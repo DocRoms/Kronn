@@ -26368,6 +26368,189 @@ async fn media_generate_queues_a_job_using_the_configured_model() {
     assert!(job["data"]["width"].is_null());
 }
 
+/// KT-1381 — the ComfyUI card reads ComfyUI's own API: version, installed
+/// models with their measured family (an unknown one listed without one),
+/// what a chosen video model still lacks, and slots that only take a model of
+/// their kind.
+#[tokio::test]
+async fn comfyui_status_reports_models_and_slots_refuse_the_wrong_kind() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    for (route, body) in [
+        (
+            "/system_stats",
+            serde_json::json!({"system": {"comfyui_version": "0.42.1"}}),
+        ),
+        (
+            "/models/checkpoints",
+            serde_json::json!(["RealVisXL_V5.0_fp16.safetensors", "mystery.safetensors"]),
+        ),
+        (
+            "/models/diffusion_models",
+            serde_json::json!(["wan2.1_t2v_1.3B_fp16.safetensors"]),
+        ),
+        (
+            "/models/text_encoders",
+            serde_json::json!(["umt5_xxl_fp8_e4m3fn_scaled.safetensors"]),
+        ),
+        ("/models/vae", serde_json::json!([])),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/view_metadata/checkpoints"))
+        .and(query_param("filename", "mystery.safetensors"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let state = test_state();
+    state.config.write().await.comfyui = kronn::models::ComfyUiConfig {
+        endpoint: Some(server.uri()),
+        image_model: None,
+        video_model: Some("wan2.1_t2v_1.3B_fp16.safetensors".into()),
+    };
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, status) = get_json(app.clone(), "/api/comfyui/status").await;
+    assert_eq!(status["success"], true, "{status}");
+    let data = &status["data"];
+    assert_eq!(data["state"], "online");
+    assert_eq!(data["version"], "0.42.1");
+    let family = |file: &str| {
+        data["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["file"] == file)
+            .map(|model| model["family"].clone())
+            .unwrap()
+    };
+    assert_eq!(family("RealVisXL_V5.0_fp16.safetensors"), "sdxl");
+    assert_eq!(family("wan2.1_t2v_1.3B_fp16.safetensors"), "wan21_t2v");
+    assert!(family("mystery.safetensors").is_null());
+    assert!(
+        data["video_blocker"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("wan_2.1_vae"),
+        "{data}"
+    );
+
+    let put = |body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let request = axum::http::Request::builder()
+                .method("PUT")
+                .uri("/api/comfyui/slots")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+            let bytes = http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+    let wrong_kind =
+        put(serde_json::json!({"image_model": "wan2.1_t2v_1.3B_fp16.safetensors"})).await;
+    assert_eq!(wrong_kind["success"], false, "{wrong_kind}");
+    let unknown = put(serde_json::json!({"image_model": "mystery.safetensors"})).await;
+    assert_eq!(unknown["success"], false, "{unknown}");
+    let saved = put(serde_json::json!({"image_model": "RealVisXL_V5.0_fp16.safetensors"})).await;
+    assert_eq!(saved["success"], true, "{saved}");
+    assert_eq!(
+        state.config.read().await.comfyui.image_model.as_deref(),
+        Some("RealVisXL_V5.0_fp16.safetensors")
+    );
+}
+
+/// KT-1381 — the local ComfyUI is a media source with no stored row: refused
+/// while no model is chosen, then reached by its alias or by omission, and
+/// held to the sizes its workflows were measured at.
+#[tokio::test]
+async fn media_generate_reaches_the_local_comfyui_once_a_model_is_chosen() {
+    let state = test_state();
+    // A connection with no image slot, so the local source is the only one.
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state.clone(), false);
+    let request = |connection: Option<&str>, ratio: Option<&str>| {
+        let mut body = serde_json::json!({
+            "modality": "image",
+            "prompt": "un renard samouraï",
+            "discussion_id": "disc-media"
+        });
+        if let Some(connection) = connection {
+            body["connection_id"] = connection.into();
+        }
+        if let Some(ratio) = ratio {
+            body["aspect_ratio"] = ratio.into();
+        }
+        body
+    };
+
+    let (_, refused) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        request(Some("comfyui"), None),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+
+    state.config.write().await.comfyui.image_model = Some("RealVisXL_V5.0_fp16.safetensors".into());
+
+    let (_, by_alias) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        request(Some("@comfyui"), Some("16:9")),
+    )
+    .await;
+    assert_eq!(by_alias["success"], true, "{by_alias}");
+    assert_eq!(by_alias["data"]["connection_id"], "local:comfyui");
+
+    let (_, by_omission) = post_json(app.clone(), "/api/media/generate", request(None, None)).await;
+    assert_eq!(by_omission["success"], true, "{by_omission}");
+    assert_eq!(by_omission["data"]["connection_id"], "local:comfyui");
+
+    let (_, odd_ratio) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        request(Some("local:comfyui"), Some("5:1")),
+    )
+    .await;
+    assert_eq!(odd_ratio["success"], false, "{odd_ratio}");
+    assert!(
+        odd_ratio["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("5:1"),
+        "{odd_ratio}"
+    );
+
+    let (_, capabilities) = get_json(
+        app,
+        "/api/media/models?connection_id=local:comfyui&modality=image",
+    )
+    .await;
+    assert_eq!(capabilities["success"], true, "{capabilities}");
+    assert_eq!(
+        capabilities["data"]["capabilities"]["aspect_ratios"][1],
+        "16:9"
+    );
+    assert_eq!(
+        capabilities["data"]["capabilities"]["max_input_references"],
+        0
+    );
+}
+
 #[tokio::test]
 async fn media_generate_caps_duration_and_resolution() {
     let state = test_state();

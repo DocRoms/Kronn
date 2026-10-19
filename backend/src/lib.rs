@@ -2118,6 +2118,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // source that could not answer.
         .route("/api/rtk/state", get(api::rtk_state::rtk_state))
         // ── Ollama (local LLM) ──
+        .route("/api/comfyui/status", get(api::comfyui::status))
+        .route("/api/comfyui/slots", put(api::comfyui::set_slots))
         .route("/api/ollama/health", get(api::ollama::health))
         .route("/api/ollama/models", get(api::ollama::models))
         .route("/api/ollama/registry", get(api::ollama::registry))

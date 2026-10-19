@@ -693,6 +693,10 @@ test_endpoint?: string, };
 
 export type AppConfig = { server: ServerConfig, tokens: TokensConfig, scan: ScanConfig, agents: AgentsConfig,
 /**
+ * Local ComfyUI media target (KT-1381).
+ */
+comfyui?: ComfyUiConfig,
+/**
  * Output language used by agents when they write their replies.
  * Separate from `ui_language` below which controls the Kronn UI locale.
  */
@@ -2150,6 +2154,60 @@ timeout_secs?: number | null,
  * Interprétation du stdout avant insertion dans `data.sources.<alias>`.
  */
 output_format: CollectQuickExecOutputFormat, };
+
+export type ComfyFamily = "flux_schnell" | "sdxl" | "wan21_t2v";
+
+/**
+ * Saved under `[comfyui]` in config.toml. Empty slots mean "ComfyUI is not
+ * offered as a media source".
+ */
+export type ComfyUiConfig = {
+/**
+ * Base URL; `None` = the default local address (`http://127.0.0.1:8188`,
+ * `host.docker.internal` from Docker).
+ */
+endpoint?: string | null,
+/**
+ * Checkpoint file used for images (`models/checkpoints`).
+ */
+image_model?: string | null,
+/**
+ * Diffusion model file used for videos (`models/diffusion_models`).
+ */
+video_model?: string | null, };
+
+/**
+ * One model file ComfyUI reports, and what Kronn can do with it.
+ */
+export type ComfyUiModel = {
+/**
+ * ComfyUI folder: `checkpoints` (image) or `diffusion_models` (video).
+ */
+folder: string, file: string,
+/**
+ * `None` = no measured workflow: listed, never selectable.
+ */
+family: ComfyFamily | null, modality: MediaModality | null, };
+
+/**
+ * What the ComfyUI card shows.
+ */
+export type ComfyUiStatus = {
+/**
+ * `online` (server answers), `offline` (installed, server down) or
+ * `not_found` (nothing detected on this machine).
+ */
+state: string, endpoint: string, version: string | null, models: Array<ComfyUiModel>, image_model: string | null, video_model: string | null,
+/**
+ * Why the chosen video model cannot run yet (a missing text encoder or
+ * VAE), in a sentence; `None` when it can.
+ */
+video_blocker: string | null,
+/**
+ * The one-command install for this OS, only where it was run and
+ * verified; elsewhere the card links to the official download page.
+ */
+install_command: string | null, download_url: string, };
 
 /**
  * A remark on a question that is not a decision: it reaches the asker and
@@ -8906,6 +8964,8 @@ color?: string | null, };
 export type SetApiAccessPolicyRequest = { policy?: ApiAccessPolicy | null, };
 
 export type SetBriefingRequest = { notes?: string | null, };
+
+export type SetComfyUiSlotsRequest = { image_model?: string | null, video_model?: string | null, };
 
 export type SetOllamaContextOverrideRequest = { model: string,
 /**

@@ -1248,3 +1248,24 @@ fn the_session_scan_reads_serde_names_and_enums() {
     found.sort();
     assert_eq!(found, ["Camel", "Renamed", "Req"]);
 }
+
+/// KT-1381 — the local ComfyUI is a media connection no table row holds; the
+/// guard must let an agent name it, and still refuse a connection that exists
+/// nowhere.
+#[tokio::test]
+async fn the_local_comfyui_connection_resides_globally_without_a_row() {
+    let db = crate::db::Database::open_in_memory().unwrap();
+    let found = db
+        .with_read_conn(|conn| {
+            Ok((
+                residence(conn, Kind::Connection, "local:comfyui")?,
+                residence(conn, Kind::Connection, "@comfyui")?,
+                residence(conn, Kind::Connection, "nowhere")?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(found.0, Some(Residence::Global));
+    assert_eq!(found.1, Some(Residence::Global));
+    assert_eq!(found.2, None);
+}

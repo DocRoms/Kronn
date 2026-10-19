@@ -23,6 +23,7 @@ pub mod citation_drift;
 pub mod cli_access_probe;
 pub mod cli_args;
 pub mod cmd;
+pub mod comfyui;
 pub mod commit_facts;
 pub mod config;
 pub mod content_memo;

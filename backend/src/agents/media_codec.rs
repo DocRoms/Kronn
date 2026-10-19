@@ -95,6 +95,12 @@ pub trait MediaCodec: Send + Sync {
         true
     }
 
+    /// Whether an image is a submit → poll job like a video. ComfyUI queues
+    /// every workflow; the HTTP providers answer images in one call.
+    fn image_is_async(&self) -> bool {
+        false
+    }
+
     fn image_url(&self, base: &str) -> String;
     fn video_submit_url(&self, base: &str) -> String;
     fn video_poll_url(&self, base: &str, provider_job_id: &str) -> String;
@@ -568,6 +574,136 @@ impl MediaCodec for NvidiaMediaCodec {
     }
 }
 
+/// Local ComfyUI (KT-1381): every generation is a queued workflow, submitted
+/// to `/prompt`, polled on `/history/<id>` and fetched from `/view` on the
+/// same origin. Nothing is billed.
+pub struct ComfyUiMediaCodec {
+    pub base: String,
+    /// Stable per job, so a resubmitted job renders the same picture.
+    pub seed: u64,
+    /// Resolved from ComfyUI before a video is submitted.
+    pub video_companions: Option<crate::core::comfyui::WanCompanions>,
+}
+
+impl ComfyUiMediaCodec {
+    fn submission(workflow: Value) -> Value {
+        json!({ "prompt": workflow, "client_id": "kronn" })
+    }
+
+    fn refuse_references(references: usize) -> Result<()> {
+        if references > 0 {
+            bail!("the local ComfyUI workflows do not take source images yet");
+        }
+        Ok(())
+    }
+}
+
+impl MediaCodec for ComfyUiMediaCodec {
+    fn supports(&self, _modality: MediaModality) -> bool {
+        true
+    }
+    fn accepts_reference_images(&self) -> bool {
+        false
+    }
+    fn image_is_async(&self) -> bool {
+        true
+    }
+    fn image_url(&self, base: &str) -> String {
+        format!("{}/prompt", trimmed_base(base))
+    }
+    fn video_submit_url(&self, base: &str) -> String {
+        format!("{}/prompt", trimmed_base(base))
+    }
+    fn video_poll_url(&self, base: &str, provider_job_id: &str) -> String {
+        format!("{}/history/{provider_job_id}", trimmed_base(base))
+    }
+    fn video_content_url(&self, base: &str, _provider_job_id: &str, _index: u32) -> String {
+        // The file name only exists in the history entry; poll returns it.
+        format!("{}/view", trimmed_base(base))
+    }
+    fn image_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        references: &[MediaReferenceImage],
+    ) -> Result<Value> {
+        Self::refuse_references(references.len())?;
+        let workflow = crate::core::comfyui::image_workflow(model, prompt, params, self.seed)?;
+        Ok(Self::submission(workflow))
+    }
+    fn video_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        reference: Option<&MediaReferenceImage>,
+    ) -> Result<Value> {
+        Self::refuse_references(usize::from(reference.is_some()))?;
+        let companions = self
+            .video_companions
+            .as_ref()
+            .ok_or_else(|| anyhow!("the Wan text encoder and VAE were not resolved"))?;
+        let workflow =
+            crate::core::comfyui::video_workflow(model, companions, prompt, params, self.seed)?;
+        Ok(Self::submission(workflow))
+    }
+    fn parse_image_response(&self, _body: &str) -> Result<MediaImageResponse> {
+        bail!("local ComfyUI images are queued, never answered inline")
+    }
+    fn parse_submit_response(&self, body: &str) -> Result<MediaSubmitAck> {
+        let value: Value = serde_json::from_str(body)?;
+        if let Some(id) = value["prompt_id"].as_str().filter(|id| !id.is_empty()) {
+            return Ok(MediaSubmitAck {
+                provider_job_id: id.to_string(),
+            });
+        }
+        // A refused workflow answers 400 with `error` and per-node details.
+        let node_detail = value["node_errors"]
+            .as_object()
+            .and_then(|nodes| nodes.values().next())
+            .and_then(|node| node["errors"][0]["details"].as_str());
+        let message = value["error"]["message"]
+            .as_str()
+            .map(|message| match node_detail {
+                Some(detail) => format!("{message}: {detail}"),
+                None => message.to_string(),
+            })
+            .unwrap_or_else(|| "ComfyUI did not queue the workflow".to_string());
+        bail!(bounded(&message))
+    }
+    fn parse_poll_response(&self, body: &str) -> Result<MediaPollState> {
+        use crate::core::comfyui::{parse_history, view_url, HistoryState};
+        let value: Value = serde_json::from_str(body)?;
+        let Some(prompt_id) = value.as_object().and_then(|entries| entries.keys().next()) else {
+            return Ok(MediaPollState::Pending);
+        };
+        match parse_history(prompt_id, body)? {
+            HistoryState::Pending => Ok(MediaPollState::Pending),
+            HistoryState::Failed(message) => Ok(MediaPollState::Failed {
+                message: bounded(&format!("ComfyUI: {message}")),
+            }),
+            HistoryState::Completed(files) => {
+                // A video job also saves a preview; the clip is the asset.
+                let file = files
+                    .iter()
+                    .find(|file| file.kind == "video")
+                    .or_else(|| files.first())
+                    .ok_or_else(|| anyhow!("ComfyUI reported no output file"))?;
+                Ok(MediaPollState::Completed {
+                    urls: vec![view_url(&self.base, file)?],
+                    cost: None,
+                    generation_id: Some(prompt_id.clone()),
+                })
+            }
+        }
+    }
+    fn asset_host_policy(&self) -> AssetHostPolicy {
+        // Assets come from the configured origin only.
+        AssetHostPolicy::credentialed_only(&[])
+    }
+}
+
 /// The codec a connection's provider needs. Both the submission path and the
 /// worker resolve it here: a preflight that guessed differently from the
 /// worker would refuse the wrong requests, or let the wrong ones through.
@@ -610,6 +746,133 @@ mod tests {
                 "https://openrouter.ai/api/v1/videos"
             );
         }
+    }
+
+    fn comfy(companions: bool) -> ComfyUiMediaCodec {
+        ComfyUiMediaCodec {
+            base: "http://127.0.0.1:8188".into(),
+            seed: 11,
+            video_companions: companions.then(|| crate::core::comfyui::WanCompanions {
+                text_encoder: "umt5_xxl_fp8_e4m3fn_scaled.safetensors".into(),
+                vae: "wan_2.1_vae.safetensors".into(),
+            }),
+        }
+    }
+
+    /// KT-1381 — ComfyUI queues images too, and its own routes are used.
+    #[test]
+    fn comfyui_queues_images_on_its_own_routes() {
+        let codec = comfy(false);
+        assert!(codec.image_is_async());
+        assert!(!OpenRouterMediaCodec.image_is_async());
+        assert!(!codec.accepts_reference_images());
+        assert_eq!(
+            codec.image_url("http://127.0.0.1:8188/"),
+            "http://127.0.0.1:8188/prompt"
+        );
+        assert_eq!(
+            codec.video_poll_url("http://127.0.0.1:8188", "p-1"),
+            "http://127.0.0.1:8188/history/p-1"
+        );
+        let body = codec
+            .image_body(
+                "flux1-schnell-fp8.safetensors",
+                "a fox",
+                &MediaParams::default(),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(body["prompt"]["5"]["inputs"]["seed"], 11);
+        assert_eq!(body["client_id"], "kronn");
+        assert_eq!(
+            codec
+                .parse_submit_response(r#"{"prompt_id":"p-1","number":3,"node_errors":{}}"#)
+                .unwrap(),
+            MediaSubmitAck {
+                provider_job_id: "p-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn comfyui_says_why_it_refused_a_workflow() {
+        let refused = comfy(false)
+            .parse_submit_response(r#"{"error":{"type":"prompt_outputs_failed_validation","message":"Prompt outputs failed validation"},"node_errors":{"1":{"errors":[{"details":"ckpt_name: 'gone.safetensors' not in []"}]}}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("failed validation") && refused.contains("gone.safetensors"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn comfyui_hands_back_the_clip_not_its_preview_on_the_configured_origin() {
+        let done = r#"{"p-2":{"outputs":{"10":{"images":[{"filename":"preview_00001_.webp","subfolder":"","type":"output"}]},"12":{"images":[{"filename":"clip_00001_.mp4","subfolder":"video","type":"output","metadata":{"kind":"video"}}]}},"status":{"status_str":"success","completed":true,"messages":[]}}}"#;
+        let MediaPollState::Completed {
+            urls,
+            cost,
+            generation_id,
+        } = comfy(true).parse_poll_response(done).unwrap()
+        else {
+            panic!("a finished job");
+        };
+        assert_eq!(
+            urls,
+            vec![
+                "http://127.0.0.1:8188/view?filename=clip_00001_.mp4&subfolder=video&type=output"
+                    .to_string()
+            ]
+        );
+        assert_eq!(cost, None);
+        assert_eq!(generation_id.as_deref(), Some("p-2"));
+        assert_eq!(
+            comfy(true).parse_poll_response("{}").unwrap(),
+            MediaPollState::Pending
+        );
+    }
+
+    #[test]
+    fn comfyui_refuses_source_images_and_needs_its_video_companions() {
+        let reference = MediaReferenceImage {
+            mode: MediaReferenceMode::FirstFrame,
+            mime_type: "image/png".into(),
+            bytes: vec![1],
+        };
+        assert!(comfy(true)
+            .image_body(
+                "flux1-schnell-fp8.safetensors",
+                "x",
+                &MediaParams::default(),
+                std::slice::from_ref(&reference)
+            )
+            .is_err());
+        assert!(comfy(true)
+            .video_body(
+                "wan2.1_t2v_1.3B_fp16.safetensors",
+                "x",
+                &MediaParams::default(),
+                Some(&reference)
+            )
+            .is_err());
+        let missing = comfy(false)
+            .video_body(
+                "wan2.1_t2v_1.3B_fp16.safetensors",
+                "x",
+                &MediaParams::default(),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("text encoder"), "{missing}");
+        assert!(comfy(true)
+            .video_body(
+                "wan2.1_t2v_1.3B_fp16.safetensors",
+                "x",
+                &MediaParams::default(),
+                None
+            )
+            .is_ok());
     }
 
     #[test]

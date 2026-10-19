@@ -153,7 +153,13 @@ pub async fn generate(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let lookup = named.clone();
+    use crate::db::external_api_connections::ConnectionReference;
+    // The local ComfyUI is a media source like a connection, but never a row.
+    let local = crate::api::comfyui::local_connection(&state.config.read().await.comfyui);
+    let names_local = named
+        .as_deref()
+        .is_some_and(crate::api::comfyui::names_local);
+    let lookup = named.clone().filter(|_| !names_local);
     let resolved = state
         .db
         .with_read_conn(move |conn| {
@@ -163,8 +169,16 @@ pub async fn generate(
             };
             Ok((reference, crate::db::external_api_connections::list(conn)?))
         })
-        .await;
-    use crate::db::external_api_connections::ConnectionReference;
+        .await
+        .map(|(reference, mut all)| {
+            all.extend(local.clone());
+            let reference = match (names_local, &local) {
+                (true, Some(local)) => Some(ConnectionReference::Found(Box::new(local.clone()))),
+                (true, None) => Some(ConnectionReference::Missing),
+                (false, _) => reference,
+            };
+            (reference, all)
+        });
     let (connection, all_connections) = match resolved {
         Ok((Some(ConnectionReference::Found(connection)), all)) => (*connection, all),
         Ok((Some(ConnectionReference::Missing), all)) => {
@@ -833,12 +847,7 @@ pub async fn estimate(
     State(state): State<AppState>,
     Query(query): Query<EstimateQuery>,
 ) -> Json<ApiResponse<MediaEstimate>> {
-    let lookup = query.connection_id.clone();
-    let connection = match state
-        .db
-        .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup))
-        .await
-    {
+    let connection = match connection_by_id(&state, &query.connection_id).await {
         Ok(Some(connection)) => connection,
         Ok(None) => {
             return Json(ApiResponse::err(format!(
@@ -1591,16 +1600,36 @@ fn store_capabilities(
 /// The launcher used to offer a hard-coded 3 s / 1080p that `seedance-2.0-mini`
 /// rejects, and hid six ratios it accepts — a billable click that could only
 /// fail. Everything offered now comes from the provider's own answer.
+/// One media source by id: the local ComfyUI for its reserved id (when a
+/// slot is set), else the stored connection.
+pub(crate) async fn connection_by_id(
+    state: &AppState,
+    id: &str,
+) -> anyhow::Result<Option<crate::models::ExternalApiConnection>> {
+    if id == crate::core::comfyui::CONNECTION_ID {
+        return Ok(crate::api::comfyui::local_connection(
+            &state.config.read().await.comfyui,
+        ));
+    }
+    let lookup = id.to_string();
+    state
+        .db
+        .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup))
+        .await
+}
+
+/// Whether a source takes source images at all, asked before a job exists.
+fn accepts_reference_images(connection: &crate::models::ExternalApiConnection) -> bool {
+    !crate::api::comfyui::is_local(connection)
+        && crate::agents::media_codec::codec_for(connection.origin_preset)
+            .accepts_reference_images()
+}
+
 pub async fn model_capabilities(
     State(state): State<AppState>,
     Query(query): Query<ModelCapabilitiesQuery>,
 ) -> Json<ApiResponse<MediaModelCapabilitiesResponse>> {
-    let lookup = query.connection_id.clone();
-    let connection = match state
-        .db
-        .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup))
-        .await
-    {
+    let connection = match connection_by_id(&state, &query.connection_id).await {
         Ok(Some(connection)) => connection,
         Ok(None) => {
             return Json(ApiResponse::err(format!(
@@ -1652,6 +1681,9 @@ pub(crate) async fn advertised_capabilities(
     model: &str,
     modality: MediaModality,
 ) -> Option<crate::agents::media_capabilities::MediaModelCapabilities> {
+    if crate::api::comfyui::is_local(connection) {
+        return Some(crate::api::comfyui::capabilities(model, modality));
+    }
     let now = Utc::now();
     let cache_key = format!("{}::{}::{}", connection.id, modality.as_str(), model);
     if let Some(capabilities) = cached_capabilities(&cache_key, now) {
@@ -1838,7 +1870,7 @@ async fn resolve_references(
     // capability check below would be skipped and the refusal would surface in
     // the worker, where it looks like an outage and is retried until the
     // deadline. Refusing here says it once, before a job exists.
-    if !crate::agents::media_codec::codec_for(connection.origin_preset).accepts_reference_images() {
+    if !accepts_reference_images(connection) {
         return Err(format!(
             "this connection's provider does not accept a source image: '{}' cannot be used here",
             mode.as_str()
