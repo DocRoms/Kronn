@@ -5238,8 +5238,8 @@ mod tests {
     #[test]
     fn lane_target_follows_the_worktree_name() {
         // Absolute on every platform: `/repo` is not on Windows.
-        let repo = std::env::temp_dir().join("repo");
-        let repo = repo.as_path();
+        let scratch = tempfile::tempdir().unwrap();
+        let repo = scratch.path();
         let worktree = repo.join(".kronn/worktrees/task-kt-9-abcd1234");
         assert_eq!(
             lane_target_for_worktree(repo, &worktree).unwrap(),
