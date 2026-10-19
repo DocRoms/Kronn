@@ -90,7 +90,7 @@ snapshots. Otherwise a parallel non-serial router test can perform the first
 initialization during a child run and make the parent falsely report an
 environment leak. Keep that initialization inside the parent branch: doing it
 in the child before its RED control would hide the confinement regression.
-[src: file: backend/tests/api_tests.rs:17742-17747#isolate_config_dir]
+[src: file: backend/tests/api_tests.rs:17745-17750#isolate_config_dir]
 
 The focused regression is not a replacement for the principal's combined-suite
 qualification; it is the source-level confinement audit and regression proof

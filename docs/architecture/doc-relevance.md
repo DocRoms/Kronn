@@ -9,7 +9,7 @@ verdict, deterministically and without a model.
 ## What the revalidation already did (reused, not rewritten)
 
 - Per-citation fingerprints, `changed` / `removed` / `file missing` / `moved`,
-  recorded at validation. [src: file: backend/src/core/citation_drift.rs:978#check]
+  recorded at validation. [src: file: backend/src/core/citation_drift.rs:1013#check]
 - The plan that re-anchors moved lines for free and sends the owning audit
   steps only the sections that need a model.
   [src: file: backend/src/api/audit/revalidate.rs:92#plan]
@@ -61,8 +61,8 @@ back depends on that step (`AnalysisStep.sources`):
 - step 2 (`glossary`) has no sources, so its digest never changes: only an edit
   of the doc queues it again.
 
-[src: file: backend/src/core/citation_drift.rs:84#DocReview]
-[src: file: backend/src/core/citation_drift.rs:860#current_review]
+[src: file: backend/src/core/citation_drift.rs:86#DocReview]
+[src: file: backend/src/core/citation_drift.rs:892#current_review]
 [src: file: backend/src/api/audit/revalidate.rs:60#stamp_rereads]
 
 ### When a prose path counts as gone
@@ -120,7 +120,7 @@ and only then. `citations.json` stores, per section key, the gone paths the
 human was shown (`known_missing`). A validation or a revalidation **carries
 over** what was accepted and never adds to it; a path accepted under one
 section is still flagged when another section names it.
-[src: file: backend/src/core/citation_drift.rs:347#accepted_missing]
+[src: file: backend/src/core/citation_drift.rs:358#accepted_missing]
 
 From the project card, the stale block lists each stale doc's gone prose paths
 with their section (`DriftSection.missing_paths`), and the acknowledgement
@@ -128,7 +128,7 @@ sends exactly those (`shown_paths`): a path that is not in the request is not
 accepted, whatever is gone at the click, and an older client that sends none
 accepts none. The per-doc panel, which lists every gone path of its doc, still
 accepts them all.
-[src: file: backend/src/core/citation_drift.rs:560#acknowledge_accepting]
+[src: file: backend/src/core/citation_drift.rs:595#acknowledge_accepting]
 
 ## The measure
 

@@ -4167,7 +4167,12 @@ image_model?: string | null, video_model?: string | null,
  * Override for providers serving media from another host than their chat
  * endpoint. Empty means "derive from `endpoint`".
  */
-media_endpoint?: string | null, };
+media_endpoint?: string | null,
+/**
+ * The model Decision steps call on this connection (KT-1366). A
+ * capability like the media slots, not a quality tier.
+ */
+decision_model?: string | null, };
 
 export type ExternalApiConnectionPreset = "lite_llm" | "nvidia" | "open_router" | "other";
 
@@ -5811,6 +5816,11 @@ export type ModelTierConfig = { economy?: string | null,
  */
 default?: string | null, reasoning?: string | null,
 /**
+ * KT-1366 — the model Decision steps call (a decision model, not a chat
+ * model). Not a tier: no `ModelTier` resolves to it. Only Ollama sets it.
+ */
+decision?: string | null,
+/**
  * KT-646 — optional reasoning-effort preset for the `economy` slot.
  * `None` means "pass no effort flag, the runtime's own CLI default
  * applies" — never a silently assigned `high`/`max`. Only consumed for
@@ -6093,7 +6103,13 @@ context_override: number | null,
  * into the API surface and a frontend has no reason to know Rust
  * variant names.
  */
-context_origin: string, };
+context_origin: string,
+/**
+ * What the catalogue says this model can do (`chat`, `vision`,
+ * `decision`…), read from Ollama's `/api/show`. A model without `chat`
+ * is never offered where a chat model is chosen.
+ */
+capabilities: Array<string>, };
 
 /**
  * One installed model's freshness.

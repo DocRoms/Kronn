@@ -1,6 +1,6 @@
 //! Strict, bounded discovery of the locally configured Ollama catalogue.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -130,14 +130,45 @@ fn parse_tags(bytes: &[u8]) -> Result<Vec<OllamaTag>, DiscoveryOutcome> {
     Ok(tags)
 }
 
-pub fn discovered_models(tags: &[OllamaTag]) -> Vec<DiscoveredModel> {
+/// Ollama's `/api/show` capability words in the catalogue's vocabulary.
+/// `completion` is what lets a model chat; a decision model lists `decision`
+/// without it, so the chat preflight refuses it. `embedding` is kept so an
+/// embedding-only model never ends with an empty list, which reads as "any".
+pub fn catalog_capabilities(ollama: &[String]) -> Vec<String> {
+    let mut capabilities = Vec::new();
+    for word in ollama {
+        let mapped = match word.as_str() {
+            "completion" => "chat",
+            "vision" => "vision",
+            "decision" => "decision",
+            "embedding" => "embedding",
+            _ => continue,
+        };
+        if !capabilities.iter().any(|known| known == mapped) {
+            capabilities.push(mapped.to_string());
+        }
+    }
+    capabilities
+}
+
+/// One catalogue row per tag. `known` holds what `/api/show` said a tag can
+/// do; a tag absent from it stays a chat model, as before Ollama listed
+/// capabilities.
+pub fn discovered_models(
+    tags: &[OllamaTag],
+    known: &HashMap<String, Vec<String>>,
+) -> Vec<DiscoveredModel> {
     tags.iter()
         .map(|tag| DiscoveredModel {
             model_id: tag.name.clone(),
             display_name: tag.name.clone(),
             resolved_model: None,
             description: None,
-            capabilities: vec!["chat".into()],
+            capabilities: known
+                .get(&tag.name)
+                .filter(|capabilities| !capabilities.is_empty())
+                .cloned()
+                .unwrap_or_else(|| vec!["chat".into()]),
             reasoning_modes: Vec::new(),
             default_reasoning_mode: None,
         })
@@ -147,6 +178,55 @@ pub fn discovered_models(tags: &[OllamaTag]) -> Vec<DiscoveredModel> {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|word| word.to_string()).collect()
+    }
+
+    /// KT-1366 — a decision model lists `decision` without `completion`, so it
+    /// must come out without `chat`; an embedding-only model must not come out
+    /// empty, which the chat preflight would read as "anything goes".
+    #[test]
+    fn ollama_capability_words_map_to_the_catalogue_vocabulary() {
+        assert_eq!(
+            catalog_capabilities(&words(&["decision", "vision"])),
+            words(&["decision", "vision"])
+        );
+        assert_eq!(
+            catalog_capabilities(&words(&["completion", "vision", "tools", "thinking"])),
+            words(&["chat", "vision"])
+        );
+        assert_eq!(
+            catalog_capabilities(&words(&["embedding"])),
+            words(&["embedding"])
+        );
+        assert_eq!(
+            catalog_capabilities(&words(&["completion", "completion"])),
+            words(&["chat"])
+        );
+        assert!(catalog_capabilities(&words(&["insert", "tools"])).is_empty());
+    }
+
+    #[test]
+    fn a_tag_without_known_capabilities_stays_a_chat_model() {
+        let tag = |name: &str| OllamaTag {
+            name: name.into(),
+            size: 1,
+            modified_at: String::new(),
+            digest: String::new(),
+        };
+        let known = HashMap::from([
+            ("clef-flash:9b".to_string(), words(&["decision", "vision"])),
+            ("odd:1b".to_string(), Vec::new()),
+        ]);
+        let models = discovered_models(
+            &[tag("clef-flash:9b"), tag("qwen3:8b"), tag("odd:1b")],
+            &known,
+        );
+        assert_eq!(models[0].capabilities, words(&["decision", "vision"]));
+        assert_eq!(models[1].capabilities, words(&["chat"]));
+        assert_eq!(models[2].capabilities, words(&["chat"]));
+    }
 
     /// KT-930 — the local half of "is there an update" is the digest
     /// `/api/tags` reports for each tag; it must come through as written, and

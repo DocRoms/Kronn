@@ -250,6 +250,28 @@ describe('ModelCatalogSection', () => {
     })));
   });
 
+  // KT-1366 — an HTTP decision model is marked `decision` without `chat`.
+  it('marks a manual HTTP model as a decision model instead of a chat model', async () => {
+    render(<ModelCatalogSection />);
+    await findSourceChip('Router one');
+    fireEvent.click(screen.getByText('modelCatalog.add'));
+    const target = screen.getByRole('combobox', { name: 'modelCatalog.target' });
+    fireEvent.focus(target);
+    fireEvent.change(target, { target: { value: 'Router two' } });
+    fireEvent.click(screen.getByRole('option', { name: 'Router two' }));
+    fireEvent.change(screen.getByLabelText('modelCatalog.modelId'), { target: { value: 'clef-flash' } });
+    fireEvent.change(screen.getByLabelText('modelCatalog.displayName'), { target: { value: 'Clef Flash' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'chat' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'modelCatalog.decisionCapability' }));
+    fireEvent.click(screen.getByText('common.save'));
+
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith(expect.objectContaining({
+      runtime_target_id: 'http:two',
+      model_id: 'clef-flash',
+      capabilities: ['decision'],
+    })));
+  });
+
   it('keeps an edited model on its saved target without a replacement selection', async () => {
     render(<ModelCatalogSection />);
     await findSourceChip('Router one');

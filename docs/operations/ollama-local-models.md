@@ -305,7 +305,7 @@ This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3348-3353#is_http_chat_agent]
 [src: file: backend/src/agents/runner.rs:4251-4272#start_ollama_http_with_idle]
 [src: file: backend/src/agents/runner.rs:4470-4483#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:13170-13179#Ollama]
+[src: file: backend/src/agents/runner.rs:13187-13196#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's
@@ -314,8 +314,8 @@ another model or a CLI default. Explicit operator settings still take priority;
 failed assignment reads refuse launch. A target with no selected or assigned
 identity keeps the existing no-model preflight behavior; this change does not
 introduce new discovery for unconfigured runtimes.
-[src: file: backend/src/core/model_catalog/mod.rs:1030-1059#requested_model]
-[src: file: backend/src/core/model_catalog/mod.rs:1231-1264#requested_launch_model]
+[src: file: backend/src/core/model_catalog/mod.rs:1078-1107#requested_model]
+[src: file: backend/src/core/model_catalog/mod.rs:1279-1312#requested_launch_model]
 
 The production integration fixture links the library without `cfg(test)` and
 uses isolated SQLite plus explicit loopback endpoints. It actually creates,
@@ -342,7 +342,7 @@ launch (`crud.rs` stamps `discussions.model` from the QP).
 
 ## "Stable output", NOT bit-exact determinism
 
-`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:7825-7885#build_ollama_chat_body] sends
+`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:7842-7902#build_ollama_chat_body] sends
 `temperature:0, top_k:1, seed:42` as INTERNAL constants (no per-step knob).
 On Apple Metal the float reduction order isn't guaranteed, so two logits within
 epsilon can flip the argmax (more so under Q4 quant) → output is *greedy-stable*,
@@ -637,8 +637,8 @@ policy is unchanged: `Fail` rejects output that remains invalid, while
 `Continue` may keep invalid raw output. Prompt-based output is not a guarantee
 of schema compliance. Repeated launches, including a repair launch, negotiate
 the capability independently; no persistent capability cache is written.
-`[src: file: backend/src/agents/runner.rs:8672-8706#rejects_structured_output]`
-`[src: file: backend/src/agents/runner.rs:9375-9439#format_fallback_notice]`
+`[src: file: backend/src/agents/runner.rs:8689-8723#rejects_structured_output]`
+`[src: file: backend/src/agents/runner.rs:9392-9456#format_fallback_notice]`
 `[src: file: backend/src/workflows/steps.rs:1074-1097#ollama_envelope_format]`
 
 **Quality escalation** (`steps.rs::escalation_step`): if a LOCAL (Ollama)
@@ -756,7 +756,7 @@ answer is bounded to 8 s; whatever finished by then is used and cached. Answers 
 cached for 6 hours, a failure for 2 minutes (long enough that a blocked network is
 not asked again on every visit, short enough that it never sticks). The only thing
 that leaves the machine is a library tag name, sent by the Kronn backend, not the
-browser. [src: file: backend/src/api/ollama.rs:326-364#registry]
+browser. [src: file: backend/src/api/ollama.rs:332-370#registry]
 [src: file: backend/src/core/ollama_registry.rs:45-51#FETCH_TIMEOUT]
 [src: file: backend/src/core/ollama_registry.rs:76-89#MAX_CONCURRENT_LOOKUPS]
 
@@ -770,7 +770,7 @@ The card marks a recheck done only once its answer has landed, so a request that
 newer render supersedes is followed by another fresh one, never by a cached one
 that raced it. [src: file: backend/src/core/ollama_registry.rs:53-62#recheck]
 [src: file: backend/src/core/ollama_registry.rs:359-364#recheck_at]
-[src: file: backend/src/api/ollama.rs:305-312#fresh]
+[src: file: backend/src/api/ollama.rs:311-318#fresh]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:417-444#recheckedTick]
 
 To check one model by hand:
@@ -808,10 +808,39 @@ where Ollama runs. [src: file: backend/src/api/ollama.rs:62-84#fetch_server_vers
    9428 of 9500 prompt tokens on a second turn). Older MLX servers lack
    prompt-prefix reuse (ollama/ollama#17829), which is not what a suggestion
    should steer a user to.
-   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:6862-6866#mlx_prefix_cache_reused]
+   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:6879-6883#mlx_prefix_cache_reused]
 
 When it is, the `-mlx` builds are listed first with an "Optimized for Mac" mark,
 then the portable list. Everywhere else the list is exactly the portable one.
+
+## Decision models (KT-1366)
+
+A decision model (for example `clef-flash:9b`) answers typed questions (yes/no,
+choice, score) with a probability through Ollama's `POST /v1/systemone`; it
+cannot chat. Ollama says so in `/api/show`: `capabilities` lists `decision`
+without `completion`. [src: url: https://docs.ollama.com/capabilities/decision]
+
+- The catalogue refresh reads `/api/show` for every listed tag and stores its
+  capabilities in the catalogue's words (`completion` becomes `chat`; `vision`,
+  `decision` and `embedding` are kept). A tag whose probe fails keeps the
+  capabilities already saved for it, and a tag never probed stays `chat`.
+  [src: file: backend/src/core/model_catalog/ollama_discovery.rs:137-152#catalog_capabilities]
+  [src: file: backend/src/core/model_catalog/mod.rs:661-703#ollama_capabilities]
+- A catalogue entry without `chat` is refused by the chat preflight, and the
+  pickers leave it out; a saved choice stays visible, disabled, saying it is a
+  decision model. An entry with no capability list stays usable.
+  [src: file: backend/src/http_transport.rs:49-51#entry_supports_capability]
+  [src: file: frontend/src/lib/modelCatalogSelection.ts:97-99#isChatCapable]
+- The model Decision steps call is chosen like a tier, with the same picker:
+  a « 🧭 Décision » row in the Ollama card's tier grid (saved as
+  `model_tiers.ollama.decision`) and a Decision slot next to image and video
+  on an HTTP connection (`decision_model`). Both list decision models only.
+  The manual catalogue form offers the `decision` capability for HTTP entries.
+  `hasDecisionModel` tells the UI whether any catalogue holds one.
+  [src: file: frontend/src/lib/modelCatalogSelection.ts:106-108#hasDecisionModel]
+- Ollama 0.34.2 refuses to pull `clef-flash` with `412 … requires a newer
+  version of Ollama`; the card now says to update Ollama. Measured on
+  0.40.6: first call 8.5 s (load), then 0.2–0.6 s.
 
 ## Bench snapshot (M5 Max 64 GB, Q4_K_M, informational)
 

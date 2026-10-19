@@ -114,7 +114,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
   plan queues its owning step (or lists it as manual when no step owns it)
   and the badge stays raised, even when relevance sees nothing wrong with its
   citations. Accepting the step or a successful run clears the banner.
-  [src: file: backend/src/api/audit/revalidate.rs:199-230#partial_docs] [src: file: backend/src/core/citation_drift.rs:464-484#partial_docs]
+  [src: file: backend/src/api/audit/revalidate.rs:199-230#partial_docs] [src: file: backend/src/core/citation_drift.rs:498-518#partial_docs]
 
 ## Leases and agents that could block a project
 

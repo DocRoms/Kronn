@@ -53,6 +53,10 @@ pub struct UpsertConnectionRequest {
     pub image_model: Option<String>,
     #[serde(default)]
     pub video_model: Option<String>,
+    /// The model Decision steps call on this connection. A capability, not a
+    /// quality tier, like the media slots.
+    #[serde(default)]
+    pub decision_model: Option<String>,
     /// Override for providers serving media from another host. Empty derives
     /// it from `endpoint`.
     #[serde(default)]
@@ -1815,6 +1819,7 @@ pub async fn create(
         updated_at: now,
         image_model: clean(req.image_model),
         video_model: clean(req.video_model),
+        decision_model: clean(req.decision_model),
         media_endpoint: clean(req.media_endpoint),
     };
 
@@ -1934,6 +1939,7 @@ pub async fn update(
         updated_at: Utc::now(),
         image_model: clean(req.image_model),
         video_model: clean(req.video_model),
+        decision_model: clean(req.decision_model),
         media_endpoint: clean(req.media_endpoint),
     };
 
@@ -2139,6 +2145,7 @@ mod tests {
             updated_at: Utc::now(),
             image_model: None,
             video_model: None,
+            decision_model: None,
             media_endpoint: None,
         };
         assert_eq!(

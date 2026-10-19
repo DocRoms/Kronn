@@ -29,6 +29,7 @@ async fn fixture(endpoint: &str) -> (AppState, ExternalApiConnection) {
         reasoning_model: None,
         image_model: None,
         video_model: None,
+        decision_model: None,
         media_endpoint: None,
         created_at: now,
         updated_at: now,

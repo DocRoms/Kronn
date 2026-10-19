@@ -172,7 +172,7 @@ for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
 [src: file: backend/src/agents/runner.rs:5837-5847#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:14933-15214#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/agents/runner.rs:14950-15231#run_acp_session_streams_usage_through_agent_process]
 [src: file: backend/src/core/redact.rs:510-534#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
@@ -191,7 +191,7 @@ initialization-only SDK catalogue is independent of the ACP execution toggle.
 See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
 [src: file: frontend/src/components/settings/AgentsSection.tsx:197-198#useModelCatalogSnapshot]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1306-1331#SearchableSelect]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:95-145#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:110-172#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]
 [src: file: backend/src/core/model_catalog/mod.rs:363-373#discover_inner]
 
