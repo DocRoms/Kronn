@@ -1857,11 +1857,27 @@ pub(crate) async fn list_with_visibility(
                 .iter()
                 .map(|wf| (wf.id.clone(), wf.clone()))
                 .collect();
+            // The run's gate renders and hashes an imported workflow: a child
+            // several cards reach is checked once per list, not once per card.
+            let mut approvals: std::collections::HashMap<String, Result<Option<String>, String>> =
+                std::collections::HashMap::new();
+            let mut approval = |wf: &Workflow| {
+                approvals
+                    .entry(wf.id.clone())
+                    .or_insert_with(|| {
+                        crate::workflows::readiness::repository_approval_refusal(conn, wf)
+                    })
+                    .clone()
+            };
             let summaries = workflows
                 .into_iter()
                 .map(|wf| {
                     let (blocker_count, human_approval_count) = crate::workflows::readiness::counts(
-                        &crate::workflows::readiness::assess_in_db(conn, &wf, &by_id),
+                        &crate::workflows::readiness::assess_with_approvals(
+                            &wf,
+                            &by_id,
+                            &mut approval,
+                        ),
                     );
                     let last_run = last_runs.remove(&wf.id);
 
