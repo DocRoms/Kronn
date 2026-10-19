@@ -6373,12 +6373,29 @@ mod tests {
     // covers the link between them — that the executor actually drives the
     // real handlers and returns something a model can consume.
 
+    /// An HTTP agent always runs in a discussion: a launch with none, no run
+    /// and no project reads catalogues only (KT-1346). `room-p` sits in
+    /// project `p`.
+    async fn state_with_project_room() -> AppState {
+        let state = test_state();
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('p','p','p','2026-09-22T00:00:00Z','2026-09-22T00:00:00Z')", [])?;
+                conn.execute("INSERT INTO discussions (id,title,project_id,created_at,updated_at) VALUES ('room-p','room-p','p','2026-09-22T00:00:00Z','2026-09-22T00:00:00Z')", [])?;
+                Ok(())
+            })
+            .await
+            .expect("seed project room");
+        state
+    }
+
     #[tokio::test]
     async fn tool_executor_runs_real_handlers_and_projects_the_result() {
         use crate::agents::tools::{ToolCall, ToolExecutor};
         use crate::api::agent_tools::KronnToolExecutor;
 
-        let exec = KronnToolExecutor::new(test_state(), None);
+        let exec = KronnToolExecutor::new(state_with_project_room().await, Some("room-p".into()));
         let call = |name: &str, args: serde_json::Value| ToolCall {
             id: "c1".into(),
             name: name.into(),
@@ -6422,10 +6439,11 @@ mod tests {
                 serde_json::json!({}),
                 "inside a Kronn discussion",
             ),
+            // Without a discussion, run or project the gate refuses it first.
             (
                 "task_create",
                 serde_json::json!({"title": "x"}),
-                "inside a Kronn discussion",
+                "no discussion",
             ),
             ("task_get", serde_json::json!({}), "task_id"),
             ("api_endpoints", serde_json::json!({}), "api_plugin_slug"),
@@ -6447,6 +6465,8 @@ mod tests {
 
         // A slug that does not exist must say so rather than return an empty
         // endpoint list, which a model would read as "this plugin has none".
+        // Inside a room: without one the token reads catalogues only.
+        let exec = KronnToolExecutor::new(state_with_project_room().await, Some("room-p".into()));
         let out = exec
             .execute(&call(
                 "api_endpoints",
@@ -6664,14 +6684,14 @@ mod tests {
         use crate::agents::tools::ToolCall;
         use crate::api::agent_tools::KronnToolExecutor;
 
-        let state = test_state();
+        let state = state_with_project_room().await;
         let discussion_id = "http-agent-planning-disc";
         let disc = crate::models::Discussion {
             connection_id: None,
             awaiting_agent: false,
             agent_running: false,
             id: discussion_id.into(),
-            project_id: None,
+            project_id: Some("p".into()),
             title: "Planning from Ollama".into(),
             agent: crate::models::AgentType::Ollama,
             language: "en".into(),

@@ -695,7 +695,7 @@ one, it has no influence. The regression test uses two real concurrent
 executions and forges B's valid id in worker A's call to prove that A remains
 the only target.
 `[src: file: backend/src/api/agent_tools.rs:3949-3971#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api_tests.rs:6954-7093#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
+`[src: file: backend/src/api_tests.rs:6972-7111#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
 two deliberately distinct identity domains. The live
