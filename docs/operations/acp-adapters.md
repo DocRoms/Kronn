@@ -219,7 +219,7 @@ project path never reuses that identifier.
   (`OPENCODE_CONFIG_CONTENT`) that denies the real environment files, allows the
   templates and keeps a refusal from ending the turn. See
   [auditing with an ACP agent](../architecture/audit-acp-agents.md).
-  [src: file: backend/src/acp/secret_files.rs:51-86#is_secret_file] [src: file: backend/src/acp/secret_files.rs:115-137#opencode_config_content]
+  [src: file: backend/src/acp/secret_files.rs:51-86#is_secret_file] [src: file: backend/src/acp/secret_files.rs:205-227#opencode_config_content]
 - **Filesystem / terminal:** Kronn has not bound a scoped executor for
   `fs/*`/`terminal/*` yet. Every such request — from any agent — gets a
   spec-correct JSON-RPC error (`-32001` "capability not granted"), never a

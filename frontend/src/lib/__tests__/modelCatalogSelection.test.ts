@@ -232,6 +232,11 @@ describe('decision models in chat pickers', () => {
     expect(options.filter(option => option.value === 'clef-flash:9b')).toHaveLength(1);
   });
 
+  it('lists only decision models for the Decision slot', () => {
+    const values = catalogModelOptions(catalogue, '', key => key, () => '', 'decision').map(option => option.value);
+    expect(values).toEqual(['clef-flash:9b']);
+  });
+
   it('treats an entry without capability tags as a chat model', () => {
     expect(isChatCapable([])).toBe(true);
     expect(isChatCapable(undefined)).toBe(true);

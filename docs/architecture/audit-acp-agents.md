@@ -44,7 +44,7 @@ asked. Kronn starts `opencode acp` with an inline configuration
 - `permission.read` denies `*.env` and `*.env.*`, then allows the four template
   suffixes (`*.env.<suffix>` and `*.env.*.<suffix>`). OpenCode honours the last
   matching rule, in the order written, so the allows follow the deny — a test
-  pins that order [src: file: backend/src/acp/secret_files.rs:247-281#the_opencode_config_denies_real_env_files_and_allows_templates_in_that_order]. A denial is not a
+  pins that order [src: file: backend/src/acp/secret_files.rs:337-371#the_opencode_config_denies_real_env_files_and_allows_templates_in_that_order]. A denial is not a
   question put to Kronn: OpenCode hands its model an error as the tool's answer
   and the turn goes on.
 - `experimental.continue_loop_on_deny` is `true`, so a refusal the broker does

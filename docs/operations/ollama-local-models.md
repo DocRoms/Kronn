@@ -831,8 +831,16 @@ without `completion`. [src: url: https://docs.ollama.com/capabilities/decision]
   decision model. An entry with no capability list stays usable.
   [src: file: backend/src/http_transport.rs:49-51#entry_supports_capability]
   [src: file: frontend/src/lib/modelCatalogSelection.ts:97-99#isChatCapable]
-- The Ollama card lists installed decision models in their own block, and the
-  manual catalogue form offers the `decision` capability for HTTP entries.
+- The model Decision steps call is chosen like a tier, with the same picker:
+  a « 🧭 Décision » row in the Ollama card's tier grid (saved as
+  `model_tiers.ollama.decision`) and a Decision slot next to image and video
+  on an HTTP connection (`decision_model`). Both list decision models only.
+  The manual catalogue form offers the `decision` capability for HTTP entries.
+  OpenRouter leaves decision models out of its default `/v1/models` listing;
+  the connection test asks `/v1/models?output_modalities=decisions` and keeps
+  only the models that declare `decisions` (e.g.
+  `perplexity/pplx-decider-flash-v1.2`).
+  [src: url: https://openrouter.ai/api/v1/models?output_modalities=decisions]
   `hasDecisionModel` tells the UI whether any catalogue holds one.
   [src: file: frontend/src/lib/modelCatalogSelection.ts:106-108#hasDecisionModel]
 - Ollama 0.34.2 refuses to pull `clef-flash` with `412 … requires a newer

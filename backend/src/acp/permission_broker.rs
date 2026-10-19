@@ -14,7 +14,7 @@
 //! trail shape, so "one broker" is true of the decision logic even though the
 //! wire mechanism differs.
 
-use super::secret_files::is_secret_file;
+use super::secret_files::is_secret_path;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
@@ -768,11 +768,7 @@ fn codex_sandbox_for(full_access: bool, in_container: bool) -> Option<&'static s
 /// A location names a secret file by its own name or, when it exists, through the
 /// file it resolves to: a link called `notes.txt` that points at `.env` is one.
 fn location_is_secret(path: &str) -> bool {
-    let path = Path::new(path);
-    is_secret_file(path)
-        || std::fs::canonicalize(path)
-            .ok()
-            .is_some_and(|resolved| is_secret_file(&resolved))
+    is_secret_path(Path::new(path))
 }
 
 /// Filesystem-aware containment check. The project root and the candidate's

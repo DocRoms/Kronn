@@ -232,7 +232,7 @@ fn empty_file_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
     }
     let path = cited_file(project, raw)?;
     if crate::core::anti_halluc::is_binary_file(&path)
-        || crate::acp::secret_files::is_secret_file(&path)
+        || crate::acp::secret_files::is_secret_path(&path)
         || line_count(&path) > 0
         || last_line_of(&path) > 0
     {
@@ -249,7 +249,7 @@ fn secret_line_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> 
         return None;
     }
     let file = cited_file(project, path.trim())?;
-    crate::acp::secret_files::is_secret_file(&file).then(|| {
+    crate::acp::secret_files::is_secret_path(&file).then(|| {
         (
             "secret_presence",
             format!("[src: file: {}:exists]", path.trim()),
@@ -354,7 +354,7 @@ fn bare_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
     if crate::core::anti_halluc::is_binary_file(&path) {
         return None;
     }
-    if crate::acp::secret_files::is_secret_file(&path) {
+    if crate::acp::secret_files::is_secret_path(&path) {
         return Some(("secret_presence", format!("{raw}:exists")));
     }
     (is_td_sheet(project, raw) && line_count(&path) > 0)

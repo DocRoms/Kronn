@@ -48,8 +48,8 @@ no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
 [src: file: backend/src/agents/runner.rs:8011-8017#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:1984-1989#cost_incomplete]
-[src: file: backend/src/api/audit/full.rs:2195#reported_cost_usd_micros]
-[src: file: backend/src/api/audit/drift.rs:1262#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/full.rs:2200#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/drift.rs:1267#reported_cost_usd_micros]
 
 Audit executors have a separate bounded policy: 64 calls per file mutation tool
 (`write_file`, `edit_file`, `edit_lines`, `insert_after_line`), 48 for
@@ -85,10 +85,10 @@ rewritten. Originals are saved by content hash under
 agent correction attempts, with existing human-section protection. Invalid
 paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
-[src: file: backend/src/api/audit/document_repair.rs:412-486#split_verified_citations]
+[src: file: backend/src/api/audit/document_repair.rs:556-630#split_verified_citations]
 [src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
 [src: file: backend/src/api/audit/full.rs:2521-2551#check_attempt]
-[src: file: backend/src/api/audit/full.rs:1849-1853#max_attempts]
+[src: file: backend/src/api/audit/full.rs:1854-1858#max_attempts]
 [src: file: backend/src/api/audit/anti_hallu_enforce.rs:24#MAX_ATTEMPTS]
 [src: file: backend/src/api/audit/document_repair.rs:337-344#feedback]
 
@@ -99,12 +99,12 @@ recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
 [src: file: backend/src/api/audit/validation.rs:96-117#coverage_repair_feedback]
-[src: file: backend/src/api/audit/full.rs:2406-2421#coverage_repair_feedback]
+[src: file: backend/src/api/audit/full.rs:2411-2426#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
 If a corrective attempt had already consumed tokens, that usage remains in the
 persisted step and its terminal SSE event; an unmeasured launch stays unknown.
-[src: file: backend/src/api/audit/full.rs:2825-2872#previous_attempt_usage]
+[src: file: backend/src/api/audit/full.rs:2870-2917#previous_attempt_usage]
 
 A provider error during a step also survives in its persisted warning and SSE
 recap. HTTP status 429 is identified as a rate limit or exhausted quota, not as
@@ -234,13 +234,13 @@ under an unrelated agent.
   invocation. It stops the test immediately: later model errors cannot hide
   the billing failure. The form and saved connection card show a translated
   message; provider response bodies and credentials remain private.
-  [src: file: backend/src/api/external_api_connections.rs:1218-1224#PAYMENT_REQUIRED]
-  [src: file: backend/src/api/external_api_connections.rs:485-491#PAYMENT_REQUIRED]
-  [src: file: backend/src/api/external_api_connections.rs:607-609#ChatProbe]
-  [src: file: backend/src/api/external_api_connections.rs:625-645#failure_response]
-  [src: file: backend/src/api/external_api_connections.rs:740-751#assemble_tier_report]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:365-366#billing_error]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1054#billing_error]
+  [src: file: backend/src/api/external_api_connections.rs:1231-1237#PAYMENT_REQUIRED]
+  [src: file: backend/src/api/external_api_connections.rs:498-504#PAYMENT_REQUIRED]
+  [src: file: backend/src/api/external_api_connections.rs:611-613#ChatProbe]
+  [src: file: backend/src/api/external_api_connections.rs:638-658#failure_response]
+  [src: file: backend/src/api/external_api_connections.rs:753-764#assemble_tier_report]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:372-373#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1059#billing_error]
   Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks
   credit, even when the key can load `/v1/models`. Previously the generic
   fallback could hide this behind a later HTTP 400 from a TTS model.

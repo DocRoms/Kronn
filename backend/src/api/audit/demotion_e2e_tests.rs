@@ -29,7 +29,7 @@ fn arm_index_step(tools: &Path, project: &Path, line: &str) {
     after_each_step(
         tools,
         &format!(
-            "{AGENTS}) grep -qF 'KT1370' '{p}' || printf '\\n<!-- KT1370 -->\\n{line}\\n' >> '{p}' ;;",
+            "{AGENTS}) grep -qF 'KT1370' '{p}' || printf '\\n<!-- KT1370 -->\\n%s\\n' '{line}' >> '{p}' ;;",
             p = index.display()
         ),
     );
@@ -152,6 +152,74 @@ async fn a_secret_file_is_never_left_as_text_with_a_line() {
     );
     assert!(!recorded.contains(".env"), "{recorded}");
     assert!(!recorded.contains("token line"), "{recorded}");
+}
+
+/// Every file under `dir` whose bytes hold `needle`, except the secret itself.
+fn files_holding(dir: &Path, needle: &str, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            if entry.file_name() != ".git" {
+                files_holding(&path, needle, found);
+            }
+        } else if kind.is_file() && entry.file_name() != ".env" {
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            if String::from_utf8_lossy(&bytes).contains(needle) {
+                found.push(path);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_secret_marker_survives_nowhere_after_a_demotion() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    std::fs::write(project.join(".env"), "TOKEN=hunter2\n").unwrap();
+    // The comma turns the comment into a would-be path; the encoded name is an
+    // alias of `.env`. Both are removed with the marker, never copied anywhere.
+    arm_index_step(
+        tools,
+        project,
+        "Set it [src: file: .env:1 safe_word, SYNTHETIC_COMMENT_7731] and \
+         [src: file: %2eenv:1 SYNTHETIC_COMMENT_7731] first.",
+    );
+    let body = run_full(state, None).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    assert_eq!(done["status"], "complete", "{body}");
+    assert_eq!(done["unverified_references"], 2, "{done}");
+    let mut found = Vec::new();
+    files_holding(project, "SYNTHETIC_COMMENT_7731", &mut found);
+    assert!(
+        found.is_empty(),
+        "the comment survives in {found:?} (docs root and audit state)"
+    );
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, steps, prompt) = persisted(state, &run_id).await;
+    let shown: Vec<_> = sse_events(&body, "documentary_demoted")
+        .iter()
+        .map(|e| e["references"].to_string())
+        .collect();
+    let recorded = format!(
+        "{shown:?}{:?}{:?}{}",
+        steps.iter().map(|s| &s.step_warning).collect::<Vec<_>>(),
+        run.documentary_notes,
+        prompt.unwrap_or_default()
+    );
+    assert!(!recorded.contains("SYNTHETIC_COMMENT_7731"), "{recorded}");
+    assert!(!recorded.contains(".env"), "{recorded}");
+    assert!(
+        recorded.contains("[src: file: <secret file>]"),
+        "{recorded}"
+    );
 }
 
 #[tokio::test]
@@ -324,7 +392,21 @@ async fn a_partial_step_demotes_what_the_enforce_gate_still_refuses_and_complete
         "{rules}"
     );
     let run_id = done["audit_run_id"].as_str().unwrap().to_string();
-    let (_, steps, _) = persisted(&fx.h.state, &run_id).await;
+    let (run, steps, _) = persisted(&fx.h.state, &run_id).await;
+    // The timeline's notes block reads the run: the partial pipeline records
+    // the unverified references there, as the Full one does.
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    assert_eq!(
+        saved["unverified"].as_array().map(Vec::len),
+        Some(1),
+        "{saved}"
+    );
+    assert_eq!(saved["unverified"][0]["doc"], RULES, "{saved}");
+    assert_eq!(
+        saved["unverified"][0]["marker"], "[src: file: src/kept.rs:999]",
+        "{saved}"
+    );
     let step = steps.first().expect("the refreshed step");
     assert!(step.cli_success, "{step:?}");
     assert!(

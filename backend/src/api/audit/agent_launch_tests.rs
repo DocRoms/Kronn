@@ -1156,6 +1156,7 @@ async fn a_named_connection_audit_calls_that_connection_with_its_tier_model() {
         updated_at: now,
         image_model: None,
         video_model: None,
+        decision_model: None,
         media_endpoint: None,
     };
     state

@@ -1740,6 +1740,21 @@ pub(crate) async fn run_partial_pipeline(
                         "unverified_references": step_demotions.len(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
+                    if !step_demotions.is_empty() {
+                        // KT-1370 — the timeline's notes block reads them from the run.
+                        let run_id = audit_run_id.clone();
+                        let added: Vec<_> = step_demotions.iter().cloned().map(|r| (step as u32, r)).collect();
+                        if let Err(error) = state.db.with_conn(move |conn| {
+                            let existing = crate::db::audit_runs::get_by_id(conn, &run_id)?
+                                .and_then(|run| run.documentary_notes);
+                            match super::document_repair::merge_unverified_notes(existing.as_deref(), &added) {
+                                Some(notes) => crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes),
+                                None => Ok(()),
+                            }
+                        }).await {
+                            tracing::warn!("Unverified references of {audit_run_id} not recorded: {error}");
+                        }
+                    }
                     {
                         let run_id = audit_run_id.clone();
                         let remit_warning = {

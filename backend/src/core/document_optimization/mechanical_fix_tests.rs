@@ -96,6 +96,52 @@ fn a_secret_file_cited_by_line_gets_its_presence_form() {
     assert_eq!(fixed.fixes[0].kind, "secret_presence");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_secret_file_gets_its_presence_form() {
+    // `key-view.txt -> .ssh/vr-v2njs01-s`: the written name hides the key.
+    let dir = project();
+    std::os::unix::fs::symlink(".ssh/vr-v2njs01-s", dir.path().join("key-view.txt")).unwrap();
+    let doc = "docs/tech-debt/TD-20261019-ssh-private-key-tracked.md";
+    for (text, repaired) in [
+        (
+            "Key [src: file: key-view.txt:2] is tracked.\n",
+            "Key [src: file: key-view.txt:exists] is tracked.\n",
+        ),
+        (
+            "Key [src: file: key-view.txt] is tracked.\n",
+            "Key [src: file: key-view.txt:exists] is tracked.\n",
+        ),
+    ] {
+        let fixed = repair(dir.path(), doc, text).unwrap();
+        assert_eq!(fixed.content, repaired);
+        assert_eq!(fixed.fixes[0].kind, "secret_presence");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_link_chain_to_a_secret_gets_its_presence_form() {
+    // `keys -> .aws -> vault`: the canonical file `vault/review-key` lost `.aws`.
+    let dir = project();
+    let root = dir.path();
+    write(root, "vault/review-key", "k1\nk2\nk3\n");
+    std::os::unix::fs::symlink("vault", root.join(".aws")).unwrap();
+    std::os::unix::fs::symlink(".aws", root.join("keys")).unwrap();
+    let doc = "docs/tech-debt/TD-20261019-ssh-private-key-tracked.md";
+    let fixed = repair(
+        root,
+        doc,
+        "Key [src: file: keys/review-key:2] is tracked.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fixed.content,
+        "Key [src: file: keys/review-key:exists] is tracked.\n"
+    );
+    assert_eq!(fixed.fixes[0].kind, "secret_presence");
+}
+
 #[test]
 fn a_tech_debt_sheet_cited_bare_is_a_presence_citation() {
     // Africanews steps 8 and 10: the index cites the sheets by bare path.

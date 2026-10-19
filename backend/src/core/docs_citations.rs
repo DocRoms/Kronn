@@ -17,8 +17,8 @@ mod merge_tests;
 
 use crate::core::anti_halluc::{
     anchor_miss, anchor_miss_detail, file_citation_anchored, is_binary_file, line_bounds_status,
-    markers_at, partition_inline_code, resolve_in_root, scan_fences, strip_inline_code, Jailed,
-    SourceStatus,
+    markers_at, partition_inline_code, resolve_in_root, scan_fences, secret_line_refusal,
+    strip_inline_code, Jailed, SourceStatus,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -99,7 +99,9 @@ fn check_reference(
     match lines {
         None if is_binary_file(&found) => None,
         None => Some(("no line: cite `path:line` or `path:start-end`".into(), None)),
-        Some(span) => match line_bounds_status(&found, Some(span)) {
+        Some(span) => match secret_line_refusal(root, rel, &found, Some(span))
+            .unwrap_or_else(|| line_bounds_status(&found, Some(span)))
+        {
             (SourceStatus::Verified, _) => {
                 let symbol = anchor?;
                 let miss = anchor_miss(&found, span, symbol)?;
@@ -792,6 +794,75 @@ mod tests {
 
     fn reasons(doc: &str, root: &Path) -> Vec<String> {
         check_doc(doc, root).into_iter().map(|f| f.reason).collect()
+    }
+
+    #[test]
+    fn a_line_of_a_secret_file_fails_even_through_a_symlink() {
+        let tmp = repo();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::fs::write(root.join(".ssh/review-key"), "k1\nk2\nk3\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(".ssh/review-key", root.join("key-view.txt")).unwrap();
+        let mut paths = vec![".ssh/review-key"];
+        if cfg!(unix) {
+            paths.push("key-view.txt");
+        }
+        for path in paths {
+            for cite in [
+                format!("{path}:2"),
+                format!("{path}:1-3"),
+                format!("{path}:1-3#PRIVATE"),
+            ] {
+                let found = reasons(&format!("[src: file: {cite}]"), root);
+                assert_eq!(found.len(), 1, "{cite}: {found:?}");
+                assert!(found[0].contains("path:exists"), "{cite}: {found:?}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_written_name_remains_secret_after_resolving_to_an_ordinary_name() {
+        let tmp = repo();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::fs::write(root.join("settings-data"), "a=1\nb=2\nc=3\n").unwrap();
+        std::os::unix::fs::symlink("settings-data", root.join(".env")).unwrap();
+        std::os::unix::fs::symlink("../settings-data", root.join(".ssh/settings-view")).unwrap();
+        std::os::unix::fs::symlink(".env", root.join("view.txt")).unwrap();
+        for path in [".env", ".ssh/settings-view", "view.txt"] {
+            for cite in [
+                format!("{path}:2"),
+                format!("{path}:1-3"),
+                format!("{path}:1-3#PRIVATE"),
+            ] {
+                let found = reasons(&format!("[src: file: {cite}]"), root);
+                assert_eq!(found.len(), 1, "{cite}: {found:?}");
+                assert!(found[0].contains("path:exists"), "{cite}: {found:?}");
+            }
+        }
+        assert!(reasons("[src: file: settings-data:2]", root).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chain_directory_component_keeps_secret_names() {
+        let tmp = repo();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("vault")).unwrap();
+        std::fs::write(root.join("vault/review-key"), "k1\nk2\nk3\n").unwrap();
+        std::os::unix::fs::symlink("vault", root.join(".ssh")).unwrap();
+        std::os::unix::fs::symlink(".ssh", root.join("keys")).unwrap();
+        for cite in [
+            "keys/review-key:2",
+            "keys/review-key:1-3",
+            "keys/review-key:1-3#PRIVATE",
+        ] {
+            let found = reasons(&format!("[src: file: {cite}]"), root);
+            assert_eq!(found.len(), 1, "{cite}: {found:?}");
+            assert!(found[0].contains("path:exists"), "{cite}: {found:?}");
+        }
     }
 
     #[test]

@@ -53,6 +53,10 @@ pub struct UpsertConnectionRequest {
     pub image_model: Option<String>,
     #[serde(default)]
     pub video_model: Option<String>,
+    /// The model Decision steps call on this connection. A capability, not a
+    /// quality tier, like the media slots.
+    #[serde(default)]
+    pub decision_model: Option<String>,
     /// Override for providers serving media from another host. Empty derives
     /// it from `endpoint`.
     #[serde(default)]
@@ -308,14 +312,27 @@ async fn probe_models(
 
     let mut catalogue = fetch_catalogue(endpoint, api_key).await;
     if catalogue.ok && is_open_router {
-        let (images, videos) = tokio::join!(
+        // OpenRouter leaves decision models out of its default listing; they
+        // are only returned when asked for by output modality.
+        let (images, videos, decisions) = tokio::join!(
             fetch_capability_catalogue(endpoint, api_key, "/v1/images/models", "image"),
             fetch_capability_catalogue(endpoint, api_key, "/v1/videos/models", "video"),
+            fetch_capability_catalogue(
+                endpoint,
+                api_key,
+                "/v1/models?output_modalities=decisions",
+                "chat",
+            ),
         );
         let (image_models, image_reached) = images;
         let (video_models, video_reached) = videos;
         merge_catalog(&mut catalogue.catalog, image_models);
         merge_catalog(&mut catalogue.catalog, video_models);
+        // Only what declares the modality: a server ignoring the filter must
+        // not turn its chat models into decision models.
+        let (mut decision_models, _) = decisions;
+        decision_models.retain(|model| model.capabilities.iter().any(|c| c == "decision"));
+        merge_catalog(&mut catalogue.catalog, decision_models);
         // A capability endpoint that answered is authoritative on its own,
         // even if it listed zero models this time (state C: proven, not
         // merely unfiltered) — independent of whatever the chat catalogue's
@@ -1377,6 +1394,7 @@ fn catalog_models_from_body(
                         "text" => "chat",
                         "image" => "image",
                         "video" => "video",
+                        "decisions" | "decision" => "decision",
                         _ => continue,
                     };
                     if !capabilities.iter().any(|known| known == capability) {
@@ -1815,6 +1833,7 @@ pub async fn create(
         updated_at: now,
         image_model: clean(req.image_model),
         video_model: clean(req.video_model),
+        decision_model: clean(req.decision_model),
         media_endpoint: clean(req.media_endpoint),
     };
 
@@ -1934,6 +1953,7 @@ pub async fn update(
         updated_at: Utc::now(),
         image_model: clean(req.image_model),
         video_model: clean(req.video_model),
+        decision_model: clean(req.decision_model),
         media_endpoint: clean(req.media_endpoint),
     };
 
@@ -2139,6 +2159,7 @@ mod tests {
             updated_at: Utc::now(),
             image_model: None,
             video_model: None,
+            decision_model: None,
             media_endpoint: None,
         };
         assert_eq!(

@@ -378,6 +378,38 @@ pub(super) fn notes_json(
     .ok()
 }
 
+/// KT-1370 — the run's stored notes with `added` appended to the references it
+/// already lists as unverified (a resumed partial run keeps the earlier steps'
+/// ones). The other parts of the notes are left as they are.
+pub(super) fn merge_unverified_notes(
+    existing: Option<&str>,
+    added: &[(u32, document_optimization::DemotedReference)],
+) -> Option<String> {
+    let mut notes = existing
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(serde_json::Value::is_object);
+    let Some(notes) = notes.as_mut() else {
+        return notes_json(&[], &[], added);
+    };
+    if added.is_empty() {
+        return existing.map(str::to_string);
+    }
+    let listed = notes
+        .as_object_mut()
+        .map(|object| {
+            object
+                .entry("unverified")
+                .or_insert_with(|| serde_json::json!([]))
+        })
+        .and_then(|value| value.as_array_mut())?;
+    listed.extend(
+        added
+            .iter()
+            .map(|(step, r)| serde_json::json!({"step": step, "doc": r.doc, "marker": r.marker})),
+    );
+    serde_json::to_string(notes).ok()
+}
+
 /// KT-1370 — the lines a step records in its `step_warning` for the markers
 /// demoted after its last attempt: the count, then each document and the marker
 /// as the agent wrote it. Empty when nothing was demoted.
@@ -501,8 +533,13 @@ pub(super) fn changed_recovery_paths(
 
 /// Save the sanitized original before either mechanical or model correction.
 /// Content-addressed, create-new files preserve every distinct failed attempt.
+/// KT-1370: a marker that names a secret file is replaced by a placeholder in
+/// the copy, so the backup never keeps what the document itself must not.
 fn preserve_original(project: &Path, content: &str) -> Result<(), String> {
-    crate::core::audit_state::preserve_citation_original(project, content)
+    crate::core::audit_state::preserve_citation_original(
+        project,
+        &document_optimization::scrub_secret_markers(project, content),
+    )
 }
 
 pub(super) fn snapshot_for_recovery(
@@ -1448,9 +1485,15 @@ mod tests {
                 .unwrap()
                 .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
                 .collect::<Vec<_>>();
-        for original in [security, sheet, index] {
+        // KT-1370: but the marker of a secret file is a placeholder in the copy.
+        let scrubbed = "# TD\nTracked key [src: file: <secret file>]\n";
+        for original in [security, scrubbed, index] {
             assert!(originals.iter().any(|o| o == original), "{original}");
         }
+        assert!(
+            originals.iter().all(|o| !o.contains(".ssh/vr-v2njs01-s")),
+            "{originals:?}"
+        );
     }
 
     #[test]
@@ -1633,6 +1676,31 @@ mod tests {
         assert_eq!(notes.len(), 2, "{notes:?}");
         assert!(notes[1].contains("docs/tech-debt.md"));
         assert!(notes[1].contains("[src: file: config/packages/prod/monolog.yaml]"));
+    }
+
+    #[test]
+    fn the_unverified_notes_of_a_resumed_run_keep_what_it_already_listed() {
+        let reference = |marker: &str| document_optimization::DemotedReference {
+            doc: "docs/a.md".into(),
+            marker: marker.into(),
+        };
+        let first = merge_unverified_notes(None, &[(1, reference("[src: file: a]"))]).unwrap();
+        let both =
+            merge_unverified_notes(Some(&first), &[(2, reference("[src: file: b]"))]).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&both).unwrap();
+        assert_eq!(saved["unverified"].as_array().unwrap().len(), 2, "{saved}");
+        assert_eq!(saved["unverified"][1]["step"], 2);
+        // Notes the Full pipeline wrote (no `unverified` yet) keep their other parts.
+        let full = r#"{"preexisting":[{"path":"p","message":"m"}],"autofixes":[]}"#;
+        let merged =
+            merge_unverified_notes(Some(full), &[(3, reference("[src: file: c]"))]).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(saved["preexisting"][0]["path"], "p", "{saved}");
+        assert_eq!(saved["unverified"][0]["step"], 3, "{saved}");
+        assert_eq!(
+            merge_unverified_notes(Some(full), &[]).as_deref(),
+            Some(full)
+        );
     }
 
     #[test]

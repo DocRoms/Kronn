@@ -10,7 +10,9 @@ use crate::core::anti_halluc::parse_line_bounds;
 
 mod demotion;
 mod mechanical_fix;
-pub use demotion::{demote_unverifiable, DemotedReference, Demotion, UNVERIFIED_FLAG};
+pub use demotion::{
+    demote_unverifiable, scrub_secret_markers, DemotedReference, Demotion, UNVERIFIED_FLAG,
+};
 pub use mechanical_fix::{mechanical_repair, AppliedFix, Repaired};
 
 const CONFIG_FILE: &str = "docs/.kronn-document-budgets.json";
@@ -675,7 +677,7 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
         }
         return Defect(match cited_file(project, raw) {
             Some(path) if crate::core::anti_halluc::is_binary_file(&path) => return Skip,
-            Some(path) if crate::acp::secret_files::is_secret_file(&path) => format!(
+            Some(path) if crate::acp::secret_files::is_secret_path(&path) => format!(
                 "malformed file citation `{raw}`: this file may hold secrets, so no line of it is \
                  cited. To state that it exists or is tracked, write [src: file: {raw}:exists] \
                  and do not quote its content; otherwise name it in backticks outside any \
@@ -738,7 +740,7 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
     }
     // A cited line of a secret file is a pointer to its content: refused like a
     // bare path, only presence may be claimed.
-    if crate::acp::secret_files::is_secret_file(&path) {
+    if crate::acp::secret_files::is_secret_path(&path) {
         return Defect(format!(
             "malformed file citation `{path_part}:{}`: this file may hold secrets, so no \
              line of it is cited. To state that it exists or is tracked, write \
@@ -891,7 +893,7 @@ fn did_you_mean_candidates(
         let holds = full.is_file()
             && !outside_project(project, &full)
             && contained_path(project, &full)
-            && !crate::acp::secret_files::is_secret_file(&full)
+            && !crate::acp::secret_files::is_secret_path(&full)
             && match spec {
                 Some(Some((start, end))) => {
                     !crate::core::anti_halluc::is_binary_file(&full)
@@ -1270,7 +1272,7 @@ fn link_resolution_hint(project: &Path, source: &Path, clean: &str) -> String {
             full.exists()
                 && !outside_project(project, &full)
                 && contained_path(project, &full)
-                && !crate::acp::secret_files::is_secret_file(&full)
+                && !crate::acp::secret_files::is_secret_path(&full)
         })
         .and_then(|candidate| root_relative_fix(project, source, &candidate));
     if let Some(fix) = found {
@@ -2819,6 +2821,29 @@ mod tests {
         assert!(proposed_markers(&messages[0])
             .iter()
             .all(|marker| accepted(tmp.path(), marker)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_secret_file_is_refused_like_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join(".ssh/review-key"), "k1\nk2\nk3\n");
+        std::os::unix::fs::symlink(".ssh/review-key", tmp.path().join("key-view.txt")).unwrap();
+        for cite in [
+            "[src: file: key-view.txt:2]",
+            "[src: file: key-view.txt:1-3]",
+            "[src: file: key-view.txt]",
+        ] {
+            let messages = citation_messages(tmp.path(), cite);
+            assert_eq!(messages.len(), 1, "{cite}: {messages:#?}");
+            assert!(
+                messages[0].contains("may hold secrets")
+                    && messages[0].contains("[src: file: key-view.txt:exists]"),
+                "{cite}: {messages:#?}"
+            );
+        }
+        let messages = citation_messages(tmp.path(), "[src: file: key-view.txt:exists]");
+        assert!(messages.is_empty(), "{messages:#?}");
     }
 
     #[test]

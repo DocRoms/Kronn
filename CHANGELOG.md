@@ -17,10 +17,13 @@ Release notes for 0.9.3 and earlier are available in the
   `/api/show` says each local model can do, so a decision model such as
   `clef-flash:9b` (which answers typed questions and cannot chat) is no longer
   offered as a chat or agent model, and a launch on it is refused before it
-  reaches Ollama. The Ollama card lists installed decision models in their own
-  block, the manual catalogue form offers the `decision` capability for HTTP
-  entries, and a pull that needs a newer Ollama says to update it instead of
-  showing the raw error.
+  reaches Ollama. The decision model is chosen like the tiers, with the same
+  picker: a « 🧭 Décision » row on the Ollama card and a Decision slot next to
+  image and video on an HTTP connection, each listing decision models only.
+  An OpenRouter connection lists its decision models (Perplexity Decider,
+  Jev, Clef…), which OpenRouter returns only when asked for by output
+  modality. The manual catalogue form offers the `decision` capability, and a pull that
+  needs a newer Ollama says to update it instead of showing the raw error.
 - The audit repairs more of what it used to fail on, and tells a human the rest
   (KT-1357, 18/10 audit matrix). Kronn splits a list of lines of one file
   (`deploy.yml:210,214,218`) into one marker per line, moves the comment that
