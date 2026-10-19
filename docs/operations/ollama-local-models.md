@@ -822,8 +822,16 @@ without `completion`. [src: url: https://docs.ollama.com/capabilities/decision]
 
 - The catalogue refresh reads `/api/show` for every listed tag and stores its
   capabilities in the catalogue's words (`completion` becomes `chat`; `vision`,
-  `decision` and `embedding` are kept). A tag whose probe fails keeps the
-  capabilities already saved for it, and a tag never probed stays `chat`.
+  `decision`, `image` and `embedding` are kept; a list with none of these
+  keeps Ollama's own words, so it never reads as chat). A tag whose probe
+  fails keeps the capabilities already saved for it, and a tag never probed
+  stays `chat`.
+- Local image generation does not run: Ollama removed it on 2026-07-28
+  (#16615, "to be re-introduced on the new MLX runner"). 0.40.6 still pulls
+  `x/flux2-klein:4b` (`capabilities: ["image"]`) but `/api/generate` answers
+  `400 image generation models are not currently supported`. Kronn keeps such
+  a model out of the chat pickers.
+  [src: url: https://github.com/ollama/ollama/pull/16615]
   [src: file: backend/src/core/model_catalog/ollama_discovery.rs:137-152#catalog_capabilities]
   [src: file: backend/src/core/model_catalog/mod.rs:661-703#ollama_capabilities]
 - A catalogue entry without `chat` is refused by the chat preflight, and the

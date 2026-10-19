@@ -131,21 +131,31 @@ fn parse_tags(bytes: &[u8]) -> Result<Vec<OllamaTag>, DiscoveryOutcome> {
 }
 
 /// Ollama's `/api/show` capability words in the catalogue's vocabulary.
-/// `completion` is what lets a model chat; a decision model lists `decision`
-/// without it, so the chat preflight refuses it. `embedding` is kept so an
-/// embedding-only model never ends with an empty list, which reads as "any".
+/// `completion` is what lets a model chat; a decision or image model lists
+/// its kind without it, so the chat preflight refuses it. A list with no word
+/// Kronn knows keeps Ollama's own words rather than coming out empty, which
+/// the catalogue reads as "any", hence chat.
 pub fn catalog_capabilities(ollama: &[String]) -> Vec<String> {
-    let mut capabilities = Vec::new();
+    let mut capabilities: Vec<String> = Vec::new();
     for word in ollama {
         let mapped = match word.as_str() {
             "completion" => "chat",
             "vision" => "vision",
             "decision" => "decision",
+            "image" => "image",
             "embedding" => "embedding",
             _ => continue,
         };
         if !capabilities.iter().any(|known| known == mapped) {
             capabilities.push(mapped.to_string());
+        }
+    }
+    if capabilities.is_empty() {
+        for word in ollama {
+            let word = word.trim().to_ascii_lowercase();
+            if !word.is_empty() && !capabilities.contains(&word) {
+                capabilities.push(word);
+            }
         }
     }
     capabilities
@@ -200,11 +210,19 @@ mod tests {
             catalog_capabilities(&words(&["embedding"])),
             words(&["embedding"])
         );
+        // KT-1366 — an Ollama image model (`x/flux2-klein:4b` on 0.40.6) is
+        // not a chat model, nor is a kind Kronn does not know yet.
+        assert_eq!(catalog_capabilities(&words(&["image"])), words(&["image"]));
+        assert_eq!(catalog_capabilities(&words(&["audio"])), words(&["audio"]));
         assert_eq!(
             catalog_capabilities(&words(&["completion", "completion"])),
             words(&["chat"])
         );
-        assert!(catalog_capabilities(&words(&["insert", "tools"])).is_empty());
+        assert_eq!(
+            catalog_capabilities(&words(&["insert", "tools"])),
+            words(&["insert", "tools"])
+        );
+        assert!(catalog_capabilities(&[]).is_empty());
     }
 
     #[test]
