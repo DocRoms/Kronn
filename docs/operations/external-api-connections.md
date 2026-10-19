@@ -28,7 +28,7 @@ the same final route. [src: file: backend/src/api/external_api_connections.rs:24
    minimal non-streaming chat request with `max_tokens: 1` to distinguish a
    valid credential from a public model catalogue. This second request reaches
    the configured provider and may be accounted for by that provider.
-   [src: file: backend/src/api/external_api_connections.rs:274-285#probe_models]
+   [src: file: backend/src/api/external_api_connections.rs:278-289#probe_models]
    [src: file: backend/src/api/external_api_connections.rs:594-600#chat_probe]
    NVIDIA and OpenRouter are exceptions: their public catalogues are not
    entitlement lists, so Kronn never probes an arbitrary first entry. OpenRouter
@@ -45,7 +45,7 @@ the same final route. [src: file: backend/src/api/external_api_connections.rs:24
    endpoint and credential have passed that test. Changing the endpoint, key or
    preset invalidates the prior result; previous mappings stay visible but
    cannot be changed until the new connection state succeeds.
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:228-228#modelsUnlocked]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:235-235#modelsUnlocked]
    [src: file: frontend/src/components/settings/ExternalApiSection.tsx:650-656#changeConnection]
 
 The model tiers remain optional: leaving one blank stores no per-connection
@@ -54,8 +54,8 @@ credential presence and all three mappings, and supports a fresh test without
 returning the stored key to the browser. Editing shows a masked key state; only
 an explicit click on the eye requests the stored value. **Replace** opens a
 blank editable field, while saving without replacement preserves the current
-credential. [src: file: backend/src/api/external_api_connections.rs:1736-1742#reveal_credential]
-[src: file: backend/src/api/external_api_connections.rs:2010-2011#set_credential]
+credential. [src: file: backend/src/api/external_api_connections.rs:1740-1746#reveal_credential]
+[src: file: backend/src/api/external_api_connections.rs:2016-2017#set_credential]
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:997-1006#has_credential]
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:321-335#SecretField]
 
@@ -114,7 +114,7 @@ request. Create/update accepts the key as a write-only field: omitting it during
 an edit preserves the current key, while an explicit blank value clears it.
 [src: file: backend/src/models/external_api_connection.rs:5-16#credential_slug]
 [src: file: backend/src/api/external_api_connections.rs:27-35#has_credential]
-[src: file: backend/src/api/external_api_connections.rs:1736-1742#reveal_credential]
+[src: file: backend/src/api/external_api_connections.rs:1740-1746#reveal_credential]
 [src: file: backend/src/api/external_api_connections.rs:37-49#api_key]
 [src: file: backend/src/api/external_api_connections.rs:1693-1697#set_credential]
 
@@ -203,7 +203,7 @@ their endpoint and Economy, Default and Reasoning models. Saving either card
 immediately refreshes the global agent selectors, and startup projects any
 previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
-stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2009-2013#sync_runtime_config]
+stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2015-2019#sync_runtime_config]
 [src: file: backend/src/db/external_api_connections.rs:21-46#sync_runtime_config]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1791-1796#onModelTiersChanged]
 
@@ -232,8 +232,8 @@ the runtime-resolution guide.
   and, when a key is supplied, the authenticated chat probe succeed. On a
   LiteLLM proxy a refused tier model is reported per tier instead of failing the
   connection.
-  [src: file: backend/src/api/external_api_connections.rs:274-285#probe_models]
-  [src: file: backend/src/api/external_api_connections.rs:369-375#probe_tier_models]
+  [src: file: backend/src/api/external_api_connections.rs:278-289#probe_models]
+  [src: file: backend/src/api/external_api_connections.rs:373-379#probe_tier_models]
 - **The test failed but the connection works:** fixed in 0.13.0. The probe used
   to send a model of its own choosing rather than one of the three the operator
   had configured, so a connection that only serves the models it was set up for

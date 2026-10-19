@@ -52,7 +52,7 @@ is appended separately.
 [src: file: frontend/src/components/settings/OllamaCard.tsx:174-202#refresh]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:236-259#pickTierModel]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:261-317#saveContextOverride]
-[src: file: frontend/src/components/settings/OllamaCard.tsx:641-642#tiersLoadError]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:637-638#tiersLoadError]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:648-652#configuredDefault]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.catalog.test.tsx:105-141#merges]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.catalog.test.tsx:182-194#initial]

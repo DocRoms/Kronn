@@ -236,11 +236,11 @@ under an unrelated agent.
   message; provider response bodies and credentials remain private.
   [src: file: backend/src/api/external_api_connections.rs:1218-1224#PAYMENT_REQUIRED]
   [src: file: backend/src/api/external_api_connections.rs:485-491#PAYMENT_REQUIRED]
-  [src: file: backend/src/api/external_api_connections.rs:607-609#ChatProbe]
+  [src: file: backend/src/api/external_api_connections.rs:611-613#ChatProbe]
   [src: file: backend/src/api/external_api_connections.rs:625-645#failure_response]
   [src: file: backend/src/api/external_api_connections.rs:740-751#assemble_tier_report]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:365-366#billing_error]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1054#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:372-373#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1059#billing_error]
   Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks
   credit, even when the key can load `/v1/models`. Previously the generic
   fallback could hide this behind a later HTTP 400 from a TTS model.
