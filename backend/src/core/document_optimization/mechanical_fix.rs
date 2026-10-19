@@ -181,6 +181,9 @@ fn citation_fix(project: &Path, rel: &str, raw: &str) -> Option<(&'static str, S
     if let Some(fix) = empty_file_fix(project, raw) {
         return Some(fix);
     }
+    if let Some(fix) = secret_line_fix(project, raw) {
+        return Some(fix);
+    }
     if let Some(fix) = directory_fix(project, raw) {
         return Some(fix);
     }
@@ -236,6 +239,22 @@ fn empty_file_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
         return None;
     }
     Some(("empty_file", format!("`{raw}` (empty)")))
+}
+
+/// A line of a secret file (`.ssh/key:1`) can only mean the file is there: the
+/// presence form, never a pointer into it.
+fn secret_line_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
+    let (path, line) = raw.rsplit_once(':')?;
+    if crate::core::anti_halluc::is_presence_marker(line) {
+        return None;
+    }
+    let file = cited_file(project, path.trim())?;
+    crate::acp::secret_files::is_secret_file(&file).then(|| {
+        (
+            "secret_presence",
+            format!("[src: file: {}:exists]", path.trim()),
+        )
+    })
 }
 
 /// A directory cannot be cited (`docs/tech-debt/`): the gate says to name it in

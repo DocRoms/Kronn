@@ -79,6 +79,24 @@ fn a_secret_file_cited_bare_gets_its_presence_form() {
 }
 
 #[test]
+fn a_secret_file_cited_by_line_gets_its_presence_form() {
+    // Apollo matrix 19/10: `.ssh/vr-v2njs01-s:1` passed the gate.
+    let dir = project();
+    let text = "Key [src: file: .ssh/vr-v2njs01-s:1] is tracked.\n";
+    let fixed = repair(
+        dir.path(),
+        "docs/tech-debt/TD-20261019-ssh-private-key-tracked.md",
+        text,
+    )
+    .unwrap();
+    assert_eq!(
+        fixed.content,
+        "Key [src: file: .ssh/vr-v2njs01-s:exists] is tracked.\n"
+    );
+    assert_eq!(fixed.fixes[0].kind, "secret_presence");
+}
+
+#[test]
 fn a_tech_debt_sheet_cited_bare_is_a_presence_citation() {
     // Africanews steps 8 and 10: the index cites the sheets by bare path.
     let dir = project();

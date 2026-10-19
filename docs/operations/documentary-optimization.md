@@ -33,14 +33,14 @@ a parenthesised `(src: file: …)` is refused (only the bracketed marker is
 verified), and every path or range the gate suggests is one it accepts. A Stack table
 row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
-[src: file: backend/src/core/document_optimization.rs:1370-1385#inspect_stack_currency]
-[src: file: backend/src/core/document_optimization.rs:1401-1473#stack_currency_problems]
-[src: file: backend/src/core/document_optimization.rs:1471-1488#diag]
+[src: file: backend/src/core/document_optimization.rs:1380-1395#inspect_stack_currency]
+[src: file: backend/src/core/document_optimization.rs:1411-1483#stack_currency_problems]
+[src: file: backend/src/core/document_optimization.rs:1481-1498#diag]
 
 A citation into a path git ignores (a vendored dependency, a build output) that
 is absent from the checkout is refused as before, but the message says the path
 is git-ignored and cannot be verified from a fresh clone, instead of leaving a
-bare "does not exist". [src: file: backend/src/core/document_optimization.rs:774-784#ignored_citation_message]
+bare "does not exist". [src: file: backend/src/core/document_optimization.rs:784-794#ignored_citation_message]
 
 A tech-debt sheet is referenced from prose with a markdown link relative to the
 document, or with the `:exists` presence form of a file citation; the rows Kronn
