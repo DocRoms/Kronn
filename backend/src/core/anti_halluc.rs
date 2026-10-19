@@ -1787,6 +1787,9 @@ fn prelude_start(text: &[&str], line: usize) -> usize {
 /// sibling lines before them: a range that starts a whole function early
 /// drifts from the function it names.
 pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Option<AnchorMiss> {
+    if crate::acp::secret_files::is_secret_path(path) {
+        return None; // never read: the range itself is refused upstream
+    }
     if std::fs::metadata(path).ok()?.len() > LINE_COUNT_SIZE_CAP_BYTES {
         return None;
     }
@@ -1978,6 +1981,9 @@ pub(crate) fn range_is_citable(lines: usize, last: usize, start: usize, end: usi
 /// `(real line count, last citable line)` of a file, `None` when it is too big
 /// to bounds-check. An empty file has no line: both are 0.
 fn count_lines_capped(path: &Path) -> Option<(usize, usize)> {
+    if crate::acp::secret_files::is_secret_path(path) {
+        return None; // a secret file is never read for its lines
+    }
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > LINE_COUNT_SIZE_CAP_BYTES {
         return None; // too big — skip the bounds check, existence is enough
@@ -1988,6 +1994,9 @@ fn count_lines_capped(path: &Path) -> Option<(usize, usize)> {
 
 /// [`last_citable_line`] of a file on disk; 0 when it cannot be read.
 pub(crate) fn last_citable_line_of(path: &Path) -> usize {
+    if crate::acp::secret_files::is_secret_path(path) {
+        return 0;
+    }
     std::fs::read_to_string(path).map_or(0, |content| last_citable_line(&content))
 }
 
@@ -2111,6 +2120,15 @@ pub(crate) fn line_bounds_status(
 ) -> (SourceStatus, String) {
     match line_spec {
         None => (SourceStatus::Verified, "file exists".into()),
+        // The one gate every line check goes through (verifier, documentary
+        // gate, step lint): a line of a secret file, written or reached through
+        // a symlink, is a pointer into its content. Only presence may be cited.
+        Some(_) if crate::acp::secret_files::is_secret_path(candidate) => (
+            SourceStatus::Rejected,
+            "this file may hold secrets, so no line of it is cited — state that it exists \
+             with `path:exists` and do not quote its content"
+                .into(),
+        ),
         Some(_) if is_binary_file(candidate) => (
             SourceStatus::OutOfBounds,
             "binary file has no lines — cite it by bare path, without a line".into(),

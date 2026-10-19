@@ -96,6 +96,29 @@ fn a_secret_file_cited_by_line_gets_its_presence_form() {
     assert_eq!(fixed.fixes[0].kind, "secret_presence");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_secret_file_gets_its_presence_form() {
+    // `key-view.txt -> .ssh/vr-v2njs01-s`: the written name hides the key.
+    let dir = project();
+    std::os::unix::fs::symlink(".ssh/vr-v2njs01-s", dir.path().join("key-view.txt")).unwrap();
+    let doc = "docs/tech-debt/TD-20261019-ssh-private-key-tracked.md";
+    for (text, repaired) in [
+        (
+            "Key [src: file: key-view.txt:2] is tracked.\n",
+            "Key [src: file: key-view.txt:exists] is tracked.\n",
+        ),
+        (
+            "Key [src: file: key-view.txt] is tracked.\n",
+            "Key [src: file: key-view.txt:exists] is tracked.\n",
+        ),
+    ] {
+        let fixed = repair(dir.path(), doc, text).unwrap();
+        assert_eq!(fixed.content, repaired);
+        assert_eq!(fixed.fixes[0].kind, "secret_presence");
+    }
+}
+
 #[test]
 fn a_tech_debt_sheet_cited_bare_is_a_presence_citation() {
     // Africanews steps 8 and 10: the index cites the sheets by bare path.

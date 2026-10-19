@@ -85,6 +85,18 @@ pub fn is_secret_file(path: &Path) -> bool {
             })
 }
 
+/// [`is_secret_file`] for a path a reader is about to FOLLOW: the written path, or
+/// the file it resolves to once symlinks are followed. A link `key-view.txt ->
+/// .ssh/review-key` is as secret as its target; a directory link (`keys -> .ssh`)
+/// is caught by the resolved components. A path that does not resolve (missing,
+/// dangling) has nothing to read and is judged by its written name alone.
+pub fn is_secret_path(path: &Path) -> bool {
+    is_secret_file(path)
+        || std::fs::canonicalize(path)
+            .ok()
+            .is_some_and(|resolved| is_secret_file(&resolved))
+}
+
 /// Files Kronn itself writes that hold the encryption key, credentials or
 /// decrypted MCP environments.
 const KRONN_SECRET_NAMES: [&str; 8] = [
@@ -278,6 +290,28 @@ mod tests {
                     > deny
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_secret_file_is_a_secret_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::fs::write(root.join(".ssh/review-key"), "synthetic\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "plain\n").unwrap();
+        std::os::unix::fs::symlink(".ssh/review-key", root.join("key-view.txt")).unwrap();
+        std::os::unix::fs::symlink(".ssh", root.join("keys")).unwrap();
+        std::os::unix::fs::symlink("notes.txt", root.join("notes-link.txt")).unwrap();
+        std::os::unix::fs::symlink("gone", root.join("dangling.txt")).unwrap();
+        // The written name says nothing; the target does.
+        assert!(!is_secret_file(&root.join("key-view.txt")));
+        assert!(is_secret_path(&root.join("key-view.txt")));
+        assert!(is_secret_path(&root.join("keys/review-key")));
+        assert!(is_secret_path(&root.join(".ssh/review-key")));
+        assert!(!is_secret_path(&root.join("notes-link.txt")));
+        assert!(!is_secret_path(&root.join("dangling.txt")));
+        assert!(!is_secret_path(&root.join("missing.txt")));
     }
 
     #[test]

@@ -421,6 +421,62 @@ mod tests {
         );
     }
 
+    /// A repo with a synthetic key, a symlink to it and a plain file.
+    fn secret_repo() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".ssh")).unwrap();
+        fs::write(
+            dir.path().join(".ssh/review-key"),
+            "-----BEGIN KEY-----\nsynthetic\n-----END KEY-----\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("plain.txt"), "a\nb\nc\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(".ssh/review-key", dir.path().join("key-view.txt")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_line_of_a_secret_file_is_fabricated_whatever_the_form() {
+        let dir = secret_repo();
+        let mut paths = vec![".ssh/review-key"];
+        if cfg!(unix) {
+            paths.push("key-view.txt");
+        }
+        for path in paths {
+            for cite in [
+                format!("[src: file: {path}:2]"),
+                format!("[src: file: {path}:1-3]"),
+                format!("[src: file: {path}:1-3#PRIVATE]"),
+                format!("[src: code-comment: {path}:2]"),
+            ] {
+                let verdict = lint_step_file(&format!("Claim {cite}."), &[dir.path()]);
+                assert_eq!(
+                    verdict.fabricated.len(),
+                    1,
+                    "{cite}: {:?}",
+                    verdict.fabricated
+                );
+                assert!(
+                    verdict.fabricated[0].detail.contains("path:exists"),
+                    "{cite}: {}",
+                    verdict.fabricated[0].detail
+                );
+                let check = anti_halluc::verify_source_marker(
+                    cite.trim_start_matches("[src: ").trim_end_matches(']'),
+                    Some(dir.path()),
+                );
+                assert!(check.status.is_fabricated(), "{cite}: {check:?}");
+            }
+            // Presence is the form that stays.
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: {path}:exists]."), &[dir.path()]);
+            assert!(verdict.is_clean(), "{path}: {:?}", verdict.fabricated);
+        }
+        let verdict = lint_step_file("Claim [src: file: plain.txt:2].", &[dir.path()]);
+        assert!(verdict.is_clean(), "{:?}", verdict.fabricated);
+    }
+
     #[test]
     fn a_dash_range_passes_the_enforce_gate_like_a_hyphen_range() {
         let dir = tempdir().unwrap();

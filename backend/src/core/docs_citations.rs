@@ -795,6 +795,31 @@ mod tests {
     }
 
     #[test]
+    fn a_line_of_a_secret_file_fails_even_through_a_symlink() {
+        let tmp = repo();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::fs::write(root.join(".ssh/review-key"), "k1\nk2\nk3\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(".ssh/review-key", root.join("key-view.txt")).unwrap();
+        let mut paths = vec![".ssh/review-key"];
+        if cfg!(unix) {
+            paths.push("key-view.txt");
+        }
+        for path in paths {
+            for cite in [
+                format!("{path}:2"),
+                format!("{path}:1-3"),
+                format!("{path}:1-3#PRIVATE"),
+            ] {
+                let found = reasons(&format!("[src: file: {cite}]"), root);
+                assert_eq!(found.len(), 1, "{cite}: {found:?}");
+                assert!(found[0].contains("path:exists"), "{cite}: {found:?}");
+            }
+        }
+    }
+
+    #[test]
     fn resolving_citations_pass() {
         let tmp = repo();
         let doc = "A [src: file: src/a.rs:2] B `[src: file: src/a.rs:1-3]`\n\
