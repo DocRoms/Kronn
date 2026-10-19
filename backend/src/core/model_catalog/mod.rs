@@ -613,7 +613,8 @@ pub async fn refresh_ollama_catalog_at(
     let target = db::agent_runtime_target_id(&AgentType::Ollama);
     match &outcome {
         Ok(tags) => {
-            let models = ollama_discovery::discovered_models(tags);
+            let known = ollama_capabilities(database, &target, base_url, tags).await;
+            let models = ollama_discovery::discovered_models(tags, &known);
             let reconcile_target = target.clone();
             database
                 .with_conn(move |conn| {
@@ -652,6 +653,53 @@ pub async fn refresh_ollama_catalog_at(
     }
     let view = build_view(database, target, AgentType::Ollama).await?;
     Ok((view, outcome))
+}
+
+/// What each listed tag can do, from `/api/show`. A tag whose probe fails
+/// keeps the capabilities already saved for it, so a transient miss never
+/// turns a decision model back into a chat model.
+async fn ollama_capabilities(
+    database: &Database,
+    target: &str,
+    base_url: &str,
+    tags: &[ollama_discovery::OllamaTag],
+) -> HashMap<String, Vec<String>> {
+    use futures::StreamExt;
+    const MAX_CONCURRENT_PROBES: usize = 4;
+    let saved: HashMap<String, Vec<String>> =
+        build_view(database, target.to_string(), AgentType::Ollama)
+            .await
+            .map(|view| {
+                view.models
+                    .into_iter()
+                    .map(|entry| (entry.model_id, entry.capabilities))
+                    .collect()
+            })
+            .unwrap_or_default();
+    let names: Vec<String> = tags.iter().map(|tag| tag.name.clone()).collect();
+    let probed = futures::stream::iter(names)
+        .map(|name| {
+            let base = base_url.to_string();
+            async move {
+                let words = crate::agents::runner::ollama_model_profile(&base, &name)
+                    .await
+                    .and_then(|profile| profile.capabilities().map(<[String]>::to_vec));
+                (name, words)
+            }
+        })
+        .buffered(MAX_CONCURRENT_PROBES)
+        .collect::<Vec<_>>()
+        .await;
+    probed
+        .into_iter()
+        .filter_map(|(name, words)| {
+            let capabilities = match words {
+                Some(words) => ollama_discovery::catalog_capabilities(&words),
+                None => saved.get(&name)?.clone(),
+            };
+            Some((name, capabilities))
+        })
+        .collect()
 }
 
 /// Persist a successful provider catalogue for one named HTTP connection.
@@ -1874,6 +1922,107 @@ mod tests {
             log.last_error_reason,
             Some(ModelUnavailableReason::Unsupported)
         );
+    }
+
+    /// A local Ollama stand-in: `/api/tags` lists `tags`, `/api/show` answers
+    /// each model's capability words, or HTTP 500 when `show_fails`.
+    async fn mock_ollama_catalog(
+        tags: &'static [&'static str],
+        capabilities: HashMap<&'static str, Vec<&'static str>>,
+        show_fails: bool,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{routing::get, routing::post, Json, Router};
+        let listing = serde_json::json!({
+            "models": tags.iter().map(|name| serde_json::json!({
+                "name": name, "size": 1, "modified_at": "2026-10-19T10:00:00Z"
+            })).collect::<Vec<_>>()
+        });
+        let app = Router::new()
+            .route("/api/tags", get(move || async move { Json(listing) }))
+            .route(
+                "/api/show",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let words = capabilities
+                        .get(body["model"].as_str().unwrap_or_default())
+                        .cloned()
+                        .unwrap_or_default();
+                    async move {
+                        if show_fails {
+                            Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                        } else {
+                            Ok(Json(serde_json::json!({ "capabilities": words })))
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), server)
+    }
+
+    /// KT-1366 — an Ollama decision model (`/api/show` lists `decision`, not
+    /// `completion`) lands in the catalogue without `chat`, so a chat launch on
+    /// it is refused while a chat model next to it still passes. A later
+    /// refresh whose probe fails keeps what was saved instead of reverting the
+    /// decision model to `chat`. Needs a local socket for the mock server.
+    #[tokio::test]
+    async fn an_ollama_decision_model_is_catalogued_without_chat_and_refused_for_chat() {
+        let db = test_db();
+        let (base, server) = mock_ollama_catalog(
+            &["clef-flash:9b", "qwen3:8b"],
+            HashMap::from([
+                ("clef-flash:9b", vec!["decision", "vision"]),
+                ("qwen3:8b", vec!["completion", "tools"]),
+            ]),
+            false,
+        )
+        .await;
+        let (view, outcome) = refresh_ollama_catalog_at(&db, &base).await.unwrap();
+        server.abort();
+        assert!(outcome.is_ok());
+        let capabilities_of = |view: &ModelCatalogView, model: &str| {
+            view.models
+                .iter()
+                .find(|entry| entry.model_id == model)
+                .map(|entry| entry.capabilities.clone())
+                .unwrap_or_else(|| panic!("{model} is catalogued"))
+        };
+        assert_eq!(capabilities_of(&view, "clef-flash:9b"), vec!["decision", "vision"]);
+        assert_eq!(capabilities_of(&view, "qwen3:8b"), vec!["chat"]);
+
+        let refused = preflight_check(
+            &db,
+            None,
+            AgentType::Ollama,
+            ModelTier::Default,
+            Some("clef-flash:9b"),
+            None,
+        )
+        .await
+        .expect("a decision-only Ollama model must refuse a chat launch");
+        assert_eq!(refused.reason, ModelUnavailableReason::Unsupported);
+        assert!(refused.detail.contains("does not support chat"));
+        assert!(preflight_check(
+            &db,
+            None,
+            AgentType::Ollama,
+            ModelTier::Default,
+            Some("qwen3:8b"),
+            None,
+        )
+        .await
+        .is_none());
+
+        // Another endpoint, so the per-process profile cache cannot answer.
+        let (failing, server) =
+            mock_ollama_catalog(&["clef-flash:9b", "qwen3:8b"], HashMap::new(), true).await;
+        let (view, _) = refresh_ollama_catalog_at(&db, &failing).await.unwrap();
+        server.abort();
+        assert_eq!(capabilities_of(&view, "clef-flash:9b"), vec!["decision", "vision"]);
+        assert_eq!(capabilities_of(&view, "qwen3:8b"), vec!["chat"]);
     }
 
     #[tokio::test]

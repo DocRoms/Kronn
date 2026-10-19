@@ -219,7 +219,12 @@ pub async fn health(State(state): State<AppState>) -> Json<ApiResponse<OllamaHea
 pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaModelsResponse>> {
     let base = resolve_base_url_pub(state.ollama_base_url_override.as_deref());
     match crate::core::model_catalog::refresh_ollama_catalog_at(&state.db, &base).await {
-        Ok((_, Ok(tags))) => {
+        Ok((view, Ok(tags))) => {
+            let capabilities: std::collections::HashMap<String, Vec<String>> = view
+                .models
+                .into_iter()
+                .map(|entry| (entry.model_id, entry.capabilities))
+                .collect();
             let listed: Vec<(String, u64, String)> = tags
                 .into_iter()
                 .map(|tag| (tag.name, tag.size, tag.modified_at))
@@ -283,6 +288,7 @@ pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaMod
                         ceiling,
                     );
                     OllamaModel {
+                        capabilities: capabilities.get(&name).cloned().unwrap_or_default(),
                         name,
                         size: format_size(size),
                         modified,
@@ -477,6 +483,9 @@ fn classify_pull_error(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("no space left") || lower.contains("disk full") {
         "Ollama could not finish because the disk is full. Free disk space, then try again.".into()
+    } else if lower.contains("newer version of ollama") {
+        "This model needs a newer version of Ollama. Update Ollama, restart it, then try again."
+            .into()
     } else if lower.contains("not found") || lower.contains("manifest unknown") {
         "Ollama could not find this model. Check its name and tag, then try again.".into()
     } else if lower.contains("connection") || lower.contains("network") || lower.contains("timeout")
@@ -726,6 +735,19 @@ pub async fn set_context_override(
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    /// KT-1366 — a tag published for a newer Ollama is refused with 412; the
+    /// card must say to update Ollama, not show the raw registry text.
+    #[test]
+    fn a_pull_needing_a_newer_ollama_says_to_update_it() {
+        let message = classify_pull_error(
+            "{\"error\":\"pull model manifest: 412: \\nThe model you are attempting to pull requires a newer version of Ollama.\\nPlease download the latest version at:\\n\\thttps://ollama.com/download\"}",
+        );
+        assert!(message.contains("needs a newer version of Ollama"), "{message}");
+        assert!(message.contains("Update Ollama"), "{message}");
+        assert!(classify_pull_error("pull model manifest: file does not exist")
+            .starts_with("Ollama could not download the model"));
+    }
 
     #[test]
     fn explicit_runner_endpoint_is_used_verbatim() {
