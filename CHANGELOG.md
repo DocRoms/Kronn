@@ -654,6 +654,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A comment on an arbitration card whose workflow step has ended is answered
+  by the room's own agent instead of nobody. It used to go to the step's
+  closed CLI session and wake no one ("personne ne lira cette réponse
+  maintenant"), so questions asked back on a framing room's cards got no
+  reply. The agent's reply answers the comment, and the question stays
+  pending for the next run; an answer or a refusal still waits for that run
+  and wakes nobody, and a room without a native agent keeps the old notice.
+
 - Confluence links read from Jira no longer come back as `***spaces/…`
   (KT-1331, the rest of KT-1249). The Atlassian plugin declares
   `CONFLUENCE_URL` as public configuration, like `JIRA_URL`: it was masked as a
