@@ -336,7 +336,7 @@ fn pending_files(worktree: &Path, configured: Option<&DocsRoot>) -> u32 {
         return 0;
     };
     let docs_dir = docs_merge::choose_docs_dir(&existing, configured.map(DocsRoot::rel));
-    untracked_under(worktree, &docs_dir).map_or(0, |files| files.len() as u32)
+    proposed_files(worktree, &docs_dir).map_or(0, |files| files.len() as u32)
 }
 
 /// Read-only: worktree list, refs and counts; no fetch, no index write.
@@ -458,6 +458,15 @@ fn modified_existing_docs(worktree: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// The one definition of "proposed by the merge": files under the docs dir that
+/// git sees as untracked in the merge worktree (sorted, ignore rules applied).
+/// The apply view, the pending count and `accept_merge` all read this.
+fn proposed_files(worktree: &Path, docs_dir: &str) -> Result<Vec<String>, String> {
+    let mut files = untracked_under(worktree, docs_dir)?;
+    files.sort();
+    Ok(files)
+}
+
 fn untracked_under(worktree: &Path, dir: &str) -> Result<Vec<String>, String> {
     let raw = git(
         worktree,
@@ -553,34 +562,29 @@ pub fn run_merge_in_worktree(
         ));
     }
 
+    // The proposal is exactly what `accept_merge` accepts (`proposed_files`): a
+    // planned write git does not see as an untracked file — the local-excluded
+    // `docs/var/.gitkeep` scratch placeholder, or a file an earlier accept already
+    // committed — is on disk but is not proposed (KT-1359).
     let mut files: Vec<MergeFileDiff> = Vec::new();
-    for (path, outcome) in &outcomes {
-        let content = std::fs::read_to_string(worktree.join(path)).unwrap_or_default();
+    for path in proposed_files(&worktree, &plan.docs_dir)? {
+        let content = std::fs::read_to_string(worktree.join(&path)).unwrap_or_default();
+        let outcome = outcomes
+            .iter()
+            .find(|(p, _)| p == &path)
+            .map_or(WriteOutcome::Created, |(_, o)| *o);
         let imported = plan
             .writes
             .iter()
-            .find(|w| &w.path == path)
+            .find(|w| w.path == path)
             .map_or(0, |w| w.imported_sections);
-        files.push(MergeFileDiff {
-            path: path.clone(),
-            outcome: Some(*outcome),
-            imported_sections: imported,
-            diff: docs_merge::addition_diff(path, &content),
-        });
-    }
-    for path in untracked_under(&worktree, &plan.docs_dir)? {
-        if files.iter().any(|f| f.path == path) {
-            continue;
-        }
-        let content = std::fs::read_to_string(worktree.join(&path)).unwrap_or_default();
         files.push(MergeFileDiff {
             diff: docs_merge::addition_diff(&path, &content),
             path,
-            outcome: Some(WriteOutcome::Created),
-            imported_sections: 0,
+            outcome: Some(outcome),
+            imported_sections: imported,
         });
     }
-    files.sort_by(|a, b| a.path.cmp(&b.path));
 
     let mut out = view(&plan, base, base_ref, files, untracked_in_checkout);
     out.worktree_path = Some(worktree.to_string_lossy().into_owned());
@@ -639,7 +643,7 @@ pub fn accept_merge(repo: &Path, paths: &[String]) -> Result<TemplateMergeAccept
     let existing = tracked_files(&worktree)?;
     let configured = configured_root(repo)?;
     let docs_dir = docs_merge::choose_docs_dir(&existing, configured.as_ref().map(DocsRoot::rel));
-    let proposed: BTreeSet<String> = untracked_under(&worktree, &docs_dir)?.into_iter().collect();
+    let proposed: BTreeSet<String> = proposed_files(&worktree, &docs_dir)?.into_iter().collect();
     let refused: Vec<&String> = paths.iter().filter(|p| !proposed.contains(*p)).collect();
     if !refused.is_empty() {
         return Err(format!(

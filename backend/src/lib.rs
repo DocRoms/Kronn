@@ -3218,6 +3218,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/skills/{id}",
             put(api::skills::update).delete(api::skills::delete),
         )
+        .route("/api/skills/{id}/guide", get(api::skills::guide))
         .route(
             "/api/skills/auto-triggers/disabled",
             get(api::skills::list_disabled_auto),

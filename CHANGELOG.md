@@ -27,6 +27,19 @@ Release notes for 0.9.3 and earlier are available in the
   section built from the whole source tree ends `unchanged`, with no agent, while
   that tree is the one its baseline recorded; the glossary joins them (its
   baseline now records the tree). An `unchanged` partial step is stored as done.
+- One guide for building automations, read the same way by every agent
+  (KT-1341). The built-in workflow architect is served section by section
+  through `tool_manual({tool: "workflow-architect", section})` to CLI agents
+  (MCP) and HTTP agents alike, and gains a « Reach » section: the workflow's
+  own project, the workflow scope a human sets (Projects accessible, every
+  project in red), why a step never inherits its room's grants, the parent
+  task over several repositories, and the general resources. HTTP agents get
+  `room_scope`. A refusal on another project now names the right way out for
+  its caller: `room_scope` for a room's agent, the workflow's scope for a step,
+  the principal for a worker (it used to name a `scope_request` tool that does
+  not exist). A test fails when a tool exists for one audience only, in either
+  direction, unless it is listed with its reason; the tools HTTP agents do not
+  have yet are deferred to KT-1356. The MCP catalogue does not grow.
 
 - A full audit no longer ends Interrupted on what the audit could not fix
   (KT-1353, audit matrix africanews/apollo). The documentary blockers the
@@ -640,6 +653,13 @@ Release notes for 0.9.3 and earlier are available in the
   Migration 259 adds `messages.session_continuity`.
 
 ### Fixed
+
+- Confluence links read from Jira no longer come back as `***spaces/…`
+  (KT-1331, the rest of KT-1249). The Atlassian plugin declares
+  `CONFLUENCE_URL` as public configuration, like `JIRA_URL`: it was masked as a
+  secret in every API response, so a workflow that rewrote a Jira description
+  wrote the masked links back. The registry definition updates installed
+  plugins at the next start.
 
 - An audit no longer lets a fabricated `deps:` or `url:` provenance reach the
   Stack table in the default (warn) mode (KT-1308). A `[src: deps: …]`

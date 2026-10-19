@@ -605,6 +605,14 @@ const COVERAGE_DIMENSIONS: &[&str] = &[
     "Documentation drift",
 ];
 
+/// A table cell without its markdown emphasis: agents bold the label column
+/// (`**Security**`), which is still the Security row.
+fn plain_cell(cell: &str) -> &str {
+    cell.trim()
+        .trim_matches(|c| matches!(c, '*' | '_' | '`'))
+        .trim()
+}
+
 /// Structural validation of the `## Dimension coverage` matrix in
 /// `inconsistencies-tech-debt.md` (Codex review #26, 2026-06-03). Cheap, and
 /// does NOT prove the scan actually happened — it just catches a missing /
@@ -646,13 +654,8 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
             .filter(|l| {
                 let l = l.trim();
                 l.starts_with('|') && {
-                    let first = l
-                        .trim_start_matches('|')
-                        .split('|')
-                        .next()
-                        .unwrap_or("")
-                        .trim();
-                    first.to_ascii_lowercase().starts_with(&dim_lc)
+                    let first = l.trim_start_matches('|').split('|').next().unwrap_or("");
+                    plain_cell(first).to_ascii_lowercase().starts_with(&dim_lc)
                 }
             })
             .collect();
@@ -674,7 +677,7 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
             .trim()
             .trim_matches('|')
             .split('|')
-            .map(|c| c.trim())
+            .map(plain_cell)
             .collect();
         let outcome = cells.get(1).copied().unwrap_or("");
         let evidence = cells.get(2).copied().unwrap_or("");
@@ -1210,6 +1213,20 @@ mod tests {
         assert!(
             validate_dimension_coverage(&m).is_ok(),
             "embellished labels must still match"
+        );
+    }
+
+    #[test]
+    fn coverage_matrix_with_bold_labels_and_outcomes_passes() {
+        let mut m = valid_coverage_matrix();
+        for dim in COVERAGE_DIMENSIONS {
+            m = m.replace(&format!("| {dim} |"), &format!("| **{dim}** |"));
+        }
+        let m = m.replace("| findings |", "| *findings* |");
+        assert!(
+            validate_dimension_coverage(&m).is_ok(),
+            "{:?}",
+            validate_dimension_coverage(&m)
         );
     }
 

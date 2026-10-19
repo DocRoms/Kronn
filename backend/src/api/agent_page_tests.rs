@@ -352,7 +352,7 @@ fn native_page_surface_has_a_bounded_measured_cost() {
         "Page family grew to {page_bytes} B; keep detail in tool_manual"
     );
     for name in ["page_create", "page_update_html"] {
-        assert!(tool_manual(Some(name))["manual"]
+        assert!(tool_manual(Some(name), None)["manual"]
             .as_str()
             .unwrap()
             .contains("HTML"));

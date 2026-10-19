@@ -40,6 +40,7 @@ pub(crate) mod run_state;
 #[cfg(test)]
 mod step_closing_tests;
 pub(crate) mod step_guard;
+pub(crate) mod step_remit;
 pub mod td_review;
 pub mod td_tasks;
 pub mod validate;
@@ -435,8 +436,9 @@ pub(crate) fn dated_step_prompt(
     let today = now.format("%Y-%m-%d").to_string();
     let today_compact = now.format("%Y%m%d").to_string();
     format!(
-        "Today's date is {today} (YYYYMMDD: {today_compact}).\n\n{}\n\n{}{}",
+        "Today's date is {today} (YYYYMMDD: {today_compact}).\n\n{}\n\n{}\n\n{}{}",
         docs_root.relocate(PROMPT_PREAMBLE),
+        step_remit::remit_prompt_block(docs_root),
         gate,
         step_prompt
     )

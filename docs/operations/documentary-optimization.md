@@ -69,7 +69,7 @@ comment after a reference the gate refuses, a comment holding a backtick, a
 bracket or a parenthesis, a list with a comment, several candidate paths, a text
 file cited without a line, an empty file cited with a line, a range farther out
 of the file, and anything inside fenced or inline code.
-[src: file: backend/src/core/document_optimization/mechanical_fix.rs:36#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:509#check_attempt]
+[src: file: backend/src/core/document_optimization/mechanical_fix.rs:36#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:545#check_attempt]
 
 **Detector signals the agent never addressed** (KT-1357). Step 8 must dispose of
 each deterministic detector signal: the index, or a TD sheet the index lists,

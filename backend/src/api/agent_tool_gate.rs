@@ -267,6 +267,27 @@ impl KronnToolExecutor {
                 .unwrap_or_default()
         };
         match call.name.as_str() {
+            // Reading the room's reach, or filing a request a human decides.
+            "room_scope" => {
+                let disc = own_disc?;
+                match text(args, "project") {
+                    None => get(
+                        "/api/discussions/{id}/scope",
+                        vec![("id".into(), disc)],
+                        None,
+                    ),
+                    Some(project) => send(
+                        "POST",
+                        "/api/discussions/{id}/scope/requests",
+                        vec![("id".into(), disc)],
+                        json!({
+                            "project": project,
+                            "access": args.get("access"),
+                            "reason": args.get("reason"),
+                        }),
+                    ),
+                }
+            }
             "plan_get" => {
                 let disc = own_disc.or_else(|| text(args, "discussion_id"))?;
                 get(

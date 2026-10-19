@@ -666,6 +666,7 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     // (`POST /api/maintenance/disk/purge`) is a human action: not listed.
     r("GET", "/api/maintenance/disk", Read, &[]),
     r("GET", "/api/skills", Read, &[]),
+    r("GET", "/api/skills/{id}/guide", Read, &[]),
     r("POST", "/api/skills", Denied, &[]),
     r("PUT", "/api/skills/{id}", Denied, &[]),
     r("DELETE", "/api/skills/{id}", Denied, &[]),
@@ -695,6 +696,7 @@ const UNBOUND_ROUTES: &[&str] = &[
     "/api/workflows/step-schema",
     "/api/signals/catalog",
     "/api/skills",
+    "/api/skills/{id}/guide",
     "/api/profiles",
     "/api/directives",
 ];
@@ -748,6 +750,29 @@ const GENERAL_WHEN_UNBOUND: &[&str] = &[
     "/api/pages",
     "/api/workflows",
 ];
+
+/// A refusal on another project, with the way out that fits the caller: a
+/// room's own agent asks with `room_scope`; a workflow step reaches others
+/// only through its workflow's scope; a worker, its task's project (KT-1341).
+pub fn project_refusal(scope: &BridgeScope, read_only: bool) -> String {
+    let what = if read_only {
+        "this room may read that project, not change it"
+    } else {
+        "the project the request names is outside this launch's reach"
+    };
+    if scope.owns_nothing() {
+        // No room, run or task: the editor's « Test step », an audit, a document agent.
+        format!("{what}: this launch reaches its project only; a workflow's real runs also reach the workflow's scope, which a human sets on the workflow page (Projects accessible)")
+    } else if scope.workflow_run_id.is_some() {
+        format!("{what}: a workflow step reaches another project only through its workflow's scope, which a human sets on the workflow page (Projects accessible)")
+    } else if scope.room_grant_discussions.is_empty() {
+        format!("{what}: a worker reaches its task's project only; the principal asks for more")
+    } else if read_only {
+        format!("{what}: ask a human for write access with room_scope({{project, access: \"write\", reason}})")
+    } else {
+        format!("{what}: ask a human with room_scope({{project, access, reason}})")
+    }
+}
 
 /// Why a project-less token's general write is refused, with the way out.
 pub const GENERAL_WRITE_NEEDS_GRANT: &str = "writing a general resource (seen by every project) needs a human to grant this room « General · write » in its Scope settings";
@@ -1757,11 +1782,8 @@ pub fn authorize_in(
             if granted {
                 continue;
             }
-            return Err(Refusal(if reach.reads(id) && route.rule != Rule::Effect {
-                "this room may read that project, not change it: ask for write access with scope_request".into()
-            } else {
-                "a project the request names is outside this bridge token's project: a human can grant it (scope_request)".into()
-            }));
+            let read_only = reach.reads(id) && route.rule != Rule::Effect;
+            return Err(Refusal(project_refusal(&grant.scope, read_only)));
         }
         if kind == Kind::Discussion && route.rule == Rule::Own && !grant.owns_discussion(id) {
             return Err(Refusal(

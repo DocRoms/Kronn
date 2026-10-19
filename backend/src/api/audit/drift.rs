@@ -954,6 +954,10 @@ pub(crate) async fn run_partial_pipeline(
             let mut target_watch = super::step_guard::TargetWatch::new(
                 &project_path, analysis_step.target_file, pre_content.as_deref(),
             );
+            // KT-1360 — where HEAD and the files outside the docs root stand
+            // before the agent runs; settled after every attempt.
+            let step_remit = super::step_remit::StepRemit::capture(&project_path, &docs_root).await;
+            let mut remit_notes: Vec<String> = Vec::new();
             let validated_docs_snapshot =
                 match super::helpers::capture_validated_docs(&project_path) {
                     Ok(snapshot) => snapshot,
@@ -1309,6 +1313,15 @@ pub(crate) async fn run_partial_pipeline(
                         }
                     }
 
+                    // KT-1360 — the agent's commits are undone and its edits outside
+                    // the docs root put back, before any gate reads the tree.
+                    if let Some(remit) = &step_remit {
+                        let report = remit.settle().await;
+                        for event in super::step_remit::warning_events(step, file_label, &report) {
+                            yield event;
+                        }
+                        remit_notes.extend(report.messages());
+                    }
                     // The rules section belongs to Kronn: an agent rewrite never keeps it.
                     super::briefing_rules::sync_from_notes(&project_path, briefing_notes.as_deref());
                     // Every write of the attempt stays; the docs a human
@@ -1658,10 +1671,12 @@ pub(crate) async fn run_partial_pipeline(
                         "total_tokens": run_tokens.total(),
                         // `null` — not 0 — when an attempt's agent reported no cost.
                         "cost_usd_micros": step_cost.usd_micros(),
+                        "remit": remit_notes,
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
                     {
                         let run_id = audit_run_id.clone();
+                        let remit_warning = (!remit_notes.is_empty()).then(|| remit_notes.join("\n"));
                         let recorded_usage = step_usage;
                         let recorded_total = run_tokens.total();
                         let step_unchanged = outcome == "unchanged";
@@ -1678,7 +1693,7 @@ pub(crate) async fn run_partial_pipeline(
                                 // An `unchanged` step is done, as in the Full
                                 // pipeline: a resume carries it only so (KT-1357).
                                 step_succeeded || step_unchanged,
-                                None,
+                                remit_warning.as_deref(),
                                 false,
                                 step_unchanged,
                             );

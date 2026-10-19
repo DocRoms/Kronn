@@ -79,11 +79,11 @@ Plus Kronn's internal catalogue — plan and task tools, `qa_list`/`qa_run`, and
 against configured REST plugins [src: file: backend/src/api/agent_tools.rs:523-1004#build_tool_catalogue].
 
 And, since 0.13.0, media generation: `media_generate` and `media_job_status`
-[src: file: backend/src/api/agent_tools.rs:1099-1194#orchestration_tool_catalogue]. These sit in the orchestration
+[src: file: backend/src/api/agent_tools.rs:1121-1216#orchestration_tool_catalogue]. These sit in the orchestration
 catalogue, so an HTTP agent replying in a discussion has them, and a bounded worker keeps
 them — they are deliberately absent from the principal-only list a worker room strips
-[src: file: backend/src/api/agent_tools.rs:1419-1470#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
-discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1532-1566#orchestration_tool_catalogue].
+[src: file: backend/src/api/agent_tools.rs:1441-1494#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
+discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1556-1590#orchestration_tool_catalogue].
 
 Until then only CLI agents could generate an image or a video, because the tools were
 declared in the MCP bridge and an HTTP agent structurally cannot reach it. The capability
@@ -123,7 +123,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3155-3222#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3228-3295#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -169,7 +169,7 @@ So the boundary today is **not** "HTTP agents cannot write". It is:
 One trap in that sentence, worth naming because the catalogue says otherwise: `git_commit`
 IS declared to a discussion agent, and its handler refuses every caller that is not the
 active native worker in its managed task worktree
-`[src: file: backend/src/api/agent_tools.rs:3492-3540#git_commit]`. So an ordinary `@ollama` in a room
+`[src: file: backend/src/api/agent_tools.rs:3565-3613#git_commit]`. So an ordinary `@ollama` in a room
 sees the tool and is turned away by it. The refusal is correct; the declaration is the part
 that misleads, and it is kept declared only because a worker room is built by narrowing the
 same catalogue.
@@ -274,7 +274,7 @@ setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
 [src: file: backend/src/api/agent_tools.rs:349-427#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2353-2361#tools_load]
+[src: file: backend/src/api/agent_tools.rs:2426-2434#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -332,8 +332,8 @@ No `web_fetch` (it would send the model off the project), no `git_commit` (the
 audit never commits), no plan, REST-plugin or discussion tools. A call to any
 other name is refused before a handler sees it, and so is a write to the
 target document of another step of the chain (the consolidation step excepted)
-[src: file: backend/src/api/agent_tools.rs:1638-1652#AUDIT_TOOLS]
-[src: file: backend/src/api/agent_tools.rs:206-237#foreign_step_target_refusal].
+[src: file: backend/src/api/agent_tools.rs:1662-1676#AUDIT_TOOLS]
+[src: file: backend/src/api/agent_tools.rs:211-242#foreign_step_target_refusal].
 
 **What the audit prompt says about other repos (KT-926).** An audit's file tools
 cannot leave the project, and the prompt goes to the model provider. It used to
@@ -366,8 +366,8 @@ one.
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs:1870-1875#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:4588-4591#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:1881-1886#agent_cancels]
+[src: file: backend/src/api/audit/full.rs:4632-4635#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 
@@ -402,8 +402,8 @@ shipping it. Three things changed:
   is accepted as its `path`. An empty or malformed value is refused with a working
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
-  [src: file: backend/src/api/agent_tools.rs:803-830#extract]
-  [src: file: backend/src/api/agent_tools.rs:4489-4513#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:808-836#extract]
+  [src: file: backend/src/api/agent_tools.rs:4572-4596#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down
@@ -463,7 +463,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-467#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9529-9531#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9524-9526#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON
