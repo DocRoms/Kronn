@@ -233,7 +233,8 @@ pub fn opencode_full_access_config(operator: Option<&str>) -> Option<String> {
     operator.is_none().then(opencode_config_content)
 }
 
-#[cfg(all(test, feature = "full-tests"))]
+// Out of `full-tests`: the CI portability jobs (Windows, macOS) run it.
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;

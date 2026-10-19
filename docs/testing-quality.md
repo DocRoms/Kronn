@@ -324,7 +324,7 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:363#timeout-minutes] [src: file: .github/workflows/ci-test.yml:717#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-182#timeout-minutes] [src: file: .github/workflows/ci-build.yml:259#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:363#timeout-minutes] [src: file: .github/workflows/ci-test.yml:717#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-182#timeout-minutes] [src: file: .github/workflows/ci-build.yml:263#timeout-minutes]
 [src: file: .github/workflows/ci-test.yml:968-1004#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
 
 ## Test placement

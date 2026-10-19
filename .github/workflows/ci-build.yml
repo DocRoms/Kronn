@@ -239,6 +239,10 @@ jobs:
         if: github.event_name != 'push'
         run: cargo test --lib --no-default-features agents::wsl
 
+      - name: Secret file paths (drives, UNC shares, links)
+        if: github.event_name != 'push'
+        run: cargo test --lib --no-default-features acp::secret_files
+
       - name: Save cargo registry and build (main)
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-portability.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4

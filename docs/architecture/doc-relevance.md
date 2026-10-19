@@ -62,7 +62,7 @@ back depends on that step (`AnalysisStep.sources`):
   of the doc queues it again.
 
 [src: file: backend/src/core/citation_drift.rs:86#DocReview]
-[src: file: backend/src/core/citation_drift.rs:892#current_review]
+[src: file: backend/src/core/citation_drift.rs:895#current_review]
 [src: file: backend/src/api/audit/revalidate.rs:60#stamp_rereads]
 
 ### When a prose path counts as gone
