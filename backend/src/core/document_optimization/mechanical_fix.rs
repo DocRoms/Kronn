@@ -181,6 +181,12 @@ fn citation_fix(project: &Path, rel: &str, raw: &str) -> Option<(&'static str, S
     if let Some(fix) = empty_file_fix(project, raw) {
         return Some(fix);
     }
+    if let Some(fix) = directory_fix(project, raw) {
+        return Some(fix);
+    }
+    if let Some(fix) = td_extension_fix(project, rel, raw) {
+        return Some(fix);
+    }
     let (kind, content) = marker_fix(project, rel, raw)?;
     Some((kind, format!("[src: file: {content}]")))
 }
@@ -230,6 +236,44 @@ fn empty_file_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
         return None;
     }
     Some(("empty_file", format!("`{raw}` (empty)")))
+}
+
+/// A directory cannot be cited (`docs/tech-debt/`): the gate says to name it in
+/// backticks without a marker, which is all the claim can mean (africanews
+/// step 8). A directory given a line (`dir:1`) is left to the gate's message.
+fn directory_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
+    is_project_dir(project, raw).then(|| ("directory_backticks", format!("`{raw}`")))
+}
+
+/// A tech-debt sheet cited without its `.md` (docroms step 8:
+/// `docs/tech-debt/TD-20260719-here-apikey-hardcoded:exists`). The one file the
+/// citation can mean is `<path>.md`; the form (`:exists`, a line, none) is kept
+/// and the result is applied only once the gate accepts it.
+fn td_extension_fix(project: &Path, rel: &str, raw: &str) -> Option<(&'static str, String)> {
+    let (path, tail) = match raw.rsplit_once(':') {
+        Some((path, tail)) => (path.trim(), Some(tail.trim())),
+        None => (raw, None),
+    };
+    if path.ends_with(".md") || cited_file(project, path).is_some() {
+        return None;
+    }
+    let sheet = format!("{path}.md");
+    if !is_td_sheet(project, &sheet) || cited_file(project, &sheet).is_none() {
+        return None;
+    }
+    let fixed = match tail {
+        Some(tail) => format!("{sheet}:{tail}"),
+        None => {
+            let (_, content) = marker_fix(project, rel, &sheet)?;
+            return Some(("td_sheet_extension", format!("[src: file: {content}]")));
+        }
+    };
+    match super::check_citation(project, rel, &fixed) {
+        super::CitationCheck::Valid { .. } | super::CitationCheck::Skip => {
+            Some(("td_sheet_extension", format!("[src: file: {fixed}]")))
+        }
+        super::CitationCheck::Defect(_) => None,
+    }
 }
 
 /// The marker content the gate would accept in place of `raw` (no comment).

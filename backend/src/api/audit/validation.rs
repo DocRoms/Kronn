@@ -618,14 +618,12 @@ fn plain_cell(cell: &str) -> &str {
 /// does NOT prove the scan actually happened — it just catches a missing /
 /// short / ill-formed matrix so the prompt's "incomplete audit" promise is
 /// mechanically backed (the future detectors anchor ground truth). Returns
-/// `Err(reason)` on the first structural problem found.
+/// `Err(reason)` naming EVERY structural problem found (KT-1364): a retry that
+/// is told about one row per attempt runs out of attempts before the rows.
 fn validate_dimension_coverage(content: &str) -> Result<(), String> {
-    let Some(sec_start) = content.find("## Dimension coverage") else {
+    let Some(body) = coverage_section(content) else {
         return Err("`## Dimension coverage` matrix is missing".to_string());
     };
-    // Section body = from the heading until the next `## ` heading or EOF.
-    let after = &content[sec_start..];
-    let body = after.find("\n## ").map(|n| &after[..n]).unwrap_or(after);
 
     // N/A reasons we refuse when they stand alone (no verifiable content).
     const TRIVIAL: &[&str] = &[
@@ -639,26 +637,10 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
         "",
     ];
 
+    let mut problems: Vec<String> = Vec::new();
     let mut missing: Vec<&str> = Vec::new();
     for dim in COVERAGE_DIMENSIONS {
-        // Match the row by a case-insensitive PREFIX on the first cell, not an
-        // exact equality: agents naturally embellish the canonical label
-        // (e.g. `Accessibility (a11y)`, `Documentation drift / docs`) and an
-        // exact match would mis-count those as a missing row and FAIL Step 8.
-        // None of the 10 dimension names is a prefix of another, so a prefix
-        // match stays unambiguous. (Fixes the 2026-06-03 self-inflicted
-        // Step-8-red on DOCROMS_WEB: the agent wrote `Accessibility (a11y)`.)
-        let dim_lc = dim.to_ascii_lowercase();
-        let rows: Vec<&str> = body
-            .lines()
-            .filter(|l| {
-                let l = l.trim();
-                l.starts_with('|') && {
-                    let first = l.trim_start_matches('|').split('|').next().unwrap_or("");
-                    plain_cell(first).to_ascii_lowercase().starts_with(&dim_lc)
-                }
-            })
-            .collect();
+        let rows = dimension_rows(body, dim);
         let row = match rows.as_slice() {
             [] => {
                 missing.push(dim);
@@ -666,11 +648,12 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
             }
             [r] => *r,
             _ => {
-                return Err(format!(
+                problems.push(format!(
                     "dimension `{}` appears {} times — exactly one row per dimension",
                     dim,
                     rows.len()
-                ))
+                ));
+                continue;
             }
         };
         let cells: Vec<&str> = row
@@ -691,21 +674,24 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
             || o.starts_with("scanned -- nothing substantiable")
             || o.starts_with("n/a");
         if outcome.is_empty() || !valid_prefix {
-            return Err(format!(
+            problems.push(format!(
                 "dimension `{}`: outcome must start with `findings` / `scanned — nothing substantiable` / `N/A:`, got `{}`",
                 dim, outcome
             ));
+            continue;
         }
         if evidence.is_empty() {
-            return Err(format!(
+            problems.push(format!(
                 "dimension `{}`: evidence/reason cell is empty",
                 dim
             ));
+            continue;
         }
         if *dim == "Dependencies" && !o.starts_with("n/a") && !states_version_source(row) {
-            return Err(format!(
+            problems.push(format!(
                 "dimension `Dependencies`: {DEPENDENCIES_SOURCE_FORMS}"
             ));
+            continue;
         }
         if o.starts_with("n/a") {
             // Reason after `N/A:` (or, failing that, the evidence cell) must be non-trivial.
@@ -715,7 +701,7 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
                 .filter(|s| !s.is_empty())
                 .unwrap_or(evidence);
             if TRIVIAL.contains(&reason.to_ascii_lowercase().trim()) {
-                return Err(format!(
+                problems.push(format!(
                     "dimension `{}`: N/A needs a human-verifiable reason, got `{}`",
                     dim, reason
                 ));
@@ -723,12 +709,156 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
         }
     }
     if !missing.is_empty() {
-        return Err(format!(
+        problems.push(format!(
             "coverage matrix missing rows: {}",
             missing.join(", ")
         ));
     }
-    Ok(())
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("; "))
+    }
+}
+
+/// The `## Dimension coverage` section: from its heading until the next `## `
+/// heading or EOF.
+fn coverage_section(content: &str) -> Option<&str> {
+    let sec_start = content.find("## Dimension coverage")?;
+    let after = &content[sec_start..];
+    Some(after.find("\n## ").map(|n| &after[..n]).unwrap_or(after))
+}
+
+/// The table rows of `body` whose first cell names `dim`.
+///
+/// Match the row by a case-insensitive PREFIX on the first cell, not an
+/// exact equality: agents naturally embellish the canonical label
+/// (e.g. `Accessibility (a11y)`, `Documentation drift / docs`) and an
+/// exact match would mis-count those as a missing row and FAIL Step 8.
+/// None of the 10 dimension names is a prefix of another, so a prefix
+/// match stays unambiguous. (Fixes the 2026-06-03 self-inflicted
+/// Step-8-red on DOCROMS_WEB: the agent wrote `Accessibility (a11y)`.)
+fn dimension_rows<'a>(body: &'a str, dim: &str) -> Vec<&'a str> {
+    let dim_lc = dim.to_ascii_lowercase();
+    body.lines()
+        .filter(|l| {
+            let l = l.trim();
+            l.starts_with('|') && {
+                let first = l.trim_start_matches('|').split('|').next().unwrap_or("");
+                plain_cell(first).to_ascii_lowercase().starts_with(&dim_lc)
+            }
+        })
+        .collect()
+}
+
+/// KT-1364 — the canonical outcomes a merged cell may start with: the length of
+/// the prefix to keep in the Outcome cell. `None` when the cell starts with
+/// anything else (`Scanned — large modules found…` is not a canonical outcome).
+fn canonical_outcome_prefix(cell: &str) -> Option<usize> {
+    let lower = cell.to_ascii_lowercase();
+    let boundary = |at: usize| {
+        lower[at..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric())
+    };
+    if lower.starts_with("findings") && boundary("findings".len()) {
+        return Some("findings".len());
+    }
+    for dash in ["—", "–", "--", "-"] {
+        let phrase = format!("scanned {dash} nothing substantiable");
+        if lower.starts_with(&phrase) && boundary(phrase.len()) {
+            return Some(phrase.len());
+        }
+    }
+    // `N/A` is the outcome only when a `:` or a dash follows it.
+    if lower.starts_with("n/a") && lower[3..].trim_start().starts_with([':', '—', '–', '-']) {
+        return Some(3);
+    }
+    None
+}
+
+/// `| Dimension | Outcome and evidence merged |` split into
+/// `| Dimension | Outcome | Evidence |`, when the second cell starts with a
+/// canonical outcome and something follows it. `None` for any other shape.
+fn split_two_column_row(row: &str) -> Option<String> {
+    let trimmed = row.trim();
+    if !trimmed.starts_with('|') {
+        return None;
+    }
+    let cells: Vec<&str> = trimmed.trim_matches('|').split('|').collect();
+    let [first, merged] = cells.as_slice() else {
+        return None;
+    };
+    let merged = merged.trim();
+    let cut = canonical_outcome_prefix(merged)?;
+    let (outcome, rest) = merged.split_at(cut);
+    let evidence = rest
+        .trim_start_matches(|c: char| {
+            c.is_whitespace() || matches!(c, ':' | ';' | ',' | '—' | '–' | '-')
+        })
+        .trim();
+    if evidence.is_empty() {
+        return None;
+    }
+    Some(format!("| {} | {} | {} |", first.trim(), outcome, evidence))
+}
+
+/// KT-1364 — the matrix with its unambiguous 2-column rows split. `None` when
+/// no row needed it.
+pub(crate) fn repaired_coverage_matrix(content: &str) -> Option<String> {
+    let sec_start = content.find("## Dimension coverage")?;
+    let body = coverage_section(content)?;
+    let body_end = sec_start + body.len();
+    let mut output = String::with_capacity(content.len() + 32);
+    output.push_str(&content[..sec_start]);
+    let mut changed = false;
+    for line in body.split_inclusive('\n') {
+        let (text, newline) = match line.strip_suffix('\n') {
+            Some(text) => (text, "\n"),
+            None => (line, ""),
+        };
+        let is_dimension_row = COVERAGE_DIMENSIONS
+            .iter()
+            .any(|dim| !dimension_rows(text, dim).is_empty());
+        match is_dimension_row
+            .then(|| split_two_column_row(text))
+            .flatten()
+        {
+            Some(row) => {
+                let indent = &text[..text.len() - text.trim_start().len()];
+                output.push_str(indent);
+                output.push_str(&row);
+                output.push_str(newline);
+                changed = true;
+            }
+            None => output.push_str(line),
+        }
+    }
+    output.push_str(&content[body_end..]);
+    changed.then_some(output)
+}
+
+/// Apply [`repaired_coverage_matrix`] to the tech-debt index of this step.
+/// Returns whether the file was rewritten.
+pub(crate) fn repair_coverage_rows(project_path: &Path, target_file: &str) -> bool {
+    if DocsRoot::of(project_path).strip(target_file) != Some("inconsistencies-tech-debt.md") {
+        return false;
+    }
+    let path = project_path.join(target_file);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Some(repaired) = repaired_coverage_matrix(&content) else {
+        return false;
+    };
+    match crate::core::mcp_scanner::atomic_write(&path, &repaired) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(target_file, %error, "could not repair the coverage matrix rows");
+            false
+        }
+    }
 }
 
 /// The forms a Dependencies row may state its source in, named in the refusal
@@ -1305,6 +1435,117 @@ mod tests {
                 assert!(err.contains(form), "{evidence}: {err}");
             }
         }
+    }
+
+    /// Apollo's step 8: the rows where the outcome and the evidence share one
+    /// cell, as the matrix came out of the bench.
+    fn apollo_matrix() -> String {
+        let mut s = valid_coverage_matrix();
+        for (dim, merged) in [
+            ("Security", "Findings: [TD-20261016-apache-root-user](tech-debt/TD-20261016-apache-root-user.md) (root user…) [src: file: docs/AGENTS.md:1] ; no hardcoded secrets found"),
+            ("Code quality", "Findings: [TD-20261016-large-modules](tech-debt/TD-20261016-large-modules.md) (modules over 800 lines)"),
+            ("Scalability", "Scanned - nothing substantiable ; no queue, no shared state"),
+            ("Maintainability", "findings — [TD-20261016-no-tests](tech-debt/TD-20261016-no-tests.md)"),
+            ("Accessibility", "N/A — backend API service, no rendered UI"),
+            ("Compliance", "N/A: no personal data processed"),
+            ("Documentation drift", "Findings: [TD-20261016-stale-readme](tech-debt/TD-20261016-stale-readme.md)"),
+        ] {
+            let row = s
+                .lines()
+                .find(|l| l.starts_with(&format!("| {dim} |")))
+                .unwrap()
+                .to_string();
+            s = s.replace(&row, &format!("| {dim} | {merged} |"));
+        }
+        s
+    }
+
+    /// KT-1364 — one feedback names every problem; one row per retry ran the
+    /// attempts out on apollo.
+    #[test]
+    fn coverage_matrix_reports_every_problem_at_once() {
+        let err = validate_dimension_coverage(&apollo_matrix()).unwrap_err();
+        for dim in [
+            "Security",
+            "Code quality",
+            "Scalability",
+            "Maintainability",
+            "Accessibility",
+            "Compliance",
+            "Documentation drift",
+        ] {
+            assert!(err.contains(&format!("dimension `{dim}`")), "{dim}: {err}");
+        }
+        // A missing row and a duplicated one are reported with the rest.
+        let broken = valid_coverage_matrix()
+            .replace("| Security | findings | TD-y |\n", "")
+            .replace(
+                "| Observability | findings | TD-z |\n",
+                "| Observability | findings | TD-z |\n| Observability | findings | TD-z2 |\n",
+            )
+            .replace(
+                "| Compliance | scanned — nothing substantiable | MIT only |",
+                "| Compliance | scanned — nothing substantiable | |",
+            );
+        let err = validate_dimension_coverage(&broken).unwrap_err();
+        assert!(err.contains("`Observability` appears 2 times"), "{err}");
+        assert!(
+            err.contains("`Compliance`: evidence/reason cell is empty"),
+            "{err}"
+        );
+        assert!(err.contains("missing rows: Security"), "{err}");
+    }
+
+    /// KT-1364 — apollo's 2-column rows are split on their canonical outcome.
+    #[test]
+    fn two_column_coverage_rows_are_split_on_their_canonical_outcome() {
+        let repaired = repaired_coverage_matrix(&apollo_matrix()).unwrap();
+        assert!(validate_dimension_coverage(&repaired).is_ok(), "{repaired}");
+        assert!(repaired.contains("| Security | Findings | [TD-20261016-apache-root-user]"));
+        assert!(repaired.contains(
+            "| Scalability | Scanned - nothing substantiable | no queue, no shared state |"
+        ));
+        assert!(repaired.contains("| Accessibility | N/A | backend API service, no rendered UI |"));
+        assert!(repaired.contains("| Compliance | N/A | no personal data processed |"));
+        // The rows already in three cells are untouched.
+        assert!(repaired.contains("| Observability | findings | TD-z |"));
+        assert!(repaired_coverage_matrix(&valid_coverage_matrix()).is_none());
+    }
+
+    /// KT-1364 — nothing but a canonical outcome is split.
+    #[test]
+    fn two_column_rows_without_a_canonical_outcome_are_left_for_the_feedback() {
+        for merged in [
+            "Scanned — large modules found in src/",
+            "Scanned later",
+            "Findingsish TD-x",
+            "N/A backend service",
+            "Findings",
+            "N/A —",
+            "TD-x only",
+        ] {
+            let m = valid_coverage_matrix().replace(
+                "| Security | findings | TD-y |",
+                &format!("| Security | {merged} |"),
+            );
+            assert!(repaired_coverage_matrix(&m).is_none(), "{merged}");
+            assert!(validate_dimension_coverage(&m).is_err(), "{merged}");
+        }
+    }
+
+    /// KT-1364 — the repair is written to the index, only to the index.
+    #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
+    fn the_index_is_rewritten_with_its_two_column_rows_split() {
+        let target = "docs/inconsistencies-tech-debt.md";
+        let (_tmp, project) = fixture(target, 0, 512);
+        std::fs::write(project.join(target), apollo_matrix()).unwrap();
+        assert!(repair_coverage_rows(&project, target));
+        let (_, warning) = validate_step_output(true, &project, target);
+        assert!(warning.is_none_or(|w| !w.reason.contains("coverage")));
+        assert!(!repair_coverage_rows(&project, target));
+        assert!(!repair_coverage_rows(&project, "docs/decisions.md"));
     }
 
     /// KT-1295 — the retry feedback carries the accepted forms.

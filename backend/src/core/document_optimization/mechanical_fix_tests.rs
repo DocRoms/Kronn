@@ -241,9 +241,84 @@ fn an_empty_file_is_named_in_backticks_instead_of_cited() {
     for text in [
         "[src: file: tests/blank.txt]\n",
         "`[src: file: tests/.gitignore]`\n",
-        "[src: file: tests]\n",
         "[src: file: tests/.gitignore:1]\n",
     ] {
         assert!(repair(dir.path(), doc, text).is_none(), "{text}");
     }
+}
+
+#[test]
+fn a_tech_debt_sheet_cited_without_its_extension_gets_it() {
+    // Docroms step 8: "citation path does not exist" for a sheet cited by its id.
+    let dir = project();
+    write(
+        dir.path(),
+        "docs/tech-debt/TD-20260719-here-apikey-hardcoded.md",
+        "# TD\n\nThe key is in the source.\n",
+    );
+    let doc = "docs/inconsistencies-tech-debt.md";
+    let fixed = repair(
+        dir.path(),
+        doc,
+        "Key [src: file: docs/tech-debt/TD-20260719-here-apikey-hardcoded:exists] and \
+         line [src: file: docs/tech-debt/TD-20260719-here-apikey-hardcoded:3].\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fixed.content,
+        "Key [src: file: docs/tech-debt/TD-20260719-here-apikey-hardcoded.md:exists] and \
+         line [src: file: docs/tech-debt/TD-20260719-here-apikey-hardcoded.md:3].\n"
+    );
+    assert!(fixed.fixes.iter().all(|f| f.kind == "td_sheet_extension"));
+    assert_eq!(fixed.fixes.len(), 2);
+    // Bare, the sheet takes the presence form the gate asks for.
+    let bare = repair(
+        dir.path(),
+        doc,
+        "[src: file: docs/tech-debt/TD-20260719-here-apikey-hardcoded]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        bare.content,
+        "[src: file: docs/tech-debt/TD-20260719-here-apikey-hardcoded.md:exists]\n"
+    );
+}
+
+#[test]
+fn a_missing_extension_is_not_added_when_it_would_be_a_guess() {
+    let dir = project();
+    let doc = "docs/inconsistencies-tech-debt.md";
+    for text in [
+        // No such sheet, with or without the extension.
+        "[src: file: docs/tech-debt/TD-20260101-nothing-here:exists]\n",
+        // Not a tech-debt sheet: only Kronn's own artefact is completed.
+        "[src: file: notes:1]\n",
+        // The line is past the end of the sheet: the gate still refuses it.
+        "[src: file: docs/tech-debt/TD-20260828-apache-root-user:40]\n",
+        // A quoted example.
+        "`[src: file: docs/tech-debt/TD-20260828-apache-root-user:exists]`\n",
+    ] {
+        assert!(repair(dir.path(), doc, text).is_none(), "{text}");
+    }
+}
+
+#[test]
+fn a_directory_cited_in_a_marker_is_named_in_backticks() {
+    // Africanews step 8: "`docs/tech-debt/` is a directory … name the directory
+    // in backticks without a marker".
+    let dir = project();
+    let doc = "docs/inconsistencies-tech-debt.md";
+    let fixed = repair(
+        dir.path(),
+        doc,
+        "Details live in [src: file: docs/tech-debt/] and [src: file: tests].\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fixed.content,
+        "Details live in `docs/tech-debt/` and `tests`.\n"
+    );
+    assert!(fixed.fixes.iter().all(|f| f.kind == "directory_backticks"));
+    // Inside inline code it is a quoted example.
+    assert!(repair(dir.path(), doc, "`[src: file: docs/tech-debt/]`\n").is_none());
 }
