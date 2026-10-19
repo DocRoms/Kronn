@@ -1972,10 +1972,11 @@ mod tests {
     async fn an_ollama_decision_model_is_catalogued_without_chat_and_refused_for_chat() {
         let db = test_db();
         let (base, server) = mock_ollama_catalog(
-            &["clef-flash:9b", "qwen3:8b"],
+            &["clef-flash:9b", "qwen3:8b", "x/flux2-klein:4b"],
             HashMap::from([
                 ("clef-flash:9b", vec!["decision", "vision"]),
                 ("qwen3:8b", vec!["completion", "tools"]),
+                ("x/flux2-klein:4b", vec!["image"]),
             ]),
             false,
         )
@@ -1995,6 +1996,17 @@ mod tests {
             vec!["decision", "vision"]
         );
         assert_eq!(capabilities_of(&view, "qwen3:8b"), vec!["chat"]);
+        assert_eq!(capabilities_of(&view, "x/flux2-klein:4b"), vec!["image"]);
+        assert!(preflight_check(
+            &db,
+            None,
+            AgentType::Ollama,
+            ModelTier::Default,
+            Some("x/flux2-klein:4b"),
+            None,
+        )
+        .await
+        .is_some_and(|failure| failure.reason == ModelUnavailableReason::Unsupported));
 
         let refused = preflight_check(
             &db,
