@@ -15672,6 +15672,15 @@ pub(crate) mod tests {
                     rusqlite::params![status, job],
                 )?;
             }
+            // Messages written by the code under test (the terminal notice a
+            // cancellation posts in the parent room) take their order from the
+            // discussion's sequence: move it past the rows inserted above.
+            conn.execute(
+                "UPDATE discussions SET next_message_seq = (
+                     SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages
+                     WHERE discussion_id = discussions.id)",
+                [],
+            )?;
             conn.execute(
                 "INSERT INTO planning_tasks (id, task_number, title, created_at, updated_at)
                  VALUES ('t-1', 1, 'CI task', ?1, ?1), ('t-2', 2, 'Other task', ?1, ?1)",
@@ -15815,7 +15824,7 @@ pub(crate) mod tests {
             Json(ReviewRequest {
                 task_execution_id: exec_id.to_string(),
                 decision: serde_json::json!({
-                    "version": 1, "task_ref": "KT-1", "decision": "approve"
+                    "version": "1", "task_ref": "KT-1", "decision": "approve"
                 }),
                 source_agent: mixed.then(|| agent.clone()),
                 source_session_id: mixed.then(|| session.clone()),
@@ -15999,6 +16008,62 @@ pub(crate) mod tests {
             execution_state(&db, &execution_id).await,
             before,
             "mixed identity: no state change"
+        );
+    }
+
+    /// Handler level, the symptom of #241: the room agent whose turn launched
+    /// the execution calls the endpoints with the identity launch accepted.
+    /// Status and cancel succeed; the others may refuse on the execution's
+    /// state, but none with the opaque answer an unknown execution gets.
+    #[tokio::test]
+    async fn the_launching_room_agent_is_accepted_by_every_principal_handler() {
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution_id = room_agent_lifecycle_fixture(&db).await;
+        let state = recovery_test_state(&db);
+        let own = || lifecycle_room("d-parent", "job-1", "msg-1");
+
+        let unknown = every_principal_call(&state, "missing-exec", own(), false).await;
+        let answers = every_principal_call(&state, &execution_id, own(), false).await;
+
+        for ((name, _, error, code), (_, _, unknown_error, unknown_code)) in
+            answers.iter().zip(&unknown)
+        {
+            assert_ne!(
+                (error, code),
+                (unknown_error, unknown_code),
+                "{name}: the launching turn never gets the unknown-execution refusal"
+            );
+        }
+        let answer = |endpoint: &str| {
+            answers
+                .iter()
+                .find(|(name, ..)| *name == endpoint)
+                .unwrap_or_else(|| panic!("{endpoint} was called"))
+        };
+        let (_, success, error, _) = answer("status");
+        assert!(success, "status is accepted: {error:?}");
+        // Pending, nothing delivered: the caller is a party, so the refusal is
+        // a state conflict (DoD-5 guard), never the not-found of a stranger.
+        let (_, success, error, code) = answer("review");
+        assert!(!success, "a pending execution has nothing to approve");
+        assert_eq!(
+            code.as_deref(),
+            Some("conflict"),
+            "review refuses on state, not on identity: {error:?}"
+        );
+        let (_, success, error, _) = answer("cancel");
+        assert!(success, "cancel is accepted: {error:?}");
+        let id = execution_id.clone();
+        let status = db
+            .with_conn(move |conn| {
+                Ok(crate::db::orchestration::get_task_execution(conn, &id)?.map(|e| e.status))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            Some(TaskExecutionStatus::Cancelled),
+            "the room agent stopped what it launched"
         );
     }
 
