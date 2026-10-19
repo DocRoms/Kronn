@@ -984,6 +984,22 @@ pub async fn is_first_run() -> Result<bool> {
 mod tests {
     use super::*;
 
+    /// KT-1366 — the Ollama Decision slot is saved with the tiers and read
+    /// back as written; a config without it still loads, with no slot.
+    #[test]
+    fn the_ollama_decision_slot_round_trips_through_the_config() {
+        use crate::models::ModelTiersConfig;
+        let legacy: ModelTiersConfig =
+            toml::from_str("[ollama]\ndefault = \"qwen3:8b\"\n").unwrap();
+        assert_eq!(legacy.ollama.decision, None);
+        let mut tiers = legacy;
+        tiers.ollama.decision = Some("clef-flash:9b".into());
+        let written = toml::to_string(&tiers).unwrap();
+        let read: ModelTiersConfig = toml::from_str(&written).unwrap();
+        assert_eq!(read.ollama.decision.as_deref(), Some("clef-flash:9b"));
+        assert_eq!(read.ollama.default.as_deref(), Some("qwen3:8b"));
+    }
+
     #[test]
     fn the_saved_full_access_setting_is_read_without_guessing() {
         use crate::models::AgentType;

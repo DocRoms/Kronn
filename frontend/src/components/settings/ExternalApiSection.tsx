@@ -66,9 +66,12 @@ const TIER_ICON: Record<Tier, string> = { economy: '⚡', default: '🎯', reaso
 // Media slots are modalities, not quality tiers — hence their own list and
 // their own icons, shared by the form that sets them and the card that reads
 // them back so the two surfaces cannot drift apart.
-const MEDIA_MODALITIES = ['image', 'video'] as const;
+// KT-1366 — the decision model is one more slot of the same kind: a
+// capability, not a tier, picked the same way.
+const MEDIA_MODALITIES = ['image', 'video', 'decision'] as const;
 type MediaModality = (typeof MEDIA_MODALITIES)[number];
-const MEDIA_ICON: Record<MediaModality, string> = { image: '🖼', video: '🎬' };
+const MEDIA_ICON: Record<MediaModality, string> = { image: '🖼', video: '🎬', decision: '🧭' };
+const MEDIA_FIELD = { image: 'image_model', video: 'video_model', decision: 'decision_model' } as const satisfies Record<MediaModality, string>;
 
 interface FormState {
   display_name: string;
@@ -80,6 +83,7 @@ interface FormState {
   reasoning_model: string;
   image_model: string;
   video_model: string;
+  decision_model: string;
   api_key: string;
   keyTouched: boolean;
 }
@@ -95,6 +99,7 @@ function emptyForm(): FormState {
     reasoning_model: '',
     image_model: '',
     video_model: '',
+    decision_model: '',
     api_key: '',
     keyTouched: false,
   };
@@ -119,6 +124,7 @@ function formFromConnection(c: ExternalApiConnectionView): FormState {
     reasoning_model: c.reasoning_model ?? '',
     image_model: c.image_model ?? '',
     video_model: c.video_model ?? '',
+    decision_model: c.decision_model ?? '',
     api_key: '',
     keyTouched: false,
   };
@@ -135,6 +141,7 @@ function toPayload(form: FormState): UpsertExternalApiConnection {
     reasoning_model: form.reasoning_model.trim() || null,
     image_model: form.image_model.trim() || null,
     video_model: form.video_model.trim() || null,
+    decision_model: form.decision_model.trim() || null,
     // Only send the key when the user actually typed one, so editing a
     // connection without retyping its key keeps the stored credential.
     api_key: form.keyTouched ? form.api_key : null,
@@ -226,7 +233,7 @@ function ConnectionForm({
     openRouterKeyValid &&
     !submitting;
   const modelsUnlocked = testResult?.ok === true && testResult.models.length > 0;
-  const catalogModels = (capability: 'chat' | 'image' | 'video') => {
+  const catalogModels = (capability: 'chat' | MediaModality) => {
     if (!testResult?.catalog) {
       return capability === 'chat'
         ? (testResult?.models ?? []).map(id => ({ id, display_name: id, capabilities: ['chat'] }))
@@ -479,21 +486,19 @@ function ConnectionForm({
           </div>
           <div className="set-ext-api-tiers">
             {MEDIA_MODALITIES.map(modality => {
-              const value = modality === 'image' ? form.image_model : form.video_model;
+              const value = form[MEDIA_FIELD[modality]];
               const setValue = (next: string) =>
-                setForm(prev =>
-                  modality === 'image'
-                    ? { ...prev, image_model: next }
-                    : { ...prev, video_model: next },
-                );
+                setForm(prev => ({ ...prev, [MEDIA_FIELD[modality]]: next }));
               const tested = testResult?.ok === true;
               // A backend that omits the field entirely (old bundle, bare test
               // fixture) is read as "known" — the pre-KT-531 behaviour, which
               // already filtered strictly on whatever `capabilities` it sent.
               // Only an explicit `false` (NVIDIA's real `/v1/models`, which
               // never carries modality metadata) opens the unknown state.
+              // A decision model is known only from the catalogue's own tags.
               const capabilityKnown = (
-                modality === 'image' ? testResult?.image_capability_known : testResult?.video_capability_known
+                modality === 'image' ? testResult?.image_capability_known
+                  : modality === 'video' ? testResult?.video_capability_known : true
               ) ?? true;
               const discovered = catalogModels(modality);
               // Unknown: the catalogue never says which models render media,
@@ -869,7 +874,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
     const mediaSlots = MEDIA_MODALITIES
       .map(modality => ({
         modality,
-        model: (modality === 'image' ? c.image_model : c.video_model)?.trim() || null,
+        model: c[MEDIA_FIELD[modality]]?.trim() || null,
       }))
       .filter((slot): slot is { modality: MediaModality; model: string } => slot.model !== null);
     return (

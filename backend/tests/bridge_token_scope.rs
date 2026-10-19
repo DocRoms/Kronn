@@ -1774,6 +1774,7 @@ async fn a_token_s_media_discussion_lands_in_its_project() {
                 updated_at: chrono::Utc::now(),
                 image_model: Some("stub/image".into()),
                 video_model: None,
+                decision_model: None,
                 media_endpoint: None,
             },
         )?;
