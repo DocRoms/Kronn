@@ -183,7 +183,7 @@ and an explicit error; typing within an open palette does not refetch.
 [src: file: frontend/src/components/MentionTierChoices.tsx:39-44#lastChecked]
 [src: file: frontend/src/components/ChatInput.tsx:510#useModelCatalogSnapshot]
 [src: file: frontend/src/components/ChatInput.tsx:734-744#mentionTierResolution]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:201#useModelCatalogSnapshot]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:197#useModelCatalogSnapshot]
 
 Untouched principal insertion preserves its saved model override and does not
 write a tier preference. Explicit tier choices resolve their own configuration.
@@ -194,7 +194,7 @@ keep their exact session and stable ordinal, expose no model tier, and do not
 change native preferences. New-discussion submissions retain the immutable
 connection and explicitly selected tier.
 [src: file: frontend/src/lib/mentionTierSelection.ts:6-16#nextMentionTierIndex]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:879-885#applyMentionSuggestion]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:874-880#applyMentionSuggestion]
 [src: file: frontend/src/components/NewDiscussionForm.tsx:646-653#initialTargets]
 [src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:149-157#untouched]
 [src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:159-170#persists]
@@ -215,7 +215,7 @@ tier. Canonical alias prefixes rank before additional substring matches, so
 typing `@co` still highlights Codex before a Claude Code substring result.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:53-62#matchesCatalogSearch]
 [src: file: frontend/src/components/ChatInput.tsx:745-762#mentionMatchesQuery]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:235-238#matchingMentionTargets]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:231-234#matchingMentionTargets]
 [src: file: frontend/src/lib/mention-autocomplete.ts:7-10#mentionMatchRank]
 
 The unfinished search token accepts Unicode letters and common model-ID

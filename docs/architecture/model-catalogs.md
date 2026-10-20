@@ -257,8 +257,8 @@ was formerly inert; ignoring it silently would claim a setting was applied
 when it was not. QPs with no effort or only whitespace keep the old behavior.
 [src: file: backend/src/db/discussion_effort.rs:9-54#UnresolvedQuickPromptEffort]
 [src: file: backend/src/db/sql/176_discussion_effort_snapshots.sql:1-8#discussion_effort_snapshots]
-[src: file: backend/src/api/discussions/crud.rs:616-638#capture]
-[src: file: backend/src/api/discussions/crud.rs:744-752#UnresolvedQuickPromptEffort]
+[src: file: backend/src/api/discussions/crud.rs:609-631#capture]
+[src: file: backend/src/api/discussions/crud.rs:734-742#UnresolvedQuickPromptEffort]
 [src: file: backend/src/api/discussions/streaming.rs:4041-4094#for_run]
 [src: file: backend/src/db/discussion_effort.rs:56-76#for_run]
 
