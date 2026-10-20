@@ -6932,6 +6932,7 @@ End with [SIGNAL: OK].`,
   "auditTimeline.docnotes.advisory.stack_conflict": "Stack version conflict",
   "auditTimeline.docnotes.advisory.unproven_resolution": "Resolution without proof",
   "auditTimeline.docnotes.commands": "{0} cited command(s) the repository does not define (Makefile, package.json, composer.json): kept as a warning",
+  "auditTimeline.docnotes.step": "step {0}",
 };
 
 export default en;

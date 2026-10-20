@@ -776,7 +776,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                       <ul>
                         {docNotes.unverified.map((item, i) => (
                           <li key={`${item.doc}-${i}`}>
-                            <code>{item.doc}</code> — step {item.step}: <code>{item.marker}</code>
+                            <code>{item.doc}</code> — {t('auditTimeline.docnotes.step', item.step)}: <code>{item.marker}</code>
                           </li>
                         ))}
                       </ul>
@@ -800,7 +800,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                       <ul>
                         {docNotes.unverified_commands.map((item, i) => (
                           <li key={`${item.path}-${i}`}>
-                            <code>{item.path}</code> — step {item.step}: {item.message}
+                            <code>{item.path}</code> — {t('auditTimeline.docnotes.step', item.step)}: {item.message}
                           </li>
                         ))}
                       </ul>

@@ -6722,6 +6722,7 @@ const zh: TranslationDict = {
   "auditTimeline.docnotes.advisory.stack_conflict": "技术栈版本冲突",
   "auditTimeline.docnotes.advisory.unproven_resolution": "无证据的已解决声明",
   "auditTimeline.docnotes.commands": "{0} 条被引用的命令在仓库中未定义（Makefile、package.json、composer.json）：已保留为警告",
+  "auditTimeline.docnotes.step": "步骤 {0}",
 };
 
 export default zh;
