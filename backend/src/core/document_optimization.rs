@@ -521,7 +521,10 @@ pub const HUMAN_SECTION_REFERENCE: &str = "human_section_reference";
 pub const UNBACKED_PROVENANCE: &str = "unbacked_provenance";
 
 /// Diagnostic code of a `make` target or package script a document cites and
-/// the repository does not define (KT-1387).
+/// the repository does not define (KT-1387). Never blocking: the check reads
+/// Makefiles and manifests without running anything, so a miss is a doubt to
+/// send back to the step, not a reason to fail a run. A step is told during its
+/// retries; what is left after the last attempt is listed in the run's notes.
 pub const UNKNOWN_COMMAND: &str = "unknown_command";
 
 /// Documents that describe defects or past state: a command named there is
@@ -543,8 +546,9 @@ fn describes_defects(project: &Path, rel: &str) -> bool {
 }
 
 /// KT-1387 — every `make <target>`, `yarn|npm|pnpm <script>` and
-/// `composer <script>` a document tells a reader to run must be defined by the
-/// repository. A human-owned section is reported, never blocking.
+/// `composer <script>` a document tells a reader to run should be defined by
+/// the repository. Never blocking; one in a human-owned section is reported
+/// for its owner and not sent back to a step.
 fn inspect_commands(
     project: &Path,
     docs: &[PathBuf],
@@ -569,12 +573,18 @@ fn inspect_commands(
             out.push(diag(UNKNOWN_COMMAND, &rel, problem));
         }
         for (name, text) in human {
-            let found: Vec<_> = defined
-                .problems(&text)
-                .into_iter()
-                .map(|problem| diag(UNKNOWN_COMMAND, &rel, problem))
-                .collect();
-            demote_human_section(&rel, &name, found, out);
+            for problem in defined.problems(&text) {
+                let item = diag(
+                    HUMAN_SECTION_REFERENCE,
+                    &rel,
+                    format!(
+                        "human-owned section `{name}`: {problem}; reported for its owner, never blocking"
+                    ),
+                );
+                if !out.contains(&item) {
+                    out.push(item);
+                }
+            }
         }
     }
 }
@@ -1560,7 +1570,7 @@ fn diag(code: &str, path: &str, message: String) -> Diagnostic {
 fn is_blocking_code(code: &str) -> bool {
     matches!(
         code,
-        "broken_link" | "broken_citation" | UNBACKED_PROVENANCE | UNKNOWN_COMMAND
+        "broken_link" | "broken_citation" | UNBACKED_PROVENANCE
     )
 }
 
@@ -3021,7 +3031,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cited_make_target_that_does_not_exist_blocks_the_gate() {
+    fn a_cited_make_target_that_does_not_exist_is_found_without_blocking_the_gate() {
         // KT-1387 — docroms: `make yarn-install` in the runbook, no such target.
         let tmp = command_fixture();
         write(
@@ -3035,22 +3045,32 @@ mod tests {
             .filter(|d| d.code == UNKNOWN_COMMAND)
             .collect();
         assert_eq!(found.len(), 1, "{:#?}", report.diagnostics);
-        assert!(found[0].blocking);
+        assert!(!found[0].blocking);
+        assert_eq!(report.blocking_diagnostics().count(), 0);
         assert_eq!(found[0].path, "docs/operations/debug-operations.md");
         assert!(found[0].message.starts_with("`make yarn-install`"));
     }
 
     #[test]
-    fn a_package_script_cited_without_a_package_json_blocks_the_gate() {
+    fn a_package_script_cited_without_a_package_json_is_found_without_blocking() {
         let tmp = command_fixture();
+        let unknown = |report: &DocumentaryOptimizationReport| -> Vec<Diagnostic> {
+            report
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == UNKNOWN_COMMAND)
+                .cloned()
+                .collect()
+        };
         write(
             &tmp.path().join("docs/operations/debug-operations.md"),
             "# Ops\n\nInstall with `yarn install`, then `make aws`.\n",
         );
         let report = analyze(tmp.path()).unwrap();
-        let found: Vec<_> = report.blocking_diagnostics().collect();
+        let found = unknown(&report);
         assert_eq!(found.len(), 1, "{:#?}", report.diagnostics);
         assert!(found[0].message.contains("no package.json"));
+        assert_eq!(report.blocking_diagnostics().count(), 0);
 
         write(
             &tmp.path().join("package.json"),
@@ -3061,11 +3081,12 @@ mod tests {
             "# Ops\n\n`yarn install`, `yarn dev`, `yarn deploy`.\n",
         );
         let report = analyze(tmp.path()).unwrap();
-        let found: Vec<_> = report.blocking_diagnostics().collect();
+        let found = unknown(&report);
         assert_eq!(found.len(), 1, "{:#?}", report.diagnostics);
         assert!(found[0]
             .message
             .starts_with("`yarn deploy` is not a script"));
+        assert_eq!(report.blocking_diagnostics().count(), 0);
     }
 
     #[test]

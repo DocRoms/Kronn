@@ -226,7 +226,7 @@ fn a_commit_msg_hook_running_commitlint_is_enforcement() {
     assert_eq!(tools[0].name, "commitlint");
     assert_eq!(
         tools[0].enforcement,
-        Enforcement::Enforced(".husky/commit-msg:1".into())
+        Enforcement::Enforced(".husky/commit-msg:2".into())
     );
 }
 
@@ -271,8 +271,99 @@ fn a_ci_step_and_an_unnamed_hook_are_enforcement() {
     let hook = tools.iter().find(|t| t.name == "commit-msg hook").unwrap();
     assert_eq!(
         hook.enforcement,
-        Enforcement::Enforced(".githooks/commit-msg:1".into())
+        Enforcement::Enforced(".githooks/commit-msg:2".into())
     );
+}
+
+#[test]
+fn a_tool_named_only_in_a_ci_comment_is_not_enforcement() {
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        ".github/workflows/ci.yml",
+        "name: CI\n# TODO: add commitlint in a future iteration\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo tests\n",
+    );
+    assert!(detect_tooling(dir.path()).is_empty());
+
+    // Neither a trailing comment, a label nor an echo runs it.
+    put(
+        dir.path(),
+        ".github/workflows/lint.yml",
+        "name: commitlint reminder\njobs:\n  x:\n    steps:\n      - name: Run commitlint\n        run: make lint # commitlint comes later\n      - run: echo \"commitlint is not wired yet\"\n",
+    );
+    assert!(detect_tooling(dir.path()).is_empty());
+
+    // With the same config file present, the tool is configured, not enforced.
+    put(dir.path(), "commitlint.config.js", "module.exports = {};\n");
+    let tools = detect_tooling(dir.path());
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert_eq!(tools[0].enforcement, Enforcement::ConfiguredOnly);
+}
+
+#[test]
+fn a_ci_step_that_runs_commitlint_is_enforcement() {
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        ".github/workflows/ci.yml",
+        "name: CI\njobs:\n  lint:\n    steps:\n      # commit messages\n      - run: npx commitlint --from origin/main\n",
+    );
+    let tools = detect_tooling(dir.path());
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert_eq!(tools[0].name, "commitlint");
+    assert_eq!(
+        tools[0].enforcement,
+        Enforcement::Enforced(".github/workflows/ci.yml:6".into())
+    );
+}
+
+#[test]
+fn a_hook_that_only_mentions_the_tool_is_not_enforcement() {
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        ".husky/commit-msg",
+        "#!/bin/sh\n# commitlint is not installed; this hook only reminds us\necho Please review your commit message\n",
+    );
+    assert!(detect_tooling(dir.path()).is_empty());
+
+    // The husky v8 loader line alone checks nothing either.
+    put(
+        dir.path(),
+        ".husky/commit-msg",
+        "#!/bin/sh\n. \"$(dirname \"$0\")/_/husky.sh\"\n",
+    );
+    assert!(detect_tooling(dir.path()).is_empty());
+
+    // Behind the loader, a real run is enforcement and points at its line.
+    put(
+        dir.path(),
+        ".husky/commit-msg",
+        "#!/bin/sh\n. \"$(dirname \"$0\")/_/husky.sh\"\n\nnpx --no-install commitlint --edit \"$1\"\n",
+    );
+    let tools = detect_tooling(dir.path());
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert_eq!(tools[0].name, "commitlint");
+    assert_eq!(
+        tools[0].enforcement,
+        Enforcement::Enforced(".husky/commit-msg:4".into())
+    );
+}
+
+#[test]
+fn a_lefthook_or_pre_commit_comment_is_not_enforcement() {
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        "lefthook.yml",
+        "commit-msg:\n  # commands:\n  #   lint: commitlint --edit\n",
+    );
+    put(
+        dir.path(),
+        ".pre-commit-config.yaml",
+        "# add gitlint at the commit-msg stage someday\nrepos: []\n",
+    );
+    assert!(detect_tooling(dir.path()).is_empty());
 }
 
 #[test]

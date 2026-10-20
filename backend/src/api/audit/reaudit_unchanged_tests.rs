@@ -1864,6 +1864,105 @@ async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
     assert!(prompt.contains("ghost.rs"), "{prompt}");
 }
 
+/// KT-1387 — a command a document cites and the repository does not define is
+/// feedback, never a blocker: the step is told on each retry, and when the
+/// attempts are spent it stays done, with a warning and a line in the run's
+/// notes and in the validation prompt. The end-of-run gate does not count it.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_unknown_command_is_told_to_the_step_then_kept_as_a_warning() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    let touching = chain
+        .iter()
+        .position(|s| s.target_file == "docs/glossary.md")
+        .unwrap() as u32
+        + 1;
+
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    // The glossary step cites a make target nothing defines, on every attempt.
+    let notes = project.join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\nPlain prose.\n").unwrap();
+    let attempts = crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS;
+    let mut scripted: Vec<&str> = Vec::new();
+    for step in &chain {
+        let times = if step.target_file == "docs/glossary.md" {
+            attempts
+        } else {
+            1
+        };
+        scripted.extend(std::iter::repeat_n(step.target_file, times));
+    }
+    arm(tools, "noop", &scripted);
+    after_each_step(
+        tools,
+        &format!(
+            "docs/glossary.md) printf 'Run `make ghost`.\\n' >> '{}' ;;",
+            notes.display()
+        ),
+    );
+    let second = run_full(state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    let retries: Vec<Value> = sse_events(&second, "step_retry")
+        .into_iter()
+        .filter(|e| e["reason"] == "documentary_unverified_commands")
+        .collect();
+    assert_eq!(retries.len(), attempts - 1, "{second}");
+    assert!(retries.iter().all(|e| e["step"] == touching), "{second}");
+    assert!(
+        retries[0]["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("make ghost"),
+        "{second}"
+    );
+    // Nothing fails: the step is done, the run completes, no blocker is counted.
+    assert!(sse_events(&second, "step_warning").is_empty(), "{second}");
+    let step_done = sse_events(&second, "step_done")
+        .into_iter()
+        .find(|e| e["step"] == touching)
+        .unwrap();
+    assert_eq!(step_done["success"], true, "{step_done}");
+    assert_eq!(done["status"], "complete", "{second}");
+    let optimization = sse_events(&second, "documentary_optimization")
+        .pop()
+        .unwrap();
+    assert_eq!(optimization["blocking_count"], 0, "{optimization}");
+
+    // Said as a warning, in the run's notes and in the validation prompt.
+    let warned = sse_events(&second, "warning")
+        .into_iter()
+        .find(|e| e["step"] == touching)
+        .unwrap_or_else(|| panic!("{second}"));
+    assert!(
+        warned["message"]
+            .as_str()
+            .unwrap()
+            .contains("cited command"),
+        "{warned}"
+    );
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, _, prompt) = persisted(state, &run_id).await;
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    assert_eq!(saved["unverified_commands"][0]["step"], touching, "{saved}");
+    assert_eq!(
+        saved["unverified_commands"][0]["path"], "docs/notes.md",
+        "{saved}"
+    );
+    assert!(prompt.expect("validation prompt").contains("make ghost"));
+}
+
 /// KT-1353 — a blocker the committed documents held before the run, in a
 /// document no step rewrote, is reported at the final gate and never charged to
 /// the founding step: the run completes (africanews: sheets citing vendor code).

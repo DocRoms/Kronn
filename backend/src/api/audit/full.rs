@@ -1404,6 +1404,9 @@ pub async fn full_audit(
         // and the problems it let through, kept to be said to the human.
         let mut documentary_autofixes: Vec<(u32, crate::core::document_optimization::AppliedFix)> = Vec::new();
         let mut documentary_preexisting: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
+        // KT-1387 — the commands the documents still cite once a step's
+        // attempts are spent: told to the step, never a blocker.
+        let mut documentary_unverified_commands: Vec<(u32, crate::core::document_optimization::Diagnostic)> = Vec::new();
 
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // KT-1199 — what the previous step left, before anything else runs.
@@ -2551,15 +2554,55 @@ pub async fn full_audit(
                                     }).to_string());
                                 }
                             }
+                            let unverified_commands = gate
+                                .as_ref()
+                                .map(|check| check.unverified_commands.clone())
+                                .unwrap_or_default();
                             let reason = match gate.map(|check| check.blocking) {
+                                // KT-1387 — only doubtful commands are left: the
+                                // step is told while attempts remain.
+                                Ok(blocking) if blocking.is_empty() && !unverified_commands.is_empty() && attempt < max_attempts => {
+                                    citation_feedback = Some(super::document_repair::feedback(&unverified_commands));
+                                    yield Event::default().event("step_retry").data(serde_json::json!({
+                                        "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
+                                        "reason":"documentary_unverified_commands","fabricated_count":unverified_commands.len(),
+                                        "diagnostics":unverified_commands,
+                                    }).to_string());
+                                    continue 'attempts;
+                                }
                                 Ok(blocking) if blocking.is_empty() => {
                                     documentary_repair_proven = super::document_repair::recovery_changed(
                                         &project_path, before, &recovery_targets,
                                     );
+                                    // The attempts are spent: the step stays done, the
+                                    // doubt is recorded and said to the human.
+                                    if !unverified_commands.is_empty() {
+                                        tracing::warn!(
+                                            "Audit step {} ({}): {} cited command(s) not defined by the repository, kept as a warning",
+                                            step, file_label, unverified_commands.len()
+                                        );
+                                        for diagnostic in &unverified_commands {
+                                            let entry = (step as u32, diagnostic.clone());
+                                            if !documentary_unverified_commands.contains(&entry) {
+                                                documentary_unverified_commands.push(entry);
+                                            }
+                                        }
+                                        yield Event::default().event("warning").data(serde_json::json!({
+                                            "message": format!(
+                                                "Step {step} ({file_label}): {} cited command(s) are not defined by the repository's Makefile or manifests; kept as a warning, listed in the run's documentary notes",
+                                                unverified_commands.len()
+                                            ),
+                                            "step":step,"file":file_label,
+                                            "diagnostics":unverified_commands,
+                                        }).to_string());
+                                    }
                                     None
                                 }
                                 Ok(blocking) if attempt < max_attempts => {
-                                    citation_feedback = Some(super::document_repair::feedback(&blocking));
+                                    // What is flagged beyond the blockers rides along.
+                                    let mut flagged = blocking.clone();
+                                    flagged.extend(unverified_commands.iter().cloned());
+                                    citation_feedback = Some(super::document_repair::feedback(&flagged));
                                     yield Event::default().event("step_retry").data(serde_json::json!({
                                         "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
                                         "reason":"documentary_blockers","fabricated_count":blocking.len(),
@@ -3233,7 +3276,7 @@ pub async fn full_audit(
                             "step":0,"file":"","phase":"final_gate","diagnostics":preexisting,
                         }).to_string());
                     }
-                    if let Some(notes) = super::document_repair::notes_json(&preexisting, &documentary_autofixes) {
+                    if let Some(notes) = super::document_repair::notes_json(&preexisting, &documentary_autofixes, &documentary_unverified_commands) {
                         let run_id = audit_run_id.clone();
                         if let Err(error) = db.with_conn(move |conn|
                             crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes)
@@ -3539,7 +3582,7 @@ pub async fn full_audit(
         );
         let validation_prompt = format!(
             "{}{validation_prompt}",
-            super::helpers::documentary_notes_block(&documentary_preexisting, &documentary_autofixes, &language)
+            super::helpers::documentary_notes_block(&documentary_preexisting, &documentary_autofixes, &documentary_unverified_commands, &language)
         );
         let accepted_listed: Vec<super::helpers::AcceptedStepLine> = accepted_rows
             .iter()

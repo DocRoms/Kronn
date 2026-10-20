@@ -534,12 +534,85 @@ fn read_small(path: &Path) -> Option<String> {
 }
 
 fn first_line_with(body: &str, needles: &[&str]) -> Option<usize> {
-    body.lines()
-        .position(|line| {
-            let lowered = line.to_lowercase();
+    live_lines(body)
+        .into_iter()
+        .find(|(_, text)| {
+            let lowered = text.to_lowercase();
             needles.iter().any(|n| lowered.contains(n))
         })
-        .map(|i| i + 1)
+        .map(|(number, _)| number)
+}
+
+/// A line without its trailing `# comment` (shell and YAML share the rule: the
+/// `#` opens a comment at the start of a word, outside quotes).
+fn without_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut previous = ' ';
+    for (at, c) in line.char_indices() {
+        match quote {
+            Some(open) => {
+                if c == open {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '#' if previous.is_whitespace() => return &line[..at],
+                _ => {}
+            },
+        }
+        previous = c;
+    }
+    line
+}
+
+/// `(line number, text)` of the lines that say something once comments and
+/// blanks are gone: a tool named only in a comment is not run by the file.
+fn live_lines(body: &str) -> Vec<(usize, String)> {
+    body.lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let text = without_comment(line).trim();
+            (!text.is_empty()).then(|| (index + 1, text.to_string()))
+        })
+        .collect()
+}
+
+/// The live text of a body, lowercased, one line each.
+fn live_text(body: &str) -> String {
+    live_lines(body)
+        .into_iter()
+        .map(|(_, text)| text.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A command that checks nothing: it prints, succeeds, or loads the hook runner.
+fn is_inert(command: &str) -> bool {
+    let command = command.trim();
+    match command.split_whitespace().next() {
+        None => true,
+        Some("echo" | "printf" | "true" | ":" | "exit" | "set" | "source") => true,
+        Some(".") => command.contains("husky.sh"),
+        Some(_) => false,
+    }
+}
+
+/// The command a CI line carries: none for a label (`name:`) or an inert step.
+fn ci_command(text: &str) -> Option<&str> {
+    let text = text.trim_start_matches('-').trim();
+    for label in ["name:", "description:", "label:", "title:", "displayName:"] {
+        if text.starts_with(label) {
+            return None;
+        }
+    }
+    let command = ["run:", "script:", "command:"]
+        .iter()
+        .find_map(|key| text.strip_prefix(key))
+        .unwrap_or(text)
+        .trim()
+        .trim_matches(['"', '\'']);
+    (!is_inert(command)).then_some(command)
 }
 
 const TOOL_KEYWORDS: &[(&str, &[&str])] = &[
@@ -555,13 +628,6 @@ fn tool_named_in(text: &str) -> Option<&'static str> {
         .map(|(name, _)| *name)
 }
 
-fn is_trivial_hook(body: &str) -> bool {
-    !body
-        .lines()
-        .map(str::trim)
-        .any(|l| !l.is_empty() && !l.starts_with('#'))
-}
-
 fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
     let mut out = Vec::new();
     for rel in [
@@ -569,15 +635,26 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
         ".githooks/commit-msg",
         ".git-hooks/commit-msg",
     ] {
-        if let Some(body) = read_small(&project.join(rel)) {
-            if !is_trivial_hook(&body) {
-                let text = body.to_lowercase();
-                out.push(Enforcer {
-                    at: format!("{rel}:1"),
-                    ci: false,
-                    tool: tool_named_in(&text),
-                });
-            }
+        let Some(body) = read_small(&project.join(rel)) else {
+            continue;
+        };
+        // A hook that only prints or loads the runner checks nothing, and a
+        // tool named in its comments is not run by it.
+        let live: Vec<(usize, String)> = live_lines(&body)
+            .into_iter()
+            .filter(|(_, text)| !is_inert(text))
+            .collect();
+        if let Some((first, _)) = live.first() {
+            let text = live
+                .iter()
+                .map(|(_, text)| text.to_lowercase())
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.push(Enforcer {
+                at: format!("{rel}:{first}"),
+                ci: false,
+                tool: tool_named_in(&text),
+            });
         }
     }
     for rel in [
@@ -597,7 +674,11 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                 .take_while(|(i, l)| *i == 0 || l.is_empty() || l.starts_with([' ', '\t', '#']))
                 .map(|(_, l)| *l)
                 .collect();
-            let text = block.join("\n").to_lowercase();
+            // A `commit-msg:` header with nothing but comments under it runs nothing.
+            let text = live_text(&block[1..].join("\n"));
+            if text.is_empty() {
+                continue;
+            }
             out.push(Enforcer {
                 at: format!("{rel}:{}", start + 1),
                 ci: false,
@@ -608,7 +689,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
     if let Some(body) = read_small(&project.join(".pre-commit-config.yaml")) {
         let needles = ["commit-msg", "conventional-pre-commit", "gitlint"];
         if let Some(line) = first_line_with(&body, &needles) {
-            let text = body.to_lowercase();
+            let text = live_text(&body);
             out.push(Enforcer {
                 at: format!(".pre-commit-config.yaml:{line}"),
                 ci: false,
@@ -640,14 +721,19 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
         let Some(body) = read_small(&project.join(&rel)) else {
             continue;
         };
-        for (index, line) in body.lines().enumerate() {
-            let text = line.to_lowercase();
+        // A CI step runs the tool: a comment, a `name:` label or an `echo`
+        // that mentions it does not (KT-1387).
+        for (number, line) in live_lines(&body) {
+            let Some(command) = ci_command(&line) else {
+                continue;
+            };
+            let text = command.to_lowercase();
             let named = tool_named_in(&text);
             let semantic =
                 text.contains("semantic-pull-request") || text.contains("conventional-pre-commit");
             if named.is_some() || semantic {
                 out.push(Enforcer {
-                    at: format!("{rel}:{}", index + 1),
+                    at: format!("{rel}:{number}"),
                     ci: true,
                     tool: named,
                 });

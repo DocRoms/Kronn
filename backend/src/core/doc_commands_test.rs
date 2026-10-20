@@ -123,11 +123,19 @@ fn a_package_script_must_exist_in_some_package_json() {
 }
 
 #[test]
-fn a_bare_yarn_name_may_be_an_installed_binary_but_run_may_not() {
+fn a_declared_binary_runs_through_yarn_but_npm_and_pnpm_run_run_scripts_only() {
     let files = [("package.json", PACKAGE)];
     assert!(problems(&files, "`yarn eslint .` and `yarn tsc` and `yarn vitest`\n").is_empty());
-    let found = problems(&files, "`yarn run vitest` and `npm vitest`\n");
-    assert_eq!(found.len(), 2, "{found:?}");
+    // `yarn run <bin>` runs an installed binary too.
+    assert!(problems(&files, "`yarn run vitest` and `yarn run eslint . --fix`\n").is_empty());
+    let found = problems(
+        &files,
+        "`npm vitest` and `npm run vitest` and `pnpm run vitest`\n",
+    );
+    assert_eq!(found.len(), 3, "{found:?}");
+    // A binary no dependency brings is still unknown.
+    let found = problems(&files, "`yarn run prettier .`\n");
+    assert_eq!(found.len(), 1, "{found:?}");
 }
 
 #[test]
@@ -200,4 +208,220 @@ fn dependency_and_build_directories_are_not_read() {
     ];
     let found = problems(&files, "`make leak` and `yarn leak`\n");
     assert_eq!(found.len(), 2, "{found:?}");
+}
+
+// ─── KT-1387 review: measured on 11 real audit repositories ────────────────
+
+/// What the apollo repository declares: no `lint` script, `eslint` as a
+/// dev dependency, a Makefile whose only `.PHONY` entry is `test`.
+const APOLLO_PACKAGE: &str = r#"{
+  "scripts": {"build": "x", "dev": "x", "doc": "x", "start": "x", "restart": "x", "test": "x"},
+  "dependencies": {"@hapi/hapi": "21"},
+  "devDependencies": {"@euronews/eslint-config-js": "3", "eslint": "9", "jest": "29"}
+}"#;
+const APOLLO_MAKEFILE: &str =
+    ".PHONY: test\ntest:\n\tjest\nlint:\n\tyarn run eslint . --fix\naws:\n\t./aws.sh\n";
+
+fn apollo() -> [(&'static str, &'static str); 2] {
+    [
+        ("package.json", APOLLO_PACKAGE),
+        ("Makefile", APOLLO_MAKEFILE),
+    ]
+}
+
+#[test]
+fn yarn_run_of_a_declared_binary_is_not_a_problem() {
+    // 7 of the 10 false positives: `yarn run eslint` with eslint a dependency.
+    for doc in [
+        "| Lint / format | `yarn run eslint . --fix` or `make lint` |\n",
+        "| Linter (ESLint) | `.eslintrc.js` | `yarn run eslint . --fix` |\n",
+        "| Linting (ESLint) | `make lint` or `yarn run eslint .` | `.eslintrc.js` | JavaScript |\n",
+        "```bash\nyarn run eslint . --fix  # Auto-fix lint issues\n```\n",
+        "Run: `yarn run eslint .` (check) or `yarn run eslint . --fix` (auto-fix)\n",
+    ] {
+        assert!(problems(&apollo(), doc).is_empty(), "{doc}");
+    }
+}
+
+#[test]
+fn npx_and_npm_exec_are_never_judged() {
+    let doc = "`npx eslint .`, `npx create-thing`, `npm exec eslint`, `npm exec -- tsc`\n";
+    assert!(problems(&apollo(), doc).is_empty());
+    assert!(problems(&[("README.md", "x")], doc).is_empty());
+}
+
+#[test]
+fn a_line_that_says_the_command_is_unavailable_claims_nothing() {
+    // The remaining measured false positive of the docroms runbook.
+    let doc = "| Install JS deps | `make yarn-install` → `yarn install` | not available; Node.js/Yarn installed in container |\n";
+    assert!(problems(&[("Makefile", "up:\n\ttrue\n")], doc).is_empty());
+    for line in [
+        "`yarn install` is unavailable: this PHP project has no package.json.\n",
+        "Do not run `make absent`: it was removed.\n",
+        "`make restart` does not exist; use `docker compose restart`.\n",
+        "`yarn install` n'est pas disponible dans ce dépôt.\n",
+        "```bash\nyarn install  # no longer available here\n```\n",
+    ] {
+        assert!(problems(&[("README.md", "x")], line).is_empty(), "{line}");
+    }
+    // The same command with no such statement is still a claim.
+    let found = problems(&[("README.md", "x")], "Run `yarn install` first.\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    // A word that only contains the phrase's letters does not exempt the line.
+    let found = problems(&[("README.md", "x")], "plan/api: `yarn install`\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn yarn_add_remove_is_a_documentation_shorthand_for_two_built_ins() {
+    let doc = "| `yarn.lock` | `yarn install` | Lock file | After any `yarn add/remove` |\n";
+    assert!(problems(&apollo(), doc).is_empty());
+    // Still judged like `yarn add` when there is nothing to add to.
+    let found = problems(&[("README.md", "x")], "`yarn add/remove`\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    // A slash that is not made of built-ins stays a script name.
+    let found = problems(&apollo(), "`yarn build/deploy`\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn the_invented_commands_of_the_corpus_are_still_found() {
+    // The 8 true positives: an invented target, invented scripts, and Yarn
+    // advice for a repository with no manifest.
+    let found = problems(
+        &apollo(),
+        "`make restart`, `make doc`, `yarn lint`, `yarn lint:fix`\n",
+    );
+    assert_eq!(found.len(), 4, "{found:?}");
+    assert!(found[0].starts_with("`make restart` is not a target"));
+    assert!(found[1].starts_with("`make doc` is not a target"));
+    assert!(found[2].starts_with("`yarn lint` is not a script"));
+    assert!(found[3].starts_with("`yarn lint:fix` is not a script"));
+    let docroms = [("Makefile", "up:\n\ttrue\nrestart:\n\ttrue\n")];
+    let found = problems(
+        &docroms,
+        "| Install JS deps | `make yarn-install` → `yarn install` |\n",
+    );
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found[1].contains("no package.json"));
+}
+
+#[test]
+fn the_exemptions_of_the_probes_stay() {
+    let files = [
+        (
+            "package.json",
+            r#"{"scripts":{"test":"x"},"devDependencies":{"eslint":"9","typescript":"5"}}"#,
+        ),
+        (
+            "plugins/example/package.json",
+            r#"{"name":"example","scripts":{"custom":"x"}}"#,
+        ),
+        ("composer.json", r#"{"scripts":{"check":"x"}}"#),
+    ];
+    for command in [
+        "npm ci",
+        "npm install",
+        "yarn add example",
+        "yarn workspace example run custom",
+        "pnpm -r",
+        "pnpm -r run test",
+        "composer install",
+        "composer require example/example",
+        "npm i -g yarn",
+        "yarn run eslint .",
+        "yarn eslint .",
+        "yarn run tsc",
+        "yarn custom",
+        "npm run custom",
+    ] {
+        let doc = format!("`{command}`\n");
+        assert!(problems(&files, &doc).is_empty(), "{command}");
+    }
+    assert!(problems(
+        &[("README.md", "x")],
+        "Install Yarn with `npm i -g yarn`.\n"
+    )
+    .is_empty());
+    assert!(problems(&[("README.md", "x")], "`pnpm -r`\n").is_empty());
+    let found = problems(&[("README.md", "x")], "`composer install`\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn a_target_only_phony_declares_counts() {
+    let files = [("Makefile", ".PHONY: ready\n")];
+    assert!(problems(&files, "`make ready`\n").is_empty());
+    let continued = [("Makefile", ".PHONY: a \\\n  b c # comment\n")];
+    assert!(problems(&continued, "`make b` `make c` `make a`\n").is_empty());
+    let found = problems(&continued, "`make d`\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn a_rule_indented_with_spaces_is_read() {
+    let files = [(
+        "Makefile",
+        "  build:\n\t@echo build\n   serve dev: build\n\ttrue\n",
+    )];
+    assert!(problems(&files, "`make build`, `make serve` and `make dev`\n").is_empty());
+}
+
+#[test]
+fn an_included_file_is_read_whatever_its_extension() {
+    let included = |extra_name: &str, extra: &str, line: &str| {
+        let files = [("Makefile", line), (extra_name, extra)];
+        problems(&files, "`make build`\n")
+    };
+    let rule = "build:\n\t@echo build\n";
+    assert!(included("tasks.mk", rule, "include tasks.mk\n").is_empty());
+    assert!(included("tasks.rules", rule, "include tasks.rules\n").is_empty());
+    assert!(included("tasks.rules", rule, "-include tasks.rules # tasks\n").is_empty());
+    // Not included: its targets are not the Makefile's.
+    let found = included("tasks.rules", rule, "all:\n\ttrue\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    // From the project root, from a subdirectory Makefile, and by pattern.
+    let files = [
+        ("Makefile", "include make/*.rules\n"),
+        ("make/a.rules", "build:\n\ttrue\n"),
+    ];
+    assert!(problems(&files, "`make build`\n").is_empty());
+    let files = [
+        ("api/Makefile", "include ../shared/tasks.rules\n"),
+        ("shared/tasks.rules", "build:\n\ttrue\n"),
+    ];
+    assert!(problems(&files, "`make build`\n").is_empty());
+    // A path built from a variable is not followed, and a loop ends.
+    let files = [(
+        "Makefile",
+        "include $(DIR)/x.rules\ninclude Makefile\nall:\n\ttrue\n",
+    )];
+    let found = problems(&files, "`make build`\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn recipes_conditionals_and_macros_do_not_declare_targets() {
+    let makefile = "\
+ifeq ($(MODE),a:b)
+mode:\n\ttrue
+endif
+define help
+usage: make nope
+endef
+build:
+\tdocker run \\
+\t  -v $(PWD):/app \\
+\t  image:latest
+\tdone: here
+export PATH := /bin:$(PATH)
+CFLAGS ::= -O2
+";
+    let files = [("Makefile", makefile)];
+    assert!(problems(&files, "`make build` and `make mode`\n").is_empty());
+    let found = problems(
+        &files,
+        "`make nope` `make usage` `make done` `make image`\n",
+    );
+    assert_eq!(found.len(), 4, "{found:?}");
 }

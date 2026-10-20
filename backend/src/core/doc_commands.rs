@@ -11,10 +11,11 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_DEPTH: usize = 8;
 const MAX_ENTRIES: usize = 20_000;
+const MAX_INCLUDE_DEPTH: usize = 8;
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
     ".kronn",
@@ -35,6 +36,9 @@ const SHOWN_NAMES: usize = 12;
 /// What the repository defines, gathered once per gate run.
 #[derive(Debug, Default)]
 pub(crate) struct ProjectCommands {
+    root: PathBuf,
+    /// Makefiles already read (found by the walk or by an `include`).
+    read_makefiles: BTreeSet<PathBuf>,
     makefiles: usize,
     make_targets: BTreeSet<String>,
     make_patterns: Vec<(String, String)>,
@@ -71,7 +75,10 @@ impl Tool {
 
 impl ProjectCommands {
     pub(crate) fn scan(project: &Path) -> Self {
-        let mut found = Self::default();
+        let mut found = Self {
+            root: project.to_path_buf(),
+            ..Self::default()
+        };
         let mut budget = MAX_ENTRIES;
         found.walk(project, 0, &mut budget);
         found
@@ -114,33 +121,155 @@ impl ProjectCommands {
         match name {
             "package.json" => self.read_package(&body),
             "composer.json" => self.read_composer(&body),
-            _ => self.read_makefile(&body),
+            _ => self.read_makefile(path, &body, 0),
         }
     }
 
-    fn read_makefile(&mut self, body: &str) {
+    /// The targets a Makefile declares: rules (indented or not), names listed
+    /// in `.PHONY`, and whatever the files it `include`s declare.
+    fn read_makefile(&mut self, path: &Path, body: &str, depth: usize) {
+        let key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if !self.read_makefiles.insert(key) {
+            return;
+        }
         self.makefiles += 1;
-        for line in body.lines() {
-            if line.starts_with(['\t', ' ', '#', '.']) {
+        let dir = path.parent().unwrap_or(&self.root).to_path_buf();
+        let mut raw_lines = body.lines();
+        let mut in_define = 0usize;
+        while let Some(first) = raw_lines.next() {
+            // A trailing backslash continues the line: a recipe (`docker run \`
+            // then `-v a:b`) must not be read as a rule.
+            let mut logical = first.to_string();
+            while logical.ends_with('\\') {
+                let Some(next) = raw_lines.next() else { break };
+                logical.pop();
+                logical.push(' ');
+                logical.push_str(next.trim_start());
+            }
+            // A tab opens a recipe line; a rule may be indented with spaces.
+            if logical.starts_with('\t') {
+                continue;
+            }
+            let line = logical.trim();
+            let word = line.split_whitespace().next().unwrap_or("");
+            match word {
+                "define" => in_define += 1,
+                "endef" => in_define = in_define.saturating_sub(1),
+                _ => {}
+            }
+            if in_define > 0 || word == "endef" || line.starts_with('#') {
+                continue;
+            }
+            if matches!(word, "include" | "-include" | "sinclude") {
+                if depth < MAX_INCLUDE_DEPTH {
+                    let list = line[word.len()..].split(" #").next().unwrap_or("");
+                    for included in list.split_whitespace() {
+                        self.read_include(&dir, included, depth + 1);
+                    }
+                }
+                continue;
+            }
+            if matches!(
+                word,
+                "ifeq"
+                    | "ifneq"
+                    | "ifdef"
+                    | "ifndef"
+                    | "else"
+                    | "endif"
+                    | "export"
+                    | "unexport"
+                    | "override"
+                    | "private"
+                    | "vpath"
+                    | "undefine"
+            ) {
+                continue;
+            }
+            // A name only `.PHONY` lists is still a target `make` accepts.
+            if let Some(names) = line
+                .strip_prefix(".PHONY")
+                .and_then(|rest| rest.trim_start().strip_prefix(':'))
+            {
+                for name in names.split(" #").next().unwrap_or("").split_whitespace() {
+                    self.add_target(name);
+                }
+                continue;
+            }
+            if line.starts_with('.') {
                 continue;
             }
             let Some(colon) = line.find(':') else {
                 continue;
             };
-            // `NAME := value` and `NAME = a:b` define variables, not rules.
-            if line[colon..].starts_with(":=") || line[..colon].contains('=') {
+            // `NAME := value`, `NAME ::= value` and `NAME = a:b` define
+            // variables, not rules.
+            if line[colon..].trim_start_matches(':').starts_with('=') || line[..colon].contains('=')
+            {
                 continue;
             }
             for target in line[..colon].split_whitespace() {
-                if target.contains("$(") || target.contains("${") {
-                    self.make_dynamic = true;
-                } else if let Some((prefix, suffix)) = target.split_once('%') {
-                    self.make_patterns
-                        .push((prefix.to_string(), suffix.to_string()));
-                } else {
-                    self.make_targets.insert(target.to_string());
+                self.add_target(target);
+            }
+        }
+    }
+
+    fn add_target(&mut self, target: &str) {
+        if target == "&" {
+            return;
+        }
+        if target.contains("$(") || target.contains("${") {
+            self.make_dynamic = true;
+        } else if let Some((prefix, suffix)) = target.split_once('%') {
+            self.make_patterns
+                .push((prefix.to_string(), suffix.to_string()));
+        } else {
+            self.make_targets.insert(target.to_string());
+        }
+    }
+
+    /// Read a file an `include` names, whatever its extension. The path is
+    /// taken from the including Makefile's directory, then the project root; a
+    /// `*` in the file name matches any run of characters. A path built from a
+    /// variable cannot be followed and is left alone.
+    fn read_include(&mut self, dir: &Path, included: &str, depth: usize) {
+        if included.contains("$(") || included.contains("${") {
+            return;
+        }
+        for base in [dir.to_path_buf(), self.root.clone()] {
+            let joined = base.join(included);
+            let Some(name) = joined.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let mut files = Vec::new();
+            if let Some((prefix, suffix)) = name.split_once('*') {
+                let Some(entries) = joined.parent().and_then(|parent| fs::read_dir(parent).ok())
+                else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let found = entry.file_name().to_string_lossy().into_owned();
+                    if found.len() >= prefix.len() + suffix.len()
+                        && found.starts_with(prefix)
+                        && found.ends_with(suffix)
+                        && entry.path().is_file()
+                    {
+                        files.push(entry.path());
+                    }
+                }
+                files.sort();
+            } else if joined.is_file() {
+                files.push(joined);
+            }
+            if files.is_empty() {
+                continue;
+            }
+            for file in files {
+                if let Ok(body) = fs::read_to_string(&file) {
+                    self.read_makefile(&file, &body, depth);
                 }
             }
+            return;
         }
     }
 
@@ -176,7 +305,12 @@ impl ProjectCommands {
     /// document order and without repeats.
     pub(crate) fn problems(&self, content: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        for (command, in_fence) in code_lines(content) {
+        for (command, in_fence, line) in code_lines(content) {
+            // A line that says the command is unavailable or gone does not claim
+            // it exists: it is the very correction this check asks for.
+            if denies_existence(&line) {
+                continue;
+            }
             for segment in split_segments(&command) {
                 if let Some(problem) = self.judge(&segment, in_fence) {
                     if !out.contains(&problem) {
@@ -354,10 +488,15 @@ impl ProjectCommands {
         }
         let name = tokens[0].as_str();
         let first = *words.first()?;
-        if GLOBAL_OR_NEUTRAL.contains(&first) || !is_name(first) {
+        // `yarn add/remove` is documentation shorthand for two built-ins.
+        let shorthand = first.contains('/')
+            && first
+                .split('/')
+                .all(|part| INSTALLING.contains(&part) || GLOBAL_OR_NEUTRAL.contains(&part));
+        if !shorthand && (GLOBAL_OR_NEUTRAL.contains(&first) || !is_name(first)) {
             return None;
         }
-        if INSTALLING.contains(&first) {
+        if shorthand || INSTALLING.contains(&first) {
             return (self.packages == 0).then(|| {
                 format!(
                     "`{name} {first}` is cited but the repository has no package.json, so there is nothing for it to act on"
@@ -376,12 +515,15 @@ impl ProjectCommands {
         if self.package_scripts.contains(script) {
             return None;
         }
-        // `yarn eslint` / `pnpm vitest` run an installed binary, which is
-        // named like a dependency; `npm` runs no bare binary.
-        let may_be_binary = !explicit
-            && tool != Tool::Npm
-            && (self.package_deps.contains(script) || script == "tsc");
-        if may_be_binary {
+        // `yarn eslint` / `pnpm vitest` / `yarn run eslint` run an installed
+        // binary, which is named like a dependency. `npm run` and `pnpm run`
+        // run scripts only; `npx` and `npm exec` are never judged.
+        let runs_binaries = match tool {
+            Tool::Yarn => true,
+            Tool::Pnpm => !explicit,
+            _ => false,
+        };
+        if runs_binaries && self.declares_binary(script) {
             return None;
         }
         let shown = if explicit {
@@ -397,6 +539,27 @@ impl ProjectCommands {
                 names_hint(" (scripts", &self.package_scripts)
             )
         })
+    }
+
+    /// Whether a binary named like this comes with a declared dependency: the
+    /// dependency or a `bin` entry carries its name, a scoped package ends with
+    /// it (`@scope/eslint-cli`), or it is a well-known alias of one.
+    fn declares_binary(&self, bin: &str) -> bool {
+        const ALIASES: &[(&str, &str)] = &[
+            ("tsc", "typescript"),
+            ("tsserver", "typescript"),
+            ("ng", "@angular/cli"),
+            ("vue-cli-service", "@vue/cli-service"),
+        ];
+        self.package_deps.contains(bin)
+            || ALIASES
+                .iter()
+                .any(|(alias, package)| *alias == bin && self.package_deps.contains(*package))
+            || self
+                .package_deps
+                .iter()
+                .any(|dep| dep.rsplit_once('/').is_some_and(|(_, last)| last == bin))
+            || bin == "tsc"
     }
 
     fn judge_composer(&self, args: &[String]) -> Option<String> {
@@ -514,9 +677,36 @@ fn is_name(token: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/' | '@'))
 }
 
+/// Whether a line of a document says that what it names is not there.
+fn denies_existence(line: &str) -> bool {
+    const PHRASES: &[&str] = &[
+        "not available",
+        "unavailable",
+        "not exist",
+        "doesn't exist",
+        "no longer",
+        "removed",
+        "not defined",
+        "not provided",
+        "not supported",
+        "not applicable",
+        "there is no ",
+        "indisponible",
+        "n'est pas disponible",
+        "n'existe pas",
+        "n'existe plus",
+        "supprimé",
+        "inexistant",
+        "non disponible",
+    ];
+    let lowered = line.to_lowercase();
+    PHRASES.iter().any(|phrase| lowered.contains(phrase))
+}
+
 /// The code of a document: every line of a fenced block, every inline span.
-/// The flag says whether it came from a fence (a real command line).
-fn code_lines(content: &str) -> Vec<(String, bool)> {
+/// The flag says whether it came from a fence (a real command line); the
+/// last item is the whole source line, for what it says around the command.
+fn code_lines(content: &str) -> Vec<(String, bool, String)> {
     let mut out = Vec::new();
     let mut fence: Option<String> = None;
     let mut in_comment = false;
@@ -526,7 +716,7 @@ fn code_lines(content: &str) -> Vec<(String, bool)> {
             if trimmed.starts_with(marker.as_str()) {
                 fence = None;
             } else {
-                out.push((line.to_string(), true));
+                out.push((line.to_string(), true, line.to_string()));
             }
             continue;
         }
@@ -560,7 +750,7 @@ fn code_lines(content: &str) -> Vec<(String, bool)> {
         }
         for (index, span) in text.split('`').enumerate() {
             if index % 2 == 1 {
-                out.push((span.to_string(), false));
+                out.push((span.to_string(), false, line.to_string()));
             }
         }
     }

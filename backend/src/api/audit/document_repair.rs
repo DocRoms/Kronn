@@ -345,7 +345,7 @@ pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
         text.push_str("A `[src: deps: …]` row must be one the dependency watch holds, and a `[src: url: …]` page one you fetched in this run. For each one flagged above, fetch the page or keep the watch row; otherwise replace the value AND its citation with `not verified: no source`. Never write a version, date or support end from memory, and never attach a citation to it.\n");
     }
     if diagnostics.iter().any(|d| d.code == UNKNOWN_COMMAND) {
-        text.push_str("A command written as code in a document must exist in this repository. For each one flagged above, open the Makefile, `package.json` or `composer.json` it names and write only a target or script that is defined there, with the command that runs it; if the repository has no such command, remove the line rather than inventing one. Do not describe a prerequisite or an install step from the tool's usual habits: read what the repository does.\n");
+        text.push_str("A command written as code in a document must exist in this repository. For each one flagged above, open the Makefile, `package.json` or `composer.json` it names and write only a target or script that is defined there, with the command that runs it; if the repository has no such command, remove the line rather than inventing one. Do not describe a prerequisite or an install step from the tool's usual habits: read what the repository does. This check reads files and runs nothing: if a flagged command really exists (an included Makefile, a binary a dependency installs), keep it and cite the file that defines it.\n");
     }
     text
 }
@@ -356,14 +356,19 @@ pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
 pub(super) fn notes_json(
     preexisting: &[Diagnostic],
     autofixes: &[(u32, document_optimization::AppliedFix)],
+    unverified_commands: &[(u32, Diagnostic)],
 ) -> Option<String> {
-    if preexisting.is_empty() && autofixes.is_empty() {
+    if preexisting.is_empty() && autofixes.is_empty() && unverified_commands.is_empty() {
         return None;
     }
     serde_json::to_string(&serde_json::json!({
         "preexisting": preexisting
             .iter()
             .map(|d| serde_json::json!({"path": d.path, "message": d.message}))
+            .collect::<Vec<_>>(),
+        "unverified_commands": unverified_commands
+            .iter()
+            .map(|(step, d)| serde_json::json!({"step": step, "path": d.path, "message": d.message}))
             .collect::<Vec<_>>(),
         "autofixes": autofixes
             .iter()
@@ -537,6 +542,10 @@ pub(super) struct AttemptCheck {
     /// The gate's own exact replacements Kronn applied to the step's documents
     /// before judging them (KT-1353).
     pub repaired: Vec<document_optimization::AppliedFix>,
+    /// Commands the step's documents cite and the repository does not define
+    /// (KT-1387). Never blocking: sent back to the step while attempts remain,
+    /// listed in the run's notes once they are spent.
+    pub unverified_commands: Vec<Diagnostic>,
 }
 
 /// Check changed documents plus explicit recovery targets. The original step
@@ -629,10 +638,17 @@ pub(super) fn check_attempt(
             preserve_original(project, content)?;
         }
     }
+    let unverified_commands = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == UNKNOWN_COMMAND && targets.contains(&d.path))
+        .cloned()
+        .collect();
     Ok(AttemptCheck {
         blocking,
         preexisting,
         repaired,
+        unverified_commands,
     })
 }
 
@@ -766,15 +782,16 @@ mod tests {
             "# Ops\n\n```bash\nmake yarn-install\nyarn install\nmake test\n```\n",
         )
         .unwrap();
-        let blocking = check_attempt(root, &before, &[], &[], None)
-            .unwrap()
-            .blocking;
-        let messages: Vec<_> = blocking.iter().map(|d| d.message.as_str()).collect();
+        // Never a blocker: the step is told, the run is not held back.
+        let check = check_attempt(root, &before, &[], &[], None).unwrap();
+        assert!(check.blocking.is_empty(), "{:#?}", check.blocking);
+        let unverified = check.unverified_commands;
+        let messages: Vec<_> = unverified.iter().map(|d| d.message.as_str()).collect();
         assert_eq!(messages.len(), 2, "{messages:#?}");
-        assert!(blocking.iter().all(|d| d.code == UNKNOWN_COMMAND));
+        assert!(unverified.iter().all(|d| d.code == UNKNOWN_COMMAND));
         assert!(messages[0].starts_with("`make yarn-install`"));
         assert!(messages[1].starts_with("`yarn install`"));
-        let feedback = feedback(&blocking);
+        let feedback = feedback(&unverified);
         assert!(feedback.contains("Documentary gate"));
         assert!(feedback.contains("must exist in this repository"));
 
@@ -783,10 +800,39 @@ mod tests {
             "# Ops\n\n```bash\nmake aws\nmake test\n```\n",
         )
         .unwrap();
-        let blocking = check_attempt(root, &before, &blocking, &[], None)
-            .unwrap()
-            .blocking;
-        assert!(blocking.is_empty(), "{blocking:#?}");
+        let check = check_attempt(root, &before, &unverified, &[], None).unwrap();
+        assert!(check.blocking.is_empty(), "{:#?}", check.blocking);
+        assert!(
+            check.unverified_commands.is_empty(),
+            "{:#?}",
+            check.unverified_commands
+        );
+    }
+
+    #[test]
+    fn a_command_cited_in_a_document_the_step_did_not_touch_is_not_asked_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Makefile"), "test:\n\tphpunit\n").unwrap();
+        std::fs::create_dir_all(root.join("docs/operations")).unwrap();
+        std::fs::write(
+            root.join("docs/AGENTS.md"),
+            "# P\n[ops](operations/ops.md)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/operations/ops.md"),
+            "# Ops\n\n`make ghost`\n",
+        )
+        .unwrap();
+        let before = snapshot(root).unwrap();
+        std::fs::write(
+            root.join("docs/AGENTS.md"),
+            "# P2\n[ops](operations/ops.md)\n",
+        )
+        .unwrap();
+        let check = check_attempt(root, &before, &[], &[], None).unwrap();
+        assert!(check.unverified_commands.is_empty());
     }
 
     #[test]
@@ -1322,21 +1368,42 @@ mod tests {
                 to: "operations".into(),
             },
         )];
-        assert_eq!(notes_json(&[], &[]), None);
+        assert_eq!(notes_json(&[], &[], &[]), None);
+        let ghost = vec![(
+            7,
+            Diagnostic {
+                code: UNKNOWN_COMMAND.into(),
+                path: "docs/operations/debug-operations.md".into(),
+                message: "`make ghost` is not a target of any Makefile in the repository".into(),
+                blocking: false,
+            },
+        )];
+        let only_commands: serde_json::Value =
+            serde_json::from_str(&notes_json(&[], &[], &ghost).unwrap()).unwrap();
+        assert_eq!(only_commands["unverified_commands"][0]["step"], 7);
+        assert!(only_commands["unverified_commands"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("make ghost"));
+        for language in ["fr", "en", "es"] {
+            let block = super::super::helpers::documentary_notes_block(&[], &[], &ghost, language);
+            assert!(block.contains("make ghost"), "{language}: {block}");
+        }
         let json: serde_json::Value =
-            serde_json::from_str(&notes_json(&held, &fixes).unwrap()).unwrap();
+            serde_json::from_str(&notes_json(&held, &fixes, &[]).unwrap()).unwrap();
         assert_eq!(json["preexisting"][0]["path"], "docs/tech-debt/TD-1.md");
         assert_eq!(json["autofixes"][0]["step"], 10);
         assert_eq!(json["autofixes"][0]["to"], "operations");
         for language in ["fr", "en", "es"] {
-            let block = super::super::helpers::documentary_notes_block(&held, &fixes, language);
+            let block =
+                super::super::helpers::documentary_notes_block(&held, &fixes, &[], language);
             assert!(
                 block.contains("docs/tech-debt/TD-1.md"),
                 "{language}: {block}"
             );
             assert!(block.contains("`operations`"), "{language}: {block}");
         }
-        assert!(super::super::helpers::documentary_notes_block(&[], &[], "en").is_empty());
+        assert!(super::super::helpers::documentary_notes_block(&[], &[], &[], "en").is_empty());
     }
 
     #[test]

@@ -463,9 +463,10 @@ pub(crate) fn human_references_block(
 pub(crate) fn documentary_notes_block(
     preexisting: &[crate::core::document_optimization::Diagnostic],
     autofixes: &[(u32, crate::core::document_optimization::AppliedFix)],
+    unverified_commands: &[(u32, crate::core::document_optimization::Diagnostic)],
     language: &str,
 ) -> String {
-    if preexisting.is_empty() && autofixes.is_empty() {
+    if preexisting.is_empty() && autofixes.is_empty() && unverified_commands.is_empty() {
         return String::new();
     }
     const SHOWN: usize = 30;
@@ -526,10 +527,24 @@ pub(crate) fn documentary_notes_block(
     if !autofixes.is_empty() {
         out.push_str(&format!("{fixed_title}\n{fixed}\n\n"));
     }
+    if !unverified_commands.is_empty() {
+        let listed = lines(
+            unverified_commands
+                .iter()
+                .map(|(step, d)| format!("- step {step}, `{}` — {}", d.path, d.message))
+                .collect(),
+        );
+        let title = match language {
+            "en" => format!("{} command(s) the documents cite and no Makefile or manifest read by Kronn defines (the step was told and kept them; Kronn reads files and runs nothing, so check each one):", unverified_commands.len()),
+            "es" => format!("{} comando(s) que los documentos citan y que ningún Makefile o manifiesto leído por Kronn define (el paso fue advertido y los mantuvo; Kronn lee archivos y no ejecuta nada, verifica cada uno):", unverified_commands.len()),
+            _ => format!("{} commande(s) que les documents citent et qu'aucun Makefile ou manifeste lu par Kronn ne définit (l'étape en a été avertie et les a gardées ; Kronn lit des fichiers et n'exécute rien, vérifie chacune) :", unverified_commands.len()),
+        };
+        out.push_str(&format!("{title}\n{listed}\n\n"));
+    }
     let rule = match language {
-        "en" => "List both to the user in a separate section of your first message; they are not yours to hide.",
-        "es" => "Enumera ambos al usuario en una sección aparte de tu primer mensaje; no te corresponde ocultarlos.",
-        _ => "Liste les deux à l'utilisateur dans une section à part de ton premier message ; ce n'est pas à toi de les cacher.",
+        "en" => "List all of it to the user in a separate section of your first message; none of it is yours to hide.",
+        "es" => "Enumera todo al usuario en una sección aparte de tu primer mensaje; no te corresponde ocultar nada.",
+        _ => "Liste tout à l'utilisateur dans une section à part de ton premier message ; ce n'est pas à toi de le cacher.",
     };
     out.push_str(rule);
     out.push_str("\n\n");
