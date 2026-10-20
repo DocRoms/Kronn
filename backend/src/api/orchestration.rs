@@ -5695,7 +5695,47 @@ pub(crate) async fn deliver_native_worker_manifest(
     .await
 }
 
+/// KT-1402 — every refusal is journaled on the execution: the worker reads it
+/// as a tool error inside its own turn, and the principal's status/escalation
+/// must be able to say why nothing was delivered.
 async fn deliver_authorized_worker_manifest(
+    db: &Database,
+    exec: TaskExecution,
+    alias: &str,
+    actor_session_id: Option<String>,
+    dispatch_expectation: crate::db::orchestration::DeliveryDispatchExpectation<'_>,
+    manifest_json: &str,
+    authorship: DeliveryManifestAuthorship,
+) -> Result<DeliverOutcome, ProvisionError> {
+    let (exec_id, attempt_no) = (exec.id.clone(), exec.attempt_no);
+    let actor = agent_actor(alias, actor_session_id.as_deref());
+    let outcome = deliver_authorized_worker_manifest_inner(
+        db,
+        exec,
+        alias,
+        actor_session_id,
+        dispatch_expectation,
+        manifest_json,
+        authorship,
+    )
+    .await?;
+    if let DeliverOutcome::InvalidManifest(detail) = &outcome {
+        let detail = detail.clone();
+        let recorded = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::record_delivery_refusal(
+                    conn, &exec_id, attempt_no, &detail, &actor,
+                )
+            })
+            .await;
+        if let Err(error) = recorded {
+            tracing::warn!("could not journal the delivery refusal: {error}");
+        }
+    }
+    Ok(outcome)
+}
+
+async fn deliver_authorized_worker_manifest_inner(
     db: &Database,
     exec: TaskExecution,
     alias: &str,
@@ -5772,8 +5812,10 @@ async fn deliver_authorized_worker_manifest(
                         .eq(current_dod_ids.iter().copied()) => {}
                 Some(_) => {
                     return Ok(DeliverOutcome::InvalidManifest(
-                        "task Definition of Done changed since this execution was launched; cancel it and launch a fresh execution before delivering ordered native assertions"
-                            .into(),
+                        format!(
+                            "task Definition of Done changed since this execution was launched and this execution did not adopt it; the task now has {} item(s). Cancel it and launch a fresh execution (or reassign it, which adopts the current Definition of Done) before delivering ordered native assertions",
+                            current_dod_ids.len()
+                        ),
                     ))
                 }
                 None => {
@@ -9932,6 +9974,7 @@ pub(crate) fn execution_detail(
         conn, exec_id,
     )?);
     let progress = execution_progress(conn, &lineage.execution)?;
+    let last_delivery_refusal = crate::db::orchestration::latest_delivery_refusal(conn, exec_id)?;
     Ok(crate::models::TaskExecutionDetail {
         lineage,
         target_branch: run.target_branch,
@@ -9940,6 +9983,7 @@ pub(crate) fn execution_detail(
         worker_sessions: crate::db::orchestration::list_worker_cli_sessions(conn, exec_id)?,
         validation_runs: crate::db::orchestration::list_validation_runs(conn, exec_id)?,
         recovery,
+        last_delivery_refusal,
         usage: crate::models::TaskExecutionUsage {
             duration_ms,
             in_app_tokens: tokens.in_app_tokens,
@@ -11243,6 +11287,27 @@ fn rejected_delivery_note(before: &TaskExecution, lang: RoomLang) -> Option<Stri
     })
 }
 
+/// KT-1402 — what a reassignment tells the replacement worker when it adopted a
+/// Definition of Done that differs from the one the execution was launched with.
+fn dod_readopted_note(
+    conn: &rusqlite::Connection,
+    before: &TaskExecution,
+    after: &TaskExecution,
+    lang: RoomLang,
+) -> Result<Option<String>> {
+    if before.worker_dod_ids == after.worker_dod_ids {
+        return Ok(None);
+    }
+    Ok(
+        crate::db::planning::get_task(conn, &after.task_id)?.map(|task| {
+            format!(
+                "\n\n{}",
+                crate::db::orchestration::dod_readopted_notice(lang, &task.definition_of_done)
+            )
+        }),
+    )
+}
+
 pub(crate) async fn reassign_native_execution(
     state: &AppState,
     exec_id: &str,
@@ -11289,10 +11354,9 @@ pub(crate) async fn reassign_native_execution(
                 }
             }
             let transaction = conn.unchecked_transaction()?;
-            let replaced_dispatch_id =
-                crate::db::orchestration::get_task_execution(&transaction, &id)?
-                    .context("execution vanished before worker reassignment")?
-                    .dispatch_job_id;
+            let before = crate::db::orchestration::get_task_execution(&transaction, &id)?
+                .context("execution vanished before worker reassignment")?;
+            let replaced_dispatch_id = before.dispatch_job_id.clone();
             let execution = crate::db::orchestration::reassign_execution_worker(
                 &transaction,
                 &id,
@@ -11300,6 +11364,7 @@ pub(crate) async fn reassign_native_execution(
                 &persisted_reason,
                 &backend_actor(),
             )?;
+            let dod_note = dod_readopted_note(&transaction, &before, &execution, lang)?;
             let child = execution
                 .sub_discussion_id
                 .clone()
@@ -11351,6 +11416,7 @@ pub(crate) async fn reassign_native_execution(
             }
             handoff.push_str(scope_note.as_deref().unwrap_or_default());
             handoff.push_str(rejected_note.as_deref().unwrap_or_default());
+            handoff.push_str(dod_note.as_deref().unwrap_or_default());
             let message =
                 orchestrator_message(format!("orch-reassign:{}:{}", id, generation), handoff);
             crate::db::discussions::insert_message(&transaction, &child, &message)?;
@@ -11399,8 +11465,13 @@ pub(crate) async fn reassign_native_execution(
             transaction.commit()?;
             let mut view = recovery_view(conn, &id)?;
             view.outcome = Some(format!(
-                "handoff generation {} queued in the existing child discussion",
-                recovery.assignment_generation
+                "handoff generation {} queued in the existing child discussion{}",
+                recovery.assignment_generation,
+                if dod_note.is_some() {
+                    "; the task's Definition of Done changed since launch and the execution re-adopted it"
+                } else {
+                    ""
+                }
             ));
             Ok((view, replaced_dispatch_id))
         })
@@ -11450,10 +11521,19 @@ pub async fn reassign_execution(
                 &backend_actor(),
             )?;
             let lang = crate::db::discussions::room_lang(conn, &before.parent_discussion_id);
-            Ok((execution, rejected_delivery_note(&before, lang)))
+            let dod_note = dod_readopted_note(conn, &before, &execution, lang)?;
+            let note = [rejected_delivery_note(&before, lang), dod_note.clone()]
+                .into_iter()
+                .flatten()
+                .collect::<String>();
+            Ok((
+                execution,
+                (!note.is_empty()).then_some(note),
+                dod_note.is_some(),
+            ))
         })
         .await;
-    let Ok((execution, rejected_note)) = reassigned else {
+    let Ok((execution, rejected_note, dod_readopted)) = reassigned else {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Conflict,
             reassigned.err().unwrap().to_string(),
@@ -11589,8 +11669,13 @@ pub async fn reassign_execution(
                 tx.commit()?;
                 let mut view = recovery_view(conn, &id)?;
                 view.outcome = Some(format!(
-                    "CLI handoff generation {} awaits exact session acceptance",
-                    recovery.assignment_generation
+                    "CLI handoff generation {} awaits exact session acceptance{}",
+                    recovery.assignment_generation,
+                    if dod_readopted {
+                        "; the task's Definition of Done changed since launch and the execution re-adopted it"
+                    } else {
+                        ""
+                    }
                 ));
                 Ok(view)
             })
@@ -13225,14 +13310,21 @@ fn compact_last_error(detail: &crate::models::TaskExecutionDetail) -> Option<Str
     let dispatch = (detail.progress.phase == crate::models::TaskExecutionProgressPhase::Failed)
         .then_some(detail.progress.reason.as_deref())
         .flatten();
+    // KT-1402 — a refused delivery is the cause; the recovery reason only says
+    // the worker ended without one.
+    let refusal = detail
+        .last_delivery_refusal
+        .as_ref()
+        .map(|detail| format!("delivery refused: {detail}"));
     execution
         .blocked_reason
-        .as_deref()
-        .or(outcome)
-        .or(recovery)
-        .or(dispatch)
+        .clone()
+        .or(refusal)
+        .or_else(|| outcome.map(str::to_string))
+        .or_else(|| recovery.map(str::to_string))
+        .or_else(|| dispatch.map(str::to_string))
         .filter(|text| !text.trim().is_empty())
-        .map(|text| clip_chars(text, COMPACT_ERROR_MAX_CHARS))
+        .map(|text| clip_chars(&text, COMPACT_ERROR_MAX_CHARS))
 }
 
 /// Latest candidate's validation runs, most recent last.
@@ -28192,6 +28284,328 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, TaskExecutionStatus::Working);
+    }
+
+    /// KT-1402 — add a DoD item to the task of `exec_id` through a normal
+    /// `task_update`, keeping the existing items (and their ids).
+    async fn add_dod_item_by_update(db: &Database, exec_id: &str, sentence: &str) {
+        let task_id = exec_of(db, exec_id).await.task_id;
+        let sentence = sentence.to_string();
+        db.with_conn(move |conn| {
+            let task = crate::db::planning::get_task(conn, &task_id)?.context("task")?;
+            let mut items = task
+                .definition_of_done
+                .iter()
+                .map(|item| CreatePlanningDodItem {
+                    id: Some(item.id.clone()),
+                    sentence: item.sentence.clone(),
+                    completed: item.completed,
+                    verification: None,
+                })
+                .collect::<Vec<_>>();
+            items.push(CreatePlanningDodItem {
+                id: None,
+                sentence,
+                completed: false,
+                verification: None,
+            });
+            crate::db::planning::update_task(
+                conn,
+                &task_id,
+                &crate::models::UpdatePlanningTaskRequest {
+                    title: None,
+                    description: None,
+                    status: None,
+                    priority: None,
+                    parent_id: None,
+                    blocked_reason: None,
+                    rank: None,
+                    project_ids: None,
+                    tags: None,
+                    definition_of_done: Some(items),
+                    links: None,
+                    actor: test_actor(),
+                },
+            )
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn provision_native_for_dod_edit(
+        db: &Database,
+        repo: &Path,
+        key: &str,
+    ) -> (TaskExecution, String, String) {
+        let (task_ref, parent_id, _) = seed(db, repo).await;
+        let execution = provision_single_task_execution(
+            db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some(key.into()),
+            },
+        )
+        .await
+        .unwrap();
+        let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
+        let lookup = dispatch_job_id.clone();
+        let trigger = db
+            .with_conn(move |conn| {
+                Ok(crate::db::agent_dispatch::get(conn, &lookup)?
+                    .unwrap()
+                    .trigger_message_id)
+            })
+            .await
+            .unwrap();
+        (execution, dispatch_job_id, trigger)
+    }
+
+    async fn discussion_contents(db: &Database, discussion_id: &str) -> Vec<String> {
+        let discussion_id = discussion_id.to_string();
+        db.with_conn(move |conn| {
+            Ok(
+                crate::db::discussions::get_discussion(conn, &discussion_id)?
+                    .unwrap()
+                    .messages
+                    .into_iter()
+                    .map(|message| message.content)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn editing_the_dod_of_a_live_execution_re_adopts_it_and_tells_the_worker() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (execution, dispatch_job_id, trigger) =
+            provision_native_for_dod_edit(&db, repo.path(), "kt1402-adopt").await;
+        let child = execution.sub_discussion_id.clone().unwrap();
+        let launched = execution.worker_dod_ids.clone().unwrap();
+
+        add_dod_item_by_update(&db, &execution.id, "the new requirement holds").await;
+
+        let after = exec_of(&db, &execution.id).await;
+        let adopted = after.worker_dod_ids.clone().unwrap();
+        assert_eq!(adopted.len(), launched.len() + 1);
+        assert_eq!(adopted[..launched.len()], launched[..]);
+        assert_eq!(after.status, TaskExecutionStatus::Working, "never parked");
+
+        // The worker is told, in its own discussion, with the new list.
+        let notice = discussion_contents(&db, &child)
+            .await
+            .into_iter()
+            .find(|content| content.contains("the new requirement holds"))
+            .unwrap_or_default();
+        assert!(notice.contains("Definition of Done"), "{notice}");
+        assert!(
+            notice.contains(&format!("exactly {}", adopted.len()))
+                || notice.contains(&format!("exactement {}", adopted.len())),
+            "{notice}"
+        );
+
+        // A delivery bound to the new DoD is not refused for the drift.
+        let manifest = projected_manifest_for_execution(&db, &execution.id).await;
+        let outcome = deliver_native_worker_manifest(
+            &db,
+            &execution.id,
+            NativeExecutionCaller {
+                discussion_id: &child,
+                agent_type: &AgentType::ClaudeCode,
+                source_message_id: Some(&trigger),
+                alias: "Claude Code",
+                actor_session_id: Some("native-delivery-turn"),
+            },
+            &dispatch_job_id,
+            &manifest,
+        )
+        .await
+        .unwrap();
+        if let DeliverOutcome::InvalidManifest(detail) = outcome {
+            assert!(
+                !detail.contains("Definition of Done changed"),
+                "the worker must not be refused for a DoD drift: {detail}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dod_edit_leaves_an_execution_that_already_delivered_on_its_snapshot() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (execution, _, _) =
+            provision_native_for_dod_edit(&db, repo.path(), "kt1402-awaiting").await;
+        let launched = execution.worker_dod_ids.clone().unwrap();
+        let execution_id = execution.id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_executions SET status = 'AwaitingReview' WHERE id = ?1",
+                [&execution_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        add_dod_item_by_update(&db, &execution.id, "added after the delivery").await;
+
+        assert_eq!(
+            exec_of(&db, &execution.id).await.worker_dod_ids.unwrap(),
+            launched,
+            "KT-1291: a delivered execution is reviewed against its launch snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_delivery_is_the_cause_shown_by_status_and_escalation() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (execution, dispatch_job_id, trigger) =
+            provision_native_for_dod_edit(&db, repo.path(), "kt1402-refusal").await;
+        let child = execution.sub_discussion_id.clone().unwrap();
+
+        // A drift the edit path cannot repair (the ids change under the
+        // execution), so the delivery is refused.
+        let task_id = execution.task_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE planning_task_dod_items SET id = 'drifted-id' WHERE task_id = ?1",
+                [&task_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let manifest = projected_manifest_for_execution(&db, &execution.id).await;
+        let outcome = deliver_native_worker_manifest(
+            &db,
+            &execution.id,
+            NativeExecutionCaller {
+                discussion_id: &child,
+                agent_type: &AgentType::ClaudeCode,
+                source_message_id: Some(&trigger),
+                alias: "Claude Code",
+                actor_session_id: Some("native-delivery-turn"),
+            },
+            &dispatch_job_id,
+            &manifest,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, DeliverOutcome::InvalidManifest(_)));
+
+        // The worker then ends its turn without a delivery.
+        let job = dispatch_job_id.clone();
+        let child_for_settle = child.clone();
+        db.with_conn(move |conn| {
+            crate::api::discussions::runtime::persist_dispatch_settlement(
+                conn,
+                &job,
+                &child_for_settle,
+                None,
+                crate::db::workflows::BatchChildOutcome::Success,
+                None,
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let execution_id = execution.id.clone();
+        let detail = db
+            .with_conn(move |conn| execution_detail(conn, &execution_id))
+            .await
+            .unwrap();
+        let refusal = detail
+            .last_delivery_refusal
+            .clone()
+            .expect("status carries the refusal");
+        assert!(refusal.contains("Definition of Done changed"), "{refusal}");
+        let recovery = detail.recovery.as_ref().unwrap();
+        assert!(
+            recovery
+                .recovery_reason
+                .starts_with("worker_completed_without_delivery"),
+            "{}",
+            recovery.recovery_reason
+        );
+        assert!(
+            recovery
+                .recovery_reason
+                .contains("Definition of Done changed"),
+            "{}",
+            recovery.recovery_reason
+        );
+        let compact = compact_execution_status(&detail, None);
+        assert!(
+            compact
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("delivery refused")),
+            "{:?}",
+            compact.last_error
+        );
+        let parent_messages = discussion_contents(&db, &execution.parent_discussion_id).await;
+        assert!(
+            parent_messages
+                .iter()
+                .any(|content| content.contains("Definition of Done changed")),
+            "the escalation notice must carry the refusal: {parent_messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reassigning_an_execution_with_a_stale_dod_snapshot_re_adopts_it() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (execution, _, _) =
+            provision_native_for_dod_edit(&db, repo.path(), "kt1402-reassign").await;
+        let child = execution.sub_discussion_id.clone().unwrap();
+        let launched = execution.worker_dod_ids.clone().unwrap();
+
+        // An execution launched before the edit path adopted: stale snapshot.
+        let task_id = execution.task_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO planning_task_dod_items \
+                 (id, task_id, sentence, completed, position, created_at, updated_at) \
+                 VALUES ('late-item', ?1, 'added late', 0, 99, \
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [&task_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = quota_test_state(&db);
+        let view = reassign_native_execution(&state, &execution.id, claude_selection(), "retry")
+            .await
+            .unwrap();
+
+        let after = exec_of(&db, &execution.id).await;
+        assert_eq!(
+            after.worker_dod_ids.as_ref().unwrap().len(),
+            launched.len() + 1
+        );
+        assert!(
+            view.outcome
+                .as_deref()
+                .is_some_and(|outcome| outcome.contains("re-adopted")),
+            "the principal is told: {:?}",
+            view.outcome
+        );
+        let handoff = discussion_contents(&db, &child)
+            .await
+            .into_iter()
+            .find(|content| content.contains("added late"))
+            .unwrap_or_default();
+        assert!(handoff.contains("Definition of Done"), "{handoff}");
     }
 
     #[tokio::test]

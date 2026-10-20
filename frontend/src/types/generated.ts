@@ -9852,7 +9852,13 @@ export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch
  * Every CLI session the worker ran, attempts and relaunches included, oldest
  * first (KT-911). Empty for a worker with no CLI session (HTTP providers).
  */
-worker_sessions: Array<TaskExecutionWorkerSession>, validation_runs: Array<TaskExecutionValidationRun>, recovery: TaskExecutionRecovery | null, usage: TaskExecutionUsage, progress: TaskExecutionProgress, };
+worker_sessions: Array<TaskExecutionWorkerSession>, validation_runs: Array<TaskExecutionValidationRun>, recovery: TaskExecutionRecovery | null,
+/**
+ * KT-1402 — why the worker's latest `task_exec_deliver` was refused, while
+ * it has not worked since: the cause an escalation otherwise hides in the
+ * worker's sub-discussion.
+ */
+last_delivery_refusal?: string, usage: TaskExecutionUsage, progress: TaskExecutionProgress, };
 
 /**
  * One journaled transition (ADR §3; DoD-3).

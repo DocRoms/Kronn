@@ -6836,3 +6836,304 @@ fn worker_cli_sessions_are_kept_per_attempt_and_only_the_current_dispatch_writes
     assert_eq!(sessions[1].cost_usd, Some(1.5));
     assert_eq!(sessions[2].cost_usd, None);
 }
+
+// ── KT-1402 — a DoD edited after launch, and the refusals that follow ──
+
+fn dod_request(sentences: &[&str]) -> Vec<crate::models::CreatePlanningDodItem> {
+    sentences
+        .iter()
+        .map(|sentence| crate::models::CreatePlanningDodItem {
+            id: None,
+            sentence: (*sentence).into(),
+            completed: false,
+            verification: None,
+        })
+        .collect()
+}
+
+fn kept_dod_request(conn: &Connection, task_id: &str) -> Vec<crate::models::CreatePlanningDodItem> {
+    crate::db::planning::get_task(conn, task_id)
+        .unwrap()
+        .unwrap()
+        .definition_of_done
+        .iter()
+        .map(|item| crate::models::CreatePlanningDodItem {
+            id: Some(item.id.clone()),
+            sentence: item.sentence.clone(),
+            completed: false,
+            verification: None,
+        })
+        .collect()
+}
+
+fn set_task_dod(
+    conn: &Connection,
+    task_id: &str,
+    items: Vec<crate::models::CreatePlanningDodItem>,
+) -> Vec<String> {
+    let request = crate::models::UpdatePlanningTaskRequest {
+        title: None,
+        description: None,
+        status: None,
+        priority: None,
+        parent_id: None,
+        blocked_reason: None,
+        rank: None,
+        project_ids: None,
+        tags: None,
+        definition_of_done: Some(items),
+        links: None,
+        actor: crate::models::PlanningActor::default(),
+    };
+    crate::db::planning::update_task(conn, task_id, &request)
+        .unwrap()
+        .definition_of_done
+        .into_iter()
+        .map(|item| item.id)
+        .collect()
+}
+
+/// A Working execution launched on the DoD the task has now, with a worker room.
+fn working_execution_on_current_dod(
+    conn: &Connection,
+    task_id: &str,
+    number: i64,
+) -> TaskExecution {
+    seed_task(conn, task_id, number);
+    let ids = set_task_dod(conn, task_id, dod_request(&["first", "second"]));
+    let mut input = LaunchSingleTaskInput::new(task_id, DISC);
+    input.worker_dod_ids = Some(ids);
+    let execution = launch_single_task(conn, &input, &backend_actor())
+        .unwrap()
+        .execution;
+    let room = format!("room-{task_id}");
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at) \
+         VALUES (?1, 'Worker', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        params![room],
+    )
+    .unwrap();
+    set_execution_sub_discussion(conn, &execution.id, &room).unwrap();
+    for to in [
+        TaskExecutionStatus::Provisioning,
+        TaskExecutionStatus::Working,
+    ] {
+        transition_execution(
+            conn,
+            &execution.id,
+            to,
+            &backend_actor(),
+            serde_json::json!({}),
+        )
+        .unwrap();
+    }
+    get_task_execution(conn, &execution.id).unwrap().unwrap()
+}
+
+fn room_messages(conn: &Connection, room: &str) -> Vec<String> {
+    conn.prepare("SELECT content FROM messages WHERE discussion_id = ?1")
+        .unwrap()
+        .query_map([room], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[test]
+fn editing_the_dod_of_a_live_execution_re_snapshots_it_and_tells_the_worker() {
+    let conn = setup();
+    let execution = working_execution_on_current_dod(&conn, "t-dod-edit", 1402);
+    assert_eq!(execution.worker_dod_ids.as_ref().map(Vec::len), Some(2));
+
+    // The principal keeps both items and appends a third, after launch.
+    let mut items = kept_dod_request(&conn, "t-dod-edit");
+    items.extend(dod_request(&["third, added after launch"]));
+    let current = set_task_dod(&conn, "t-dod-edit", items);
+    assert_eq!(current.len(), 3);
+
+    let after = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(
+        after.worker_dod_ids,
+        Some(current),
+        "the execution adopts the edited DoD instead of refusing every delivery"
+    );
+    assert_eq!(after.status, TaskExecutionStatus::Working);
+
+    let room = room_messages(&conn, "room-t-dod-edit");
+    assert_eq!(room.len(), 1, "the worker is told, once: {room:?}");
+    assert!(room[0].contains("exactly 3") || room[0].contains("exactement 3"));
+    assert!(room[0].contains("third, added after launch"));
+
+    let events = list_execution_events(&conn, &execution.id).unwrap();
+    let adoption = events
+        .iter()
+        .find(|event| event.action == "dod_readopted")
+        .expect("the adoption is journaled");
+    assert_eq!(adoption.changes["cause"], "task_dod_edited");
+
+    // An edit that leaves the item set unchanged is not announced again.
+    let same = kept_dod_request(&conn, "t-dod-edit");
+    set_task_dod(&conn, "t-dod-edit", same);
+    assert_eq!(room_messages(&conn, "room-t-dod-edit").len(), 1);
+}
+
+#[test]
+fn a_dod_edit_leaves_an_execution_already_awaiting_review_on_its_snapshot() {
+    let conn = setup();
+    let execution = working_execution_on_current_dod(&conn, "t-dod-review", 1403);
+    let snapshot = execution.worker_dod_ids.clone().unwrap();
+    conn.execute(
+        "UPDATE task_executions SET status = 'AwaitingReview' WHERE id = ?1",
+        [&execution.id],
+    )
+    .unwrap();
+
+    set_task_dod(&conn, "t-dod-review", dod_request(&["brand new"]));
+
+    let after = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(
+        after.worker_dod_ids,
+        Some(snapshot),
+        "a delivery under review is judged on the launch-time DoD (KT-1291)"
+    );
+}
+
+#[test]
+fn reassigning_an_execution_whose_dod_drifted_re_adopts_the_current_dod() {
+    let conn = setup();
+    let execution = working_execution_on_current_dod(&conn, "t-dod-reassign", 1404);
+    // An execution that predates the fix: the task moved on, its snapshot did not.
+    set_task_dod(&conn, "t-dod-reassign", dod_request(&["only one now"]));
+    conn.execute(
+        "UPDATE task_executions SET worker_dod_ids_json = ?2 WHERE id = ?1",
+        params![execution.id, r#"["stale-a","stale-b"]"#],
+    )
+    .unwrap();
+
+    let selection = CampaignWorkerSelection {
+        target: MessageTarget::agent(AgentType::ClaudeCode).with_tier(ModelTier::Reasoning),
+        model: Some("claude-reasoning".into()),
+        profile_id: None,
+    };
+    let reassigned = reassign_execution_worker(
+        &conn,
+        &execution.id,
+        &selection,
+        "worker stuck",
+        &backend_actor(),
+    )
+    .unwrap();
+
+    let current = crate::db::planning::get_task(&conn, "t-dod-reassign")
+        .unwrap()
+        .unwrap()
+        .definition_of_done
+        .into_iter()
+        .map(|item| item.id)
+        .collect::<Vec<_>>();
+    assert_eq!(reassigned.worker_dod_ids, Some(current));
+}
+
+#[test]
+fn a_refused_delivery_is_remembered_until_the_worker_works_again() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-refused", 1405);
+    assert_eq!(latest_delivery_refusal(&conn, &execution.id).unwrap(), None);
+
+    record_delivery_refusal(&conn, &execution.id, 1, "first refusal", &backend_actor()).unwrap();
+    record_delivery_refusal(&conn, &execution.id, 1, "second refusal", &backend_actor()).unwrap();
+    assert_eq!(
+        latest_delivery_refusal(&conn, &execution.id)
+            .unwrap()
+            .as_deref(),
+        Some("second refusal"),
+        "the latest refusal is the one reported"
+    );
+
+    // Interrupt, then resume into Working: a fresh turn retires the refusal.
+    transition_execution(
+        &conn,
+        &execution.id,
+        TaskExecutionStatus::Interrupted,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    assert!(latest_delivery_refusal(&conn, &execution.id)
+        .unwrap()
+        .is_some());
+    transition_execution(
+        &conn,
+        &execution.id,
+        TaskExecutionStatus::Working,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    assert_eq!(latest_delivery_refusal(&conn, &execution.id).unwrap(), None);
+}
+
+#[test]
+fn the_escalation_of_a_worker_that_ended_after_a_refused_delivery_says_why() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-escalated", 1406);
+    conn.execute(
+        "INSERT INTO messages
+         (id, discussion_id, role, content, timestamp, sort_order, received_at)
+         VALUES ('message-refused', ?1, 'User', 'go', ?2, 1, ?2)",
+        params![DISC, chrono::Utc::now().to_rfc3339()],
+    )
+    .unwrap();
+    crate::db::agent_dispatch::enqueue_for_latest_user(
+        &conn,
+        crate::db::agent_dispatch::NewLatestUserDispatch {
+            id: "dispatch-refused",
+            discussion_id: DISC,
+            dedupe_key: "message:message-refused",
+            agent_override: None,
+            chain_prompt_ids: &[],
+            batch_item: None,
+            group_id: None,
+            group_concurrency_limit: None,
+        },
+    )
+    .unwrap();
+    attach_execution_dispatch(&conn, &execution.id, "dispatch-refused").unwrap();
+    let refusal = "task Definition of Done changed since this execution was launched";
+    record_delivery_refusal(&conn, &execution.id, 1, refusal, &backend_actor()).unwrap();
+
+    let interrupted = interrupt_undelivered_execution_for_dispatch(
+        &conn,
+        "dispatch-refused",
+        "worker_completed_without_delivery",
+        &backend_actor(),
+    )
+    .unwrap()
+    .expect("the worker ended without a delivery");
+    assert_eq!(interrupted.delivery_refusal.as_deref(), Some(refusal));
+
+    let recovery = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        recovery
+            .recovery_reason
+            .starts_with("worker_completed_without_delivery"),
+        "readers keep matching on the reason code: {}",
+        recovery.recovery_reason
+    );
+    assert!(
+        recovery
+            .recovery_reason
+            .contains("Definition of Done changed"),
+        "{}",
+        recovery.recovery_reason
+    );
+
+    let detail = crate::api::orchestration::execution_detail(&conn, &execution.id).unwrap();
+    assert_eq!(
+        detail.last_delivery_refusal.as_deref(),
+        Some(refusal),
+        "task_exec_status carries the refusal"
+    );
+}
