@@ -38,7 +38,7 @@ alone does not establish a user-visible duration.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:1017-1018#reconcileLoadedDiscussion]
 5. The detail response also queries all message targets belonging to the
    discussion and groups them in a map.
-   [src: file: backend/src/db/discussions.rs:3038-3082#list_discussion_message_targets]
+   [src: file: backend/src/db/discussions.rs:3044-3088#list_discussion_message_targets]
    This means the refresh payload and
    server-side deserialization can grow with both messages and addressed
    targets, independently of visible transcript rows.
@@ -67,15 +67,15 @@ alone does not establish a user-visible duration.
 4. A `MessageBubble` passes normal text through `MessageBody`, which splits
    injected context and sends the content to `ReactMarkdown` with
    `remark-gfm` and `remark-emoji`.
-   [src: file: frontend/src/components/MessageBubble.tsx:2252-2300#MessageBody]
-   [src: file: frontend/src/components/MessageBubble.tsx:2203-2216#ReactMarkdown]
+   [src: file: frontend/src/components/MessageBubble.tsx:2265-2313#MessageBody]
+   [src: file: frontend/src/components/MessageBubble.tsx:2216-2229#ReactMarkdown]
    Each message first renders as plain text and upgrades to Markdown once it is
    near the viewport or the browser is idle, so every message is still parsed.
-   [src: file: frontend/src/components/MessageBubble.tsx:2153-2185#canDefer]
+   [src: file: frontend/src/components/MessageBubble.tsx:2166-2198#canDefer]
    There is a per-message
    200,000-character fallback that avoids this Markdown path for very large
    individual messages; it does not cap the count of ordinary messages.
-   [src: file: frontend/src/components/MessageBubble.tsx:1967-1975#MAX_MARKDOWN_CHARS]
+   [src: file: frontend/src/components/MessageBubble.tsx:1980-1988#MAX_MARKDOWN_CHARS]
 5. In-transcript search walks each rendered message row, then scans each row's
    rendered text nodes. For every match, the range helper locates start and end
    nodes by linear `find` calls.

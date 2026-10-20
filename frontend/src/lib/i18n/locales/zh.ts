@@ -6719,6 +6719,11 @@ const zh: TranslationDict = {
   "auditTimeline.docnotes.preexisting": "{0} 个已有的引用问题（位于没有任何步骤负责的文档中）",
   "auditTimeline.docnotes.autofixes": "Kronn 应用了 {0} 处检查给出的精确替换",
   "auditTimeline.docnotes.unverified": "{0} 个未验证的引用：多次尝试后仍无法生效的引用标记，现已改为带标记的反引号路径",
+  "auditTimeline.docnotes.advisories": "文档中留有 {0} 条提示：需要核对，审计并未因此失败",
+  "auditTimeline.docnotes.advisory.stack_conflict": "技术栈版本冲突",
+  "auditTimeline.docnotes.advisory.unproven_resolution": "无证据的已解决声明",
+  "auditTimeline.docnotes.commands": "{0} 条被引用的命令在仓库中未定义（Makefile、package.json、composer.json）：已保留为警告",
+  "auditTimeline.docnotes.step": "步骤 {0}",
 };
 
 export default zh;

@@ -6942,6 +6942,11 @@ Termine par [SIGNAL: OK].`,
   "auditTimeline.docnotes.preexisting": "{0} problème(s) de citation préexistant(s) dans des docs qu'aucune étape ne possède",
   "auditTimeline.docnotes.autofixes": "{0} remplacement(s) exact(s) de la porte appliqué(s) par Kronn",
   "auditTimeline.docnotes.unverified": "{0} référence(s) non vérifiée(s) : marqueurs de citation qu'aucune tentative n'a pu rendre valides, désormais des chemins entre accents graves signalés",
+  "auditTimeline.docnotes.advisories": "{0} point(s) d'attention laissé(s) dans les docs : à vérifier, l'audit n'a pas échoué pour cela",
+  "auditTimeline.docnotes.advisory.stack_conflict": "Conflit de version de la stack",
+  "auditTimeline.docnotes.advisory.unproven_resolution": "Résolution sans preuve",
+  "auditTimeline.docnotes.commands": "{0} commande(s) citée(s) que le dépôt ne définit pas (Makefile, package.json, composer.json) : conservée(s) comme avertissement",
+  "auditTimeline.docnotes.step": "étape {0}",
 };
 
 export default fr;

@@ -813,6 +813,9 @@ pub(crate) async fn run_partial_pipeline(
         // KT-1388 — the advice the steps left in their documents: noted on the
         // run and in the validation prompt, never counted as a failure.
         let mut documentary_advisories: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
+        // KT-1389 — the commands the documents cite that the repository does not
+        // define, once a step's attempts are spent: told to the step, never a blocker.
+        let mut documentary_unverified_commands: Vec<(u32, crate::core::document_optimization::Diagnostic)> = Vec::new();
         // KT-1370 — the markers demoted to flagged backticked paths once a
         // step's attempts were spent, with the step that left each one.
         let mut unverified_references: Vec<(u32, crate::core::document_optimization::DemotedReference)> = Vec::new();
@@ -984,6 +987,8 @@ pub(crate) async fn run_partial_pipeline(
             };
             // KT-1370 — what this step demoted after its last attempt.
             let mut step_demotions: Vec<crate::core::document_optimization::DemotedReference> = Vec::new();
+            // KT-1389 — the commands this step left unverified once its attempts were spent.
+            let mut step_unverified_commands: Vec<(u32, crate::core::document_optimization::Diagnostic)> = Vec::new();
             let validated_docs_snapshot =
                 match super::helpers::capture_validated_docs(&project_path) {
                     Ok(snapshot) => snapshot,
@@ -1672,34 +1677,70 @@ pub(crate) async fn run_partial_pipeline(
                     // the step stays done.
                     if success {
                         if let Some(before) = &documentary_before {
-                            match super::document_repair::advisories_since(&project_path, before, analysis_step.target_file) {
-                                Ok(advisory) if !advisory.is_empty() && attempt < max_attempts => {
-                                    citation_feedback = Some(super::document_repair::advice(&advisory));
+                            match super::document_repair::advice_since(&project_path, before, analysis_step.target_file) {
+                                // KT-1387 / KT-1389 — as the Full gate: feedback only,
+                                // handed back while the step can still correct.
+                                Ok(left) if !left.is_empty() && attempt < max_attempts => {
+                                    let (retry_reason, flagged) = if left.advisories.is_empty() {
+                                        citation_feedback = Some(super::document_repair::feedback(&left.unverified_commands));
+                                        ("documentary_unverified_commands", left.unverified_commands.clone())
+                                    } else {
+                                        let mut flagged = left.advisories.clone();
+                                        flagged.extend(left.unverified_commands.iter().cloned());
+                                        citation_feedback = Some(super::document_repair::advice(&flagged));
+                                        ("documentary_advisories", flagged)
+                                    };
                                     yield Event::default().event("step_retry").data(
                                         serde_json::json!({
                                             "step": step, "file": file_label,
                                             "attempt": attempt, "max_attempts": max_attempts,
-                                            "reason": "documentary_advisories",
-                                            "advisory_count": advisory.len(),
-                                            "diagnostics": advisory,
+                                            "reason": retry_reason,
+                                            "advisory_count": left.advisories.len(),
+                                            "fabricated_count": left.unverified_commands.len(),
+                                            "diagnostics": flagged,
                                         }).to_string()
                                     );
                                     continue 'attempts;
                                 }
-                                Ok(advisory) if !advisory.is_empty() => {
-                                    remit_notes.extend(advisory.iter().map(|d| {
-                                        format!("Unverified: `{}` — {}", d.path, d.message)
-                                    }));
-                                    yield Event::default().event("documentary_advisory").data(
-                                        serde_json::json!({
-                                            "step": step, "file": file_label,
-                                            "diagnostics": advisory,
-                                        }).to_string()
-                                    );
-                                    for diagnostic in advisory {
-                                        if !documentary_advisories.contains(&diagnostic) {
-                                            documentary_advisories.push(diagnostic);
+                                Ok(left) if !left.is_empty() => {
+                                    if !left.advisories.is_empty() {
+                                        remit_notes.extend(left.advisories.iter().map(|d| {
+                                            format!("Unverified: `{}` — {}", d.path, d.message)
+                                        }));
+                                        yield Event::default().event("documentary_advisory").data(
+                                            serde_json::json!({
+                                                "step": step, "file": file_label,
+                                                "diagnostics": left.advisories,
+                                            }).to_string()
+                                        );
+                                        for diagnostic in left.advisories {
+                                            if !documentary_advisories.contains(&diagnostic) {
+                                                documentary_advisories.push(diagnostic);
+                                            }
                                         }
+                                    }
+                                    // The attempts are spent: the step stays done, the
+                                    // doubt is recorded and said to the human.
+                                    if !left.unverified_commands.is_empty() {
+                                        tracing::warn!(
+                                            "Partial audit step {step} ({file_label}): {} cited command(s) not defined by the repository, kept as a warning",
+                                            left.unverified_commands.len()
+                                        );
+                                        for diagnostic in &left.unverified_commands {
+                                            let entry = (step as u32, diagnostic.clone());
+                                            if !documentary_unverified_commands.contains(&entry) {
+                                                step_unverified_commands.push(entry.clone());
+                                                documentary_unverified_commands.push(entry);
+                                            }
+                                        }
+                                        yield Event::default().event("warning").data(serde_json::json!({
+                                            "message": format!(
+                                                "Step {step} ({file_label}): {} cited command(s) are not defined by the repository's Makefile or manifests; kept as a warning, listed in the run's documentary notes",
+                                                left.unverified_commands.len()
+                                            ),
+                                            "step": step, "file": file_label,
+                                            "diagnostics": left.unverified_commands,
+                                        }).to_string());
                                     }
                                 }
                                 Ok(_) => {}
@@ -1810,19 +1851,25 @@ pub(crate) async fn run_partial_pipeline(
                         "unverified_references": step_demotions.len(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
-                    if !step_demotions.is_empty() {
-                        // KT-1370 — the timeline's notes block reads them from the run.
+                    if !step_demotions.is_empty() || !step_unverified_commands.is_empty() || !documentary_advisories.is_empty() {
+                        // KT-1370 / KT-1387 / KT-1388 — the timeline's notes block reads
+                        // them from the run, recorded step by step so an interrupted run
+                        // keeps what its done steps left.
                         let run_id = audit_run_id.clone();
                         let added: Vec<_> = step_demotions.iter().cloned().map(|r| (step as u32, r)).collect();
+                        let commands = step_unverified_commands.clone();
+                        let advisories = documentary_advisories.clone();
                         if let Err(error) = state.db.with_conn(move |conn| {
                             let existing = crate::db::audit_runs::get_by_id(conn, &run_id)?
                                 .and_then(|run| run.documentary_notes);
-                            match super::document_repair::merge_unverified_notes(existing.as_deref(), &added) {
+                            let merged = super::document_repair::merge_unverified_notes(existing.as_deref(), &added);
+                            let merged = super::document_repair::merge_command_notes(merged.as_deref(), &commands);
+                            match super::document_repair::merge_advisory_notes(merged.as_deref(), &advisories) {
                                 Some(notes) => crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes),
                                 None => Ok(()),
                             }
                         }).await {
-                            tracing::warn!("Unverified references of {audit_run_id} not recorded: {error}");
+                            tracing::warn!("Documentary notes of {audit_run_id} not recorded: {error}");
                         }
                     }
                     {
@@ -2049,22 +2096,6 @@ pub(crate) async fn run_partial_pipeline(
                 super::reconciliation::td_validation_scope(&pp, &idx).undecided
             }).await.unwrap_or_default()
         };
-        // KT-1388 — what the steps left as advice is noted on the run, as the
-        // Full pipeline's final gate does.
-        if !documentary_advisories.is_empty() {
-            let run_id = audit_run_id.clone();
-            let advisories = documentary_advisories.clone();
-            if let Err(error) = state.db.with_conn(move |conn| {
-                let existing = crate::db::audit_runs::get_by_id(conn, &run_id)?
-                    .and_then(|run| run.documentary_notes);
-                match super::document_repair::merge_advisory_notes(existing.as_deref(), &advisories) {
-                    Some(notes) => crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes),
-                    None => Ok(()),
-                }
-            }).await {
-                tracing::warn!("Documentary notes of {audit_run_id} not recorded: {error}");
-            }
-        }
         // Exact partition (matrix v2): requested = succeeded ⊎ unchanged ⊎ failed.
         let outcomes_json = serde_json::json!({
             "requested": requested_steps,
@@ -2081,7 +2112,7 @@ pub(crate) async fn run_partial_pipeline(
             };
             let prompt = format!(
                 "{}{}{}{}",
-                super::helpers::documentary_notes_block(&[], &documentary_advisories, &[], &unverified_references, &[], &language),
+                super::helpers::documentary_notes_block(&[], &documentary_advisories, &[], &unverified_references, &documentary_unverified_commands, &language),
                 super::helpers::unchanged_steps_block(&listed(&unchanged_steps), total_chain, &language),
                 super::helpers::partial_refresh_failed_block(&listed(&failed_steps), total_chain, &language),
                 super::helpers::build_partial_validation_prompt(&scope_files, &run_td_ids, &language),

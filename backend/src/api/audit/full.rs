@@ -489,6 +489,8 @@ pub async fn full_audit(
             std::collections::HashSet::new();
         // KT-1131 — carried steps a human accepted, with who and why.
         let mut accepted_rows: Vec<AcceptedStep> = Vec::new();
+        // KT-1389 — the documentary notes the run being resumed had recorded.
+        let mut resumed_notes: Option<String> = None;
         if retry_steps_req.is_some() && resume_run_id_req.is_none() {
             yield Event::default().event("error").data(
                 serde_json::json!({ "error": "retry_steps needs resume_run_id: only a step of an interrupted run can be retried alone" }).to_string(),
@@ -540,6 +542,7 @@ pub async fn full_audit(
                              a newer attempt supersedes it; launch a fresh audit instead"
                         ))
                     } else {
+                        resumed_notes = row.as_ref().and_then(|run| run.documentary_notes.clone());
                         resolve_resume_row(&run_id, row.as_ref(), &project_id).map(|plan| (plan, steps))
                     }
                 }
@@ -1404,15 +1407,30 @@ pub async fn full_audit(
         // and the problems it let through, kept to be said to the human.
         let mut documentary_autofixes: Vec<(u32, crate::core::document_optimization::AppliedFix)> = Vec::new();
         let mut documentary_preexisting: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
+        // KT-1389 — a resume inherits what the steps it carries over as done had
+        // left in the notes (the references and commands below), recorded on its
+        // own row right away so the next interruption does not lose them either.
+        let carried = super::document_repair::carried_notes(
+            resumed_notes.as_deref(),
+            |step| already_succeeded_steps.contains(&step),
+        );
         // KT-1387 — the commands the documents still cite once a step's
         // attempts are spent: told to the step, never a blocker.
-        let mut documentary_unverified_commands: Vec<(u32, crate::core::document_optimization::Diagnostic)> = Vec::new();
+        let mut documentary_unverified_commands: Vec<(u32, crate::core::document_optimization::Diagnostic)> = carried.unverified_commands;
         // KT-1388 — stack conflicts and unproven closures the documents still
         // hold at the end: advice recorded for the human, never a blocker.
         let mut documentary_advisories: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
         // KT-1370 — the markers Kronn demoted to flagged backticked paths once a
         // step's attempts were spent, with the step that left each one.
-        let mut unverified_references: Vec<(u32, crate::core::document_optimization::DemotedReference)> = Vec::new();
+        let mut unverified_references: Vec<(u32, crate::core::document_optimization::DemotedReference)> = carried.unverified;
+        if let Some(notes) = super::document_repair::notes_json(&documentary_preexisting, &documentary_advisories, &documentary_autofixes, &unverified_references, &documentary_unverified_commands) {
+            let run_id = audit_run_id.clone();
+            if let Err(error) = db.with_conn(move |conn|
+                crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes)
+            ).await {
+                tracing::warn!("Documentary notes of {audit_run_id} not carried over: {error}");
+            }
+        }
 
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // KT-1199 — what the previous step left, before anything else runs.
@@ -2885,6 +2903,18 @@ pub async fn full_audit(
                         "unverified_references": step_demotions.len(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
+
+                    // KT-1389 — the notes are recorded as each step ends, not only
+                    // at the final gate: an interrupted run keeps what its done
+                    // steps left, and a resume inherits it.
+                    if let Some(notes) = super::document_repair::notes_json(&documentary_preexisting, &documentary_advisories, &documentary_autofixes, &unverified_references, &documentary_unverified_commands) {
+                        let run_id = audit_run_id.clone();
+                        if let Err(error) = db.with_conn(move |conn|
+                            crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes)
+                        ).await {
+                            tracing::warn!("Documentary notes of {audit_run_id} not recorded: {error}");
+                        }
+                    }
 
                     // 0.8.4 (#298) — finalize the per-step row. `success`
                     // captures both CLI exit code AND the validation

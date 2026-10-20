@@ -54,7 +54,7 @@ autocomplete must always show which one is being picked (KT-211).
   Claude CLI unless Claude is the room's own agent. That CLI gets the
   wake and no punctual agent is spawned; with two candidate CLIs and no
   reply context nothing is guessed.
-  [src: file: backend/src/db/discussions.rs:4062-4088#agent_alias_cli_target]
+  [src: file: backend/src/db/discussions.rs:4068-4094#agent_alias_cli_target]
   [src: file: backend/src/db/discussions.rs:1967-2010#providers_resolved_to_cli]
   [src: file: backend/src/api/disc_source.rs:678-730#agent_alias_cli_target]
 
@@ -152,7 +152,7 @@ context the short alias stays free (both identities may be wanted).
   native identity rotated (fresh session id) needs one `disc_join` with
   a token, which mints its credential — one-shot, by design. Unacked
   awareness survives reloads (server cursors, migrations 105/106).
-  [src: file: backend/scripts/disc-introspection-mcp.py:3566-3575#_BINDING_DIR]
+  [src: file: backend/scripts/disc-introspection-mcp.py:3567-3576#_BINDING_DIR]
   [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
 
 ## 7. Autocomplete presentation (KT-211 contract)
