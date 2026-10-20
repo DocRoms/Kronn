@@ -255,8 +255,8 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:490-514#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1291-1490#generate_summary_on_demand] |
 | Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1802-2043#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3700-3780#execute_step] |
-| Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1893-1907#start] |
-| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1112-1122#start] |
+| Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1911-1925#start] |
+| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1117-1127#start] |
 
 Audits still refuse Vibe, which has no file tools Kronn can scope to the
 project; every HTTP provider is admitted since KT-924 and KT-980, a `Custom`
