@@ -13,7 +13,7 @@ seen in October 2026, with their fixes:
   the execution while it is `Approved` (before the integration task claims
   `Integrating`) is a valid retry and succeeds. Assert the durable invariant
   (one review, one claim, one validation), not which transport won.
-  [src: file: backend/src/api/orchestration.rs:31933-32032#concurrent_review_retries_share_one_durable_integration_claim]
+  [src: file: backend/src/api/orchestration.rs:31992-32091#concurrent_review_retries_share_one_durable_integration_claim]
 - **A copied git index loses its racy-entry protection.** `snapshot_tree`
   copied the real index with `std::fs::copy`. On Linux the copy gets a fresh
   mtime, so git no longer treats an entry as recent as the index as "racy"

@@ -111,7 +111,7 @@ The bounds that make that acceptable are not in the tool, they are around it:
   agent cannot direct a generation — or its cost — at a room it is not in.
 - A job is claimed once (`media_jobs` reuses the `agent_resume_jobs` claim), so a retried
   tool call does not buy the asset twice
-  [src: file: docs/architecture/media-generation.md:74-75#agent_resume_jobs].
+  [src: file: docs/architecture/media-generation.md:80-81#agent_resume_jobs].
 - An agent only learns a modality exists when a connection has a model configured for it —
   the worker catalogue lists modalities one per configured model and stays silent otherwise.
   An agent is never told it can produce a video that the request would then refuse.
@@ -234,7 +234,7 @@ mutable Quick Prompt. CLI effort keeps its existing snapshot format.
 [src: file: backend/src/api/mcp_remote.rs:584-612#create_batch_run_with_launch_settings]
 [src: file: backend/src/db/discussion_launch_settings.rs:18-117#capture]
 [src: file: backend/src/db/sql/186_discussion_http_settings.sql:1-10#discussion_http_settings]
-[src: file: backend/src/api/discussions/crud.rs:620-631#capture]
+[src: file: backend/src/api/discussions/crud.rs:627-638#capture]
 
 HTTP launches transmit explicit `reasoning_effort` and `max_tokens` on the
 OpenAI-compatible wire. Ollama receives `think` and `options.num_predict` after

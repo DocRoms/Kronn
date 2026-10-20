@@ -50,7 +50,7 @@ that quiet returns cost nothing. The bridge's runtime functions did not change.
 [src: file: backend/scripts/disc-introspection-mcp.py:9960-9996#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/disc-introspection-mcp.py:10257-10258#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/disc-introspection-mcp.py:10606-10610#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:12005#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:12010#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:11970-12020#JoinedRoomWorkProtocolTests]
 
 ## Deaf windows in the bridge wait (KT-703)
@@ -78,7 +78,7 @@ These fixes do not cover host behaviour. A host can still move a long wait to
 the background. Any other Kronn call ends the wait (`wait_preempted`), and an
 interactive turn that ends while the wait runs in the background is outside
 Kronn's control. A real Claude Code run is still needed to check that case.
-[src: file: backend/scripts/disc-introspection-mcp.py:12120-12128#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:12125-12133#_with_wait_preempted]
 
 ## Qualification scope
 

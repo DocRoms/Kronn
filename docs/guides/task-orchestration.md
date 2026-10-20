@@ -138,7 +138,7 @@ Kronn derives one fixed-layout report; replay does not produce another.
 [src: file: backend/src/api/orchestration.rs:8348-8352#has_room_publication]
 [src: file: backend/src/api/orchestration.rs:8396-8445#parent_milestones]
 [src: file: backend/src/api/orchestration.rs:7049-7073#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:30593-30694#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:30652-30753#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -146,7 +146,7 @@ human turn. Removing that allowance explicitly does not remove structural
 guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
-[src: file: backend/src/models/setup.rs:295-311#agent_handoff_paid_limit]
+[src: file: backend/src/models/setup.rs:298-314#agent_handoff_paid_limit]
 [src: file: backend/src/db/discussions.rs:1684-1685#MAX_AGENT_HANDOFF_DEPTH]
 [src: file: backend/src/db/discussions.rs:1693-1728#agent_handoff_root]
 [src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]

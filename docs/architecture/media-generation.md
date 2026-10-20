@@ -202,8 +202,8 @@ room to the existing generation endpoint. A successfully created room is kept
 across a generation error, and the same idempotency key is retained for an
 explicit identical retry; the UI never automatically repeats an ambiguous
 billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:400-419#createMediaDiscussion]`
-`[src: file: frontend/src/components/MediaGenerateForm.tsx:477-532#submit]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:2635-2654#handleCreateMediaDiscussion]`
+`[src: file: frontend/src/components/MediaGenerateForm.tsx:489-544#submit]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:2671-2690#handleCreateMediaDiscussion]`
 
 ## What a model accepts, read rather than assumed
 
@@ -416,7 +416,7 @@ connection with the reserved id `local:comfyui` (alias `comfyui`, no
 credential, no text tier), and every media path resolves it: generation and
 its preflights, `/api/media/models`, the estimate, the worker, the bridge
 guard and the `agent_list` catalogue.
-[src: file: backend/src/api/comfyui.rs:714-738#local_connection]
+[src: file: backend/src/api/comfyui.rs:988-1012#local_connection]
 [src: file: backend/src/api/orchestration.rs:12702-12708#with_local_media_source]
 
 ComfyUI runs a node graph, so a model is usable only when Kronn has a
@@ -438,9 +438,9 @@ folder checked when the server is down (default `~/ComfyUI-Installs`, Comfy
 Desktop's) are settings. Each slot keeps optional steps, guidance, sampler and
 scheduler overrides; an empty field uses the family's measured default, and
 the sampler lists come from the running ComfyUI's `/object_info/KSampler`.
-[src: file: backend/src/api/comfyui.rs:183-197#install_dir]
-[src: file: backend/src/api/comfyui.rs:643-676#set_settings]
-[src: file: backend/src/core/comfyui.rs:247-266#settings]
+[src: file: backend/src/api/comfyui.rs:276-290#install_dir]
+[src: file: backend/src/api/comfyui.rs:896-929#set_settings]
+[src: file: backend/src/core/comfyui.rs:254-273#settings]
 
 Images are queued like videos: `POST /prompt` records ComfyUI's prompt id as
 the provider handle, `/history/<id>` is polled, and the file is fetched from
@@ -467,4 +467,4 @@ past its size, and is renamed only once its size and SHA-256 match; one pull
 holds a file at a time, and disk space is checked first. From Docker those
 folders are the host's, so the card only links to Hugging Face.
 [src: file: backend/src/agents/media_codec.rs:683-693#ComfyUiMediaCodec]
-[src: file: backend/src/agents/media_runner.rs:766-839#advance_local_comfyui]
+[src: file: backend/src/agents/media_runner.rs:773-846#advance_local_comfyui]

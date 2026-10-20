@@ -69,7 +69,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:872-947#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:879-954#AgentDetection]
 
 ## Policy and precedence
 
