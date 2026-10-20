@@ -3941,6 +3941,7 @@ async fn release_terminal_checkout(
     final_head: Option<String>,
 ) -> Result<String, String> {
     let evidence = terminal_evidence_dir(exec_id)?;
+    let evidence_dir = evidence.clone();
     let repo_owned = repo.to_path_buf();
     let path_owned = scanner::resolve_host_path(checkout_path)
         .to_string_lossy()
@@ -3958,11 +3959,16 @@ async fn release_terminal_checkout(
         worktree::TerminalWorktreeRelease::AlreadyGone => None,
     };
     let id = exec_id.to_string();
+    let staged_patch =
+        std::path::Path::new(&evidence_dir).join(worktree::RELEASED_WORKTREE_STAGED_PATCH);
+    let staged_patch = (patch.is_some() && staged_patch.exists())
+        .then(|| staged_patch.to_string_lossy().to_string());
     let event = serde_json::json!({
         "path": checkout_path,
         "branch": branch,
         "already_gone": released == worktree::TerminalWorktreeRelease::AlreadyGone,
         "uncommitted_patch": patch.as_ref().map(|p| p.to_string_lossy().to_string()),
+        "staged_patch": staged_patch,
     });
     db.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
@@ -4001,6 +4007,7 @@ async fn release_terminal_checkout(
 async fn release_finished_execution_checkout(
     db: &Database,
     exec_id: &str,
+    min_idle: std::time::Duration,
 ) -> Result<Option<String>, String> {
     let id = exec_id.to_string();
     let snapshot = db
@@ -4037,6 +4044,14 @@ async fn release_finished_execution_checkout(
     let project_path =
         project_path.ok_or_else(|| format!("project {} is unavailable", workspace.project_id))?;
     let repo = scanner::resolve_host_path(&project_path);
+    // `finished_at` and the session state say the execution is over, not that
+    // nobody writes in the checkout any more (a human may be working in it).
+    // The newest write in the tree restarts the inactivity window; an activity
+    // that cannot be read is never idle.
+    if let Some(reason) = recent_checkout_activity(&path, min_idle).await {
+        record_release_kept(db, exec_id, &reason).await;
+        return Err(reason);
+    }
     match release_terminal_checkout(
         db,
         exec_id,
@@ -4052,23 +4067,65 @@ async fn release_finished_execution_checkout(
             // A refusal that rests on the checkout itself (an evidence cap, a
             // diff that cannot be saved, a foreign branch) is the human's to
             // see: recorded once per distinct reason, not once per sweep.
-            let id = exec_id.to_string();
-            let recorded = reason.clone();
-            if let Err(error) = db
-                .with_conn(move |conn| {
-                    crate::db::orchestration::record_release_kept_once(
-                        conn,
-                        &id,
-                        &recorded,
-                        &backend_actor(),
-                    )
-                })
-                .await
-            {
-                tracing::warn!(execution_id = %exec_id, "kept-worktree reason not recorded: {error}");
-            }
+            record_release_kept(db, exec_id, &reason).await;
             Err(reason)
         }
+    }
+}
+
+/// Why a checkout is not idle yet: `Some(reason)` when something in it was
+/// written within `min_idle` or its age cannot be established. The reason is
+/// the same text on every sweep so the event log records it once.
+async fn recent_checkout_activity(
+    checkout_path: &str,
+    min_idle: std::time::Duration,
+) -> Option<String> {
+    let path = scanner::resolve_host_path(checkout_path);
+    let walked = tokio::task::spawn_blocking(move || {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(min_idle)
+            .unwrap_or(std::time::UNIX_EPOCH);
+        worktree::checkout_written_since(&path, cutoff)
+    })
+    .await;
+    match walked {
+        Ok(Ok(None)) => None,
+        Ok(Ok(Some(newest))) => {
+            tracing::debug!(newest = %newest.display(), "checkout written within the idle window");
+            Some(format!(
+                "the checkout was written within the last {} s (server.disk_sweep_idle_hours) — keeping it",
+                min_idle.as_secs()
+            ))
+        }
+        Ok(Err(error)) => Some(format!(
+            "the checkout's last write cannot be established ({error}) — keeping it"
+        )),
+        Err(error) => Some(format!(
+            "the checkout activity scan failed: {error} — keeping it"
+        )),
+    }
+}
+
+/// Record, once per distinct reason, that the release kept a finished
+/// execution's checkout.
+async fn record_release_kept(db: &Database, exec_id: &str, reason: &str) {
+    let id = exec_id.to_string();
+    let recorded = reason.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_release_kept_once(
+                conn,
+                &id,
+                &recorded,
+                &backend_actor(),
+            )
+        })
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, "kept-worktree reason not recorded: {error}");
     }
 }
 
@@ -4124,7 +4181,7 @@ async fn release_terminal_worktrees(
             report.terminal_worktrees_kept += 1;
             continue;
         }
-        match release_finished_execution_checkout(db, &exec_id).await {
+        match release_finished_execution_checkout(db, &exec_id, min_idle).await {
             Ok(Some(outcome)) => {
                 report.terminal_worktrees_released += 1;
                 report
@@ -32894,6 +32951,31 @@ pub(crate) mod tests {
         (exec_id, path, lane_target)
     }
 
+    /// Make every entry of a checkout look unwritten for two days (children
+    /// before their directory, so a parent keeps the old time).
+    fn age_checkout(dir: &std::path::Path) {
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        fn walk(dir: &std::path::Path, old: std::time::SystemTime, top: bool) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                if top && entry.file_name() == ".git" {
+                    continue;
+                }
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    walk(&path, old, false);
+                }
+                if !entry.file_type().unwrap().is_symlink() {
+                    std::fs::File::open(&path)
+                        .unwrap()
+                        .set_modified(old)
+                        .unwrap();
+                }
+            }
+            std::fs::File::open(dir).unwrap().set_modified(old).unwrap();
+        }
+        walk(dir, old, true);
+    }
+
     async fn kept_reasons(db: &Database, exec_id: &str) -> Vec<String> {
         let id = exec_id.to_string();
         db.with_conn(move |conn| {
@@ -32978,12 +33060,87 @@ pub(crate) mod tests {
         let db = Database::open_in_memory().unwrap();
         let (exec_id, path, lane_target) = finished_dirty_execution(&db, repo.path()).await;
         force_status(&db, &exec_id, "Failed").await;
+        // The periodic pass honours the configured idle window: the checkout
+        // must have gone unwritten for it.
+        age_checkout(std::path::Path::new(&path));
 
         let (released, kept) = release_finished_worktrees(&db).await;
 
         assert_eq!((released, kept), (1, 0));
         assert!(!std::path::Path::new(&path).exists());
         assert!(!lane_target.exists());
+    }
+
+    /// KT-1397 — `finished_at` does not prove the checkout idle: a file written
+    /// just before the sweep keeps an old terminal execution's checkout and lane
+    /// for the idle window, with a reason recorded once; the same checkout with
+    /// no idle window is released.
+    #[tokio::test]
+    async fn a_recently_written_checkout_keeps_its_worktree_for_the_idle_window() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, path, lane_target) = finished_dirty_execution(&db, repo.path()).await;
+        // The execution finished long ago.
+        let id = exec_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_executions SET finished_at = '2020-01-01T00:00:00Z' WHERE id = ?1",
+                rusqlite::params![id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let recent = std::path::Path::new(&path).join("recent-work.txt");
+        std::fs::write(&recent, "recent edit after the execution finished\n").unwrap();
+
+        for _ in 0..2 {
+            let mut report = OrchestrationBootReport::default();
+            release_terminal_worktrees(&db, std::time::Duration::from_secs(3600), &mut report)
+                .await;
+            assert_eq!(report.terminal_worktrees_released, 0, "{report:?}");
+            assert_eq!(report.terminal_worktrees_kept, 1, "{report:?}");
+        }
+
+        assert!(recent.exists());
+        assert!(lane_target.exists());
+        let reasons = kept_reasons(&db, &exec_id).await;
+        assert_eq!(reasons.len(), 1, "recorded once: {reasons:?}");
+        assert!(reasons[0].contains("written within"), "{reasons:?}");
+
+        let mut report = OrchestrationBootReport::default();
+        release_terminal_worktrees(&db, std::time::Duration::ZERO, &mut report).await;
+        assert_eq!(report.terminal_worktrees_released, 1, "{report:?}");
+        assert!(!std::path::Path::new(&path).exists());
+        assert!(!lane_target.exists());
+    }
+
+    /// KT-1397 — staged-only work is saved by the sweep too: both patches land
+    /// in the execution's evidence directory and the event names them.
+    #[tokio::test]
+    async fn the_sweep_saves_staged_only_work_before_releasing() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, path, _lane) = finished_dirty_execution(&db, repo.path()).await;
+        let wt = std::path::Path::new(&path);
+        let original = git(wt, &["show", "HEAD:README.md"]).stdout;
+        std::fs::write(wt.join("README.md"), "STAGED_WORK_TO_PRESERVE\n").unwrap();
+        assert!(git(wt, &["add", "README.md"]).status.success());
+        std::fs::write(wt.join("README.md"), original).unwrap();
+        let _ = std::fs::remove_dir_all(terminal_evidence_dir(&exec_id).unwrap());
+
+        let mut report = OrchestrationBootReport::default();
+        release_terminal_worktrees(&db, std::time::Duration::ZERO, &mut report).await;
+
+        assert_eq!(report.terminal_worktrees_released, 1, "{report:?}");
+        assert!(!wt.exists());
+        let staged = terminal_evidence_dir(&exec_id)
+            .unwrap()
+            .join(worktree::RELEASED_WORKTREE_STAGED_PATCH);
+        assert!(std::fs::read_to_string(staged)
+            .unwrap()
+            .contains("STAGED_WORK_TO_PRESERVE"));
+        assert_eq!(lane_target_events(&db, "worktree_released").await, 1);
     }
 
     /// KT-1397 — DoD 1/2: a Cancelled (kept by policy) and a Failed execution

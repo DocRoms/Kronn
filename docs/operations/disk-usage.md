@@ -18,7 +18,7 @@ orphan sweeper**, a **free-space guard on launch**, and **visibility** (API, MCP
 
 | Kind (`DiskKind`) | Path | Owner | Removed by |
 |---|---|---|---|
-| `worktree` | `<repo>/.kronn/worktrees/<name>` | the task execution that provisioned it | its integration or cancel flow only — **never by a purge** |
+| `worktree` | `<repo>/.kronn/worktrees/<name>` | the task execution that provisioned it | its integration or cancel flow, or the terminal-checkout release below — **never by a purge** |
 | `lane_build_dir` | `<repo>/target/wt-<lane>` (the lane's `CARGO_TARGET_DIR`) | the execution named in its ownership marker | the end-of-life cleanup, the sweeper, a purge |
 | `cache` | `<repo>/.kronn/worktrees/<name>/target` | the same execution | the artefact reclaim (KT-373), a confirmed purge |
 
@@ -32,9 +32,11 @@ inside the lane or the worktree, so they go with it.
 provisions a lane, again on every Claude worker launch (resumes and reworks, task or campaign) and before
 a validation builds in a worker's lane whatever the worker kind, so a lane Kronn made is never left
 unowned. The file is written once per execution (a relaunch leaves the lane's idle clock alone) next to a
-`.gitignore` of `*`, so a checkout that does not ignore `target/` never reads it as uncommitted work. Only a
-lane carrying the marker is ever swept. Everything else — an unmarked `wt-*`, the interactive
-`target/debug`, any directory Kronn did not create — is **reported as `foreign` and never touched**.
+`.gitignore` of `*`, so a checkout that does not ignore `target/` never reads it as uncommitted work. A lane
+carrying the marker is swept. A lane **without** a marker is swept only when durable lineage attributes it
+to a managed workspace (see *Lane attribution* below). Everything else — an unmarked `wt-*` no workspace
+row names, the interactive `target/debug`, any directory Kronn did not create — is **reported as `foreign`
+and never touched**.
 [src: file: backend/src/core/worktree.rs:523-570#mark_lane_target]
 [src: file: backend/src/core/worktree.rs:580-598#mark_lane_target_for_worktree]
 
@@ -43,10 +45,35 @@ lane carrying the marker is ever swept. Everything else — an unmarked `wt-*`, 
 | Event | What goes | Guard |
 |---|---|---|
 | Execution **Done** (integrated), clean worktree removed | the lane build dir, with the worktree | `cleanup_integrated_execution` |
-| Execution **Cancelled**, `RemoveIfClean` | the lane build dir, with the worktree | `settle_cancelled_workspace` |
+| Execution **Cancelled**, `RemoveIfClean`, clean checkout | the lane build dir, with the worktree | `settle_cancelled_workspace` |
+| Execution **Cancelled**, checkout **dirty** or policy `Preserve` | nothing at cancel time: the worker may still be writing | released later by the terminal-checkout release |
+| Boot and **every 30 min**: a **Done, Failed or Cancelled** execution whose managed checkout is still on disk | the checkout (branch kept) and its lane build dir | the terminal-checkout release below |
 | Boot: an orphaned managed checkout removed | its lane build dir, with it | `reconcile_at_boot` |
-| Worktree **kept** (dirty, diverged, `Preserve`) | nothing: the lane is kept with it | same policy as the worktree |
+| Worktree **kept** (diverged, over the evidence cap, written recently) | nothing: the lane is kept with it | same policy as the worktree |
 | Boot, **every 30 min**, and under pressure | **orphan** lane build dirs | the sweeper rules below |
+
+### Terminal-checkout release (KT-1397)
+
+A task execution that ends Done, Failed or Cancelled (including a cancel the principal followed by a manual
+integration) no longer keeps `.kronn/worktrees/task-*` forever. At boot and from the periodic sweep, before
+the lane sweep, Kronn releases the managed checkout of every such execution when *all* hold:
+
+1. the workspace is Kronn's (managed layout) and the checkout is on exactly the execution's branch;
+2. durable state proves the execution terminal with no live session, finished for at least
+   `server.disk_sweep_idle_hours`;
+3. nothing in the checkout (excluding the Git admin entry) was written within that same window: a
+   finished execution does not prove nobody is working in the directory. A recent write, or an
+   unreadable mtime, keeps the checkout with a recorded reason;
+4. the uncommitted state fits the evidence cap (256 MiB): a larger one keeps the checkout, with a reason.
+
+The **branch is kept**. Uncommitted work is saved first, under `<data dir>/task-evidence/<execution id>/`,
+as two patches that reapply in order on the kept branch: `staged-changes.patch` (`HEAD` → the worktree's own
+index, written only when something is staged) then `uncommitted-changes.patch` (that index → the files on
+disk, untracked files included). `git apply --index` the first and `git apply` the second rebuild the index
+and the working tree exactly; staged-only content (index differs from the files) is therefore not lost. The
+worktree's index is only copied, never written. If a patch cannot be written, exceeds the cap, or the index
+holds unmerged paths, nothing is removed. Each distinct *kept* reason is recorded once as a
+`worktree_release_kept` event, a release as `worktree_released`. Evidence patches are not cleaned up by Kronn.
 
 [src: file: backend/src/api/orchestration.rs:3803-3815#cleanup_integrated_execution]
 [src: file: backend/src/api/orchestration.rs:10958-10969#settle_cancelled_workspace]
@@ -55,7 +82,8 @@ lane carrying the marker is ever swept. Everything else — an unmarked `wt-*`, 
 
 A lane build dir is an **orphan** — and only then removed by the sweep — when *all* hold:
 
-1. it carries Kronn's ownership marker (Kronn created it);
+1. Kronn created it: it carries the ownership marker, or — for a lane made before the marker existed —
+   durable lineage attributes it (below);
 2. durable state proves its execution **finished** (no live session, lease or unfinished execution);
 3. its worktree is **gone**;
 4. it has not been written for **`server.disk_sweep_idle_hours`** (default **6 h**, floor **1 h**: a
@@ -65,6 +93,12 @@ A lane build dir is an **orphan** — and only then removed by the sweep — whe
 5. Cargo does not hold its build lock.
 
 An aged lane of a live execution, or whose clean worktree is still there, is **not** an orphan.
+
+**Lane attribution.** An unmarked `target/wt-*` is attributed through the database: the workspace rows of
+managed workspaces that still name their worktree give the lane name Kronn would have derived, and so the
+execution that owned it. It is then judged by the rules above (worktree gone, execution terminal, idle). A
+dir no managed workspace names, one that belongs to an unmanaged workspace, or a lane name two executions
+derive in common is attributed to nobody and stays `foreign`.
 [src: file: backend/src/core/worktree.rs:870-905#process_lane_target_idle]
 [src: file: backend/src/core/worktree.rs:819-855#lane_target_last_write]
 [src: file: backend/src/api/disk.rs:129-140#lane_entry_state]
@@ -133,9 +167,12 @@ Both new keys are editable in Settings → Disk or `POST /api/config/server`, an
 
 ## Limits
 
-- **Pre-existing lanes carry no marker.** The 195 directories of the incident were created before the
-  manifest existed; they show as `foreign` and are not touched. Remove them by hand once, with the lane's
-  worktree gone and no build running (`ls -t target | grep ^wt-`).
+- **Pre-existing lanes carry no marker.** Those that a managed workspace row still names are attributed
+  and swept like any orphan. The others (no row, or a row of an unmanaged workspace) show as `foreign` and
+  are not touched: remove them by hand once, with the lane's worktree gone and no build running
+  (`ls -t target | grep ^wt-`).
+- A checkout over the evidence cap, or recently written, stays until a human acts or it goes idle; the
+  evidence patches under `task-evidence/` are never purged by Kronn.
 - Sizes are floors on a very large target: the report says `≥` rather than stall (1.69 million files took
   44 minutes to walk in the 2026-08-21 incident).
 - The guard measures free space *before* the launch; it cannot stop a build that fills the disk later. The
