@@ -98,10 +98,38 @@ pub async fn prompt_known(base: &str, prompt_id: &str) -> anyhow::Result<bool> {
     in_history().await
 }
 
-/// Stops a prompt Kronn gave up on: removed from the queue, interrupted if
-/// it is the one rendering, so the GPU is not kept busy for nothing.
-pub async fn abandon_prompt(base: &str, prompt_id: &str) -> anyhow::Result<()> {
+/// What happened to a prompt Kronn gave up on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Abandoned {
+    /// Cancelled by id: removed from the queue or stopped while rendering.
+    Cancelled,
+    /// Already finished or unknown to ComfyUI.
+    Gone,
+    /// Rendering on a ComfyUI that cannot stop one job by id: left to
+    /// finish, since `/interrupt` without an id stops whatever runs.
+    LeftRunning,
+}
+
+/// Stops a prompt Kronn gave up on, by id only. `POST /api/jobs/<id>/cancel`
+/// (recent ComfyUI) does it atomically; elsewhere a queued prompt is deleted
+/// by id and a rendering one is left running rather than interrupted
+/// globally, which could stop another job started in between.
+pub async fn abandon_prompt(base: &str, prompt_id: &str) -> anyhow::Result<Abandoned> {
     let http = client(LIST_TIMEOUT);
+    let cancel = http
+        .post(format!("{base}/api/jobs/{prompt_id}/cancel"))
+        .send()
+        .await?;
+    if cancel.status().is_success() {
+        let body: Value = cancel.json().await.unwrap_or(Value::Null);
+        if let Some(cancelled) = body["cancelled"].as_bool() {
+            return Ok(if cancelled {
+                Abandoned::Cancelled
+            } else {
+                Abandoned::Gone
+            });
+        }
+    }
     let queue = http
         .get(format!("{base}/queue"))
         .send()
@@ -109,28 +137,24 @@ pub async fn abandon_prompt(base: &str, prompt_id: &str) -> anyhow::Result<()> {
         .error_for_status()?
         .text()
         .await?;
-    match crate::core::comfyui::queue_position(prompt_id, &queue)? {
-        crate::core::comfyui::QueuePosition::Pending => {
-            http.post(format!("{base}/queue"))
-                .json(&serde_json::json!({ "delete": [prompt_id] }))
-                .send()
-                .await?
-                .error_for_status()?;
-        }
-        // `/interrupt` stops whatever runs; it is ours, checked just above.
-        crate::core::comfyui::QueuePosition::Running => {
-            http.post(format!("{base}/interrupt"))
-                .send()
-                .await?
-                .error_for_status()?;
-        }
-        crate::core::comfyui::QueuePosition::Absent => {}
-    }
-    Ok(())
+    Ok(
+        match crate::core::comfyui::queue_position(prompt_id, &queue)? {
+            crate::core::comfyui::QueuePosition::Pending => {
+                http.post(format!("{base}/queue"))
+                    .json(&serde_json::json!({ "delete": [prompt_id] }))
+                    .send()
+                    .await?
+                    .error_for_status()?;
+                Abandoned::Cancelled
+            }
+            crate::core::comfyui::QueuePosition::Running => Abandoned::LeftRunning,
+            crate::core::comfyui::QueuePosition::Absent => Abandoned::Gone,
+        },
+    )
 }
 
 /// After a job was cancelled or timed out: if it ran on the local ComfyUI,
-/// stop it there. Best effort, the job is already settled.
+/// stop it there, and say on the job when that was not possible.
 pub async fn release_local_job(state: &AppState, job_id: &str) {
     let id = job_id.to_string();
     let job = match state
@@ -149,9 +173,23 @@ pub async fn release_local_job(state: &AppState, job_id: &str) {
         return;
     };
     let base = base_url(&state.config.read().await.comfyui);
-    if let Err(e) = abandon_prompt(&base, handle).await {
-        tracing::warn!(job = %job_id, error = %e, "could not stop the abandoned ComfyUI job");
-    }
+    let note = match abandon_prompt(&base, handle).await {
+        Ok(Abandoned::Cancelled | Abandoned::Gone) => return,
+        Ok(Abandoned::LeftRunning) => {
+            "stopped in Kronn; this ComfyUI cannot stop one job by id, so it finishes \
+             rendering on the GPU (update ComfyUI to free it at once)"
+                .to_string()
+        }
+        Err(e) => {
+            tracing::warn!(job = %job_id, error = %e, "could not stop the abandoned ComfyUI job");
+            format!("stopped in Kronn; ComfyUI could not be asked to stop it: {e}")
+        }
+    };
+    let id = job_id.to_string();
+    let _ = state
+        .db
+        .with_conn(move |conn| crate::db::media_jobs::note_error(conn, &id, &note))
+        .await;
 }
 
 /// ComfyUI's version when its server answers, else `None`.
@@ -481,7 +519,7 @@ fn confined_model_dir(
 /// ComfyUI on this machine (not Docker, whose paths are the host's) and a
 /// folder inside the configured install folder.
 async fn model_dir(base: &str, config: &ComfyUiConfig, folder: &str) -> Option<PathBuf> {
-    if crate::core::env::is_docker() || !is_loopback(base) {
+    if cfg!(not(unix)) || crate::core::env::is_docker() || !is_loopback(base) {
         return None;
     }
     let paths: Value = client(LIST_TIMEOUT)
@@ -517,6 +555,7 @@ fn pull_error(message: impl Into<String>) -> Sse<PullStream> {
 }
 
 /// Room kept free on the disk beyond the download itself.
+#[cfg_attr(not(unix), allow(dead_code))]
 const DISK_MARGIN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// POST /api/comfyui/pull — downloads a suggested model into ComfyUI's own
@@ -542,7 +581,28 @@ pub async fn pull(
             "ComfyUI does not answer on {base}: start it, then retry."
         ));
     }
-    let installed = installed_files(&base).await;
+    pull_into(suggestion, &base, &config).await
+}
+
+#[cfg(not(unix))]
+async fn pull_into(
+    _suggestion: &crate::core::comfyui::Suggestion,
+    _base: &str,
+    _config: &ComfyUiConfig,
+) -> Sse<PullStream> {
+    pull_error("Download the files from Hugging Face on this system.")
+}
+
+#[cfg(unix)]
+async fn pull_into(
+    suggestion: &crate::core::comfyui::Suggestion,
+    base: &str,
+    config: &ComfyUiConfig,
+) -> Sse<PullStream> {
+    use crate::core::model_dir::{identity, ModelDir};
+    use std::sync::Arc;
+
+    let installed = installed_files(base).await;
     let mut plan = Vec::new();
     for file in suggestion.files {
         if installed
@@ -551,25 +611,35 @@ pub async fn pull(
         {
             continue;
         }
-        let Some(dir) = model_dir(&base, &config, file.folder).await else {
+        let Some(dir) = model_dir(base, config, file.folder).await else {
             return pull_error(
                 "Kronn writes models only into a ComfyUI running on this machine, inside its \
                  install folder: download the files from Hugging Face instead.",
             );
         };
-        plan.push((*file, dir));
+        let Ok(id) = identity(&dir) else {
+            return pull_error(format!("cannot read {}", dir.display()));
+        };
+        plan.push((*file, dir, id));
     }
     // One download per file at a time: two writers on one `.part` corrupt it.
-    let Some(lease) = PullLease::take(plan.iter().map(|(file, dir)| dir.join(file.file)).collect())
-    else {
+    let Some(lease) = PullLease::take(
+        plan.iter()
+            .map(|(file, dir, _)| dir.join(file.file))
+            .collect(),
+    ) else {
         return pull_error("This model is already downloading.");
     };
-    let total: u64 = plan.iter().map(|(file, _)| file.bytes).sum();
+    let total: u64 = plan.iter().map(|(file, _, _)| file.bytes).sum();
     let already: u64 = plan
         .iter()
-        .map(|(file, dir)| part_len(&dir.join(part_name(file.file))))
+        .filter_map(|(file, dir, id)| {
+            ModelDir::open(dir, *id)
+                .and_then(|handle| handle.part_len(&part_name(file.file)))
+                .ok()
+        })
         .sum();
-    if let Some((_, dir)) = plan.first() {
+    if let Some((_, dir, _)) = plan.first() {
         let free = fs2::available_space(dir).unwrap_or(0);
         if free < total.saturating_sub(already) + DISK_MARGIN_BYTES {
             return pull_error(format!(
@@ -586,10 +656,17 @@ pub async fn pull(
             .build()
             .unwrap_or_default();
         let mut done_before: u64 = 0;
-        for (file, dir) in plan {
-            let part = dir.join(part_name(file.file));
-            let target = dir.join(file.file);
-            match download_file(&http, &file, &part, &target, total, done_before).await {
+        for (file, dir, id) in plan {
+            // Held for the whole file: every operation below is relative to
+            // this handle, so swapping the folder for a link changes nothing.
+            let handle = match ModelDir::open(&dir, id) {
+                Ok(handle) => Arc::new(handle),
+                Err(e) => {
+                    yield pull_event("error", serde_json::json!({ "message": format!("{e}; nothing was written") }));
+                    return;
+                }
+            };
+            match download_file(&http, &file, handle.clone(), total, done_before).await {
                 Ok(mut progress) => {
                     while let Some(event) = progress.next().await {
                         match event {
@@ -612,8 +689,8 @@ pub async fn pull(
                 }
             }
             let checked = {
-                let (part, target) = (part.clone(), target.clone());
-                tokio::task::spawn_blocking(move || finish_file(&part, &target, file.bytes, file.sha256))
+                let handle = handle.clone();
+                tokio::task::spawn_blocking(move || finish_file(&handle, &file))
                     .await
                     .unwrap_or_else(|e| Err(format!("checking {} failed: {e}", file.file)))
             };
@@ -628,19 +705,19 @@ pub async fn pull(
     Sse::new(crate::core::sse_limits::bounded(stream))
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn part_name(file: &str) -> String {
     format!("{file}.part")
 }
 
-fn part_len(part: &std::path::Path) -> u64 {
-    std::fs::metadata(part).map(|meta| meta.len()).unwrap_or(0)
-}
-
+#[cfg_attr(not(unix), allow(dead_code))]
 static PULLING: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// Holds the target files of one download; released when it ends, however.
+#[cfg_attr(not(unix), allow(dead_code))]
 struct PullLease(Vec<PathBuf>);
 
+#[cfg_attr(not(unix), allow(dead_code))]
 impl PullLease {
     fn take(targets: Vec<PathBuf>) -> Option<Self> {
         let mut pulling = PULLING.lock().unwrap_or_else(|e| e.into_inner());
@@ -659,35 +736,43 @@ impl Drop for PullLease {
     }
 }
 
-/// The start of a `Content-Range: bytes <start>-<end>/<total>` answer, if it
-/// matches the expected file.
-fn range_start(header: Option<&str>, expected_total: u64) -> Option<u64> {
-    let (range, total) = header?.strip_prefix("bytes ")?.split_once('/')?;
-    if total.trim().parse::<u64>().ok()? != expected_total {
-        return None;
-    }
-    range.split_once('-')?.0.trim().parse().ok()
+/// Whether a `Content-Range: bytes <start>-<end>/<total>` answer continues
+/// the `.part` exactly: it starts at `start`, ends within the file, and the
+/// file has the expected size.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn range_continues(header: Option<&str>, start: u64, expected_total: u64) -> bool {
+    let parsed = || -> Option<(u64, u64, u64)> {
+        let (range, total) = header?.strip_prefix("bytes ")?.split_once('/')?;
+        let (first, last) = range.split_once('-')?;
+        Some((first.parse().ok()?, last.parse().ok()?, total.parse().ok()?))
+    };
+    matches!(parsed(), Some((first, last, total))
+        if first == start && last >= first && last < total && total == expected_total)
 }
 
+#[cfg(unix)]
 type ByteProgress = std::pin::Pin<Box<dyn futures::Stream<Item = Result<u64, String>> + Send>>;
 
-/// Streams one file into its `.part`, resuming from what is already there.
-/// Yields the bytes done across the whole pull, at most every ~1 %. Never
-/// writes past the file's size.
+/// Streams one file into its `.part` inside the model folder, resuming from
+/// what is already there. Yields the bytes done across the whole pull, at
+/// most every ~1 %. Never writes past the file's size.
+#[cfg(unix)]
 async fn download_file(
     http: &reqwest::Client,
     file: &crate::core::comfyui::SuggestedFile,
-    part: &std::path::Path,
-    _target: &std::path::Path,
+    dir: std::sync::Arc<crate::core::model_dir::ModelDir>,
     total: u64,
     done_before: u64,
 ) -> Result<ByteProgress, String> {
     use tokio::io::AsyncWriteExt;
+    let part = part_name(file.file);
+    let fail = |e: std::io::Error| format!("cannot write {part}: {e}");
+    let mut resume_from = dir.part_len(&part).map_err(fail)?;
     // Longer than the file: not this file, start over.
-    if part_len(part) > file.bytes {
-        std::fs::remove_file(part).map_err(|e| format!("cannot reset {}: {e}", part.display()))?;
+    if resume_from > file.bytes {
+        dir.remove(&part).map_err(fail)?;
+        resume_from = 0;
     }
-    let resume_from = part_len(part);
     if resume_from == file.bytes {
         return Ok(Box::pin(futures::stream::once(async move {
             Ok(done_before + resume_from)
@@ -706,38 +791,31 @@ async fn download_file(
         return Err(format!("download of {} answered HTTP {status}", file.file));
     }
     // A server that ignored the range sends the whole file again; a range
-    // that does not start where the `.part` ends would splice two files.
+    // that does not continue the `.part` exactly would splice two files.
     let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT;
-    if resumed {
-        let start = range_start(
+    if resumed
+        && !range_continues(
             response
                 .headers()
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|value| value.to_str().ok()),
+            resume_from,
             file.bytes,
-        );
-        if start != Some(resume_from) {
-            let _ = std::fs::remove_file(part);
-            return Err(format!(
-                "the source of {} resumed at the wrong place; the partial file was removed, retry",
-                file.file
-            ));
-        }
+        )
+    {
+        let _ = dir.remove(&part);
+        return Err(format!(
+            "the source of {} resumed at the wrong place; the partial file was removed, retry",
+            file.file
+        ));
     }
-    let mut out = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(resumed)
-        .write(true)
-        .truncate(!resumed)
-        .open(part)
-        .await
-        .map_err(|e| format!("cannot write {}: {e}", part.display()))?;
+    let out = dir.open_part(&part, resumed).map_err(fail)?;
+    let mut out = tokio::fs::File::from_std(out);
     let mut written = if resumed { resume_from } else { 0 };
     let cap = file.bytes;
     let step = (total / 100).max(1);
     let mut body = response.bytes_stream();
     let label = file.file;
-    let part_path = part.to_path_buf();
     Ok(Box::pin(async_stream::stream! {
         let mut last_reported = 0_u64;
         while let Some(chunk) = body.next().await {
@@ -747,7 +825,7 @@ async fn download_file(
             };
             if written + chunk.len() as u64 > cap {
                 drop(out);
-                let _ = std::fs::remove_file(&part_path);
+                let _ = dir.remove(&part);
                 yield Err(format!("the source sent more than the {cap} bytes of {label}; the partial file was removed"));
                 return;
             }
@@ -769,13 +847,13 @@ async fn download_file(
     }))
 }
 
-fn sha256_of(path: &std::path::Path) -> std::io::Result<String> {
+#[cfg_attr(not(unix), allow(dead_code))]
+fn sha256_of(mut reader: impl std::io::Read) -> std::io::Result<String> {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
-    let mut reader = std::fs::File::open(path)?;
     let mut buffer = vec![0_u8; 1 << 20];
     loop {
-        let read = std::io::Read::read(&mut reader, &mut buffer)?;
+        let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;
         }
@@ -788,31 +866,46 @@ fn sha256_of(path: &std::path::Path) -> std::io::Result<String> {
         .collect())
 }
 
-/// Renames a complete `.part` whose hash matches, or says what is wrong: a
-/// short file stays to resume, a wrong one is removed. Neither lands as a
-/// model file.
+/// Installs a complete `.part` whose hash matches, or says what is wrong: a
+/// short file stays to resume, a wrong or replaced one is removed. The file
+/// hashed is the file renamed.
+#[cfg(unix)]
 fn finish_file(
-    part: &std::path::Path,
-    target: &std::path::Path,
-    expected: u64,
-    sha256: &str,
+    dir: &crate::core::model_dir::ModelDir,
+    file: &crate::core::comfyui::SuggestedFile,
 ) -> Result<(), String> {
-    let got = part_len(part);
-    if got != expected {
+    let part = part_name(file.file);
+    let opened = match dir.open_read(&part) {
+        Ok(opened) => opened,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("{part} is missing; retry the download"))
+        }
+        Err(_) => {
+            let _ = dir.remove(&part);
+            return Err(format!(
+                "{part} was replaced during the download; it was removed, retry"
+            ));
+        }
+    };
+    let got = opened.metadata().map(|meta| meta.len()).unwrap_or(0);
+    if got != file.bytes {
         return Err(format!(
-            "{} is {got} bytes instead of {expected}; it stays as .part and resumes on the next try",
-            target.display()
+            "{} is {got} bytes instead of {}; it stays as .part and resumes on the next try",
+            file.file, file.bytes
         ));
     }
-    let digest = sha256_of(part).map_err(|e| format!("cannot check {}: {e}", part.display()))?;
-    if !digest.eq_ignore_ascii_case(sha256) {
-        let _ = std::fs::remove_file(part);
+    let id = crate::core::model_dir::file_identity(&opened)
+        .map_err(|e| format!("cannot check {part}: {e}"))?;
+    let digest = sha256_of(&opened).map_err(|e| format!("cannot check {part}: {e}"))?;
+    if !digest.eq_ignore_ascii_case(file.sha256) {
+        let _ = dir.remove(&part);
         return Err(format!(
             "{} does not match its published checksum; it was removed, retry the download",
-            target.display()
+            file.file
         ));
     }
-    std::fs::rename(part, target).map_err(|e| format!("cannot finish {}: {e}", target.display()))
+    dir.rename(&part, file.file, id)
+        .map_err(|e| format!("cannot finish {}: {e}", file.file))
 }
 
 /// Why `file` cannot fill the `modality` slot, if it cannot: it must run
@@ -1111,16 +1204,18 @@ mod tests {
         assert!(!names_local("local:ollama"));
     }
 
-    fn suggested(url: String, bytes: u64) -> crate::core::comfyui::SuggestedFile {
+    #[cfg(unix)]
+    fn suggested(url: String, bytes: u64, sha256: &str) -> crate::core::comfyui::SuggestedFile {
         crate::core::comfyui::SuggestedFile {
             folder: IMAGE_FOLDER,
             file: "model.safetensors",
             url: Box::leak(url.into_boxed_str()),
             bytes,
-            sha256: "",
+            sha256: Box::leak(sha256.to_string().into_boxed_str()),
         }
     }
 
+    #[cfg(unix)]
     fn hex_sha256(bytes: &[u8]) -> String {
         use sha2::Digest;
         sha2::Sha256::digest(bytes)
@@ -1129,6 +1224,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     async fn drain(mut progress: ByteProgress) -> Result<u64, String> {
         let mut last = 0;
         while let Some(step) = progress.next().await {
@@ -1137,9 +1233,43 @@ mod tests {
         Ok(last)
     }
 
+    /// A model folder in a scratch dir, opened like a pull opens it.
+    #[cfg(unix)]
+    fn model_folder() -> (
+        tempfile::TempDir,
+        PathBuf,
+        std::sync::Arc<crate::core::model_dir::ModelDir>,
+    ) {
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path().canonicalize().unwrap();
+        let id = crate::core::model_dir::identity(&dir).unwrap();
+        let handle = crate::core::model_dir::ModelDir::open(&dir, id).unwrap();
+        (scratch, dir, std::sync::Arc::new(handle))
+    }
+
+    #[test]
+    fn a_content_range_must_continue_the_part_exactly() {
+        assert!(range_continues(Some("bytes 100-999/1000"), 100, 1000));
+        assert!(range_continues(Some("bytes 100-499/1000"), 100, 1000));
+        for refused in [
+            "bytes 100-garbage/1000",
+            "bytes 100-99/1000",
+            "bytes 100-1001/1000",
+            "bytes 100-1000/1000",
+            "bytes 0-999/1000",
+            "bytes 100-999/2000",
+            "bytes 100-999/*",
+            "100-999/1000",
+        ] {
+            assert!(!range_continues(Some(refused), 100, 1000), "{refused}");
+        }
+        assert!(!range_continues(None, 100, 1000));
+    }
+
     /// KT-1385 — a download lands as `.part`, resumes from it with a Range
     /// request, and only a file of the exact size and checksum becomes the
     /// model.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_download_resumes_from_its_part_and_only_a_verified_file_becomes_the_model() {
         use wiremock::matchers::{header, method, path};
@@ -1165,52 +1295,54 @@ mod tests {
             .mount(&server)
             .await;
 
-        let dir = tempfile::tempdir().unwrap();
-        let part = dir.path().join("model.safetensors.part");
-        let target = dir.path().join("model.safetensors");
+        let (_scratch, dir, handle) = model_folder();
+        let part = dir.join("model.safetensors.part");
+        let target = dir.join("model.safetensors");
         let http = reqwest::Client::new();
-        let file = suggested(format!("{}/model", server.uri()), body.len() as u64);
+        let file = suggested(format!("{}/model", server.uri()), 1000, &sha);
 
         // Resume: 400 bytes already there.
         std::fs::write(&part, &body[..400]).unwrap();
         let done = drain(
-            download_file(&http, &file, &part, &target, 1000, 0)
+            download_file(&http, &file, handle.clone(), 1000, 0)
                 .await
                 .unwrap(),
         )
         .await
         .unwrap();
         assert_eq!(done, 1000);
-        finish_file(&part, &target, 1000, &sha).unwrap();
+        finish_file(&handle, &file).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), body);
+        assert!(std::fs::symlink_metadata(&target).unwrap().is_file());
         assert!(!part.exists());
 
         // A short file never becomes the model, and stays for the next try.
         std::fs::remove_file(&target).unwrap();
-        let short = suggested(format!("{}/model", server.uri()), 2000);
+        let short = suggested(format!("{}/model", server.uri()), 2000, &sha);
         let cut = drain(
-            download_file(&http, &short, &part, &target, 2000, 0)
+            download_file(&http, &short, handle.clone(), 2000, 0)
                 .await
                 .unwrap(),
         )
         .await
         .unwrap();
         assert_eq!(cut, 1000);
-        let refused = finish_file(&part, &target, 2000, &sha).unwrap_err();
+        let refused = finish_file(&handle, &short).unwrap_err();
         assert!(refused.contains("1000 bytes instead of 2000"), "{refused}");
         assert!(!target.exists());
         assert!(part.exists());
 
         // The right size with the wrong bytes is removed, never installed.
         std::fs::write(&part, vec![0_u8; 1000]).unwrap();
-        let corrupt = finish_file(&part, &target, 1000, &sha).unwrap_err();
+        let corrupt = finish_file(&handle, &file).unwrap_err();
         assert!(corrupt.contains("checksum"), "{corrupt}");
         assert!(!part.exists() && !target.exists());
     }
 
     /// A source that sends more than the file, a `.part` longer than the
-    /// file, or a range that does not start where the `.part` ends: nothing
-    /// is spliced or kept.
+    /// file, or a range that does not continue the `.part`: nothing is
+    /// spliced or kept.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_download_never_writes_past_the_file_nor_splices_a_wrong_range() {
         use wiremock::matchers::{header, method, path};
@@ -1222,8 +1354,8 @@ mod tests {
             .and(header("range", "bytes=100-"))
             .respond_with(
                 ResponseTemplate::new(206)
-                    .insert_header("content-range", "bytes 0-999/1000")
-                    .set_body_bytes(vec![1_u8; 1000]),
+                    .insert_header("content-range", "bytes 100-1001/1000")
+                    .set_body_bytes(vec![1_u8; 902]),
             )
             .mount(&server)
             .await;
@@ -1232,15 +1364,14 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1_u8; 1500]))
             .mount(&server)
             .await;
-        let dir = tempfile::tempdir().unwrap();
-        let part = dir.path().join("model.safetensors.part");
-        let target = dir.path().join("model.safetensors");
+        let (_scratch, dir, handle) = model_folder();
+        let part = dir.join("model.safetensors.part");
         let http = reqwest::Client::new();
-        let file = suggested(format!("{}/model", server.uri()), 1000);
+        let file = suggested(format!("{}/model", server.uri()), 1000, "");
 
         // 1500 bytes for a 1000-byte file: stopped and removed.
         let over = drain(
-            download_file(&http, &file, &part, &target, 1000, 0)
+            download_file(&http, &file, handle.clone(), 1000, 0)
                 .await
                 .unwrap(),
         )
@@ -1249,9 +1380,9 @@ mod tests {
         assert!(over.contains("more than the 1000 bytes"), "{over}");
         assert!(!part.exists());
 
-        // A range answer starting at 0 for a resume at 100.
+        // A range that ends past the file, for a resume at 100.
         std::fs::write(&part, vec![1_u8; 100]).unwrap();
-        let spliced = download_file(&http, &file, &part, &target, 1000, 0)
+        let spliced = download_file(&http, &file, handle.clone(), 1000, 0)
             .await
             .err()
             .unwrap();
@@ -1262,13 +1393,118 @@ mod tests {
         // (and then refused for the oversized body above).
         std::fs::write(&part, vec![1_u8; 4000]).unwrap();
         let restarted = drain(
-            download_file(&http, &file, &part, &target, 1000, 0)
+            download_file(&http, &file, handle.clone(), 1000, 0)
                 .await
                 .unwrap(),
         )
         .await
         .unwrap_err();
         assert!(restarted.contains("more than"), "{restarted}");
+    }
+
+    /// Review (KT-1381 r1) — a `.part` planted as a symbolic or hard link to
+    /// a file outside, or the folder swapped for a link to elsewhere: nothing
+    /// outside is ever written, and the model is never a link.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn links_planted_in_the_model_folder_never_lead_a_download_outside() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let body = vec![7_u8; 1000];
+        let sha = hex_sha256(&body);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/model"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        let http = reqwest::Client::new();
+        let file = suggested(format!("{}/model", server.uri()), 1000, &sha);
+
+        for hard in [false, true] {
+            let (_scratch, dir, handle) = model_folder();
+            let part = dir.join("model.safetensors.part");
+            let target = dir.join("model.safetensors");
+            std::fs::write(&victim, b"twenty-five bytes, intact").unwrap();
+            if hard {
+                std::fs::hard_link(&victim, &part).unwrap();
+            } else {
+                std::os::unix::fs::symlink(&victim, &part).unwrap();
+            }
+            drain(
+                download_file(&http, &file, handle.clone(), 1000, 0)
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            finish_file(&handle, &file).unwrap();
+            assert_eq!(
+                std::fs::read(&victim).unwrap(),
+                b"twenty-five bytes, intact",
+                "hard: {hard}"
+            );
+            let installed = std::fs::symlink_metadata(&target).unwrap();
+            assert!(installed.is_file() && std::os::unix::fs::MetadataExt::nlink(&installed) == 1);
+            assert_eq!(std::fs::read(&target).unwrap(), body);
+        }
+
+        // The `.part` swapped for a link between the download and the finish.
+        let (_scratch, dir, handle) = model_folder();
+        let part = dir.join("model.safetensors.part");
+        std::fs::write(&victim, b"twenty-five bytes, intact").unwrap();
+        std::os::unix::fs::symlink(&victim, &part).unwrap();
+        let refused = finish_file(&handle, &file).unwrap_err();
+        assert!(refused.contains("replaced"), "{refused}");
+        assert!(!dir.join("model.safetensors").exists());
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"twenty-five bytes, intact"
+        );
+
+        // The folder checked at planning, swapped for a link to elsewhere
+        // before the download opens it: refused, nothing written.
+        let scratch = tempfile::tempdir().unwrap();
+        let planned = scratch.path().canonicalize().unwrap().join("checkpoints");
+        std::fs::create_dir(&planned).unwrap();
+        let id = crate::core::model_dir::identity(&planned).unwrap();
+        std::fs::rename(&planned, scratch.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &planned).unwrap();
+        assert!(crate::core::model_dir::ModelDir::open(&planned, id).is_err());
+        // And a real folder put in its place is not the one checked either.
+        std::fs::remove_file(&planned).unwrap();
+        std::fs::create_dir(&planned).unwrap();
+        assert!(crate::core::model_dir::ModelDir::open(&planned, id).is_err());
+
+        // Swapped after the download opened it: writes stay in the folder
+        // the handle holds, never in the link's target.
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path().canonicalize().unwrap().join("checkpoints");
+        std::fs::create_dir(&dir).unwrap();
+        let handle = std::sync::Arc::new(
+            crate::core::model_dir::ModelDir::open(
+                &dir,
+                crate::core::model_dir::identity(&dir).unwrap(),
+            )
+            .unwrap(),
+        );
+        let held = scratch.path().join("held");
+        std::fs::rename(&dir, &held).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &dir).unwrap();
+        drain(
+            download_file(&http, &file, handle.clone(), 1000, 0)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        finish_file(&handle, &file).unwrap();
+        assert!(held.join("model.safetensors").is_file());
+        assert!(!outside.path().join("model.safetensors").exists());
+        assert!(!outside.path().join("model.safetensors.part").exists());
     }
 
     #[test]

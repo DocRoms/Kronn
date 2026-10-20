@@ -1926,24 +1926,25 @@ mod tests {
         assert_eq!(resubmitted.provider_job_id.as_deref(), Some("p-again"));
     }
 
-    /// Review P2 — a job that times out stops rendering on the GPU.
+    /// Review P2 — a job that times out is cancelled on ComfyUI by its id.
     #[tokio::test]
-    async fn an_expired_local_job_is_interrupted_on_the_gpu() {
+    async fn an_expired_local_job_is_cancelled_on_comfyui_by_its_id() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/queue"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "queue_running": [[1, "p-slow", {}, {}, []]], "queue_pending": []
-            })))
+        Mock::given(method("POST"))
+            .and(path("/api/jobs/p-slow/cancel"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"cancelled": true})),
+            )
+            .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
             .and(path("/interrupt"))
             .respond_with(ResponseTemplate::new(200))
-            .expect(1)
+            .expect(0)
             .mount(&server)
             .await;
         let state = local_state(&server.uri());
@@ -1964,5 +1965,87 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(settled.status, MediaJobStatus::TimedOut);
+    }
+
+    /// On a ComfyUI without cancel-by-id: a queued prompt is deleted by its
+    /// id, a rendering one is never interrupted globally — the job says so —
+    /// and an unknown one is left alone.
+    #[tokio::test]
+    async fn an_older_comfyui_is_never_interrupted_globally() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (queue, delete_calls, note) in [
+            (
+                serde_json::json!({"queue_running": [], "queue_pending": [[2, "p-mine", {}, {}, []]]}),
+                1,
+                false,
+            ),
+            (
+                serde_json::json!({"queue_running": [[1, "p-mine", {}, {}, []]], "queue_pending": []}),
+                0,
+                true,
+            ),
+            (
+                serde_json::json!({"queue_running": [[1, "someone-else", {}, {}, []]], "queue_pending": []}),
+                0,
+                false,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/jobs/p-mine/cancel"))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/queue"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(queue))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/queue"))
+                .and(body_json(serde_json::json!({"delete": ["p-mine"]})))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(delete_calls)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/interrupt"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let state = local_state(&server.uri());
+            let now = Utc::now();
+            seed_local_job(
+                &state.db,
+                "job-old",
+                now,
+                now + ChronoDuration::minutes(90),
+                Some("p-mine"),
+            )
+            .await;
+            state
+                .db
+                .with_conn(move |conn| media_jobs::cancel(conn, "job-old", now))
+                .await
+                .unwrap();
+            crate::api::comfyui::release_local_job(&state, "job-old").await;
+            let job = state
+                .db
+                .with_read_conn(|conn| media_jobs::get(conn, "job-old"))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(job.status, MediaJobStatus::Cancelled);
+            assert_eq!(
+                job.last_error
+                    .unwrap_or_default()
+                    .contains("finishes rendering"),
+                note
+            );
+            server.verify().await;
+        }
     }
 }

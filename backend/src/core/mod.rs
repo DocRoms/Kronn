@@ -82,6 +82,7 @@ pub mod mcp_secret_refs;
 pub mod media_probe;
 pub mod message_file_links;
 pub mod model_catalog;
+pub mod model_dir;
 pub mod native_files;
 pub mod net_expose;
 pub mod oauth2_cache;

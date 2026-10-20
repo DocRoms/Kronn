@@ -29,8 +29,10 @@ Release notes for 0.9.3 and earlier are available in the
   workflow of a model Kronn cannot recognise on its own, and per-slot steps,
   guidance, sampler and scheduler. A stopped ComfyUI, a job it lost or one
   finished without a file fails at once with a sentence; a job that times out
-  or is cancelled is stopped on the GPU; downloads go only into the install
-  folder of a ComfyUI on this machine and are checked against their SHA-256.
+  or is cancelled is cancelled on ComfyUI by its id, never by a global
+  interrupt; downloads go only into the install folder of a ComfyUI on this
+  machine, never through a link, and are checked against their SHA-256
+  (macOS and Linux; Windows links to Hugging Face).
 - Decision models are recognised (KT-1366). Kronn reads what Ollama's
   `/api/show` says each local model can do, so a decision model such as
   `clef-flash:9b` (which answers typed questions and cannot chat) is no longer

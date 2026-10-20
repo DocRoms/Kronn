@@ -453,18 +453,27 @@ ComfyUI not answering before a submission, a prompt it no longer holds in its
 history or queue (restarted, queue cleared), or a job finished without an
 output file. Since nothing is billed, a submission whose handle was lost is
 simply sent again. Its deadline is 90 min (video is slow on a laptop GPU), and
-a job that times out or is cancelled is removed from ComfyUI's queue, or
-interrupted if it is the one rendering. Measurements: `docs/research/comfyui-local-media-2026-10-19.md`.
+a job that times out or is cancelled is cancelled on ComfyUI by its id
+(`POST /api/jobs/<id>/cancel`, atomic). A ComfyUI without that route only
+gets a queued prompt deleted by id; a rendering one is left to finish, never
+interrupted globally (`/interrupt` without an id stops whatever runs), and the
+job says so. Measurements: `docs/research/comfyui-local-media-2026-10-19.md`.
 
 The card also offers measured models to download (RealVisXL V5, FLUX.1
 schnell, the Wan 2.1 1.3B pack), like the Ollama suggestions. Files go to the
 first model folder ComfyUI reports (`/internal/folder_paths`) that lies
 inside the install folder, symlinks resolved, and only when the address is
 this machine (loopback): a remote ComfyUI never chooses where Kronn writes.
-Each file comes from a pinned Hugging Face revision as `<name>.part`, resumes
-only from a `Content-Range` that starts where the `.part` ends, never grows
-past its size, and is renamed only once its size and SHA-256 match; one pull
-holds a file at a time, and disk space is checked first. From Docker those
-folders are the host's, so the card only links to Hugging Face.
+The folder is then held by a directory handle checked against the one
+planned (device, inode), and every file operation is relative to it with
+`O_NOFOLLOW` (`core::model_dir`): a `.part` that is a symbolic or hard link is
+removed, never written through; an opened file is checked (regular, one link)
+before any byte is written; the hashed file is the one renamed. Each file
+comes from a pinned Hugging Face revision, resumes only from a
+`Content-Range` that continues the `.part` exactly, never grows past its
+size, and is installed only once its size and SHA-256 match; one pull holds a
+file at a time, and disk space is checked first. From Docker those folders
+are the host's, and Windows has no such handle here, so there the card only
+links to Hugging Face.
 [src: file: backend/src/agents/media_codec.rs:683-693#ComfyUiMediaCodec]
 [src: file: backend/src/agents/media_runner.rs:766-839#advance_local_comfyui]
