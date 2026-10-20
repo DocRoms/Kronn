@@ -403,6 +403,7 @@ pub fn media_run(job: &crate::db::media_jobs::MediaJob) -> SharedRun {
     // so a job recorded with the single-image field still projects its source.
     result.reference_asset_ids = job.params.reference_ids();
     result.reference_mode = job.params.reference_mode;
+    result.model = Some(job.model.clone());
 
     let now = Utc::now();
     SharedRun {

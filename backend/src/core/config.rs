@@ -745,6 +745,7 @@ pub fn default_config() -> AppConfig {
             scan_depth: 4,
             default_docs_dir: None,
         },
+        comfyui: crate::models::ComfyUiConfig::default(),
         agents: AgentsConfig {
             claude_code: AgentConfig {
                 concurrency: None,

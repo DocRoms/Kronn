@@ -118,6 +118,9 @@ export interface NewDiscussionFormProps {
   configLanguage: string | null;
   agentAccess: AgentsConfig | null;
   externalConnections?: ExternalApiConnectionView[];
+  /** Media sources: the HTTP connections plus the local ComfyUI when a slot is
+   *  set (KT-1381). Defaults to `externalConnections`. */
+  mediaConnections?: ExternalApiConnectionView[];
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   onSubmit: (config: NewDiscConfig) => void;
   onCreateMediaDiscussion?: (config: Pick<NewDiscConfig, 'title' | 'agent' | 'projectId' | 'tier'> & {
@@ -136,6 +139,7 @@ export function NewDiscussionForm({
   agents,
   agentAccess,
   externalConnections = [],
+  mediaConnections,
   prefill,
   onSubmit,
   onCreateMediaDiscussion,
@@ -266,10 +270,11 @@ export function NewDiscussionForm({
   const launchReady = Boolean(newDiscPrompt.trim())
     && (agentLaunchMode === 'prompt' ? promptModeReady : Boolean(newDiscAgent))
     && fullAccessRequiredAgents.length === 0;
+  const mediaSources = mediaConnections ?? externalConnections;
   const hasConfiguredMediaSlot = useMemo(
-    () => externalConnections.some(connection =>
+    () => mediaSources.some(connection =>
       Boolean(connection.image_model?.trim() || connection.video_model?.trim())),
-    [externalConnections],
+    [mediaSources],
   );
 
   const isAgentRestricted = (agentType: AgentType): boolean =>
@@ -832,7 +837,7 @@ export function NewDiscussionForm({
             <div className="disc-new-prompt-wrap">
               {entryMode === 'media' ? (
                 <MediaGenerateForm
-                  connections={externalConnections}
+                  connections={mediaSources}
                   onCreateDiscussion={createMediaDiscussion}
                   onLaunched={() => handleClose()}
                   t={t}

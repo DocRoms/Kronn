@@ -133,6 +133,9 @@ vi.mock('../../lib/api', () => ({
   externalApi: {
     list: vi.fn().mockResolvedValue([]),
   },
+  comfyui: {
+    source: vi.fn().mockResolvedValue(null),
+  },
   contacts: {
     list: vi.fn().mockResolvedValue([]),
     add: vi.fn(),

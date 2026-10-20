@@ -693,6 +693,10 @@ test_endpoint?: string, };
 
 export type AppConfig = { server: ServerConfig, tokens: TokensConfig, scan: ScanConfig, agents: AgentsConfig,
 /**
+ * Local ComfyUI media target (KT-1381).
+ */
+comfyui?: ComfyUiConfig,
+/**
  * Output language used by agents when they write their replies.
  * Separate from `ui_language` below which controls the Kronn UI locale.
  */
@@ -2163,6 +2167,130 @@ timeout_secs?: number | null,
  * Interprétation du stdout avant insertion dans `data.sources.<alias>`.
  */
 output_format: CollectQuickExecOutputFormat, };
+
+export type ComfyFamily = "flux_schnell" | "sdxl" | "wan21_t2v";
+
+/**
+ * Generation settings a user may override per slot in the card. Empty =
+ * the family's measured default.
+ */
+export type ComfyGenSettings = { steps?: number | null, cfg?: number | null, sampler?: string | null, scheduler?: string | null, };
+
+/**
+ * Saved under `[comfyui]` in config.toml. Empty slots mean "ComfyUI is not
+ * offered as a media source".
+ */
+export type ComfyUiConfig = {
+/**
+ * Base URL; `None` = the default local address (`http://127.0.0.1:8188`,
+ * `host.docker.internal` from Docker).
+ */
+endpoint?: string | null,
+/**
+ * Checkpoint file used for images (`models/checkpoints`).
+ */
+image_model?: string | null,
+/**
+ * Diffusion model file used for videos (`models/diffusion_models`).
+ */
+video_model?: string | null,
+/**
+ * The workflow validated when the image slot was chosen, so a job does
+ * not depend on reading the checkpoint header again.
+ */
+image_family?: ComfyFamily | null,
+/**
+ * Where ComfyUI is installed, to tell "installed but stopped" from "not
+ * installed"; `None` = `~/ComfyUI-Installs` (Comfy Desktop's default).
+ */
+install_dir?: string | null,
+/**
+ * The workflow the user chose for a model Kronn cannot recognise on its
+ * own, keyed `<folder>/<file>`.
+ */
+model_families?: { [key in string]: ComfyFamily },
+/**
+ * Overrides of the family defaults, per slot.
+ */
+image_settings?: ComfyGenSettings, video_settings?: ComfyGenSettings, };
+
+export type ComfyUiFamilyDefaults = { family: ComfyFamily, settings: ResolvedGenSettings, };
+
+/**
+ * One model file ComfyUI reports, and what Kronn can do with it.
+ */
+export type ComfyUiModel = {
+/**
+ * ComfyUI folder: `checkpoints` (image) or `diffusion_models` (video).
+ */
+folder: string, file: string,
+/**
+ * `None` = Kronn does not know how to run it until the user picks its
+ * workflow.
+ */
+family: ComfyFamily | null, modality: MediaModality | null,
+/**
+ * The family comes from the user's choice, not from the file.
+ */
+chosen: boolean, };
+
+/**
+ * What the ComfyUI card shows.
+ */
+export type ComfyUiStatus = {
+/**
+ * `online` (server answers), `offline` (installed, server down) or
+ * `not_found` (nothing detected on this machine).
+ */
+state: string, endpoint: string, version: string | null, models: Array<ComfyUiModel>, image_model: string | null, video_model: string | null,
+/**
+ * Why the chosen video model cannot run yet (a missing text encoder or
+ * VAE), in a sentence; `None` when it can.
+ */
+video_blocker: string | null,
+/**
+ * The one-command install for this OS, only where it was run and
+ * verified; elsewhere the card links to the official download page.
+ */
+install_command: string | null, download_url: string,
+/**
+ * Models the card offers to download (KT-1385).
+ */
+suggestions: Array<ComfyUiSuggestion>,
+/**
+ * The folder checked for an installation, as configured or defaulted.
+ */
+install_dir: string,
+/**
+ * What the user typed, `None` while the defaults above apply.
+ */
+configured_endpoint: string | null, configured_install_dir: string | null, image_settings: ComfyGenSettings, video_settings: ComfyGenSettings,
+/**
+ * Each family's measured defaults, shown as the placeholders.
+ */
+family_defaults: Array<ComfyUiFamilyDefaults>,
+/**
+ * What this ComfyUI's KSampler accepts (empty while it is down).
+ */
+samplers: Array<string>, schedulers: Array<string>, };
+
+/**
+ * One suggested model, as the card shows it.
+ */
+export type ComfyUiSuggestion = { id: string, family: ComfyFamily, modality: MediaModality,
+/**
+ * Total size of its files, as the source serves them.
+ */
+bytes: number,
+/**
+ * Every file is already in ComfyUI.
+ */
+installed: boolean,
+/**
+ * Kronn can write into ComfyUI's model folders from here (a native
+ * install; not from Docker, where those paths are the host's).
+ */
+downloadable: boolean, };
 
 /**
  * A remark on a question that is not a decision: it reaches the asker and
@@ -5680,7 +5808,11 @@ reference_asset_ids?: Array<string>,
  * Single-image form of the field above, kept readable for runs published
  * before a generation could start from several pictures.
  */
-reference_asset_id?: string | null, reference_mode?: MediaReferenceMode | null, };
+reference_asset_id?: string | null, reference_mode?: MediaReferenceMode | null,
+/**
+ * The model that ran, so a failed bubble says what failed (KT-1214).
+ */
+model?: string | null, };
 
 export type MergeBase = "local" | "remote";
 
@@ -7307,6 +7439,8 @@ export type PublishProjectRepositoryResourceRequest = { kind: ProjectRepositoryR
  */
 overwrite_repository_changes?: boolean, };
 
+export type PullComfyUiModelRequest = { suggestion: string, };
+
 /**
  * The sole accepted input for a local Ollama pull.  The endpoint never
  * accepts arbitrary upstream URLs: it always uses Kronn's configured Ollama
@@ -7955,6 +8089,11 @@ export type RepoSource = { id: string, label: string, provider: string, };
  * no value is ever read.
  */
 export type RequiredSecretStatus = { name: string, configured: boolean, };
+
+/**
+ * The settings a workflow actually runs with.
+ */
+export type ResolvedGenSettings = { steps: number, cfg: number, sampler: string, scheduler: string, };
 
 /**
  * ADR-005 portability tier. Deliberately serialized as the literal `N0` /
@@ -8949,6 +9088,27 @@ color?: string | null, };
 export type SetApiAccessPolicyRequest = { policy?: ApiAccessPolicy | null, };
 
 export type SetBriefingRequest = { notes?: string | null, };
+
+/**
+ * PUT /api/comfyui/model-family — run a model Kronn cannot recognise with
+ * one of its workflows; `family: null` forgets the choice.
+ */
+export type SetComfyUiModelFamilyRequest = { folder: string, file: string, family?: ComfyFamily | null, };
+
+/**
+ * PUT /api/comfyui/settings — the machine-dependent part of the card.
+ */
+export type SetComfyUiSettingsRequest = {
+/**
+ * Empty = the default local address.
+ */
+endpoint?: string | null,
+/**
+ * Empty = `~/ComfyUI-Installs`.
+ */
+install_dir?: string | null, image_settings?: ComfyGenSettings, video_settings?: ComfyGenSettings, };
+
+export type SetComfyUiSlotsRequest = { image_model?: string | null, video_model?: string | null, };
 
 export type SetOllamaContextOverrideRequest = { model: string,
 /**

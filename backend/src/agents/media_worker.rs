@@ -60,6 +60,11 @@ pub fn backoff_delay(attempts: u32) -> Duration {
 /// lightest case, because resolution and duration both stretch it.
 pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(20 * 60);
 
+/// Budget on a local ComfyUI: video there is slow (2 s of Wan 2.1 took about
+/// 10 min on a laptop GPU), costs nothing, and an abandoned job is stopped
+/// on the GPU, so a long budget wastes nothing.
+pub const LOCAL_DEADLINE: Duration = Duration::from_secs(90 * 60);
+
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;

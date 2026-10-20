@@ -21,6 +21,8 @@ export type MediaRunDetails = {
   height?: number;
   durationMs?: number;
   assetId?: string;
+  /** The model that ran, when the run says so. */
+  model?: string;
   /** The pictures this generation started from, when it did. Ordered as the
    *  caller chose them: providers weigh references by position. */
   referenceAssetIds: string[];
@@ -50,6 +52,7 @@ export function mediaRunDetails(result: unknown): MediaRunDetails | null {
     height: positive(raw.height),
     durationMs: positive(raw.media_duration_ms),
     assetId: typeof raw.asset_id === 'string' && raw.asset_id ? raw.asset_id : undefined,
+    model: typeof raw.model === 'string' && raw.model ? raw.model : undefined,
     // Both forms are read: runs published before a generation could start
     // from several pictures still name their source.
     referenceAssetIds: Array.isArray(raw.reference_asset_ids)

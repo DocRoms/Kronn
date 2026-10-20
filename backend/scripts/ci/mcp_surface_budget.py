@@ -142,9 +142,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # re-measured on the tree merged with KT-1329/KT-1320 (84_894 -> 84_860).
 # KT-1401: `disc_append` says a refused `kronn-question` comes back in
 # `invalid_cards`; paid for by dropping two schema descriptions that restated
-# the tool description (`content`, `wait_for_reply`). Ceiling lowered by 14 B
-# (84_860 -> 84_846) and the heaviest declaration by 14 B (2_746 -> 2_732).
-CATALOGUE_MAX_BYTES = 84_846
+# the tool description (`content`, `wait_for_reply`): -14 B. The heaviest
+# declaration went 2_746 -> 2_732.
+# KT-1381: `media_generate` says "media source" (the local ComfyUI counts),
+# 3 B shorter than "HTTP connection"; the ComfyUI detail lives in its manual.
+CATALOGUE_MAX_BYTES = 84_843
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Clapperboard, FileText, Film, Images, LayoutGrid, Search, Sparkles, X } from 'lucide-react';
+import type { MediaModality } from '../types/generated';
 import type { ContextFile } from '../types/generated';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { MessageAttachments, type ImageGenerationRequest } from './MessageAttachments';
@@ -35,6 +36,7 @@ export function DiscussionAssetsPanel({
   connections = [],
   onMediaLaunched,
   openAssetRequest,
+  retryRequest,
   onAssetDeleted,
   onAssetExtracted,
 }: {
@@ -52,6 +54,10 @@ export function DiscussionAssetsPanel({
   /** One-shot request from a transcript media bubble. The nonce lets the same
    * asset be deliberately opened again after the viewer was closed. */
   openAssetRequest?: { assetId: string; nonce: number } | null;
+  /** KT-1214 — a failed generation asks to be launched again: the Creator
+   * opens with its prompt and modality, so the user retries or picks another
+   * source. One-shot, like `openAssetRequest`. */
+  retryRequest?: { prompt: string; modality: MediaModality; nonce: number } | null;
   /// Fired once the server confirmed a deletion, so the discussion drops the
   /// file from its own inventory. Absent, the panel offers no deletion.
   onAssetDeleted?: (fileId: string) => void;
@@ -74,7 +80,12 @@ export function DiscussionAssetsPanel({
   const [generationRequest, setGenerationRequest] = useState<(ImageGenerationRequest & { nonce: number }) | null>(null);
   const clearPagination = useCallback(() => setPinnedCount(0), []);
 
+  // Reset when the panel moves to another discussion, not at mount: a panel
+  // opened BY a request (a relaunch) must keep the tab that request chose.
+  const shownDiscussion = useRef(discussionId);
   useEffect(() => {
+    if (shownDiscussion.current === discussionId) return;
+    shownDiscussion.current = discussionId;
     setQuery('');
     setFilter('all');
     setPaging({ key: '', count: PAGE_SIZE });
@@ -101,6 +112,14 @@ export function DiscussionAssetsPanel({
     const index = ordered.findIndex(file => file.id === openAssetRequest.assetId);
     setPinnedCount(index >= 0 ? index + 1 : 0);
   }
+
+  const [answeredRetry, setAnsweredRetry] = useState<typeof retryRequest>(null);
+  if (retryRequest && retryRequest !== answeredRetry) {
+    setAnsweredRetry(retryRequest);
+    setGenerationRequest(null);
+    setTab('creator');
+  }
+  const pendingRetry = retryRequest && retryRequest === answeredRetry ? retryRequest : null;
 
   const videos = useMemo(() => files.filter(isVideo), [files]);
   // An order needs at least two clips; with fewer the tab would only ever
@@ -198,7 +217,7 @@ export function DiscussionAssetsPanel({
           {/* Always offered: with no media slot configured, the form itself
               says so and where to fix it, which a hidden entry never did. */}
           <MediaGenerateForm
-            key={generationRequest?.nonce ?? 0}
+            key={generationRequest?.nonce ?? pendingRetry?.nonce ?? 0}
             discussionId={discussionId}
             connections={connections}
             /* The images already in this room are the only ones a generation
@@ -209,6 +228,8 @@ export function DiscussionAssetsPanel({
             onLaunched={onMediaLaunched}
             onImageAttached={onAssetExtracted}
             initialSlotKey={generationRequest?.slotKey}
+            initialPrompt={generationRequest ? undefined : pendingRetry?.prompt}
+            initialModality={generationRequest ? undefined : pendingRetry?.modality}
             initialReference={generationRequest
               ? { assetId: generationRequest.assetId, mode: generationRequest.referenceMode }
               : null}

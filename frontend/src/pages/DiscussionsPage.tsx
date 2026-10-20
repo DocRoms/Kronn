@@ -20,7 +20,7 @@ import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, runsApi, publicationCredentials } from '../lib/api';
+import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, comfyui as comfyuiApi, runsApi, publicationCredentials } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { TerminalPanel } from '../components/TerminalPanel';
@@ -865,6 +865,13 @@ export function DiscussionsPage({
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [externalConnections, setExternalConnections] = useState<ExternalApiConnectionView[]>([]);
+  // KT-1381 — the local ComfyUI, shaped like a connection, offered only where
+  // media is generated (never as an agent or a mention target).
+  const [localMediaSource, setLocalMediaSource] = useState<ExternalApiConnectionView | null>(null);
+  const mediaConnections = useMemo(
+    () => (localMediaSource ? [...externalConnections, localMediaSource] : externalConnections),
+    [externalConnections, localMediaSource],
+  );
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
   // KT-1107 — the agent check of each room started from this page, until dismissed.
@@ -969,6 +976,23 @@ export function DiscussionsPage({
     setShowSettingsPanel(false);
     setShowAssetsPanel(true);
     setAssetOpenRequest(current => ({ assetId, nonce: (current?.nonce ?? 0) + 1 }));
+  }, []);
+  // KT-1214 — a failed generation reopens the Creator with what was asked.
+  const [mediaRetryRequest, setMediaRetryRequest] = useState<{ prompt: string; modality: 'image' | 'video'; nonce: number } | null>(null);
+  // Dropped when the panel closes, so reopening it does not replay the
+  // retried prompt.
+  const [retryPanelOpen, setRetryPanelOpen] = useState(showAssetsPanel);
+  if (retryPanelOpen !== showAssetsPanel) {
+    setRetryPanelOpen(showAssetsPanel);
+    if (!showAssetsPanel) setMediaRetryRequest(null);
+  }
+  const retryMediaGeneration = useCallback((prompt: string, modality: 'image' | 'video') => {
+    setShowGitPanel(false);
+    setShowTerminalPanel(false);
+    setShowPlanPanel(false);
+    setShowSettingsPanel(false);
+    setShowAssetsPanel(true);
+    setMediaRetryRequest(current => ({ prompt, modality, nonce: (current?.nonce ?? 0) + 1 }));
   }, []);
   const mediaJobsRelistTimer = useRef<{ id: number; discId: string } | null>(null);
   const scheduleMediaJobsRelist = useCallback((discId: string) => {
@@ -1707,9 +1731,21 @@ export function DiscussionsPage({
     directivesApi.list().then(setAvailableDirectives).catch(() => {});
     contactsApi.list().then(setContactsList).catch(() => {});
     externalApiConnections.list().then(setExternalConnections).catch(() => {});
+    // Re-read when the ComfyUI card saves a change, and when the tab comes
+    // back, so a model chosen elsewhere is offered without a reload.
+    const refetchLocalMediaSource = () => comfyuiApi.source()
+      .then(source => setLocalMediaSource(source ? { ...source, has_credential: false } : null))
+      .catch(() => {});
+    refetchLocalMediaSource();
     refetchBatchSummaries();
     window.addEventListener('kronn:profiles-changed', refetchProfiles);
-    return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
+    window.addEventListener('kronn:comfyui-changed', refetchLocalMediaSource);
+    window.addEventListener('focus', refetchLocalMediaSource);
+    return () => {
+      window.removeEventListener('kronn:profiles-changed', refetchProfiles);
+      window.removeEventListener('kronn:comfyui-changed', refetchLocalMediaSource);
+      window.removeEventListener('focus', refetchLocalMediaSource);
+    };
   }, [refetchBatchSummaries]);
 
   // WebSocket-based real-time events (presence, chat, invites).
@@ -4078,6 +4114,7 @@ export function DiscussionsPage({
                   prompt={msg.content}
                   run={mediaRun}
                   onOpenAsset={openMediaAsset}
+                  onRetry={retryMediaGeneration}
                 />
                 {pending}
               </Fragment>
@@ -4357,6 +4394,7 @@ export function DiscussionsPage({
             configLanguage={configLanguage}
             agentAccess={agentAccess}
             externalConnections={externalConnections}
+            mediaConnections={mediaConnections}
             prefill={prefill}
             onSubmit={handleCreateDiscussion}
             onCreateMediaDiscussion={handleCreateMediaDiscussion}
@@ -5864,7 +5902,7 @@ export function DiscussionsPage({
               <DiscussionAssetsPanel
                 discussionId={activeDiscussion.id}
                 files={activeContextFiles}
-                connections={externalConnections}
+                connections={mediaConnections}
                 onClose={() => setShowAssetsPanel(false)}
                 onMediaLaunched={(jobId) => {
                   const launchedDiscussionId = activeDiscussion.id;
@@ -5878,6 +5916,7 @@ export function DiscussionsPage({
                   reloadDiscussion(activeDiscussion.id);
                 }}
                 openAssetRequest={showAssetsPanel ? assetOpenRequest : null}
+                retryRequest={showAssetsPanel ? mediaRetryRequest : null}
                 onAssetDeleted={(fileId) => {
                   // Dropped from the discussion's own inventory, which every
                   // surface reads: the grid, the counters, the carousel and a

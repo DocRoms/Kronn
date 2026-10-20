@@ -13,6 +13,26 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Local image and video generation through ComfyUI (KT-1381). Config ›
+  Agents › Local gains a ComfyUI card next to Ollama: server state and
+  version, the one-command install on macOS (`brew install --cask comfy`), and
+  Image / Video pickers listing the installed models Kronn has a measured
+  workflow for (FLUX.1 schnell, SDXL such as RealVisXL, Wan 2.1). Once a model
+  is chosen, ComfyUI is offered wherever media is generated (new
+  conversation, the Assets Creator) and in `agent_list` as `local:comfyui`,
+  so agents generate on it through `media_generate`. Local generations cost
+  nothing and never enter estimates; ComfyUI never appears as a chat agent.
+  The card also downloads measured models (RealVisXL V5, FLUX.1 schnell, the
+  Wan 2.1 1.3B pack) into ComfyUI's own model folders, with progress, cancel,
+  resume and a disk-space check. Everything machine-dependent is a setting:
+  the server address, the install folder (default `~/ComfyUI-Installs`), the
+  workflow of a model Kronn cannot recognise on its own, and per-slot steps,
+  guidance, sampler and scheduler. A stopped ComfyUI, a job it lost or one
+  finished without a file fails at once with a sentence; a job that times out
+  or is cancelled is cancelled on ComfyUI by its id, never by a global
+  interrupt; downloads go only into the install folder of a ComfyUI on this
+  machine, never through a link, and are checked against their SHA-256
+  (macOS and Linux; Windows links to Hugging Face).
 - Decision models are recognised (KT-1366). Kronn reads what Ollama's
   `/api/show` says each local model can do, so a decision model such as
   `clef-flash:9b` (which answers typed questions and cannot chat) is no longer
@@ -682,6 +702,15 @@ Release notes for 0.9.3 and earlier are available in the
   - the run's refusal names the Quick Exec and where to approve it.
   An agent still cannot approve: the server refuses it.
 
+- LiteLLM image generation works (KT-1214). Kronn sent images to
+  `/v1/images`, a route a LiteLLM proxy does not have, and reported the 404 as
+  "image response carries no b64_json payload"; it now uses
+  `/v1/images/generations` with the OpenAI body (checked with
+  `vertex_ai/gemini-3-pro-image`). A provider `usage` that states tokens but
+  no price no longer records a 0 $ cost. A failed generation's bubble names
+  the model that ran and offers « Relancer… », which opens the Assets
+  Creator with the same prompt and kind. Opening a media room from the New
+  discussion entry no longer stores an empty first message.
 - A comment on an arbitration card whose workflow step has ended is answered
   by the room's own agent instead of nobody. It used to go to the step's
   closed CLI session and wake no one ("personne ne lira cette réponse

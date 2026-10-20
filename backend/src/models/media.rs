@@ -268,6 +268,9 @@ pub struct MediaRunResult {
     pub reference_asset_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_mode: Option<MediaReferenceMode>,
+    /// The model that ran, so a failed bubble says what failed (KT-1214).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 pub const MEDIA_RUN_RESULT_SCHEMA_VERSION: u32 = 1;
@@ -290,6 +293,7 @@ impl MediaRunResult {
             reference_asset_ids: Vec::new(),
             reference_asset_id: None,
             reference_mode: None,
+            model: None,
         }
     }
 }
