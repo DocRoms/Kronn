@@ -2916,6 +2916,11 @@ lint?: AppendLintSummary,
  */
 important?: ImportantIngest,
 /**
+ * KT-1401 — `kronn-question` fences of the appended message that no card
+ * could be recorded from, each with its reason: the author reposts them.
+ */
+invalid_cards?: Array<InvalidCard>,
+/**
  * `sort_order` of the LAST appended message (stab-1). This is a write
  * receipt, not a read cursor: another message may have landed between
  * the caller's last read and this append. `None` when nothing was appended.

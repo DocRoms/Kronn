@@ -647,6 +647,9 @@ enum RoomAgentWake {
     /// The last pending card of the ended step's message was answered: the
     /// asker will never read the set, the room's agent does (KT-1401).
     ForAnswer,
+    /// An earlier card of that message was answered while others are pending:
+    /// nothing wakes now, the last answer carries this one to the room's agent.
+    Deferred,
 }
 
 /// Publish a human resolution of `question` and route it back to whoever asked.
@@ -682,16 +685,23 @@ fn publish_human_resolution(
         None
     };
     if step_ended {
-        content.push_str(if room_agent.is_some() {
-            if wake == RoomAgentWake::ForAnswer {
+        content.push_str(match (room_agent.is_some(), wake) {
+            (true, RoomAgentWake::ForAnswer) => {
                 "\n\nL'étape qui a posé cette question est terminée : l'agent de la room reprend avec les réponses de ce message."
-            } else {
+            }
+            (true, RoomAgentWake::Deferred) => {
+                "\n\nL'étape qui a posé cette question est terminée : cette réponse sera transmise à l'agent de la room avec la dernière réponse de ce message."
+            }
+            (true, _) => {
                 "\n\nL'étape qui a posé cette question est terminée : l'agent de la room répond. La question reste en attente pour le prochain run."
             }
-        } else {
-            "\n\nL'étape qui a posé cette question est terminée ; personne ne lira cette réponse maintenant. Elle sera disponible au prochain run."
+            (false, _) => {
+                "\n\nL'étape qui a posé cette question est terminée ; personne ne lira cette réponse maintenant. Elle sera disponible au prochain run."
+            }
         });
     }
+    // A deferred answer only takes the notice: the wake belongs to the last one.
+    let room_agent = room_agent.filter(|_| wake != RoomAgentWake::Deferred);
     let message = crate::models::DiscussionMessage {
         id: message_id.to_string(),
         role: crate::models::MessageRole::User,
@@ -1597,6 +1607,7 @@ fn answer_inner(
             .into_iter()
             .filter(|q| q.source_message_id == question.source_message_id && q.id != question.id)
             .collect::<Vec<_>>();
+        wake = RoomAgentWake::Deferred;
         if siblings
             .iter()
             .all(|q| q.state != DiscussionQuestionState::Pending)

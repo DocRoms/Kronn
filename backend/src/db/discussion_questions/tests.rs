@@ -1691,6 +1691,43 @@ fn answering_the_last_card_of_an_ended_step_wakes_the_room_agent_once_with_every
     assert_eq!(dispatch_count(&conn), 1);
 }
 
+fn answer_notice(conn: &Connection, index: usize) -> String {
+    conn.query_row(
+        "SELECT content FROM messages WHERE id=?1",
+        [format!("question-answer:question:step-question:{index}")],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn an_earlier_card_of_an_ended_step_says_its_answer_goes_to_the_room_agent_with_the_last_one() {
+    let conn = finished_step_cards(&[card("first"), card("second")]);
+    answer_with(&conn, 0, "retry");
+    assert_eq!(dispatch_count(&conn), 0, "the last answer wakes, not this");
+    let early = answer_notice(&conn, 0);
+    assert!(
+        early.contains(
+            "cette réponse sera transmise à l'agent de la room avec la dernière réponse de ce message"
+        ),
+        "{early}"
+    );
+    assert!(!early.contains("personne ne lira"), "{early}");
+
+    answer_with(&conn, 1, "wait");
+    assert!(answer_notice(&conn, 1).contains("l'agent de la room reprend"));
+
+    // Without a native agent nobody reads it: the old notice stays true.
+    let quiet = finished_step_cards(&[card("first"), card("second")]);
+    quiet
+        .execute("UPDATE discussions SET no_agent=1 WHERE id='d'", [])
+        .unwrap();
+    answer_with(&quiet, 0, "retry");
+    let quiet_notice = answer_notice(&quiet, 0);
+    assert!(quiet_notice.contains("personne ne lira"), "{quiet_notice}");
+    assert!(!quiet_notice.contains("sera transmise"), "{quiet_notice}");
+}
+
 #[test]
 fn a_refused_sibling_does_not_block_the_wake_and_a_room_without_agent_wakes_nobody() {
     let conn = finished_step_cards(&[card("first"), card("second")]);
