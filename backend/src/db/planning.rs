@@ -1873,6 +1873,7 @@ pub fn update_task(
         crate::db::orchestration::adopt_task_dod_into_live_executions(
             &transaction,
             task_id,
+            &existing.definition_of_done,
             &crate::models::PlanningActor {
                 kind: crate::models::PlanningActorKind::Backend,
                 id: Some("orchestrator".to_string()),

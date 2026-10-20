@@ -6978,6 +6978,68 @@ fn editing_the_dod_of_a_live_execution_re_snapshots_it_and_tells_the_worker() {
 }
 
 #[test]
+fn rewording_a_dod_sentence_under_the_same_id_is_announced_to_the_worker() {
+    let conn = setup();
+    let execution = working_execution_on_current_dod(&conn, "t-dod-reword", 1407);
+    let launched = execution.worker_dod_ids.clone().unwrap();
+
+    let mut items = kept_dod_request(&conn, "t-dod-reword");
+    items[1].sentence = "second, now with a stricter bar".into();
+    let current = set_task_dod(&conn, "t-dod-reword", items);
+    assert_eq!(current, launched, "the ids are untouched by a reword");
+
+    let room = room_messages(&conn, "room-t-dod-reword");
+    assert_eq!(room.len(), 1, "the worker is told of the reword: {room:?}");
+    assert!(room[0].contains("second, now with a stricter bar"));
+    let events = list_execution_events(&conn, &execution.id).unwrap();
+    assert!(events.iter().any(|event| event.action == "dod_readopted"));
+
+    // Re-saving the same text is a true no-op: nothing more is announced.
+    let same = kept_dod_request(&conn, "t-dod-reword");
+    set_task_dod(&conn, "t-dod-reword", same);
+    assert_eq!(room_messages(&conn, "room-t-dod-reword").len(), 1);
+}
+
+#[test]
+fn an_accepted_delivery_supersedes_the_refusal_of_the_same_turn_but_keeps_its_event() {
+    let conn = setup();
+    let execution = working_execution(&conn, "t-refused-then-ok", 1408);
+    record_delivery_refusal(
+        &conn,
+        &execution.id,
+        1,
+        "first manifest invalid",
+        &backend_actor(),
+    )
+    .unwrap();
+    assert!(latest_delivery_refusal(&conn, &execution.id)
+        .unwrap()
+        .is_some());
+
+    transition_execution(
+        &conn,
+        &execution.id,
+        TaskExecutionStatus::AwaitingReview,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+
+    assert_eq!(
+        latest_delivery_refusal(&conn, &execution.id).unwrap(),
+        None,
+        "no active refusal once the corrected manifest was accepted"
+    );
+    let events = list_execution_events(&conn, &execution.id).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.action == "delivery_refused"),
+        "the refusal stays in the journal as history"
+    );
+}
+
+#[test]
 fn a_dod_edit_leaves_an_execution_already_awaiting_review_on_its_snapshot() {
     let conn = setup();
     let execution = working_execution_on_current_dod(&conn, "t-dod-review", 1403);

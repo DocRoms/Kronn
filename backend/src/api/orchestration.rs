@@ -28289,8 +28289,26 @@ pub(crate) mod tests {
     /// KT-1402 — add a DoD item to the task of `exec_id` through a normal
     /// `task_update`, keeping the existing items (and their ids).
     async fn add_dod_item_by_update(db: &Database, exec_id: &str, sentence: &str) {
-        let task_id = exec_of(db, exec_id).await.task_id;
         let sentence = sentence.to_string();
+        edit_dod_by_update(db, exec_id, move |items| {
+            items.push(CreatePlanningDodItem {
+                id: None,
+                sentence,
+                completed: false,
+                verification: None,
+            });
+        })
+        .await;
+    }
+
+    /// KT-1402 — edit the DoD of the task of `exec_id` through a normal
+    /// `task_update` that starts from the current items (ids kept).
+    async fn edit_dod_by_update(
+        db: &Database,
+        exec_id: &str,
+        edit: impl FnOnce(&mut Vec<CreatePlanningDodItem>) + Send + 'static,
+    ) {
+        let task_id = exec_of(db, exec_id).await.task_id;
         db.with_conn(move |conn| {
             let task = crate::db::planning::get_task(conn, &task_id)?.context("task")?;
             let mut items = task
@@ -28303,12 +28321,7 @@ pub(crate) mod tests {
                     verification: None,
                 })
                 .collect::<Vec<_>>();
-            items.push(CreatePlanningDodItem {
-                id: None,
-                sentence,
-                completed: false,
-                verification: None,
-            });
+            edit(&mut items);
             crate::db::planning::update_task(
                 conn,
                 &task_id,
@@ -28432,6 +28445,131 @@ pub(crate) mod tests {
                 "the worker must not be refused for a DoD drift: {detail}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn rewording_a_dod_sentence_keeps_the_ids_tells_the_worker_and_still_delivers() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (execution, dispatch_job_id, trigger) =
+            provision_native_for_dod_edit(&db, repo.path(), "kt1402-reword").await;
+        let child = execution.sub_discussion_id.clone().unwrap();
+        let launched = execution.worker_dod_ids.clone().unwrap();
+
+        edit_dod_by_update(&db, &execution.id, |items| {
+            items[0].sentence = "reworded with a much stricter bar".into();
+        })
+        .await;
+
+        let after = exec_of(&db, &execution.id).await;
+        assert_eq!(after.worker_dod_ids.as_ref(), Some(&launched));
+        assert_eq!(after.status, TaskExecutionStatus::Working);
+        let notice = discussion_contents(&db, &child)
+            .await
+            .into_iter()
+            .find(|content| content.contains("reworded with a much stricter bar"))
+            .unwrap_or_default();
+        assert!(notice.contains("Definition of Done"), "{notice}");
+
+        let manifest = projected_manifest_for_execution(&db, &execution.id).await;
+        let outcome = deliver_native_worker_manifest(
+            &db,
+            &execution.id,
+            NativeExecutionCaller {
+                discussion_id: &child,
+                agent_type: &AgentType::ClaudeCode,
+                source_message_id: Some(&trigger),
+                alias: "Claude Code",
+                actor_session_id: Some("native-delivery-turn"),
+            },
+            &dispatch_job_id,
+            &manifest,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(outcome, DeliverOutcome::Delivered { .. }),
+            "delivery against the reworded DoD is accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_accepted_delivery_clears_the_active_refusal_of_an_earlier_invalid_manifest() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (execution, dispatch_job_id, trigger) =
+            provision_native_for_dod_edit(&db, repo.path(), "kt1402-refusal-then-ok").await;
+        let child = execution.sub_discussion_id.clone().unwrap();
+        let deliver = |manifest: String| {
+            let (db, id, child, job, trigger) = (
+                &db,
+                execution.id.clone(),
+                child.clone(),
+                dispatch_job_id.clone(),
+                trigger.clone(),
+            );
+            async move {
+                deliver_native_worker_manifest(
+                    db,
+                    &id,
+                    NativeExecutionCaller {
+                        discussion_id: &child,
+                        agent_type: &AgentType::ClaudeCode,
+                        source_message_id: Some(&trigger),
+                        alias: "Claude Code",
+                        actor_session_id: Some("native-delivery-turn"),
+                    },
+                    &job,
+                    &manifest,
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let refused = deliver(String::from("not a manifest")).await;
+        assert!(matches!(refused, DeliverOutcome::InvalidManifest(_)));
+        let execution_id = execution.id.clone();
+        let detail = db
+            .with_conn(move |conn| execution_detail(conn, &execution_id))
+            .await
+            .unwrap();
+        assert!(detail.last_delivery_refusal.is_some());
+
+        let manifest = projected_manifest_for_execution(&db, &execution.id).await;
+        let accepted = deliver(manifest).await;
+        assert!(matches!(accepted, DeliverOutcome::Delivered { .. }));
+
+        let execution_id = execution.id.clone();
+        let (detail, events) = db
+            .with_conn(move |conn| {
+                Ok((
+                    execution_detail(conn, &execution_id)?,
+                    crate::db::orchestration::list_execution_events(conn, &execution_id)?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            detail.lineage.execution.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+        assert_eq!(detail.last_delivery_refusal, None);
+        let compact = compact_execution_status(&detail, None);
+        assert!(
+            !compact
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("delivery refused")),
+            "{:?}",
+            compact.last_error
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.action == "delivery_refused"),
+            "the refusal stays in the journal"
+        );
     }
 
     #[tokio::test]

@@ -5500,9 +5500,11 @@ pub fn record_delivery_refusal(
     )
 }
 
-/// The latest delivery refusal the worker has not worked past: a later
-/// transition into `Working`, a reassignment or a DoD re-adoption starts a fresh
-/// turn against fresh facts and retires it.
+/// The latest delivery refusal still in force: a later transition into
+/// `Working`, a reassignment or a DoD re-adoption starts a fresh turn against
+/// fresh facts, and an accepted delivery (the move to `AwaitingReview`)
+/// supersedes a refusal from the same turn. The refusal event itself stays in
+/// the journal as history.
 pub fn latest_delivery_refusal(conn: &Connection, exec_id: &str) -> Result<Option<String>> {
     let latest: Option<String> = conn
         .query_row(
@@ -5510,7 +5512,7 @@ pub fn latest_delivery_refusal(conn: &Connection, exec_id: &str) -> Result<Optio
              WHERE task_execution_id = ?1 AND action = ?2 \
                AND rowid > COALESCE((SELECT MAX(rowid) FROM task_execution_events \
                                       WHERE task_execution_id = ?1 \
-                                        AND (to_status = 'Working' \
+                                        AND (to_status IN ('Working', 'AwaitingReview') \
                                              OR action IN (?3, 'worker_reassigned'))), 0) \
              ORDER BY rowid DESC LIMIT 1",
             params![exec_id, DELIVERY_REFUSED_ACTION, DOD_READOPTED_ACTION],
@@ -5543,12 +5545,31 @@ fn awaits_a_delivery(execution: &TaskExecution) -> bool {
     }
 }
 
+/// Do two DoD versions ask the worker for something different? Ticks and
+/// evidence are progress, not requirements, so they are ignored; a reworded
+/// sentence or another verification kind is a change even under the same id.
+pub fn dod_requirements_differ(
+    before: &[crate::models::PlanningDodItem],
+    after: &[crate::models::PlanningDodItem],
+) -> bool {
+    let key = |items: &[crate::models::PlanningDodItem]| {
+        items
+            .iter()
+            .map(|item| (item.id.clone(), item.sentence.clone(), item.verification))
+            .collect::<Vec<_>>()
+    };
+    key(before) != key(after)
+}
+
 /// KT-1402 — point an execution's DoD snapshot at the task's current DoD.
+/// `requirements_changed` covers an edit that keeps every id (a reworded
+/// sentence): the snapshot is then unchanged but the worker must still be told.
 /// Returns whether anything changed.
 pub fn readopt_dod_snapshot(
     conn: &Connection,
     exec_id: &str,
     dod_ids: &[String],
+    requirements_changed: bool,
     cause: &str,
     actor: &OrchestrationActor,
 ) -> Result<bool> {
@@ -5559,7 +5580,7 @@ pub fn readopt_dod_snapshot(
         // No snapshot = a pre-snapshot execution: delivery already tells it to
         // relaunch, and there is no earlier DoD to announce a change from.
         match execution.worker_dod_ids.as_deref() {
-            Some(snapshot) if snapshot != dod_ids => {}
+            Some(snapshot) if requirements_changed || snapshot != dod_ids => {}
             _ => return Ok(false),
         }
         conn.execute(
@@ -5590,15 +5611,19 @@ pub fn readopt_dod_snapshot(
 /// KT-1402 — the task's DoD was edited: every execution of the task that still
 /// owes a delivery adopts the new one and its worker is told in its own
 /// discussion. Without that, the worker's delivery is refused for a drift it
-/// cannot see and the whole turn is lost. Returns the adopting execution ids.
+/// cannot see and the whole turn is lost. `before` is the DoD as it stood
+/// before the edit, so a reworded sentence under an unchanged id is noticed too.
+/// Returns the adopting execution ids.
 pub fn adopt_task_dod_into_live_executions(
     conn: &Connection,
     task_id: &str,
+    before: &[crate::models::PlanningDodItem],
     actor: &OrchestrationActor,
 ) -> Result<Vec<String>> {
     let Some(task) = crate::db::planning::get_task(conn, task_id)? else {
         return Ok(Vec::new());
     };
+    let requirements_changed = dod_requirements_differ(before, &task.definition_of_done);
     let dod_ids = task
         .definition_of_done
         .iter()
@@ -5616,7 +5641,14 @@ pub fn adopt_task_dod_into_live_executions(
         if !awaits_a_delivery(&execution) {
             continue;
         }
-        if !readopt_dod_snapshot(conn, &exec_id, &dod_ids, "task_dod_edited", actor)? {
+        if !readopt_dod_snapshot(
+            conn,
+            &exec_id,
+            &dod_ids,
+            requirements_changed,
+            "task_dod_edited",
+            actor,
+        )? {
             continue;
         }
         if let Some(child) = execution.sub_discussion_id.as_deref() {
@@ -7056,7 +7088,7 @@ pub fn reassign_execution_worker(
                 .iter()
                 .map(|item| item.id.clone())
                 .collect::<Vec<_>>();
-            if readopt_dod_snapshot(conn, exec_id, &dod_ids, "worker_reassigned", actor)? {
+            if readopt_dod_snapshot(conn, exec_id, &dod_ids, false, "worker_reassigned", actor)? {
                 execution.worker_dod_ids = Some(dod_ids);
             }
         }
