@@ -7,7 +7,7 @@ worker-undelivered alerts. They are `User`/`System` messages authored as
 
 ## The typed signal
 
-`messages.kind` (migration `268_message_kind`, model `MessageKind` in
+`messages.kind` (migration `273_message_kind`, model `MessageKind` in
 `backend/src/models/discussions.rs`) is `orchestration` when the orchestrator
 posted the message. It is set where the backend posts: `orchestrator_message()`
 and `build_control_offer_message()` in `api/orchestration.rs` (which also covers

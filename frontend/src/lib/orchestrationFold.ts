@@ -37,6 +37,10 @@ const QUESTION_FENCE = /^[ \t]*```+[ \t]*kronn-question\b/m;
 /** The campaign parked on a human: `orch-campaign-gate:{run}:{exec}:awaiting:{n}`.
  *  Its release (`:resumed:`) asks nothing and folds like any other post. */
 const HUMAN_GATE_ID = /^orch-campaign-gate:[^:]*:[^:]*:awaiting:/;
+/** Generated notices that ask a person to decide: an escalation, an exhausted
+ * provider quota, disk pressure, a refused integration, a worker that left
+ * without delivering, a review waiting too long. */
+const HUMAN_DECISION_ID = /^(orch-escalation|provider-quota-escalation|orch-disk-pressure|orch-integration-refused|orch-worker-undelivered|orch-principal-timeout):/;
 
 /**
  * A message that needs the user's action is never hidden: a question card, a
@@ -49,6 +53,7 @@ export function requiresUserAction(
 ): boolean {
   return QUESTION_FENCE.test(message.content)
     || HUMAN_GATE_ID.test(message.id)
+    || HUMAN_DECISION_ID.test(message.id)
     || hasActions(message.id);
 }
 

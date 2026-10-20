@@ -145,4 +145,25 @@ describe('requiresUserAction', () => {
     expect(requiresUserAction(mk('x', { content: '```kronn-question\n{}\n```' }))).toBe(true);
     expect(requiresUserAction(mk('orch-campaign-gate:r:e:awaiting:2'))).toBe(true);
   });
+
+  it('keeps every generated notice that asks a person to decide', () => {
+    for (const id of [
+      'orch-escalation:exec-1:7',
+      'provider-quota-escalation:job-1',
+      'orch-disk-pressure:now',
+      'orch-integration-refused:exec-1:2',
+      'orch-worker-undelivered:exec-1',
+      'orch-principal-timeout:exec-1:review_wait_timeout:job',
+    ]) {
+      expect(requiresUserAction(orch(id)), id).toBe(true);
+    }
+  });
+
+  it('never folds an escalation into a run', () => {
+    const items = groupMessagesWithToolFold([
+      orch('orch-dispatch:a'), orch('orch-escalation:exec-1:7'), orch('orch-dispatch:b'),
+    ]);
+    const folded = foldOrchestrationRuns(items, { hide: true, expandedRunIds: new Set() });
+    expect(folded.some(item => 'msg' in item && item.msg.id === 'orch-escalation:exec-1:7')).toBe(true);
+  });
 });
