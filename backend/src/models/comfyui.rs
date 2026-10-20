@@ -60,6 +60,31 @@ pub struct ComfyUiStatus {
     /// verified; elsewhere the card links to the official download page.
     pub install_command: Option<String>,
     pub download_url: String,
+    /// Models the card offers to download (KT-1385).
+    pub suggestions: Vec<ComfyUiSuggestion>,
+}
+
+/// One suggested model, as the card shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+pub struct ComfyUiSuggestion {
+    pub id: String,
+    pub family: ComfyFamily,
+    pub modality: MediaModality,
+    /// Total size of its files, as the source serves them.
+    #[ts(type = "number")]
+    pub bytes: u64,
+    /// Every file is already in ComfyUI.
+    pub installed: bool,
+    /// Kronn can write into ComfyUI's model folders from here (a native
+    /// install; not from Docker, where those paths are the host's).
+    pub downloadable: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct PullComfyUiModelRequest {
+    pub suggestion: String,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]

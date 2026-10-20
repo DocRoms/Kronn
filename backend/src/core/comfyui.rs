@@ -79,6 +79,77 @@ pub const WAN_TEXT_ENCODERS: &[&str] = &[
 ];
 pub const WAN_VAES: &[&str] = &["wan_2.1_vae.safetensors"];
 
+/// One file of a suggested download, with the exact size the source serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SuggestedFile {
+    pub folder: &'static str,
+    pub file: &'static str,
+    pub url: &'static str,
+    pub bytes: u64,
+}
+
+/// A model the ComfyUI card offers to download, like the Ollama suggestions:
+/// each one measured on 2026-10-19 (docs/research/comfyui-local-media-2026-10-19.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Suggestion {
+    pub id: &'static str,
+    pub family: ComfyFamily,
+    pub files: &'static [SuggestedFile],
+}
+
+impl Suggestion {
+    pub fn bytes(&self) -> u64 {
+        self.files.iter().map(|file| file.bytes).sum()
+    }
+}
+
+pub const SUGGESTIONS: &[Suggestion] = &[
+    Suggestion {
+        id: "realvisxl-v5",
+        family: ComfyFamily::Sdxl,
+        files: &[SuggestedFile {
+            folder: IMAGE_FOLDER,
+            file: "RealVisXL_V5.0_fp16.safetensors",
+            url: "https://huggingface.co/SG161222/RealVisXL_V5.0/resolve/main/RealVisXL_V5.0_fp16.safetensors",
+            bytes: 6_938_065_488,
+        }],
+    },
+    Suggestion {
+        id: "flux1-schnell-fp8",
+        family: ComfyFamily::FluxSchnell,
+        files: &[SuggestedFile {
+            folder: IMAGE_FOLDER,
+            file: "flux1-schnell-fp8.safetensors",
+            url: "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/flux1-schnell-fp8.safetensors",
+            bytes: 17_236_328_572,
+        }],
+    },
+    Suggestion {
+        id: "wan21-t2v-1.3b",
+        family: ComfyFamily::Wan21T2v,
+        files: &[
+            SuggestedFile {
+                folder: VIDEO_FOLDER,
+                file: "wan2.1_t2v_1.3B_fp16.safetensors",
+                url: "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
+                bytes: 2_838_303_560,
+            },
+            SuggestedFile {
+                folder: TEXT_ENCODER_FOLDER,
+                file: "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                url: "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                bytes: 6_735_906_897,
+            },
+            SuggestedFile {
+                folder: VAE_FOLDER,
+                file: "wan_2.1_vae.safetensors",
+                url: "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+                bytes: 253_815_318,
+            },
+        ],
+    },
+];
+
 /// RealVisXL's own recommended negative prompt, plus the terms that kept the
 /// render photographic in the 2026-10-19 runs.
 const SDXL_NEGATIVE: &str =
@@ -503,6 +574,35 @@ mod tests {
             9
         )
         .is_err());
+    }
+
+    /// Every suggestion is a model Kronn can run once downloaded: its main
+    /// file belongs to the family it claims, in the right folder.
+    #[test]
+    fn every_suggestion_downloads_a_model_kronn_can_run() {
+        for suggestion in SUGGESTIONS {
+            let main = suggestion.files[0];
+            assert_eq!(
+                family_of(main.folder, main.file, None),
+                Some(suggestion.family),
+                "{}",
+                suggestion.id
+            );
+            assert!(suggestion
+                .files
+                .iter()
+                .all(|file| file.url.starts_with("https://huggingface.co/")));
+            assert!(suggestion.bytes() > 0);
+        }
+        let wan = SUGGESTIONS
+            .iter()
+            .find(|s| s.family == ComfyFamily::Wan21T2v)
+            .unwrap();
+        let folders: Vec<&str> = wan.files.iter().map(|file| file.folder).collect();
+        assert_eq!(folders, [VIDEO_FOLDER, TEXT_ENCODER_FOLDER, VAE_FOLDER]);
+        assert!(
+            WAN_TEXT_ENCODERS.contains(&wan.files[1].file) && WAN_VAES.contains(&wan.files[2].file)
+        );
     }
 
     #[test]

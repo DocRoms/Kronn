@@ -2207,7 +2207,29 @@ video_blocker: string | null,
  * The one-command install for this OS, only where it was run and
  * verified; elsewhere the card links to the official download page.
  */
-install_command: string | null, download_url: string, };
+install_command: string | null, download_url: string,
+/**
+ * Models the card offers to download (KT-1385).
+ */
+suggestions: Array<ComfyUiSuggestion>, };
+
+/**
+ * One suggested model, as the card shows it.
+ */
+export type ComfyUiSuggestion = { id: string, family: ComfyFamily, modality: MediaModality,
+/**
+ * Total size of its files, as the source serves them.
+ */
+bytes: number,
+/**
+ * Every file is already in ComfyUI.
+ */
+installed: boolean,
+/**
+ * Kronn can write into ComfyUI's model folders from here (a native
+ * install; not from Docker, where those paths are the host's).
+ */
+downloadable: boolean, };
 
 /**
  * A remark on a question that is not a decision: it reaches the asker and
@@ -7334,6 +7356,8 @@ export type PublishProjectRepositoryResourceRequest = { kind: ProjectRepositoryR
  * Required when the repository side also moved since the baseline.
  */
 overwrite_repository_changes?: boolean, };
+
+export type PullComfyUiModelRequest = { suggestion: string, };
 
 /**
  * The sole accepted input for a local Ollama pull.  The endpoint never

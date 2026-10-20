@@ -3,9 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApiMock } from '../../../test/apiMock';
 import type { ComfyUiStatus } from '../../../types/generated';
 
-const { status, setSlots } = vi.hoisted(() => ({ status: vi.fn(), setSlots: vi.fn() }));
+const { status, setSlots, pull } = vi.hoisted(() => ({ status: vi.fn(), setSlots: vi.fn(), pull: vi.fn() }));
 vi.mock('../../../lib/api', () => buildApiMock({
-  comfyui: { status: status as never, setSlots: setSlots as never },
+  comfyui: { status: status as never, setSlots: setSlots as never, pull: pull as never },
 }));
 import { ComfyUiCard } from '../ComfyUiCard';
 
@@ -22,6 +22,7 @@ function online(patch: Partial<ComfyUiStatus> = {}): ComfyUiStatus {
     ],
     image_model: null, video_model: null, video_blocker: null,
     install_command: 'brew install --cask comfy', download_url: 'https://www.comfy.org/download',
+    suggestions: [],
     ...patch,
   };
 }
@@ -29,6 +30,7 @@ function online(patch: Partial<ComfyUiStatus> = {}): ComfyUiStatus {
 beforeEach(() => {
   status.mockReset();
   setSlots.mockReset();
+  pull.mockReset();
 });
 afterEach(cleanup);
 
@@ -73,5 +75,35 @@ describe('ComfyUiCard (KT-1381)', () => {
     const video = screen.getByTestId('comfyui-slot-video');
     fireEvent.focus(video);
     expect(screen.queryByRole('option', { name: /RealVisXL/ })).not.toBeInTheDocument();
+  });
+
+  // KT-1385 — suggested models download from the card, like Ollama's.
+  it('downloads a suggestion with progress and reads the state again when done', async () => {
+    const suggestions = [
+      { id: 'realvisxl-v5', family: 'sdxl', modality: 'image', bytes: 6_938_065_488, installed: true, downloadable: true },
+      { id: 'wan21-t2v-1.3b', family: 'wan21_t2v', modality: 'video', bytes: 9_828_025_775, installed: false, downloadable: true },
+    ] as ComfyUiStatus['suggestions'];
+    status.mockResolvedValue(online({ suggestions }));
+    let handlers: { onProgress: (p: unknown) => void; onSuccess: () => void } | null = null;
+    pull.mockImplementation((_id: string, h: typeof handlers) => { handlers = h; return Promise.resolve(); });
+    await act(async () => { render(<ComfyUiCard t={t} />); });
+
+    expect(screen.getByTestId('comfyui-suggestion-realvisxl-v5')).toHaveTextContent('comfyui.installed');
+    expect(screen.queryByTestId('comfyui-pull-realvisxl-v5')).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByTestId('comfyui-pull-wan21-t2v-1.3b')); });
+    expect(pull).toHaveBeenCalledWith('wan21-t2v-1.3b', expect.anything(), expect.any(AbortSignal));
+    await act(async () => { handlers!.onProgress({ status: 'downloading', completed: 4_000_000_000, total: 9_828_025_775 }); });
+    expect(screen.getByRole('status')).toHaveTextContent('4 GB');
+    await act(async () => { handlers!.onSuccess(); });
+    await waitFor(() => expect(status).toHaveBeenCalledTimes(2));
+  });
+
+  it('points to Hugging Face when Kronn cannot write into ComfyUI from here', async () => {
+    status.mockResolvedValue(online({
+      suggestions: [{ id: 'flux1-schnell-fp8', family: 'flux_schnell', modality: 'image', bytes: 17_236_328_572, installed: false, downloadable: false }] as ComfyUiStatus['suggestions'],
+    }));
+    await act(async () => { render(<ComfyUiCard t={t} />); });
+    expect(screen.getByTestId('comfyui-suggestion-flux1-schnell-fp8')).toHaveTextContent('comfyui.notDownloadable');
+    expect(screen.queryByTestId('comfyui-pull-flux1-schnell-fp8')).toBeNull();
   });
 });

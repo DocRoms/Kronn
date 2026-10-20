@@ -3394,7 +3394,56 @@ export const comfyui = {
   setSlots: (body: SetComfyUiSlotsRequest) => api<ComfyUiConfig>('PUT', '/comfyui/slots', body),
   /** The local media source, shaped like a connection, or null without a slot. */
   source: () => api<ExternalApiConnection | null>('GET', '/comfyui/source'),
+  /** KT-1385 — download a suggested model into ComfyUI's model folders, with
+   *  the Ollama pull contract: `progress` events, then `success` or `error`.
+   *  Aborting the signal stops it; the partial file resumes next time. */
+  pull: (
+    suggestion: string,
+    handlers: {
+      onProgress: (progress: ComfyUiPullProgress) => void;
+      onSuccess: () => void;
+      onError: (message: string) => void;
+    },
+    signal: AbortSignal,
+  ) => {
+    let terminal = false;
+    return fetchAndParseSSE(`${_apiBase}/api/comfyui/pull`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ suggestion }),
+      signal,
+    }, {
+      onEvent: (type, data) => {
+        const event = (data && typeof data === 'object' ? data : {}) as Partial<ComfyUiPullProgress> & { message?: unknown };
+        if (type === 'progress' && typeof event.status === 'string') {
+          handlers.onProgress(event as ComfyUiPullProgress);
+        } else if (type === 'success') {
+          terminal = true;
+          handlers.onSuccess();
+        } else {
+          terminal = true;
+          handlers.onError(typeof event.message === 'string' ? event.message : 'The download stopped with an unreadable update.');
+        }
+      },
+      onDone: () => {
+        if (!terminal && !signal.aborted) {
+          terminal = true;
+          handlers.onError('The download connection closed before completion. Please try again.');
+        }
+      },
+      onError: message => {
+        terminal = true;
+        handlers.onError(message);
+      },
+    });
+  },
 };
+
+export interface ComfyUiPullProgress {
+  status: string;
+  completed: number;
+  total: number;
+}
 
 export const ollama = {
   health: () => api<OllamaHealthResponse>('GET', '/ollama/health'),

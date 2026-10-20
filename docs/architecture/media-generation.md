@@ -433,5 +433,12 @@ the provider handle, `/history/<id>` is polled, and the file is fetched from
 `/view` on the configured origin. A local job stores no cost, so it never
 enters an estimate or the spend; the Creator form says it costs nothing.
 Source images are not taken yet. Measurements: `docs/research/comfyui-local-media-2026-10-19.md`.
+
+The card also offers measured models to download (RealVisXL V5, FLUX.1
+schnell, the Wan 2.1 1.3B pack), like the Ollama suggestions. Files go to the
+first model folder ComfyUI itself reports (`/internal/folder_paths`), as
+`<name>.part`, resumed with a Range request and renamed only once their size
+matches the source; disk space is checked first. From Docker those folders
+are the host's, so the card only links to Hugging Face.
 [src: file: backend/src/agents/media_codec.rs:580-586#ComfyUiMediaCodec]
 [src: file: backend/src/agents/media_runner.rs:767-812#advance_local_comfyui]

@@ -26442,6 +26442,20 @@ async fn comfyui_status_reports_models_and_slots_refuse_the_wrong_kind() {
             .contains("wan_2.1_vae"),
         "{data}"
     );
+    // Suggestions: RealVisXL is already there; nothing is downloadable since
+    // this ComfyUI reports no model folder Kronn can write into.
+    let suggestion = |id: &str| {
+        data["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(suggestion("realvisxl-v5")["installed"], true);
+    assert_eq!(suggestion("flux1-schnell-fp8")["installed"], false);
+    assert_eq!(suggestion("wan21-t2v-1.3b")["downloadable"], false);
 
     let put = |body: serde_json::Value| {
         let app = app.clone();
