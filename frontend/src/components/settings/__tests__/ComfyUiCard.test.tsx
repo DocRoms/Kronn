@@ -79,6 +79,18 @@ describe('ComfyUiCard (KT-1381)', () => {
     }));
   });
 
+  it('tells the media surfaces to re-read the local source after a save', async () => {
+    status.mockResolvedValue(online());
+    setSlots.mockResolvedValue({ image_model: 'RealVisXL_V5.0_fp16.safetensors', video_model: null });
+    const announced = vi.fn();
+    window.addEventListener('kronn:comfyui-changed', announced);
+    await act(async () => { render(<ComfyUiCard t={t} />); });
+    fireEvent.focus(screen.getByTestId('comfyui-slot-image'));
+    await act(async () => { fireEvent.click(screen.getByRole('option', { name: /RealVisXL/ })); });
+    await waitFor(() => expect(announced).toHaveBeenCalledTimes(1));
+    window.removeEventListener('kronn:comfyui-changed', announced);
+  });
+
   it('lists only video models in the Video picker and says what a chosen one still lacks', async () => {
     status.mockResolvedValue(online({
       video_model: 'wan2.1_t2v_1.3B_fp16.safetensors',

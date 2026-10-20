@@ -62,6 +62,11 @@ function choiceOptions(choices: string[], current: string) {
   return options;
 }
 
+/** Tells the media surfaces to re-read the local source. */
+function announceChange() {
+  window.dispatchEvent(new Event('kronn:comfyui-changed'));
+}
+
 function formatGigabytes(bytes: number): string {
   return `${(bytes / 1_000_000_000).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB`;
 }
@@ -106,6 +111,7 @@ export function ComfyUiCard({ t }: ComfyUiCardProps) {
         video_model: modality === 'video' ? value : status.video_model,
       });
       setStatus(current => current && { ...current, image_model: saved.image_model ?? null, video_model: saved.video_model ?? null });
+      announceChange();
       // The video row says what the newly chosen model still lacks.
       if (modality === 'video') void refresh();
     } catch (e) {
@@ -163,6 +169,7 @@ export function ComfyUiCard({ t }: ComfyUiCardProps) {
         video_settings: slotSettings(shown.video),
       });
       setDraft(null);
+      announceChange();
       await refresh();
     } catch (e) {
       setSettingsError(e instanceof Error ? e.message : String(e));
@@ -178,6 +185,7 @@ export function ComfyUiCard({ t }: ComfyUiCardProps) {
     setError(null);
     try {
       await comfyui.setModelFamily({ folder: model.folder, file: model.file, family });
+      announceChange();
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

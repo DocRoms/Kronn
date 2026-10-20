@@ -84,8 +84,11 @@ pub const WAN_VAES: &[&str] = &["wan_2.1_vae.safetensors"];
 pub struct SuggestedFile {
     pub folder: &'static str,
     pub file: &'static str,
+    /// Pinned to a revision, so the bytes cannot change under the hash.
     pub url: &'static str,
     pub bytes: u64,
+    /// SHA-256 of the file, as Hugging Face's LFS pointer declares it.
+    pub sha256: &'static str,
 }
 
 /// A model the ComfyUI card offers to download, like the Ollama suggestions:
@@ -110,8 +113,9 @@ pub const SUGGESTIONS: &[Suggestion] = &[
         files: &[SuggestedFile {
             folder: IMAGE_FOLDER,
             file: "RealVisXL_V5.0_fp16.safetensors",
-            url: "https://huggingface.co/SG161222/RealVisXL_V5.0/resolve/main/RealVisXL_V5.0_fp16.safetensors",
+            url: "https://huggingface.co/SG161222/RealVisXL_V5.0/resolve/ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc/RealVisXL_V5.0_fp16.safetensors",
             bytes: 6_938_065_488,
+            sha256: "6a35a7855770ae9820a3c931d4964c3817b6d9e3c6f9c4dabb5b3a94e5643b80",
         }],
     },
     Suggestion {
@@ -120,8 +124,9 @@ pub const SUGGESTIONS: &[Suggestion] = &[
         files: &[SuggestedFile {
             folder: IMAGE_FOLDER,
             file: "flux1-schnell-fp8.safetensors",
-            url: "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/flux1-schnell-fp8.safetensors",
+            url: "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/c2b683ea00713d6feadcd54b39e3725bbc78638b/flux1-schnell-fp8.safetensors",
             bytes: 17_236_328_572,
+            sha256: "ead426278b49030e9da5df862994f25ce94ab2ee4df38b556ddddb3db093bf72",
         }],
     },
     Suggestion {
@@ -131,20 +136,23 @@ pub const SUGGESTIONS: &[Suggestion] = &[
             SuggestedFile {
                 folder: VIDEO_FOLDER,
                 file: "wan2.1_t2v_1.3B_fp16.safetensors",
-                url: "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
+                url: "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/123acf1cc74bccbb9bfff8ac1ee72edc08c2341d/split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
                 bytes: 2_838_303_560,
+                sha256: "be531024cd9018cb5b48c40cfbb6a6191645b1c792eb8bf4f8c1c6e10f924dc5",
             },
             SuggestedFile {
                 folder: TEXT_ENCODER_FOLDER,
                 file: "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-                url: "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                url: "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/123acf1cc74bccbb9bfff8ac1ee72edc08c2341d/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
                 bytes: 6_735_906_897,
+                sha256: "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68",
             },
             SuggestedFile {
                 folder: VAE_FOLDER,
                 file: "wan_2.1_vae.safetensors",
-                url: "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors",
+                url: "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/123acf1cc74bccbb9bfff8ac1ee72edc08c2341d/split_files/vae/wan_2.1_vae.safetensors",
                 bytes: 253_815_318,
+                sha256: "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",
             },
         ],
     },
@@ -485,9 +493,42 @@ pub fn parse_history(prompt_id: &str, body: &str) -> Result<HistoryState> {
         }
     }
     if files.is_empty() {
-        bail!("ComfyUI finished the job but reported no output file");
+        // Settled now: polling again would only wait for the deadline.
+        return Ok(HistoryState::Failed(
+            "ComfyUI finished the job but saved no output file: the workflow \
+             has no save node, or it saved to a temporary folder"
+                .into(),
+        ));
     }
     Ok(HistoryState::Completed(files))
+}
+
+/// Whether ComfyUI's `/queue` (`queue_running` and `queue_pending`, items
+/// `[number, prompt_id, …]`) still holds a prompt, and whether it is the one
+/// running.
+pub fn queue_position(prompt_id: &str, body: &str) -> Result<QueuePosition> {
+    let value: Value = serde_json::from_str(body)?;
+    let holds = |field: &str| {
+        value[field]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|item| item[1].as_str() == Some(prompt_id))
+    };
+    Ok(if holds("queue_running") {
+        QueuePosition::Running
+    } else if holds("queue_pending") {
+        QueuePosition::Pending
+    } else {
+        QueuePosition::Absent
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuePosition {
+    Running,
+    Pending,
+    Absent,
 }
 
 /// Where a produced file is fetched, on the configured ComfyUI itself.
@@ -806,5 +847,46 @@ mod tests {
             view_url("http://127.0.0.1:8188/", &file).unwrap(),
             "http://127.0.0.1:8188/view?filename=kronn+image_00001_.png&subfolder=video&type=output"
         );
+    }
+
+    #[test]
+    fn a_finished_job_without_output_is_a_failure_and_the_queue_is_read() {
+        let finished = r#"{"p": {"outputs": {}, "status": {"status_str": "success", "completed": true, "messages": []}}}"#;
+        match parse_history("p", finished).unwrap() {
+            HistoryState::Failed(message) => {
+                assert!(message.contains("no output file"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+        let queue =
+            r#"{"queue_running": [[1, "a", {}, {}, []]], "queue_pending": [[2, "b", {}, {}, []]]}"#;
+        assert_eq!(queue_position("a", queue).unwrap(), QueuePosition::Running);
+        assert_eq!(queue_position("b", queue).unwrap(), QueuePosition::Pending);
+        assert_eq!(queue_position("c", queue).unwrap(), QueuePosition::Absent);
+    }
+
+    /// Review — whatever a hostile `/history` names, the file is asked of
+    /// the configured ComfyUI's `/view`, its names only as encoded query
+    /// values: never another host, never a path.
+    #[test]
+    fn a_hostile_history_only_ever_reaches_view_on_the_configured_origin() {
+        let base = "http://127.0.0.1:8188";
+        let history = r#"{"p": {"status": {"status_str": "success", "completed": true, "messages": []},
+            "outputs": {"9": {"images": [
+                {"filename": "http://evil.example/x.png", "subfolder": "../../..", "type": "output"},
+                {"filename": "secret.png", "subfolder": "", "type": "temp"}
+            ]}}}}"#;
+        let HistoryState::Completed(files) = parse_history("p", history).unwrap() else {
+            panic!("completed");
+        };
+        // A temporary file is never offered.
+        assert_eq!(files.len(), 1);
+        let url = reqwest::Url::parse(&view_url(base, &files[0]).unwrap()).unwrap();
+        assert_eq!(url.origin(), reqwest::Url::parse(base).unwrap().origin());
+        assert_eq!(url.path(), "/view");
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query["filename"], "http://evil.example/x.png");
+        assert_eq!(query["subfolder"], "../../..");
+        assert_eq!(query["type"], "output");
     }
 }

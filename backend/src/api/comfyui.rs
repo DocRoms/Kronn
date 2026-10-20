@@ -61,6 +61,99 @@ fn client(timeout: Duration) -> reqwest::Client {
         .unwrap_or_default()
 }
 
+/// Whether ComfyUI still holds a submitted prompt, in its history or its
+/// queue. `false` means it was lost (ComfyUI restarted, or its queue was
+/// cleared): no poll will ever see it finish.
+pub async fn prompt_known(base: &str, prompt_id: &str) -> anyhow::Result<bool> {
+    let in_history = || async {
+        let body = client(LIST_TIMEOUT)
+            .get(format!("{base}/history/{prompt_id}"))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        anyhow::Ok(
+            serde_json::from_str::<Value>(&body)?
+                .get(prompt_id)
+                .is_some(),
+        )
+    };
+    if in_history().await? {
+        return Ok(true);
+    }
+    let queue = client(LIST_TIMEOUT)
+        .get(format!("{base}/queue"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    if crate::core::comfyui::queue_position(prompt_id, &queue)?
+        != crate::core::comfyui::QueuePosition::Absent
+    {
+        return Ok(true);
+    }
+    // It may have finished between the two reads.
+    in_history().await
+}
+
+/// Stops a prompt Kronn gave up on: removed from the queue, interrupted if
+/// it is the one rendering, so the GPU is not kept busy for nothing.
+pub async fn abandon_prompt(base: &str, prompt_id: &str) -> anyhow::Result<()> {
+    let http = client(LIST_TIMEOUT);
+    let queue = http
+        .get(format!("{base}/queue"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    match crate::core::comfyui::queue_position(prompt_id, &queue)? {
+        crate::core::comfyui::QueuePosition::Pending => {
+            http.post(format!("{base}/queue"))
+                .json(&serde_json::json!({ "delete": [prompt_id] }))
+                .send()
+                .await?
+                .error_for_status()?;
+        }
+        // `/interrupt` stops whatever runs; it is ours, checked just above.
+        crate::core::comfyui::QueuePosition::Running => {
+            http.post(format!("{base}/interrupt"))
+                .send()
+                .await?
+                .error_for_status()?;
+        }
+        crate::core::comfyui::QueuePosition::Absent => {}
+    }
+    Ok(())
+}
+
+/// After a job was cancelled or timed out: if it ran on the local ComfyUI,
+/// stop it there. Best effort, the job is already settled.
+pub async fn release_local_job(state: &AppState, job_id: &str) {
+    let id = job_id.to_string();
+    let job = match state
+        .db
+        .with_read_conn(move |conn| crate::db::media_jobs::get(conn, &id))
+        .await
+    {
+        Ok(Some(job)) => job,
+        _ => return,
+    };
+    let Some(handle) = job
+        .provider_job_id
+        .as_deref()
+        .filter(|handle| !handle.is_empty() && job.connection_id == CONNECTION_ID)
+    else {
+        return;
+    };
+    let base = base_url(&state.config.read().await.comfyui);
+    if let Err(e) = abandon_prompt(&base, handle).await {
+        tracing::warn!(job = %job_id, error = %e, "could not stop the abandoned ComfyUI job");
+    }
+}
+
 /// ComfyUI's version when its server answers, else `None`.
 pub async fn probe_version(base: &str) -> Option<String> {
     let body: Value = client(PROBE_TIMEOUT)
@@ -298,7 +391,10 @@ pub async fn status(State(state): State<AppState>) -> Json<ApiResponse<ComfyUiSt
             .err()
             .map(|error| error.to_string());
     }
-    status.suggestions = suggestion_views(&installed_files(&base).await, downloadable(&base).await);
+    status.suggestions = suggestion_views(
+        &installed_files(&base).await,
+        downloadable(&base, &config).await,
+    );
     (status.samplers, status.schedulers) = sampler_choices(&base).await;
     Json(ApiResponse::ok(status))
 }
@@ -347,8 +443,45 @@ fn suggestion_views(installed: &[(String, String)], downloadable: bool) -> Vec<C
 /// The directory ComfyUI reads `folder` from, as it reports it
 /// (`/internal/folder_paths`): the first one that exists on this machine.
 /// `None` from Docker, where those are the host's paths.
-async fn model_dir(base: &str, folder: &str) -> Option<PathBuf> {
-    if crate::core::env::is_docker() {
+/// Whether the address is this machine: only then are the folders ComfyUI
+/// reports folders of this disk.
+fn is_loopback(base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base) else {
+        return false;
+    };
+    match url.host_str() {
+        Some(host) if host.eq_ignore_ascii_case("localhost") => true,
+        Some(host) => host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+        None => false,
+    }
+}
+
+/// The first folder ComfyUI reports for `folder` that is a real directory
+/// inside the install folder, symlinks resolved. Anything else, a folder
+/// elsewhere on the disk included, is never written to.
+fn confined_model_dir(
+    paths: &Value,
+    folder: &str,
+    install_root: &std::path::Path,
+) -> Option<PathBuf> {
+    let root = install_root.canonicalize().ok()?;
+    paths[folder]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|dir| std::path::Path::new(dir).canonicalize().ok())
+        .find(|dir| dir.is_dir() && dir.starts_with(&root))
+}
+
+/// Where a model of `folder` is downloaded, if Kronn may write it: a
+/// ComfyUI on this machine (not Docker, whose paths are the host's) and a
+/// folder inside the configured install folder.
+async fn model_dir(base: &str, config: &ComfyUiConfig, folder: &str) -> Option<PathBuf> {
+    if crate::core::env::is_docker() || !is_loopback(base) {
         return None;
     }
     let paths: Value = client(LIST_TIMEOUT)
@@ -361,16 +494,11 @@ async fn model_dir(base: &str, folder: &str) -> Option<PathBuf> {
         .json()
         .await
         .ok()?;
-    paths[folder]
-        .as_array()?
-        .iter()
-        .filter_map(Value::as_str)
-        .map(PathBuf::from)
-        .find(|dir| dir.is_dir())
+    confined_model_dir(&paths, folder, &install_dir(config))
 }
 
-async fn downloadable(base: &str) -> bool {
-    model_dir(base, IMAGE_FOLDER).await.is_some()
+async fn downloadable(base: &str, config: &ComfyUiConfig) -> bool {
+    model_dir(base, config, IMAGE_FOLDER).await.is_some()
 }
 
 type PullStream =
@@ -407,7 +535,8 @@ pub async fn pull(
     else {
         return pull_error(format!("unknown suggestion {}", request.suggestion));
     };
-    let base = base_url(&state.config.read().await.comfyui);
+    let config = state.config.read().await.comfyui.clone();
+    let base = base_url(&config);
     if probe_version(&base).await.is_none() {
         return pull_error(format!(
             "ComfyUI does not answer on {base}: start it, then retry."
@@ -422,14 +551,19 @@ pub async fn pull(
         {
             continue;
         }
-        let Some(dir) = model_dir(&base, file.folder).await else {
+        let Some(dir) = model_dir(&base, &config, file.folder).await else {
             return pull_error(
-                "Kronn cannot write into ComfyUI's model folders from here \
-                 (Docker, or ComfyUI reported none): download the files from Hugging Face instead.",
+                "Kronn writes models only into a ComfyUI running on this machine, inside its \
+                 install folder: download the files from Hugging Face instead.",
             );
         };
         plan.push((*file, dir));
     }
+    // One download per file at a time: two writers on one `.part` corrupt it.
+    let Some(lease) = PullLease::take(plan.iter().map(|(file, dir)| dir.join(file.file)).collect())
+    else {
+        return pull_error("This model is already downloading.");
+    };
     let total: u64 = plan.iter().map(|(file, _)| file.bytes).sum();
     let already: u64 = plan
         .iter()
@@ -446,6 +580,7 @@ pub async fn pull(
         }
     }
     let stream: PullStream = Box::pin(async_stream::stream! {
+        let _lease = lease;
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .build()
@@ -476,7 +611,13 @@ pub async fn pull(
                     return;
                 }
             }
-            if let Err(message) = finish_file(&part, &target, file.bytes) {
+            let checked = {
+                let (part, target) = (part.clone(), target.clone());
+                tokio::task::spawn_blocking(move || finish_file(&part, &target, file.bytes, file.sha256))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("checking {} failed: {e}", file.file)))
+            };
+            if let Err(message) = checked {
                 yield pull_event("error", serde_json::json!({ "message": message }));
                 return;
             }
@@ -495,10 +636,44 @@ fn part_len(part: &std::path::Path) -> u64 {
     std::fs::metadata(part).map(|meta| meta.len()).unwrap_or(0)
 }
 
+static PULLING: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Holds the target files of one download; released when it ends, however.
+struct PullLease(Vec<PathBuf>);
+
+impl PullLease {
+    fn take(targets: Vec<PathBuf>) -> Option<Self> {
+        let mut pulling = PULLING.lock().unwrap_or_else(|e| e.into_inner());
+        if targets.iter().any(|target| pulling.contains(target)) {
+            return None;
+        }
+        pulling.extend(targets.iter().cloned());
+        Some(Self(targets))
+    }
+}
+
+impl Drop for PullLease {
+    fn drop(&mut self) {
+        let mut pulling = PULLING.lock().unwrap_or_else(|e| e.into_inner());
+        pulling.retain(|target| !self.0.contains(target));
+    }
+}
+
+/// The start of a `Content-Range: bytes <start>-<end>/<total>` answer, if it
+/// matches the expected file.
+fn range_start(header: Option<&str>, expected_total: u64) -> Option<u64> {
+    let (range, total) = header?.strip_prefix("bytes ")?.split_once('/')?;
+    if total.trim().parse::<u64>().ok()? != expected_total {
+        return None;
+    }
+    range.split_once('-')?.0.trim().parse().ok()
+}
+
 type ByteProgress = std::pin::Pin<Box<dyn futures::Stream<Item = Result<u64, String>> + Send>>;
 
 /// Streams one file into its `.part`, resuming from what is already there.
-/// Yields the bytes done across the whole pull, at most every ~1 %.
+/// Yields the bytes done across the whole pull, at most every ~1 %. Never
+/// writes past the file's size.
 async fn download_file(
     http: &reqwest::Client,
     file: &crate::core::comfyui::SuggestedFile,
@@ -508,7 +683,11 @@ async fn download_file(
     done_before: u64,
 ) -> Result<ByteProgress, String> {
     use tokio::io::AsyncWriteExt;
-    let resume_from = part_len(part).min(file.bytes);
+    // Longer than the file: not this file, start over.
+    if part_len(part) > file.bytes {
+        std::fs::remove_file(part).map_err(|e| format!("cannot reset {}: {e}", part.display()))?;
+    }
+    let resume_from = part_len(part);
     if resume_from == file.bytes {
         return Ok(Box::pin(futures::stream::once(async move {
             Ok(done_before + resume_from)
@@ -526,8 +705,25 @@ async fn download_file(
     if !status.is_success() {
         return Err(format!("download of {} answered HTTP {status}", file.file));
     }
-    // A server that ignored the range sends the whole file again.
+    // A server that ignored the range sends the whole file again; a range
+    // that does not start where the `.part` ends would splice two files.
     let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT;
+    if resumed {
+        let start = range_start(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok()),
+            file.bytes,
+        );
+        if start != Some(resume_from) {
+            let _ = std::fs::remove_file(part);
+            return Err(format!(
+                "the source of {} resumed at the wrong place; the partial file was removed, retry",
+                file.file
+            ));
+        }
+    }
     let mut out = tokio::fs::OpenOptions::new()
         .create(true)
         .append(resumed)
@@ -537,9 +733,11 @@ async fn download_file(
         .await
         .map_err(|e| format!("cannot write {}: {e}", part.display()))?;
     let mut written = if resumed { resume_from } else { 0 };
+    let cap = file.bytes;
     let step = (total / 100).max(1);
     let mut body = response.bytes_stream();
     let label = file.file;
+    let part_path = part.to_path_buf();
     Ok(Box::pin(async_stream::stream! {
         let mut last_reported = 0_u64;
         while let Some(chunk) = body.next().await {
@@ -547,6 +745,12 @@ async fn download_file(
                 Ok(chunk) => chunk,
                 Err(e) => { yield Err(format!("download of {label} stopped: {e}")); return; }
             };
+            if written + chunk.len() as u64 > cap {
+                drop(out);
+                let _ = std::fs::remove_file(&part_path);
+                yield Err(format!("the source sent more than the {cap} bytes of {label}; the partial file was removed"));
+                return;
+            }
             if let Err(e) = out.write_all(&chunk).await {
                 yield Err(format!("cannot write {label}: {e}"));
                 return;
@@ -565,12 +769,33 @@ async fn download_file(
     }))
 }
 
-/// Renames a complete `.part`, or says what came short — a wrong size never
-/// lands as a model file.
+fn sha256_of(path: &std::path::Path) -> std::io::Result<String> {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    let mut reader = std::fs::File::open(path)?;
+    let mut buffer = vec![0_u8; 1 << 20];
+    loop {
+        let read = std::io::Read::read(&mut reader, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Renames a complete `.part` whose hash matches, or says what is wrong: a
+/// short file stays to resume, a wrong one is removed. Neither lands as a
+/// model file.
 fn finish_file(
     part: &std::path::Path,
     target: &std::path::Path,
     expected: u64,
+    sha256: &str,
 ) -> Result<(), String> {
     let got = part_len(part);
     if got != expected {
@@ -579,31 +804,40 @@ fn finish_file(
             target.display()
         ));
     }
+    let digest = sha256_of(part).map_err(|e| format!("cannot check {}: {e}", part.display()))?;
+    if !digest.eq_ignore_ascii_case(sha256) {
+        let _ = std::fs::remove_file(part);
+        return Err(format!(
+            "{} does not match its published checksum; it was removed, retry the download",
+            target.display()
+        ));
+    }
     std::fs::rename(part, target).map_err(|e| format!("cannot finish {}: {e}", target.display()))
 }
 
 /// Why `file` cannot fill the `modality` slot, if it cannot: it must run
 /// with a known workflow of that kind.
-async fn slot_refusal(
+async fn slot_family(
     base: &str,
     config: &ComfyUiConfig,
     file: &str,
     modality: MediaModality,
-) -> Option<String> {
+) -> Result<ComfyFamily, String> {
     let folder = match modality {
         MediaModality::Image => IMAGE_FOLDER,
         MediaModality::Video => VIDEO_FOLDER,
     };
     match model_family(base, config, folder, file).await {
-        Some(family) if family.modality() == modality => None,
-        _ => Some(format!(
+        Some(family) if family.modality() == modality => Ok(family),
+        _ => Err(format!(
             "{file} has no {} workflow yet: choose which one runs it in the ComfyUI card",
             modality.as_str()
         )),
     }
 }
 
-/// PUT /api/comfyui/slots
+/// PUT /api/comfyui/slots — only a slot that changes is checked against
+/// ComfyUI, and the image workflow found is saved with it.
 pub async fn set_slots(
     State(state): State<AppState>,
     Json(request): Json<SetComfyUiSlotsRequest>,
@@ -612,18 +846,26 @@ pub async fn set_slots(
     let video_model = slot(&request.video_model);
     let current = state.config.read().await.comfyui.clone();
     let base = base_url(&current);
-    for (file, modality) in [
-        (image_model.as_deref(), MediaModality::Image),
-        (video_model.as_deref(), MediaModality::Video),
-    ] {
-        if let Some(file) = file {
-            if let Some(message) = slot_refusal(&base, &current, file, modality).await {
+    let mut image_family = current.image_family;
+    if image_model != slot(&current.image_model) {
+        image_family = None;
+        if let Some(file) = image_model.as_deref() {
+            match slot_family(&base, &current, file, MediaModality::Image).await {
+                Ok(family) => image_family = Some(family),
+                Err(message) => return Json(ApiResponse::err(message)),
+            }
+        }
+    }
+    if video_model != slot(&current.video_model) {
+        if let Some(file) = video_model.as_deref() {
+            if let Err(message) = slot_family(&base, &current, file, MediaModality::Video).await {
                 return Json(ApiResponse::err(message));
             }
         }
     }
     save_comfyui(&state, |comfyui| {
         comfyui.image_model = image_model;
+        comfyui.image_family = image_family;
         comfyui.video_model = video_model;
     })
     .await
@@ -724,12 +966,18 @@ pub async fn set_model_family(
     }
     let key = format!("{folder}/{file}");
     let family = request.family;
-    save_comfyui(&state, move |comfyui| match family {
-        Some(family) => {
-            comfyui.model_families.insert(key, family);
+    save_comfyui(&state, move |comfyui| {
+        match family {
+            Some(family) => {
+                comfyui.model_families.insert(key, family);
+            }
+            None => {
+                comfyui.model_families.remove(&key);
+            }
         }
-        None => {
-            comfyui.model_families.remove(&key);
+        // The image slot runs the workflow chosen here from now on.
+        if folder == IMAGE_FOLDER && slot(&comfyui.image_model).as_deref() == Some(file.as_str()) {
+            comfyui.image_family = family;
         }
     })
     .await
@@ -869,7 +1117,16 @@ mod tests {
             file: "model.safetensors",
             url: Box::leak(url.into_boxed_str()),
             bytes,
+            sha256: "",
         }
+    }
+
+    fn hex_sha256(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 
     async fn drain(mut progress: ByteProgress) -> Result<u64, String> {
@@ -881,18 +1138,24 @@ mod tests {
     }
 
     /// KT-1385 — a download lands as `.part`, resumes from it with a Range
-    /// request, and only a file of the exact size becomes the model.
+    /// request, and only a file of the exact size and checksum becomes the
+    /// model.
     #[tokio::test]
-    async fn a_download_resumes_from_its_part_and_only_a_full_file_becomes_the_model() {
+    async fn a_download_resumes_from_its_part_and_only_a_verified_file_becomes_the_model() {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let body: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let sha = hex_sha256(&body);
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/model"))
             .and(header("range", "bytes=400-"))
-            .respond_with(ResponseTemplate::new(206).set_body_bytes(body[400..].to_vec()))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 400-999/1000")
+                    .set_body_bytes(body[400..].to_vec()),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -918,24 +1181,150 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(done, 1000);
-        finish_file(&part, &target, 1000).unwrap();
+        finish_file(&part, &target, 1000, &sha).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), body);
         assert!(!part.exists());
 
         // A short file never becomes the model, and stays for the next try.
         std::fs::remove_file(&target).unwrap();
         let short = suggested(format!("{}/model", server.uri()), 2000);
-        drain(
+        let cut = drain(
             download_file(&http, &short, &part, &target, 2000, 0)
                 .await
                 .unwrap(),
         )
         .await
         .unwrap();
-        let refused = finish_file(&part, &target, 2000).unwrap_err();
+        assert_eq!(cut, 1000);
+        let refused = finish_file(&part, &target, 2000, &sha).unwrap_err();
         assert!(refused.contains("1000 bytes instead of 2000"), "{refused}");
         assert!(!target.exists());
         assert!(part.exists());
+
+        // The right size with the wrong bytes is removed, never installed.
+        std::fs::write(&part, vec![0_u8; 1000]).unwrap();
+        let corrupt = finish_file(&part, &target, 1000, &sha).unwrap_err();
+        assert!(corrupt.contains("checksum"), "{corrupt}");
+        assert!(!part.exists() && !target.exists());
+    }
+
+    /// A source that sends more than the file, a `.part` longer than the
+    /// file, or a range that does not start where the `.part` ends: nothing
+    /// is spliced or kept.
+    #[tokio::test]
+    async fn a_download_never_writes_past_the_file_nor_splices_a_wrong_range() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/model"))
+            .and(header("range", "bytes=100-"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", "bytes 0-999/1000")
+                    .set_body_bytes(vec![1_u8; 1000]),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/model"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1_u8; 1500]))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("model.safetensors.part");
+        let target = dir.path().join("model.safetensors");
+        let http = reqwest::Client::new();
+        let file = suggested(format!("{}/model", server.uri()), 1000);
+
+        // 1500 bytes for a 1000-byte file: stopped and removed.
+        let over = drain(
+            download_file(&http, &file, &part, &target, 1000, 0)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert!(over.contains("more than the 1000 bytes"), "{over}");
+        assert!(!part.exists());
+
+        // A range answer starting at 0 for a resume at 100.
+        std::fs::write(&part, vec![1_u8; 100]).unwrap();
+        let spliced = download_file(&http, &file, &part, &target, 1000, 0)
+            .await
+            .err()
+            .unwrap();
+        assert!(spliced.contains("wrong place"), "{spliced}");
+        assert!(!part.exists());
+
+        // A `.part` longer than the file is not this file: started over
+        // (and then refused for the oversized body above).
+        std::fs::write(&part, vec![1_u8; 4000]).unwrap();
+        let restarted = drain(
+            download_file(&http, &file, &part, &target, 1000, 0)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert!(restarted.contains("more than"), "{restarted}");
+    }
+
+    #[test]
+    fn one_model_file_is_downloaded_by_one_pull_at_a_time() {
+        let target = PathBuf::from("/models/checkpoints/one-pull-at-a-time.safetensors");
+        let first = PullLease::take(vec![target.clone()]).unwrap();
+        assert!(PullLease::take(vec![target.clone()]).is_none());
+        drop(first);
+        assert!(PullLease::take(vec![target]).is_some());
+    }
+
+    #[test]
+    fn downloads_go_only_into_the_install_folder_of_a_comfyui_on_this_machine() {
+        for local in [
+            "http://127.0.0.1:8188",
+            "http://localhost:8000",
+            "http://[::1]:8188",
+        ] {
+            assert!(is_loopback(local), "{local}");
+        }
+        for remote in [
+            "http://192.168.1.20:8188",
+            "https://comfy.example.com",
+            "not a url",
+        ] {
+            assert!(!is_loopback(remote), "{remote}");
+        }
+
+        let install = tempfile::tempdir().unwrap();
+        let inside = install.path().join("ComfyUI/models/checkpoints");
+        std::fs::create_dir_all(&inside).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let paths = |dirs: &[&std::path::Path]| serde_json::json!({ "checkpoints": dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>() });
+        // The first folder outside the install folder is skipped.
+        assert_eq!(
+            confined_model_dir(
+                &paths(&[elsewhere.path(), &inside]),
+                "checkpoints",
+                install.path()
+            ),
+            Some(inside.canonicalize().unwrap())
+        );
+        assert_eq!(
+            confined_model_dir(&paths(&[elsewhere.path()]), "checkpoints", install.path()),
+            None
+        );
+        // A link inside the install folder that leads out of it is out.
+        #[cfg(unix)]
+        {
+            let link = install.path().join("escape");
+            std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
+            assert_eq!(
+                confined_model_dir(&paths(&[&link]), "checkpoints", install.path()),
+                None
+            );
+        }
     }
 
     #[test]
@@ -985,50 +1374,56 @@ mod tests {
     async fn a_slot_takes_a_known_model_or_one_whose_workflow_the_user_chose() {
         let base = "http://127.0.0.1:9";
         let mut config = ComfyUiConfig::default();
-        assert!(slot_refusal(
-            base,
-            &config,
-            "RealVisXL_V5.0_fp16.safetensors",
-            MediaModality::Image
-        )
-        .await
-        .is_none());
-        assert!(slot_refusal(
+        assert_eq!(
+            slot_family(
+                base,
+                &config,
+                "RealVisXL_V5.0_fp16.safetensors",
+                MediaModality::Image
+            )
+            .await,
+            Ok(ComfyFamily::Sdxl)
+        );
+        assert_eq!(
+            slot_family(
+                base,
+                &config,
+                "wan2.1_t2v_1.3B_fp16.safetensors",
+                MediaModality::Video
+            )
+            .await,
+            Ok(ComfyFamily::Wan21T2v)
+        );
+        assert!(slot_family(
             base,
             &config,
             "wan2.1_t2v_1.3B_fp16.safetensors",
-            MediaModality::Video
-        )
-        .await
-        .is_none());
-        assert!(slot_refusal(
-            base,
-            &config,
-            "wan2.1_t2v_1.3B_fp16.safetensors",
             MediaModality::Image
         )
         .await
-        .is_some());
-        let unknown = slot_refusal(
+        .is_err());
+        let unknown = slot_family(
             base,
             &config,
             "Juggernaut-XL_v9.safetensors",
             MediaModality::Image,
         )
         .await
-        .unwrap();
+        .unwrap_err();
         assert!(unknown.contains("choose which one runs it"), "{unknown}");
         config.model_families.insert(
             "checkpoints/Juggernaut-XL_v9.safetensors".into(),
             ComfyFamily::Sdxl,
         );
-        assert!(slot_refusal(
-            base,
-            &config,
-            "Juggernaut-XL_v9.safetensors",
-            MediaModality::Image
-        )
-        .await
-        .is_none());
+        assert_eq!(
+            slot_family(
+                base,
+                &config,
+                "Juggernaut-XL_v9.safetensors",
+                MediaModality::Image
+            )
+            .await,
+            Ok(ComfyFamily::Sdxl)
+        );
     }
 }

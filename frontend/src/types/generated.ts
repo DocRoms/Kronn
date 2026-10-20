@@ -2182,6 +2182,11 @@ image_model?: string | null,
  */
 video_model?: string | null,
 /**
+ * The workflow validated when the image slot was chosen, so a job does
+ * not depend on reading the checkpoint header again.
+ */
+image_family?: ComfyFamily | null,
+/**
  * Where ComfyUI is installed, to tell "installed but stopped" from "not
  * installed"; `None` = `~/ComfyUI-Installs` (Comfy Desktop's default).
  */

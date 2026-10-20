@@ -101,6 +101,13 @@ pub trait MediaCodec: Send + Sync {
         false
     }
 
+    /// Whether submitting twice costs nothing. A lost handle on a billed
+    /// provider must not be resubmitted; a local server can simply be asked
+    /// again.
+    fn resubmit_is_free(&self) -> bool {
+        false
+    }
+
     /// Wait before the next poll. A billed provider is polled on a growing
     /// ladder; a local one is free to ask often.
     fn poll_delay(&self, attempts: u32) -> std::time::Duration {
@@ -713,6 +720,9 @@ impl MediaCodec for ComfyUiMediaCodec {
         false
     }
     fn image_is_async(&self) -> bool {
+        true
+    }
+    fn resubmit_is_free(&self) -> bool {
         true
     }
     fn poll_delay(&self, _attempts: u32) -> std::time::Duration {

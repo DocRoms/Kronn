@@ -1269,3 +1269,25 @@ async fn the_local_comfyui_connection_resides_globally_without_a_row() {
     assert_eq!(found.1, Some(Residence::Global));
     assert_eq!(found.2, None);
 }
+
+/// KT-1381 — an agent cannot repoint ComfyUI, pick its models or start a
+/// multi-gigabyte download: none of its routes accepts a bridge token.
+#[test]
+fn no_comfyui_route_accepts_a_bridge_token() {
+    for (method, pattern) in [
+        ("GET", "/api/comfyui/status"),
+        ("PUT", "/api/comfyui/slots"),
+        ("GET", "/api/comfyui/source"),
+        ("POST", "/api/comfyui/pull"),
+        ("PUT", "/api/comfyui/settings"),
+        ("PUT", "/api/comfyui/model-family"),
+    ] {
+        assert!(
+            route_for(method, pattern).is_none(),
+            "{method} {pattern} must never accept a bridge token"
+        );
+    }
+    assert!(BRIDGE_ROUTES
+        .iter()
+        .all(|route| !route.pattern.starts_with("/api/comfyui")));
+}

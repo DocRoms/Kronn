@@ -264,8 +264,13 @@ pub async fn generate(
     }
 
     let now = Utc::now();
+    let budget = if crate::api::comfyui::is_local(&connection) {
+        crate::agents::media_worker::LOCAL_DEADLINE
+    } else {
+        DEFAULT_DEADLINE
+    };
     let deadline =
-        now + chrono::Duration::from_std(DEFAULT_DEADLINE).unwrap_or(chrono::Duration::minutes(20));
+        now + chrono::Duration::from_std(budget).unwrap_or(chrono::Duration::minutes(20));
     let job_id = idempotency_key
         .map(|key| idempotent_job_id(&connection.id, key))
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -741,6 +746,7 @@ pub async fn cancel_job(
         // billed and must not be rewritten as cancelled.
         Ok(cancelled) => {
             if cancelled {
+                crate::api::comfyui::release_local_job(&state, &job_id).await;
                 // The endpoint itself publishes: relying on a caller to sync
                 // afterwards is what made the previous test a false positive.
                 if let Err(e) = crate::api::shared_runs::publish_media_job(&state, &job_id).await {

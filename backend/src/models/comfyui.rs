@@ -25,6 +25,10 @@ pub struct ComfyUiConfig {
     /// Diffusion model file used for videos (`models/diffusion_models`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_model: Option<String>,
+    /// The workflow validated when the image slot was chosen, so a job does
+    /// not depend on reading the checkpoint header again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_family: Option<ComfyFamily>,
     /// Where ComfyUI is installed, to tell "installed but stopped" from "not
     /// installed"; `None` = `~/ComfyUI-Installs` (Comfy Desktop's default).
     #[serde(default, skip_serializing_if = "Option::is_none")]

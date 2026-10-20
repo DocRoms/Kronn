@@ -51,6 +51,10 @@ pub async fn advance(
     }
 
     match next_action(job, now) {
+        // Nothing is billed twice on a local server: ask it again.
+        MediaAction::RefuseUnsafeResume if ctx.codec.resubmit_is_free() => {
+            submit(db, ctx, job, now).await
+        }
         MediaAction::RefuseUnsafeResume => {
             // Deliberately terminal: the provider may have accepted — and
             // charged — a submission whose handle we lost. Retrying blind is
@@ -598,6 +602,7 @@ pub async fn tick(state: &crate::AppState, client: &reqwest::Client) -> Result<(
     // will never see it again and no later sweep would catch up. Without this,
     // a card already on screen keeps showing `running`.
     for job_id in &expired {
+        crate::api::comfyui::release_local_job(state, job_id).await;
         if let Err(e) = crate::api::shared_runs::publish_media_job(state, job_id).await {
             tracing::warn!(job = %job_id, error = %e, "expired media run publication failed");
         }
@@ -777,20 +782,58 @@ async fn advance_local_comfyui(
     let config = state.config.read().await.comfyui.clone();
     let base = crate::api::comfyui::base_url(&config);
     let submitting = job.provider_job_id.as_deref().is_none_or(str::is_empty);
+    // A stopped ComfyUI is told at once rather than retried until the
+    // deadline, and a job it lost (restart, cleared queue) is never seen
+    // finishing.
+    if now < job.deadline_at {
+        if submitting {
+            if crate::api::comfyui::probe_version(&base).await.is_none() {
+                return Err(AdvanceFailure::Permanent(format!(
+                    "ComfyUI does not answer at {base}: start it, then retry the generation"
+                )));
+            }
+        } else if let Some(handle) = job.provider_job_id.as_deref() {
+            match crate::api::comfyui::prompt_known(&base, handle).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(AdvanceFailure::Permanent(
+                        "ComfyUI no longer knows this generation (it was restarted or \
+                         its queue was cleared): retry it"
+                            .into(),
+                    ))
+                }
+                Err(e) => {
+                    return Err(AdvanceFailure::Permanent(format!(
+                        "ComfyUI stopped answering at {base} during the generation: {e}"
+                    )))
+                }
+            }
+        }
+    }
     // The workflow and its settings, read when the job is submitted: the
     // user's choice for this file and their overrides for this slot.
     let (image_family, settings) = match job.modality {
         MediaModality::Image => {
-            let family = if submitting {
-                crate::api::comfyui::model_family(
-                    &base,
-                    &config,
-                    crate::core::comfyui::IMAGE_FOLDER,
-                    &job.model,
-                )
-                .await
-            } else {
-                None
+            // Saved with the slot, so a failing header read cannot make a
+            // known model look unknown; read from ComfyUI only for a model
+            // that is no longer the slot's.
+            let saved = config
+                .chosen_family(crate::core::comfyui::IMAGE_FOLDER, &job.model)
+                .or(config
+                    .image_family
+                    .filter(|_| config.image_model.as_deref() == Some(job.model.as_str())));
+            let family = match saved {
+                Some(family) => Some(family),
+                None if submitting => {
+                    crate::api::comfyui::model_family(
+                        &base,
+                        &config,
+                        crate::core::comfyui::IMAGE_FOLDER,
+                        &job.model,
+                    )
+                    .await
+                }
+                None => None,
             };
             let settings = family
                 .unwrap_or(crate::core::comfyui::ComfyFamily::Sdxl)
@@ -1557,8 +1600,8 @@ mod tests {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let scratch = std::env::temp_dir().join(format!("kronn-comfy-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        let scratch_dir = tempfile::tempdir().expect("scratch dir");
+        let scratch = scratch_dir.path().to_path_buf();
         let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
         crate::core::child_env::set_var("KRONN_DATA_DIR", &scratch);
 
@@ -1671,6 +1714,255 @@ mod tests {
             Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
             None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
-        let _ = std::fs::remove_dir_all(&scratch);
+        drop(scratch_dir);
+    }
+
+    fn local_state(endpoint: &str) -> crate::AppState {
+        use std::sync::Arc;
+        let db = Arc::new(Database::open_in_memory().expect("in-memory db"));
+        let mut config = crate::core::config::default_config();
+        config.comfyui.endpoint = Some(endpoint.to_string());
+        config.comfyui.image_model = Some("RealVisXL_V5.0_fp16.safetensors".into());
+        crate::AppState::new_defaults(
+            Arc::new(tokio::sync::RwLock::new(config)),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    async fn seed_local_job(
+        db: &Database,
+        id: &'static str,
+        now: DateTime<Utc>,
+        deadline: DateTime<Utc>,
+        handle: Option<&'static str>,
+    ) -> MediaJob {
+        db.with_conn(move |conn| {
+            media_jobs::insert(
+                conn,
+                NewMediaJob {
+                    id,
+                    modality: MediaModality::Image,
+                    connection_id: crate::core::comfyui::CONNECTION_ID,
+                    model: "RealVisXL_V5.0_fp16.safetensors",
+                    prompt: "un renard",
+                    params: &MediaParams::default(),
+                    discussion_id: None,
+                    message_id: None,
+                    project_id: None,
+                    scheduled_at: now,
+                    deadline_at: deadline,
+                },
+                now,
+            )?;
+            if let Some(handle) = handle {
+                media_jobs::mark_submit_attempt(conn, id, now)?;
+                media_jobs::record_submission(conn, id, handle, now)?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("seed");
+        db.with_read_conn(move |conn| media_jobs::get(conn, id))
+            .await
+            .expect("read")
+            .expect("job")
+    }
+
+    /// Review P2 — a stopped ComfyUI is told at once, not retried for 20 min,
+    /// and a job it no longer knows fails instead of waiting for the deadline.
+    #[tokio::test]
+    async fn a_stopped_comfyui_or_a_lost_job_fails_with_a_sentence_at_once() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let now = at("2026-10-20T10:00:00Z");
+        let client = reqwest::Client::new();
+
+        let down = local_state("http://127.0.0.1:9");
+        let job = seed_local_job(
+            &down.db,
+            "job-down",
+            now,
+            now + ChronoDuration::minutes(20),
+            None,
+        )
+        .await;
+        match advance_claimed(&down, &client, &job, now).await {
+            Err(AdvanceFailure::Permanent(message)) => {
+                assert!(message.contains("does not answer"), "{message}")
+            }
+            other => panic!("expected a permanent refusal, got {other:?}"),
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/history/p-lost"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "queue_running": [[3, "someone-else", {}, {}, []]], "queue_pending": []
+            })))
+            .mount(&server)
+            .await;
+        let restarted = local_state(&server.uri());
+        let job = seed_local_job(
+            &restarted.db,
+            "job-lost",
+            now,
+            now + ChronoDuration::minutes(20),
+            Some("p-lost"),
+        )
+        .await;
+        match advance_claimed(&restarted, &client, &job, now).await {
+            Err(AdvanceFailure::Permanent(message)) => {
+                assert!(message.contains("no longer knows"), "{message}")
+            }
+            other => panic!("expected a permanent failure, got {other:?}"),
+        }
+    }
+
+    /// A finished job with no saved file fails on that poll.
+    #[tokio::test]
+    async fn a_comfyui_job_finished_without_an_output_fails_on_that_poll() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/history/p-empty"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "p-empty": { "outputs": {}, "status": {"status_str": "success", "completed": true, "messages": []} }
+            })))
+            .mount(&server)
+            .await;
+        let now = at("2026-10-20T10:00:00Z");
+        let state = local_state(&server.uri());
+        let job = seed_local_job(
+            &state.db,
+            "job-empty",
+            now,
+            now + ChronoDuration::minutes(20),
+            Some("p-empty"),
+        )
+        .await;
+        advance_claimed(&state, &reqwest::Client::new(), &job, now)
+            .await
+            .expect("the poll settles the job");
+        let settled = state
+            .db
+            .with_read_conn(|conn| media_jobs::get(conn, "job-empty"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.status, MediaJobStatus::Failed);
+        assert!(settled
+            .last_error
+            .unwrap_or_default()
+            .contains("no output file"));
+    }
+
+    /// A lost handle on the local source is simply submitted again: nothing
+    /// is billed twice there.
+    #[tokio::test]
+    async fn a_local_job_whose_handle_was_lost_is_submitted_again() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"prompt_id": "p-again"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let now = at("2026-10-20T10:00:00Z");
+        let db = Database::open_in_memory().unwrap();
+        let mut job = seed_local_job(
+            &db,
+            "job-again",
+            now,
+            now + ChronoDuration::minutes(20),
+            None,
+        )
+        .await;
+        db.with_conn(|conn| {
+            media_jobs::mark_submit_attempt(conn, "job-again", at("2026-10-20T09:59:00Z"))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        job.submit_attempted_at = Some(at("2026-10-20T09:59:00Z"));
+        let base = server.uri();
+        let codec = crate::agents::media_codec::ComfyUiMediaCodec {
+            base: base.clone(),
+            seed: 1,
+            image_family: Some(crate::core::comfyui::ComfyFamily::Sdxl),
+            settings: crate::core::comfyui::ComfyFamily::Sdxl.defaults(),
+            video_companions: None,
+        };
+        let client = reqwest::Client::new();
+        let ctx = MediaContext {
+            codec: &codec,
+            base: &base,
+            api_key: "",
+            client: &client,
+        };
+        assert_eq!(
+            advance(&db, ctx, &job, now).await.unwrap(),
+            MediaJobStatus::Pending
+        );
+        let resubmitted = db
+            .with_read_conn(|conn| media_jobs::get(conn, "job-again"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resubmitted.provider_job_id.as_deref(), Some("p-again"));
+    }
+
+    /// Review P2 — a job that times out stops rendering on the GPU.
+    #[tokio::test]
+    async fn an_expired_local_job_is_interrupted_on_the_gpu() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/queue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "queue_running": [[1, "p-slow", {}, {}, []]], "queue_pending": []
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/interrupt"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let state = local_state(&server.uri());
+        let past = Utc::now() - ChronoDuration::hours(3);
+        seed_local_job(
+            &state.db,
+            "job-slow",
+            past,
+            past + ChronoDuration::minutes(90),
+            Some("p-slow"),
+        )
+        .await;
+        tick(&state, &reqwest::Client::new()).await.expect("tick");
+        let settled = state
+            .db
+            .with_read_conn(|conn| media_jobs::get(conn, "job-slow"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.status, MediaJobStatus::TimedOut);
     }
 }

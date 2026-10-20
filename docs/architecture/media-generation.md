@@ -426,6 +426,8 @@ header declares (FLUX.1 schnell, any SDXL base), else from its exact file
 name in the measured list — never from what a name suggests. Anything else is
 listed on the card, disabled, until the user picks the workflow it runs with:
 that choice is saved per file under `model_families` and wins over detection.
+The family validated when the image slot is chosen is saved with it
+(`image_family`), so a job never depends on reading the header again.
 A Wan job also needs its text encoder and VAE; one missing is refused before
 submission.
 [src: file: backend/src/core/comfyui.rs:172-197#family_of]
@@ -444,13 +446,25 @@ Images are queued like videos: `POST /prompt` records ComfyUI's prompt id as
 the provider handle, `/history/<id>` is polled, and the file is fetched from
 `/view` on the configured origin. A local job stores no cost, so it never
 enters an estimate or the spend; the Creator form says it costs nothing.
-Source images are not taken yet. Measurements: `docs/research/comfyui-local-media-2026-10-19.md`.
+Source images are not taken yet.
+
+A local job fails with a sentence instead of waiting for its deadline:
+ComfyUI not answering before a submission, a prompt it no longer holds in its
+history or queue (restarted, queue cleared), or a job finished without an
+output file. Since nothing is billed, a submission whose handle was lost is
+simply sent again. Its deadline is 90 min (video is slow on a laptop GPU), and
+a job that times out or is cancelled is removed from ComfyUI's queue, or
+interrupted if it is the one rendering. Measurements: `docs/research/comfyui-local-media-2026-10-19.md`.
 
 The card also offers measured models to download (RealVisXL V5, FLUX.1
 schnell, the Wan 2.1 1.3B pack), like the Ollama suggestions. Files go to the
-first model folder ComfyUI itself reports (`/internal/folder_paths`), as
-`<name>.part`, resumed with a Range request and renamed only once their size
-matches the source; disk space is checked first. From Docker those folders
-are the host's, so the card only links to Hugging Face.
+first model folder ComfyUI reports (`/internal/folder_paths`) that lies
+inside the install folder, symlinks resolved, and only when the address is
+this machine (loopback): a remote ComfyUI never chooses where Kronn writes.
+Each file comes from a pinned Hugging Face revision as `<name>.part`, resumes
+only from a `Content-Range` that starts where the `.part` ends, never grows
+past its size, and is renamed only once its size and SHA-256 match; one pull
+holds a file at a time, and disk space is checked first. From Docker those
+folders are the host's, so the card only links to Hugging Face.
 [src: file: backend/src/agents/media_codec.rs:683-693#ComfyUiMediaCodec]
 [src: file: backend/src/agents/media_runner.rs:766-839#advance_local_comfyui]

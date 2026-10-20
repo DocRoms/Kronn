@@ -979,6 +979,13 @@ export function DiscussionsPage({
   }, []);
   // KT-1214 — a failed generation reopens the Creator with what was asked.
   const [mediaRetryRequest, setMediaRetryRequest] = useState<{ prompt: string; modality: 'image' | 'video'; nonce: number } | null>(null);
+  // Dropped when the panel closes, so reopening it does not replay the
+  // retried prompt.
+  const [retryPanelOpen, setRetryPanelOpen] = useState(showAssetsPanel);
+  if (retryPanelOpen !== showAssetsPanel) {
+    setRetryPanelOpen(showAssetsPanel);
+    if (!showAssetsPanel) setMediaRetryRequest(null);
+  }
   const retryMediaGeneration = useCallback((prompt: string, modality: 'image' | 'video') => {
     setShowGitPanel(false);
     setShowTerminalPanel(false);
@@ -1724,12 +1731,21 @@ export function DiscussionsPage({
     directivesApi.list().then(setAvailableDirectives).catch(() => {});
     contactsApi.list().then(setContactsList).catch(() => {});
     externalApiConnections.list().then(setExternalConnections).catch(() => {});
-    comfyuiApi.source()
+    // Re-read when the ComfyUI card saves a change, and when the tab comes
+    // back, so a model chosen elsewhere is offered without a reload.
+    const refetchLocalMediaSource = () => comfyuiApi.source()
       .then(source => setLocalMediaSource(source ? { ...source, has_credential: false } : null))
       .catch(() => {});
+    refetchLocalMediaSource();
     refetchBatchSummaries();
     window.addEventListener('kronn:profiles-changed', refetchProfiles);
-    return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
+    window.addEventListener('kronn:comfyui-changed', refetchLocalMediaSource);
+    window.addEventListener('focus', refetchLocalMediaSource);
+    return () => {
+      window.removeEventListener('kronn:profiles-changed', refetchProfiles);
+      window.removeEventListener('kronn:comfyui-changed', refetchLocalMediaSource);
+      window.removeEventListener('focus', refetchLocalMediaSource);
+    };
   }, [refetchBatchSummaries]);
 
   // WebSocket-based real-time events (presence, chat, invites).
