@@ -708,6 +708,36 @@ pub fn lane_target_claims(
     Ok(claims)
 }
 
+/// Managed checkouts that outlive a finished execution (KT-1397): one row per
+/// terminal (`Done`, `Failed`, `Cancelled`) execution whose managed workspace
+/// still names a path on disk. `finished_at` lets the caller leave a recent
+/// finish alone; a legacy row without one is old enough by definition.
+pub fn terminal_executions_with_checkout(
+    conn: &Connection,
+) -> Result<Vec<(String, Option<chrono::DateTime<chrono::Utc>>)>> {
+    let mut statement = conn.prepare(
+        "SELECT te.id, te.finished_at FROM task_executions te
+           JOIN discussion_workspaces dw ON dw.task_execution_id = te.id
+          WHERE dw.ownership = 'managed' AND dw.canonical_path IS NOT NULL
+            AND te.status IN ('Done', 'Failed', 'Cancelled')
+          ORDER BY te.finished_at, te.id",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, finished)| {
+            let finished = finished
+                .and_then(|text| chrono::DateTime::parse_from_rfc3339(&text).ok())
+                .map(|at| at.with_timezone(&chrono::Utc));
+            (id, finished)
+        })
+        .collect())
+}
+
 /// Audit one lane target reclaim against the execution that owned `canonical_path`.
 /// The same shape as [`record_artifact_reclaim`], under its own actions so a
 /// worktree's `target/` and its lane target are told apart. KT-1256.

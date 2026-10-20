@@ -2875,6 +2875,107 @@ pub fn remove_cancelled_task_worktree(
     remove_discussion_worktree(repo_path, worktree_path, false)
 }
 
+/// What [`release_terminal_task_worktree`] did with the checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalWorktreeRelease {
+    /// The checkout was already gone; only the admin entry was pruned.
+    AlreadyGone,
+    /// The checkout was removed. `patch` is the saved uncommitted diff, when
+    /// there was one.
+    Removed { patch: Option<PathBuf> },
+}
+
+/// Name of the uncommitted-changes patch kept as evidence of a released worktree.
+pub const RELEASED_WORKTREE_PATCH: &str = "uncommitted-changes.patch";
+
+/// The uncommitted state of a checkout (tracked edits and untracked files) as a
+/// binary-safe patch against `HEAD`, built in a scratch index so the worktree's
+/// own index is never touched.
+fn uncommitted_patch(wt: &Path, index: &Path) -> Result<Vec<u8>, String> {
+    let git = |args: &[&str]| -> Result<Vec<u8>, String> {
+        let output = crate::core::cmd::git_cmd()
+            .args(args)
+            .env("GIT_INDEX_FILE", index)
+            .current_dir(wt)
+            .output()
+            .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(output.stdout)
+    };
+    git(&["read-tree", "HEAD"])?;
+    git(&["add", "-A"])?;
+    git(&["diff", "--cached", "--binary", "--no-ext-diff", "HEAD"])
+}
+
+/// Release the checkout of a task execution that has reached a terminal status
+/// (KT-1397): the branch is kept, the uncommitted changes are saved as a patch
+/// under `evidence_dir` first, and the checkout is then removed.
+///
+/// The caller proves the execution is terminal and the workspace is Kronn's
+/// (`managed`); this proves the rest against Git: the path is in the managed
+/// layout and the checkout is on exactly `expected_branch`. Unlike
+/// [`remove_cancelled_task_worktree`] a dirty tree is not a reason to keep the
+/// directory, but a patch that cannot be written is: nothing is removed unless
+/// the evidence is on disk.
+pub fn release_terminal_task_worktree(
+    repo_path: &Path,
+    worktree_path: &str,
+    expected_branch: &str,
+    evidence_dir: &Path,
+) -> Result<TerminalWorktreeRelease, String> {
+    reject_option_like_rev(expected_branch)?;
+    let wt = Path::new(worktree_path);
+    assert_managed_task_worktree_path(repo_path, wt)?;
+    if !wt.exists() {
+        let _ = crate::core::cmd::git_cmd()
+            .args(["worktree", "prune"])
+            .current_dir(repo_path)
+            .output();
+        return Ok(TerminalWorktreeRelease::AlreadyGone);
+    }
+    let actual_branch = find_branch_for_worktree(repo_path, worktree_path).ok_or_else(|| {
+        format!("cannot determine branch for terminal worktree {worktree_path} — preserving it")
+    })?;
+    if actual_branch != expected_branch {
+        return Err(format!(
+            "terminal worktree {worktree_path} is on branch {actual_branch}, expected {expected_branch} — preserving it"
+        ));
+    }
+    let mut patch = None;
+    if !worktree_dirty_files(wt)?.is_empty() {
+        std::fs::create_dir_all(evidence_dir).map_err(|e| {
+            format!(
+                "cannot create {} for the uncommitted changes of {worktree_path}: {e} — preserving it",
+                evidence_dir.display()
+            )
+        })?;
+        let scratch_index = evidence_dir.join("patch-index.tmp");
+        let bytes = uncommitted_patch(wt, &scratch_index);
+        let _ = std::fs::remove_file(&scratch_index);
+        let bytes = bytes
+            .map_err(|e| format!("cannot save the uncommitted changes of {worktree_path}: {e}"))?;
+        if !bytes.is_empty() {
+            let path = evidence_dir.join(RELEASED_WORKTREE_PATCH);
+            std::fs::write(&path, &bytes)
+                .map_err(|e| {
+                    format!(
+                        "cannot save the uncommitted changes of {worktree_path} to {}: {e} — preserving it",
+                        path.display()
+                    )
+                })?;
+            patch = Some(path);
+        }
+    }
+    remove_discussion_worktree(repo_path, worktree_path, false)?;
+    Ok(TerminalWorktreeRelease::Removed { patch })
+}
+
 /// Remove a task worktree AFTER its candidate was integrated successfully.
 /// Unlike provisioning compensation, the branch is expected to have advanced:
 /// ownership is proven by the exact managed branch, a clean tree and
@@ -5798,6 +5899,72 @@ mod tests {
 
         assert!(remove_cancelled_task_worktree(repo.path(), &info.path, &info.branch).is_err());
         assert!(Path::new(&info.path).exists());
+    }
+
+    /// KT-1397 — a terminal worktree is released even when dirty: the diff is
+    /// saved first, the branch (with its commits) stays.
+    #[test]
+    fn release_terminal_task_worktree_saves_the_diff_and_keeps_the_branch() {
+        let repo = make_test_repo("task-release-terminal");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-1397", "release", &base).unwrap();
+        let landed = commit_file(Path::new(&info.path), "done.txt", "done", "worker work");
+        fs::write(Path::new(&info.path).join("README.md"), "# edited").unwrap();
+        fs::write(Path::new(&info.path).join("scratch.txt"), "untracked").unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+
+        let released =
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path())
+                .unwrap();
+
+        let TerminalWorktreeRelease::Removed { patch: Some(patch) } = released else {
+            panic!("expected a removal with a saved patch, got {released:?}");
+        };
+        let saved = fs::read_to_string(patch).unwrap();
+        assert!(saved.contains("+# edited") && saved.contains("scratch.txt"));
+        assert!(
+            !saved.contains("done.txt"),
+            "committed work is the branch's"
+        );
+        assert!(!Path::new(&info.path).exists());
+        assert_eq!(
+            branch_commit(repo.path(), &info.branch).as_deref(),
+            Some(landed.as_str())
+        );
+        assert!(!evidence.path().join("patch-index.tmp").exists());
+        // Retry-safe once the checkout is gone.
+        assert_eq!(
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path())
+                .unwrap(),
+            TerminalWorktreeRelease::AlreadyGone
+        );
+    }
+
+    /// KT-1397 — ownership is proved before anything is removed: a checkout on
+    /// another branch, or outside the managed layout, is refused untouched.
+    #[test]
+    fn release_terminal_task_worktree_refuses_foreign_checkouts() {
+        let repo = make_test_repo("task-release-foreign");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-1397", "foreign", &base).unwrap();
+        fs::write(Path::new(&info.path).join("scratch.txt"), "keep").unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+
+        let wrong_branch =
+            release_terminal_task_worktree(repo.path(), &info.path, "main", evidence.path());
+        assert!(wrong_branch.is_err());
+        assert!(Path::new(&info.path).join("scratch.txt").exists());
+
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().to_string_lossy().to_string();
+        assert!(release_terminal_task_worktree(
+            repo.path(),
+            &outside_path,
+            &info.branch,
+            evidence.path()
+        )
+        .is_err());
+        assert!(outside.path().exists());
     }
 
     /// KT-514/KT-478 — the reclaim must succeed on a task worktree that carries a
