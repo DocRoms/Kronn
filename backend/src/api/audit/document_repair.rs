@@ -2,7 +2,7 @@
 //! Only unambiguous comma-bundled references are normalized automatically.
 //! Real missing paths/invalid lines require an agent retry and remain blocking.
 
-use crate::core::document_optimization::{self, Diagnostic, UNBACKED_PROVENANCE};
+use crate::core::document_optimization::{self, Diagnostic, UNBACKED_PROVENANCE, UNKNOWN_COMMAND};
 use crate::core::run_provenance::RunProvenance;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -343,6 +343,9 @@ pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
     text.push_str("\nRead and correct EACH named document, including auxiliary findings. Use ONE `[src: file: path:line]` or `[src: file: path:start-end]` marker per reference; never bundle paths with commas. A binary file (.docx, .pdf, image) has no lines: cite it by bare path, `[src: file: path]`. Read the actual source before correcting a missing path or invalid line. If the evidence cannot be established, remove the unsupported claim entirely; do not invent a path or merely hide the citation. In a human-owned section, correct only what is wrong; Kronn asks its owner to reconfirm. A resolvable citation proves existence, not the truth of its claim.\n");
     if diagnostics.iter().any(|d| d.code == UNBACKED_PROVENANCE) {
         text.push_str("A `[src: deps: …]` row must be one the dependency watch holds, and a `[src: url: …]` page one you fetched in this run. For each one flagged above, fetch the page or keep the watch row; otherwise replace the value AND its citation with `not verified: no source`. Never write a version, date or support end from memory, and never attach a citation to it.\n");
+    }
+    if diagnostics.iter().any(|d| d.code == UNKNOWN_COMMAND) {
+        text.push_str("A command written as code in a document must exist in this repository. For each one flagged above, open the Makefile, `package.json` or `composer.json` it names and write only a target or script that is defined there, with the command that runs it; if the repository has no such command, remove the line rather than inventing one. Do not describe a prerequisite or an install step from the tool's usual habits: read what the repository does.\n");
     }
     text
 }
@@ -731,6 +734,55 @@ mod tests {
                       Comment [src: file: config.yml:1]\nThe `empty.txt` file is empty.\n\
                       [td](tech-debt/TD-1.md)\n";
         std::fs::write(root.join("docs/AGENTS.md"), second).unwrap();
+        let blocking = check_attempt(root, &before, &blocking, &[], None)
+            .unwrap()
+            .blocking;
+        assert!(blocking.is_empty(), "{blocking:#?}");
+    }
+
+    #[test]
+    fn a_step_that_invents_a_command_is_sent_back_and_follows_the_feedback() {
+        // KT-1387 — docroms: the runbook told readers to `make yarn-install`
+        // then `yarn install`, in a repository with neither. The step is told
+        // which commands do not exist and what to read, then writes real ones.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Makefile"),
+            "test:\n\tphpunit\naws:\n\t./aws.sh\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("docs/operations")).unwrap();
+        std::fs::write(
+            root.join("docs/AGENTS.md"),
+            "# P\n[ops](operations/ops.md)\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("docs/operations/ops.md"), "# Ops\n").unwrap();
+        let before = snapshot(root).unwrap();
+
+        std::fs::write(
+            root.join("docs/operations/ops.md"),
+            "# Ops\n\n```bash\nmake yarn-install\nyarn install\nmake test\n```\n",
+        )
+        .unwrap();
+        let blocking = check_attempt(root, &before, &[], &[], None)
+            .unwrap()
+            .blocking;
+        let messages: Vec<_> = blocking.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(messages.len(), 2, "{messages:#?}");
+        assert!(blocking.iter().all(|d| d.code == UNKNOWN_COMMAND));
+        assert!(messages[0].starts_with("`make yarn-install`"));
+        assert!(messages[1].starts_with("`yarn install`"));
+        let feedback = feedback(&blocking);
+        assert!(feedback.contains("Documentary gate"));
+        assert!(feedback.contains("must exist in this repository"));
+
+        std::fs::write(
+            root.join("docs/operations/ops.md"),
+            "# Ops\n\n```bash\nmake aws\nmake test\n```\n",
+        )
+        .unwrap();
         let blocking = check_attempt(root, &before, &blocking, &[], None)
             .unwrap()
             .blocking;

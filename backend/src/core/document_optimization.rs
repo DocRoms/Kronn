@@ -204,6 +204,7 @@ pub fn analyze_with(
 
     inspect_docs(project, &docs, &adapters, &budgets, &mut diagnostics);
     inspect_stack_currency(project, &mut diagnostics);
+    inspect_commands(project, &docs, &adapters, &mut diagnostics);
     if let Some(run) = run {
         inspect_run_provenance(project, &docs, &adapters, run, &mut diagnostics);
     }
@@ -518,6 +519,65 @@ pub const HUMAN_SECTION_REFERENCE: &str = "human_section_reference";
 
 /// Diagnostic code of a `deps:` / `url:` citation the audit run cannot back.
 pub const UNBACKED_PROVENANCE: &str = "unbacked_provenance";
+
+/// Diagnostic code of a `make` target or package script a document cites and
+/// the repository does not define (KT-1387).
+pub const UNKNOWN_COMMAND: &str = "unknown_command";
+
+/// Documents that describe defects or past state: a command named there is
+/// the finding, not an instruction.
+fn describes_defects(project: &Path, rel: &str) -> bool {
+    [
+        "docs/tech-debt/",
+        "docs/reports/",
+        LEGACY_DOCS_PREFIX,
+        "docs/templates/",
+        "docs/examples/",
+    ]
+    .iter()
+    .any(|prefix| rel.starts_with(under_root(project, prefix)))
+        || rel
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with("inconsistencies-"))
+}
+
+/// KT-1387 — every `make <target>`, `yarn|npm|pnpm <script>` and
+/// `composer <script>` a document tells a reader to run must be defined by the
+/// repository. A human-owned section is reported, never blocking.
+fn inspect_commands(
+    project: &Path,
+    docs: &[PathBuf],
+    adapters: &[PathBuf],
+    out: &mut Vec<Diagnostic>,
+) {
+    let mut paths: Vec<&PathBuf> = docs.iter().chain(adapters).collect();
+    paths.sort();
+    paths.dedup();
+    let mut defined: Option<crate::core::doc_commands::ProjectCommands> = None;
+    for path in paths {
+        let rel = relative(project, path);
+        if describes_defects(project, &rel) {
+            continue;
+        }
+        let Ok(content) = read(path) else { continue };
+        let (owned, human) =
+            crate::api::audit::anti_hallu_enforce::split_human_owned_sections(&content);
+        let defined = defined
+            .get_or_insert_with(|| crate::core::doc_commands::ProjectCommands::scan(project));
+        for problem in defined.problems(&owned) {
+            out.push(diag(UNKNOWN_COMMAND, &rel, problem));
+        }
+        for (name, text) in human {
+            let found: Vec<_> = defined
+                .problems(&text)
+                .into_iter()
+                .map(|problem| diag(UNKNOWN_COMMAND, &rel, problem))
+                .collect();
+            demote_human_section(&rel, &name, found, out);
+        }
+    }
+}
 
 /// KT-1308 — every document, holding its `deps:` and `url:` citations against
 /// what the run read. A human-owned section is reported, never blocking.
@@ -1500,7 +1560,7 @@ fn diag(code: &str, path: &str, message: String) -> Diagnostic {
 fn is_blocking_code(code: &str) -> bool {
     matches!(
         code,
-        "broken_link" | "broken_citation" | UNBACKED_PROVENANCE
+        "broken_link" | "broken_citation" | UNBACKED_PROVENANCE | UNKNOWN_COMMAND
     )
 }
 
@@ -2947,5 +3007,104 @@ mod tests {
             "{}",
             messages[2]
         );
+    }
+    const RUNBOOK_MAKEFILE: &str = "test:\n\tphpunit\naws:\n\t./aws.sh\n";
+
+    fn command_fixture() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("Makefile"), RUNBOOK_MAKEFILE);
+        write(
+            &tmp.path().join("docs/AGENTS.md"),
+            "# Index\n\n[ops](operations/debug-operations.md)\n",
+        );
+        tmp
+    }
+
+    #[test]
+    fn a_cited_make_target_that_does_not_exist_blocks_the_gate() {
+        // KT-1387 — docroms: `make yarn-install` in the runbook, no such target.
+        let tmp = command_fixture();
+        write(
+            &tmp.path().join("docs/operations/debug-operations.md"),
+            "# Ops\n\n```bash\nmake yarn-install\nmake test\n```\n",
+        );
+        let report = analyze(tmp.path()).unwrap();
+        let found: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == UNKNOWN_COMMAND)
+            .collect();
+        assert_eq!(found.len(), 1, "{:#?}", report.diagnostics);
+        assert!(found[0].blocking);
+        assert_eq!(found[0].path, "docs/operations/debug-operations.md");
+        assert!(found[0].message.starts_with("`make yarn-install`"));
+    }
+
+    #[test]
+    fn a_package_script_cited_without_a_package_json_blocks_the_gate() {
+        let tmp = command_fixture();
+        write(
+            &tmp.path().join("docs/operations/debug-operations.md"),
+            "# Ops\n\nInstall with `yarn install`, then `make aws`.\n",
+        );
+        let report = analyze(tmp.path()).unwrap();
+        let found: Vec<_> = report.blocking_diagnostics().collect();
+        assert_eq!(found.len(), 1, "{:#?}", report.diagnostics);
+        assert!(found[0].message.contains("no package.json"));
+
+        write(
+            &tmp.path().join("package.json"),
+            r#"{"scripts":{"dev":"vite"}}"#,
+        );
+        write(
+            &tmp.path().join("docs/operations/debug-operations.md"),
+            "# Ops\n\n`yarn install`, `yarn dev`, `yarn deploy`.\n",
+        );
+        let report = analyze(tmp.path()).unwrap();
+        let found: Vec<_> = report.blocking_diagnostics().collect();
+        assert_eq!(found.len(), 1, "{:#?}", report.diagnostics);
+        assert!(found[0]
+            .message
+            .starts_with("`yarn deploy` is not a script"));
+    }
+
+    #[test]
+    fn real_commands_and_defect_sheets_do_not_block() {
+        let tmp = command_fixture();
+        write(
+            &tmp.path().join("docs/operations/debug-operations.md"),
+            "# Ops\n\n`make test` and `make aws`\n",
+        );
+        // A TD sheet names the invented command as the finding.
+        write(
+            &tmp.path().join("docs/tech-debt/TD-1.md"),
+            "# TD\n\nThe README says `make ghost`, which does not exist.\n",
+        );
+        let report = analyze(tmp.path()).unwrap();
+        assert!(
+            !report.diagnostics.iter().any(|d| d.code == UNKNOWN_COMMAND),
+            "{:#?}",
+            report.diagnostics
+        );
+    }
+
+    #[test]
+    fn an_unknown_command_in_a_human_section_is_a_to_do_not_a_blocker() {
+        let tmp = command_fixture();
+        write(
+            &tmp.path().join("docs/operations/debug-operations.md"),
+            "# Ops\n\n<!-- kronn:section name=\"team\" curated=\"human\" owner=\"human\" -->\nRun `make ghost`.\n<!-- kronn:section:end -->\n",
+        );
+        let report = analyze(tmp.path()).unwrap();
+        assert_eq!(
+            report.blocking_diagnostics().count(),
+            0,
+            "{:#?}",
+            report.diagnostics
+        );
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == HUMAN_SECTION_REFERENCE && d.message.contains("make ghost")));
     }
 }

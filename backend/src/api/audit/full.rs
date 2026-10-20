@@ -1550,6 +1550,9 @@ pub async fn full_audit(
             if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
                 full_prompt.push_str(&block);
             }
+            if let Some(block) = super::commit_context::block_for(&project_path, analysis_step.target_file, &docs_root) {
+                full_prompt.push_str(&block);
+            }
             full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline.decisions, &docs_root));
             full_prompt.push_str(&super::briefing_rules::prompt_block(analysis_step.target_file, project_rules.as_ref()));
             // 0.8.3 (#272) — pre-existing user docs are migrated to
@@ -2417,10 +2420,14 @@ pub async fn full_audit(
                     if cli_success && !success
                         && documentary_snapshot.is_some() && attempt < max_attempts
                     {
-                        if let Some(feedback) = super::validation::coverage_repair_feedback(&project_path, analysis_step.target_file) {
+                        let repair = super::validation::coverage_repair_feedback(&project_path, analysis_step.target_file)
+                            .map(|feedback| ("dimension_coverage", feedback))
+                            .or_else(|| super::validation::companion_repair_feedback(&project_path, analysis_step.target_file)
+                                .map(|feedback| ("unfilled_companion", feedback)));
+                        if let Some((reason, feedback)) = repair {
                             yield Event::default().event("step_retry").data(serde_json::json!({
                                 "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
-                                "reason":"dimension_coverage","diagnostic":warning.as_ref().map(|w| &w.reason),
+                                "reason":reason,"diagnostic":warning.as_ref().map(|w| &w.reason),
                             }).to_string());
                             citation_feedback = Some(feedback);
                             continue 'attempts;

@@ -116,6 +116,70 @@ pub(crate) fn coverage_repair_feedback(project_path: &Path, target_file: &str) -
     ))
 }
 
+/// KT-1387 — documents a step must fill besides its target file, under the
+/// docs root. The coding-rules step owns the commit conventions: one sample
+/// of the A/B left `workflow/commits.md` as the untouched template.
+fn companion_docs(within_root: &str) -> &'static [&'static str] {
+    match within_root {
+        "coding-rules.md" => &[super::commit_context::COMMITS_DOC],
+        _ => &[],
+    }
+}
+
+/// Marker of the template banner, and of the hint comments, a filled file drops.
+const TEMPLATE_BANNER: &str = "**TEMPLATE FILE.**";
+const FILL_HINT: &str = "<!-- Fill:";
+
+/// Why a companion document of `target_file` is still the template (a raw
+/// `{{...}}` placeholder, the template banner or a `<!-- Fill: -->` hint), or
+/// `None` when each is filled or absent (a project without it owes nothing).
+pub(crate) fn unfilled_companion(project_path: &Path, target_file: &str) -> Option<String> {
+    let root = DocsRoot::of(project_path);
+    let within = root.strip(target_file)?;
+    for companion in companion_docs(within) {
+        let Ok(content) = std::fs::read_to_string(root.file(project_path, companion)) else {
+            continue;
+        };
+        let names = raw_placeholder_names(&content);
+        let banner = content.contains(TEMPLATE_BANNER);
+        let hints = content.matches(FILL_HINT).count();
+        if names.is_empty() && !banner && hints == 0 {
+            continue;
+        }
+        let mut left: Vec<String> = names
+            .iter()
+            .take(5)
+            .map(|n| format!("{{{{{n}}}}}"))
+            .collect();
+        if banner {
+            left.push("the template banner".into());
+        }
+        if hints > 0 {
+            left.push(format!("{hints} `<!-- Fill: -->` hint(s)"));
+        }
+        return Some(format!(
+            "step left `{}` as the template: {} still there",
+            root.path(companion),
+            left.join(", ")
+        ));
+    }
+    None
+}
+
+/// The targeted correction for [`unfilled_companion`], given back to the step
+/// within its attempt budget.
+pub(crate) fn companion_repair_feedback(project_path: &Path, target_file: &str) -> Option<String> {
+    let reason = unfilled_companion(project_path, target_file)?;
+    Some(format!(
+        "## Commit conventions — targeted correction required\n\n\
+         {reason}. Read the document and fill it from the `Commit facts` block of this prompt: \
+         the observed subject shape, the tooling and whether a hook or CI step enforces it, the \
+         trailer policy. Where the facts establish nothing, write `Not formalized — ask before \
+         assuming.` in place of the placeholder. Remove the template banner and the `<!-- Fill: -->` \
+         hints. Correct this document only; do not repeat the rest of the step.\n"
+    ))
+}
+
 /// Retain safe provider and tool-budget causes alongside the artifact failure.
 /// A recovered ceiling or negotiated provider fallback does not fail a good step.
 pub(crate) fn with_http_diagnostics(
@@ -315,6 +379,16 @@ pub fn validate_step_output(
                 );
             }
         }
+    }
+
+    if let Some(reason) = unfilled_companion(project_path, target_file) {
+        return (
+            false,
+            Some(StepValidationWarning {
+                reason,
+                repaired: false,
+            }),
+        );
     }
 
     (cli_success, None)
@@ -1735,6 +1809,61 @@ mod tests {
             before, after,
             "user content must be untouched above threshold"
         );
+    }
+
+    const COMMITS_TEMPLATE: &str = "# Commits\n\n> **TEMPLATE FILE.** Fill `{{...}}`.\n\n\
+         ## Message convention\n\n<!-- Fill: message format only. -->\n{{COMMIT_CONVENTION}}\n\n\
+         ## Attribution\n\n{{COMMIT_ATTRIBUTION_POLICY}}\n\n## Sign-off\n\n{{SIGNOFF_POLICY}}\n";
+
+    const COMMITS_FILLED: &str = "# Commits\n\n## Message convention\n\n\
+         Subjects read `type(scope) subject`, without a colon, in French.\n\n\
+         ## Attribution\n\nNot formalized — ask before assuming.\n\n\
+         ## Sign-off\n\n`Signed-off-by` on every commit.\n";
+
+    #[test]
+    #[serial(kronn_templates_env)]
+    fn an_unfilled_commits_template_fails_the_coding_rules_step() {
+        // KT-1387 — one A/B sample left `workflow/commits.md` as the template.
+        let (_tmp, project) = fixture("docs/coding-rules.md", 1000, 1000);
+        std::fs::write(
+            project.join("docs/coding-rules.md"),
+            "# Rules\n".repeat(150),
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.join("docs/workflow")).unwrap();
+        std::fs::write(project.join("docs/workflow/commits.md"), COMMITS_TEMPLATE).unwrap();
+
+        let (success, warning) = validate_step_output(true, &project, "docs/coding-rules.md");
+        assert!(!success, "an unfilled commits.md must fail the step");
+        let reason = warning.expect("the failure says why").reason;
+        assert!(reason.contains("docs/workflow/commits.md"), "{reason}");
+        assert!(reason.contains("{{COMMIT_CONVENTION}}"), "{reason}");
+        assert!(reason.contains("template banner"), "{reason}");
+        assert!(reason.contains("`<!-- Fill: -->` hint"), "{reason}");
+
+        // It is sent back to the step with the exact failure.
+        let feedback = companion_repair_feedback(&project, "docs/coding-rules.md").unwrap();
+        assert!(feedback.contains("Commit facts"));
+        assert!(feedback.contains("Not formalized"));
+
+        // Filled from the facts, the step passes and nothing is sent back.
+        std::fs::write(project.join("docs/workflow/commits.md"), COMMITS_FILLED).unwrap();
+        let (success, warning) = validate_step_output(true, &project, "docs/coding-rules.md");
+        assert!(success, "{:?}", warning.map(|w| w.reason));
+        assert!(companion_repair_feedback(&project, "docs/coding-rules.md").is_none());
+    }
+
+    #[test]
+    #[serial(kronn_templates_env)]
+    fn only_the_coding_rules_step_answers_for_commits_md_and_only_when_it_exists() {
+        let (_tmp, project) = fixture("docs/glossary.md", 1000, 1000);
+        std::fs::write(project.join("docs/glossary.md"), "# Glossary\n".repeat(150)).unwrap();
+        std::fs::create_dir_all(project.join("docs/workflow")).unwrap();
+        std::fs::write(project.join("docs/workflow/commits.md"), COMMITS_TEMPLATE).unwrap();
+        assert!(unfilled_companion(&project, "docs/glossary.md").is_none());
+        // A project without the document owes nothing.
+        std::fs::remove_file(project.join("docs/workflow/commits.md")).unwrap();
+        assert!(unfilled_companion(&project, "docs/coding-rules.md").is_none());
     }
 
     #[test]

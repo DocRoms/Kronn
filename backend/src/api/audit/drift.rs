@@ -899,6 +899,9 @@ pub(crate) async fn run_partial_pipeline(
             if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
                 full_prompt.push_str(&block);
             }
+            if let Some(block) = super::commit_context::block_for(&project_path, analysis_step.target_file, &docs_root) {
+                full_prompt.push_str(&block);
+            }
             if let Some(block) = revalidation.as_ref().and_then(|r| r.blocks.get(&step)) {
                 full_prompt.push_str(block);
             }
@@ -1437,14 +1440,19 @@ pub(crate) async fn run_partial_pipeline(
                     // the attempt budget (apollo's revalidation lost step 8 to its
                     // first attempt). Never after a provider failure.
                     if cli_success && !success && attempt < max_attempts {
-                        if let Some(feedback) = super::validation::coverage_repair_feedback(
+                        let repair = super::validation::coverage_repair_feedback(
                             &project_path, analysis_step.target_file,
-                        ) {
+                        )
+                        .map(|feedback| ("dimension_coverage", feedback))
+                        .or_else(|| super::validation::companion_repair_feedback(
+                            &project_path, analysis_step.target_file,
+                        ).map(|feedback| ("unfilled_companion", feedback)));
+                        if let Some((reason, feedback)) = repair {
                             yield Event::default().event("step_retry").data(
                                 serde_json::json!({
                                     "step": step, "file": file_label,
                                     "attempt": attempt, "max_attempts": max_attempts,
-                                    "reason": "dimension_coverage",
+                                    "reason": reason,
                                     "diagnostic": validation_warning.as_ref().map(|w| &w.reason),
                                 }).to_string()
                             );

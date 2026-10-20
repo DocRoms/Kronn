@@ -90,6 +90,14 @@ case "$prompt" in
         printf '\nChecked by the audit: scanned — nothing substantiable.\n' >> "$f.next"
       fi
       mv "$f.next" "$f"
+      if [ "$(basename "$target")" = coding-rules.md ]; then
+        c="$(dirname "$f")/workflow/commits.md"
+        if [ -f "$c" ]; then
+          sed -e '/TEMPLATE FILE/d' -e 's/<!-- Fill:[^>]*-->//g' \
+              -e 's/{{{{[A-Z0-9_]*}}}}/Not formalized - ask before assuming./g' "$c" > "$c.next"
+          mv "$c.next" "$c"
+        fi
+      fi
       if [ "$target" = docs/AGENTS.md ] && [ -f '{state}/stack-table' ]; then
         cat '{state}/stack-table' >> "$f"
       fi

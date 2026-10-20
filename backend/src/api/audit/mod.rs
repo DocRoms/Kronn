@@ -23,6 +23,7 @@ pub(crate) mod briefing_load;
 #[cfg(test)]
 mod briefing_residuals_tests;
 pub(crate) mod briefing_rules;
+mod commit_context;
 pub mod cross_audit;
 pub(crate) mod docs_write;
 mod document_repair;
@@ -2328,6 +2329,63 @@ mod prompt_tests {
             checked_steps >= 7,
             "expected every foundation step (1,3-9) to have a shipped template to check against, got {checked_steps}"
         );
+    }
+
+    #[test]
+    fn operations_and_testing_prompts_describe_only_commands_that_exist() {
+        // KT-1387 — the A/B showed `make yarn-install` in a repo with no
+        // package.json, a real OpenSearch as a test prerequisite where the
+        // test setup starts a mock, and an SSH key for what is an AWS token.
+        let prompt_of = |target: &str| {
+            ANALYSIS_STEPS
+                .iter()
+                .find(|s| s.target_file == target)
+                .unwrap_or_else(|| panic!("no step for {target}"))
+                .prompt
+        };
+        let ops = prompt_of("docs/operations/debug-operations.md");
+        assert!(ops.contains("ONLY COMMANDS THAT EXIST"));
+        assert!(ops.contains("a `make` target must be a target of a Makefile"));
+        assert!(ops.contains("with no `package.json` there is no `yarn install`"));
+        assert!(ops.contains("name the mechanism the repository's own target and script use"));
+        let testing = prompt_of("docs/testing-quality.md");
+        assert!(testing.contains("TEST PREREQUISITES COME FROM THE TEST SETUP"));
+        assert!(testing.contains("setupServer"));
+        assert!(testing.contains("do not list the real service as a prerequisite"));
+        assert!(testing.contains("ONLY COMMANDS THAT EXIST"));
+        assert!(prompt_of("docs/AGENTS.md").contains("must exist in this repository"));
+    }
+
+    #[test]
+    fn the_coding_rules_step_owns_the_commit_conventions_document() {
+        // KT-1387 — one A/B sample left workflow/commits.md as the template: a
+        // step owns it, is told to fill it from Kronn's computed commit facts,
+        // and every placeholder it must replace is in the shipped template.
+        let step = ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/coding-rules.md")
+            .unwrap();
+        assert!(step.prompt.contains("docs/workflow/commits.md"));
+        assert!(step.prompt.contains("`Commit facts` block"));
+        assert!(step.prompt.contains("enforced ONLY"));
+        assert!(step.prompt.contains("fails this step"));
+        assert!(commit_context::writes_commits_doc(step.target_file));
+        let template = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("templates/docs/workflow/commits.md"),
+        )
+        .unwrap();
+        for token in [
+            "{{COMMIT_CONVENTION}}",
+            "{{COMMIT_ATTRIBUTION_POLICY}}",
+            "{{SIGNOFF_POLICY}}",
+            "**TEMPLATE FILE.**",
+            "<!-- Fill:",
+        ] {
+            assert!(template.contains(token), "template must carry {token}");
+        }
     }
 
     #[test]
