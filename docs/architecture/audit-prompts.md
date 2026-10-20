@@ -12,9 +12,9 @@ the existing synchronization test.
 The extraction preserves prompt bytes, including whitespace. Validation-card
 instructions and briefing prompts retain their three existing locales; Rust
 still substitutes the briefing values at the call site.
-[src: file: backend/src/api/audit/helpers.rs:784-800#validation_card_protocol]
-[src: file: backend/src/api/audit/helpers.rs:1174-1194#build_briefing_review_prompt]
-[src: file: backend/src/api/audit/helpers.rs:1197-1205#build_briefing_legacy_prompt]
+[src: file: backend/src/api/audit/helpers.rs:828-844#validation_card_protocol]
+[src: file: backend/src/api/audit/helpers.rs:1203-1223#build_briefing_review_prompt]
+[src: file: backend/src/api/audit/helpers.rs:1241-1249#build_briefing_legacy_prompt]
 
 The Drift prompt asks the agent to report checksum mismatches without rewriting
 documentation. Its title no longer describes an unfinished placeholder; this

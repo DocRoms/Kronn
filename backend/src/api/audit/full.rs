@@ -1407,6 +1407,9 @@ pub async fn full_audit(
         // KT-1388 — stack conflicts and unproven closures the documents still
         // hold at the end: advice recorded for the human, never a blocker.
         let mut documentary_advisories: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
+        // KT-1370 — the markers Kronn demoted to flagged backticked paths once a
+        // step's attempts were spent, with the step that left each one.
+        let mut unverified_references: Vec<(u32, crate::core::document_optimization::DemotedReference)> = Vec::new();
 
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // KT-1199 — what the previous step left, before anything else runs.
@@ -1673,6 +1676,8 @@ pub async fn full_audit(
             // before the agent runs; settled after every attempt.
             let step_remit = super::step_remit::StepRemit::capture(&project_path, &docs_root).await;
             let mut remit_notes: Vec<String> = Vec::new();
+            // KT-1370 — what this step's documentary gate demoted after its last attempt.
+            let mut step_demotions: Vec<crate::core::document_optimization::DemotedReference> = Vec::new();
 
             // Correct blockers before final validation, at most twice per
             // step. Full's documentary gate also applies in off/warn mode;
@@ -2598,7 +2603,45 @@ pub async fn full_audit(
                                     }).to_string());
                                     continue 'attempts;
                                 }
-                                Ok(blocking) => Some(super::document_repair::feedback(&blocking)),
+                                // KT-1370 — the last attempt is spent: what is left is
+                                // only citation markers neither the agent nor the exact
+                                // fixes could repair. They stop being citations (a flagged
+                                // backticked path) and the run goes on, instead of
+                                // ending Interrupted with every later step refused.
+                                Ok(blocking) => {
+                                    let target_holds = || matches!(
+                                        super::anti_hallu_enforce::evaluate_enforce_gate(
+                                            enforce_mode, true, analysis_step.target_file,
+                                            &project_path, attempt, max_attempts, version_ctx.snapshot.as_ref(),
+                                        ),
+                                        super::anti_hallu_enforce::EnforceGateOutcome::NotApplicable
+                                            | super::anti_hallu_enforce::EnforceGateOutcome::Pass { .. }
+                                    );
+                                    match super::document_repair::demote_last_attempt(
+                                        &project_path, &blocking, Some(&run_provenance), &target_holds,
+                                    ) {
+                                        Ok(demoted) if !demoted.is_empty() => {
+                                            tracing::warn!(
+                                                "Audit step {} ({}): {} citation marker(s) demoted to unverified references after the last attempt",
+                                                step, file_label, demoted.len()
+                                            );
+                                            documentary_repair_proven = super::document_repair::recovery_changed(
+                                                &project_path, before, &recovery_targets,
+                                            );
+                                            yield Event::default().event("documentary_demoted").data(serde_json::json!({
+                                                "step":step,"file":file_label,"attempt":attempt,"references":demoted,
+                                            }).to_string());
+                                            unverified_references.extend(demoted.iter().cloned().map(|r| (step as u32, r)));
+                                            step_demotions = demoted;
+                                            None
+                                        }
+                                        Ok(_) => Some(super::document_repair::feedback(&blocking)),
+                                        Err(error) => {
+                                            tracing::warn!("Audit step {step} ({file_label}): demotion failed: {error}");
+                                            Some(super::document_repair::feedback(&blocking))
+                                        }
+                                    }
+                                }
                                 Err(error) => Some(format!("Documentary correction failed: {error}")),
                             };
                             if let Some(reason) = reason {
@@ -2789,6 +2832,7 @@ pub async fn full_audit(
                         // `null` — not 0 — when an attempt's agent reported no cost.
                         "cost_usd_micros": step_cost.usd_micros(),
                         "remit": remit_notes,
+                        "unverified_references": step_demotions.len(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
 
@@ -2803,6 +2847,7 @@ pub async fn full_audit(
                         let warn_reason = {
                             let mut reasons: Vec<String> = warning.as_ref().map(|w| w.reason.clone()).into_iter().collect();
                             reasons.extend(remit_notes.iter().cloned());
+                            reasons.extend(super::document_repair::demotion_notes(&step_demotions));
                             (!reasons.is_empty()).then(|| reasons.join("\n"))
                         };
                         let repaired = warning.as_ref().map(|w| w.repaired).unwrap_or(false);
@@ -3266,7 +3311,7 @@ pub async fn full_audit(
                     }
                     // KT-1388 - what the documents still hold as advice: noted, never counted.
                     documentary_advisories = report.advisory_diagnostics().cloned().collect();
-                    if let Some(notes) = super::document_repair::notes_json(&preexisting, &documentary_advisories, &documentary_autofixes) {
+                    if let Some(notes) = super::document_repair::notes_json(&preexisting, &documentary_advisories, &documentary_autofixes, &unverified_references) {
                         let run_id = audit_run_id.clone();
                         if let Err(error) = db.with_conn(move |conn|
                             crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes)
@@ -3572,7 +3617,7 @@ pub async fn full_audit(
         );
         let validation_prompt = format!(
             "{}{validation_prompt}",
-            super::helpers::documentary_notes_block(&documentary_preexisting, &documentary_advisories, &documentary_autofixes, &language)
+            super::helpers::documentary_notes_block(&documentary_preexisting, &documentary_advisories, &documentary_autofixes, &unverified_references, &language)
         );
         let accepted_listed: Vec<super::helpers::AcceptedStepLine> = accepted_rows
             .iter()
@@ -3861,6 +3906,7 @@ pub async fn full_audit(
             "discussion_id": disc_id,
             "template_was_installed": template_installed,
             "audit_run_id": audit_run_id,
+            "unverified_references": unverified_references.len(),
         });
         yield Event::default().event("done").data(done.to_string());
     });

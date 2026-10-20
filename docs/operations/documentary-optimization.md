@@ -5,7 +5,7 @@ reconciliation and before validation. It writes
 `.kronn/audit/document-optimization.json`, Kronn's local working state (listed
 in `.git/info/exclude`, never in your `.gitignore`); any blocking diagnostic prevents the
 audit from completing and the validation endpoint re-runs the same gate before
-recording validated state. [src: file: backend/src/api/audit/full.rs:3145-3212#analyze_and_write] [src: file: backend/src/core/document_optimization.rs:222-232#analyze_and_write] [src: file: backend/src/core/audit_state.rs:38-58#state_dir]
+recording validated state. [src: file: backend/src/api/audit/full.rs:3242-3309#analyze_and_write] [src: file: backend/src/core/document_optimization.rs:240-250#analyze_and_write] [src: file: backend/src/core/audit_state.rs:38-58#state_dir]
 [src: file: backend/src/api/audit/validate.rs:610-626#blocking_diagnostics]
 
 Defaults are 220 words per root adapter, 800 words for `docs/AGENTS.md`, 1,200
@@ -18,10 +18,10 @@ safety ceilings still apply: 800 adapter words, 1,200 `docs/AGENTS.md` words,
 2,000 mandatory-path words, four initially routed documents, and a 2,000-word
 large-inventory threshold.
 [src: file: backend/src/core/document_optimization.rs:31-41#DocumentBudgets]
-[src: file: backend/src/core/document_optimization.rs:275-312#validate_budgets]
+[src: file: backend/src/core/document_optimization.rs:291-328#validate_budgets]
 
 The report includes bytes, words, estimated tokens, routed documents and the
-five largest contributors for each detected adapter. [src: file: backend/src/core/document_optimization.rs:58-67#AgentLoadPath] [src: file: backend/src/core/document_optimization.rs:191-202#top_contributors]
+five largest contributors for each detected adapter. [src: file: backend/src/core/document_optimization.rs:58-67#AgentLoadPath] [src: file: backend/src/core/document_optimization.rs:202-213#top_contributors]
 Diagnostics cover
 budget overruns, unresolved placeholders, broken local links and file
 citations, duplicate or obsolete guides, orphan documents, large inventories
@@ -33,14 +33,14 @@ a parenthesised `(src: file: …)` is refused (only the bracketed marker is
 verified), and every path or range the gate suggests is one it accepts. A Stack table
 row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
-[src: file: backend/src/core/document_optimization.rs:1380-1395#inspect_stack_currency]
-[src: file: backend/src/core/document_optimization.rs:1411-1483#stack_currency_problems]
-[src: file: backend/src/core/document_optimization.rs:1481-1498#diag]
+[src: file: backend/src/core/document_optimization.rs:1389-1404#inspect_stack_currency]
+[src: file: backend/src/core/document_optimization.rs:1639-1711#stack_currency_problems]
+[src: file: backend/src/core/document_optimization.rs:1717-1737#diag]
 
 A citation into a path git ignores (a vendored dependency, a build output) that
 is absent from the checkout is refused as before, but the message says the path
 is git-ignored and cannot be verified from a fresh clone, instead of leaving a
-bare "does not exist". [src: file: backend/src/core/document_optimization.rs:784-794#ignored_citation_message]
+bare "does not exist". [src: file: backend/src/core/document_optimization.rs:801-811#ignored_citation_message]
 
 A tech-debt sheet is referenced from prose with a markdown link relative to the
 document, or with the `:exists` presence form of a file citation; the rows Kronn
@@ -69,7 +69,7 @@ comment after a reference the gate refuses, a comment holding a backtick, a
 bracket or a parenthesis, a list with a comment, several candidate paths, a text
 file cited without a line, an empty file cited with a line, a range farther out
 of the file, and anything inside fenced or inline code.
-[src: file: backend/src/core/document_optimization/mechanical_fix.rs:36#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:545#check_attempt]
+[src: file: backend/src/core/document_optimization/mechanical_fix.rs:36#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:790#check_attempt]
 
 **Detector signals the agent never addressed** (KT-1357). Step 8 must dispose of
 each deterministic detector signal: the index, or a TD sheet the index lists,

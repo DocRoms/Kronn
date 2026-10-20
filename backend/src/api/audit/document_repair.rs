@@ -409,13 +409,19 @@ pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
 
 /// KT-1353 — what the run's documentary gate let through or repaired by
 /// itself, as stored on the run (`audit_runs.documentary_notes`) for the audit
-/// timeline. `None` when there is nothing to report.
+/// timeline. `None` when there is nothing to report. KT-1370: with the markers
+/// demoted after the last attempt, each with the step that left it.
 pub(super) fn notes_json(
     preexisting: &[Diagnostic],
     advisories: &[Diagnostic],
     autofixes: &[(u32, document_optimization::AppliedFix)],
+    unverified: &[(u32, document_optimization::DemotedReference)],
 ) -> Option<String> {
-    if preexisting.is_empty() && advisories.is_empty() && autofixes.is_empty() {
+    if preexisting.is_empty()
+        && advisories.is_empty()
+        && autofixes.is_empty()
+        && unverified.is_empty()
+    {
         return None;
     }
     serde_json::to_string(&serde_json::json!({
@@ -434,8 +440,173 @@ pub(super) fn notes_json(
                 "step": step, "path": f.path, "kind": f.kind, "from": f.from, "to": f.to,
             }))
             .collect::<Vec<_>>(),
+        "unverified": unverified
+            .iter()
+            .map(|(step, r)| serde_json::json!({"step": step, "doc": r.doc, "marker": r.marker}))
+            .collect::<Vec<_>>(),
     }))
     .ok()
+}
+
+/// KT-1370 — the run's stored notes with `added` appended to the references it
+/// already lists as unverified (a resumed partial run keeps the earlier steps'
+/// ones). The other parts of the notes are left as they are.
+pub(super) fn merge_unverified_notes(
+    existing: Option<&str>,
+    added: &[(u32, document_optimization::DemotedReference)],
+) -> Option<String> {
+    let mut notes = existing
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(serde_json::Value::is_object);
+    let Some(notes) = notes.as_mut() else {
+        return notes_json(&[], &[], &[], added);
+    };
+    if added.is_empty() {
+        return existing.map(str::to_string);
+    }
+    let listed = notes
+        .as_object_mut()
+        .map(|object| {
+            object
+                .entry("unverified")
+                .or_insert_with(|| serde_json::json!([]))
+        })
+        .and_then(|value| value.as_array_mut())?;
+    listed.extend(
+        added
+            .iter()
+            .map(|(step, r)| serde_json::json!({"step": step, "doc": r.doc, "marker": r.marker})),
+    );
+    serde_json::to_string(notes).ok()
+}
+
+/// KT-1388 — the run's stored notes with the advice the steps left in their
+/// documents (`advisories`). A partial run records each step's demoted markers
+/// as it goes, so what is already stored is kept and only this part is set.
+pub(super) fn merge_advisory_notes(
+    existing: Option<&str>,
+    advisories: &[Diagnostic],
+) -> Option<String> {
+    let mut notes = existing
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(serde_json::Value::is_object);
+    let Some(notes) = notes.as_mut() else {
+        return notes_json(&[], advisories, &[], &[]);
+    };
+    if advisories.is_empty() {
+        return existing.map(str::to_string);
+    }
+    notes.as_object_mut()?.insert(
+        "advisories".into(),
+        serde_json::Value::Array(
+            advisories
+                .iter()
+                .map(|d| serde_json::json!({"code": d.code, "path": d.path, "message": d.message}))
+                .collect(),
+        ),
+    );
+    serde_json::to_string(notes).ok()
+}
+
+/// KT-1370 — the lines a step records in its `step_warning` for the markers
+/// demoted after its last attempt: the count, then each document and the marker
+/// as the agent wrote it. Empty when nothing was demoted.
+pub(super) fn demotion_notes(demoted: &[document_optimization::DemotedReference]) -> Vec<String> {
+    if demoted.is_empty() {
+        return Vec::new();
+    }
+    let mut notes = vec![format!(
+        "{} citation marker(s) Kronn could not repair were demoted to backticked paths flagged {}:",
+        demoted.len(),
+        document_optimization::UNVERIFIED_FLAG
+    )];
+    notes.extend(
+        demoted
+            .iter()
+            .map(|r| format!("- `{}`: {}", r.doc, r.marker)),
+    );
+    notes
+}
+
+/// KT-1370 — after the LAST attempt: the markers of the gate that neither the
+/// agent nor the exact fixes repaired no longer interrupt the run. Applies only
+/// when every blocker of the step is a citation-marker defect (`broken_citation`)
+/// and demoting the markers clears them all; anything else leaves the documents
+/// as they were and returns nothing, so the caller fails the step as before.
+/// `holds_after` is the caller's last word on the documents once demoted (the
+/// enforce gate's lint of the target); a refusal puts the originals back.
+pub(super) fn demote_last_attempt(
+    project: &Path,
+    blocking: &[Diagnostic],
+    run: Option<&RunProvenance>,
+    holds_after: &dyn Fn() -> bool,
+) -> Result<Vec<document_optimization::DemotedReference>, String> {
+    if blocking.is_empty() || blocking.iter().any(|d| d.code != "broken_citation") {
+        return Ok(Vec::new());
+    }
+    let root = project.canonicalize().map_err(|e| e.to_string())?;
+    let paths: BTreeSet<&str> = blocking.iter().map(|d| d.path.as_str()).collect();
+    let mut writes: Vec<(&str, String, String)> = Vec::new();
+    let mut references = Vec::new();
+    for path in paths {
+        if !document_optimization::kronn_owns(project, path) {
+            return Ok(Vec::new());
+        }
+        let original = std::fs::read_to_string(project.join(path)).map_err(|e| e.to_string())?;
+        let Some(demotion) = document_optimization::demote_unverifiable(project, path, &original)
+        else {
+            return Ok(Vec::new());
+        };
+        if !project
+            .join(path)
+            .canonicalize()
+            .map_err(|e| e.to_string())?
+            .starts_with(&root)
+        {
+            return Err(format!("demotion target escapes project: {path}"));
+        }
+        references.extend(demotion.references);
+        writes.push((path, original, demotion.content));
+    }
+    let write = |path: &str, from: &str, to: &str| -> Result<(), String> {
+        crate::core::mcp_scanner::atomic_write(&project.join(path), to)
+            .map_err(|e| e.to_string())?;
+        if let Err(e) = crate::core::doc_provenance::note_write(
+            project,
+            path,
+            from,
+            to,
+            crate::core::doc_provenance::DocWriter::DocumentRepair,
+        ) {
+            tracing::warn!("Human-validation provenance of {path} not recorded: {e}");
+        }
+        Ok(())
+    };
+    let undo = |done: &[(&str, String, String)]| {
+        for (path, original, demoted) in done {
+            if let Err(e) = write(path, demoted, original) {
+                tracing::error!("Could not put {path} back after a refused demotion: {e}");
+            }
+        }
+    };
+    for (index, (path, original, demoted)) in writes.iter().enumerate() {
+        let attempted =
+            preserve_original(project, original).and_then(|()| write(path, original, demoted));
+        if let Err(e) = attempted {
+            undo(&writes[..index]);
+            return Err(e);
+        }
+    }
+    let left = document_optimization::analyze_with(project, run).map(|report| {
+        report
+            .blocking_diagnostics()
+            .any(|d| blocking.iter().any(|b| same_blocker(b, d)))
+    });
+    if !matches!(left, Ok(false)) || !holds_after() {
+        undo(&writes);
+        return Ok(Vec::new());
+    }
+    Ok(references)
 }
 
 pub(super) fn recovery_changed(project: &Path, before: &Snapshot, recovery: &[Diagnostic]) -> bool {
@@ -460,8 +631,13 @@ pub(super) fn changed_recovery_paths(
 
 /// Save the sanitized original before either mechanical or model correction.
 /// Content-addressed, create-new files preserve every distinct failed attempt.
+/// KT-1370: a marker that names a secret file is replaced by a placeholder in
+/// the copy, so the backup never keeps what the document itself must not.
 fn preserve_original(project: &Path, content: &str) -> Result<(), String> {
-    crate::core::audit_state::preserve_citation_original(project, content)
+    crate::core::audit_state::preserve_citation_original(
+        project,
+        &document_optimization::scrub_secret_markers(project, content),
+    )
 }
 
 pub(super) fn snapshot_for_recovery(
@@ -1345,22 +1521,24 @@ mod tests {
                 to: "operations".into(),
             },
         )];
-        assert_eq!(notes_json(&[], &[], &[]), None);
+        assert_eq!(notes_json(&[], &[], &[], &[]), None);
         let json: serde_json::Value =
-            serde_json::from_str(&notes_json(&held, &[], &fixes).unwrap()).unwrap();
+            serde_json::from_str(&notes_json(&held, &[], &fixes, &[]).unwrap()).unwrap();
         assert_eq!(json["preexisting"][0]["path"], "docs/tech-debt/TD-1.md");
         assert_eq!(json["autofixes"][0]["step"], 10);
         assert_eq!(json["autofixes"][0]["to"], "operations");
         for language in ["fr", "en", "es"] {
             let block =
-                super::super::helpers::documentary_notes_block(&held, &[], &fixes, language);
+                super::super::helpers::documentary_notes_block(&held, &[], &fixes, &[], language);
             assert!(
                 block.contains("docs/tech-debt/TD-1.md"),
                 "{language}: {block}"
             );
             assert!(block.contains("`operations`"), "{language}: {block}");
         }
-        assert!(super::super::helpers::documentary_notes_block(&[], &[], &[], "en").is_empty());
+        assert!(
+            super::super::helpers::documentary_notes_block(&[], &[], &[], &[], "en").is_empty()
+        );
     }
 
     /// KT-1388 — what the documents still hold as advice is in the run's notes
@@ -1373,9 +1551,10 @@ mod tests {
             message: "Stack version conflict: `Symfony 7.3` at docs/coding-rules.md:5".into(),
             blocking: false,
         };
-        let json: serde_json::Value =
-            serde_json::from_str(&notes_json(&[], std::slice::from_ref(&advisory), &[]).unwrap())
-                .unwrap();
+        let json: serde_json::Value = serde_json::from_str(
+            &notes_json(&[], std::slice::from_ref(&advisory), &[], &[]).unwrap(),
+        )
+        .unwrap();
         assert_eq!(json["advisories"][0]["code"], STACK_CONFLICT);
         assert_eq!(json["advisories"][0]["path"], "docs/coding-rules.md");
         assert_eq!(json["preexisting"].as_array().unwrap().len(), 0);
@@ -1383,6 +1562,7 @@ mod tests {
             let block = super::super::helpers::documentary_notes_block(
                 &[],
                 std::slice::from_ref(&advisory),
+                &[],
                 &[],
                 language,
             );
@@ -1444,9 +1624,15 @@ mod tests {
                 .unwrap()
                 .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
                 .collect::<Vec<_>>();
-        for original in [security, sheet, index] {
+        // KT-1370: but the marker of a secret file is a placeholder in the copy.
+        let scrubbed = "# TD\nTracked key [src: file: <secret file>]\n";
+        for original in [security, scrubbed, index] {
             assert!(originals.iter().any(|o| o == original), "{original}");
         }
+        assert!(
+            originals.iter().all(|o| !o.contains(".ssh/vr-v2njs01-s")),
+            "{originals:?}"
+        );
     }
 
     /// KT-1388 — a conflict written by step 4 is handed to the final review as
@@ -1675,5 +1861,143 @@ mod tests {
         blame.record_step(root, 7, &baseline, &after);
         assert_eq!(blame.charge(&baseline[0]), Some(4));
         assert_eq!(blame.charge(&check.blocking[0]), Some(7));
+    }
+
+    /// docroms step 8, reduced: a text file cited without a line, a secret file.
+    fn docroms(doc_text: &str) -> (tempfile::TempDir, Vec<Diagnostic>) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("config/packages/prod")).unwrap();
+        std::fs::write(
+            root.join("config/packages/prod/monolog.yaml"),
+            "monolog:\n    handlers: {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".env"), "TOKEN=1\n").unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "# P\n").unwrap();
+        std::fs::write(root.join("docs/tech-debt.md"), doc_text).unwrap();
+        let blocking = document_optimization::analyze(root)
+            .unwrap()
+            .blocking_diagnostics()
+            .cloned()
+            .collect();
+        (dir, blocking)
+    }
+
+    #[test]
+    fn the_last_attempt_demotes_the_docroms_marker_to_a_flagged_path() {
+        let text = "# T\n\nLogs [src: file: config/packages/prod/monolog.yaml] in prod.\n";
+        let (dir, blocking) = docroms(text);
+        assert_eq!(blocking.len(), 1, "{blocking:?}");
+        let demoted = demote_last_attempt(dir.path(), &blocking, None, &|| true).unwrap();
+        assert_eq!(demoted.len(), 1);
+        assert_eq!(demoted[0].doc, "docs/tech-debt.md");
+        assert_eq!(
+            demoted[0].marker,
+            "[src: file: config/packages/prod/monolog.yaml]"
+        );
+        let written = std::fs::read_to_string(dir.path().join("docs/tech-debt.md")).unwrap();
+        assert_eq!(
+            written,
+            "# T\n\nLogs `config/packages/prod/monolog.yaml` (unverified reference) in prod.\n"
+        );
+        // The original is kept, and the gate no longer sees a citation.
+        assert!(std::fs::read_dir(
+            dir.path()
+                .join(crate::core::audit_state::CITATION_ORIGINALS_DIR)
+        )
+        .unwrap()
+        .next()
+        .is_some());
+        assert!(document_optimization::analyze(dir.path())
+            .unwrap()
+            .blocking_diagnostics()
+            .next()
+            .is_none());
+        let notes = demotion_notes(&demoted);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[1].contains("docs/tech-debt.md"));
+        assert!(notes[1].contains("[src: file: config/packages/prod/monolog.yaml]"));
+    }
+
+    #[test]
+    fn the_unverified_notes_of_a_resumed_run_keep_what_it_already_listed() {
+        let reference = |marker: &str| document_optimization::DemotedReference {
+            doc: "docs/a.md".into(),
+            marker: marker.into(),
+        };
+        let first = merge_unverified_notes(None, &[(1, reference("[src: file: a]"))]).unwrap();
+        let both =
+            merge_unverified_notes(Some(&first), &[(2, reference("[src: file: b]"))]).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&both).unwrap();
+        assert_eq!(saved["unverified"].as_array().unwrap().len(), 2, "{saved}");
+        assert_eq!(saved["unverified"][1]["step"], 2);
+        // Notes the Full pipeline wrote (no `unverified` yet) keep their other parts.
+        let full = r#"{"preexisting":[{"path":"p","message":"m"}],"autofixes":[]}"#;
+        let merged =
+            merge_unverified_notes(Some(full), &[(3, reference("[src: file: c]"))]).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(saved["preexisting"][0]["path"], "p", "{saved}");
+        assert_eq!(saved["unverified"][0]["step"], 3, "{saved}");
+        assert_eq!(
+            merge_unverified_notes(Some(full), &[]).as_deref(),
+            Some(full)
+        );
+    }
+
+    #[test]
+    fn a_blocker_that_is_not_a_citation_marker_demotes_nothing() {
+        let text =
+            "# T\n\nLogs [src: file: config/packages/prod/monolog.yaml] [x](nowhere/gone.md)\n";
+        let (dir, blocking) = docroms(text);
+        assert!(blocking.len() >= 2, "{blocking:?}");
+        assert!(blocking.iter().any(|d| d.code != "broken_citation"));
+        let demoted = demote_last_attempt(dir.path(), &blocking, None, &|| true).unwrap();
+        assert!(demoted.is_empty());
+        let written = std::fs::read_to_string(dir.path().join("docs/tech-debt.md")).unwrap();
+        assert_eq!(written, text);
+        // Nothing to demote: nothing to do.
+        assert!(demote_last_attempt(dir.path(), &[], None, &|| true)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_demotion_the_caller_refuses_puts_the_document_back() {
+        let text = "# T\n\nLogs [src: file: config/packages/prod/monolog.yaml] in prod.\n";
+        let (dir, blocking) = docroms(text);
+        let demoted = demote_last_attempt(dir.path(), &blocking, None, &|| false).unwrap();
+        assert!(demoted.is_empty());
+        let written = std::fs::read_to_string(dir.path().join("docs/tech-debt.md")).unwrap();
+        assert_eq!(written, text);
+    }
+
+    #[test]
+    fn a_blocker_demotion_cannot_clear_leaves_the_document_whole() {
+        // A parenthesised citation is `broken_citation` too, but it is not a
+        // marker: the document is left whole and the step fails as before.
+        let text =
+            "# T\n\nLogs [src: file: config/packages/prod/monolog.yaml] (src: file: src/a.rs:1)\n";
+        let (dir, blocking) = docroms(text);
+        assert!(blocking.iter().all(|d| d.code == "broken_citation"));
+        let demoted = demote_last_attempt(dir.path(), &blocking, None, &|| true).unwrap();
+        assert!(demoted.is_empty());
+        let written = std::fs::read_to_string(dir.path().join("docs/tech-debt.md")).unwrap();
+        assert_eq!(written, text);
+    }
+
+    #[test]
+    fn a_secret_file_marker_is_removed_with_no_path_and_no_line() {
+        let text = "# T\n\nSet the token [src: file: .env:3 the token line] first.\n";
+        let (dir, blocking) = docroms(text);
+        assert_eq!(blocking.len(), 1, "{blocking:?}");
+        let demoted = demote_last_attempt(dir.path(), &blocking, None, &|| true).unwrap();
+        assert_eq!(demoted.len(), 1);
+        let written = std::fs::read_to_string(dir.path().join("docs/tech-debt.md")).unwrap();
+        assert_eq!(written, "# T\n\nSet the token  first.\n");
+        let listed = format!("{demoted:?}{:?}", demotion_notes(&demoted));
+        assert!(!listed.contains(".env"), "{listed}");
+        assert!(!listed.contains("token line"), "{listed}");
     }
 }
