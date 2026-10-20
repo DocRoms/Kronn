@@ -235,8 +235,8 @@ describe('UnsafeStepsPanel', () => {
       quick_exec: { id: 'qe-cw', name: 'CloudWatch', source_alias: 'q', program: 'aws' },
     };
     readiness
-      .mockResolvedValueOnce({ workflow_id: 'wf-1', ready: false, blockers: [blocker], human_approval_count: 1, checked_workflow_ids: ['wf-1'], summary: '' } as WorkflowReadiness)
-      .mockResolvedValue({ workflow_id: 'wf-1', ready: true, blockers: [], human_approval_count: 0, checked_workflow_ids: ['wf-1'], summary: '' } as WorkflowReadiness);
+      .mockResolvedValueOnce({ workflow_id: 'wf-1', workflow_name: 'PR review', enabled: true, ready: false, blockers: [blocker], human_approval_count: 1, checked_workflow_ids: ['wf-1'], summary: '' } as WorkflowReadiness)
+      .mockResolvedValue({ workflow_id: 'wf-1', workflow_name: 'PR review', enabled: true, ready: true, blockers: [], human_approval_count: 0, checked_workflow_ids: ['wf-1'], summary: '' } as WorkflowReadiness);
     listQuickExecs.mockResolvedValue([{
       id: 'qe-cw', name: 'CloudWatch', icon: '🔎', description: '', project_id: 'p1', command: 'aws',
       args: ['logs', '{{from}}'], timeout_secs: 30, output_format: 'json', variables: [], pinned: false,
