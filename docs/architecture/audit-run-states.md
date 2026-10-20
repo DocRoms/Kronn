@@ -40,7 +40,7 @@ by a human (KT-1131). An accepted step keeps its failure on record:
 
 A step that still holds citation markers after its last attempt, which neither
 the agent nor the exact fixes of KT-1353 could repair, no longer ends the run
-`Interrupted`. docroms step 8 showed the cost: `[src: file: config/packages/prod/monolog.yaml]`
+`Interrupted`. docroms step 8 showed the cost: a marker citing `config/packages/prod/monolog.yaml` without a line
 (a text file cited without a line, which Kronn never guesses a line for)
 survived three attempts, `fresh_full` was interrupted, and validate,
 revalidate and partial were refused downstream. Romu decided (19/10) that
@@ -55,13 +55,13 @@ this degrades and continues.
   marker cannot be demoted, or the document still fails after demoting, the
   originals are put back and the step fails as before.
   [src: file: backend/src/api/audit/document_repair.rs:433-505#demote_last_attempt]
-- **What it writes.** `[src: file: X]` becomes `` `X` (unverified reference) ``
+- **What it writes.** a marker on path `X` becomes `` `X` (unverified reference) ``
   (line, range, anchor and `:exists` dropped; a bundle becomes one flagged list).
   Nothing else of the marker survives: a comment the agent put inside it is
   dropped for every file, never carried after the flag, and a later piece of a
   bundle is kept only when it is cited like a path (line, range, `:exists`) or
   is a file of the project. The list (event, `step_warning`, notes, prompt)
-  records only the path part, `[src: file: X]`, never the line or the comment. Inline code and
+  records only the path part (`X`), never the line or the comment. Inline code and
   fenced code are untouched, as in `mechanical_fix`. The flag is plain text:
   a backticked path is not a citation, so the gate never reads it and a
   revalidation reports the demoted references as they stand, never failing on
