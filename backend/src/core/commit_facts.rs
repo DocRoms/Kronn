@@ -587,15 +587,197 @@ fn live_text(body: &str) -> String {
         .join("\n")
 }
 
-/// A command that checks nothing: it prints, succeeds, or loads the hook runner.
+/// A command that checks nothing: every part of it prints, succeeds, loads the
+/// hook runner or only installs packages.
 fn is_inert(command: &str) -> bool {
     let command = command.trim();
-    match command.split_whitespace().next() {
-        None => true,
-        Some("echo" | "printf" | "true" | ":" | "exit" | "set" | "source") => true,
-        Some(".") => command.contains("husky.sh"),
-        Some(_) => false,
+    let parts = command_parts(command);
+    parts.is_empty()
+        || parts.iter().all(|part| {
+            let words = words_of(part);
+            match words.first().map(String::as_str) {
+                None => true,
+                Some("echo" | "printf" | "true" | ":" | "exit" | "set" | "source") => true,
+                Some(".") => command.contains("husky.sh"),
+                Some(_) => installs(&words),
+            }
+        })
+}
+
+/// The parts of a shell line that are separate commands.
+fn command_parts(command: &str) -> Vec<&str> {
+    command
+        .split([';', '|', '&', '\n'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+/// The words of one command, without quotes, brackets or `$(`.
+fn words_of(part: &str) -> Vec<String> {
+    part.split_whitespace()
+        .map(|word| {
+            word.trim_start_matches("$(")
+                .trim_matches(['"', '\'', '(', ')', '`'])
+                .to_string()
+        })
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn is_env_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// A command that only fetches or installs software: naming a package there
+/// (`npm install --save-dev @commitlint/cli`) is not running it.
+fn installs(words: &[String]) -> bool {
+    const MANAGERS: &[&str] = &[
+        "npm", "yarn", "pnpm", "bun", "pip", "pip3", "pipx", "poetry", "uv", "apt", "apt-get",
+        "apk", "brew", "gem", "cargo", "go", "composer", "conda",
+    ];
+    const VERBS: &[&str] = &[
+        "install",
+        "i",
+        "add",
+        "ci",
+        "update",
+        "upgrade",
+        "remove",
+        "uninstall",
+        "global",
+        "get",
+        "fetch",
+        "download",
+    ];
+    let mut rest = words
+        .iter()
+        .skip_while(|w| is_env_assignment(w) || *w == "sudo")
+        .map(String::as_str);
+    let Some(manager) = rest.next() else {
+        return false;
+    };
+    MANAGERS.contains(&manager)
+        && rest
+            .find(|w| !w.starts_with('-'))
+            .is_some_and(|verb| VERBS.contains(&verb))
+}
+
+/// Words that only launch another command: they never name the checker.
+const LAUNCHERS: &[&str] = &[
+    "npx",
+    "bunx",
+    "pnpx",
+    "npm",
+    "yarn",
+    "pnpm",
+    "bun",
+    "exec",
+    "run",
+    "run-script",
+    "dlx",
+    "sudo",
+    "sh",
+    "bash",
+    "zsh",
+    "env",
+    "time",
+    "command",
+    "nohup",
+    "if",
+    "then",
+    "do",
+    "else",
+    "elif",
+    "!",
+    "poetry",
+    "pipx",
+    "pipenv",
+    "uv",
+    "uvx",
+    "python",
+    "python3",
+];
+
+/// Whether `command` RUNS a commit-message checker: `Some(Some(tool))` for a
+/// named one, `Some(None)` for a checker with no name here, `None` when no part
+/// of the line launches one. A checker only named (a package to install, an
+/// environment key, a comment's subject) is not run.
+fn runs_checker(command: &str) -> Option<Option<&'static str>> {
+    for part in command_parts(command) {
+        let words = words_of(part);
+        if installs(&words) {
+            continue;
+        }
+        let mut via_script = false;
+        let mut position = None;
+        for (at, word) in words.iter().enumerate() {
+            if is_env_assignment(word) || word.starts_with('-') || word.starts_with('@') {
+                continue;
+            }
+            if LAUNCHERS.contains(&word.as_str()) {
+                via_script |= matches!(word.as_str(), "run" | "run-script");
+                continue;
+            }
+            position = Some(at);
+            break;
+        }
+        let Some(at) = position else { continue };
+        let program = words[at].rsplit('/').next().unwrap_or("").to_lowercase();
+        let rest = &words[at + 1..];
+        let found = match program.as_str() {
+            "commitlint" => Some(Some("commitlint")),
+            "gitlint" if !rest.iter().any(|w| w == "install-hook") => Some(Some("gitlint")),
+            "cz" | "commitizen" if rest.iter().any(|w| w == "check") => Some(Some("commitizen")),
+            "conventional-pre-commit" => Some(None),
+            // `npm run commitlint`: a script named for the tool.
+            name if via_script
+                && name.contains("commitlint")
+                && !["install", "setup", "disable", "init", "config"]
+                    .iter()
+                    .any(|skip| name.contains(skip)) =>
+            {
+                Some(Some("commitlint"))
+            }
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
     }
+    None
+}
+
+/// A CI step that `uses:` a commit-message action, same answer as
+/// [`runs_checker`]. Only the action's own name counts, never its inputs.
+fn action_used(line: &str) -> Option<Option<&'static str>> {
+    let lowered = line.trim_start_matches('-').trim().to_lowercase();
+    let action = lowered.strip_prefix("uses:")?;
+    let action = action
+        .trim()
+        .trim_matches(['"', '\''])
+        .split('@')
+        .next()
+        .unwrap_or("");
+    if action.contains("commitlint") {
+        Some(Some("commitlint"))
+    } else if action.contains("gitlint") {
+        Some(Some("gitlint"))
+    } else if action.contains("semantic-pull-request") || action.contains("conventional-pre-commit")
+    {
+        Some(None)
+    } else {
+        None
+    }
+}
+
+/// The tool the live lines run, for a hook or a block of CI-like lines.
+fn tool_run_in<'a>(lines: impl IntoIterator<Item = &'a str>) -> Option<&'static str> {
+    lines
+        .into_iter()
+        .find_map(|line| runs_checker(line).flatten())
 }
 
 /// The command a CI line carries: none for a label (`name:`) or an inert step.
@@ -645,15 +827,10 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
             .filter(|(_, text)| !is_inert(text))
             .collect();
         if let Some((first, _)) = live.first() {
-            let text = live
-                .iter()
-                .map(|(_, text)| text.to_lowercase())
-                .collect::<Vec<_>>()
-                .join("\n");
             out.push(Enforcer {
                 at: format!("{rel}:{first}"),
                 ci: false,
-                tool: tool_named_in(&text),
+                tool: tool_run_in(live.iter().map(|(_, text)| text.as_str())),
             });
         }
     }
@@ -674,15 +851,27 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                 .take_while(|(i, l)| *i == 0 || l.is_empty() || l.starts_with([' ', '\t', '#']))
                 .map(|(_, l)| *l)
                 .collect();
-            // A `commit-msg:` header with nothing but comments under it runs nothing.
-            let text = live_text(&block[1..].join("\n"));
-            if text.is_empty() {
+            // A `commit-msg:` header with no command under it (nothing but
+            // comments, keys, an echo or an install) runs nothing.
+            let commands: Vec<String> = live_lines(&block[1..].join("\n"))
+                .into_iter()
+                .filter_map(|(_, line)| {
+                    let value = line.trim_start_matches('-').trim();
+                    let command = ["run:", "script:"]
+                        .iter()
+                        .find_map(|key| value.strip_prefix(key))?
+                        .trim()
+                        .trim_matches(['"', '\'']);
+                    (!is_inert(command)).then(|| command.to_string())
+                })
+                .collect();
+            if commands.is_empty() {
                 continue;
             }
             out.push(Enforcer {
                 at: format!("{rel}:{}", start + 1),
                 ci: false,
-                tool: tool_named_in(&text),
+                tool: tool_run_in(commands.iter().map(String::as_str)),
             });
         }
     }
@@ -727,15 +916,11 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
             let Some(command) = ci_command(&line) else {
                 continue;
             };
-            let text = command.to_lowercase();
-            let named = tool_named_in(&text);
-            let semantic =
-                text.contains("semantic-pull-request") || text.contains("conventional-pre-commit");
-            if named.is_some() || semantic {
+            if let Some(tool) = action_used(&line).or_else(|| runs_checker(command)) {
                 out.push(Enforcer {
                     at: format!("{rel}:{number}"),
                     ci: true,
-                    tool: named,
+                    tool,
                 });
             }
         }

@@ -301,6 +301,99 @@ fn a_tool_named_only_in_a_ci_comment_is_not_enforcement() {
 }
 
 #[test]
+fn an_install_step_or_an_env_key_does_not_run_the_checker() {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "commitlint.config.js", "module.exports = {};\n");
+    for (body, why) in [
+        (
+            "jobs:\n  x:\n    steps:\n      - run: npm install --save-dev @commitlint/cli\n",
+            "install",
+        ),
+        ("steps:\n  - run: yarn add -D @commitlint/cli\n", "yarn add"),
+        ("steps:\n  - run: pip install commitizen gitlint\n", "pip"),
+        (
+            "jobs:\n  x:\n    steps:\n      - run: make lint\n        env:\n          COMMITLINT_DISABLED: true\n",
+            "env key",
+        ),
+        ("steps:\n  - run: npm ci && echo commitlint\n", "echo"),
+        (
+            "steps:\n  - uses: actions/checkout@v4\n    with:\n      commitlint-config: commitlint.config.js\n",
+            "action input",
+        ),
+        (
+            "steps:\n  - run: gitlint install-hook\n",
+            "gitlint install-hook",
+        ),
+        ("steps:\n  - run: cz commit\n", "cz commit"),
+    ] {
+        put(dir.path(), ".github/workflows/ci.yml", body);
+        let tools = detect_tooling(dir.path());
+        assert_eq!(tools.len(), 1, "{why}: {tools:?}");
+        assert_eq!(tools[0].enforcement, Enforcement::ConfiguredOnly, "{why}");
+    }
+    // A hook that only installs the tool checks nothing either.
+    let hooked = tempfile::tempdir().unwrap();
+    put(
+        hooked.path(),
+        ".husky/commit-msg",
+        "#!/bin/sh\nnpm install --save-dev @commitlint/cli\n",
+    );
+    assert!(detect_tooling(hooked.path()).is_empty());
+}
+
+#[test]
+fn a_live_line_that_runs_the_checker_is_enforcement_in_every_form() {
+    for (command, tool) in [
+        ("npx commitlint --edit $1", "commitlint"),
+        ("npx --no -- commitlint --edit \"$1\"", "commitlint"),
+        ("yarn commitlint --from origin/main", "commitlint"),
+        ("pnpm exec commitlint --edit", "commitlint"),
+        ("npm exec -- commitlint --edit", "commitlint"),
+        ("npm run commitlint", "commitlint"),
+        ("node_modules/.bin/commitlint --edit", "commitlint"),
+        ("npm ci && npx commitlint --from main", "commitlint"),
+        ("CI=1 commitlint --last", "commitlint"),
+        ("cz check --rev-range origin/main..HEAD", "commitizen"),
+        (
+            "python -m commitizen check --commit-msg-file $1",
+            "commitizen",
+        ),
+        ("gitlint --commits origin/main..HEAD", "gitlint"),
+    ] {
+        let ran = runs_checker(command);
+        assert_eq!(ran, Some(Some(tool)), "{command}");
+    }
+    for command in [
+        "npm install --save-dev @commitlint/cli",
+        "npm run build",
+        "echo commitlint",
+        "COMMITLINT_DISABLED: true",
+        "cz commit",
+        "pip install gitlint",
+        "make lint",
+    ] {
+        assert_eq!(runs_checker(command), None, "{command}");
+    }
+}
+
+#[test]
+fn a_ci_action_for_commit_messages_is_enforcement() {
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        ".github/workflows/ci.yml",
+        "steps:\n  - uses: wagoid/commitlint-github-action@v6\n",
+    );
+    let tools = detect_tooling(dir.path());
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert_eq!(tools[0].name, "commitlint");
+    assert_eq!(
+        tools[0].enforcement,
+        Enforcement::Enforced(".github/workflows/ci.yml:2".into())
+    );
+}
+
+#[test]
 fn a_ci_step_that_runs_commitlint_is_enforcement() {
     let dir = tempfile::tempdir().unwrap();
     put(

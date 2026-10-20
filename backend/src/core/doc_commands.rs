@@ -11,11 +11,19 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+
+use crate::core::{fs_guard, rooted_io};
 
 const MAX_DEPTH: usize = 8;
 const MAX_ENTRIES: usize = 20_000;
 const MAX_INCLUDE_DEPTH: usize = 8;
+/// Bounds on what `include` lines can make us read: files, bytes per file,
+/// bytes overall, and directory entries listed for one `*` pattern.
+const MAX_INCLUDE_FILES: usize = 256;
+const MAX_INCLUDE_FILE_BYTES: u64 = 1 << 20;
+const MAX_INCLUDE_TOTAL_BYTES: usize = 8 << 20;
+const MAX_GLOB_ENTRIES: usize = 2_000;
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
     ".kronn",
@@ -40,6 +48,9 @@ pub(crate) struct ProjectCommands {
     /// Makefiles already read (found by the walk or by an `include`).
     read_makefiles: BTreeSet<PathBuf>,
     makefiles: usize,
+    /// Files and bytes read through `include` lines (bounded).
+    included_files: usize,
+    included_bytes: usize,
     make_targets: BTreeSet<String>,
     make_patterns: Vec<(String, String)>,
     /// A target name built by make itself (`$(…)`): the list cannot be closed.
@@ -232,45 +243,100 @@ impl ProjectCommands {
     /// taken from the including Makefile's directory, then the project root; a
     /// `*` in the file name matches any run of characters. A path built from a
     /// variable cannot be followed and is left alone.
+    ///
+    /// The project is a jail: a path that resolves outside it (`../`, an
+    /// absolute path elsewhere) or passes through a symlink is never opened, so
+    /// a name that only exists outside the project cannot reach the diagnostic
+    /// sent to the agent. Each file is read with [`rooted_io::read`] (no link
+    /// followed below the root) and what includes can make us read is bounded.
     fn read_include(&mut self, dir: &Path, included: &str, depth: usize) {
         if included.contains("$(") || included.contains("${") {
             return;
         }
         for base in [dir.to_path_buf(), self.root.clone()] {
-            let joined = base.join(included);
-            let Some(name) = joined.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            let Some(rel) = self.project_relative(&base, included) else {
                 continue;
             };
+            let Some(name) = rel.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let parent = rel.parent().map(Path::to_path_buf).unwrap_or_default();
             let mut files = Vec::new();
             if let Some((prefix, suffix)) = name.split_once('*') {
-                let Some(entries) = joined.parent().and_then(|parent| fs::read_dir(parent).ok())
-                else {
+                let listed = self.root.join(&parent);
+                if fs_guard::assert_contained_no_symlink(&self.root, &listed).is_err() {
+                    continue;
+                }
+                let Ok(entries) = fs::read_dir(&listed) else {
                     continue;
                 };
-                for entry in entries.flatten() {
+                for entry in entries.flatten().take(MAX_GLOB_ENTRIES) {
                     let found = entry.file_name().to_string_lossy().into_owned();
+                    // `file_type` does not follow a link: a symlink is no file.
                     if found.len() >= prefix.len() + suffix.len()
                         && found.starts_with(prefix)
                         && found.ends_with(suffix)
-                        && entry.path().is_file()
+                        && entry.file_type().is_ok_and(|kind| kind.is_file())
                     {
-                        files.push(entry.path());
+                        files.push(parent.join(&found));
                     }
                 }
                 files.sort();
-            } else if joined.is_file() {
-                files.push(joined);
+            } else if fs::symlink_metadata(self.root.join(&rel)).is_ok_and(|m| m.is_file()) {
+                files.push(rel);
             }
             if files.is_empty() {
                 continue;
             }
             for file in files {
-                if let Ok(body) = fs::read_to_string(&file) {
-                    self.read_makefile(&file, &body, depth);
+                if let Some(body) = self.read_included_file(&file) {
+                    let path = self.root.join(&file);
+                    self.read_makefile(&path, &body, depth);
                 }
             }
             return;
         }
+    }
+
+    /// `included` as a path relative to the project root, cleaned of `.` and
+    /// `..`; `None` when it leaves the project (a `..` past the root, or an
+    /// absolute path elsewhere). Purely lexical: nothing is opened.
+    fn project_relative(&self, base: &Path, included: &str) -> Option<PathBuf> {
+        let joined = base.join(included);
+        let below = joined.strip_prefix(&self.root).ok()?;
+        let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+        for component in below.components() {
+            match component {
+                Component::Normal(part) => parts.push(part),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    parts.pop()?;
+                }
+                _ => return None,
+            }
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(parts.into_iter().collect())
+    }
+
+    /// One included file's text, within the bounds and without following any
+    /// link below the project root.
+    fn read_included_file(&mut self, rel: &Path) -> Option<String> {
+        if self.included_files >= MAX_INCLUDE_FILES {
+            return None;
+        }
+        let size = fs::symlink_metadata(self.root.join(rel)).ok()?.len();
+        if size > MAX_INCLUDE_FILE_BYTES
+            || self.included_bytes.saturating_add(size as usize) > MAX_INCLUDE_TOTAL_BYTES
+        {
+            return None;
+        }
+        let bytes = rooted_io::read(&self.root, rel).ok()?;
+        self.included_files += 1;
+        self.included_bytes += bytes.len();
+        String::from_utf8(bytes).ok()
     }
 
     fn read_package(&mut self, body: &str) {

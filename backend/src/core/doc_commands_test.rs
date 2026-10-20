@@ -425,3 +425,186 @@ CFLAGS ::= -O2
     );
     assert_eq!(found.len(), 4, "{found:?}");
 }
+
+/// A project at `outer/proj` next to files only the outside holds.
+fn jailed(files: &[(&str, &str)], outside: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
+    let outer = tempfile::tempdir().unwrap();
+    let proj = outer.path().join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    for (rel, body) in files {
+        let path = proj.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+    for (rel, body) in outside {
+        let path = outer.path().join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+    (outer, proj)
+}
+
+const SENTINEL: &str = "OUTSIDE_REVIEW_SENTINEL";
+
+fn outside_rules() -> String {
+    format!("{SENTINEL}:\n\ttrue\nask:\n\ttrue\n")
+}
+
+/// The diagnostics for `make ask`, which no Makefile in the project defines.
+fn asked_for(proj: &Path) -> Vec<String> {
+    ProjectCommands::scan(proj).problems("`make ask`\n")
+}
+
+/// `make ask` is still unknown, and no outside target name reached the message.
+fn assert_nothing_leaks(found: &[String]) {
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(!found[0].contains(SENTINEL), "{found:?}");
+}
+
+#[test]
+fn an_include_cannot_leave_the_project_by_parent_directories() {
+    let outside = outside_rules();
+    let (_outer, proj) = jailed(
+        &[("Makefile", "include ../outside.rules\nall:\n\ttrue\n")],
+        &[("outside.rules", &outside)],
+    );
+    assert_nothing_leaks(&asked_for(&proj));
+    // From a subdirectory Makefile, `../..` is outside as well.
+    let (_outer, proj) = jailed(
+        &[("api/Makefile", "include ../../outside.rules\n")],
+        &[("outside.rules", &outside)],
+    );
+    assert_nothing_leaks(&asked_for(&proj));
+    // And a path that goes down and back up past the root.
+    let (_outer, proj) = jailed(
+        &[("Makefile", "include a/../../outside.rules\n")],
+        &[("outside.rules", &outside)],
+    );
+    assert_nothing_leaks(&asked_for(&proj));
+}
+
+#[test]
+fn an_include_by_absolute_path_outside_the_project_is_refused() {
+    let outside = outside_rules();
+    let (outer, proj) = jailed(&[], &[("outside.rules", &outside)]);
+    let absolute = outer.path().join("outside.rules");
+    fs::write(
+        proj.join("Makefile"),
+        format!("include {}\nall:\n\ttrue\n", absolute.display()),
+    )
+    .unwrap();
+    assert_nothing_leaks(&asked_for(&proj));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_include_through_a_symlink_out_of_the_project_is_refused() {
+    use std::os::unix::fs::symlink;
+    let outside = outside_rules();
+    // A link to an outside file, a link in the middle of the path, and a
+    // pattern whose directory is a link.
+    let (outer, proj) = jailed(
+        &[(
+            "Makefile",
+            "include linked.rules\ninclude linkdir/inner.rules\ninclude glob/*.rules\n",
+        )],
+        &[
+            ("outside.rules", &outside),
+            ("outdir/inner.rules", &outside),
+        ],
+    );
+    symlink(
+        outer.path().join("outside.rules"),
+        proj.join("linked.rules"),
+    )
+    .unwrap();
+    symlink(outer.path().join("outdir"), proj.join("linkdir")).unwrap();
+    symlink(outer.path().join("outdir"), proj.join("glob")).unwrap();
+    assert_nothing_leaks(&asked_for(&proj));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_inside_the_project_is_not_followed_either() {
+    use std::os::unix::fs::symlink;
+    let (_outer, proj) = jailed(
+        &[
+            ("Makefile", "include link.rules\n"),
+            ("real.rules", "other:\n\ttrue\n"),
+        ],
+        &[],
+    );
+    symlink(proj.join("real.rules"), proj.join("link.rules")).unwrap();
+    // Refused like any link: the read never follows one below the root. The
+    // real file is still read directly when something includes it by name.
+    assert_eq!(asked_for(&proj).len(), 1);
+}
+
+#[test]
+fn a_glob_whose_directory_is_outside_the_project_is_refused() {
+    let outside = outside_rules();
+    let (outer, proj) = jailed(
+        &[("Makefile", "include ../outdir/*.rules\n")],
+        &[("outdir/a.rules", &outside)],
+    );
+    assert_nothing_leaks(&asked_for(&proj));
+    fs::write(
+        proj.join("Makefile"),
+        format!("include {}/outdir/*.rules\n", outer.path().display()),
+    )
+    .unwrap();
+    assert_nothing_leaks(&asked_for(&proj));
+}
+
+#[test]
+fn includes_inside_the_project_still_work() {
+    let (_outer, proj) = jailed(
+        &[
+            (
+                "Makefile",
+                "include make/tasks.rules\ninclude make/*.inc\ninclude ./up/../make/more.rules\n",
+            ),
+            ("make/tasks.rules", "ask:\n\ttrue\n"),
+            ("make/a.inc", "second:\n\ttrue\n"),
+            ("make/more.rules", "third:\n\ttrue\n"),
+            ("api/Makefile", "include ../make/tasks.rules\n"),
+        ],
+        &[],
+    );
+    let found = ProjectCommands::scan(&proj).problems("`make ask` `make second` `make third`\n");
+    assert!(found.is_empty(), "{found:?}");
+    // An absolute path that lands inside the project is inside the project.
+    fs::write(
+        proj.join("Makefile"),
+        format!("include {}/make/tasks.rules\n", proj.display()),
+    )
+    .unwrap();
+    assert!(asked_for(&proj).is_empty());
+}
+
+#[test]
+fn what_includes_make_us_read_is_bounded() {
+    let mut files: Vec<(String, String)> = (0..MAX_INCLUDE_FILES + 20)
+        .map(|n| (format!("many/{n:04}.rules"), format!("t{n}:\n\ttrue\n")))
+        .collect();
+    files.push((
+        "Makefile".into(),
+        "include many/*.rules\ninclude big.rules\n".into(),
+    ));
+    // One oversized include is skipped whole.
+    files.push((
+        "big.rules".into(),
+        format!(
+            "huge:\n\ttrue\n#{}\n",
+            "x".repeat(MAX_INCLUDE_FILE_BYTES as usize)
+        ),
+    ));
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let dir = project(&refs);
+    let found = ProjectCommands::scan(dir.path());
+    assert!(found.included_files <= MAX_INCLUDE_FILES);
+    assert!(!found.make_targets.contains("huge"));
+}
