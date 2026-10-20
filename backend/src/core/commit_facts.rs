@@ -539,6 +539,10 @@ struct Enforcer {
     /// something else is only listed: when execution is not proven the fact is
     /// "configured", never "enforced".
     runs_checker: bool,
+    /// A CI action that checks the pull-request TITLE, not the commit messages
+    /// (`amannn/action-semantic-pull-request`): it needs a separate squash or
+    /// merge setting to become the commit message, which is not read here.
+    pr_title: bool,
 }
 
 /// THE way this module reads a file of the project: through
@@ -1200,9 +1204,20 @@ fn script_checker(
         .filter(|_| !is_control_flow(first) || program(first) == Some("exec"))
 }
 
-/// A CI step that `uses:` a commit-message action, same answer as
-/// [`command_runs_checker`]. Only the action's own name counts, never its inputs.
-fn action_used(value: &str) -> Option<Option<&'static str>> {
+/// What a `uses:` line is worth for commit conventions.
+enum Action {
+    /// A dedicated commit-message action that runs this checker on the commits
+    /// (`wagoid/commitlint-github-action`).
+    Checker(&'static str),
+    /// A check of the pull-request title, not of the commit messages.
+    PrTitle,
+    /// Related to commit messages, but not proven to check them.
+    Unproven,
+}
+
+/// A CI step that `uses:` a commit-message action. Only the action's own name
+/// counts, never its inputs.
+fn action_used(value: &str) -> Option<Action> {
     let action = value
         .trim()
         .trim_matches(['"', '\''])
@@ -1210,13 +1225,19 @@ fn action_used(value: &str) -> Option<Option<&'static str>> {
         .next()
         .unwrap_or("")
         .to_lowercase();
-    if action.contains("commitlint") {
-        Some(Some("commitlint"))
-    } else if action.contains("gitlint") {
-        Some(Some("gitlint"))
-    } else if action.contains("semantic-pull-request") || action.contains("conventional-pre-commit")
+    // A title check never counts as a commit check, whatever tool it names.
+    if action.contains("pull-request")
+        || action.contains("pull_request")
+        || action.contains("pr-title")
+        || action.contains("pr_title")
     {
-        Some(None)
+        Some(Action::PrTitle)
+    } else if action.contains("commitlint") {
+        Some(Action::Checker("commitlint"))
+    } else if action.contains("gitlint") {
+        Some(Action::Checker("gitlint"))
+    } else if action.contains("conventional-pre-commit") {
+        Some(Action::Unproven)
     } else {
         None
     }
@@ -1292,15 +1313,15 @@ const DATA_KEYS: &[&str] = &[
     "defaults",
 ];
 
-/// Whether the CI system of `rel` runs a command list with errexit on (the step
-/// stops at the first failing command): GitHub Actions starts `bash -e {0}`,
-/// GitLab and CircleCI run their `script:` / `command:` with `set -e` too. For
-/// any other file nothing is assumed, and a checker counts only as the LAST
-/// command of its step.
-fn ci_stops_at_first_failure(rel: &str) -> bool {
+/// Whether the CI file `rel` is one whose semantics are read well enough to
+/// call a checker ENFORCED: a GitHub Actions workflow, whose default shell is
+/// `bash -e {0}` (the step stops at the first failing command). Any other CI
+/// system (GitLab, CircleCI, Azure, Bitbucket, Drone, Jenkins) has its own
+/// `allow_failure` / `when` / `rules` / `only` / `condition` / Groovy
+/// semantics that are not read here: a checker found there is listed as
+/// configured, never enforced (KT-1387).
+fn ci_proves_enforcement(rel: &str) -> bool {
     rel.starts_with(".github/workflows/")
-        || rel == ".gitlab-ci.yml"
-        || rel == ".circleci/config.yml"
 }
 
 /// A `shell:` that is the default one of its CI system (`bash`, `sh`): the step
@@ -1594,6 +1615,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                 ci: false,
                 tool: checker.flatten(),
                 runs_checker: checker.is_some(),
+                pr_title: false,
             });
         }
     }
@@ -1633,6 +1655,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                 ci: false,
                 tool: checker.flatten(),
                 runs_checker: checker.is_some(),
+                pr_title: false,
             });
         }
     }
@@ -1645,6 +1668,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                 ci: false,
                 tool: tool_named_in(&text),
                 runs_checker: true,
+                pr_title: false,
             });
         }
     }
@@ -1680,7 +1704,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
         // A CI file runs what its command keys and `uses:` lines say: a
         // comment, a `name:` label, an `env:` entry or an `echo` that mentions
         // a tool does not run it (KT-1387).
-        let errexit = ci_stops_at_first_failure(&rel);
+        let proves = ci_proves_enforcement(&rel);
         let steps = if rel == "Jenkinsfile" {
             jenkins_steps(&body)
         } else {
@@ -1689,12 +1713,20 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
         for step in steps {
             match step {
                 Step::Uses(number, value) => {
-                    if let Some(tool) = action_used(&value) {
+                    if let Some(action) = action_used(&value) {
+                        // `uses:` is a GitHub Actions construct; elsewhere the
+                        // line proves nothing and names no tool.
+                        let (tool, runs_checker, pr_title) = match action {
+                            Action::Checker(tool) if proves => (Some(tool), true, false),
+                            Action::PrTitle => (None, false, true),
+                            _ => (None, false, false),
+                        };
                         out.push(Enforcer {
                             at: format!("{rel}:{number}"),
                             ci: true,
                             tool,
-                            runs_checker: true,
+                            runs_checker,
+                            pr_title,
                         });
                     }
                 }
@@ -1703,13 +1735,13 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                     // `exit 0`, behind `||` or inside an `if` is not proven to
                     // run, so the step is listed as configured, not enforced.
                     let cmds = shell_commands(&text, number);
-                    // A Jenkinsfile is Groovy around its `sh` steps (`try`,
-                    // `catchError`, `returnStatus`): what happens to a failing
-                    // step is not read here, so it is never proof.
-                    let proven = if rel == "Jenkinsfile" {
-                        None
+                    // Only a GitHub Actions step is proof. Another CI system
+                    // (and a Jenkinsfile, Groovy around its `sh` steps) decides
+                    // what a failing step does in ways not read here.
+                    let proven = if proves {
+                        script_checker(&cmds, &scripts, 0, true)
                     } else {
-                        script_checker(&cmds, &scripts, 0, errexit)
+                        None
                     };
                     if let Some(tool) = proven {
                         if let Some(first) = cmds.iter().find(|cmd| !is_trivial(cmd)) {
@@ -1718,6 +1750,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                                 ci: true,
                                 tool,
                                 runs_checker: true,
+                                pr_title: false,
                             });
                         }
                     } else if let Some(cmd) = cmds.iter().find(|cmd| {
@@ -1728,6 +1761,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                             ci: true,
                             tool: None,
                             runs_checker: false,
+                            pr_title: false,
                         });
                     }
                 }
@@ -1870,12 +1904,24 @@ fn detect_tooling(project: &Path) -> Vec<Tool> {
     // a CI step whose commands are not proven to run a message checker is
     // listed as configured too.
     for e in enforcers.iter().filter(|e| e.tool.is_none()) {
-        let name = if e.ci {
+        let name = if e.pr_title {
+            "PR title check (CI)"
+        } else if e.ci {
             "CI commit-message check"
         } else {
             "commit-msg hook"
         };
-        let (enforcement, note) = if !e.ci {
+        let (enforcement, note) = if e.pr_title {
+            // The title becomes the commit message only through a separate
+            // squash/merge setting that is not read here: never a commit fact.
+            (
+                Enforcement::ConfiguredOnly,
+                Some(
+                    "checks the pull-request title, not each commit message; it reaches the history only if the repository squashes or merges with the title as the commit message (a separate setting, not read here)"
+                        .to_string(),
+                ),
+            )
+        } else if !e.ci {
             let read = if e.runs_checker {
                 ""
             } else {

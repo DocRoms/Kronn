@@ -264,12 +264,12 @@ fn a_config_nothing_runs_is_not_enforcement() {
 }
 
 #[test]
-fn a_ci_action_is_enforcement_and_an_unrecognised_hook_is_only_configured() {
+fn a_commit_checker_action_is_enforcement_and_an_unrecognised_hook_is_only_configured() {
     let dir = tempfile::tempdir().unwrap();
     put(
         dir.path(),
         ".github/workflows/pr.yml",
-        "name: pr\njobs:\n  title:\n    steps:\n      - uses: amannn/action-semantic-pull-request@v5\n",
+        "name: pr\njobs:\n  lint:\n    steps:\n      - uses: wagoid/commitlint-github-action@v6\n",
     );
     put(
         dir.path(),
@@ -277,10 +277,9 @@ fn a_ci_action_is_enforcement_and_an_unrecognised_hook_is_only_configured() {
         "#!/bin/sh\ngrep -qE '^(feat|fix)' \"$1\"\n",
     );
     let tools = detect_tooling(dir.path());
-    let ci = tools
-        .iter()
-        .find(|t| t.name == "CI commit-message check")
-        .unwrap();
+    // The dedicated commit-message action names the tool and enforces it.
+    assert_eq!(enforced(dir.path()), vec!["commitlint".to_string()]);
+    let ci = tools.iter().find(|t| t.name == "commitlint").unwrap();
     assert_eq!(
         ci.enforcement,
         Enforcement::Enforced(".github/workflows/pr.yml:5".into())
@@ -580,7 +579,8 @@ fn real_multi_line_and_list_ci_commands_are_enforcement_at_their_line() {
         block[0].enforcement,
         Enforcement::Enforced(".github/workflows/ci.yml:6".into())
     );
-    // GitLab list under `script:`, indented or at the key's own column.
+    // GitLab list under `script:`, indented or at the key's own column: found
+    // at its line, but a CI system other than GitHub Actions is never proof.
     for list in [
         "lint:\n  script:\n    - echo go\n    - npx commitlint --from HEAD~1\n",
         "lint:\n  script:\n  - echo go\n  - npx commitlint --from HEAD~1\n",
@@ -589,10 +589,9 @@ fn real_multi_line_and_list_ci_commands_are_enforcement_at_their_line() {
         put(dir.path(), ".gitlab-ci.yml", list);
         let tools = detect_tooling(dir.path());
         assert_eq!(tools.len(), 1, "{list}: {tools:?}");
-        assert_eq!(
-            tools[0].enforcement,
-            Enforcement::Enforced(".gitlab-ci.yml:4".into())
-        );
+        assert_eq!(tools[0].name, "CI commit-message check");
+        assert_eq!(tools[0].enforcement, Enforcement::ConfiguredOnly);
+        assert_eq!(tools[0].evidence, vec![".gitlab-ci.yml:4".to_string()]);
     }
     // Jenkins `sh` steps, single and triple quoted, are found at their line but
     // sit inside Groovy (`try`, `catchError`, `returnStatus`) that is not read:
@@ -1399,21 +1398,119 @@ fn a_ci_step_whose_failure_is_masked_is_not_enforcement() {
 }
 
 #[test]
-fn a_ci_system_with_unknown_errexit_enforces_only_a_last_checker() {
+fn only_github_actions_is_proof_every_other_ci_system_is_configured() {
+    // The same plain checker step, in every CI file other than a GitHub
+    // workflow: found and cited, never ENFORCED, even as the last command.
+    let gitlab = "lint:\n  script:\n    - npx commitlint --from HEAD~1\n";
+    let circle = "jobs:\n  lint:\n    steps:\n      - run:\n          command: npx commitlint --from HEAD~1\n";
+    let azure = "steps:\n  - script: |\n      echo start\n      npx commitlint --from HEAD~1\n";
+    let bitbucket = "pipelines:\n  default:\n    - step:\n        script:\n          - npx commitlint --from HEAD~1\n";
+    let drone = "steps:\n  - name: lint\n    commands:\n      - npx commitlint --from HEAD~1\n";
+    let jenkins = "pipeline {\n  stages {\n    stage('x') {\n      steps {\n        sh 'npx commitlint --from HEAD~1'\n      }\n    }\n  }\n}\n";
+    for (file, body) in [
+        (".gitlab-ci.yml", gitlab),
+        (".circleci/config.yml", circle),
+        ("azure-pipelines.yml", azure),
+        ("bitbucket-pipelines.yml", bitbucket),
+        (".drone.yml", drone),
+        ("Jenkinsfile", jenkins),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), file, body);
+        assert!(enforced(dir.path()).is_empty(), "{file}");
+        let tools = detect_tooling(dir.path());
+        assert_eq!(tools.len(), 1, "{file}: {tools:?}");
+        assert_eq!(tools[0].enforcement, Enforcement::ConfiguredOnly, "{file}");
+        assert_eq!(tools[0].name, "CI commit-message check", "{file}");
+        assert!(tools[0].evidence[0].starts_with(file), "{file}: {tools:?}");
+    }
+    // A `uses:` line outside a GitHub workflow names no tool and proves nothing.
     let dir = tempfile::tempdir().unwrap();
     put(
         dir.path(),
-        "azure-pipelines.yml",
-        "steps:\n  - script: |\n      npx commitlint --from HEAD~1\n      echo done\n",
+        ".drone.yml",
+        "steps:\n  - uses: wagoid/commitlint-github-action@v5\n",
     );
     assert!(enforced(dir.path()).is_empty());
+    // The same checker in a GitHub workflow, and a dedicated commit-check
+    // action there, are the positive controls.
     let dir = tempfile::tempdir().unwrap();
     put(
         dir.path(),
-        "azure-pipelines.yml",
-        "steps:\n  - script: |\n      echo start\n      npx commitlint --from HEAD~1\n",
+        ".github/workflows/ci.yml",
+        github_checker_step(),
     );
     assert_eq!(enforced(dir.path()), vec!["commitlint".to_string()]);
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        ".github/workflows/pr.yml",
+        "jobs:\n  t:\n    steps:\n      - uses: wagoid/commitlint-github-action@v6\n",
+    );
+    assert_eq!(enforced(dir.path()), vec!["commitlint".to_string()]);
+}
+
+#[test]
+fn a_pr_title_action_is_configured_never_a_commit_check() {
+    // `amannn/action-semantic-pull-request` checks the PR TITLE; the title
+    // becomes the commit message only through a separate squash/merge setting.
+    for action in [
+        "amannn/action-semantic-pull-request@v5",
+        "\"amannn/action-semantic-pull-request@v5\"",
+        "someone/commitlint-pr-title@v1",
+        "someone/pull-request-commitlint@v1",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        put(
+            dir.path(),
+            ".github/workflows/pr.yml",
+            &format!("jobs:\n  t:\n    steps:\n      - uses: {action}\n"),
+        );
+        assert!(enforced(dir.path()).is_empty(), "{action}");
+        let tools = detect_tooling(dir.path());
+        assert_eq!(tools.len(), 1, "{action}: {tools:?}");
+        assert_eq!(tools[0].name, "PR title check (CI)", "{action}");
+        assert_eq!(
+            tools[0].enforcement,
+            Enforcement::ConfiguredOnly,
+            "{action}"
+        );
+        assert_eq!(
+            tools[0].evidence,
+            vec![".github/workflows/pr.yml:4".to_string()],
+            "{action}"
+        );
+        assert!(
+            tools[0]
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("pull-request title, not each commit message")),
+            "{action}: {tools:?}"
+        );
+        let facts = CommitFacts {
+            tooling: tools,
+            ..CommitFacts::default()
+        };
+        let block = facts.render_block("c.md");
+        assert!(block.contains("PR title check (CI)"), "{block}");
+        assert!(!block.contains("ENFORCED — checked"), "{action}: {block}");
+    }
+    // Beside a real commit-checker action, only that one is the commit fact.
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        ".github/workflows/pr.yml",
+        "jobs:\n  t:\n    steps:\n      - uses: amannn/action-semantic-pull-request@v5\n      - uses: wagoid/commitlint-github-action@v6\n",
+    );
+    assert_eq!(enforced(dir.path()), vec!["commitlint".to_string()]);
+    let tools = detect_tooling(dir.path());
+    assert!(tools
+        .iter()
+        .any(|t| t.name == "PR title check (CI)" && t.enforcement == Enforcement::ConfiguredOnly));
+}
+
+fn github_checker_step() -> &'static str {
+    "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n"
 }
 
 #[test]
