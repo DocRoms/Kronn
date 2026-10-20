@@ -2830,6 +2830,7 @@ const en: TranslationDict = {
   'disc.lintLaneTitle': 'Present in a worktree, not merged yet',
   'disc.lintPillHintLane': 'Files found in an unmerged worktree of the project — click for details',
   'disc.lintUnsourcedTitle': 'Claims with no cited source',
+  'disc.invalidCard': 'Invalid card, not recorded: {0}',
   'disc.lintCaveat': '"Verified" means the source exists, not that the claim is true.',
   'disc.confirmDelete': 'Delete this discussion? This action cannot be undone.',
   'disc.bulk.start': 'Select multiple discussions',

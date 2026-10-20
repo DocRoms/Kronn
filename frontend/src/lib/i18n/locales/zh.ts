@@ -2807,6 +2807,7 @@ const zh: TranslationDict = {
   "disc.lintLaneTitle": "存在于 worktree 中，尚未合并",
   "disc.lintPillHintLane": "在项目未合并的 worktree 中找到的文件 — 点击查看详情",
   "disc.lintUnsourcedTitle": "无引用来源的声明",
+  "disc.invalidCard": "无效卡片，未记录：{0}",
   "disc.lintCaveat": "“已验证”表示来源存在，而非声明为真。",
   "disc.confirmDelete": "删除此讨论？此操作不可撤销。",
   "disc.bulk.start": "选择多个讨论",

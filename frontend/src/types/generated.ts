@@ -4756,6 +4756,15 @@ redirects_to: Array<string>, };
 export type IntegrationStrategy = "two_phase_ff_only";
 
 /**
+ * A `kronn-question` fence that no card could be recorded from.
+ */
+export type InvalidCard = {
+/**
+ * The fence's `key`, when it could still be read.
+ */
+key?: string, reason: string, };
+
+/**
  * Wire shape returned by the invite endpoint. The frontend displays
  * `instruction_text` directly in the copy-paste modal — the wording
  * lives server-side so we can tweak it (i18n, channel, etc.) without
@@ -5016,7 +5025,14 @@ export type LintReport = { unsourced_count: number, flagged_spans: Array<Flagged
  * honestly "couldn't verify" (typo? cross-repo? wrong line?), surfaced as
  * a soft amber pill, NOT a red "fabricated" one.
  */
-unverified_count: number, };
+unverified_count: number,
+/**
+ * KT-1401 — `kronn-question` fences of the message that Kronn could not
+ * turn into an arbitration card, each with the reason. Set when the
+ * message is stored, so the author is told instead of leaving a card the
+ * human sees but cannot answer.
+ */
+invalid_cards?: Array<InvalidCard>, };
 
 export type ListRequest = { authority: string, };
 

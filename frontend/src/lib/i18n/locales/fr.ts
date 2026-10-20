@@ -2840,6 +2840,7 @@ const fr: TranslationDict = {
   'disc.lintLaneTitle': 'Présentes dans un worktree, pas encore intégrées',
   'disc.lintPillHintLane': 'Fichiers trouvés dans un worktree non intégré du projet — cliquer pour le détail',
   'disc.lintUnsourcedTitle': 'Affirmations sans source citée',
+  'disc.invalidCard': 'Carte invalide, non enregistrée : {0}',
   'disc.lintCaveat': "« Vérifiée » signifie que la source existe, pas que l'affirmation est vraie.",
   'disc.confirmDelete': 'Supprimer cette discussion ? Cette action est irréversible.',
   'disc.bulk.start': 'Sélectionner plusieurs discussions',

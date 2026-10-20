@@ -355,6 +355,24 @@ pub struct LintReport {
     /// a soft amber pill, NOT a red "fabricated" one.
     #[serde(default)]
     pub unverified_count: u32,
+    /// KT-1401 — `kronn-question` fences of the message that Kronn could not
+    /// turn into an arbitration card, each with the reason. Set when the
+    /// message is stored, so the author is told instead of leaving a card the
+    /// human sees but cannot answer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<InvalidCard>>", optional)]
+    pub invalid_cards: Vec<InvalidCard>,
+}
+
+/// A `kronn-question` fence that no card could be recorded from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct InvalidCard {
+    /// The fence's `key`, when it could still be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub key: Option<String>,
+    pub reason: String,
 }
 
 impl LintReport {
@@ -365,6 +383,7 @@ impl LintReport {
             sources: Vec::new(),
             fabricated_count: 0,
             unverified_count: 0,
+            invalid_cards: Vec::new(),
         }
     }
     /// Count of mechanically-verified sources (file:line resolved on disk, or a
@@ -389,7 +408,7 @@ impl LintReport {
     ///
     /// Only a reply with NO heuristic flag AND NO citation of any kind is silent.
     pub fn has_signal(&self) -> bool {
-        self.unsourced_count > 0 || !self.sources.is_empty()
+        self.unsourced_count > 0 || !self.sources.is_empty() || !self.invalid_cards.is_empty()
     }
 
     /// Back-compat: "no signal at all". Note the flipped semantics vs the
@@ -1152,6 +1171,7 @@ pub fn lint_assertions(text: &str) -> LintReport {
         sources: Vec::new(),
         fabricated_count: 0,
         unverified_count: 0,
+        invalid_cards: Vec::new(),
     }
 }
 
