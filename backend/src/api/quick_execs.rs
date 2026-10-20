@@ -500,7 +500,7 @@ pub async fn run(
     for (name, value) in resolved.values {
         context.set(name, value);
     }
-    // Refused before a run row exists, with the Quick Exec's own approval path (KT-1398).
+    // Refused before the program starts, naming where to approve it (KT-1398).
     if let Some((_, message)) = crate::core::inline_code::quick_exec_approval_needed(
         &item.name,
         &item.command,
@@ -508,7 +508,30 @@ pub async fn run(
         item.unmodelled_args_approved == Some(true),
         item.agent_written == Some(true),
     ) {
-        return Json(ApiResponse::err(message));
+        let response = RunQuickExecResponse {
+            exit_code: None,
+            run_id: run_id.clone(),
+            success: false,
+            duration_ms: 0,
+            data: None,
+            stdout: None,
+            stderr: None,
+            error: Some(message),
+        };
+        if let Err(error) = persist_quick_exec_terminal(
+            &state,
+            &id,
+            project_id.clone(),
+            launch.discussion_id.clone(),
+            created_at,
+            &response,
+            crate::models::SharedRunStatus::PreflightFailed,
+        )
+        .await
+        {
+            return Json(ApiResponse::err(format!("DB error: {error}")));
+        }
+        return Json(ApiResponse::ok(response));
     }
     let step = WorkflowStep {
         name: item.name.clone(),
