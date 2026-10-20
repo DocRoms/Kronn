@@ -821,10 +821,11 @@ pub(crate) fn repaired_coverage_matrix(content: &str) -> Option<String> {
         let is_dimension_row = COVERAGE_DIMENSIONS
             .iter()
             .any(|dim| !dimension_rows(text, dim).is_empty());
-        match is_dimension_row
+        let split = is_dimension_row
             .then(|| split_two_column_row(text))
-            .flatten()
-        {
+            .flatten();
+        let sourced = with_dependencies_source(split.as_deref().unwrap_or(text));
+        match sourced.or(split) {
             Some(row) => {
                 let indent = &text[..text.len() - text.trim_start().len()];
                 output.push_str(indent);
@@ -837,6 +838,28 @@ pub(crate) fn repaired_coverage_matrix(content: &str) -> Option<String> {
     }
     output.push_str(&content[body_end..]);
     changed.then_some(output)
+}
+
+/// The Dependencies row when it names no version source: Kronn says the
+/// versions are not verified rather than failing the step (docroms A/B, 19/10).
+/// `None` for any other row, an N/A row or a row that already states one.
+fn with_dependencies_source(row: &str) -> Option<String> {
+    let trimmed = row.trim();
+    if dimension_rows(trimmed, "Dependencies").is_empty() || states_version_source(trimmed) {
+        return None;
+    }
+    let cells: Vec<&str> = trimmed
+        .trim_matches('|')
+        .split('|')
+        .map(plain_cell)
+        .collect();
+    if cells.len() < 3 || cells[1].to_ascii_lowercase().starts_with("n/a") || cells[2].is_empty() {
+        return None;
+    }
+    let body = trimmed.strip_suffix('|')?.trim_end();
+    Some(format!(
+        "{body}; source used: not stated (versions not verified) |"
+    ))
 }
 
 /// Apply [`repaired_coverage_matrix`] to the tech-debt index of this step.
@@ -1513,6 +1536,29 @@ mod tests {
     }
 
     /// KT-1364 — nothing but a canonical outcome is split.
+    #[test]
+    fn a_dependencies_row_without_a_version_source_says_it_is_not_verified() {
+        // docroms A/B (19/10): three retries never named the source.
+        let silent = valid_coverage_matrix().replace(
+            "| Dependencies | findings | TD-x; source used: dependency watch dated 2026-10-04 |",
+            "| Dependencies | scanned — nothing substantiable | symfony 8.1 current |",
+        );
+        assert!(validate_dimension_coverage(&silent).is_err());
+        let repaired = repaired_coverage_matrix(&silent).expect("the row is completed");
+        assert!(
+            repaired.contains("| Dependencies | scanned — nothing substantiable | symfony 8.1 current; source used: not stated (versions not verified) |"),
+            "{repaired}"
+        );
+        assert!(validate_dimension_coverage(&repaired).is_ok());
+        // A row that states its source, or an N/A row, is left alone.
+        assert!(repaired_coverage_matrix(&valid_coverage_matrix()).is_none());
+        let na = valid_coverage_matrix().replace(
+            "| Dependencies | findings | TD-x; source used: dependency watch dated 2026-10-04 |",
+            "| Dependencies | N/A: no manifest in the repo | ls shows none |",
+        );
+        assert!(repaired_coverage_matrix(&na).is_none());
+    }
+
     #[test]
     fn two_column_rows_without_a_canonical_outcome_are_left_for_the_feedback() {
         for merged in [

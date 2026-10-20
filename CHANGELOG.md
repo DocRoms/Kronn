@@ -20,7 +20,9 @@ Release notes for 0.9.3 and earlier are available in the
   reaches Ollama. The decision model is chosen like the tiers, with the same
   picker: a « 🧭 Décision » row on the Ollama card and a Decision slot next to
   image and video on an HTTP connection, each listing decision models only.
-  An OpenRouter connection lists its decision models (Perplexity Decider,
+  A local Ollama image model (such as `x/flux2-klein:4b`), or any model
+  whose declared capabilities do not include chat, is no longer offered as a
+  chat model either. An OpenRouter connection lists its decision models (Perplexity Decider,
   Jev, Clef…), which OpenRouter returns only when asked for by output
   modality. The manual catalogue form offers the `decision` capability, and a pull that
   needs a newer Ollama says to update it instead of showing the raw error.
