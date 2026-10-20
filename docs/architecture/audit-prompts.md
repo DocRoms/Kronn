@@ -6,7 +6,7 @@ ordering, target files, source patterns, and dynamic prompt assembly. The
 anti-hallucination section remains shared with the bootstrap template through
 the existing synchronization test.
 [src: file: backend/src/api/audit/mod.rs:189#PROMPT_PREAMBLE]
-[src: file: backend/src/api/audit/mod.rs:204#ANTI_HALLU_SECTION_BODY]
+[src: file: backend/src/api/audit/mod.rs:214#ANTI_HALLU_SECTION_BODY]
 [src: file: backend/src/api/audit/mod.rs:236#ANALYSIS_STEPS]
 
 The extraction preserves prompt bytes, including whitespace. Validation-card
