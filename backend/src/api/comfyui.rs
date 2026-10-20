@@ -977,6 +977,30 @@ pub async fn set_slots(
     .await
 }
 
+/// Saves the family found for the image slot's model when none is saved
+/// yet. Best effort: the job already has its family.
+pub async fn remember_image_family(state: &AppState, model: &str, family: ComfyFamily) {
+    {
+        let config = state.config.read().await;
+        let slot_model = slot(&config.comfyui.image_model);
+        if slot_model.as_deref() != Some(model) || config.comfyui.image_family.is_some() {
+            return;
+        }
+    }
+    let model = model.to_string();
+    let saved = save_comfyui(state, move |comfyui| {
+        if slot(&comfyui.image_model).as_deref() == Some(model.as_str())
+            && comfyui.image_family.is_none()
+        {
+            comfyui.image_family = Some(family);
+        }
+    })
+    .await;
+    if !saved.0.success {
+        tracing::warn!(error = ?saved.0.error, "could not save the ComfyUI image family");
+    }
+}
+
 /// Applies one change to `[comfyui]` and saves it; the in-memory config
 /// moves only once the file is written.
 async fn save_comfyui(
