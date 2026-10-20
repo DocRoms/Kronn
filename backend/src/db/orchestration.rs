@@ -708,6 +708,129 @@ pub fn lane_target_claims(
     Ok(claims)
 }
 
+/// The lanes durable lineage attributes to an execution, whatever is (or is not)
+/// written inside them (KT-1397): every managed workspace row of the project
+/// that still names its worktree (`workspace_path` survives the retirement that
+/// clears `canonical_path`) and belongs to an execution. The lane derives from
+/// that worktree name exactly as provisioning derived it.
+///
+/// Attribution only names an owner; whether that owner is finished and the
+/// worktree gone is still the claims' and the sweep's to prove. A row without
+/// an execution, an external workspace or a path no lane derives from is not
+/// attributed.
+pub fn lane_attributions(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<std::collections::HashMap<String, crate::core::worktree::LaneOwner>> {
+    let mut statement = conn.prepare(
+        "SELECT task_execution_id, workspace_path FROM discussion_workspaces
+          WHERE project_id = ?1 AND ownership = 'managed'
+            AND task_execution_id IS NOT NULL AND workspace_path IS NOT NULL
+          ORDER BY created_at, id",
+    )?;
+    let rows = statement
+        .query_map(params![project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut attributed = std::collections::HashMap::new();
+    for (execution_id, worktree) in rows {
+        let Ok(lane) =
+            crate::core::task_worker_env::WorkerLane::for_worktree(std::path::Path::new(&worktree))
+        else {
+            continue;
+        };
+        let owner = crate::core::worktree::LaneOwner {
+            version: 1,
+            lane: lane.name.clone(),
+            execution_id,
+            worktree,
+        };
+        // Two executions that derive the same lane name cannot both own it: the
+        // lane is then attributed to neither, and stays.
+        match attributed.entry(lane.name) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Some(owner));
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if slot
+                    .get()
+                    .as_ref()
+                    .is_some_and(|known| known.execution_id != owner.execution_id)
+                {
+                    slot.insert(None);
+                }
+            }
+        }
+    }
+    Ok(attributed
+        .into_iter()
+        .filter_map(|(lane, owner)| owner.map(|owner| (lane, owner)))
+        .collect())
+}
+
+/// Record, once per distinct reason, that a finished execution's checkout was
+/// kept by the release (KT-1397): a sweep that runs every half hour must not
+/// bury the event log under the same refusal. `true` when it was recorded now.
+pub fn record_release_kept_once(
+    conn: &Connection,
+    exec_id: &str,
+    reason: &str,
+    actor: &OrchestrationActor,
+) -> Result<bool> {
+    let changes = serde_json::json!({ "reason": reason });
+    let already: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_execution_events
+              WHERE task_execution_id = ?1 AND action = 'worktree_release_kept'
+                AND changes_json = ?2)",
+        params![exec_id, serde_json::to_string(&changes)?],
+        |row| row.get(0),
+    )?;
+    if already {
+        return Ok(false);
+    }
+    record_execution_event(
+        conn,
+        exec_id,
+        "worktree_release_kept",
+        None,
+        None,
+        actor,
+        changes,
+    )?;
+    Ok(true)
+}
+
+/// Managed checkouts that outlive a finished execution (KT-1397): one row per
+/// terminal (`Done`, `Failed`, `Cancelled`) execution whose managed workspace
+/// still names a path on disk. `finished_at` lets the caller leave a recent
+/// finish alone; a legacy row without one is old enough by definition.
+pub fn terminal_executions_with_checkout(
+    conn: &Connection,
+) -> Result<Vec<(String, Option<chrono::DateTime<chrono::Utc>>)>> {
+    let mut statement = conn.prepare(
+        "SELECT te.id, te.finished_at FROM task_executions te
+           JOIN discussion_workspaces dw ON dw.task_execution_id = te.id
+          WHERE dw.ownership = 'managed' AND dw.canonical_path IS NOT NULL
+            AND te.status IN ('Done', 'Failed', 'Cancelled')
+          ORDER BY te.finished_at, te.id",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, finished)| {
+            let finished = finished
+                .and_then(|text| chrono::DateTime::parse_from_rfc3339(&text).ok())
+                .map(|at| at.with_timezone(&chrono::Utc));
+            (id, finished)
+        })
+        .collect())
+}
+
 /// Audit one lane target reclaim against the execution that owned `canonical_path`.
 /// The same shape as [`record_artifact_reclaim`], under its own actions so a
 /// worktree's `target/` and its lane target are told apart. KT-1256.
@@ -2744,6 +2867,7 @@ fn announce_integration_refusal(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -4895,6 +5019,7 @@ fn publish_campaign_gate_card(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -5047,6 +5172,7 @@ fn notify_principal_of_terminal(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -5168,6 +5294,7 @@ fn return_cli_worker_to_origin(
         recovered_partial: false,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let child_message = message(
         format!("orch-return-child:{exec_id}:{terminal}"),
@@ -6709,6 +6836,7 @@ fn notify_principal_of_timeout(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(

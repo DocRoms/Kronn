@@ -308,6 +308,20 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// `dir` as shown to the user: the home directory as `~`, so a placeholder
+/// never prints one person's own path.
+fn shown_dir(dir: &std::path::Path) -> String {
+    shown_under(dir, home_dir().as_deref())
+}
+
+fn shown_under(dir: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    match home.and_then(|home| dir.strip_prefix(home).ok().map(PathBuf::from)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => dir.display().to_string(),
+    }
+}
+
 /// Where ComfyUI is looked for when its server does not answer: the folder
 /// the user set, else Comfy Desktop's default `~/ComfyUI-Installs`. A leading
 /// `~/` is the home directory.
@@ -401,7 +415,7 @@ pub async fn status(State(state): State<AppState>) -> Json<ApiResponse<ComfyUiSt
         install_command: install_command(),
         download_url: DOWNLOAD_URL.into(),
         suggestions: suggestion_views(&[], false),
-        install_dir: dir.display().to_string(),
+        install_dir: shown_dir(&dir),
         configured_endpoint: slot(&config.endpoint),
         configured_install_dir: slot(&config.install_dir),
         image_settings: config.image_settings.clone(),
@@ -963,6 +977,30 @@ pub async fn set_slots(
     .await
 }
 
+/// Saves the family found for the image slot's model when none is saved
+/// yet. Best effort: the job already has its family.
+pub async fn remember_image_family(state: &AppState, model: &str, family: ComfyFamily) {
+    {
+        let config = state.config.read().await;
+        let slot_model = slot(&config.comfyui.image_model);
+        if slot_model.as_deref() != Some(model) || config.comfyui.image_family.is_some() {
+            return;
+        }
+    }
+    let model = model.to_string();
+    let saved = save_comfyui(state, move |comfyui| {
+        if slot(&comfyui.image_model).as_deref() == Some(model.as_str())
+            && comfyui.image_family.is_none()
+        {
+            comfyui.image_family = Some(family);
+        }
+    })
+    .await;
+    if !saved.0.success {
+        tracing::warn!(error = ?saved.0.error, "could not save the ComfyUI image family");
+    }
+}
+
 /// Applies one change to `[comfyui]` and saves it; the in-memory config
 /// moves only once the file is written.
 async fn save_comfyui(
@@ -1157,6 +1195,24 @@ pub fn names_local(reference: &str) -> bool {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_install_folder_is_shown_under_a_tilde_never_with_the_home_path() {
+        let home = std::path::Path::new("/Users/someone");
+        assert_eq!(
+            shown_under(&home.join("ComfyUI-Installs"), Some(home)),
+            "~/ComfyUI-Installs"
+        );
+        assert_eq!(shown_under(home, Some(home)), "~");
+        assert_eq!(
+            shown_under(std::path::Path::new("/opt/comfy"), Some(home)),
+            "/opt/comfy"
+        );
+        assert_eq!(
+            shown_under(std::path::Path::new("/opt/comfy"), None),
+            "/opt/comfy"
+        );
+    }
 
     #[test]
     fn the_local_connection_exists_only_with_a_slot_and_never_carries_a_credential() {

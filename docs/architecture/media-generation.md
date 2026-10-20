@@ -203,7 +203,7 @@ across a generation error, and the same idempotency key is retained for an
 explicit identical retry; the UI never automatically repeats an ambiguous
 billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:400-419#createMediaDiscussion]`
 `[src: file: frontend/src/components/MediaGenerateForm.tsx:489-544#submit]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:2671-2690#handleCreateMediaDiscussion]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:2693-2712#handleCreateMediaDiscussion]`
 
 ## What a model accepts, read rather than assumed
 
@@ -232,7 +232,7 @@ trimmed and case-insensitively, so a caller is never refused over `720P`.
 
 The same read serves both surfaces. `agent_list` sweeps every configured media
 slot concurrently, each under its own 8 s window, and attaches what came back
-[src: file: backend/src/api/orchestration.rs:12645-12698#bounded_media_capabilities]; the catalogue builder
+[src: file: backend/src/api/orchestration.rs:13055-13108#bounded_media_capabilities]; the catalogue builder
 itself stays pure and is handed the result, like the reachability and quota
 preflights beside it. An envelope is attached only when the model it was read
 for is still the configured one — a connection whose model changed between the
@@ -416,8 +416,8 @@ connection with the reserved id `local:comfyui` (alias `comfyui`, no
 credential, no text tier), and every media path resolves it: generation and
 its preflights, `/api/media/models`, the estimate, the worker, the bridge
 guard and the `agent_list` catalogue.
-[src: file: backend/src/api/comfyui.rs:1080-1104#local_connection]
-[src: file: backend/src/api/orchestration.rs:12702-12708#with_local_media_source]
+[src: file: backend/src/api/comfyui.rs:1118-1142#local_connection]
+[src: file: backend/src/api/orchestration.rs:13112-13118#with_local_media_source]
 
 ComfyUI runs a node graph, so a model is usable only when Kronn has a
 measured workflow for its family (FLUX.1 schnell, SDXL such as RealVisXL,
@@ -438,8 +438,8 @@ folder checked when the server is down (default `~/ComfyUI-Installs`, Comfy
 Desktop's) are settings. Each slot keeps optional steps, guidance, sampler and
 scheduler overrides; an empty field uses the family's measured default, and
 the sampler lists come from the running ComfyUI's `/object_info/KSampler`.
-[src: file: backend/src/api/comfyui.rs:314-328#install_dir]
-[src: file: backend/src/api/comfyui.rs:988-1021#set_settings]
+[src: file: backend/src/api/comfyui.rs:328-342#install_dir]
+[src: file: backend/src/api/comfyui.rs:1026-1059#set_settings]
 [src: file: backend/src/core/comfyui.rs:254-273#settings]
 
 Images are queued like videos: `POST /prompt` records ComfyUI's prompt id as

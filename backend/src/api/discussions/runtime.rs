@@ -921,6 +921,7 @@ async fn finish_dispatch_turn(
             session_tokens_at_message: None,
             author_cli_ordinal: None,
             session_continuity: None,
+            kind: Default::default(),
             model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),

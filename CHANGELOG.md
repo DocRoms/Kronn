@@ -33,6 +33,17 @@ Release notes for 0.9.3 and earlier are available in the
   interrupt; downloads go only into the install folder of a ComfyUI on this
   machine, never through a link, and are checked against their SHA-256
   (macOS and Linux; Windows links to Hugging Face).
+- A « hide orchestration messages » toggle beside « hide notes » in the
+  discussion composer (KT-1330). What the orchestrator posts into a room
+  (review requests, delivery summaries, terminal events, bounces, timeouts,
+  worker-undelivered alerts) now carries a typed `kind: "orchestration"`
+  (`messages.kind`; rows older than the column resolve it from their `orch-…` /
+  `delivery-summary:…` id). Hiding folds each run of consecutive ones behind one
+  expandable marker, persisted like « hide notes » (`kronn:showOrchestrationMessages`).
+  A question card, a campaign gate waiting on a human, a message with an open
+  action and a search hit are never folded. Display only: agents and the
+  bridge/MCP read paths still get every message. Orchestration messages no
+  longer raise the unread badge. See `docs/architecture/orchestration-message-kind.md`.
 - Decision models are recognised (KT-1366). Kronn reads what Ollama's
   `/api/show` says each local model can do, so a decision model such as
   `clef-flash:9b` (which answers typed questions and cannot chat) is no longer
@@ -60,6 +71,32 @@ Release notes for 0.9.3 and earlier are available in the
   section built from the whole source tree ends `unchanged`, with no agent, while
   that tree is the one its baseline recorded; the glossary joins them (its
   baseline now records the tree). An `unchanged` partial step is stored as done.
+- The audit checks what its documents claim against the repository (KT-1387,
+  KT-1388, KT-1370, KT-1389; v1/v2 A/B KT-1358). A `make` target or a
+  `npm`/`yarn`/`pnpm`/`composer` script a document cites that no Makefile or
+  manifest defines is sent back to the step that wrote it; the commit
+  conventions are written from the observed history (`git log` pattern,
+  prefixes, language) and detected tooling, and called enforced only when a
+  GitHub Actions step under an established `bash`/`sh` shell or a dedicated
+  commit-message action runs the checker (a local hook, another CI system, a
+  Windows or matrix runner is « configured »); an unfilled commits template
+  fails its step. Stack facts read from lockfiles and runtime files are given
+  to the prompts, versions that contradict each other across documents are
+  flagged, and a debt is not declared resolved without proof in the code. A
+  citation marker no attempt could repair is demoted, after the last attempt,
+  to a flagged backticked path. All of these are advice measured on 754 real
+  audit documents (no false positive) and never fail a run: the partial
+  refresh feeds them back per attempt like the Full audit, they are recorded
+  as each step ends and survive a resume, and the audit timeline lists them
+  next to the unverified references. Repository files are read through the
+  project-rooted reader only, and a secret file is never cited by line.
+- Arbitration cards are never lost (KT-1401). A `kronn-question` whose label,
+  question or context is too long is recorded with the text shortened at a word
+  (the full text kept in its description or context); a card still invalid is
+  shown as such with its reason and returned to its author in the
+  `disc_append` result (`invalid_cards`). Answering the last pending card of a
+  workflow step that has ended wakes the room's agent once with every answer;
+  an earlier card says its answer will reach that agent.
 - One guide for building automations, read the same way by every agent
   (KT-1341). The built-in workflow architect is served section by section
   through `tool_manual({tool: "workflow-architect", section})` to CLI agents

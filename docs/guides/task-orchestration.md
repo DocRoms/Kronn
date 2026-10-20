@@ -135,10 +135,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:8348-8352#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:8396-8445#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:7049-7073#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:30651-30752#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:8711-8715#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:8759-8808#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:7412-7436#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:31531-31632#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -147,7 +147,7 @@ guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
 [src: file: backend/src/models/setup.rs:298-314#agent_handoff_paid_limit]
-[src: file: backend/src/db/discussions.rs:1684-1685#MAX_AGENT_HANDOFF_DEPTH]
+[src: file: backend/src/db/discussions.rs:1687-1688#MAX_AGENT_HANDOFF_DEPTH]
 [src: file: backend/src/db/discussions.rs:1693-1728#agent_handoff_root]
 [src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
 [src: file: backend/src/db/discussions.rs:2012-2055#already_scheduled]
@@ -183,9 +183,9 @@ delivery manifest and diff, then choose one of:
   worktree, these checks followed by `git merge --ff-only` are not an atomic
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
-  [src: file: backend/src/core/worktree.rs:2019-2047#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:2282-2302#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:2227-2279#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:2088-2116#write_backup_ref]
+  [src: file: backend/src/core/worktree.rs:2351-2371#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:2296-2348#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -199,7 +199,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:2199-2206#integration_target]
+[src: file: backend/src/core/worktree.rs:2268-2275#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This

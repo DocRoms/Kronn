@@ -825,13 +825,19 @@ async fn advance_local_comfyui(
             let family = match saved {
                 Some(family) => Some(family),
                 None if submitting => {
-                    crate::api::comfyui::model_family(
+                    let found = crate::api::comfyui::model_family(
                         &base,
                         &config,
                         crate::core::comfyui::IMAGE_FOLDER,
                         &job.model,
                     )
-                    .await
+                    .await;
+                    // A slot chosen before the family was saved with it
+                    // gets it now, so the header is read only once.
+                    if let Some(family) = found {
+                        crate::api::comfyui::remember_image_family(state, &job.model, family).await;
+                    }
+                    found
                 }
                 None => None,
             };
@@ -1822,6 +1828,64 @@ mod tests {
                 assert!(message.contains("no longer knows"), "{message}")
             }
             other => panic!("expected a permanent failure, got {other:?}"),
+        }
+    }
+
+    /// A slot chosen before its family was saved with it: the first job
+    /// reads the family and saves it, so later jobs never depend on the
+    /// header again.
+    #[tokio::test]
+    #[serial_test::serial] // KRONN_DATA_DIR is process-wide
+    async fn the_first_local_job_saves_the_family_an_older_slot_lacked() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", scratch.path());
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/system_stats"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"system": {"comfyui_version": "0.42.1"}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"prompt_id": "p-1"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let state = local_state(&server.uri());
+        assert_eq!(state.config.read().await.comfyui.image_family, None);
+        let now = at("2026-10-21T10:00:00Z");
+        let job = seed_local_job(
+            &state.db,
+            "job-old-slot",
+            now,
+            now + ChronoDuration::minutes(20),
+            None,
+        )
+        .await;
+        advance_claimed(&state, &reqwest::Client::new(), &job, now)
+            .await
+            .expect("submitted");
+
+        assert_eq!(
+            state.config.read().await.comfyui.image_family,
+            Some(crate::core::comfyui::ComfyFamily::Sdxl)
+        );
+        let saved = std::fs::read_to_string(scratch.path().join("config.toml")).unwrap_or_default();
+        assert!(saved.contains("image_family"), "{saved}");
+
+        match previous {
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 

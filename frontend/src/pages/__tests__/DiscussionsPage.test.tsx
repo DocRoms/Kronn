@@ -926,6 +926,105 @@ describe('DiscussionsPage', () => {
     expect(screen.getAllByText('Private timeline note').length).toBeGreaterThan(0);
   });
 
+  it('folds orchestration messages behind an expandable marker, persists the choice and never hides a question', async () => {
+    localStorage.removeItem('kronn:showOrchestrationMessages');
+    const base = { agent_type: null, tokens_used: 0, auth_mode: null, author_pseudo: 'Orchestrateur', kind: 'orchestration' as const };
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d-orch', 5),
+      messages: [
+        { id: 'main-1', role: 'User', channel: 'main', content: 'Human turn', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'orch-review-request:e:0', role: 'User', channel: 'main', content: 'Review requested for KT-1', timestamp: '2026-01-01T00:00:01Z', ...base },
+        { id: 'delivery-summary:e:0', role: 'User', channel: 'main', content: 'Delivery accepted for KT-1', timestamp: '2026-01-01T00:00:02Z', ...base },
+        { id: 'orch-ask:e:0', role: 'User', channel: 'main', content: 'Decide now\n\n```kronn-question\n{"version":1,"key":"k","question":"Ship it?","options":[{"id":"y","label":"Yes"}]}\n```', timestamp: '2026-01-01T00:00:03Z', ...base },
+        { id: 'orch-terminal:e:0', role: 'User', channel: 'main', content: 'Execution finished', timestamp: '2026-01-01T00:00:04Z', ...base },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    const props = {
+      projects: [], agents: [], allDiscussions: [{ ...makeListDiscussion('d-orch', 5), messages: fullDisc.messages }],
+      configLanguage: 'fr' as const, agentAccess: null, refetchDiscussions: noop, refetchProjects: noop,
+      onNavigate: noop, toast: toastFn, initialActiveDiscussionId: 'd-orch', ...liftedProps(),
+    };
+    const { unmount } = await wrap(<DiscussionsPage {...props} />);
+
+    // Shown by default, like notes.
+    await waitFor(() => expect(screen.getAllByText('Review requested for KT-1').length).toBeGreaterThan(0));
+    expect(screen.queryByTestId('orchestration-fold-marker')).toBeNull();
+
+    const toggle = screen.getByRole('button', { name: "Masquer les messages d'orchestration" });
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(toggle);
+
+    // Two runs fold (2 + 1); the question card between them stays.
+    const markers = screen.getAllByTestId('orchestration-fold-marker');
+    expect(markers).toHaveLength(2);
+    expect(markers[0]).toHaveTextContent("2 message(s) d'orchestration masqué(s)");
+    expect(markers[0]).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('Review requested for KT-1')).not.toBeInTheDocument();
+    expect(screen.queryByText('Execution finished')).not.toBeInTheDocument();
+    expect(screen.getByText('Human turn')).toBeInTheDocument();
+    expect(screen.getAllByText(/Decide now/).length).toBeGreaterThan(0);
+    expect(localStorage.getItem('kronn:showOrchestrationMessages')).toBe('false');
+
+    // Nothing is lost: opening a marker brings its messages back.
+    fireEvent.click(markers[0]);
+    expect(screen.getAllByText('Review requested for KT-1').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Delivery accepted for KT-1').length).toBeGreaterThan(0);
+    expect(screen.getAllByTestId('orchestration-fold-marker')[0]).toHaveAttribute('aria-expanded', 'true');
+
+    // Persisted like "hide notes": a fresh mount starts folded.
+    unmount();
+    await wrap(<DiscussionsPage {...props} />);
+    await waitFor(() => expect(screen.getAllByTestId('orchestration-fold-marker').length).toBe(2));
+    expect(screen.getByRole('button', { name: "Afficher les messages d'orchestration" })).toHaveAttribute('aria-pressed', 'false');
+    localStorage.removeItem('kronn:showOrchestrationMessages');
+  });
+
+  it('shows notes and orchestration messages by default and keeps a stored choice for each', async () => {
+    const orchBase = { agent_type: null, tokens_used: 0, auth_mode: null, author_pseudo: 'Orchestrateur', kind: 'orchestration' as const };
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d-defaults', 3),
+      messages: [
+        { id: 'main-1', role: 'User', channel: 'main', content: 'Human turn', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'note-1', role: 'User', channel: 'note', content: 'A timeline note', agent_type: null, timestamp: '2026-01-01T00:00:01Z', tokens_used: 0, auth_mode: null, author_pseudo: 'Romuald' },
+        { id: 'orch-review-request:e:0', role: 'User', channel: 'main', content: 'Review requested for KT-2', timestamp: '2026-01-01T00:00:02Z', ...orchBase },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+    const props = {
+      projects: [], agents: [], allDiscussions: [{ ...makeListDiscussion('d-defaults', 3), messages: fullDisc.messages }],
+      configLanguage: 'fr' as const, agentAccess: null, refetchDiscussions: noop, refetchProjects: noop,
+      onNavigate: noop, toast: toastFn, initialActiveDiscussionId: 'd-defaults', ...liftedProps(),
+    };
+
+    // Nothing stored: everything visible, both toggles pressed.
+    localStorage.removeItem('kronn:showDiscussionNotes');
+    localStorage.removeItem('kronn:showOrchestrationMessages');
+    const first = await wrap(<DiscussionsPage {...props} />);
+    await waitFor(() => expect(screen.getAllByText('A timeline note').length).toBeGreaterThan(0));
+    expect(screen.getAllByText('Review requested for KT-2').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Masquer les notes' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: "Masquer les messages d'orchestration" })).toHaveAttribute('aria-pressed', 'true');
+    first.unmount();
+
+    // A stored "hidden" choice survives a fresh mount, independently per toggle.
+    localStorage.setItem('kronn:showDiscussionNotes', 'false');
+    localStorage.setItem('kronn:showOrchestrationMessages', 'false');
+    try {
+      await wrap(<DiscussionsPage {...props} />);
+      await waitFor(() => expect(screen.getByText('Human turn')).toBeInTheDocument());
+      expect(screen.queryByText('A timeline note')).not.toBeInTheDocument();
+      expect(screen.queryByText('Review requested for KT-2')).not.toBeInTheDocument();
+      expect(screen.getByTestId('orchestration-fold-marker')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Afficher les notes' })).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByRole('button', { name: "Afficher les messages d'orchestration" })).toHaveAttribute('aria-pressed', 'false');
+    } finally {
+      localStorage.removeItem('kronn:showDiscussionNotes');
+      localStorage.removeItem('kronn:showOrchestrationMessages');
+    }
+  });
+
   it('passes persisted routing tiers from the discussion detail to each user message', async () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d-routing', 1),

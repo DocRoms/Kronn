@@ -412,6 +412,7 @@ fn project_label(conn: &Connection, project: Option<&str>) -> Result<String> {
 fn receipt(conn: &Connection, discussion_id: &str, receipt_id: String, body: String) -> Result<()> {
     let message = crate::models::DiscussionMessage {
         recovered_partial: false,
+        kind: Default::default(),
         session_tokens_at_message: None,
         author_cli_ordinal: None,
         session_continuity: None,

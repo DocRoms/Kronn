@@ -40,7 +40,7 @@ an interrupted/failed turn or rolled-back write leaves no completed proof.
 [src: file: backend/src/db/acp_runtime_sessions.rs:110-195#begin_turn]
 [src: file: backend/src/db/discussions.rs:1847-1871#insert_native_agent_message_with_checkpoint]
 [src: file: backend/src/db/discussions.rs:1903-1911#checkpoint]
-[src: file: backend/src/db/discussions.rs:2149-2152#complete_turn]
+[src: file: backend/src/db/discussions.rs:2152-2155#complete_turn]
 
 Claude CLI-print retains its separate `claude_cli_print_v1` identity. Its init
 event and final response share the same per-turn store; ACP adapter identities
@@ -109,7 +109,7 @@ Additional tests cover scope isolation, stale turn/session events, incomplete
 legacy progress and atomic response/checkpoint rollback. Existing ACP fixtures
 cover capability absence, missing sessions, ambiguous errors, cancellation and
 redacted prompt/persistence failures.
-[src: file: backend/src/api/discussions/streaming.rs:8674-8993#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+[src: file: backend/src/api/discussions/streaming.rs:8687-9006#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 [src: file: backend/src/db/acp_runtime_sessions.rs:402-531#completed_checkpoint_is_scoped_and_a_new_turn_invalidates_it_before_prompt]
 [src: file: backend/src/agents/runner.rs:14847-14948#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
 [src: file: backend/src/agents/runner.rs:15005-15209#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
