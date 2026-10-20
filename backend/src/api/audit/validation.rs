@@ -173,7 +173,7 @@ pub(crate) fn companion_repair_feedback(project_path: &Path, target_file: &str) 
     Some(format!(
         "## Commit conventions — targeted correction required\n\n\
          {reason}. Read the document and fill it from the `Commit facts` block of this prompt: \
-         the observed subject shape, the tooling and whether a hook or CI step enforces it, the \
+         the observed subject shape, the tooling and whether a CI step checks it (a local hook is not enforcement), the \
          trailer policy. Where the facts establish nothing, write `Not formalized — ask before \
          assuming.` in place of the placeholder. Remove the template banner and the `<!-- Fill: -->` \
          hints. Correct this document only; do not repeat the rest of the step.\n"

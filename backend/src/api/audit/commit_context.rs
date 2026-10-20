@@ -1,7 +1,8 @@
 // Commit facts for the steps that write about commits (KT-1387): computed by
 // Kronn from the git history and the repository's commit tooling, handed to
 // the step as ground truth, so the commit-conventions document describes what
-// the history shows and says "enforced" only for what a hook or CI enforces.
+// the history shows and says "enforced" only for what CI checks (a local hook is
+// not enforcement).
 
 use std::path::Path;
 

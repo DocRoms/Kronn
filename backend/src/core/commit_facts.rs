@@ -7,7 +7,8 @@
 //! `git log -n 200` and the repository's own tooling: the share of each
 //! subject shape (colon after the type or not), ticket prefixes, types,
 //! scopes, language, trailers, and which commit tooling exists and whether a
-//! hook or CI step actually enforces it. [`CommitFacts::render_block`] hands
+//! CI step actually enforces it (a local git hook never does: it runs only where
+//! it was installed). [`CommitFacts::render_block`] hands
 //! them to the step as ground truth.
 
 use std::collections::BTreeMap;
@@ -56,11 +57,11 @@ pub struct Ticket {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Enforcement {
-    /// A hook or CI step that runs it (where).
+    /// A CI step that runs it, for everyone (where).
     Enforced(String),
     /// A command people run by hand; nothing forces it.
     OptIn,
-    /// Configured, but no hook or CI step runs it.
+    /// Configured, or run by a local hook, but no CI step is proven to run it.
     ConfiguredOnly,
 }
 
@@ -254,11 +255,10 @@ impl CommitFacts {
         }
         for tool in &self.tooling {
             let status = match &tool.enforcement {
-                Enforcement::Enforced(by) => format!("ENFORCED by {by}"),
+                Enforcement::Enforced(by) => format!("ENFORCED — checked in CI by {by}"),
                 Enforcement::OptIn => "opt-in, run by hand — nothing enforces it".to_string(),
                 Enforcement::ConfiguredOnly => {
-                    "configured, but no commit-msg hook or CI step runs it — not enforced"
-                        .to_string()
+                    "configured, but no CI step is proven to run it — not enforced".to_string()
                 }
             };
             let evidence = tool
@@ -276,7 +276,7 @@ impl CommitFacts {
         out.push_str(&format!(
             "\nRules for `{commits_doc}`:\n\
              1. Describe the OBSERVED subject shape above, with its colon or absence of colon, its language and its ticket keys. Do not write the standard Conventional Commits form unless it is what the history shows.\n\
-             2. Say a convention is enforced ONLY for a tool above marked ENFORCED (a hook or CI step). An opt-in or configured-only tool is described as exactly that.\n\
+             2. Say a convention is enforced ONLY for a tool above marked ENFORCED, and say it is checked in CI. A local git hook is never enforcement: write `local hook (not enforced)`, active only where a developer installed it. An opt-in or configured-only tool is described as exactly that.\n\
              3. Read every tool file listed above. If one defines a closed list of types or scopes, write the full lists with a citation.\n\
              4. State the attribution and sign-off policy only from the trailer counts and from what the repository's own docs say; when neither establishes one, write `Not formalized — ask before assuming.`\n\
              5. Replace every `{{{{...}}}}` placeholder and remove the template banner and `<!-- Fill: -->` hints of `{commits_doc}`: a file that still holds the template fails this step.\n"
@@ -522,7 +522,14 @@ fn language_of(subject: &str) -> Option<bool> {
 
 // ─── tooling ────────────────────────────────────────────────────────────────
 
-/// A hook or CI step that checks commit messages.
+/// What a local git hook is worth as a fact: the repository holds it, but git
+/// runs it only in a clone where someone installed it (`core.hooksPath`, husky's
+/// `prepare`, lefthook install). It is never enforcement.
+const LOCAL_HOOK_NOTE: &str =
+    "local hook (not enforced): runs only where each developer installed it";
+
+/// A local hook or CI step that checks commit messages. Only a CI one
+/// (`ci: true`) can make a tool ENFORCED.
 struct Enforcer {
     at: String,
     ci: bool,
@@ -1041,7 +1048,7 @@ fn command_runs_checker(
         // `sh -c "<command>"` runs that command.
         if word == "-c" && i > 0 && matches!(words[i - 1].as_str(), "sh" | "bash" | "zsh") {
             let inner = words.get(i + 1)?;
-            return script_checker(&shell_commands(inner, cmd.line), scripts, depth);
+            return script_checker(&shell_commands(inner, cmd.line), scripts, depth, false);
         }
         if word.is_empty() || is_env_assignment(word) || word.starts_with(['-', '@']) {
             i += 1;
@@ -1067,7 +1074,7 @@ fn command_runs_checker(
                 if depth > 0 {
                     return None;
                 }
-                return script_checker(&shell_commands(body, cmd.line), scripts, depth + 1);
+                return script_checker(&shell_commands(body, cmd.line), scripts, depth + 1, false);
             }
             if manager == Some("npm") {
                 return None;
@@ -1147,14 +1154,38 @@ fn is_control_flow(cmd: &Cmd) -> bool {
         || (first == "set" && cmd.words.iter().any(|w| w.starts_with('+')))
 }
 
-/// What a script (a hook, a CI `run:` text, a package script) answers to "does it
-/// run a commit-message checker?". `Some` ONLY for a straight-line script whose
-/// first non-trivial command is the checker: no `exit`/`return`, no `||`, pipe or
-/// `&`, no `&&` behind a command that can fail on its own, no `if`/`case`/loop,
-/// no function or group, no `set +e` anywhere in it. Anything else abstains
-/// (`None`, so "configured"): a false "enforced" is the harmful error.
-fn script_checker(cmds: &[Cmd], scripts: &Scripts, depth: usize) -> Option<Option<&'static str>> {
+/// What a script (a CI `run:` text, a package script, a `sh -c` string, a hook)
+/// answers to "does it run a commit-message checker?". `Some` ONLY for a
+/// straight-line script whose first non-trivial command is the checker: no
+/// `exit`/`return`, no `||`, pipe or `&`, no `&&` behind a command that can fail
+/// on its own, no `if`/`case`/loop, no function or group, no `set +e` anywhere
+/// in it. Anything else abstains (`None`, so "configured"): a false "enforced"
+/// is the harmful error.
+///
+/// `errexit` says the shell stops at the first failing command, as a CI `run:`
+/// step does by default (GitHub Actions starts `bash -e {0}`): the checker's
+/// failure then ends the script whatever follows it (`checker; echo done`
+/// fails). Without it (`sh -c`, an `npm run` script) the script's status is its
+/// LAST command's, so the checker must be the last command, or the head of an
+/// `&&` chain that runs to the end of the script.
+fn script_checker(
+    cmds: &[Cmd],
+    scripts: &Scripts,
+    depth: usize,
+    errexit: bool,
+) -> Option<Option<&'static str>> {
     let first = cmds.iter().find(|cmd| !is_trivial(cmd))?;
+    let at = cmds.iter().position(|cmd| std::ptr::eq(cmd, first))?;
+    let tail = &cmds[at + 1..];
+    // The script's status is the checker's when nothing runs after it, or when
+    // everything after it hangs off it with `&&` (a failing checker skips the
+    // rest and the script ends on its status).
+    let status_reaches_the_end = tail.is_empty()
+        || (first.after == Join::And && tail.iter().all(|cmd| cmd.before == Join::And))
+        || (errexit && first.after == Join::Seq);
+    if !status_reaches_the_end {
+        return None;
+    }
     if cmds.iter().any(|cmd| {
         is_control_flow(cmd) && !std::ptr::eq(cmd, first)
             || matches!(cmd.before, Join::Or | Join::Pipe | Join::Background)
@@ -1167,11 +1198,6 @@ fn script_checker(cmds: &[Cmd], scripts: &Scripts, depth: usize) -> Option<Optio
     // `exec` is control flow unless it launches the checker itself.
     command_runs_checker(first, scripts, depth)
         .filter(|_| !is_control_flow(first) || program(first) == Some("exec"))
-}
-
-/// The first of `cmds` that runs a checker, under [`script_checker`]'s rules.
-fn first_checker(cmds: &[Cmd], scripts: &Scripts) -> Option<Option<&'static str>> {
-    script_checker(cmds, scripts, 0)
 }
 
 /// A CI step that `uses:` a commit-message action, same answer as
@@ -1266,9 +1292,50 @@ const DATA_KEYS: &[&str] = &[
     "defaults",
 ];
 
+/// Whether the CI system of `rel` runs a command list with errexit on (the step
+/// stops at the first failing command): GitHub Actions starts `bash -e {0}`,
+/// GitLab and CircleCI run their `script:` / `command:` with `set -e` too. For
+/// any other file nothing is assumed, and a checker counts only as the LAST
+/// command of its step.
+fn ci_stops_at_first_failure(rel: &str) -> bool {
+    rel.starts_with(".github/workflows/")
+        || rel == ".gitlab-ci.yml"
+        || rel == ".circleci/config.yml"
+}
+
+/// A `shell:` that is the default one of its CI system (`bash`, `sh`): the step
+/// runs with errexit. Any other value is a custom command line (`bash {0}`,
+/// `pwsh`, `python`) whose exit handling is its own.
+fn default_shell(value: &str) -> bool {
+    matches!(
+        unquote_yaml(without_comment(value).trim()).trim(),
+        "bash" | "sh"
+    )
+}
+
+/// Whether `key: value` makes a failing step NOT fail the run: the step's
+/// failure is masked, so a checker in it enforces nothing.
+fn masks_failure(key: &str, value: &str) -> bool {
+    let value = unquote_yaml(without_comment(value).trim())
+        .trim()
+        .to_lowercase();
+    let unmasked = matches!(value.as_str(), "false" | "0" | "no" | "off");
+    match key {
+        // Anything but a literal false (`true`, an expression, a mapping with
+        // `exit_codes`, an empty value opening one) is doubt.
+        "continue-on-error" | "continueOnError" | "allow_failure" => !unmasked,
+        "failure" => value == "ignore",
+        "shell" => !default_shell(&value),
+        _ => false,
+    }
+}
+
 /// Whether `key: value` switches its step (or job, or hook) off: a step with
 /// `if: false` never runs, whatever its command says.
 fn switches_off(key: &str, value: &str) -> bool {
+    if masks_failure(key, value) {
+        return true;
+    }
     let value = unquote_yaml(without_comment(value).trim()).trim();
     if value.is_empty() {
         return false;
@@ -1318,6 +1385,7 @@ fn yaml_steps(body: &str) -> Vec<Step> {
     let mut mappings: Vec<Mapping> = Vec::new();
     let mut keys: Vec<(usize, String)> = Vec::new();
     let mut next_id = 0usize;
+    let mut everything_masked = false;
     for (index, raw) in body.lines().enumerate() {
         let number = index + 1;
         let trimmed = raw.trim_start();
@@ -1373,6 +1441,10 @@ fn yaml_steps(body: &str) -> Vec<Step> {
                 keys.pop();
             }
             data = keys.iter().any(|(_, k)| DATA_KEYS.contains(&k.as_str()));
+            // `defaults: run: shell: pwsh` changes the shell of every step.
+            if data && masks_failure(name, rest) {
+                everything_masked = true;
+            }
             keys.push((col, name.to_string()));
             if switches_off(name, rest) {
                 if let Some(m) = mappings.last() {
@@ -1440,7 +1512,7 @@ fn yaml_steps(body: &str) -> Vec<Step> {
         out.push((Step::Shell(block.first, block.text), block.mappings));
     }
     out.into_iter()
-        .filter(|(_, ids)| !ids.iter().any(|id| off.contains(id)))
+        .filter(|(_, ids)| !everything_masked && !ids.iter().any(|id| off.contains(id)))
         .map(|(step, _)| step)
         .collect()
 }
@@ -1516,7 +1588,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
         // tool named in a comment or a string is not run by it.
         let cmds = shell_commands(&body, 1);
         if let Some(first) = cmds.iter().find(|cmd| !is_inert(cmd)) {
-            let checker = first_checker(&cmds, &scripts);
+            let checker = script_checker(&cmds, &scripts, 0, true);
             out.push(Enforcer {
                 at: format!("{rel}:{}", first.line),
                 ci: false,
@@ -1555,7 +1627,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
             if cmds.iter().all(is_inert) {
                 continue;
             }
-            let checker = first_checker(&cmds, &scripts);
+            let checker = script_checker(&cmds, &scripts, 0, true);
             out.push(Enforcer {
                 at: format!("{rel}:{}", start + 1),
                 ci: false,
@@ -1608,6 +1680,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
         // A CI file runs what its command keys and `uses:` lines say: a
         // comment, a `name:` label, an `env:` entry or an `echo` that mentions
         // a tool does not run it (KT-1387).
+        let errexit = ci_stops_at_first_failure(&rel);
         let steps = if rel == "Jenkinsfile" {
             jenkins_steps(&body)
         } else {
@@ -1630,7 +1703,15 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                     // `exit 0`, behind `||` or inside an `if` is not proven to
                     // run, so the step is listed as configured, not enforced.
                     let cmds = shell_commands(&text, number);
-                    if let Some(tool) = first_checker(&cmds, &scripts) {
+                    // A Jenkinsfile is Groovy around its `sh` steps (`try`,
+                    // `catchError`, `returnStatus`): what happens to a failing
+                    // step is not read here, so it is never proof.
+                    let proven = if rel == "Jenkinsfile" {
+                        None
+                    } else {
+                        script_checker(&cmds, &scripts, 0, errexit)
+                    };
+                    if let Some(tool) = proven {
                         if let Some(first) = cmds.iter().find(|cmd| !is_trivial(cmd)) {
                             out.push(Enforcer {
                                 at: format!("{rel}:{}", first.line),
@@ -1732,22 +1813,28 @@ fn detect_tooling(project: &Path) -> Vec<Tool> {
     names.sort();
     for name in names {
         let evidence = configured.get(name).cloned().unwrap_or_default();
+        // Only a CI step enforces: it runs for everyone. A local hook runs
+        // where each developer installed it, whatever its script says.
         let enforcer = enforcers
             .iter()
-            .find(|e| e.runs_checker && e.tool == Some(name));
-        let (enforcement, note) = match enforcer {
-            Some(e) => (Enforcement::Enforced(e.at.clone()), None),
-            None if name == "commitizen" => (
-                Enforcement::OptIn,
-                Some(
-                    "used through its CLI; no commit-msg hook or CI step runs `cz check`"
-                        .to_string(),
-                ),
+            .find(|e| e.ci && e.runs_checker && e.tool == Some(name));
+        let local_hook = enforcers
+            .iter()
+            .find(|e| !e.ci && e.runs_checker && e.tool == Some(name));
+        let (enforcement, note) = match (enforcer, local_hook) {
+            (Some(e), _) => (Enforcement::Enforced(e.at.clone()), None),
+            (None, Some(_)) => (
+                Enforcement::ConfiguredOnly,
+                Some(LOCAL_HOOK_NOTE.to_string()),
             ),
-            None => (Enforcement::ConfiguredOnly, None),
+            (None, None) if name == "commitizen" => (
+                Enforcement::OptIn,
+                Some("used through its CLI; no CI step runs `cz check`".to_string()),
+            ),
+            (None, None) => (Enforcement::ConfiguredOnly, None),
         };
         let mut evidence = evidence;
-        if let Some(e) = enforcer {
+        if let Some(e) = enforcer.or(local_hook) {
             evidence.push(e.at.clone());
         }
         tools.push(Tool {
@@ -1779,21 +1866,27 @@ fn detect_tooling(project: &Path) -> Vec<Tool> {
         });
     }
 
-    // Hooks and CI steps that name no tool. A hook whose commands are not
-    // proven to run a message checker is listed as configured, never enforced.
+    // Hooks and CI steps that name no tool. A local hook is never enforcement;
+    // a CI step whose commands are not proven to run a message checker is
+    // listed as configured too.
     for e in enforcers.iter().filter(|e| e.tool.is_none()) {
         let name = if e.ci {
             "CI commit-message check"
         } else {
             "commit-msg hook"
         };
-        let (enforcement, note) = if e.runs_checker {
+        let (enforcement, note) = if !e.ci {
+            let read = if e.runs_checker {
+                ""
+            } else {
+                "; it is not proven to run a commit-message checker: read the file before saying what it checks"
+            };
             (
-                Enforcement::Enforced(e.at.clone()),
-                (!e.ci).then(|| {
-                    "a hook in the repository is active only where it is installed".to_string()
-                }),
+                Enforcement::ConfiguredOnly,
+                Some(format!("{LOCAL_HOOK_NOTE}{read}")),
             )
+        } else if e.runs_checker {
+            (Enforcement::Enforced(e.at.clone()), None)
         } else {
             (
                 Enforcement::ConfiguredOnly,

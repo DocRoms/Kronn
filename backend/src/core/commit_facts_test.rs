@@ -204,7 +204,7 @@ fn an_opt_in_commit_target_is_not_enforcement() {
         block.contains("opt-in, run by hand — nothing enforces it"),
         "{block}"
     );
-    assert!(!block.contains("ENFORCED by"), "{block}");
+    assert!(!block.contains("ENFORCED —"), "{block}");
     assert!(block.contains("[src: file: nicommitizen.sh:1]"), "{block}");
     assert!(
         block.contains("Read every tool file listed above"),
@@ -213,7 +213,9 @@ fn an_opt_in_commit_target_is_not_enforcement() {
 }
 
 #[test]
-fn a_commit_msg_hook_running_commitlint_is_enforcement() {
+fn a_commit_msg_hook_running_commitlint_is_a_local_hook_never_enforcement() {
+    // KT-1387 round 6: a hook of the repository runs only where a developer
+    // installed it, whatever its script says.
     let dir = tempfile::tempdir().unwrap();
     put(dir.path(), "commitlint.config.js", "module.exports = {};\n");
     put(
@@ -224,10 +226,25 @@ fn a_commit_msg_hook_running_commitlint_is_enforcement() {
     let tools = detect_tooling(dir.path());
     assert_eq!(tools.len(), 1, "{tools:?}");
     assert_eq!(tools[0].name, "commitlint");
-    assert_eq!(
-        tools[0].enforcement,
-        Enforcement::Enforced(".husky/commit-msg:2".into())
+    assert_eq!(tools[0].enforcement, Enforcement::ConfiguredOnly);
+    assert!(
+        tools[0]
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("local hook (not enforced)")),
+        "{tools:?}"
     );
+    assert!(tools[0]
+        .evidence
+        .contains(&".husky/commit-msg:2".to_string()));
+    let facts = CommitFacts {
+        tooling: tools,
+        ..CommitFacts::default()
+    };
+    let block = facts.render_block("c.md");
+    assert!(!block.contains("ENFORCED —"), "{block}");
+    assert!(block.contains("local hook (not enforced)"), "{block}");
+    assert!(block.contains("checked in CI"), "{block}");
 }
 
 #[test]
@@ -268,11 +285,14 @@ fn a_ci_action_is_enforcement_and_an_unrecognised_hook_is_only_configured() {
         ci.enforcement,
         Enforcement::Enforced(".github/workflows/pr.yml:5".into())
     );
-    // A hook that runs a command Kronn cannot tell is a message checker is
-    // listed, but never called enforcement.
+    // A hook is listed as a local hook, never called enforcement.
     let hook = tools.iter().find(|t| t.name == "commit-msg hook").unwrap();
     assert_eq!(hook.enforcement, Enforcement::ConfiguredOnly);
     assert_eq!(hook.evidence, vec![".githooks/commit-msg:2".to_string()]);
+    assert!(hook
+        .note
+        .as_deref()
+        .is_some_and(|n| n.contains("local hook (not enforced)")));
 }
 
 #[test]
@@ -341,13 +361,27 @@ fn an_install_step_or_an_env_key_does_not_run_the_checker() {
     assert!(detect_tooling(hooked.path()).is_empty());
 }
 
-/// Whether a one-line shell text runs a checker, with the given scripts.
+/// Whether a shell text, run by a shell that stops at the first failing command
+/// (a CI `run:` step), runs a checker, with the given scripts.
 fn runs(command: &str, scripts: &[(&str, &str)]) -> Option<Option<&'static str>> {
+    runs_with(command, scripts, true)
+}
+
+/// The same, for a shell without errexit (`sh -c`, an `npm run` script).
+fn runs_plain(command: &str) -> Option<Option<&'static str>> {
+    runs_with(command, &[], false)
+}
+
+fn runs_with(
+    command: &str,
+    scripts: &[(&str, &str)],
+    errexit: bool,
+) -> Option<Option<&'static str>> {
     let scripts: Scripts = scripts
         .iter()
         .map(|(name, body)| (name.to_string(), body.to_string()))
         .collect();
-    first_checker(&shell_commands(command, 1), &scripts)
+    script_checker(&shell_commands(command, 1), &scripts, 0, errexit)
 }
 
 #[test]
@@ -560,7 +594,9 @@ fn real_multi_line_and_list_ci_commands_are_enforcement_at_their_line() {
             Enforcement::Enforced(".gitlab-ci.yml:4".into())
         );
     }
-    // Jenkins `sh` steps, single and triple quoted.
+    // Jenkins `sh` steps, single and triple quoted, are found at their line but
+    // sit inside Groovy (`try`, `catchError`, `returnStatus`) that is not read:
+    // listed, never proof.
     let dir = tempfile::tempdir().unwrap();
     put(
         dir.path(),
@@ -569,10 +605,9 @@ fn real_multi_line_and_list_ci_commands_are_enforcement_at_their_line() {
     );
     let tools = detect_tooling(dir.path());
     assert_eq!(tools.len(), 1, "{tools:?}");
-    assert_eq!(
-        tools[0].enforcement,
-        Enforcement::Enforced("Jenkinsfile:8".into())
-    );
+    assert_eq!(tools[0].name, "CI commit-message check");
+    assert_eq!(tools[0].enforcement, Enforcement::ConfiguredOnly);
+    assert_eq!(tools[0].evidence, vec!["Jenkinsfile:8".to_string()]);
 }
 
 #[test]
@@ -648,7 +683,8 @@ fn a_hook_that_only_mentions_the_tool_is_not_enforcement() {
     );
     assert!(detect_tooling(dir.path()).is_empty());
 
-    // Behind the loader, a real run is enforcement and points at its line.
+    // Behind the loader, a real run names the tool and points at its line, as a
+    // local hook: configured, not enforced.
     put(
         dir.path(),
         ".husky/commit-msg",
@@ -657,10 +693,10 @@ fn a_hook_that_only_mentions_the_tool_is_not_enforcement() {
     let tools = detect_tooling(dir.path());
     assert_eq!(tools.len(), 1, "{tools:?}");
     assert_eq!(tools[0].name, "commitlint");
-    assert_eq!(
-        tools[0].enforcement,
-        Enforcement::Enforced(".husky/commit-msg:4".into())
-    );
+    assert_eq!(tools[0].enforcement, Enforcement::ConfiguredOnly);
+    assert!(tools[0]
+        .evidence
+        .contains(&".husky/commit-msg:4".to_string()));
 }
 
 #[test]
@@ -689,10 +725,12 @@ fn lefthook_and_pre_commit_commit_msg_stages_are_hooks() {
     );
     let tools = detect_tooling(dir.path());
     let commitlint = tools.iter().find(|t| t.name == "commitlint").unwrap();
-    assert_eq!(
-        commitlint.enforcement,
-        Enforcement::Enforced("lefthook.yml:5".into())
-    );
+    assert_eq!(commitlint.enforcement, Enforcement::ConfiguredOnly);
+    assert!(commitlint.evidence.contains(&"lefthook.yml:5".to_string()));
+    assert!(commitlint
+        .note
+        .as_deref()
+        .is_some_and(|n| n.contains("local hook (not enforced)")));
     // A lefthook with no commit-msg block enforces nothing.
     let none = tempfile::tempdir().unwrap();
     put(
@@ -781,7 +819,7 @@ fn a_hook_that_runs_no_checker_is_configured_never_enforced() {
             ..CommitFacts::default()
         };
         let block = facts.render_block("c.md");
-        assert!(!block.contains("ENFORCED by"), "{body}\n{block}");
+        assert!(!block.contains("ENFORCED —"), "{body}\n{block}");
     }
     // A lefthook `commit-msg` command that runs no checker.
     let lefthook = tempfile::tempdir().unwrap();
@@ -791,18 +829,17 @@ fn a_hook_that_runs_no_checker_is_configured_never_enforced() {
         "commit-msg:\n  commands:\n    notify:\n      run: ./scripts/notify.sh {1}\n    help:\n      run: npx commitlint --help\n",
     );
     assert!(enforced(lefthook.path()).is_empty());
-    // Positive controls: a hook that really runs the checker.
+    // A hook that really runs the checker is still only a local hook.
     for body in [
         "#!/bin/sh\nnpx commitlint --edit message\n",
         "#!/bin/sh\n. \"$(dirname \"$0\")/_/husky.sh\"\nnpx --no -- commitlint --edit \"$1\"\n",
     ] {
         let dir = tempfile::tempdir().unwrap();
         put(dir.path(), ".husky/commit-msg", body);
-        assert_eq!(
-            enforced(dir.path()),
-            vec!["commitlint".to_string()],
-            "{body}"
-        );
+        assert!(enforced(dir.path()).is_empty(), "{body}");
+        let tools = detect_tooling(dir.path());
+        assert_eq!(tools.len(), 1, "{body}: {tools:?}");
+        assert_eq!(tools[0].enforcement, Enforcement::ConfiguredOnly, "{body}");
     }
 }
 
@@ -1135,7 +1172,7 @@ fn an_unreachable_checker_in_a_hook_or_ci_is_configured_not_enforced() {
             "{why}: {tools:?}"
         );
     }
-    // The two direct controls stay enforced.
+    // The direct CI control stays enforced; the same line in a hook never is.
     let dir = tempfile::tempdir().unwrap();
     put(
         dir.path(),
@@ -1143,10 +1180,7 @@ fn an_unreachable_checker_in_a_hook_or_ci_is_configured_not_enforced() {
         "#!/bin/sh\nnpx commitlint --edit \"$1\"\n",
     );
     let tools = detect_tooling(dir.path());
-    assert!(
-        matches!(tools[0].enforcement, Enforcement::Enforced(_)),
-        "{tools:?}"
-    );
+    assert_eq!(tools[0].enforcement, Enforcement::ConfiguredOnly);
     let tools = ci_tool(
         "jobs:\n  t:\n    steps:\n      - run: npx commitlint --edit\n",
         None,
@@ -1154,5 +1188,266 @@ fn an_unreachable_checker_in_a_hook_or_ci_is_configured_not_enforced() {
     assert!(
         matches!(tools[0].enforcement, Enforcement::Enforced(_)),
         "{tools:?}"
+    );
+}
+
+// ─── KT-1387 round 6: local hooks never enforce, CI does under errexit ──────
+
+#[test]
+fn no_form_of_local_hook_is_ever_enforced() {
+    // The reviewer's six exit-status fixtures, as hooks: the checker's status
+    // may or may not reach git, and a hook only runs where it is installed, so
+    // none of them is enforcement.
+    for body in [
+        "npx commitlint --edit message\necho done\n",
+        "npx commitlint --edit message; printf done\n",
+        "npx commitlint --edit message\n",
+        "set -e\nnpx commitlint --edit message\necho done\n",
+        "exec npx commitlint --edit message\n",
+        "npx commitlint --edit message && echo done\n",
+        "#!/bin/sh\n. \"$(dirname \"$0\")/_/husky.sh\"\nnpx --no -- commitlint --edit \"$1\"\n",
+    ] {
+        for hook in [
+            ".husky/commit-msg",
+            ".githooks/commit-msg",
+            ".git-hooks/commit-msg",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            put(dir.path(), hook, body);
+            let tools = detect_tooling(dir.path());
+            assert_eq!(tools.len(), 1, "{hook} {body}: {tools:?}");
+            assert_eq!(
+                tools[0].enforcement,
+                Enforcement::ConfiguredOnly,
+                "{hook} {body}"
+            );
+            assert!(
+                tools[0]
+                    .note
+                    .as_deref()
+                    .is_some_and(|n| n.contains("local hook (not enforced)")),
+                "{hook} {body}: {tools:?}"
+            );
+        }
+    }
+    // Lefthook and pre-commit, whatever they run.
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        "lefthook.yml",
+        "commit-msg:\n  commands:\n    lint:\n      run: npx commitlint --edit {1}\n",
+    );
+    put(
+        dir.path(),
+        ".pre-commit-config.yaml",
+        "repos:\n  - repo: https://github.com/jorisroovers/gitlint\n    hooks:\n      - id: gitlint\n        stages: [commit-msg]\n",
+    );
+    assert!(enforced(dir.path()).is_empty());
+    assert!(!detect_tooling(dir.path()).is_empty());
+
+    // The same checker in a CI step IS enforcement: CI runs for everyone.
+    let tools = ci_tool(
+        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --edit message\n",
+        None,
+    );
+    assert_eq!(
+        tools[0].enforcement,
+        Enforcement::Enforced(".github/workflows/ci.yml:4".into())
+    );
+    let facts = CommitFacts {
+        tooling: tools,
+        ..CommitFacts::default()
+    };
+    assert!(facts
+        .render_block("c.md")
+        .contains("ENFORCED — checked in CI by .github/workflows/ci.yml:4"));
+}
+
+#[test]
+fn a_hook_and_a_ci_step_on_the_same_tool_report_the_ci_step() {
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        ".husky/commit-msg",
+        "#!/bin/sh\nnpx commitlint --edit \"$1\"\n",
+    );
+    put(
+        dir.path(),
+        ".github/workflows/ci.yml",
+        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from origin/main\n",
+    );
+    let tools = detect_tooling(dir.path());
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert_eq!(
+        tools[0].enforcement,
+        Enforcement::Enforced(".github/workflows/ci.yml:4".into())
+    );
+}
+
+#[test]
+fn a_ci_step_runs_with_errexit_so_what_follows_the_checker_cannot_hide_it() {
+    // GitHub Actions starts `bash -e {0}`: a failing checker fails the step.
+    for run in [
+        "npx commitlint --edit message\n          echo done",
+        "npx commitlint --edit message; printf done",
+        "set -e\n          npx commitlint --edit message\n          echo done",
+        "exec npx commitlint --edit message",
+        "npx commitlint --edit message && echo done",
+        "npx commitlint --edit message",
+        "echo start\n          npx commitlint --edit message\n          echo done",
+    ] {
+        let tools = ci_tool(
+            &format!("jobs:\n  t:\n    steps:\n      - run: |\n          {run}\n"),
+            None,
+        );
+        assert_eq!(tools.len(), 1, "{run}: {tools:?}");
+        assert!(
+            matches!(tools[0].enforcement, Enforcement::Enforced(_)),
+            "{run}: {tools:?}"
+        );
+    }
+    // Anything that can hide the checker's status abstains.
+    for run in [
+        "npx commitlint --edit message || true",
+        "npx commitlint --edit message; exit 0",
+        "set +e\n          npx commitlint --edit message",
+        "set +e; npx commitlint --edit message; echo done",
+        "npx commitlint --edit message && make build; echo done",
+        "npx commitlint --edit message | tee out.log",
+        "npx commitlint --edit message &",
+        "if npx commitlint --edit message; then echo ok; fi",
+        "exit 0\n          npx commitlint --edit message",
+    ] {
+        let tools = ci_tool(
+            &format!("jobs:\n  t:\n    steps:\n      - run: |\n          {run}\n"),
+            None,
+        );
+        assert!(
+            tools
+                .iter()
+                .all(|t| t.enforcement == Enforcement::ConfiguredOnly),
+            "{run}: {tools:?}"
+        );
+    }
+}
+
+#[test]
+fn a_ci_step_whose_failure_is_masked_is_not_enforcement() {
+    for (why, body) in [
+        (
+            "continue-on-error step",
+            "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        continue-on-error: true\n",
+        ),
+        (
+            "continue-on-error before run",
+            "jobs:\n  t:\n    steps:\n      - continue-on-error: true\n        run: npx commitlint --from HEAD~1\n",
+        ),
+        (
+            "continue-on-error job",
+            "jobs:\n  t:\n    continue-on-error: true\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
+        ),
+        (
+            "continue-on-error expression",
+            "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        continue-on-error: ${{ matrix.experimental }}\n",
+        ),
+        (
+            "custom shell",
+            "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        shell: pwsh\n",
+        ),
+        (
+            "custom shell template",
+            "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        shell: bash {0}\n",
+        ),
+        (
+            "default shell of every step",
+            "defaults:\n  run:\n    shell: pwsh\njobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
+        ),
+        (
+            "gitlab allow_failure",
+            "lint:\n  allow_failure: true\n  script:\n    - npx commitlint --from HEAD~1\n",
+        ),
+        (
+            "gitlab allow_failure exit codes",
+            "lint:\n  allow_failure:\n    exit_codes: 1\n  script:\n    - npx commitlint --from HEAD~1\n",
+        ),
+        (
+            "azure continueOnError",
+            "steps:\n  - script: npx commitlint --from HEAD~1\n    continueOnError: true\n",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let file = if body.starts_with("lint:") {
+            ".gitlab-ci.yml"
+        } else if body.starts_with("steps:") {
+            "azure-pipelines.yml"
+        } else {
+            ".github/workflows/ci.yml"
+        };
+        put(dir.path(), file, body);
+        assert!(enforced(dir.path()).is_empty(), "{why}:\n{body}");
+    }
+    // The explicit defaults are not masking.
+    for body in [
+        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        shell: bash\n",
+        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        continue-on-error: false\n",
+        "defaults:\n  run:\n    shell: bash\njobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), ".github/workflows/ci.yml", body);
+        assert_eq!(enforced(dir.path()), vec!["commitlint".to_string()], "{body}");
+    }
+}
+
+#[test]
+fn a_ci_system_with_unknown_errexit_enforces_only_a_last_checker() {
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        "azure-pipelines.yml",
+        "steps:\n  - script: |\n      npx commitlint --from HEAD~1\n      echo done\n",
+    );
+    assert!(enforced(dir.path()).is_empty());
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        "azure-pipelines.yml",
+        "steps:\n  - script: |\n      echo start\n      npx commitlint --from HEAD~1\n",
+    );
+    assert_eq!(enforced(dir.path()), vec!["commitlint".to_string()]);
+}
+
+#[test]
+fn a_nested_script_without_errexit_needs_its_checker_last() {
+    // `sh -c` and an `npm run` script end on their LAST command's status.
+    assert_eq!(runs("sh -c 'npx commitlint --edit; echo done'", &[]), None);
+    assert_eq!(
+        runs("sh -c 'npx commitlint --edit'", &[]),
+        Some(Some("commitlint"))
+    );
+    assert_eq!(
+        runs("sh -c 'npx commitlint --edit && echo ok'", &[]),
+        Some(Some("commitlint"))
+    );
+    assert_eq!(
+        runs("npm run c", &[("c", "commitlint --edit; echo done")]),
+        None
+    );
+    assert_eq!(
+        runs("npm run c", &[("c", "commitlint --edit")]),
+        Some(Some("commitlint"))
+    );
+    // And the shell-level helper itself.
+    assert_eq!(runs_plain("npx commitlint --edit; echo done"), None);
+    assert_eq!(
+        runs_plain("npx commitlint --edit"),
+        Some(Some("commitlint"))
+    );
+    assert_eq!(
+        runs_plain("npx commitlint --edit && echo ok"),
+        Some(Some("commitlint"))
+    );
+    assert_eq!(
+        runs_plain("npx commitlint --edit && make build; echo done"),
+        None
     );
 }
