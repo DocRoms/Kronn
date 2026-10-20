@@ -179,6 +179,54 @@ describe('AuditTimeline — cancelled runs, half-written targets, drift', () => 
     expect(listed).toHaveTextContent('config/packages/prod/monolog.yaml');
   });
 
+  it('KT-1389: the advisories and the unverified commands are listed next to the unverified references', async () => {
+    const notes = JSON.stringify({
+      unverified: [{ step: 8, doc: 'docs/AGENTS.md', marker: '[src: file: config/packages/prod/monolog.yaml]' }],
+      advisories: [
+        { code: 'stack_conflict', path: 'docs/AGENTS.md', message: 'Symfony 7.3 here, ^8.1 in composer.json' },
+        { code: 'unproven_resolution', path: 'docs/inconsistencies-security.md', message: 'TD-1 is resolved without code proof' },
+      ],
+      unverified_commands: [{ step: 4, path: 'docs/notes.md', message: 'Command `make ghost` is not defined by the repository' }],
+    });
+    mockTimeline({ status: 'Completed', documentary_notes: notes }, [step(1)]);
+    wrap(<AuditTimeline {...props()} />);
+    const block = await screen.findByTestId('audit-timeline-documentary-notes');
+    expect(within(block).getByTestId('audit-timeline-documentary-unverified')).toBeInTheDocument();
+    const advice = within(block).getByTestId('audit-timeline-documentary-advisories');
+    expect(advice).toHaveTextContent(fr['auditTimeline.docnotes.advisories'].replace('{0}', '2'));
+    expect(advice).toHaveTextContent(fr['auditTimeline.docnotes.advisory.stack_conflict']);
+    expect(advice).toHaveTextContent(fr['auditTimeline.docnotes.advisory.unproven_resolution']);
+    expect(advice).toHaveTextContent('Symfony 7.3 here, ^8.1 in composer.json');
+    const commands = within(block).getByTestId('audit-timeline-documentary-commands');
+    expect(commands).toHaveTextContent(fr['auditTimeline.docnotes.commands'].replace('{0}', '1'));
+    expect(commands).toHaveTextContent('docs/notes.md');
+    expect(commands).toHaveTextContent('make ghost');
+  });
+
+  it('KT-1389: a run whose only notes are advisories or commands still shows the block', async () => {
+    mockTimeline({
+      status: 'Completed',
+      documentary_notes: JSON.stringify({ unverified_commands: [{ step: 2, path: 'docs/notes.md', message: 'make ghost' }] }),
+    }, [step(1)]);
+    wrap(<AuditTimeline {...props()} />);
+    const block = await screen.findByTestId('audit-timeline-documentary-notes');
+    expect(within(block).queryByTestId('audit-timeline-documentary-advisories')).toBeNull();
+    expect(within(block).getByTestId('audit-timeline-documentary-commands')).toBeInTheDocument();
+  });
+
+  it('KT-1389: every language has the new documentary notes labels', async () => {
+    const keys = [
+      'auditTimeline.docnotes.advisories',
+      'auditTimeline.docnotes.advisory.stack_conflict',
+      'auditTimeline.docnotes.advisory.unproven_resolution',
+      'auditTimeline.docnotes.commands',
+    ] as const;
+    for (const language of ['en', 'fr', 'es', 'zh']) {
+      const locale = (await import(`../../lib/i18n/locales/${language}.ts`)).default as Record<string, string>;
+      for (const key of keys) expect(locale[key], `${language}: ${key}`).toBeTruthy();
+    }
+  });
+
   it('KT-1353: nothing is shown without notes, or with notes that cannot be read', async () => {
     mockTimeline({ status: 'Completed', documentary_notes: '{not json' }, [step(1)]);
     const { container } = wrap(<AuditTimeline {...props()} />);

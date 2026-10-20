@@ -48,6 +48,10 @@ interface DocumentaryNotes {
   autofixes: { step: number; path: string; kind: string; from: string; to: string }[];
   /** KT-1370 — markers demoted to flagged backticked paths after a step's last attempt. */
   unverified: { step: number; doc: string; marker: string }[];
+  /** KT-1388 — stack conflicts and unproven closures the documents still hold (advice, never a failure). */
+  advisories: { code: string; path: string; message: string }[];
+  /** KT-1387 — commands a document cites that the repository does not define. */
+  unverified_commands: { step: number; path: string; message: string }[];
 }
 
 function parseDocumentaryNotes(raw: string | null): DocumentaryNotes | null {
@@ -58,8 +62,11 @@ function parseDocumentaryNotes(raw: string | null): DocumentaryNotes | null {
       preexisting: Array.isArray(parsed.preexisting) ? parsed.preexisting : [],
       autofixes: Array.isArray(parsed.autofixes) ? parsed.autofixes : [],
       unverified: Array.isArray(parsed.unverified) ? parsed.unverified : [],
+      advisories: Array.isArray(parsed.advisories) ? parsed.advisories : [],
+      unverified_commands: Array.isArray(parsed.unverified_commands) ? parsed.unverified_commands : [],
     };
-    return notes.preexisting.length || notes.autofixes.length || notes.unverified.length ? notes : null;
+    return notes.preexisting.length || notes.autofixes.length || notes.unverified.length
+      || notes.advisories.length || notes.unverified_commands.length ? notes : null;
   } catch {
     return null;
   }
@@ -390,6 +397,11 @@ export function AuditTimeline(props: AuditTimelineProps) {
   // step completed) the only next action is a fresh launch; settled
   // `Interrupted` it is resumable and still tells it was cancelled.
   const docNotes = useMemo(() => parseDocumentaryNotes(latestRun?.documentaryNotes ?? null), [latestRun]);
+  const advisoryLabel = (code: string) => {
+    if (code === 'stack_conflict') return t('auditTimeline.docnotes.advisory.stack_conflict');
+    if (code === 'unproven_resolution') return t('auditTimeline.docnotes.advisory.unproven_resolution');
+    return code;
+  };
   const cancelledRun = !auditActive && latestRun !== null && latestRun.cancelledAtStep !== null
     && (latestRun.status === 'Cancelled' || latestRun.status === 'Interrupted');
 
@@ -765,6 +777,30 @@ export function AuditTimeline(props: AuditTimelineProps) {
                         {docNotes.unverified.map((item, i) => (
                           <li key={`${item.doc}-${i}`}>
                             <code>{item.doc}</code> — step {item.step}: <code>{item.marker}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {docNotes.advisories.length > 0 && (
+                    <details data-testid="audit-timeline-documentary-advisories">
+                      <summary>{t('auditTimeline.docnotes.advisories', docNotes.advisories.length)}</summary>
+                      <ul>
+                        {docNotes.advisories.map((item, i) => (
+                          <li key={`${item.path}-${i}`}>
+                            {advisoryLabel(item.code)}: <code>{item.path}</code> — {item.message}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {docNotes.unverified_commands.length > 0 && (
+                    <details data-testid="audit-timeline-documentary-commands">
+                      <summary>{t('auditTimeline.docnotes.commands', docNotes.unverified_commands.length)}</summary>
+                      <ul>
+                        {docNotes.unverified_commands.map((item, i) => (
+                          <li key={`${item.path}-${i}`}>
+                            <code>{item.path}</code> — step {item.step}: {item.message}
                           </li>
                         ))}
                       </ul>

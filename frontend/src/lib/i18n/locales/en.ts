@@ -6928,6 +6928,10 @@ End with [SIGNAL: OK].`,
   "auditTimeline.docnotes.preexisting": "{0} pre-existing citation problem(s) in docs no step owns",
   "auditTimeline.docnotes.autofixes": "{0} exact gate replacement(s) applied by Kronn",
   "auditTimeline.docnotes.unverified": "{0} unverified reference(s): citation markers no attempt could make valid, now flagged backticked paths",
+  "auditTimeline.docnotes.advisories": "{0} advisory finding(s) left in the docs: to check, the audit did not fail over them",
+  "auditTimeline.docnotes.advisory.stack_conflict": "Stack version conflict",
+  "auditTimeline.docnotes.advisory.unproven_resolution": "Resolution without proof",
+  "auditTimeline.docnotes.commands": "{0} cited command(s) the repository does not define (Makefile, package.json, composer.json): kept as a warning",
 };
 
 export default en;

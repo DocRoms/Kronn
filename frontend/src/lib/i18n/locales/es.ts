@@ -6928,6 +6928,10 @@ Termina con [SIGNAL: OK].`,
   "auditTimeline.docnotes.preexisting": "{0} problema(s) de citas preexistente(s) en docs que ningún paso posee",
   "auditTimeline.docnotes.autofixes": "{0} reemplazo(s) exacto(s) de la puerta aplicado(s) por Kronn",
   "auditTimeline.docnotes.unverified": "{0} referencia(s) no verificada(s): marcadores de cita que ningún intento logró validar, ahora rutas entre comillas invertidas señaladas",
+  "auditTimeline.docnotes.advisories": "{0} aviso(s) dejado(s) en los docs: por comprobar, la auditoría no falló por ello",
+  "auditTimeline.docnotes.advisory.stack_conflict": "Conflicto de versión de la stack",
+  "auditTimeline.docnotes.advisory.unproven_resolution": "Resolución sin prueba",
+  "auditTimeline.docnotes.commands": "{0} comando(s) citado(s) que el repositorio no define (Makefile, package.json, composer.json): conservado(s) como advertencia",
 };
 
 export default es;
