@@ -577,6 +577,20 @@ async fn a_bridge_token_cannot_spawn_agents_through_the_readiness_probe() {
     assert_eq!(json["data"][0]["reason"], "not_probed");
 }
 
+/// The list of Quick Execs awaiting a human's approval is the human's own
+/// worklist (KT-1398): a bridge token never reads it; the operator does.
+#[tokio::test]
+async fn a_bridge_token_cannot_read_the_pending_quick_exec_approvals() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let path = "/api/quick-execs/pending-approvals";
+    let (status, json) = call(&app, "GET", path, Some(guard.value()), None).await;
+    assert_eq!(status, 403, "{json}");
+    let (status, json) = call(&app, "GET", path, None, None).await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["success"], true, "{json}");
+}
+
 /// A shared workflow triggered from a project-bound room runs for that
 /// project; one that does not serve it stays refused.
 #[tokio::test]
