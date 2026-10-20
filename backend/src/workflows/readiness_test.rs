@@ -411,3 +411,89 @@ fn a_native_agent_without_full_access_blocks_the_run() {
     assert!(full_access_blockers(&readiness).is_empty());
     assert!(readiness.ready, "{:?}", readiness.blockers);
 }
+
+/// KT-1398 — a CollectApiData source that runs a saved Quick Exec by id is
+/// read from the Quick Exec itself: awaiting a human's approval, it is a
+/// blocker that names the Quick Exec, so the page can approve it in place.
+#[test]
+fn a_saved_quick_exec_source_awaiting_approval_is_a_named_blocker() {
+    let exec = |approved: Option<bool>| crate::models::QuickExec {
+        id: "qe-cw".into(),
+        name: "CloudWatch — top 5xx".into(),
+        icon: "🔎".into(),
+        description: String::new(),
+        project_id: None,
+        command: "aws".into(),
+        args: vec![
+            "logs".into(),
+            "start-query".into(),
+            "--start-time".into(),
+            "{{from}}".into(),
+        ],
+        timeout_secs: 30,
+        output_format: crate::models::CollectQuickExecOutputFormat::Json,
+        variables: vec![],
+        pinned: false,
+        unmodelled_args_approved: approved,
+        agent_written: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let collect = WorkflowStep {
+        name: "cw-start".into(),
+        step_type: StepType::CollectApiData,
+        collect_api_data: Some(crate::models::CollectApiDataConfig {
+            sources: vec![crate::models::CollectApiDataSource {
+                alias: "q".into(),
+                quick_api_id: String::new(),
+                quick_exec_id: "qe-cw".into(),
+                quick_exec: None,
+                required: true,
+                variables: Default::default(),
+            }],
+            concurrent_limit: None,
+        }),
+        ..Default::default()
+    };
+    let wf = workflow("cw", vec![collect], vec![]);
+    let pending: HashMap<String, crate::models::QuickExec> =
+        [("qe-cw".to_string(), exec(None))].into_iter().collect();
+    let verdict = assess_with(&wf, &HashMap::new(), &pending);
+    assert!(!verdict.ready);
+    assert_eq!(verdict.human_approval_count, 1);
+    let blocker = &verdict.blockers[0];
+    assert_eq!(blocker.kind, WorkflowBlockerKind::HumanApproval);
+    assert!(blocker.human_only);
+    let named = blocker
+        .quick_exec
+        .as_ref()
+        .expect("the Quick Exec is named");
+    assert_eq!(
+        (
+            named.id.as_str(),
+            named.source_alias.as_str(),
+            named.program.as_str()
+        ),
+        ("qe-cw", "q", "aws")
+    );
+    assert!(
+        blocker
+            .message
+            .contains("Quick Exec « CloudWatch — top 5xx »"),
+        "{}",
+        blocker.message
+    );
+    assert!(
+        blocker.message.contains("Quick Execs"),
+        "{}",
+        blocker.message
+    );
+
+    let approved: HashMap<String, crate::models::QuickExec> =
+        [("qe-cw".to_string(), exec(Some(true)))]
+            .into_iter()
+            .collect();
+    assert!(assess_with(&wf, &HashMap::new(), &approved).ready);
+    // Without the Quick Exec map, the old check sees nothing to block.
+    assert!(assess(&wf, &HashMap::new()).ready);
+}

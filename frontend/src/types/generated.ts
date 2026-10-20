@@ -1512,6 +1512,19 @@ parent_workflow_id: string | null, parent_workflow_name: string | null,
 parent_run_sequence: number | null, };
 
 /**
+ * The saved Quick Exec behind a blocker, and the program it hands run values to.
+ */
+export type BlockedQuickExec = { id: string, name: string,
+/**
+ * The CollectApiData source alias that runs it.
+ */
+source_alias: string,
+/**
+ * The program that receives run values, e.g. `aws`.
+ */
+program: string, };
+
+/**
  * Structured discriminant for a non-terminal `Blocked` TaskExecution (KT-328). A
  * `Blocked` row also carries a human-readable `blocked_reason`, but a consumer
  * classifies the hold on THIS code — never by matching prose (KT-334 owns the
@@ -7360,6 +7373,15 @@ export type QuickExecExportEnvelope = { kind: string, version: number, exported_
  */
 redacted_fields?: Array<RedactedField>, };
 
+/**
+ * One saved Quick Exec whose line waits for a human's approval (KT-1398).
+ */
+export type QuickExecPendingApproval = { id: string,
+/**
+ * The program that receives run values, e.g. `aws`.
+ */
+program: string, message: string, };
+
 export type QuickExecResult = { status: QuickExecStatus,
 /**
  * `None` when the process died on a signal or never started. Not 0 — an
@@ -11135,7 +11157,12 @@ reason?: string, message: string, action: string,
 /**
  * Only a human can lift it: an agent must report it, never work around it.
  */
-human_only: boolean, };
+human_only: boolean,
+/**
+ * A saved Quick Exec a CollectApiData source runs (KT-1398): the human
+ * approves it there, so the page can approve it or open it directly.
+ */
+quick_exec?: BlockedQuickExec, };
 
 /**
  * What keeps a run from starting (KT-1138).

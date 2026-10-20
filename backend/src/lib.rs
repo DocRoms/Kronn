@@ -2603,6 +2603,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::quick_execs::list).post(api::quick_execs::create),
         )
         .route(
+            "/api/quick-execs/pending-approvals",
+            get(api::quick_execs::pending_approvals),
+        )
+        .route(
             "/api/quick-execs/{id}",
             put(api::quick_execs::update)
                 .patch(api::quick_execs::update_pinned)

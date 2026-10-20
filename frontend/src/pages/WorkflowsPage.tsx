@@ -413,6 +413,9 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
   const { data: quickPromptList, refetch: refetchQP } = useApi(() => quickPromptsApi.list(), []);
   const { data: quickApiList, refetch: refetchQA } = useApi(() => quickApisApi.list(), []);
   const { data: quickExecList, refetch: refetchQE } = useApi(() => quickExecsApi.list(), []);
+  // KT-1398 — which Quick Execs wait for a human's approval (refreshed with the list).
+  const { data: pendingQE } = useApi(() => quickExecsApi.pendingApprovals(), [quickExecList]);
+  const pendingByQE = new Map((pendingQE ?? []).map(item => [item.id, item]));
   const { data: externalConnectionList } = useApi(() => externalApiConnections.list(), []);
   // 0.8.5 — catalogs for the QP form binding pickers (skills + profiles +
   // directives). Empty-array fallback keeps the form rendering during the
@@ -4133,6 +4136,11 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                           </>
                         )}
                       </div>
+                      {pendingByQE.has(quickExec.id) && (
+                        <p className="qe-pending" role="status" data-testid="qe-pending">
+                          <strong>{t('qe.pendingBadge')}</strong> {t('qe.pendingHint', pendingByQE.get(quickExec.id)?.program ?? '')}
+                        </p>
+                      )}
                       <div className="qp-card-meta">
                         <span>{quickExec.output_format.toUpperCase()}</span>
                         <span>{quickExec.timeout_secs}s</span>

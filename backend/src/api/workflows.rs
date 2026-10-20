@@ -1857,11 +1857,17 @@ pub(crate) async fn list_with_visibility(
                 .iter()
                 .map(|wf| (wf.id.clone(), wf.clone()))
                 .collect();
+            // Saved Quick Execs a step runs by id count too (KT-1398).
+            let quick_execs: std::collections::HashMap<String, QuickExec> =
+                crate::db::quick_execs::list_quick_execs(conn)?
+                    .into_iter()
+                    .map(|exec| (exec.id.clone(), exec))
+                    .collect();
             let summaries = workflows
                 .into_iter()
                 .map(|wf| {
                     let (blocker_count, human_approval_count) = crate::workflows::readiness::counts(
-                        &crate::workflows::readiness::assess(&wf, &by_id),
+                        &crate::workflows::readiness::assess_with(&wf, &by_id, &quick_execs),
                     );
                     let last_run = last_runs.remove(&wf.id);
 
@@ -1961,12 +1967,21 @@ pub async fn readiness(
 pub(crate) async fn workflow_readiness(state: &AppState, wf: &Workflow) -> WorkflowReadiness {
     match state
         .db
-        .with_read_conn(crate::db::workflows::list_workflows)
+        .with_read_conn(|conn| {
+            Ok((
+                crate::db::workflows::list_workflows(conn)?,
+                crate::db::quick_execs::list_quick_execs(conn)?,
+            ))
+        })
         .await
     {
-        Ok(all) => crate::workflows::readiness::assess(
+        Ok((all, quick_execs)) => crate::workflows::readiness::assess_with(
             wf,
             &all.into_iter().map(|w| (w.id.clone(), w)).collect(),
+            &quick_execs
+                .into_iter()
+                .map(|exec| (exec.id.clone(), exec))
+                .collect(),
         ),
         Err(e) => crate::workflows::readiness::collection_failure(wf, &format!("DB error: {e}")),
     }

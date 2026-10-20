@@ -1,4 +1,4 @@
-import type { AcceptAuditStepResponse, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
+import type { AcceptAuditStepResponse, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange, QuickExecPendingApproval } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
 import type {
@@ -3269,6 +3269,8 @@ export const quickApis = {
 
 export const quickExecs = {
   list: () => api<QuickExec[]>('GET', '/quick-execs'),
+  /** KT-1398 — the Quick Execs a run refuses until a human approves them. */
+  pendingApprovals: () => api<QuickExecPendingApproval[]>('GET', '/quick-execs/pending-approvals'),
   create: (req: CreateQuickExecRequest) => api<QuickExec>('POST', '/quick-execs', req),
   update: (id: string, req: CreateQuickExecRequest) =>
     api<QuickExec>('PUT', `/quick-execs/${id}`, req),

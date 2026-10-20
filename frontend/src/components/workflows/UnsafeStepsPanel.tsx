@@ -7,7 +7,7 @@
 // or rollbacks are named so a saved chain is never mistaken for a ready one.
 import { useEffect, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
-import { workflows as workflowsApi } from '../../lib/api';
+import { quickExecs as quickExecsApi, workflows as workflowsApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
 import type { UnsafeExecStep, Workflow, WorkflowBlocker, WorkflowReadiness } from '../../types/generated';
 
@@ -35,6 +35,8 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
   const [applying, setApplying] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [readiness, setReadiness] = useState<WorkflowReadiness | null>(null);
+  const [reload, setReload] = useState(0);
+  const [approveError, setApproveError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -47,7 +49,37 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
       .then(found => { if (!cancelled) setReadiness(found ?? null); })
       .catch(() => { if (!cancelled) setReadiness(null); });
     return () => { cancelled = true; };
-  }, [workflow]);
+  }, [workflow, reload]);
+
+  // KT-1398 — a saved Quick Exec a collection runs is approved here, on the
+  // Quick Exec itself: the run reads the approval from its row.
+  const approveQuickExec = async (blocker: WorkflowBlocker) => {
+    const target = blocker.quick_exec;
+    if (!target || applying) return;
+    setApplying(`qe:${target.id}`);
+    setApproveError(null);
+    try {
+      const exec = (await quickExecsApi.list()).find(item => item.id === target.id);
+      if (!exec) throw new Error(t('wf.qeApproveMissing', target.name));
+      await quickExecsApi.update(exec.id, {
+        name: exec.name,
+        icon: exec.icon,
+        description: exec.description,
+        project_id: exec.project_id,
+        command: exec.command,
+        args: exec.args,
+        timeout_secs: exec.timeout_secs,
+        output_format: exec.output_format,
+        variables: exec.variables,
+        unmodelled_args_approved: true,
+      });
+      setReload(value => value + 1);
+    } catch (error) {
+      setApproveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setApplying(null);
+    }
+  };
 
   // Blockers that live in another workflow of the chain, grouped by workflow.
   const elsewhere = new Map<string, { name: string; total: number; human: number }>();
@@ -163,7 +195,21 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
                 </span>
               </div>
               <p className="wf-unsafe-manual-reason">{blocker.message}</p>
-              <p className="wf-unsafe-manual">{blocker.action}</p>
+              {blocker.quick_exec ? (
+                <div className="wf-unsafe-fix" data-testid="readiness-quick-exec">
+                  <button
+                    type="button"
+                    className="wf-btn-secondary wf-unsafe-apply"
+                    disabled={applying !== null}
+                    onClick={() => { void approveQuickExec(blocker); }}
+                  >
+                    {t('wf.qeApprove', blocker.quick_exec.name, blocker.quick_exec.program)}
+                  </button>
+                  {approveError && <p className="wf-unsafe-manual-reason" role="alert">{approveError}</p>}
+                </div>
+              ) : (
+                <p className="wf-unsafe-manual">{blocker.action}</p>
+              )}
             </li>
           ))}
         </ul>

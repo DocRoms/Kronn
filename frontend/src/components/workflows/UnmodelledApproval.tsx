@@ -66,18 +66,25 @@ export function UnmodelledApproval({
 
   if (covered.length === 0) return null;
   const programs = [...new Set(covered.map(line => line.split(': ').slice(1).join(': ')))].join(', ');
+  // KT-1398 — say what is asked and why before the box: a bare checkbox under
+  // the arguments was read as optional, and the run then failed.
   return (
-    <label className="wf-unmodelled-approval">
-      <input
-        type="checkbox"
-        checked={approved}
-        onChange={event => onChange(event.target.checked)}
-      />
-      <span>
-        {agentWritten ? `${t('exec.agentWrittenApprove')} ` : ''}
-        {t('exec.unmodelledApprove', programs)}
-      </span>
-      <small>{t('exec.unmodelledCovers', covered.join(' · '))}</small>
-    </label>
+    <div className="wf-unmodelled-block" data-approved={approved} data-testid="unmodelled-approval">
+      <p className="wf-unmodelled-title" role={approved ? undefined : 'alert'}>
+        {approved ? t('exec.approvalGiven', programs) : t('exec.approvalNeeded', programs)}
+      </p>
+      <label className="wf-unmodelled-approval">
+        <input
+          type="checkbox"
+          checked={approved}
+          onChange={event => onChange(event.target.checked)}
+        />
+        <span>
+          {agentWritten ? `${t('exec.agentWrittenApprove')} ` : ''}
+          {t('exec.unmodelledApprove', programs)}
+        </span>
+        <small>{t('exec.unmodelledCovers', covered.join(' · '))}</small>
+      </label>
+    </div>
   );
 }
