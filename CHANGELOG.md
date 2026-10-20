@@ -97,6 +97,22 @@ Release notes for 0.9.3 and earlier are available in the
   `disc_append` result (`invalid_cards`). Answering the last pending card of a
   workflow step that has ended wakes the room's agent once with every answer;
   an earlier card says its answer will reach that agent.
+- A finished task execution gives its disk back (KT-1397). Its managed
+  checkout is removed once the execution is Done, Failed or Cancelled, nothing
+  uses it and it has been idle for `server.disk_sweep_idle_hours` (by finish
+  time and by the newest file written in it); the branch is kept and anything
+  uncommitted is saved first as two patches (staged, then working tree) under
+  the execution's evidence, so the exact state can be reapplied. A cancel with
+  « remove if clean » still removes only a clean checkout; a dirty or preserved
+  one waits for the sweep, which runs at start-up and every 30 minutes. Lane
+  build dirs (`target/wt-*`) whose checkout is gone are reclaimed when durable
+  lineage attributes them to a finished execution. A state over 256 MiB, with
+  unmerged paths or written recently is kept, with the reason recorded.
+- A Definition of Done edited during an execution is adopted (KT-1402): the
+  execution re-reads it and the worker is told the new requirements, instead of
+  every delivery being refused. A refused delivery is recorded and shown in
+  `task_exec_status` (`last_delivery_refusal`) and in the escalation, and an
+  accepted one clears it.
 - One guide for building automations, read the same way by every agent
   (KT-1341). The built-in workflow architect is served section by section
   through `tool_manual({tool: "workflow-architect", section})` to CLI agents
@@ -723,6 +739,10 @@ Release notes for 0.9.3 and earlier are available in the
   Migration 259 adds `messages.session_continuity`.
 
 ### Fixed
+
+- TLS certificate checks use rustls-webpki 0.103.16 and webpki-roots /
+  webpki-root-certs 1.0.10 (RUSTSEC-2026-0381, -0382, -0383: distrusted
+  intermediates and emSign roots were accepted).
 
 - An Exec line awaiting a human's approval is visible before the run and can
   be approved where it is used (KT-1398). Since KT-1017 a run value handed to
