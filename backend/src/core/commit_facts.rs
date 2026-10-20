@@ -14,12 +14,16 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+use crate::core::rooted_io;
+
 /// Subjects read from the history.
 const SAMPLE: &str = "200";
 /// Below this many subjects there is no pattern to observe.
 const MIN_HISTORY: usize = 10;
 const MAX_READ: u64 = 256 * 1024;
 const SHOWN: usize = 12;
+/// Workflow files read at most.
+const MAX_CI_FILES: usize = 64;
 
 /// The shape of one subject.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -524,13 +528,32 @@ struct Enforcer {
     ci: bool,
     /// The named tool it runs, when it names one.
     tool: Option<&'static str>,
+    /// A live command line of it RUNS a message checker. A hook that runs
+    /// something else is only listed: when execution is not proven the fact is
+    /// "configured", never "enforced".
+    runs_checker: bool,
 }
 
-fn read_small(path: &Path) -> Option<String> {
-    if fs::metadata(path).ok()?.len() > MAX_READ {
+/// THE way this module reads a file of the project: through
+/// [`rooted_io::read`], which opens nothing below the root through a link and
+/// refuses anything but a regular file with a single link, so neither a
+/// symlink nor a hard link can bring outside text into the facts. Bounded.
+fn read_small(project: &Path, rel: &str) -> Option<String> {
+    let rel = Path::new(rel);
+    if fs::symlink_metadata(project.join(rel)).ok()?.len() > MAX_READ {
         return None;
     }
-    fs::read_to_string(path).ok()
+    let bytes = rooted_io::read(project, rel).ok()?;
+    if bytes.len() as u64 > MAX_READ {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Whether `rel` is a regular, single-link file of the project, reached
+/// without a link (the same rule as [`read_small`]).
+fn is_regular(project: &Path, rel: &str) -> bool {
+    read_small(project, rel).is_some()
 }
 
 fn first_line_with(body: &str, needles: &[&str]) -> Option<usize> {
@@ -919,7 +942,7 @@ const LAUNCHERS: &[&str] = &[
 type Scripts = BTreeMap<String, String>;
 
 fn package_scripts(project: &Path) -> Scripts {
-    let Some(body) = read_small(&project.join("package.json")) else {
+    let Some(body) = read_small(project, "package.json") else {
         return Scripts::new();
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
@@ -1094,19 +1117,77 @@ fn unquote_yaml(value: &str) -> &str {
     value
 }
 
+/// Keys whose children are data, not commands: an entry named `run` or
+/// `script` under one of them is a value of the CI file, never a step.
+const DATA_KEYS: &[&str] = &[
+    "env",
+    "environment",
+    "with",
+    "vars",
+    "variables",
+    "inputs",
+    "args",
+    "secrets",
+    "matrix",
+    "parameters",
+    "params",
+    "labels",
+    "outputs",
+    "defaults",
+];
+
+/// Whether `key: value` switches its step (or job, or hook) off: a step with
+/// `if: false` never runs, whatever its command says.
+fn switches_off(key: &str, value: &str) -> bool {
+    let value = unquote_yaml(without_comment(value).trim()).trim();
+    if value.is_empty() {
+        return false;
+    }
+    let inner = value
+        .strip_prefix("${{")
+        .and_then(|v| v.strip_suffix("}}"))
+        .map_or(value, str::trim);
+    let inner = unquote_yaml(inner).trim().to_lowercase();
+    match key {
+        "if" => {
+            matches!(inner.as_str(), "false" | "0" | "null" | "none")
+                || inner.starts_with("false &&")
+        }
+        "enabled" => inner == "false",
+        "skip" | "disabled" => inner == "true",
+        "when" => matches!(inner.as_str(), "never" | "manual"),
+        _ => false,
+    }
+}
+
 /// The commands and actions of a YAML CI file: the value of a command key
 /// (inline, block scalar or list) and `uses:` lines. Any other value (an `env:`
-/// entry, an input, a block scalar holding an example) is not run by the file.
+/// entry, an input, a block scalar holding an example) is not run by the file,
+/// and neither is a step, job or hook switched off (`if: false`).
+///
+/// A command key counts only when none of its ancestors is a data section
+/// ([`DATA_KEYS`]): `env: { run: … }` is an environment variable named `run`.
 fn yaml_steps(body: &str) -> Vec<Step> {
     struct Open {
         col: usize,
         commands: bool,
         first: usize,
         text: String,
+        mappings: Vec<usize>,
     }
-    let mut out = Vec::new();
+    /// A YAML mapping: its key column and an identity, so that an `if:` finds
+    /// the `run:` next to it (and a job's `if:` the steps under it).
+    struct Mapping {
+        col: usize,
+        id: usize,
+    }
+    let mut out: Vec<(Step, Vec<usize>)> = Vec::new();
+    let mut off: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     let mut open: Option<Open> = None;
     let mut list_col: Option<usize> = None;
+    let mut mappings: Vec<Mapping> = Vec::new();
+    let mut keys: Vec<(usize, String)> = Vec::new();
+    let mut next_id = 0usize;
     for (index, raw) in body.lines().enumerate() {
         let number = index + 1;
         let trimmed = raw.trim_start();
@@ -1124,7 +1205,7 @@ fn yaml_steps(body: &str) -> Vec<Step> {
                 continue;
             }
             if let Some(block) = open.take().filter(|block| block.commands) {
-                out.push(Step::Shell(block.first, block.text));
+                out.push((Step::Shell(block.first, block.text), block.mappings));
             }
         }
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -1141,25 +1222,71 @@ fn yaml_steps(body: &str) -> Vec<Step> {
             item = rest.trim_start();
         }
         let col = raw.len() - item.len();
-        if let Some(value) = item.strip_prefix("uses:") {
-            out.push(Step::Uses(number, value.trim().to_string()));
+        let key = bare_key(item);
+        let mut data = false;
+        if let Some((name, rest)) = key {
+            while mappings.last().is_some_and(|m| m.col > col) {
+                mappings.pop();
+            }
+            match mappings.last_mut() {
+                Some(m) if m.col == col && dashed => {
+                    next_id += 1;
+                    m.id = next_id;
+                }
+                Some(m) if m.col == col => {}
+                _ => {
+                    next_id += 1;
+                    mappings.push(Mapping { col, id: next_id });
+                }
+            }
+            while keys.last().is_some_and(|(c, _)| *c >= col) {
+                keys.pop();
+            }
+            data = keys.iter().any(|(_, k)| DATA_KEYS.contains(&k.as_str()));
+            keys.push((col, name.to_string()));
+            if switches_off(name, rest) {
+                if let Some(m) = mappings.last() {
+                    off.insert(m.id);
+                }
+            }
+        }
+        let ids: Vec<usize> = mappings.iter().map(|m| m.id).collect();
+        if data {
+            // Inside an `env:` / `with:` section nothing is a command, not
+            // even the block scalars it may hold.
+            if let Some((_, rest)) = key {
+                if is_block_indicator(without_comment(rest).trim()) {
+                    open = Some(Open {
+                        col,
+                        commands: false,
+                        first: number + 1,
+                        text: String::new(),
+                        mappings: ids,
+                    });
+                }
+            }
             continue;
         }
-        match bare_key(item) {
-            Some((key, rest)) => {
+        if let Some(value) = item.strip_prefix("uses:") {
+            out.push((Step::Uses(number, value.trim().to_string()), ids));
+            continue;
+        }
+        match key {
+            Some((name, rest)) => {
                 let rest = without_comment(rest).trim();
-                let commands = COMMAND_KEYS.contains(&key);
+                let commands = COMMAND_KEYS.contains(&name);
                 if is_block_indicator(rest) {
                     open = Some(Open {
                         col,
                         commands,
                         first: number + 1,
                         text: String::new(),
+                        mappings: ids,
                     });
                 } else if commands && rest.is_empty() {
                     list_col = Some(col);
                 } else if commands {
-                    out.push(Step::Shell(number, unquote_yaml(rest).to_string()));
+                    out.push((Step::Shell(number, unquote_yaml(rest).to_string()), ids));
                 }
             }
             None if dashed && list_col.is_some() => {
@@ -1170,18 +1297,22 @@ fn yaml_steps(body: &str) -> Vec<Step> {
                         commands: true,
                         first: number + 1,
                         text: String::new(),
+                        mappings: ids,
                     });
                 } else {
-                    out.push(Step::Shell(number, unquote_yaml(item).to_string()));
+                    out.push((Step::Shell(number, unquote_yaml(item).to_string()), ids));
                 }
             }
             None => {}
         }
     }
     if let Some(block) = open.filter(|block| block.commands) {
-        out.push(Step::Shell(block.first, block.text));
+        out.push((Step::Shell(block.first, block.text), block.mappings));
     }
-    out
+    out.into_iter()
+        .filter(|(_, ids)| !ids.iter().any(|id| off.contains(id)))
+        .map(|(step, _)| step)
+        .collect()
 }
 
 /// The `sh '…'` / `sh """…"""` steps of a Jenkinsfile.
@@ -1248,17 +1379,19 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
         ".githooks/commit-msg",
         ".git-hooks/commit-msg",
     ] {
-        let Some(body) = read_small(&project.join(rel)) else {
+        let Some(body) = read_small(project, rel) else {
             continue;
         };
         // A hook that only prints or loads the runner checks nothing, and a
         // tool named in a comment or a string is not run by it.
         let cmds = shell_commands(&body, 1);
         if let Some(first) = cmds.iter().find(|cmd| !is_inert(cmd)) {
+            let checker = first_checker(&cmds, &scripts);
             out.push(Enforcer {
                 at: format!("{rel}:{}", first.line),
                 ci: false,
-                tool: first_checker(&cmds, &scripts).flatten(),
+                tool: checker.flatten(),
+                runs_checker: checker.is_some(),
             });
         }
     }
@@ -1268,7 +1401,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
         ".lefthook.yml",
         ".lefthook.yaml",
     ] {
-        let Some(body) = read_small(&project.join(rel)) else {
+        let Some(body) = read_small(project, rel) else {
             continue;
         };
         let lines: Vec<&str> = body.lines().collect();
@@ -1292,14 +1425,16 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
             if cmds.iter().all(is_inert) {
                 continue;
             }
+            let checker = first_checker(&cmds, &scripts);
             out.push(Enforcer {
                 at: format!("{rel}:{}", start + 1),
                 ci: false,
-                tool: first_checker(&cmds, &scripts).flatten(),
+                tool: checker.flatten(),
+                runs_checker: checker.is_some(),
             });
         }
     }
-    if let Some(body) = read_small(&project.join(".pre-commit-config.yaml")) {
+    if let Some(body) = read_small(project, ".pre-commit-config.yaml") {
         let needles = ["commit-msg", "conventional-pre-commit", "gitlint"];
         if let Some(line) = first_line_with(&body, &needles) {
             let text = live_text(&body);
@@ -1307,6 +1442,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                 at: format!(".pre-commit-config.yaml:{line}"),
                 ci: false,
                 tool: tool_named_in(&text),
+                runs_checker: true,
             });
         }
     }
@@ -1328,10 +1464,15 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
             .filter(|n| n.ends_with(".yml") || n.ends_with(".yaml"))
             .collect();
         names.sort();
-        ci.extend(names.into_iter().map(|n| format!(".github/workflows/{n}")));
+        ci.extend(
+            names
+                .into_iter()
+                .take(MAX_CI_FILES)
+                .map(|n| format!(".github/workflows/{n}")),
+        );
     }
     for rel in ci {
-        let Some(body) = read_small(&project.join(&rel)) else {
+        let Some(body) = read_small(project, &rel) else {
             continue;
         };
         // A CI file runs what its command keys and `uses:` lines say: a
@@ -1350,6 +1491,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                             at: format!("{rel}:{number}"),
                             ci: true,
                             tool,
+                            runs_checker: true,
                         });
                     }
                 }
@@ -1363,6 +1505,7 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                                 at: format!("{rel}:{}", cmd.line),
                                 ci: true,
                                 tool,
+                                runs_checker: true,
                             });
                         }
                     }
@@ -1379,8 +1522,8 @@ fn detect_tooling(project: &Path) -> Vec<Tool> {
 
     // Named tools: configured where a config file shows them.
     let mut configured: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
-    let package = read_small(&project.join("package.json"));
-    let pyproject = read_small(&project.join("pyproject.toml"));
+    let package = read_small(project, "package.json");
+    let pyproject = read_small(project, "pyproject.toml");
     for (rel, tool) in [
         (".czrc", "commitizen"),
         (".cz.json", "commitizen"),
@@ -1406,7 +1549,7 @@ fn detect_tooling(project: &Path) -> Vec<Tool> {
         (".commitlintrc.ts", "commitlint"),
         (".gitlint", "gitlint"),
     ] {
-        if project.join(rel).is_file() {
+        if is_regular(project, rel) {
             configured.entry(tool).or_default().push(format!("{rel}:1"));
         }
     }
@@ -1449,7 +1592,9 @@ fn detect_tooling(project: &Path) -> Vec<Tool> {
     names.sort();
     for name in names {
         let evidence = configured.get(name).cloned().unwrap_or_default();
-        let enforcer = enforcers.iter().find(|e| e.tool == Some(name));
+        let enforcer = enforcers
+            .iter()
+            .find(|e| e.runs_checker && e.tool == Some(name));
         let (enforcement, note) = match enforcer {
             Some(e) => (Enforcement::Enforced(e.at.clone()), None),
             None if name == "commitizen" => (
@@ -1481,33 +1626,48 @@ fn detect_tooling(project: &Path) -> Vec<Tool> {
             .map(|t| t.trim_start_matches("./"))
             .find(|t| {
                 (t.ends_with(".sh") || t.ends_with(".js") || t.ends_with(".py"))
-                    && project.join(t).is_file()
+                    && is_regular(project, t)
             });
         if let Some(script) = script {
             evidence.push(format!("{script}:1"));
         }
         tools.push(Tool {
-            name: format!("Makefile target `make {target}` (runs `{recipe}`)"),
+            name: format!("Makefile target `make {target}`"),
             evidence,
             enforcement: Enforcement::OptIn,
             note: Some("a command people choose to run; a plain `git commit` bypasses it".into()),
         });
     }
 
-    // Hooks and CI steps that name no tool.
+    // Hooks and CI steps that name no tool. A hook whose commands are not
+    // proven to run a message checker is listed as configured, never enforced.
     for e in enforcers.iter().filter(|e| e.tool.is_none()) {
         let name = if e.ci {
             "CI commit-message check"
         } else {
             "commit-msg hook"
         };
+        let (enforcement, note) = if e.runs_checker {
+            (
+                Enforcement::Enforced(e.at.clone()),
+                (!e.ci).then(|| {
+                    "a hook in the repository is active only where it is installed".to_string()
+                }),
+            )
+        } else {
+            (
+                Enforcement::ConfiguredOnly,
+                Some(
+                    "its commands are not recognised as a commit-message checker: read the hook before saying what it checks"
+                        .to_string(),
+                ),
+            )
+        };
         tools.push(Tool {
             name: name.to_string(),
             evidence: vec![e.at.clone()],
-            enforcement: Enforcement::Enforced(e.at.clone()),
-            note: (name == "commit-msg hook").then(|| {
-                "a hook in the repository is active only where it is installed".to_string()
-            }),
+            enforcement,
+            note,
         });
     }
     tools
@@ -1546,7 +1706,7 @@ fn make_commit_targets(project: &Path) -> Vec<(String, String, usize, String)> {
     }
     let mut out = Vec::new();
     for rel in files {
-        let Some(body) = read_small(&project.join(&rel)) else {
+        let Some(body) = read_small(project, &rel) else {
             continue;
         };
         let lines: Vec<&str> = body.lines().collect();
@@ -1561,7 +1721,11 @@ fn make_commit_targets(project: &Path) -> Vec<(String, String, usize, String)> {
                 continue;
             }
             for target in line[..colon].split_whitespace() {
-                if !target.to_lowercase().contains("commit") || target.contains(['$', '%']) {
+                if !target.to_lowercase().contains("commit")
+                    || !target
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+                {
                     continue;
                 }
                 let recipe = lines[index + 1..]

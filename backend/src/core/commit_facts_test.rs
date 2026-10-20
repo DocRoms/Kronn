@@ -247,7 +247,7 @@ fn a_config_nothing_runs_is_not_enforcement() {
 }
 
 #[test]
-fn a_ci_step_and_an_unnamed_hook_are_enforcement() {
+fn a_ci_action_is_enforcement_and_an_unrecognised_hook_is_only_configured() {
     let dir = tempfile::tempdir().unwrap();
     put(
         dir.path(),
@@ -268,11 +268,11 @@ fn a_ci_step_and_an_unnamed_hook_are_enforcement() {
         ci.enforcement,
         Enforcement::Enforced(".github/workflows/pr.yml:5".into())
     );
+    // A hook that runs a command Kronn cannot tell is a message checker is
+    // listed, but never called enforcement.
     let hook = tools.iter().find(|t| t.name == "commit-msg hook").unwrap();
-    assert_eq!(
-        hook.enforcement,
-        Enforcement::Enforced(".githooks/commit-msg:2".into())
-    );
+    assert_eq!(hook.enforcement, Enforcement::ConfiguredOnly);
+    assert_eq!(hook.evidence, vec![".githooks/commit-msg:2".to_string()]);
 }
 
 #[test]
@@ -750,4 +750,282 @@ fn a_directory_that_is_not_a_repository_has_no_history() {
     assert!(facts
         .render_block("docs/workflow/commits.md")
         .contains("no pattern can be observed"));
+}
+
+/// The tools reported as ENFORCED, by name.
+fn enforced(dir: &Path) -> Vec<String> {
+    detect_tooling(dir)
+        .into_iter()
+        .filter(|t| matches!(t.enforcement, Enforcement::Enforced(_)))
+        .map(|t| t.name)
+        .collect()
+}
+
+#[test]
+fn a_hook_that_runs_no_checker_is_configured_never_enforced() {
+    // The reviewer's context fixtures: `--help`, a wrapped echo, a `cat`.
+    for body in [
+        "#!/bin/sh\nnpx commitlint --help\n",
+        "#!/bin/sh\nsh -c 'echo Reminder only'\n",
+        "#!/bin/sh\ncat README.md\n",
+        "#!/bin/sh\n./scripts/notify.sh \"$1\"\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), "README.md", "Reminder only.\n");
+        put(dir.path(), ".husky/commit-msg", body);
+        assert!(enforced(dir.path()).is_empty(), "{body}");
+        let facts = CommitFacts {
+            tooling: detect_tooling(dir.path()),
+            ..CommitFacts::default()
+        };
+        let block = facts.render_block("c.md");
+        assert!(!block.contains("ENFORCED by"), "{body}\n{block}");
+    }
+    // A lefthook `commit-msg` command that runs no checker.
+    let lefthook = tempfile::tempdir().unwrap();
+    put(
+        lefthook.path(),
+        "lefthook.yml",
+        "commit-msg:\n  commands:\n    notify:\n      run: ./scripts/notify.sh {1}\n    help:\n      run: npx commitlint --help\n",
+    );
+    assert!(enforced(lefthook.path()).is_empty());
+    // Positive controls: a hook that really runs the checker.
+    for body in [
+        "#!/bin/sh\nnpx commitlint --edit message\n",
+        "#!/bin/sh\n. \"$(dirname \"$0\")/_/husky.sh\"\nnpx --no -- commitlint --edit \"$1\"\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), ".husky/commit-msg", body);
+        assert_eq!(
+            enforced(dir.path()),
+            vec!["commitlint".to_string()],
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_command_key_under_env_with_or_variables_is_not_a_command() {
+    let cases = [
+        // The reviewer's fixture: `run` is an environment variable.
+        "name: CI\non: push\nenv:\n  run: npx commitlint --edit message\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo tests\n",
+        "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n        env:\n          run: npx commitlint --edit message\n        run: echo tests\n",
+        "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          script: npx commitlint --edit message\n",
+        "variables:\n  script: npx commitlint --edit message\nbuild:\n  script:\n    - make build\n",
+        "jobs:\n  test:\n    env:\n      script:\n        - npx commitlint --edit message\n    steps:\n      - run: make test\n",
+        "jobs:\n  test:\n    env:\n      run: |\n        npx commitlint --edit message\n    steps:\n      - run: make test\n",
+    ];
+    for (index, body) in cases.iter().enumerate() {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), ".github/workflows/ci.yml", body);
+        assert!(enforced(dir.path()).is_empty(), "case {index}:\n{body}");
+        assert!(detect_tooling(dir.path()).is_empty(), "case {index}");
+    }
+    // The same command under a real step is enforcement.
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        ".github/workflows/ci.yml",
+        "env:\n  CI: true\njobs:\n  test:\n    steps:\n      - name: lint\n        env:\n          FORCE_COLOR: 1\n        run: npx commitlint --from HEAD~1\n",
+    );
+    assert_eq!(
+        detect_tooling(dir.path())[0].enforcement,
+        Enforcement::Enforced(".github/workflows/ci.yml:9".into())
+    );
+}
+
+#[test]
+fn a_step_switched_off_is_not_enforcement() {
+    for body in [
+        "jobs:\n  t:\n    steps:\n      - if: false\n        run: npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    steps:\n      - if: ${{ false }}\n        run: npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        if: \"false\"\n",
+        "jobs:\n  t:\n    steps:\n      - name: x\n        if: false # temporarily\n        run: |\n          npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    if: false\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    steps:\n      - if: false\n        uses: wagoid/commitlint-github-action@v6\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), ".github/workflows/ci.yml", body);
+        assert!(enforced(dir.path()).is_empty(), "{body}");
+    }
+    // A condition that can be true, or a neighbour step switched off, changes
+    // nothing for a live step.
+    for body in [
+        "jobs:\n  t:\n    steps:\n      - if: github.event_name == 'pull_request'\n        run: npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    steps:\n      - if: false\n        run: echo skipped\n      - run: npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n      - if: false\n        run: echo skipped\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), ".github/workflows/ci.yml", body);
+        assert_eq!(enforced(dir.path()), vec!["commitlint".to_string()], "{body}");
+    }
+    // A lefthook command that is skipped.
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        "lefthook.yml",
+        "commit-msg:\n  commands:\n    lint:\n      skip: true\n      run: npx commitlint --edit {1}\n",
+    );
+    assert!(enforced(dir.path()).is_empty());
+}
+
+/// A project directory next to an `outside` one holding what must never be read.
+#[cfg(unix)]
+fn jailed_project() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let outer = tempfile::tempdir().unwrap();
+    let project = outer.path().join("project");
+    let outside = outer.path().join("outside");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    (outer, project, outside)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_makefile_that_links_out_of_the_project_puts_nothing_in_the_facts() {
+    use std::os::unix::fs::symlink;
+    let (_outer, project, outside) = jailed_project();
+    let body = "commit:\n\techo OUTSIDE_RECIPE_REVIEW_SENTINEL\n";
+    fs::write(outside.join("outside.mk"), body).unwrap();
+    symlink(outside.join("outside.mk"), project.join("Makefile")).unwrap();
+    let facts = CommitFacts::detect(&project);
+    assert!(facts.tooling.is_empty(), "{:?}", facts.tooling);
+    assert!(!facts
+        .render_block("c.md")
+        .contains("OUTSIDE_RECIPE_REVIEW_SENTINEL"));
+
+    // The same file as a hard link, in the root and one level down.
+    let (_outer2, project2, outside2) = jailed_project();
+    fs::write(outside2.join("outside.mk"), body).unwrap();
+    fs::create_dir_all(project2.join("sub")).unwrap();
+    for name in ["Makefile", "sub/Makefile"] {
+        if fs::hard_link(outside2.join("outside.mk"), project2.join(name)).is_err() {
+            return;
+        }
+    }
+    let facts = CommitFacts::detect(&project2);
+    assert!(facts.tooling.is_empty(), "{:?}", facts.tooling);
+    assert!(!facts
+        .render_block("c.md")
+        .contains("OUTSIDE_RECIPE_REVIEW_SENTINEL"));
+}
+
+#[cfg(unix)]
+#[test]
+fn no_file_read_by_the_facts_follows_a_link_out_of_the_project() {
+    use std::os::unix::fs::symlink;
+    let (_outer, project, outside) = jailed_project();
+    let hook = "#!/bin/sh\nnpx commitlint --edit \"$1\"\n";
+    let ci = "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n";
+    let lefthook = "commit-msg:\n  commands:\n    l:\n      run: npx commitlint --edit {1}\n";
+    for (name, body) in [
+        ("hook", hook),
+        ("ci.yml", ci),
+        ("lefthook.yml", lefthook),
+        (
+            "package.json",
+            "{\"devDependencies\": {\"commitizen\": \"1\"}}",
+        ),
+        (
+            "pre-commit.yaml",
+            "repos:\n  - hooks:\n      - id: gitlint\n        stages: [commit-msg]\n",
+        ),
+        ("pyproject.toml", "[tool.commitizen]\n"),
+        ("Jenkinsfile", "sh 'npx commitlint --edit'\n"),
+        ("commitlint.config.js", "module.exports = {};\n"),
+    ] {
+        fs::write(outside.join(name), body).unwrap();
+    }
+    fs::create_dir_all(project.join(".husky")).unwrap();
+    fs::create_dir_all(project.join(".github")).unwrap();
+    symlink(outside.join("hook"), project.join(".husky/commit-msg")).unwrap();
+    symlink(outside.join("lefthook.yml"), project.join("lefthook.yml")).unwrap();
+    symlink(outside.join("package.json"), project.join("package.json")).unwrap();
+    symlink(
+        outside.join("pre-commit.yaml"),
+        project.join(".pre-commit-config.yaml"),
+    )
+    .unwrap();
+    symlink(
+        outside.join("pyproject.toml"),
+        project.join("pyproject.toml"),
+    )
+    .unwrap();
+    symlink(outside.join("Jenkinsfile"), project.join("Jenkinsfile")).unwrap();
+    symlink(
+        outside.join("commitlint.config.js"),
+        project.join("commitlint.config.js"),
+    )
+    .unwrap();
+    // A workflows directory that is itself a link out.
+    fs::create_dir_all(outside.join("workflows")).unwrap();
+    fs::write(outside.join("workflows/ci.yml"), ci).unwrap();
+    symlink(outside.join("workflows"), project.join(".github/workflows")).unwrap();
+    assert!(
+        detect_tooling(&project).is_empty(),
+        "{:?}",
+        detect_tooling(&project)
+    );
+
+    // Hard links to the same outside files.
+    let (_outer2, project2, outside2) = jailed_project();
+    fs::create_dir_all(project2.join(".husky")).unwrap();
+    fs::create_dir_all(project2.join(".github/workflows")).unwrap();
+    fs::write(outside2.join("hook"), hook).unwrap();
+    fs::write(outside2.join("ci.yml"), ci).unwrap();
+    fs::write(outside2.join("lefthook.yml"), lefthook).unwrap();
+    for (from, to) in [
+        ("hook", ".husky/commit-msg"),
+        ("ci.yml", ".github/workflows/ci.yml"),
+        ("lefthook.yml", "lefthook.yml"),
+    ] {
+        if fs::hard_link(outside2.join(from), project2.join(to)).is_err() {
+            return;
+        }
+    }
+    assert!(
+        detect_tooling(&project2).is_empty(),
+        "{:?}",
+        detect_tooling(&project2)
+    );
+}
+
+#[test]
+fn a_makefile_commit_target_names_the_tool_and_the_line_never_the_recipe() {
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        "Makefile",
+        "commit:\n\t@echo RECIPE_TEXT_SENTINEL && ./nicommitizen.sh\n",
+    );
+    put(dir.path(), "nicommitizen.sh", "#!/bin/sh\n");
+    let facts = CommitFacts::detect(dir.path());
+    assert_eq!(facts.tooling.len(), 1, "{:?}", facts.tooling);
+    let tool = &facts.tooling[0];
+    assert_eq!(tool.name, "Makefile target `make commit`");
+    assert_eq!(
+        tool.evidence,
+        vec!["Makefile:1".to_string(), "nicommitizen.sh:1".to_string()]
+    );
+    assert_eq!(tool.enforcement, Enforcement::OptIn);
+    let block = facts.render_block("c.md");
+    assert!(!block.contains("RECIPE_TEXT_SENTINEL"), "{block}");
+    // A target whose name is not a plain identifier is not reported.
+    put(
+        dir.path(),
+        "Makefile",
+        "git-commit-$(shell echo X):\n\techo hi\n",
+    );
+    assert!(CommitFacts::detect(dir.path()).tooling.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_script_evidence_outside_the_project_is_never_cited() {
+    let (_outer, project, outside) = jailed_project();
+    fs::write(outside.join("evil.sh"), "#!/bin/sh\n").unwrap();
+    put(&project, "Makefile", "commit:\n\t../outside/evil.sh\n");
+    let tools = detect_tooling(&project);
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert_eq!(tools[0].evidence, vec!["Makefile:1".to_string()]);
 }
