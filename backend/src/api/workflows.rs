@@ -1863,11 +1863,28 @@ pub(crate) async fn list_with_visibility(
                     .into_iter()
                     .map(|exec| (exec.id.clone(), exec))
                     .collect();
+            // The run's gate renders and hashes an imported workflow: a child
+            // several cards reach is checked once per list, not once per card.
+            let mut approvals: std::collections::HashMap<String, Result<Option<String>, String>> =
+                std::collections::HashMap::new();
+            let mut approval = |wf: &Workflow| {
+                approvals
+                    .entry(wf.id.clone())
+                    .or_insert_with(|| {
+                        crate::workflows::readiness::repository_approval_refusal(conn, wf)
+                    })
+                    .clone()
+            };
             let summaries = workflows
                 .into_iter()
                 .map(|wf| {
                     let (blocker_count, human_approval_count) = crate::workflows::readiness::counts(
-                        &crate::workflows::readiness::assess_with(&wf, &by_id, &quick_execs),
+                        &crate::workflows::readiness::assess_full(
+                            &wf,
+                            &by_id,
+                            &quick_execs,
+                            &mut approval,
+                        ),
                     );
                     let last_run = last_runs.remove(&wf.id);
 
@@ -1965,24 +1982,22 @@ pub async fn readiness(
 /// The readiness of a saved workflow against every workflow it may call; a
 /// failed load is reported as such, never as ready.
 pub(crate) async fn workflow_readiness(state: &AppState, wf: &Workflow) -> WorkflowReadiness {
+    // The run's repository-approval gate reads the database, so the check
+    // runs on the same connection as the workflow list.
+    let root = wf.clone();
     match state
         .db
-        .with_read_conn(|conn| {
-            Ok((
-                crate::db::workflows::list_workflows(conn)?,
-                crate::db::quick_execs::list_quick_execs(conn)?,
+        .with_read_conn(move |conn| {
+            let all = crate::db::workflows::list_workflows(conn)?;
+            Ok(crate::workflows::readiness::assess_in_db(
+                conn,
+                &root,
+                &all.into_iter().map(|w| (w.id.clone(), w)).collect(),
             ))
         })
         .await
     {
-        Ok((all, quick_execs)) => crate::workflows::readiness::assess_with(
-            wf,
-            &all.into_iter().map(|w| (w.id.clone(), w)).collect(),
-            &quick_execs
-                .into_iter()
-                .map(|exec| (exec.id.clone(), exec))
-                .collect(),
-        ),
+        Ok(readiness) => readiness,
         Err(e) => crate::workflows::readiness::collection_failure(wf, &format!("DB error: {e}")),
     }
 }

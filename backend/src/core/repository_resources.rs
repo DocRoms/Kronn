@@ -1937,20 +1937,24 @@ pub fn field_diff(
         .collect()
 }
 
-pub fn ensure_execution_approved(
+/// The gate's refusal of an imported resource, told from a failure of the
+/// check itself: `Ok(None)` when it may run (never imported, or its current
+/// content is approved), `Ok(Some(message))` when a human approval is
+/// missing, `Err(_)` when the alignment or the approval could not be read.
+pub fn execution_refusal(
     conn: &rusqlite::Connection,
     kind: &str,
     target_id: &str,
     current_hash: &str,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let alignment =
         crate::db::repository_resources::find_alignment_by_target(conn, kind, target_id)
             .map_err(|error| error.to_string())?;
     let Some(alignment) = alignment else {
-        return Ok(());
+        return Ok(None);
     };
     if !alignment.imported {
-        return Ok(());
+        return Ok(None);
     }
     let approved = crate::db::repository_resources::is_approved(
         conn,
@@ -1960,14 +1964,44 @@ pub fn ensure_execution_approved(
         current_hash,
     )
     .map_err(|error| error.to_string())?;
-    if approved {
-        Ok(())
-    } else {
-        Err(format!(
+    Ok((!approved).then(|| {
+        format!(
             "{}:{} must be approved for its current content hash before execution",
             alignment.kind, alignment.slug
-        ))
+        )
+    }))
+}
+
+/// [`execution_refusal`] as a run applies it: a missing approval and a failed
+/// check both stop the run, each with its message.
+pub fn ensure_execution_approved(
+    conn: &rusqlite::Connection,
+    kind: &str,
+    target_id: &str,
+    current_hash: &str,
+) -> Result<(), String> {
+    execution_refusal(conn, kind, target_id, current_hash)?.map_or(Ok(()), Err)
+}
+
+/// [`execution_refusal`] of an imported resource's current rendering; a
+/// rendering that fails is a failed check.
+fn rendered_execution_refusal(
+    conn: &rusqlite::Connection,
+    kind: &str,
+    target_id: &str,
+    render: impl FnOnce(&str) -> Result<RenderedRepositoryResource, String>,
+) -> Result<Option<String>, String> {
+    let alignment =
+        crate::db::repository_resources::find_alignment_by_target(conn, kind, target_id)
+            .map_err(|error| error.to_string())?;
+    let Some(alignment) = alignment else {
+        return Ok(None);
+    };
+    if !alignment.imported {
+        return Ok(None);
     }
+    let rendered = render(&alignment.slug)?;
+    execution_refusal(conn, kind, target_id, &approval_hash(&rendered.document))
 }
 
 fn ensure_rendered_execution_approved(
@@ -1976,45 +2010,47 @@ fn ensure_rendered_execution_approved(
     target_id: &str,
     render: impl FnOnce(&str) -> Result<RenderedRepositoryResource, String>,
 ) -> Result<(), String> {
-    let alignment =
-        crate::db::repository_resources::find_alignment_by_target(conn, kind, target_id)
-            .map_err(|error| error.to_string())?;
-    let Some(alignment) = alignment else {
-        return Ok(());
-    };
-    if !alignment.imported {
-        return Ok(());
+    rendered_execution_refusal(conn, kind, target_id, render)?.map_or(Ok(()), Err)
+}
+
+/// [`execution_refusal`] of a workflow's current content, as the run checks
+/// it before its first step: the readiness check reads this same gate.
+pub fn workflow_execution_refusal(
+    conn: &rusqlite::Connection,
+    workflow: &Workflow,
+) -> Result<Option<String>, String> {
+    let mut portable = workflow.clone();
+    crate::core::resource_refs::symbolize_workflow(conn, &mut portable)
+        .map_err(|error| error.to_string())?;
+    let symbolized = rendered_execution_refusal(conn, "workflow", &workflow.id, |slug| {
+        render_workflow(&portable, slug)
+    });
+    // An approval recorded before references were symbolised (KT-917) named
+    // the literal ids; the content it approved is unchanged.
+    match symbolized {
+        Ok(None) => Ok(None),
+        outcome
+            if serde_json::to_value(&portable.steps).ok()
+                != serde_json::to_value(&workflow.steps).ok()
+                || serde_json::to_value(&portable.on_failure).ok()
+                    != serde_json::to_value(&workflow.on_failure).ok() =>
+        {
+            match rendered_execution_refusal(conn, "workflow", &workflow.id, |slug| {
+                render_workflow(workflow, slug)
+            }) {
+                Ok(None) => Ok(None),
+                _ => outcome,
+            }
+        }
+        outcome => outcome,
     }
-    let rendered = render(&alignment.slug)?;
-    ensure_execution_approved(conn, kind, target_id, &approval_hash(&rendered.document))
 }
 
 pub fn ensure_workflow_execution_approved(
     conn: &rusqlite::Connection,
     workflow: &Workflow,
 ) -> Result<(), String> {
-    let mut portable = workflow.clone();
-    crate::core::resource_refs::symbolize_workflow(conn, &mut portable)
-        .map_err(|error| error.to_string())?;
-    let symbolized = ensure_rendered_execution_approved(conn, "workflow", &workflow.id, |slug| {
-        render_workflow(&portable, slug)
-    });
-    // An approval recorded before references were symbolised (KT-917) named
-    // the literal ids; the content it approved is unchanged.
-    match symbolized {
-        Err(error)
-            if serde_json::to_value(&portable.steps).ok()
-                != serde_json::to_value(&workflow.steps).ok()
-                || serde_json::to_value(&portable.on_failure).ok()
-                    != serde_json::to_value(&workflow.on_failure).ok() =>
-        {
-            ensure_rendered_execution_approved(conn, "workflow", &workflow.id, |slug| {
-                render_workflow(workflow, slug)
-            })
-            .map_err(|_| error)
-        }
-        other => other,
-    }
+    workflow_execution_refusal(conn, workflow)?.map_or(Ok(()), Err)
 }
 
 pub fn ensure_quick_prompt_execution_approved(

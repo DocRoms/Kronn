@@ -957,9 +957,12 @@ The verdict covers the workflow, its sub-workflows, the workflows it triggers
 and every `on_failure` chain; each blocker names its workflow, step, `kind`, runtime `reason`,
 `action` and `human_only`. Missing children, cycles and a failed collection are
 blockers, never silence. Fix every `human_only:false` blocker and save again;
-report each `human_only:true` one (an agent-written Exec line taking a run
-value, or an unpinned script) to the user by workflow and step. No tool
-approves, clears provenance or marks a line human-written. `ready:true` means no
+report each `human_only:true` one to the user by workflow and step, with
+the place its `action` names: an agent-written Exec line taking a run value or
+an unpinned script, approved in the workflow editor; a workflow imported from
+the project repository whose current content is unapproved (workflow-level, no
+step), approved in the project's repository resources. No tool approves, clears
+provenance or marks a line human-written. `ready:true` means no
 known refusal, not a guaranteed run: report the real outcome from
 `workflow_run_get`. The bridge forwards the backend's verdict and never
 re-derives it.

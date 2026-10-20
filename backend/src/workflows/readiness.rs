@@ -18,10 +18,22 @@ const QUICK_EXEC_APPROVAL_ACTION: &str = "Ask a human to approve this saved Quic
 const SCRIPT_APPROVAL_ACTION: &str = "Ask a human to open the step in the workflow editor and \
      save it, which approves the script's current content. An agent cannot pin a script hash.";
 
-/// The readiness of `root`, resolving sub-workflows through `workflows`
-/// (`root` itself need not be in it).
+const REPOSITORY_APPROVAL_ACTION: &str = "Ask a human to approve the workflow in the \
+     project's repository resources: it was imported from the repository and its current \
+     content is not approved. An agent cannot approve it.";
+const RETRY_CHECK_ACTION: &str =
+    "Retry the check (workflow_validate); do not report the workflow as ready.";
+
+/// The repository-import gate's refusal of one workflow, as the run applies
+/// it: `Ok(None)` when it may start, `Ok(Some(_))` with the run's message when
+/// a human approval is missing, `Err(_)` when the check itself failed.
+pub type ApprovalCheck<'a> = dyn FnMut(&Workflow) -> Result<Option<String>, String> + 'a;
+
+/// The readiness of `root` without the repository-import approval gate,
+/// which needs the database: production callers use [`assess_in_db`].
+/// Sub-workflows resolve through `workflows` (`root` need not be in it).
 pub fn assess(root: &Workflow, workflows: &HashMap<String, Workflow>) -> WorkflowReadiness {
-    assess_with(root, workflows, &HashMap::new())
+    assess_full(root, workflows, &HashMap::new(), &mut |_| Ok(None))
 }
 
 /// [`assess`] that also reads the saved Quick Execs CollectApiData sources run
@@ -31,6 +43,62 @@ pub fn assess_with(
     workflows: &HashMap<String, Workflow>,
     quick_execs: &HashMap<String, QuickExec>,
 ) -> WorkflowReadiness {
+    assess_full(root, workflows, quick_execs, &mut |_| Ok(None))
+}
+
+/// [`assess`] with the approval gate read through `approval`.
+pub fn assess_with_approvals(
+    root: &Workflow,
+    workflows: &HashMap<String, Workflow>,
+    approval: &mut ApprovalCheck<'_>,
+) -> WorkflowReadiness {
+    assess_full(root, workflows, &HashMap::new(), approval)
+}
+
+/// [`assess`] plus the repository-import approval gate the run checks before
+/// its first step and the saved Quick Execs, against the database the run reads.
+pub fn assess_in_db(
+    conn: &rusqlite::Connection,
+    root: &Workflow,
+    workflows: &HashMap<String, Workflow>,
+) -> WorkflowReadiness {
+    let quick_execs = match crate::db::quick_execs::list_quick_execs(conn) {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|exec| (exec.id.clone(), exec))
+            .collect(),
+        Err(error) => return collection_failure(root, &format!("Quick Execs: {error}")),
+    };
+    assess_full(root, workflows, &quick_execs, &mut |wf| {
+        repository_approval_refusal(conn, wf)
+    })
+}
+
+/// The run's own gate (`workflow_execution_refusal`, which the runner's
+/// `ensure_workflow_execution_approved` wraps), skipped without rendering for
+/// a workflow that was never imported from a repository. A failed check (the
+/// alignment, the approval or the rendering could not be read) is `Err(_)`,
+/// never a missing approval.
+pub fn repository_approval_refusal(
+    conn: &rusqlite::Connection,
+    wf: &Workflow,
+) -> Result<Option<String>, String> {
+    let alignment =
+        crate::db::repository_resources::find_alignment_by_target(conn, "workflow", &wf.id)
+            .map_err(|error| error.to_string())?;
+    if !alignment.is_some_and(|alignment| alignment.imported) {
+        return Ok(None);
+    }
+    crate::core::repository_resources::workflow_execution_refusal(conn, wf)
+}
+
+/// Every check: sub-workflows, saved Quick Execs and the approval gate.
+pub fn assess_full(
+    root: &Workflow,
+    workflows: &HashMap<String, Workflow>,
+    quick_execs: &HashMap<String, QuickExec>,
+    approval: &mut ApprovalCheck<'_>,
+) -> WorkflowReadiness {
     let mut walk = Walk {
         workflows,
         quick_execs,
@@ -39,6 +107,7 @@ pub fn assess_with(
         checked: Vec::new(),
         blockers: Vec::new(),
         full_access_refusals: HashMap::new(),
+        approval,
     };
     walk.visit(root);
     finish(root, walk.checked, walk.blockers)
@@ -55,7 +124,7 @@ pub fn collection_failure(root: &Workflow, error: &str) -> WorkflowReadiness {
         phase: None,
         reason: None,
         message: format!("The readiness check could not run: {error}"),
-        action: "Retry the check (workflow_validate); do not report the workflow as ready.".into(),
+        action: RETRY_CHECK_ACTION.into(),
         human_only: false,
         quick_exec: None,
     };
@@ -70,7 +139,7 @@ pub fn counts(readiness: &WorkflowReadiness) -> (u32, u32) {
     )
 }
 
-struct Walk<'a> {
+struct Walk<'a, 'b> {
     workflows: &'a HashMap<String, Workflow>,
     quick_execs: &'a HashMap<String, QuickExec>,
     root: &'a Workflow,
@@ -79,9 +148,44 @@ struct Walk<'a> {
     blockers: Vec<WorkflowBlocker>,
     /// Each agent's setting is read once per check, as the runner reads it.
     full_access_refusals: HashMap<String, bool>,
+    /// The repository-import gate every run of a checked workflow passes.
+    approval: &'a mut ApprovalCheck<'b>,
 }
 
-impl Walk<'_> {
+impl Walk<'_, '_> {
+    /// The workflow-level refusal of an imported workflow whose current
+    /// content no human approved: the run aborts before its first step.
+    fn approval_blocker(&mut self, wf: &Workflow) {
+        let (kind, message, action, human_only) = match (self.approval)(wf) {
+            Ok(None) => return,
+            Ok(Some(message)) => (
+                WorkflowBlockerKind::HumanApproval,
+                message,
+                REPOSITORY_APPROVAL_ACTION.to_string(),
+                true,
+            ),
+            Err(error) => (
+                WorkflowBlockerKind::CollectionError,
+                format!("The repository approval check could not run: {error}"),
+                RETRY_CHECK_ACTION.to_string(),
+                false,
+            ),
+        };
+        self.blockers.push(WorkflowBlocker {
+            workflow_id: wf.id.clone(),
+            workflow_name: wf.name.clone(),
+            step: None,
+            on_failure: false,
+            kind,
+            phase: None,
+            reason: human_only.then(|| "repository_approval_required".into()),
+            message,
+            action,
+            human_only,
+            quick_exec: None,
+        });
+    }
+
     fn refused_for_full_access(&mut self, agent: &AgentType) -> bool {
         *self
             .full_access_refusals
@@ -188,6 +292,7 @@ impl Walk<'_> {
             return;
         }
         self.checked.push(wf.id.clone());
+        self.approval_blocker(wf);
         for (chain, on_failure) in [(&wf.steps, false), (&wf.on_failure, true)] {
             for step in chain {
                 self.blockers.extend(step_blockers(wf, step, on_failure));
