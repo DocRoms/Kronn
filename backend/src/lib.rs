@@ -2122,6 +2122,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/comfyui/slots", put(api::comfyui::set_slots))
         .route("/api/comfyui/source", get(api::comfyui::source))
         .route("/api/comfyui/pull", post(api::comfyui::pull))
+        .route("/api/comfyui/settings", put(api::comfyui::set_settings))
+        .route(
+            "/api/comfyui/model-family",
+            put(api::comfyui::set_model_family),
+        )
         .route("/api/ollama/health", get(api::ollama::health))
         .route("/api/ollama/models", get(api::ollama::models))
         .route("/api/ollama/registry", get(api::ollama::registry))

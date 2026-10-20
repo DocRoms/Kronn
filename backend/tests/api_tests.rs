@@ -26396,6 +26396,13 @@ async fn comfyui_status_reports_models_and_slots_refuse_the_wrong_kind() {
             serde_json::json!(["umt5_xxl_fp8_e4m3fn_scaled.safetensors"]),
         ),
         ("/models/vae", serde_json::json!([])),
+        (
+            "/object_info/KSampler",
+            serde_json::json!({"KSampler": {"input": {"required": {
+                "sampler_name": [["euler", "dpmpp_sde"]],
+                "scheduler": [["simple", "karras"]]
+            }}}}),
+        ),
     ] {
         Mock::given(method("GET"))
             .and(path(route))
@@ -26415,6 +26422,7 @@ async fn comfyui_status_reports_models_and_slots_refuse_the_wrong_kind() {
         endpoint: Some(server.uri()),
         image_model: None,
         video_model: Some("wan2.1_t2v_1.3B_fp16.safetensors".into()),
+        ..Default::default()
     };
     let app = build_router_with_auth(state.clone(), false);
 
@@ -26485,6 +26493,99 @@ async fn comfyui_status_reports_models_and_slots_refuse_the_wrong_kind() {
         state.config.read().await.comfyui.image_model.as_deref(),
         Some("RealVisXL_V5.0_fp16.safetensors")
     );
+
+    // Configurable for any machine: samplers come from this ComfyUI, the
+    // install folder defaults to Comfy Desktop's.
+    assert_eq!(data["samplers"], serde_json::json!(["euler", "dpmpp_sde"]));
+    assert!(
+        data["install_dir"]
+            .as_str()
+            .unwrap()
+            .ends_with("ComfyUI-Installs"),
+        "{data}"
+    );
+
+    // An unknown checkpoint runs once the user picks its workflow.
+    let put_at = |uri: &'static str, body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let request = axum::http::Request::builder()
+                .method("PUT")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+            let bytes = http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+    let wrong = put_at(
+        "/api/comfyui/model-family",
+        serde_json::json!({
+            "folder": "checkpoints", "file": "mystery.safetensors", "family": "wan21_t2v"
+        }),
+    )
+    .await;
+    assert_eq!(wrong["success"], false, "{wrong}");
+    let chosen = put_at(
+        "/api/comfyui/model-family",
+        serde_json::json!({
+            "folder": "checkpoints", "file": "mystery.safetensors", "family": "sdxl"
+        }),
+    )
+    .await;
+    assert_eq!(chosen["success"], true, "{chosen}");
+    let (_, status) = get_json(app.clone(), "/api/comfyui/status").await;
+    let mystery = status["data"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["file"] == "mystery.safetensors")
+        .cloned()
+        .unwrap();
+    assert_eq!(mystery["family"], "sdxl");
+    assert_eq!(mystery["chosen"], true);
+    let mystery_slot = put(serde_json::json!({"image_model": "mystery.safetensors"})).await;
+    assert_eq!(mystery_slot["success"], true, "{mystery_slot}");
+
+    // Address, install folder and per-slot settings are saved, and checked.
+    let bad_address = put_at(
+        "/api/comfyui/settings",
+        serde_json::json!({
+            "endpoint": "ftp://box", "install_dir": null
+        }),
+    )
+    .await;
+    assert_eq!(bad_address["success"], false, "{bad_address}");
+    let bad_steps = put_at(
+        "/api/comfyui/settings",
+        serde_json::json!({
+            "endpoint": null, "install_dir": null, "image_settings": {"steps": 0}
+        }),
+    )
+    .await;
+    assert_eq!(bad_steps["success"], false, "{bad_steps}");
+    let saved_settings = put_at(
+        "/api/comfyui/settings",
+        serde_json::json!({
+            "endpoint": "http://192.168.1.20:8000",
+            "install_dir": "~/apps/ComfyUI",
+            "image_settings": {"steps": 20, "sampler": "euler"}
+        }),
+    )
+    .await;
+    assert_eq!(saved_settings["success"], true, "{saved_settings}");
+    let comfyui = state.config.read().await.comfyui.clone();
+    assert_eq!(
+        comfyui.endpoint.as_deref(),
+        Some("http://192.168.1.20:8000")
+    );
+    assert_eq!(comfyui.install_dir.as_deref(), Some("~/apps/ComfyUI"));
+    assert_eq!(comfyui.image_settings.steps, Some(20));
 }
 
 /// KT-1214 — the media entry opens a human-only room with no prompt. It must

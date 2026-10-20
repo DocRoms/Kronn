@@ -101,6 +101,12 @@ pub trait MediaCodec: Send + Sync {
         false
     }
 
+    /// Wait before the next poll. A billed provider is polled on a growing
+    /// ladder; a local one is free to ask often.
+    fn poll_delay(&self, attempts: u32) -> std::time::Duration {
+        crate::agents::media_worker::backoff_delay(attempts)
+    }
+
     fn image_url(&self, base: &str) -> String;
     fn video_submit_url(&self, base: &str) -> String;
     fn video_poll_url(&self, base: &str, provider_job_id: &str) -> String;
@@ -678,6 +684,10 @@ pub struct ComfyUiMediaCodec {
     pub base: String,
     /// Stable per job, so a resubmitted job renders the same picture.
     pub seed: u64,
+    /// The workflow an image runs with: known, declared or chosen by the user.
+    pub image_family: Option<crate::core::comfyui::ComfyFamily>,
+    /// The job's settings: the family defaults with the user's overrides.
+    pub settings: crate::core::comfyui::ResolvedGenSettings,
     /// Resolved from ComfyUI before a video is submitted.
     pub video_companions: Option<crate::core::comfyui::WanCompanions>,
 }
@@ -705,6 +715,11 @@ impl MediaCodec for ComfyUiMediaCodec {
     fn image_is_async(&self) -> bool {
         true
     }
+    fn poll_delay(&self, _attempts: u32) -> std::time::Duration {
+        // The worker ticks every 5 s; a local job is checked at each tick
+        // (measured: the ladder turned a 2 min image into 5 min, 2026-10-20).
+        std::time::Duration::from_secs(5)
+    }
     fn image_url(&self, base: &str) -> String {
         format!("{}/prompt", trimmed_base(base))
     }
@@ -726,7 +741,19 @@ impl MediaCodec for ComfyUiMediaCodec {
         references: &[MediaReferenceImage],
     ) -> Result<Value> {
         Self::refuse_references(references.len())?;
-        let workflow = crate::core::comfyui::image_workflow(model, prompt, params, self.seed)?;
+        let family = self.image_family.ok_or_else(|| {
+            anyhow!(
+                "{model} has no image workflow yet: choose which one runs it in the ComfyUI card"
+            )
+        })?;
+        let workflow = crate::core::comfyui::image_workflow(
+            family,
+            model,
+            prompt,
+            params,
+            self.seed,
+            &self.settings,
+        )?;
         Ok(Self::submission(workflow))
     }
     fn video_body(
@@ -741,8 +768,14 @@ impl MediaCodec for ComfyUiMediaCodec {
             .video_companions
             .as_ref()
             .ok_or_else(|| anyhow!("the Wan text encoder and VAE were not resolved"))?;
-        let workflow =
-            crate::core::comfyui::video_workflow(model, companions, prompt, params, self.seed)?;
+        let workflow = crate::core::comfyui::video_workflow(
+            model,
+            companions,
+            prompt,
+            params,
+            self.seed,
+            &self.settings,
+        )?;
         Ok(Self::submission(workflow))
     }
     fn parse_image_response(&self, _body: &str) -> Result<MediaImageResponse> {
@@ -904,6 +937,8 @@ mod tests {
         ComfyUiMediaCodec {
             base: "http://127.0.0.1:8188".into(),
             seed: 11,
+            image_family: Some(crate::core::comfyui::ComfyFamily::FluxSchnell),
+            settings: crate::core::comfyui::ComfyFamily::FluxSchnell.defaults(),
             video_companions: companions.then(|| crate::core::comfyui::WanCompanions {
                 text_encoder: "umt5_xxl_fp8_e4m3fn_scaled.safetensors".into(),
                 vae: "wan_2.1_vae.safetensors".into(),
@@ -944,6 +979,19 @@ mod tests {
                 provider_job_id: "p-1".into()
             }
         );
+    }
+
+    #[test]
+    fn comfyui_is_polled_at_every_worker_tick_and_billed_providers_on_the_ladder() {
+        assert_eq!(
+            comfy(false).poll_delay(6),
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(
+            OpenRouterMediaCodec.poll_delay(6),
+            crate::agents::media_worker::backoff_delay(6)
+        );
+        assert!(OpenRouterMediaCodec.poll_delay(6) > std::time::Duration::from_secs(5));
     }
 
     #[test]

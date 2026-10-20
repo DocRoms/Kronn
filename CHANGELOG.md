@@ -24,7 +24,10 @@ Release notes for 0.9.3 and earlier are available in the
   nothing and never enter estimates; ComfyUI never appears as a chat agent.
   The card also downloads measured models (RealVisXL V5, FLUX.1 schnell, the
   Wan 2.1 1.3B pack) into ComfyUI's own model folders, with progress, cancel,
-  resume and a disk-space check.
+  resume and a disk-space check. Everything machine-dependent is a setting:
+  the server address, the install folder (default `~/ComfyUI-Installs`), the
+  workflow of a model Kronn cannot recognise on its own, and per-slot steps,
+  guidance, sampler and scheduler.
 - Decision models are recognised (KT-1366). Kronn reads what Ollama's
   `/api/show` says each local model can do, so a decision model such as
   `clef-flash:9b` (which answers typed questions and cannot chat) is no longer

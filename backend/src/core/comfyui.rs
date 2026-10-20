@@ -158,19 +158,115 @@ const SDXL_NEGATIVE: &str =
      text, watermark";
 const WAN_NEGATIVE: &str = "blurry, low quality, distorted, static, worst quality";
 
-/// The family a model belongs to: the architecture its header declares when
-/// ComfyUI reports one, else the measured file list. `None` = not usable.
-pub fn family_of(folder: &str, file: &str, architecture: Option<&str>) -> Option<ComfyFamily> {
-    if let Some(arch) = architecture {
-        // The only declared value measured so far (FLUX.1 schnell's header).
-        if folder == IMAGE_FOLDER && arch.trim().eq_ignore_ascii_case("Flux.1-schnell") {
-            return Some(ComfyFamily::FluxSchnell);
+/// The folder a family's main file sits in.
+pub fn folder_of(family: ComfyFamily) -> &'static str {
+    match family.modality() {
+        MediaModality::Image => IMAGE_FOLDER,
+        MediaModality::Video => VIDEO_FOLDER,
+    }
+}
+
+/// The family a model belongs to, in this order: the workflow the user chose
+/// for this file in the card, the architecture its header declares, the
+/// measured file list. `None` = Kronn does not know how to run it yet.
+pub fn family_of(
+    folder: &str,
+    file: &str,
+    architecture: Option<&str>,
+    chosen: Option<ComfyFamily>,
+) -> Option<ComfyFamily> {
+    if let Some(family) = chosen.filter(|family| folder_of(*family) == folder) {
+        return Some(family);
+    }
+    if let Some(arch) = architecture.map(str::trim) {
+        if folder == IMAGE_FOLDER {
+            if arch.eq_ignore_ascii_case("Flux.1-schnell") {
+                return Some(ComfyFamily::FluxSchnell);
+            }
+            // modelspec's SDXL base value; a refiner only refines.
+            let arch = arch.to_ascii_lowercase();
+            if arch.starts_with("stable-diffusion-xl") && !arch.contains("refiner") {
+                return Some(ComfyFamily::Sdxl);
+            }
         }
     }
     KNOWN_MODELS
         .iter()
         .find(|(known_folder, known_file, _)| *known_folder == folder && *known_file == file)
         .map(|(_, _, family)| *family)
+}
+
+/// Generation settings a user may override per slot in the card. Empty =
+/// the family's measured default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ComfyGenSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfg: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampler: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<String>,
+}
+
+impl ComfyGenSettings {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// The settings a workflow actually runs with.
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct ResolvedGenSettings {
+    pub steps: u32,
+    pub cfg: f32,
+    pub sampler: String,
+    pub scheduler: String,
+}
+
+impl ComfyFamily {
+    /// The settings measured on 2026-10-19 for this family.
+    pub fn defaults(self) -> ResolvedGenSettings {
+        let (steps, cfg, sampler, scheduler) = match self {
+            Self::FluxSchnell => (4, 1.0, "euler", "simple"),
+            Self::Sdxl => (30, 5.0, "dpmpp_sde", "karras"),
+            Self::Wan21T2v => (30, 6.0, "uni_pc", "simple"),
+        };
+        ResolvedGenSettings {
+            steps,
+            cfg,
+            sampler: sampler.into(),
+            scheduler: scheduler.into(),
+        }
+    }
+
+    /// The family defaults with the user's overrides on top.
+    pub fn settings(self, overrides: &ComfyGenSettings) -> ResolvedGenSettings {
+        let defaults = self.defaults();
+        let text = |value: &Option<String>, fallback: String| {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or(fallback)
+        };
+        ResolvedGenSettings {
+            steps: overrides
+                .steps
+                .filter(|steps| (1..=200).contains(steps))
+                .unwrap_or(defaults.steps),
+            cfg: overrides
+                .cfg
+                .filter(|cfg| cfg.is_finite() && (0.0..=30.0).contains(cfg))
+                .unwrap_or(defaults.cfg),
+            sampler: text(&overrides.sampler, defaults.sampler),
+            scheduler: text(&overrides.scheduler, defaults.scheduler),
+        }
+    }
 }
 
 /// Text encoder and VAE a Wan 2.1 job needs, from what is installed.
@@ -262,30 +358,20 @@ pub fn seed_for(job_id: &str) -> u64 {
         & 0x0000_ffff_ffff_ffff
 }
 
-/// The text-to-image workflow (ComfyUI API format) for a measured checkpoint.
+/// The text-to-image workflow (ComfyUI API format) for a checkpoint of a
+/// known family, with the settings to run it with.
 pub fn image_workflow(
+    family: ComfyFamily,
     checkpoint: &str,
     prompt: &str,
     params: &MediaParams,
     seed: u64,
+    settings: &ResolvedGenSettings,
 ) -> Result<Value> {
-    let Some(family) = family_of(IMAGE_FOLDER, checkpoint, None) else {
-        bail!(
-            "Kronn has no measured workflow for the image model {checkpoint}: \
-             pick a known model in the ComfyUI card"
-        );
-    };
     let (width, height) = size_for(IMAGE_SIZES, params.aspect_ratio.as_deref())?;
-    let (latent, negative, steps, cfg, sampler, scheduler) = match family {
-        ComfyFamily::FluxSchnell => ("EmptySD3LatentImage", "", 4, 1.0, "euler", "simple"),
-        ComfyFamily::Sdxl => (
-            "EmptyLatentImage",
-            SDXL_NEGATIVE,
-            30,
-            5.0,
-            "dpmpp_sde",
-            "karras",
-        ),
+    let (latent, negative) = match family {
+        ComfyFamily::FluxSchnell => ("EmptySD3LatentImage", ""),
+        ComfyFamily::Sdxl => ("EmptyLatentImage", SDXL_NEGATIVE),
         ComfyFamily::Wan21T2v => bail!("{checkpoint} is a video model, not an image one"),
     };
     Ok(json!({
@@ -295,27 +381,22 @@ pub fn image_workflow(
         "4": {"class_type": latent, "inputs": {"width": width, "height": height, "batch_size": 1}},
         "5": {"class_type": "KSampler", "inputs": {
             "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0], "latent_image": ["4", 0],
-            "seed": seed, "steps": steps, "cfg": cfg, "sampler_name": sampler,
-            "scheduler": scheduler, "denoise": 1.0}},
+            "seed": seed, "steps": settings.steps, "cfg": settings.cfg,
+            "sampler_name": settings.sampler, "scheduler": settings.scheduler, "denoise": 1.0}},
         "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
         "7": {"class_type": "SaveImage", "inputs": {"images": ["6", 0], "filename_prefix": "kronn/image"}}
     }))
 }
 
-/// The text-to-video workflow for a measured Wan 2.1 diffusion model.
+/// The text-to-video workflow for a Wan 2.1 diffusion model.
 pub fn video_workflow(
     diffusion_model: &str,
     companions: &WanCompanions,
     prompt: &str,
     params: &MediaParams,
     seed: u64,
+    settings: &ResolvedGenSettings,
 ) -> Result<Value> {
-    if family_of(VIDEO_FOLDER, diffusion_model, None) != Some(ComfyFamily::Wan21T2v) {
-        bail!(
-            "Kronn has no measured workflow for the video model {diffusion_model}: \
-             pick a known model in the ComfyUI card"
-        );
-    }
     let (width, height) = size_for(VIDEO_SIZES, params.aspect_ratio.as_deref())?;
     let length = video_frames(params.duration_secs)?;
     Ok(json!({
@@ -328,8 +409,8 @@ pub fn video_workflow(
         "7": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": 8.0}},
         "8": {"class_type": "KSampler", "inputs": {
             "model": ["7", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0],
-            "seed": seed, "steps": 30, "cfg": 6.0, "sampler_name": "uni_pc",
-            "scheduler": "simple", "denoise": 1.0}},
+            "seed": seed, "steps": settings.steps, "cfg": settings.cfg,
+            "sampler_name": settings.sampler, "scheduler": settings.scheduler, "denoise": 1.0}},
         "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
         "10": {"class_type": "CreateVideo", "inputs": {"images": ["9", 0], "fps": VIDEO_FPS}},
         "11": {"class_type": "SaveVideo", "inputs": {"video": ["10", 0], "filename_prefix": "kronn/video",
@@ -435,30 +516,89 @@ mod tests {
     }
 
     #[test]
-    fn a_family_comes_from_the_header_or_the_measured_list_never_the_name() {
+    fn a_family_comes_from_the_user_the_header_or_the_measured_list_never_the_name() {
         assert_eq!(
-            family_of(IMAGE_FOLDER, "anything.safetensors", Some("Flux.1-schnell")),
+            family_of(
+                IMAGE_FOLDER,
+                "anything.safetensors",
+                Some("Flux.1-schnell"),
+                None
+            ),
             Some(ComfyFamily::FluxSchnell)
         );
         assert_eq!(
-            family_of(IMAGE_FOLDER, "RealVisXL_V5.0_fp16.safetensors", None),
+            family_of(
+                IMAGE_FOLDER,
+                "juggernaut.safetensors",
+                Some("stable-diffusion-xl-v1-base"),
+                None
+            ),
             Some(ComfyFamily::Sdxl)
         );
-        // A name that merely looks like a known family is not one.
         assert_eq!(
-            family_of(IMAGE_FOLDER, "my-flux-finetune.safetensors", None),
+            family_of(
+                IMAGE_FOLDER,
+                "refiner.safetensors",
+                Some("stable-diffusion-xl-v1-refiner"),
+                None
+            ),
             None
         );
         assert_eq!(
-            family_of(IMAGE_FOLDER, "Juggernaut-XL_v9.safetensors", None),
+            family_of(IMAGE_FOLDER, "RealVisXL_V5.0_fp16.safetensors", None, None),
+            Some(ComfyFamily::Sdxl)
+        );
+        // A name that merely looks like a known family is not one…
+        assert_eq!(
+            family_of(IMAGE_FOLDER, "my-flux-finetune.safetensors", None, None),
             None
         );
-        // The right file in the wrong folder is not that model.
+        // …until the user says which workflow runs it.
         assert_eq!(
-            family_of(IMAGE_FOLDER, "wan2.1_t2v_1.3B_fp16.safetensors", None),
+            family_of(
+                IMAGE_FOLDER,
+                "my-flux-finetune.safetensors",
+                None,
+                Some(ComfyFamily::FluxSchnell)
+            ),
+            Some(ComfyFamily::FluxSchnell)
+        );
+        // A choice that does not fit the folder is ignored.
+        assert_eq!(
+            family_of(
+                IMAGE_FOLDER,
+                "x.safetensors",
+                None,
+                Some(ComfyFamily::Wan21T2v)
+            ),
+            None
+        );
+        assert_eq!(
+            family_of(IMAGE_FOLDER, "wan2.1_t2v_1.3B_fp16.safetensors", None, None),
             None
         );
         assert_eq!(ComfyFamily::Wan21T2v.modality(), MediaModality::Video);
+    }
+
+    #[test]
+    fn settings_override_the_measured_defaults_only_with_sane_values() {
+        let defaults = ComfyFamily::Sdxl.settings(&ComfyGenSettings::default());
+        assert_eq!(defaults, ComfyFamily::Sdxl.defaults());
+        let tuned = ComfyFamily::Sdxl.settings(&ComfyGenSettings {
+            steps: Some(20),
+            cfg: Some(4.5),
+            sampler: Some(" euler ".into()),
+            scheduler: Some("".into()),
+        });
+        assert_eq!((tuned.steps, tuned.cfg), (20, 4.5));
+        assert_eq!(tuned.sampler, "euler");
+        assert_eq!(tuned.scheduler, "karras");
+        let absurd = ComfyFamily::FluxSchnell.settings(&ComfyGenSettings {
+            steps: Some(0),
+            cfg: Some(f32::NAN),
+            ..Default::default()
+        });
+        assert_eq!((absurd.steps, absurd.cfg), (4, 1.0));
     }
 
     #[test]
@@ -493,11 +633,14 @@ mod tests {
     /// The workflows are the ones measured on 2026-10-19.
     #[test]
     fn image_workflows_follow_the_measured_settings_of_each_family() {
+        let flux_settings = ComfyFamily::FluxSchnell.defaults();
         let flux = image_workflow(
+            ComfyFamily::FluxSchnell,
             "flux1-schnell-fp8.safetensors",
             "a fox",
             &params(Some("16:9"), None),
             7,
+            &flux_settings,
         )
         .unwrap();
         assert_eq!(flux["4"]["class_type"], "EmptySD3LatentImage");
@@ -508,10 +651,12 @@ mod tests {
         assert_eq!(flux["3"]["inputs"]["text"], "");
 
         let sdxl = image_workflow(
+            ComfyFamily::Sdxl,
             "RealVisXL_V5.0_fp16.safetensors",
             "a fox",
             &params(None, None),
             7,
+            &ComfyFamily::Sdxl.defaults(),
         )
         .unwrap();
         assert_eq!(sdxl["4"]["class_type"], "EmptyLatentImage");
@@ -524,20 +669,41 @@ mod tests {
             .unwrap()
             .contains("bad hands"));
 
-        let unknown = image_workflow(
-            "Juggernaut-XL_v9.safetensors",
+        let video_as_image = image_workflow(
+            ComfyFamily::Wan21T2v,
+            "wan.safetensors",
             "a fox",
             &params(None, None),
             7,
+            &ComfyFamily::Wan21T2v.defaults(),
         )
         .unwrap_err()
         .to_string();
-        assert!(unknown.contains("no measured workflow"), "{unknown}");
+        assert!(video_as_image.contains("video model"), "{video_as_image}");
+        // The user's settings reach the sampler.
+        let tuned = image_workflow(
+            ComfyFamily::Sdxl,
+            "juggernaut.safetensors",
+            "a fox",
+            &params(None, None),
+            7,
+            &ComfyFamily::Sdxl.settings(&ComfyGenSettings {
+                steps: Some(25),
+                sampler: Some("euler_ancestral".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(tuned["5"]["inputs"]["steps"], 25);
+        assert_eq!(tuned["5"]["inputs"]["sampler_name"], "euler_ancestral");
+        assert_eq!(tuned["5"]["inputs"]["scheduler"], "karras");
         let ratio = image_workflow(
+            ComfyFamily::FluxSchnell,
             "flux1-schnell-fp8.safetensors",
             "x",
             &params(Some("5:1"), None),
             7,
+            &flux_settings,
         )
         .unwrap_err()
         .to_string();
@@ -556,6 +722,7 @@ mod tests {
             "a fox trotting",
             &params(None, Some(2)),
             9,
+            &ComfyFamily::Wan21T2v.defaults(),
         )
         .unwrap();
         assert_eq!(video["6"]["inputs"]["length"], 33);
@@ -566,14 +733,6 @@ mod tests {
         assert_eq!(video["10"]["inputs"]["fps"], 16);
         assert_eq!(video_frames(Some(4)).unwrap(), 65);
         assert!(video_frames(Some(9)).is_err());
-        assert!(video_workflow(
-            "flux1-schnell-fp8.safetensors",
-            &companions,
-            "x",
-            &params(None, None),
-            9
-        )
-        .is_err());
     }
 
     /// Every suggestion is a model Kronn can run once downloaded: its main
@@ -583,7 +742,7 @@ mod tests {
         for suggestion in SUGGESTIONS {
             let main = suggestion.files[0];
             assert_eq!(
-                family_of(main.folder, main.file, None),
+                family_of(main.folder, main.file, None, None),
                 Some(suggestion.family),
                 "{}",
                 suggestion.id

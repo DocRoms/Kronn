@@ -2158,6 +2158,12 @@ output_format: CollectQuickExecOutputFormat, };
 export type ComfyFamily = "flux_schnell" | "sdxl" | "wan21_t2v";
 
 /**
+ * Generation settings a user may override per slot in the card. Empty =
+ * the family's measured default.
+ */
+export type ComfyGenSettings = { steps?: number | null, cfg?: number | null, sampler?: string | null, scheduler?: string | null, };
+
+/**
  * Saved under `[comfyui]` in config.toml. Empty slots mean "ComfyUI is not
  * offered as a media source".
  */
@@ -2174,7 +2180,23 @@ image_model?: string | null,
 /**
  * Diffusion model file used for videos (`models/diffusion_models`).
  */
-video_model?: string | null, };
+video_model?: string | null,
+/**
+ * Where ComfyUI is installed, to tell "installed but stopped" from "not
+ * installed"; `None` = `~/ComfyUI-Installs` (Comfy Desktop's default).
+ */
+install_dir?: string | null,
+/**
+ * The workflow the user chose for a model Kronn cannot recognise on its
+ * own, keyed `<folder>/<file>`.
+ */
+model_families?: { [key in string]: ComfyFamily },
+/**
+ * Overrides of the family defaults, per slot.
+ */
+image_settings?: ComfyGenSettings, video_settings?: ComfyGenSettings, };
+
+export type ComfyUiFamilyDefaults = { family: ComfyFamily, settings: ResolvedGenSettings, };
 
 /**
  * One model file ComfyUI reports, and what Kronn can do with it.
@@ -2185,9 +2207,14 @@ export type ComfyUiModel = {
  */
 folder: string, file: string,
 /**
- * `None` = no measured workflow: listed, never selectable.
+ * `None` = Kronn does not know how to run it until the user picks its
+ * workflow.
  */
-family: ComfyFamily | null, modality: MediaModality | null, };
+family: ComfyFamily | null, modality: MediaModality | null,
+/**
+ * The family comes from the user's choice, not from the file.
+ */
+chosen: boolean, };
 
 /**
  * What the ComfyUI card shows.
@@ -2211,7 +2238,23 @@ install_command: string | null, download_url: string,
 /**
  * Models the card offers to download (KT-1385).
  */
-suggestions: Array<ComfyUiSuggestion>, };
+suggestions: Array<ComfyUiSuggestion>,
+/**
+ * The folder checked for an installation, as configured or defaulted.
+ */
+install_dir: string,
+/**
+ * What the user typed, `None` while the defaults above apply.
+ */
+configured_endpoint: string | null, configured_install_dir: string | null, image_settings: ComfyGenSettings, video_settings: ComfyGenSettings,
+/**
+ * Each family's measured defaults, shown as the placeholders.
+ */
+family_defaults: Array<ComfyUiFamilyDefaults>,
+/**
+ * What this ComfyUI's KSampler accepts (empty while it is down).
+ */
+samplers: Array<string>, schedulers: Array<string>, };
 
 /**
  * One suggested model, as the card shows it.
@@ -8000,6 +8043,11 @@ export type RepoSource = { id: string, label: string, provider: string, };
 export type RequiredSecretStatus = { name: string, configured: boolean, };
 
 /**
+ * The settings a workflow actually runs with.
+ */
+export type ResolvedGenSettings = { steps: number, cfg: number, sampler: string, scheduler: string, };
+
+/**
  * ADR-005 portability tier. Deliberately serialized as the literal `N0` /
  * `N1` / `N2` used throughout the ADR and `kronn/INDEX.md`, not
  * `snake_case`, so the API value matches the vocabulary humans read.
@@ -8992,6 +9040,25 @@ color?: string | null, };
 export type SetApiAccessPolicyRequest = { policy?: ApiAccessPolicy | null, };
 
 export type SetBriefingRequest = { notes?: string | null, };
+
+/**
+ * PUT /api/comfyui/model-family — run a model Kronn cannot recognise with
+ * one of its workflows; `family: null` forgets the choice.
+ */
+export type SetComfyUiModelFamilyRequest = { folder: string, file: string, family?: ComfyFamily | null, };
+
+/**
+ * PUT /api/comfyui/settings — the machine-dependent part of the card.
+ */
+export type SetComfyUiSettingsRequest = {
+/**
+ * Empty = the default local address.
+ */
+endpoint?: string | null,
+/**
+ * Empty = `~/ComfyUI-Installs`.
+ */
+install_dir?: string | null, image_settings?: ComfyGenSettings, video_settings?: ComfyGenSettings, };
 
 export type SetComfyUiSlotsRequest = { image_model?: string | null, video_model?: string | null, };
 

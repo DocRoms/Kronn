@@ -5,12 +5,14 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::core::comfyui::ComfyFamily;
+use std::collections::BTreeMap;
+
+use crate::core::comfyui::{ComfyFamily, ComfyGenSettings, ResolvedGenSettings};
 use crate::models::MediaModality;
 
 /// Saved under `[comfyui]` in config.toml. Empty slots mean "ComfyUI is not
 /// offered as a media source".
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ComfyUiConfig {
     /// Base URL; `None` = the default local address (`http://127.0.0.1:8188`,
@@ -23,6 +25,28 @@ pub struct ComfyUiConfig {
     /// Diffusion model file used for videos (`models/diffusion_models`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_model: Option<String>,
+    /// Where ComfyUI is installed, to tell "installed but stopped" from "not
+    /// installed"; `None` = `~/ComfyUI-Installs` (Comfy Desktop's default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_dir: Option<String>,
+    /// The workflow the user chose for a model Kronn cannot recognise on its
+    /// own, keyed `<folder>/<file>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_families: BTreeMap<String, ComfyFamily>,
+    /// Overrides of the family defaults, per slot.
+    #[serde(default, skip_serializing_if = "ComfyGenSettings::is_empty")]
+    pub image_settings: ComfyGenSettings,
+    #[serde(default, skip_serializing_if = "ComfyGenSettings::is_empty")]
+    pub video_settings: ComfyGenSettings,
+}
+
+impl ComfyUiConfig {
+    /// The workflow the user chose for one model file, if any.
+    pub fn chosen_family(&self, folder: &str, file: &str) -> Option<ComfyFamily> {
+        self.model_families
+            .get(&format!("{folder}/{file}"))
+            .copied()
+    }
 }
 
 pub fn is_unset(config: &ComfyUiConfig) -> bool {
@@ -36,13 +60,16 @@ pub struct ComfyUiModel {
     /// ComfyUI folder: `checkpoints` (image) or `diffusion_models` (video).
     pub folder: String,
     pub file: String,
-    /// `None` = no measured workflow: listed, never selectable.
+    /// `None` = Kronn does not know how to run it until the user picks its
+    /// workflow.
     pub family: Option<ComfyFamily>,
     pub modality: Option<MediaModality>,
+    /// The family comes from the user's choice, not from the file.
+    pub chosen: bool,
 }
 
 /// What the ComfyUI card shows.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct ComfyUiStatus {
     /// `online` (server answers), `offline` (installed, server down) or
@@ -62,6 +89,49 @@ pub struct ComfyUiStatus {
     pub download_url: String,
     /// Models the card offers to download (KT-1385).
     pub suggestions: Vec<ComfyUiSuggestion>,
+    /// The folder checked for an installation, as configured or defaulted.
+    pub install_dir: String,
+    /// What the user typed, `None` while the defaults above apply.
+    pub configured_endpoint: Option<String>,
+    pub configured_install_dir: Option<String>,
+    pub image_settings: ComfyGenSettings,
+    pub video_settings: ComfyGenSettings,
+    /// Each family's measured defaults, shown as the placeholders.
+    pub family_defaults: Vec<ComfyUiFamilyDefaults>,
+    /// What this ComfyUI's KSampler accepts (empty while it is down).
+    pub samplers: Vec<String>,
+    pub schedulers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct ComfyUiFamilyDefaults {
+    pub family: ComfyFamily,
+    pub settings: ResolvedGenSettings,
+}
+
+/// PUT /api/comfyui/settings — the machine-dependent part of the card.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct SetComfyUiSettingsRequest {
+    /// Empty = the default local address.
+    pub endpoint: Option<String>,
+    /// Empty = `~/ComfyUI-Installs`.
+    pub install_dir: Option<String>,
+    #[serde(default)]
+    pub image_settings: ComfyGenSettings,
+    #[serde(default)]
+    pub video_settings: ComfyGenSettings,
+}
+
+/// PUT /api/comfyui/model-family — run a model Kronn cannot recognise with
+/// one of its workflows; `family: null` forgets the choice.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct SetComfyUiModelFamilyRequest {
+    pub folder: String,
+    pub file: String,
+    pub family: Option<ComfyFamily>,
 }
 
 /// One suggested model, as the card shows it.

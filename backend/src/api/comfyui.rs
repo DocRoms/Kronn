@@ -20,8 +20,9 @@ use crate::core::comfyui::{
     IMAGE_FOLDER, TEXT_ENCODER_FOLDER, VAE_FOLDER, VIDEO_FOLDER,
 };
 use crate::models::{
-    ApiResponse, ComfyUiConfig, ComfyUiModel, ComfyUiStatus, ComfyUiSuggestion,
-    ExternalApiConnection, ExternalApiConnectionPreset, MediaModality, PullComfyUiModelRequest,
+    ApiResponse, ComfyUiConfig, ComfyUiFamilyDefaults, ComfyUiModel, ComfyUiStatus,
+    ComfyUiSuggestion, ExternalApiConnection, ExternalApiConnectionPreset, MediaModality,
+    PullComfyUiModelRequest, SetComfyUiModelFamilyRequest, SetComfyUiSettingsRequest,
     SetComfyUiSlotsRequest,
 };
 use crate::AppState;
@@ -112,22 +113,43 @@ async fn declared_architecture(base: &str, folder: &str, file: &str) -> Option<S
     body["modelspec.architecture"].as_str().map(str::to_string)
 }
 
-/// Image and video models installed in ComfyUI, each with its family when
-/// Kronn has a measured workflow for it.
-pub async fn installed_models(base: &str) -> anyhow::Result<Vec<ComfyUiModel>> {
+/// The family a model runs with: the workflow the user chose for it, the
+/// measured list, else the architecture its header declares (checkpoints
+/// only). `None` until the user picks one in the card.
+pub async fn model_family(
+    base: &str,
+    config: &ComfyUiConfig,
+    folder: &str,
+    file: &str,
+) -> Option<ComfyFamily> {
+    let chosen = config.chosen_family(folder, file);
+    if let Some(family) = family_of(folder, file, None, chosen) {
+        return Some(family);
+    }
+    if folder != IMAGE_FOLDER {
+        return None;
+    }
+    let architecture = declared_architecture(base, folder, file).await;
+    family_of(folder, file, architecture.as_deref(), None)
+}
+
+/// Image and video models installed in ComfyUI, each with the family it runs
+/// with when Kronn knows one.
+pub async fn installed_models(
+    base: &str,
+    config: &ComfyUiConfig,
+) -> anyhow::Result<Vec<ComfyUiModel>> {
     let mut models = Vec::new();
     for folder in [IMAGE_FOLDER, VIDEO_FOLDER] {
         let files = list_folder(base, folder).await?;
         let classified = futures::stream::iter(files)
             .map(|file| async move {
-                let mut family = family_of(folder, &file, None);
-                if family.is_none() && folder == IMAGE_FOLDER {
-                    let architecture = declared_architecture(base, folder, &file).await;
-                    family = family_of(folder, &file, architecture.as_deref());
-                }
+                let chosen = config.chosen_family(folder, &file);
+                let family = model_family(base, config, folder, &file).await;
                 ComfyUiModel {
                     folder: folder.to_string(),
                     modality: family.map(ComfyFamily::modality),
+                    chosen: chosen.is_some() && family == chosen,
                     family,
                     file,
                 }
@@ -155,15 +177,67 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Whether ComfyUI is installed on this machine while its server is down:
-/// Comfy Desktop's app and install folder, or comfy-cli's default workspace.
-fn installed_on_disk() -> bool {
-    let mut places = vec![PathBuf::from("/Applications/Comfy Desktop.app")];
-    if let Some(home) = home_dir() {
-        places.push(home.join("ComfyUI-Installs"));
-        places.push(home.join("comfy").join("ComfyUI"));
+/// Where ComfyUI is looked for when its server does not answer: the folder
+/// the user set, else Comfy Desktop's default `~/ComfyUI-Installs`. A leading
+/// `~/` is the home directory.
+pub fn install_dir(config: &ComfyUiConfig) -> PathBuf {
+    let home = home_dir().unwrap_or_default();
+    match config
+        .install_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+    {
+        Some(dir) => match dir.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => PathBuf::from(dir),
+        },
+        None => home.join("ComfyUI-Installs"),
     }
-    places.iter().any(|place| place.exists())
+}
+
+/// Samplers and schedulers this ComfyUI's KSampler accepts.
+async fn sampler_choices(base: &str) -> (Vec<String>, Vec<String>) {
+    let body: Option<Value> = async {
+        client(LIST_TIMEOUT)
+            .get(format!("{base}/object_info/KSampler"))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()
+    }
+    .await;
+    let list = |field: &str| {
+        body.as_ref()
+            .and_then(|body| body["KSampler"]["input"]["required"][field][0].as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    (list("sampler_name"), list("scheduler"))
+}
+
+fn family_defaults() -> Vec<ComfyUiFamilyDefaults> {
+    [
+        ComfyFamily::FluxSchnell,
+        ComfyFamily::Sdxl,
+        ComfyFamily::Wan21T2v,
+    ]
+    .into_iter()
+    .map(|family| ComfyUiFamilyDefaults {
+        family,
+        settings: family.defaults(),
+    })
+    .collect()
 }
 
 /// The one-command install, only where it was run and verified (macOS,
@@ -184,28 +258,33 @@ fn slot(value: &Option<String>) -> Option<String> {
 pub async fn status(State(state): State<AppState>) -> Json<ApiResponse<ComfyUiStatus>> {
     let config = state.config.read().await.comfyui.clone();
     let base = base_url(&config);
-    let image_model = slot(&config.image_model);
-    let video_model = slot(&config.video_model);
-    let Some(version) = probe_version(&base).await else {
-        return Json(ApiResponse::ok(ComfyUiStatus {
-            state: if installed_on_disk() {
-                "offline"
-            } else {
-                "not_found"
-            }
-            .into(),
-            endpoint: base,
-            version: None,
-            models: Vec::new(),
-            image_model,
-            video_model,
-            video_blocker: None,
-            install_command: install_command(),
-            download_url: DOWNLOAD_URL.into(),
-            suggestions: suggestion_views(&[], false),
-        }));
+    let dir = install_dir(&config);
+    let mut status = ComfyUiStatus {
+        state: if dir.is_dir() { "offline" } else { "not_found" }.into(),
+        endpoint: base.clone(),
+        version: None,
+        models: Vec::new(),
+        image_model: slot(&config.image_model),
+        video_model: slot(&config.video_model),
+        video_blocker: None,
+        install_command: install_command(),
+        download_url: DOWNLOAD_URL.into(),
+        suggestions: suggestion_views(&[], false),
+        install_dir: dir.display().to_string(),
+        configured_endpoint: slot(&config.endpoint),
+        configured_install_dir: slot(&config.install_dir),
+        image_settings: config.image_settings.clone(),
+        video_settings: config.video_settings.clone(),
+        family_defaults: family_defaults(),
+        samplers: Vec::new(),
+        schedulers: Vec::new(),
     };
-    let models = match installed_models(&base).await {
+    let Some(version) = probe_version(&base).await else {
+        return Json(ApiResponse::ok(status));
+    };
+    status.state = "online".into();
+    status.version = Some(version);
+    status.models = match installed_models(&base, &config).await {
         Ok(models) => models,
         Err(error) => {
             return Json(ApiResponse::err(format!(
@@ -213,26 +292,15 @@ pub async fn status(State(state): State<AppState>) -> Json<ApiResponse<ComfyUiSt
             )))
         }
     };
-    let video_blocker = match video_model {
-        Some(_) => video_companions(&base)
+    if status.video_model.is_some() {
+        status.video_blocker = video_companions(&base)
             .await
             .err()
-            .map(|error| error.to_string()),
-        None => None,
-    };
-    let suggestions = suggestion_views(&installed_files(&base).await, downloadable(&base).await);
-    Json(ApiResponse::ok(ComfyUiStatus {
-        state: "online".into(),
-        endpoint: base,
-        version: Some(version),
-        models,
-        image_model,
-        video_model,
-        video_blocker,
-        install_command: install_command(),
-        download_url: DOWNLOAD_URL.into(),
-        suggestions,
-    }))
+            .map(|error| error.to_string());
+    }
+    status.suggestions = suggestion_views(&installed_files(&base).await, downloadable(&base).await);
+    (status.samplers, status.schedulers) = sampler_choices(&base).await;
+    Json(ApiResponse::ok(status))
 }
 
 /// GET /api/comfyui/source — the local media source the media surfaces list
@@ -514,17 +582,22 @@ fn finish_file(
     std::fs::rename(part, target).map_err(|e| format!("cannot finish {}: {e}", target.display()))
 }
 
-/// Whether `file` may fill the `modality` slot: a model of a measured family
-/// of that modality.
-fn check_slot(file: &str, modality: MediaModality) -> Result<(), String> {
+/// Why `file` cannot fill the `modality` slot, if it cannot: it must run
+/// with a known workflow of that kind.
+async fn slot_refusal(
+    base: &str,
+    config: &ComfyUiConfig,
+    file: &str,
+    modality: MediaModality,
+) -> Option<String> {
     let folder = match modality {
         MediaModality::Image => IMAGE_FOLDER,
         MediaModality::Video => VIDEO_FOLDER,
     };
-    match family_of(folder, file, None) {
-        Some(family) if family.modality() == modality => Ok(()),
-        _ => Err(format!(
-            "{file} is not a {} model Kronn has a measured workflow for",
+    match model_family(base, config, folder, file).await {
+        Some(family) if family.modality() == modality => None,
+        _ => Some(format!(
+            "{file} has no {} workflow yet: choose which one runs it in the ComfyUI card",
             modality.as_str()
         )),
     }
@@ -537,37 +610,129 @@ pub async fn set_slots(
 ) -> Json<ApiResponse<ComfyUiConfig>> {
     let image_model = slot(&request.image_model);
     let video_model = slot(&request.video_model);
-    let base = base_url(&state.config.read().await.comfyui);
-    // A checkpoint whose header declares a measured architecture is valid
-    // even under another file name, so ask ComfyUI before refusing it.
-    if let Some(file) = image_model.as_deref() {
-        if check_slot(file, MediaModality::Image).is_err() {
-            let declared = declared_architecture(&base, IMAGE_FOLDER, file).await;
-            if family_of(IMAGE_FOLDER, file, declared.as_deref()).map(ComfyFamily::modality)
-                != Some(MediaModality::Image)
-            {
-                return Json(ApiResponse::err(
-                    check_slot(file, MediaModality::Image).unwrap_err(),
-                ));
+    let current = state.config.read().await.comfyui.clone();
+    let base = base_url(&current);
+    for (file, modality) in [
+        (image_model.as_deref(), MediaModality::Image),
+        (video_model.as_deref(), MediaModality::Video),
+    ] {
+        if let Some(file) = file {
+            if let Some(message) = slot_refusal(&base, &current, file, modality).await {
+                return Json(ApiResponse::err(message));
             }
         }
     }
-    if let Some(file) = video_model.as_deref() {
-        if let Err(message) = check_slot(file, MediaModality::Video) {
-            return Json(ApiResponse::err(message));
-        }
-    }
+    save_comfyui(&state, |comfyui| {
+        comfyui.image_model = image_model;
+        comfyui.video_model = video_model;
+    })
+    .await
+}
+
+/// Applies one change to `[comfyui]` and saves it; the in-memory config
+/// moves only once the file is written.
+async fn save_comfyui(
+    state: &AppState,
+    change: impl FnOnce(&mut ComfyUiConfig),
+) -> Json<ApiResponse<ComfyUiConfig>> {
     let mut config = state.config.write().await;
     let mut next = config.clone();
-    next.comfyui.image_model = image_model;
-    next.comfyui.video_model = video_model;
+    change(&mut next.comfyui);
     if let Err(error) = crate::core::config::save(&next).await {
         return Json(ApiResponse::err(format!(
-            "Failed to save — the previous models are still in effect: {error}"
+            "Failed to save — the previous settings are still in effect: {error}"
         )));
     }
     *config = next;
     Json(ApiResponse::ok(config.comfyui.clone()))
+}
+
+fn optional_text(value: &Option<String>) -> Option<String> {
+    slot(value)
+}
+
+/// PUT /api/comfyui/settings — address, install folder and per-slot
+/// generation settings, all machine-dependent.
+pub async fn set_settings(
+    State(state): State<AppState>,
+    Json(request): Json<SetComfyUiSettingsRequest>,
+) -> Json<ApiResponse<ComfyUiConfig>> {
+    let endpoint = optional_text(&request.endpoint);
+    if let Some(endpoint) = endpoint.as_deref() {
+        match reqwest::Url::parse(endpoint) {
+            Ok(url) if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() => {}
+            _ => {
+                return Json(ApiResponse::err(format!(
+                    "{endpoint} is not an http(s) address such as http://127.0.0.1:8188"
+                )))
+            }
+        }
+    }
+    let install_dir = optional_text(&request.install_dir);
+    for (label, settings) in [
+        ("image", &request.image_settings),
+        ("video", &request.video_settings),
+    ] {
+        if settings
+            .steps
+            .is_some_and(|steps| !(1..=200).contains(&steps))
+        {
+            return Json(ApiResponse::err(format!(
+                "{label} steps must be between 1 and 200"
+            )));
+        }
+        if settings
+            .cfg
+            .is_some_and(|cfg| !cfg.is_finite() || !(0.0..=30.0).contains(&cfg))
+        {
+            return Json(ApiResponse::err(format!(
+                "{label} guidance must be between 0 and 30"
+            )));
+        }
+    }
+    let image_settings = request.image_settings.clone();
+    let video_settings = request.video_settings.clone();
+    save_comfyui(&state, move |comfyui| {
+        comfyui.endpoint = endpoint;
+        comfyui.install_dir = install_dir;
+        comfyui.image_settings = image_settings;
+        comfyui.video_settings = video_settings;
+    })
+    .await
+}
+
+/// PUT /api/comfyui/model-family — run a model Kronn cannot recognise with
+/// one of its workflows, or forget that choice.
+pub async fn set_model_family(
+    State(state): State<AppState>,
+    Json(request): Json<SetComfyUiModelFamilyRequest>,
+) -> Json<ApiResponse<ComfyUiConfig>> {
+    let folder = request.folder.trim().to_string();
+    let file = request.file.trim().to_string();
+    if ![IMAGE_FOLDER, VIDEO_FOLDER].contains(&folder.as_str()) || file.is_empty() {
+        return Json(ApiResponse::err(format!(
+            "a workflow is chosen for a file of {IMAGE_FOLDER} or {VIDEO_FOLDER}"
+        )));
+    }
+    if let Some(family) = request.family {
+        if crate::core::comfyui::folder_of(family) != folder {
+            return Json(ApiResponse::err(format!(
+                "a {} workflow cannot run a file of {folder}",
+                family.modality().as_str()
+            )));
+        }
+    }
+    let key = format!("{folder}/{file}");
+    let family = request.family;
+    save_comfyui(&state, move |comfyui| match family {
+        Some(family) => {
+            comfyui.model_families.insert(key, family);
+        }
+        None => {
+            comfyui.model_families.remove(&key);
+        }
+    })
+    .await
 }
 
 /// The in-memory connection media generation uses for ComfyUI, when at least
@@ -799,11 +964,71 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_only_takes_a_measured_model_of_its_modality() {
-        assert!(check_slot("RealVisXL_V5.0_fp16.safetensors", MediaModality::Image).is_ok());
-        assert!(check_slot("wan2.1_t2v_1.3B_fp16.safetensors", MediaModality::Video).is_ok());
-        assert!(check_slot("wan2.1_t2v_1.3B_fp16.safetensors", MediaModality::Image).is_err());
-        let unknown = check_slot("Juggernaut-XL_v9.safetensors", MediaModality::Image).unwrap_err();
-        assert!(unknown.contains("measured workflow"), "{unknown}");
+    fn the_install_folder_is_configurable_with_a_desktop_default() {
+        let home = home_dir().unwrap_or_default();
+        assert_eq!(
+            install_dir(&ComfyUiConfig::default()),
+            home.join("ComfyUI-Installs")
+        );
+        let at = |dir: &str| ComfyUiConfig {
+            install_dir: Some(dir.into()),
+            ..Default::default()
+        };
+        assert_eq!(install_dir(&at("~/apps/comfy")), home.join("apps/comfy"));
+        assert_eq!(install_dir(&at("/opt/comfy")), PathBuf::from("/opt/comfy"));
+        assert_eq!(install_dir(&at("   ")), home.join("ComfyUI-Installs"));
+    }
+
+    /// Nothing answers on this address, so only the user's choice and the
+    /// measured list can name a family.
+    #[tokio::test]
+    async fn a_slot_takes_a_known_model_or_one_whose_workflow_the_user_chose() {
+        let base = "http://127.0.0.1:9";
+        let mut config = ComfyUiConfig::default();
+        assert!(slot_refusal(
+            base,
+            &config,
+            "RealVisXL_V5.0_fp16.safetensors",
+            MediaModality::Image
+        )
+        .await
+        .is_none());
+        assert!(slot_refusal(
+            base,
+            &config,
+            "wan2.1_t2v_1.3B_fp16.safetensors",
+            MediaModality::Video
+        )
+        .await
+        .is_none());
+        assert!(slot_refusal(
+            base,
+            &config,
+            "wan2.1_t2v_1.3B_fp16.safetensors",
+            MediaModality::Image
+        )
+        .await
+        .is_some());
+        let unknown = slot_refusal(
+            base,
+            &config,
+            "Juggernaut-XL_v9.safetensors",
+            MediaModality::Image,
+        )
+        .await
+        .unwrap();
+        assert!(unknown.contains("choose which one runs it"), "{unknown}");
+        config.model_families.insert(
+            "checkpoints/Juggernaut-XL_v9.safetensors".into(),
+            ComfyFamily::Sdxl,
+        );
+        assert!(slot_refusal(
+            base,
+            &config,
+            "Juggernaut-XL_v9.safetensors",
+            MediaModality::Image
+        )
+        .await
+        .is_none());
     }
 }

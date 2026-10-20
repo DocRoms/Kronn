@@ -206,7 +206,7 @@ async fn submit(
                 Ok(())
             })
             .await?;
-            reschedule(db, &job.id, job.attempts, now).await?;
+            reschedule(db, &job.id, ctx.codec.poll_delay(job.attempts), now).await?;
             Ok(MediaJobStatus::Pending)
         }
     }
@@ -227,7 +227,7 @@ async fn poll(
 
     match ctx.codec.parse_poll_response(&text) {
         Ok(MediaPollState::Pending) => {
-            reschedule(db, &job.id, job.attempts, now).await?;
+            reschedule(db, &job.id, ctx.codec.poll_delay(job.attempts), now).await?;
             Ok(MediaJobStatus::Pending)
         }
         Ok(MediaPollState::Completed {
@@ -254,7 +254,7 @@ async fn poll(
         Err(e) => {
             // An unreadable poll is not a failed generation: keep polling
             // until the deadline rather than discarding a paid job.
-            reschedule(db, &job.id, job.attempts, now).await?;
+            reschedule(db, &job.id, ctx.codec.poll_delay(job.attempts), now).await?;
             tracing::warn!(job = %job.id, error = %e, "media poll response unreadable");
             Ok(MediaJobStatus::Pending)
         }
@@ -367,8 +367,12 @@ async fn settle_failure(
     .await
 }
 
-async fn reschedule(db: &Database, job_id: &str, attempts: u32, now: DateTime<Utc>) -> Result<()> {
-    let delay = backoff_delay(attempts);
+async fn reschedule(
+    db: &Database,
+    job_id: &str,
+    delay: Duration,
+    now: DateTime<Utc>,
+) -> Result<()> {
     let next = now + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::seconds(30));
     let job_id = job_id.to_string();
     db.with_conn(move |conn| {
@@ -770,8 +774,34 @@ async fn advance_local_comfyui(
     job: &MediaJob,
     now: DateTime<Utc>,
 ) -> std::result::Result<(), AdvanceFailure> {
-    let base = crate::api::comfyui::base_url(&state.config.read().await.comfyui);
+    let config = state.config.read().await.comfyui.clone();
+    let base = crate::api::comfyui::base_url(&config);
     let submitting = job.provider_job_id.as_deref().is_none_or(str::is_empty);
+    // The workflow and its settings, read when the job is submitted: the
+    // user's choice for this file and their overrides for this slot.
+    let (image_family, settings) = match job.modality {
+        MediaModality::Image => {
+            let family = if submitting {
+                crate::api::comfyui::model_family(
+                    &base,
+                    &config,
+                    crate::core::comfyui::IMAGE_FOLDER,
+                    &job.model,
+                )
+                .await
+            } else {
+                None
+            };
+            let settings = family
+                .unwrap_or(crate::core::comfyui::ComfyFamily::Sdxl)
+                .settings(&config.image_settings);
+            (family, settings)
+        }
+        MediaModality::Video => (
+            None,
+            crate::core::comfyui::ComfyFamily::Wan21T2v.settings(&config.video_settings),
+        ),
+    };
     let video_companions = if submitting && job.modality == MediaModality::Video {
         match crate::api::comfyui::video_companions(&base).await {
             Ok(companions) => Some(companions),
@@ -791,6 +821,8 @@ async fn advance_local_comfyui(
     let codec = crate::agents::media_codec::ComfyUiMediaCodec {
         base: base.clone(),
         seed: crate::core::comfyui::seed_for(&job.id),
+        image_family,
+        settings,
         video_companions,
     };
     if !job.params.reference_ids().is_empty() {
@@ -1600,6 +1632,8 @@ mod tests {
         let codec = crate::agents::media_codec::ComfyUiMediaCodec {
             base: base.clone(),
             seed: 7,
+            image_family: Some(crate::core::comfyui::ComfyFamily::Sdxl),
+            settings: crate::core::comfyui::ComfyFamily::Sdxl.defaults(),
             video_companions: None,
         };
         let client = reqwest::Client::new();

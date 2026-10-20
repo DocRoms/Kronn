@@ -1,7 +1,7 @@
 import type { AcceptAuditStepResponse, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
-import type { ComfyUiConfig, ComfyUiStatus, ExternalApiConnection, SetComfyUiSlotsRequest } from '../types/generated';
+import type { ComfyUiConfig, ComfyUiStatus, ExternalApiConnection, SetComfyUiSlotsRequest, SetComfyUiSettingsRequest, SetComfyUiModelFamilyRequest } from '../types/generated';
 import type {
   DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, GrantDiscussionProjectRequest,
   RevokeDiscussionProjectRequest, RevokeWorkflowScopeRequest, SetWorkflowScopeRequest, WorkflowScope,
@@ -3392,6 +3392,10 @@ export const usage = {
 export const comfyui = {
   status: () => api<ComfyUiStatus>('GET', '/comfyui/status'),
   setSlots: (body: SetComfyUiSlotsRequest) => api<ComfyUiConfig>('PUT', '/comfyui/slots', body),
+  /** Address, install folder and per-slot generation settings. */
+  setSettings: (body: SetComfyUiSettingsRequest) => api<ComfyUiConfig>('PUT', '/comfyui/settings', body),
+  /** Run a model Kronn cannot recognise with one of its workflows; `family: null` forgets it. */
+  setModelFamily: (body: SetComfyUiModelFamilyRequest) => api<ComfyUiConfig>('PUT', '/comfyui/model-family', body),
   /** The local media source, shaped like a connection, or null without a slot. */
   source: () => api<ExternalApiConnection | null>('GET', '/comfyui/source'),
   /** KT-1385 — download a suggested model into ComfyUI's model folders, with
