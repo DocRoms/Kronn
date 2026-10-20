@@ -320,6 +320,18 @@ fn column(header: &[String], names: &[&str]) -> Option<usize> {
         .position(|h| names.iter().any(|n| h.eq_ignore_ascii_case(n)))
 }
 
+/// `(id, problem)` of a ``- `TD-…` — problem`` bullet, the form `kept_rows`
+/// writes.
+fn kept_bullet(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("- `")?;
+    let (id, tail) = rest.split_once('`')?;
+    if !is_sheet_id(id) || !id.contains(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let title = tail.trim_start().trim_start_matches(['—', '-']).trim();
+    Some((id.to_string(), clean(title)))
+}
+
 /// The rows of an index file by sheet id (any `is_sheet_id` id, not only
 /// `TD-`), read through the header of their table. A table without a header
 /// row uses the central index layout: ID | Problem | Area | Severity | Status.
@@ -334,6 +346,17 @@ pub fn index_rows(content: &str) -> BTreeMap<String, IndexRow> {
         }
         if fenced || !t.starts_with('|') {
             header.clear();
+            // The bullet a resync keeps for a row whose TD has no sheet
+            // (`kept_rows`) still names the debt: answering one card must not
+            // make the next card's TD unresolvable (KT-1348).
+            if !fenced {
+                if let Some((id, title)) = kept_bullet(t) {
+                    out.entry(id).or_insert_with(|| IndexRow {
+                        title: Some(title).filter(|title| !title.is_empty()),
+                        ..IndexRow::default()
+                    });
+                }
+            }
             continue;
         }
         let cells: Vec<String> = t

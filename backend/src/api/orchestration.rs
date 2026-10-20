@@ -15322,6 +15322,7 @@ pub(crate) mod tests {
             updated_at: chrono::Utc::now(),
             image_model: image.map(str::to_string),
             video_model: video.map(str::to_string),
+            decision_model: None,
             media_endpoint: None,
         }
     }

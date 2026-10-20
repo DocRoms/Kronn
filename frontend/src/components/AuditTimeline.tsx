@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi, externalApi, type ExternalApiConnectionView } from '../lib/api';
+import { connectionAgent } from '../lib/auditLaunchChoice';
 import { AGENT_LABELS, MODEL_TIER_ICONS, isUsable } from '../lib/constants';
 import { stepRanges } from '../lib/stepRanges';
 import { canRunAudit } from '../lib/agentCapabilities';
@@ -37,6 +38,31 @@ interface LatestRunFacts {
   cancelledAtStep: number | null;
   /** What moved in the sources during a resume. */
   resumeDrift: string | null;
+  /** KT-1353 — what the documentary gate let through or repaired (JSON). */
+  documentaryNotes: string | null;
+}
+
+/** KT-1353 — `audit_runs.documentary_notes`: unreadable or empty reads as none. */
+interface DocumentaryNotes {
+  preexisting: { path: string; message: string }[];
+  autofixes: { step: number; path: string; kind: string; from: string; to: string }[];
+  /** KT-1370 — markers demoted to flagged backticked paths after a step's last attempt. */
+  unverified: { step: number; doc: string; marker: string }[];
+}
+
+function parseDocumentaryNotes(raw: string | null): DocumentaryNotes | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<DocumentaryNotes>;
+    const notes = {
+      preexisting: Array.isArray(parsed.preexisting) ? parsed.preexisting : [],
+      autofixes: Array.isArray(parsed.autofixes) ? parsed.autofixes : [],
+      unverified: Array.isArray(parsed.unverified) ? parsed.unverified : [],
+    };
+    return notes.preexisting.length || notes.autofixes.length || notes.unverified.length ? notes : null;
+  } catch {
+    return null;
+  }
 }
 
 interface StepRow {
@@ -74,6 +100,10 @@ export interface AuditTimelineProps {
   agents: AgentDetection[];
   selectedAgent: AgentType | null;
   selectedTier: ModelTier;
+  /** The shown choice is the one of the run being retried or resumed (KT-1320). */
+  selectionFromRun?: boolean;
+  /** The run's own named connection was deleted: the launch uses the agent's default one. */
+  selectionConnectionGone?: boolean;
   modelTiers: ModelTiersConfig | null | undefined;
   /** Named external API connection of the selected HTTP agent, if any. */
   selectedConnectionId: string | null;
@@ -111,7 +141,13 @@ export interface AuditTimelineProps {
   resumableUnknown?: boolean;
   onReloadResumable?: () => void;
   /** The last launch stopped on this error; `retry` replays it (KT-1169). */
-  launchError?: { message: string; retry: () => void } | null;
+  launchError?: {
+    message: string;
+    retry: () => void;
+    /** KT-1324 — the refusal is a process table Kronn could not read (no agent
+     * was seen): this relaunches on the human's word that none is running. */
+    confirmUnverified?: () => void;
+  } | null;
   onDismissLaunchError?: () => void;
   onLaunch: () => void;
   /** Retry one failed step of the resumable run, alone (KT-1131). */
@@ -145,10 +181,6 @@ const NEWS_KEY = 'kr.audit.timeline.news.0.14.2';
 const LOCAL_AGENTS = new Set<AgentType>(['Ollama']);
 const HTTP_AGENTS = new Set<AgentType>(['LiteLlm', 'Nvidia', 'Custom']);
 const TIERS: ModelTier[] = ['reasoning', 'default', 'economy'];
-
-const PRESET_AGENT: Record<string, AgentType> = {
-  lite_llm: 'LiteLlm', nvidia: 'Nvidia', open_router: 'Custom', other: 'Custom',
-};
 
 interface AgentChoice {
   key: string;
@@ -316,6 +348,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
           id: latestRun.id, status: latestRun.status, endedAt: latestRun.ended_at ?? null,
           cancelledAtStep: latestRun.cancelled_at_step ?? null,
           resumeDrift: latestRun.resume_drift ?? null,
+          documentaryNotes: latestRun.documentary_notes ?? null,
         } : null,
         repo: data.repo ?? null,
         repoCanValidate: data.repo_can_validate === true,
@@ -356,6 +389,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
   // KT-1211 — the latest run was cancelled by the user. Settled `Cancelled` (no
   // step completed) the only next action is a fresh launch; settled
   // `Interrupted` it is resumable and still tells it was cancelled.
+  const docNotes = useMemo(() => parseDocumentaryNotes(latestRun?.documentaryNotes ?? null), [latestRun]);
   const cancelledRun = !auditActive && latestRun !== null && latestRun.cancelledAtStep !== null
     && (latestRun.status === 'Cancelled' || latestRun.status === 'Interrupted');
 
@@ -407,7 +441,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
     const kindOf = (agent: AgentType): AgentChoice['kind'] =>
       LOCAL_AGENTS.has(agent) ? 'local' : HTTP_AGENTS.has(agent) ? 'http' : 'cli';
     // A named connection replaces the bare provider slot of the same preset.
-    const connected = new Set(connections.map(c => PRESET_AGENT[c.origin_preset] ?? 'Custom'));
+    const connected = new Set(connections.map(c => connectionAgent(c)));
     const detected: AgentChoice[] = props.agents
       .filter(a => canRunAudit(a) || (!isUsable(a) && isCliCandidate(a.agent_type)))
       .filter(a => !(HTTP_AGENTS.has(a.agent_type) && connected.has(a.agent_type)))
@@ -416,7 +450,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
         usable: canRunAudit(a), kind: kindOf(a.agent_type), connection: null,
       }));
     const named: AgentChoice[] = connections.map(c => ({
-      key: `conn:${c.id}`, agent: PRESET_AGENT[c.origin_preset] ?? 'Custom', label: c.display_name,
+      key: `conn:${c.id}`, agent: connectionAgent(c), label: c.display_name,
       usable: !!c.endpoint, kind: 'http', connection: c,
     }));
     const all = [...detected, ...named];
@@ -698,6 +732,47 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 </div>
               </div>
             )}
+            {docNotes && !auditActive && (
+              <div className="audit-tl-warn" role="status" data-testid="audit-timeline-documentary-notes">
+                <AlertTriangle size={13} aria-hidden="true" />
+                <div>
+                  {docNotes.preexisting.length > 0 && (
+                    <details data-testid="audit-timeline-documentary-preexisting">
+                      <summary>{t('auditTimeline.docnotes.preexisting', docNotes.preexisting.length)}</summary>
+                      <ul>
+                        {docNotes.preexisting.map((item, i) => (
+                          <li key={`${item.path}-${i}`}><code>{item.path}</code> — {item.message}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {docNotes.autofixes.length > 0 && (
+                    <details data-testid="audit-timeline-documentary-autofixes">
+                      <summary>{t('auditTimeline.docnotes.autofixes', docNotes.autofixes.length)}</summary>
+                      <ul>
+                        {docNotes.autofixes.map((fix, i) => (
+                          <li key={`${fix.path}-${i}`}>
+                            <code>{fix.path}</code> — {fix.kind}: <code>{fix.from}</code> → <code>{fix.to}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {docNotes.unverified.length > 0 && (
+                    <details data-testid="audit-timeline-documentary-unverified">
+                      <summary>{t('auditTimeline.docnotes.unverified', docNotes.unverified.length)}</summary>
+                      <ul>
+                        {docNotes.unverified.map((item, i) => (
+                          <li key={`${item.doc}-${i}`}>
+                            <code>{item.doc}</code> — step {item.step}: <code>{item.marker}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </div>
+              </div>
+            )}
             {leaseOrphaned && !auditActive && (
               <div className="audit-tl-warn" role="alert" data-testid="audit-timeline-lease-orphaned">
                 <AlertTriangle size={13} aria-hidden="true" />
@@ -717,10 +792,18 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 <div>
                   <p><strong>{t('auditTimeline.error.title')}</strong></p>
                   <p className="audit-tl-error-message">{props.launchError.message}</p>
+                  {props.launchError.confirmUnverified && (
+                    <p className="audit-tl-muted" data-testid="audit-timeline-launch-error-unverified">{t('auditTimeline.error.unverified.explain')}</p>
+                  )}
                   <div className="audit-tl-validation-actions">
                     <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={props.launchError.retry} data-testid="audit-timeline-launch-error-retry">
                       <RotateCcw size={12} /> {t('auditTimeline.error.resume')}
                     </button>
+                    {props.launchError.confirmUnverified && (
+                      <button type="button" className="audit-tl-btn audit-tl-btn-small audit-tl-btn-warn" onClick={props.launchError.confirmUnverified} data-testid="audit-timeline-launch-error-confirm-unverified">
+                        {t('auditTimeline.error.unverified.confirm')}
+                      </button>
+                    )}
                     {props.onDismissLaunchError && (
                       <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onDismissLaunchError}>
                         {t('auditTimeline.error.dismiss')}
@@ -1126,6 +1209,16 @@ export function AuditTimeline(props: AuditTimelineProps) {
                   `${MODEL_TIER_ICONS[selectedTier]} ${t(`disc.tier.${selectedTier}`)}`,
                   tierModel(selectedTier),
                 ].filter(Boolean).join(' · '))}
+              </p>
+            )}
+            {!locked && props.selectionFromRun && selected && selectedTier && (
+              <p className="audit-tl-note" data-testid="audit-timeline-selection-from-run">
+                {t('auditTimeline.agent.fromRun', `${MODEL_TIER_ICONS[selectedTier]} ${t(`disc.tier.${selectedTier}`)}`)}
+              </p>
+            )}
+            {!locked && props.selectionFromRun && props.selectionConnectionGone && selected && (
+              <p className="audit-tl-note" role="status" data-testid="audit-timeline-connection-gone">
+                {t('auditTimeline.agent.connectionGone', AGENT_LABELS[selected] ?? selected)}
               </p>
             )}
             {agentChoices.length === 0 && <p className="audit-tl-muted">{t('disc.noAgent')}</p>}

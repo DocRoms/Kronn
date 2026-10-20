@@ -28,8 +28,8 @@ therefore carries its briefing and options without the original database.
 When closed project answers are absent or unreadable, the project-doc hook
 keeps an existing generated `project.md`; a newly installed template still
 gets its default fields filled. The report exposes `kept_without_answers`.
-[src: file: backend/src/api/audit/full.rs:967-972#sync_briefing_file]
-[src: file: backend/src/api/audit/full.rs:1087-1099#fill_project_doc_for_audit]
+[src: file: backend/src/api/audit/full.rs:936-941#sync_briefing_file]
+[src: file: backend/src/api/audit/full.rs:1056-1068#fill_project_doc_for_audit]
 [src: file: backend/src/api/audit/project_doc.rs:1202-1211#ProjectDocReport]
 [src: file: backend/src/api/audit/project_doc.rs:1266-1284#fill_project_doc_for_audit]
 [src: file: backend/src/api/audit/project_doc.rs:1286-1306#write_project_page]
@@ -62,4 +62,4 @@ scripted Full audit that reads the briefing before its first step in both
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:99-118#briefing_residuals_removing_an_option_in_the_file_overrides_stale_db_notes]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:120-169#briefing_residuals_fresh_clone_keeps_the_generated_project_doc_without_answers]
 [src: file: backend/src/api/audit/briefing_cards.rs:1049-1089#briefing_residuals_unattended_launch_requires_explicit_saved_defaults]
-[src: file: backend/src/api/audit/relocation_e2e_tests.rs:163-200#briefing_residuals_phase_one_materializes_notes_before_the_first_agent_step]
+[src: file: backend/src/api/audit/relocation_e2e_tests.rs:169-206#briefing_residuals_phase_one_materializes_notes_before_the_first_agent_step]

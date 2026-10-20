@@ -16,6 +16,9 @@ pub(super) struct VersionContext {
     block: String,
     /// The same rows, worded for the project index's Stack table (KT-819).
     stack_block: String,
+    /// What the manifests, lock files and runtime files state about the stack
+    /// (KT-1388), handed to the steps that write a version.
+    stack_facts: Option<String>,
 }
 
 impl VersionContext {
@@ -44,8 +47,12 @@ impl VersionContext {
             }
         };
         let root = project_path.to_path_buf();
-        let (runtimes, ci_files) = tokio::task::spawn_blocking(move || {
-            (ci_runtime_versions(&root), ci_files_present(&root))
+        let (runtimes, ci_files, stack_facts) = tokio::task::spawn_blocking(move || {
+            (
+                ci_runtime_versions(&root),
+                ci_files_present(&root),
+                crate::core::stack_consistency::facts_block(&root),
+            )
         })
         .await
         .unwrap_or_default();
@@ -74,17 +81,36 @@ impl VersionContext {
             source,
             block,
             stack_block,
+            stack_facts,
         }
     }
 
-    /// The prompt block for `target_file`, if that step judges versions or
-    /// fills the Stack table.
+    /// The prompt block for `target_file`, if that step judges versions, fills
+    /// the Stack table or states the stack's versions in prose.
     pub(super) fn block_for(&self, target_file: &str) -> Option<String> {
+        let mut out = String::new();
         if is_stack_table_step(target_file) {
-            return Some(format!("\n\n{}\n", self.stack_block));
+            out.push_str(&format!("\n\n{}\n", self.stack_block));
+        } else if applies_to(target_file) {
+            out.push_str(&format!("\n\n{}\n", self.block));
         }
-        applies_to(target_file).then(|| format!("\n\n{}\n", self.block))
+        if states_versions(target_file) {
+            if let Some(facts) = &self.stack_facts {
+                out.push_str(&format!("\n\n{facts}\n"));
+            }
+        }
+        (!out.is_empty()).then_some(out)
     }
+}
+
+/// The steps that write the stack's versions in prose — the project index, the
+/// coding rules and the final review — are handed the computed stack facts
+/// (KT-1388): a version copied from them cannot contradict the manifests or
+/// another document.
+pub(super) fn states_versions(target_file: &str) -> bool {
+    is_stack_table_step(target_file)
+        || target_file.ends_with("coding-rules.md")
+        || target_file.ends_with("decisions.md")
 }
 
 /// The project index owns the Stack table: each row's latest stable version
@@ -127,6 +153,7 @@ mod tests {
             source: VersionSource::None,
             block: "JUDGEMENT".into(),
             stack_block: "STACK".into(),
+            stack_facts: None,
         };
         assert!(context
             .block_for("docs/AGENTS.md")
@@ -141,5 +168,41 @@ mod tests {
             .unwrap()
             .contains("JUDGEMENT"));
         assert!(context.block_for("docs/glossary.md").is_none());
+    }
+
+    #[test]
+    fn the_stack_facts_reach_the_index_the_coding_rules_and_the_final_review_only() {
+        // KT-1388 — computed, not asked: the three steps that write a version
+        // in prose copy it from the manifests.
+        let context = VersionContext {
+            snapshot: None,
+            source: VersionSource::None,
+            block: "JUDGEMENT".into(),
+            stack_block: "STACK".into(),
+            stack_facts: Some("FACTS".into()),
+        };
+        let index = context.block_for("docs/AGENTS.md").unwrap();
+        assert!(
+            index.contains("STACK") && index.contains("FACTS"),
+            "{index}"
+        );
+        for target in ["docs/coding-rules.md", "docs/decisions.md"] {
+            let block = context.block_for(target).unwrap();
+            assert!(
+                block.contains("FACTS") && !block.contains("STACK"),
+                "{block}"
+            );
+        }
+        // The tech-debt index keeps its judgement block, without the facts.
+        let debt = context
+            .block_for("docs/inconsistencies-tech-debt.md")
+            .unwrap();
+        assert!(
+            debt.contains("JUDGEMENT") && !debt.contains("FACTS"),
+            "{debt}"
+        );
+        for other in ["docs/glossary.md", "docs/repo-map.md", "REVIEW"] {
+            assert!(context.block_for(other).is_none(), "{other}");
+        }
     }
 }

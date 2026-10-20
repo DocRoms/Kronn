@@ -148,4 +148,41 @@ describe('AuditTimeline — cancelled runs, half-written targets, drift', () => 
     fireEvent.click(within(drift).getByTestId('audit-timeline-redo-drifted'));
     expect(onRedoSteps).toHaveBeenCalledWith([1, 2]);
   });
+
+  it('KT-1353: the citation problems the gate let through and the replacements it applied are listed', async () => {
+    const notes = JSON.stringify({
+      preexisting: [{ path: 'docs/tech-debt/TD-1.md', message: 'path does not exist `vendor/x.php`' }],
+      autofixes: [{ step: 10, path: 'docs/AGENTS.md', kind: 'link_base', from: 'docs/operations/', to: 'operations' }],
+    });
+    mockTimeline({ status: 'Completed', documentary_notes: notes }, [step(1)]);
+    wrap(<AuditTimeline {...props()} />);
+    const block = await screen.findByTestId('audit-timeline-documentary-notes');
+    const held = within(block).getByTestId('audit-timeline-documentary-preexisting');
+    expect(held).toHaveTextContent(fr['auditTimeline.docnotes.preexisting'].replace('{0}', '1'));
+    expect(held).toHaveTextContent('docs/tech-debt/TD-1.md');
+    const fixed = within(block).getByTestId('audit-timeline-documentary-autofixes');
+    expect(fixed).toHaveTextContent(fr['auditTimeline.docnotes.autofixes'].replace('{0}', '1'));
+    expect(fixed).toHaveTextContent('operations');
+  });
+
+  it('KT-1370: the references Kronn demoted after a last attempt are counted and listed', async () => {
+    const notes = JSON.stringify({
+      preexisting: [],
+      autofixes: [],
+      unverified: [{ step: 8, doc: 'docs/AGENTS.md', marker: '[src: file: config/packages/prod/monolog.yaml]' }],
+    });
+    mockTimeline({ status: 'Completed', documentary_notes: notes }, [step(1)]);
+    wrap(<AuditTimeline {...props()} />);
+    const block = await screen.findByTestId('audit-timeline-documentary-notes');
+    const listed = within(block).getByTestId('audit-timeline-documentary-unverified');
+    expect(listed).toHaveTextContent(fr['auditTimeline.docnotes.unverified'].replace('{0}', '1'));
+    expect(listed).toHaveTextContent('config/packages/prod/monolog.yaml');
+  });
+
+  it('KT-1353: nothing is shown without notes, or with notes that cannot be read', async () => {
+    mockTimeline({ status: 'Completed', documentary_notes: '{not json' }, [step(1)]);
+    const { container } = wrap(<AuditTimeline {...props()} />);
+    await waitFor(() => expect(container.querySelector('.audit-tl-group-head')).not.toBeNull());
+    expect(screen.queryByTestId('audit-timeline-documentary-notes')).toBeNull();
+  });
 });

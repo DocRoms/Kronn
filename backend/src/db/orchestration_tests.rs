@@ -3035,7 +3035,10 @@ fn escalated_campaign_holds_the_principal_and_terminal_child_notifies_parent() {
         )
         .unwrap();
     assert!(posted >= 3, "gate, release and terminal were posted");
-    assert_eq!(untyped, 0, "every orchestrator post carries kind=orchestration");
+    assert_eq!(
+        untyped, 0,
+        "every orchestrator post carries kind=orchestration"
+    );
 
     // KT-619 — every steering event on this path mints a card, each in the same
     // transaction as the message it attaches to. Three happened above, in this

@@ -191,10 +191,10 @@ mod imp {
         Ok(st)
     }
 
-    pub fn read(root: &Path, rel: &Path) -> io::Result<Vec<u8>> {
+    pub fn read(root: &Path, rel: &Path, max: u64) -> io::Result<Vec<u8>> {
         let (dir, name) = parent_dir(root, rel, false)?;
         // O_NONBLOCK: opening a FIFO must fail or return, never hang.
-        let mut file = File::from(open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK)?);
+        let file = File::from(open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK)?);
         #[cfg(test)]
         super::tests::AFTER_OPEN.with(|hook| {
             if let Some(hook) = hook.borrow_mut().take() {
@@ -215,8 +215,15 @@ mod imp {
         {
             return Err(super::refused("the file changed while it was opened"));
         }
+        if meta.len() > max {
+            return Err(super::refused("the file is larger than the limit"));
+        }
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        // `take`: a file that grows after the size check stays bounded too.
+        file.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max {
+            return Err(super::refused("the file is larger than the limit"));
+        }
         Ok(bytes)
     }
 
@@ -345,7 +352,7 @@ mod imp {
         Ok(info.nNumberOfLinks)
     }
 
-    pub fn read(root: &Path, rel: &Path) -> io::Result<Vec<u8>> {
+    pub fn read(root: &Path, rel: &Path, max: u64) -> io::Result<Vec<u8>> {
         let path = guarded(root, rel)?;
         let mut file = OpenOptions::new()
             .read(true)
@@ -355,8 +362,17 @@ mod imp {
         if !meta.is_file() || meta.file_type().is_symlink() || link_count(&file)? != 1 {
             return Err(super::refused("not a regular file with a single link"));
         }
+        if meta.len() > max {
+            return Err(super::refused("the file is larger than the limit"));
+        }
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        // `take`: a file that grows after the size check stays bounded too.
+        (&mut file)
+            .take(max.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max {
+            return Err(super::refused("the file is larger than the limit"));
+        }
         Ok(bytes)
     }
 
@@ -422,7 +438,13 @@ mod imp {
 /// Reads `rel` under `root`: a regular, single-link file reached without
 /// following any link below the root.
 pub fn read(root: &Path, rel: &Path) -> io::Result<Vec<u8>> {
-    imp::read(root, rel)
+    imp::read(root, rel, u64::MAX)
+}
+
+/// [`read`] for a file that must not be big: one over `max` bytes is refused
+/// before it is read, and a file that grows while it is read stays bounded.
+pub fn read_capped(root: &Path, rel: &Path, max: u64) -> io::Result<Vec<u8>> {
+    imp::read(root, rel, max)
 }
 
 /// Replaces `rel` under `root` with `bytes` (fresh file renamed over it),
@@ -434,7 +456,7 @@ pub fn write(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
 /// Appends by rewriting: the existing content is read with [`read`]'s checks
 /// and replaced like [`write`]. Meant for small journals.
 pub fn append(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut content = match imp::read(root, rel) {
+    let mut content = match imp::read(root, rel, u64::MAX) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error),
@@ -646,6 +668,23 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["taken"]);
+    }
+
+    #[test]
+    fn a_capped_read_refuses_a_file_over_the_limit() {
+        let (root, _) = dirs();
+        write(root.path(), Path::new("f"), b"12345").unwrap();
+        assert_eq!(
+            read_capped(root.path(), Path::new("f"), 5).unwrap(),
+            b"12345"
+        );
+        assert!(read_capped(root.path(), Path::new("f"), 4).is_err());
+        // The cap does not weaken the link checks.
+        let (root, outside) = dirs();
+        let Some(_) = hard_link(root.path(), outside.path()) else {
+            return;
+        };
+        assert!(read_capped(root.path(), Path::new("hard"), 100).is_err());
     }
 
     #[test]

@@ -125,7 +125,7 @@ path / out-of-bounds line / outside the project is treated as **fabricated** and
     }
     out.push_str(
         "\nFor EACH one: either correct it to a real `path:line` you have actually read (a binary \
-file: its bare path), OR \
+file: its bare path; a claim that a file merely exists or is tracked: `path:exists`), OR \
 remove the unverifiable claim entirely (do not weaken it into prose — drop it). \
 Do NOT invent a path just to pass the check. Re-write the file, then finish.\n",
     );
@@ -205,7 +205,7 @@ const OWNERSHIP_FENCE_CHARS: [char; 2] = ['`', '~'];
 /// An unclosed fence is read leniently (its lines stay visible, so a stray
 /// fence in a human's own document does not strip protection) — except when
 /// `strict_unclosed` is set, where it is CommonMark's block-to-end-of-file.
-pub(super) fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
+pub(crate) fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
     scan_fences(text, &OWNERSHIP_FENCE_CHARS, strict_unclosed)
 }
 
@@ -419,6 +419,135 @@ mod tests {
             verdict.is_clean(),
             "verified citation must not be fabricated"
         );
+    }
+
+    /// A repo with a synthetic key, a symlink to it and a plain file.
+    fn secret_repo() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".ssh")).unwrap();
+        fs::write(
+            dir.path().join(".ssh/review-key"),
+            "-----BEGIN KEY-----\nsynthetic\n-----END KEY-----\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("plain.txt"), "a\nb\nc\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(".ssh/review-key", dir.path().join("key-view.txt")).unwrap();
+        dir
+    }
+
+    /// `.env -> settings-data`, `.ssh/settings-view -> ../settings-data` and
+    /// `view.txt -> .env`: the written name is secret although the target is not.
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_written_name_remains_secret_after_resolving_to_an_ordinary_name() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("settings-data"), "a=1\nb=2\nc=3\n").unwrap();
+        fs::create_dir_all(dir.path().join(".ssh")).unwrap();
+        std::os::unix::fs::symlink("settings-data", dir.path().join(".env")).unwrap();
+        std::os::unix::fs::symlink("../settings-data", dir.path().join(".ssh/settings-view"))
+            .unwrap();
+        std::os::unix::fs::symlink(".env", dir.path().join("view.txt")).unwrap();
+        for path in [".env", ".ssh/settings-view", "view.txt"] {
+            for cite in [
+                format!("[src: file: {path}:2]"),
+                format!("[src: file: {path}:1-3]"),
+                format!("[src: file: {path}:1-3#PRIVATE]"),
+                format!("[src: code-comment: {path}:2]"),
+            ] {
+                let verdict = lint_step_file(&format!("Claim {cite}."), &[dir.path()]);
+                assert_eq!(
+                    verdict.fabricated.len(),
+                    1,
+                    "{cite}: {:?}",
+                    verdict.fabricated
+                );
+                let check = anti_halluc::verify_source_marker(
+                    cite.trim_start_matches("[src: ").trim_end_matches(']'),
+                    Some(dir.path()),
+                );
+                assert!(check.status.is_fabricated(), "{cite}: {check:?}");
+            }
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: {path}:exists]."), &[dir.path()]);
+            assert!(verdict.is_clean(), "{path}: {:?}", verdict.fabricated);
+        }
+        let verdict = lint_step_file("Claim [src: file: settings-data:2].", &[dir.path()]);
+        assert!(verdict.is_clean(), "{:?}", verdict.fabricated);
+    }
+
+    /// `.ssh -> vault`, `keys -> .ssh`: the canonical `vault/review-key` has lost the
+    /// `.ssh` name the chain passed through.
+    #[cfg(unix)]
+    #[test]
+    fn chain_directory_component_keeps_secret_names() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("vault")).unwrap();
+        fs::write(dir.path().join("vault/review-key"), "k1\nk2\nk3\n").unwrap();
+        std::os::unix::fs::symlink("vault", dir.path().join(".ssh")).unwrap();
+        std::os::unix::fs::symlink(".ssh", dir.path().join("keys")).unwrap();
+        for cite in [
+            "[src: file: keys/review-key:2]",
+            "[src: file: keys/review-key:1-3]",
+            "[src: file: keys/review-key:1-3#PRIVATE]",
+            "[src: code-comment: keys/review-key:2]",
+        ] {
+            let verdict = lint_step_file(&format!("Claim {cite}."), &[dir.path()]);
+            assert_eq!(
+                verdict.fabricated.len(),
+                1,
+                "{cite}: {:?}",
+                verdict.fabricated
+            );
+            let check = anti_halluc::verify_source_marker(
+                cite.trim_start_matches("[src: ").trim_end_matches(']'),
+                Some(dir.path()),
+            );
+            assert!(check.status.is_fabricated(), "{cite}: {check:?}");
+        }
+        let verdict = lint_step_file("Claim [src: file: keys/review-key:exists].", &[dir.path()]);
+        assert!(verdict.is_clean(), "{:?}", verdict.fabricated);
+    }
+
+    #[test]
+    fn a_line_of_a_secret_file_is_fabricated_whatever_the_form() {
+        let dir = secret_repo();
+        let mut paths = vec![".ssh/review-key"];
+        if cfg!(unix) {
+            paths.push("key-view.txt");
+        }
+        for path in paths {
+            for cite in [
+                format!("[src: file: {path}:2]"),
+                format!("[src: file: {path}:1-3]"),
+                format!("[src: file: {path}:1-3#PRIVATE]"),
+                format!("[src: code-comment: {path}:2]"),
+            ] {
+                let verdict = lint_step_file(&format!("Claim {cite}."), &[dir.path()]);
+                assert_eq!(
+                    verdict.fabricated.len(),
+                    1,
+                    "{cite}: {:?}",
+                    verdict.fabricated
+                );
+                assert!(
+                    verdict.fabricated[0].detail.contains("path:exists"),
+                    "{cite}: {}",
+                    verdict.fabricated[0].detail
+                );
+                let check = anti_halluc::verify_source_marker(
+                    cite.trim_start_matches("[src: ").trim_end_matches(']'),
+                    Some(dir.path()),
+                );
+                assert!(check.status.is_fabricated(), "{cite}: {check:?}");
+            }
+            // Presence is the form that stays.
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: {path}:exists]."), &[dir.path()]);
+            assert!(verdict.is_clean(), "{path}: {:?}", verdict.fabricated);
+        }
+        let verdict = lint_step_file("Claim [src: file: plain.txt:2].", &[dir.path()]);
+        assert!(verdict.is_clean(), "{:?}", verdict.fabricated);
     }
 
     #[test]

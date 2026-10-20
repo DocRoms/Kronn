@@ -730,6 +730,28 @@ pub enum ModelTier {
     Reasoning,
 }
 
+impl ModelTier {
+    /// The label serde writes (`economy` / `default` / `reasoning`), as stored
+    /// on an audit run.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelTier::Economy => "economy",
+            ModelTier::Default => "default",
+            ModelTier::Reasoning => "reasoning",
+        }
+    }
+
+    /// Inverse of [`as_str`]; `None` for anything else.
+    pub fn parse(label: &str) -> Option<Self> {
+        match label {
+            "economy" => Some(ModelTier::Economy),
+            "default" => Some(ModelTier::Default),
+            "reasoning" => Some(ModelTier::Reasoning),
+            _ => None,
+        }
+    }
+}
+
 /// Per-agent model tier configuration. Maps Economy/Reasoning to concrete model names.
 /// Stored in config.toml under [agents.model_tiers].
 #[derive(Debug, Clone, Serialize, Deserialize, Default, TS)]
@@ -747,6 +769,10 @@ pub struct ModelTierConfig {
     pub default: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// KT-1366 — the model Decision steps call (a decision model, not a chat
+    /// model). Not a tier: no `ModelTier` resolves to it. Only Ollama sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
     /// KT-646 — optional reasoning-effort preset for the `economy` slot.
     /// `None` means "pass no effort flag, the runtime's own CLI default
     /// applies" — never a silently assigned `high`/`max`. Only consumed for

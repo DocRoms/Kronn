@@ -800,11 +800,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
     if let Some(mut d) = disc {
         d.messages = list_messages(conn, &d.id)?;
         d.message_count = d.messages.len() as u32;
-        d.non_system_message_count = d
-            .messages
-            .iter()
-            .filter(|m| m.counts_as_unread())
-            .count() as u32;
+        d.non_system_message_count =
+            d.messages.iter().filter(|m| m.counts_as_unread()).count() as u32;
         Ok(Some(d))
     } else {
         Ok(None)

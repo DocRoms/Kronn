@@ -29,6 +29,58 @@ use crate::core::agent_orphans::start_stamp;
 /// The dispatch job a process was started under.
 pub const DISPATCH_ENV: &str = "KRONN_TASK_DISPATCH_ID";
 
+/// KT-1324 — the tag of the agents an audit run starts, in [`DISPATCH_ENV`]
+/// like a worker's: a run's agent can outlive the backend (an ACP-adapter agent
+/// has no pid recorded on the run), and boot stops whatever still carries the
+/// tag of a run before settling its steps.
+///
+/// The tag also names the instance (its data directory): a second backend on a
+/// copy of this database — a bench, a lane — knows the same run ids, and must
+/// not stop the agents of the instance that really runs them.
+pub fn audit_run_tag(audit_run_id: &str) -> String {
+    audit_run_tag_in(instance_id(), audit_run_id)
+}
+
+/// [`audit_run_tag`] of the instance `instance`.
+pub fn audit_run_tag_in(instance: &str, audit_run_id: &str) -> String {
+    format!("audit-run:{instance}:{audit_run_id}")
+}
+
+/// The tag agents carried before it named an instance. An agent started by the
+/// previous version and still alive after the upgrade carries this one: it is
+/// looked for too, so the upgrade does not let it write past a settlement.
+pub fn legacy_audit_run_tag(audit_run_id: &str) -> String {
+    format!("audit-run:{audit_run_id}")
+}
+
+/// Stop what an audit run's agents left, under both tag forms. `reap` stops
+/// the processes of one tag (see [`reap_dispatch`]); the reports are merged.
+pub fn reap_audit_run(audit_run_id: &str, reap: &dyn Fn(&str) -> ReapReport) -> ReapReport {
+    reap(&audit_run_tag(audit_run_id)).merged(reap(&legacy_audit_run_tag(audit_run_id)))
+}
+
+/// A short, stable name for this backend's data directory. Fixed for the life
+/// of the process, so the tag an agent is launched with is the one boot looks
+/// for after a restart on the same directory.
+pub fn instance_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| match crate::core::config::config_dir() {
+        Ok(dir) => instance_id_of(&dir.canonicalize().unwrap_or(dir)),
+        // No directory to tell instances apart by: a tag nothing else shares.
+        Err(_) => format!("pid{}", std::process::id()),
+    })
+}
+
+fn instance_id_of(data_dir: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(data_dir.as_os_str().as_encoded_bytes());
+    digest
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// What one reap found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReapReport {
@@ -36,6 +88,27 @@ pub struct ReapReport {
     pub signalled: usize,
     /// Processes still alive after SIGKILL (not expected; logged by the caller).
     pub survivors: Vec<u32>,
+    /// The process table could not be read: nothing is known of what runs.
+    pub unverified: bool,
+}
+
+impl ReapReport {
+    /// Something of the run may still be alive, or could not be looked for.
+    pub fn may_still_run(&self) -> bool {
+        self.unverified || !self.survivors.is_empty()
+    }
+
+    /// What two reaps of the same run found, together.
+    pub fn merged(mut self, other: ReapReport) -> ReapReport {
+        self.signalled += other.signalled;
+        for pid in other.survivors {
+            if !self.survivors.contains(&pid) {
+                self.survivors.push(pid);
+            }
+        }
+        self.unverified |= other.unverified;
+        self
+    }
 }
 
 /// One row of the process table.
@@ -49,6 +122,9 @@ struct ProcessRow {
     stamp: Option<String>,
     /// The process's environment names `DISPATCH_ENV=<this dispatch>`.
     tagged: bool,
+    /// A live process of this user whose environment the kernel withheld (it
+    /// is not dumpable, or runs under other credentials): its tag is unknown.
+    hidden: bool,
 }
 
 /// Why a process is taken as the run's.
@@ -134,6 +210,7 @@ fn parse_process_table(output: &str, dispatch_job_id: &str) -> Vec<ProcessRow> {
                 sid: None,
                 stamp: None,
                 tagged: carries_token(line, &needle),
+                hidden: false,
             }),
             None => {
                 if let Some(last) = rows.last_mut() {
@@ -191,12 +268,112 @@ fn carries_tag(pid: u32, dispatch_job_id: &str) -> bool {
         })
 }
 
-/// The process table, each process with its parent, session, start stamp and
-/// whether its environment carries this dispatch's id. `None` when it cannot
-/// be read.
+/// The process table: each process with its parent, session, start stamp and
+/// whether its environment carries this dispatch's id.
+#[derive(Debug, Default)]
+struct ProcessTable {
+    rows: Vec<ProcessRow>,
+    /// Processes of this user that exist but whose parent could not be read (a
+    /// `hidepid` mount, a restricted `/proc`): one of them may be the run's,
+    /// and it cannot be told.
+    unreadable: usize,
+    /// Even the backend's own environment could not be read back: no hidden
+    /// row can be ruled out.
+    restricted: bool,
+}
+
+impl ProcessTable {
+    #[cfg(unix)]
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    fn of(rows: Vec<ProcessRow>) -> Self {
+        Self {
+            rows,
+            unreadable: 0,
+            restricted: false,
+        }
+    }
+
+    /// The processes that may be the run's but could not be checked.
+    #[cfg(any(unix, test))]
+    fn unverifiable(&self, targets: &[Target], own_pid: u32) -> usize {
+        self.unreadable + hidden_kin(&self.rows, targets, own_pid, self.restricted)
+    }
+}
+
+/// Hidden rows that may be the run's: a child of the backend, or a descendant
+/// of a run process that the session rule did not take (a daemon it started).
+/// Any other hidden process of this user (`(sd-pam)`, an `ssh-agent`) was not
+/// started from the run's tree. Under a restricted `/proc` every hidden row
+/// counts.
+#[cfg(any(unix, test))]
+fn hidden_kin(rows: &[ProcessRow], targets: &[Target], own_pid: u32, restricted: bool) -> usize {
+    let parent_of = |pid: u32| rows.iter().find(|row| row.pid == pid).map(|row| row.ppid);
+    let is_run = |pid: u32| targets.iter().any(|target| target.pid == pid);
+    rows.iter()
+        .filter(|row| row.hidden && !is_run(row.pid))
+        .filter(|row| {
+            if restricted {
+                return true;
+            }
+            let mut parent = row.ppid;
+            // Bounded: a pid reused mid-scan can make the chain loop.
+            for _ in 0..rows.len() {
+                if parent == own_pid || is_run(parent) {
+                    return true;
+                }
+                match parent_of(parent) {
+                    Some(next) if parent > 1 => parent = next,
+                    _ => return false,
+                }
+            }
+            false
+        })
+        .count()
+}
+
+/// State and parent from `/proc/<pid>/stat`. The command (field 2) may hold
+/// spaces and parentheses: the fields are read after its last ')'.
+#[cfg(any(target_os = "linux", test))]
+fn parse_stat(stat: &str) -> Option<(char, u32)> {
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let ppid = fields.next()?.parse::<u32>().ok()?;
+    Some((state, ppid))
+}
+
+/// A zombie (or dead) process has exited: nothing of it runs, its
+/// environment is gone (the kernel refuses to read it) and its parent reaps it.
+#[cfg(any(target_os = "linux", test))]
+fn has_exited(state: char) -> bool {
+    matches!(state, 'Z' | 'X' | 'x')
+}
+
+/// An unreadable `/proc` entry matters only if it could be this user's: every
+/// agent runs as the backend's own user, and another user's processes are
+/// always unreadable to it.
+#[cfg(any(target_os = "linux", test))]
+fn could_be_ours(owner_uid: Option<u32>, own_uid: u32) -> bool {
+    owner_uid.is_none_or(|uid| uid == own_uid)
+}
+
+/// The process ended while it was being read.
 #[cfg(target_os = "linux")]
-fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
-    let mut rows = Vec::new();
+fn vanished(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
+}
+
+/// The process table; `None` when it cannot be read at all.
+#[cfg(target_os = "linux")]
+fn process_table(dispatch_job_id: &str) -> Option<ProcessTable> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: a plain query of the caller's own uid.
+    let own_uid = unsafe { libc::geteuid() };
+    let needle = format!("{DISPATCH_ENV}={dispatch_job_id}");
+    let stat_of = |path: &std::path::Path| std::fs::read_to_string(path.join("stat"));
+    let mut table = ProcessTable {
+        restricted: std::fs::read(format!("/proc/{}/environ", std::process::id())).is_err(),
+        ..ProcessTable::default()
+    };
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let Some(pid) = entry
             .file_name()
@@ -205,31 +382,55 @@ fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
         else {
             continue;
         };
-        // Field 2 (the command) may hold spaces: read after its closing ')'.
-        let Some(ppid) = std::fs::read_to_string(entry.path().join("stat"))
-            .ok()
-            .and_then(|stat| {
-                let after = stat.rsplit_once(')')?.1;
-                after.split_whitespace().nth(1)?.parse::<u32>().ok()
-            })
-        else {
+        let path = entry.path();
+        let owner = match entry.metadata() {
+            Ok(meta) => Some(meta.uid()),
+            Err(error) if vanished(&error) => continue,
+            Err(_) => None,
+        };
+        let ours = could_be_ours(owner, own_uid);
+        let Some((state, ppid)) = (match stat_of(&path) {
+            Ok(stat) => parse_stat(&stat),
+            Err(error) if vanished(&error) => continue,
+            Err(_) => None,
+        }) else {
+            // Without its parent the process cannot be followed either.
+            if ours {
+                table.unreadable += 1;
+            }
             continue;
         };
-        rows.push(ProcessRow {
+        if has_exited(state) {
+            continue;
+        }
+        let (tagged, hidden) = match std::fs::read(path.join("environ")) {
+            Ok(environ) => (
+                environ.split(|b| *b == 0).any(|e| e == needle.as_bytes()),
+                false,
+            ),
+            Err(error) if vanished(&error) => continue,
+            // It may have exited since its `stat` was read.
+            Err(_) => match stat_of(&path).ok().as_deref().and_then(parse_stat) {
+                Some((state, _)) if !has_exited(state) => (false, ours),
+                _ => continue,
+            },
+        };
+        table.rows.push(ProcessRow {
             pid,
             ppid,
             sid: session_of(pid),
             stamp: start_stamp(pid),
-            tagged: carries_tag(pid, dispatch_job_id),
+            tagged,
+            hidden,
         });
     }
-    Some(rows)
+    Some(table)
 }
 
 /// No subprocess: the kernel's own answer, which also works where `ps` may not
 /// be executed (the same reasoning as `agent_orphans::start_stamp`).
 #[cfg(target_os = "macos")]
-fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
+fn process_table(dispatch_job_id: &str) -> Option<ProcessTable> {
     // SAFETY: a null buffer only asks for the number of pids.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if count <= 0 {
@@ -266,9 +467,10 @@ fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
             sid: session_of(pid as u32),
             stamp: start_stamp(pid as u32),
             tagged: carries_tag(pid as u32, dispatch_job_id),
+            hidden: false,
         });
     }
-    Some(rows)
+    Some(ProcessTable::of(rows))
 }
 
 /// `KERN_PROCARGS2` of a process of the same user; `None` for any other.
@@ -334,7 +536,7 @@ fn procargs_environment(raw: &[u8]) -> Vec<&[u8]> {
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
+fn process_table(dispatch_job_id: &str) -> Option<ProcessTable> {
     // BSD syntax: `e` appends the environment to the command; `ww` lifts the
     // width limit.
     let output = crate::core::cmd::sync_tool_cmd("ps")
@@ -350,7 +552,7 @@ fn process_table(dispatch_job_id: &str) -> Option<Vec<ProcessRow>> {
         row.sid = session_of(row.pid);
         row.stamp = start_stamp(row.pid);
     }
-    Some(rows)
+    Some(ProcessTable::of(rows))
 }
 
 #[cfg(unix)]
@@ -369,14 +571,8 @@ fn is_alive(pid: u32) -> bool {
 fn is_zombie(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
-        .and_then(|stat| {
-            stat.rsplit_once(')')?
-                .1
-                .split_whitespace()
-                .next()
-                .map(|state| state == "Z")
-        })
-        .unwrap_or(false)
+        .and_then(|stat| parse_stat(&stat))
+        .is_some_and(|(state, _)| has_exited(state))
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -454,14 +650,24 @@ pub fn reap_dispatch(dispatch_job_id: &str) -> ReapReport {
     }
     let own_pid = std::process::id();
     for _ in 0..ROUNDS {
-        let Some(rows) = process_table(dispatch_job_id) else {
+        let Some(table) = process_table(dispatch_job_id) else {
             tracing::warn!(
                 dispatch_job_id,
                 "cannot read the process table to reap a dispatch"
             );
+            report.unverified = true;
             return report;
         };
-        let targets = run_processes(&rows, own_pid);
+        let targets = run_processes(&table.rows, own_pid);
+        let unverifiable = table.unverifiable(&targets, own_pid);
+        if unverifiable > 0 {
+            tracing::warn!(
+                dispatch_job_id,
+                unverifiable,
+                "processes of this user cannot be inspected: the dispatch's run cannot be fully verified"
+            );
+            report.unverified = true;
+        }
         if targets.is_empty() {
             report.survivors.clear();
             return report;
@@ -494,9 +700,13 @@ pub fn reap_dispatch(_dispatch_job_id: &str) -> ReapReport {
 /// [`reap_dispatch`] off the async runtime's threads.
 pub async fn reap_dispatch_async(dispatch_job_id: &str) -> ReapReport {
     let id = dispatch_job_id.to_string();
+    // A reap that did not complete says nothing about what runs.
     let report = tokio::task::spawn_blocking(move || reap_dispatch(&id))
         .await
-        .unwrap_or_default();
+        .unwrap_or(ReapReport {
+            unverified: true,
+            ..Default::default()
+        });
     if report.signalled > 0 {
         tracing::info!(
             dispatch_job_id,

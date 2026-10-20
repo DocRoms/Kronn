@@ -319,6 +319,10 @@ impl SourceOrigin {
             name: Some(name.to_string()),
         }
     }
+
+    fn is_checkout(&self) -> bool {
+        self.kind == SourceOriginKind::Checkout
+    }
 }
 
 /// A worktree of the discussion's own project, consulted after the checkout.
@@ -1483,6 +1487,25 @@ pub(crate) fn dep_citation(raw: &str) -> Option<(String, String, String)> {
     Some((manager.to_string(), package.to_string(), date))
 }
 
+/// The address a `url:` marker (or a bare `https://…` one) cites, without the
+/// `url:` keyword or any trailing comment. `None` for any other kind, or an
+/// empty reference.
+pub(crate) fn url_reference(raw: &str) -> Option<String> {
+    let (kind, reference) = classify_source(raw);
+    if kind != SourceKind::Url {
+        return None;
+    }
+    let reference = clean_reference(&reference);
+    let lower = reference.to_ascii_lowercase();
+    let start = ["https://", "http://"]
+        .iter()
+        .filter_map(|scheme| lower.find(scheme))
+        .min()
+        .unwrap_or(0);
+    let url = clean_reference(reference[start..].split_whitespace().next()?);
+    (!url.is_empty()).then(|| url.to_string())
+}
+
 /// If `s` starts (case-insensitively) with `keyword` AT A TOKEN BOUNDARY
 /// (followed by end-of-string, `:`, or whitespace), return the trimmed
 /// remainder (after an optional `:`). Returns `None` when the keyword is just
@@ -1513,9 +1536,67 @@ fn split_path_and_lines(reference: &str) -> (&str, Option<(usize, usize)>) {
             if let Some((s, e)) = parse_line_spec(after) {
                 return (path, Some((s, e)));
             }
+            // A presence citation names the file, not a line of it.
+            if is_presence_marker(after) {
+                return (path, None);
+            }
         }
     }
     (reference, None)
+}
+
+/// Suffixes of a presence citation, `[src: file: <path>:exists]`: the claim is
+/// that the file is there (or tracked), so it needs no line and never invites
+/// quoting the content of a private key or a log.
+const PRESENCE_MARKERS: &[&str] = &["exists", "tracked"];
+
+/// Whether the text after the last `:` of a file citation is a presence marker.
+pub(crate) fn is_presence_marker(after: &str) -> bool {
+    let after = after.trim();
+    PRESENCE_MARKERS
+        .iter()
+        .any(|marker| after.eq_ignore_ascii_case(marker))
+}
+
+/// Whether the presence marker claims the file is tracked by git, which the
+/// index must confirm: `exists` is settled by the file being there.
+pub(crate) fn is_tracked_marker(after: &str) -> bool {
+    after.trim().eq_ignore_ascii_case("tracked")
+}
+
+/// A `path:tracked` citation that no checkout root's git index backs.
+fn untracked_claim(reference: &str, roots: &[&Path]) -> bool {
+    let Some((path, after)) = clean_reference(reference).rsplit_once(':') else {
+        return false;
+    };
+    is_tracked_marker(after) && !roots.iter().any(|root| is_git_tracked(root, path.trim()))
+}
+
+/// Whether git tracks `rel` in the repository at `root`. Outside a repository,
+/// or without git, nothing is tracked.
+pub(crate) fn is_git_tracked(root: &Path, rel: &str) -> bool {
+    crate::core::cmd::git_cmd()
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--error-unmatch", "--", rel])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Whether git ignores `rel` in the repository at `root` (a vendored or generated
+/// path, absent from a clone), whether or not the file is on disk. Outside a
+/// repository, or without git, nothing is ignored.
+pub(crate) fn is_git_ignored(root: &Path, rel: &str) -> bool {
+    crate::core::cmd::git_cmd()
+        .arg("-C")
+        .arg(root)
+        .args(["check-ignore", "-q", "--", rel])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// The en and em dash, which models write where a line range wants a hyphen.
@@ -1706,6 +1787,9 @@ fn prelude_start(text: &[&str], line: usize) -> usize {
 /// sibling lines before them: a range that starts a whole function early
 /// drifts from the function it names.
 pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Option<AnchorMiss> {
+    if crate::acp::secret_files::is_secret_path(path) {
+        return None; // never read: the range itself is refused upstream
+    }
     if std::fs::metadata(path).ok()?.len() > LINE_COUNT_SIZE_CAP_BYTES {
         return None;
     }
@@ -1897,6 +1981,9 @@ pub(crate) fn range_is_citable(lines: usize, last: usize, start: usize, end: usi
 /// `(real line count, last citable line)` of a file, `None` when it is too big
 /// to bounds-check. An empty file has no line: both are 0.
 fn count_lines_capped(path: &Path) -> Option<(usize, usize)> {
+    if crate::acp::secret_files::is_secret_path(path) {
+        return None; // a secret file is never read for its lines
+    }
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > LINE_COUNT_SIZE_CAP_BYTES {
         return None; // too big — skip the bounds check, existence is enough
@@ -1907,6 +1994,9 @@ fn count_lines_capped(path: &Path) -> Option<(usize, usize)> {
 
 /// [`last_citable_line`] of a file on disk; 0 when it cannot be read.
 pub(crate) fn last_citable_line_of(path: &Path) -> usize {
+    if crate::acp::secret_files::is_secret_path(path) {
+        return 0;
+    }
     std::fs::read_to_string(path).map_or(0, |content| last_citable_line(&content))
 }
 
@@ -1979,8 +2069,18 @@ pub fn verify_source_marker_lanes(raw: &str, roots: &[&Path], lanes: &[LaneRoot]
         }
         SourceKind::File => {
             let (st, detail, found_in) = verify_file_ref_located(&reference, roots, lanes);
+            let untracked = st == SourceStatus::Verified
+                && found_in.as_ref().is_some_and(SourceOrigin::is_checkout)
+                && untracked_claim(&reference, roots);
             origin = found_in;
-            (st, detail)
+            if untracked {
+                (
+                    SourceStatus::NotFound,
+                    format!("{detail} — but git does not track it"),
+                )
+            } else {
+                (st, detail)
+            }
         }
     };
 
@@ -2013,6 +2113,33 @@ fn clean_reference(reference: &str) -> &str {
     s
 }
 
+/// The verdict for a line or range cited into a secret file.
+fn secret_line_verdict() -> (SourceStatus, String) {
+    (
+        SourceStatus::Rejected,
+        "this file may hold secrets, so no line of it is cited — state that it exists \
+         with `path:exists` and do not quote its content"
+            .into(),
+    )
+}
+
+/// Refusal for a line or range cited into a secret file, judged on the written
+/// path (`rel` under `root`) AND on `resolved`, the file the jail settled on:
+/// `.env -> settings-data` is secret by its name although its target is not.
+/// `None` for presence-only citations and ordinary files.
+pub(crate) fn secret_line_refusal(
+    root: &Path,
+    rel: &Path,
+    resolved: &Path,
+    line_spec: Option<(usize, usize)>,
+) -> Option<(SourceStatus, String)> {
+    line_spec?;
+    let secret = crate::acp::secret_files::is_secret_file(rel)
+        || crate::acp::secret_files::is_secret_path(&root.join(rel))
+        || crate::acp::secret_files::is_secret_path(resolved);
+    secret.then(secret_line_verdict)
+}
+
 /// Line-bounds verdict for an existing candidate file.
 pub(crate) fn line_bounds_status(
     candidate: &Path,
@@ -2020,6 +2147,12 @@ pub(crate) fn line_bounds_status(
 ) -> (SourceStatus, String) {
     match line_spec {
         None => (SourceStatus::Verified, "file exists".into()),
+        // The gate every line check ends in (verifier, documentary gate, step
+        // lint): a line of a secret file, written or reached through a symlink,
+        // is a pointer into its content. Only presence may be cited. Callers that
+        // hold the written path check it first (`secret_line_refusal`), since
+        // `candidate` is already resolved.
+        Some(_) if crate::acp::secret_files::is_secret_path(candidate) => secret_line_verdict(),
         Some(_) if is_binary_file(candidate) => (
             SourceStatus::OutOfBounds,
             "binary file has no lines — cite it by bare path, without a line".into(),
@@ -2384,7 +2517,8 @@ fn verify_file_ref_as_written(
             );
         };
         return match resolve_in_root(root, &rel) {
-            Jailed::Inside(found) => anchored_bounds_status(&found, line_spec, anchor),
+            Jailed::Inside(found) => secret_line_refusal(root, &rel, &found, line_spec)
+                .unwrap_or_else(|| anchored_bounds_status(&found, line_spec, anchor)),
             Jailed::Missing => (
                 SourceStatus::NotFound,
                 format!("file not found: {}", path_str),
@@ -2408,7 +2542,10 @@ fn verify_file_ref_as_written(
         }
         all_escaped = false;
         match resolve_in_root(root, path) {
-            Jailed::Inside(found) => return anchored_bounds_status(&found, line_spec, anchor),
+            Jailed::Inside(found) => {
+                return secret_line_refusal(root, path, &found, line_spec)
+                    .unwrap_or_else(|| anchored_bounds_status(&found, line_spec, anchor))
+            }
             Jailed::Missing => continue,
             Jailed::Escapes => {
                 return (
@@ -3835,6 +3972,38 @@ mod tests {
         assert_eq!(split_path_and_lines("weird:name"), ("weird:name", None));
         // Reversed range is rejected → treated as no line spec.
         assert_eq!(split_path_and_lines("foo.rs:20-10"), ("foo.rs:20-10", None));
+        // A presence marker names the file, not a line of it.
+        assert_eq!(split_path_and_lines("foo.rs:exists"), ("foo.rs", None));
+        assert_eq!(split_path_and_lines("foo.rs:Tracked"), ("foo.rs", None));
+    }
+
+    #[test]
+    fn a_presence_marker_verifies_the_file_exists_without_a_line() {
+        let root = temp_project();
+        let found = verify_source_marker("file: src/foo.rs:exists", Some(&root));
+        assert_eq!(found.status, SourceStatus::Verified, "{found:?}");
+        let missing = verify_source_marker("file: src/gone.rs:exists", Some(&root));
+        assert_eq!(missing.status, SourceStatus::NotFound, "{missing:?}");
+        // `tracked` is the index's word, not the disk's: this root is no repository yet.
+        let untracked = verify_source_marker("file: src/foo.rs:tracked", Some(&root));
+        assert_eq!(untracked.status, SourceStatus::NotFound, "{untracked:?}");
+        assert!(
+            untracked.detail.contains("git does not track it"),
+            "{untracked:?}"
+        );
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "src/foo.rs"]);
+        let tracked = verify_source_marker("file: src/foo.rs:tracked", Some(&root));
+        assert_eq!(tracked.status, SourceStatus::Verified, "{tracked:?}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // KT-1307: the en and em dash a model writes for a range hyphen are read the

@@ -193,3 +193,35 @@ describe('OllamaCard shared catalogue and safe persistence (KT-531)', () => {
     expect(setTiers).not.toHaveBeenCalled();
   });
 });
+
+// KT-1366 — the Decision slot is a picker like the tiers: it lists only
+// decision models and saves the choice; the tiers never offer them.
+describe('OllamaCard Decision slot (KT-1366)', () => {
+  const decisionCatalogue = () => snapshot(target([
+    model('current'),
+    model('clef-flash:9b', { capabilities: ['decision', 'vision'] }),
+    model('jev:2b', { capabilities: ['decision'] }),
+  ]));
+
+  it('lists only decision models and saves the chosen one', async () => {
+    list.mockResolvedValue(decisionCatalogue());
+    await show();
+    const slot = screen.getByLabelText('ollama.decisionSlot') as HTMLInputElement;
+    fireEvent.focus(slot);
+    expect(await screen.findByRole('option', { name: 'clef-flash:9b' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'jev:2b' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'current' })).not.toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole('option', { name: 'jev:2b' })); });
+    await waitFor(() => expect(setTiers).toHaveBeenCalledWith(expect.objectContaining({
+      ollama: expect.objectContaining({ decision: 'jev:2b', default: 'current' }),
+    })));
+  });
+
+  it('keeps decision models out of the tier pickers', async () => {
+    list.mockResolvedValue(decisionCatalogue());
+    const input = await show();
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'clef' } });
+    await waitFor(() => expect(screen.queryByRole('option', { name: /clef-flash/ })).not.toBeInTheDocument());
+  });
+});

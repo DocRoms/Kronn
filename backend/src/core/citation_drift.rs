@@ -6,7 +6,9 @@
 // it must travel with `git clone` like the docs it describes, so a teammate
 // sees the same "sources clean / to re-verify" state. Only paths, line numbers
 // and SHA-256 digests are written. Each cited line is hashed after secret
-// redaction, so a digest never depends on a secret value.
+// redaction, so a digest never depends on a secret value. A line of a secret
+// file (by name, or through a symlink) is never read at all: it is recorded as
+// presence only, and a digest recorded before is dropped at the next write.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -269,7 +271,12 @@ fn read_lines(path: &Path) -> FileLines {
     let Ok(meta) = std::fs::metadata(path) else {
         return FileLines::Missing;
     };
-    if !meta.is_file() || meta.len() > FILE_SIZE_CAP_BYTES {
+    // A secret file (by its name or the file a symlink resolves to) is never
+    // read: no line of it is hashed, so none can be stored or brute-forced.
+    if !meta.is_file()
+        || meta.len() > FILE_SIZE_CAP_BYTES
+        || crate::acp::secret_files::is_secret_path(path)
+    {
         return FileLines::Opaque;
     }
     match std::fs::read_to_string(path) {
@@ -331,6 +338,10 @@ fn fingerprint(project_path: &Path, citation: &DocCitation) -> Option<CitationFi
     let Some((start, end)) = citation.lines else {
         return Some(fp);
     };
+    // A line of a secret file is recorded as presence only, like a bare path.
+    if crate::acp::secret_files::is_secret_path(&path) {
+        return Some(fp);
+    }
     fp.line = Some(start);
     fp.end_line = Some(end);
     if let FileLines::Lines { lines, citable } = read_lines(&path) {
@@ -416,7 +427,30 @@ pub fn read_strict(project_path: &Path) -> Result<Option<CitationsFile>, String>
     }
 }
 
+/// Remediation for a repo audited before secret lines were refused: a recorded
+/// citation whose target resolves to a secret file keeps its path (presence) and
+/// loses its line and digest. Returns whether anything was dropped.
+fn drop_secret_fingerprints(project_path: &Path, file: &mut CitationsFile) -> bool {
+    let mut dropped = false;
+    for entry in file.docs.values_mut() {
+        for fp in &mut entry.citations {
+            let has_digest = fp.sha256.is_some() || fp.line.is_some() || fp.end_line.is_some();
+            if has_digest
+                && resolve_cited(project_path, &fp.file)
+                    .is_some_and(|path| crate::acp::secret_files::is_secret_path(&path))
+            {
+                fp.line = None;
+                fp.end_line = None;
+                fp.sha256 = None;
+                dropped = true;
+            }
+        }
+    }
+    dropped
+}
+
 fn write(project_path: &Path, file: &mut CitationsFile) -> Result<(), String> {
+    drop_secret_fingerprints(project_path, file);
     file.readme = CITATIONS_README.to_string();
     let json = serde_json::to_string_pretty(file).map_err(|e| format!("JSON error: {e}"))?;
     crate::core::mcp_scanner::atomic_write(&citations_path(project_path), &json)
@@ -522,6 +556,7 @@ pub fn record_after_audit(project_path: &Path, rewritten: &[String]) -> Result<(
     let previous = read_strict(project_path)?;
     let docs: BTreeSet<String> = doc_files(project_path).into_iter().collect();
     let mut file = previous.clone().unwrap_or_default();
+    drop_secret_fingerprints(project_path, &mut file);
     for doc in rewritten.iter().filter(|d| docs.contains(*d)) {
         if let Some(content) = read_doc(project_path, doc) {
             let entry = fingerprint_doc(

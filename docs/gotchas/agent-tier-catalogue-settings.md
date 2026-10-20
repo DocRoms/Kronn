@@ -10,7 +10,7 @@ and preserves an unknown configured model as a disabled, explicitly labelled
 option. Cache provenance never becomes a live discovery merely because the
 snapshot request succeeded. Clearing an override is an explicit action; its
 placeholder and card preview show the catalogue's tier assignment when known.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:95-146#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1306-1331#renderSelect]
 
@@ -123,12 +123,12 @@ snapshot read reports the error and retains previous data as cached, not live.
 Saved per-discussion and Quick Prompt overrides are shown for the current
 selection; alternative choices resolve their own tiers. The Quick Prompt
 caller still explicitly clears its old override when choosing a new agent/tier.
-[src: file: frontend/src/lib/modelCatalogSelection.ts:95-146#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
 [src: file: frontend/src/components/ChatHeader.tsx:430-431#currentModel]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1606-1637#changeQuickPromptAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3220-3221#currentModel]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1612-1643#changeQuickPromptAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3227-3228#currentModel]
 
 KT-627 separately removed the HTTP runner's embedded fallback and qualified
 production-library resolution/preflight. The final migration and cross-surface
@@ -181,8 +181,8 @@ and an explicit error; typing within an open palette does not refetch.
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/components/MentionTierChoices.tsx:7-15#MentionTierChoices]
 [src: file: frontend/src/components/MentionTierChoices.tsx:39-44#lastChecked]
-[src: file: frontend/src/components/ChatInput.tsx:510#useModelCatalogSnapshot]
-[src: file: frontend/src/components/ChatInput.tsx:734-744#mentionTierResolution]
+[src: file: frontend/src/components/ChatInput.tsx:517#useModelCatalogSnapshot]
+[src: file: frontend/src/components/ChatInput.tsx:741-751#mentionTierResolution]
 [src: file: frontend/src/components/NewDiscussionForm.tsx:197#useModelCatalogSnapshot]
 
 Untouched principal insertion preserves its saved model override and does not
@@ -214,7 +214,7 @@ explicitly unverified. A joined CLI's results never inherit a native catalogue
 tier. Canonical alias prefixes rank before additional substring matches, so
 typing `@co` still highlights Codex before a Claude Code substring result.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:53-62#matchesCatalogSearch]
-[src: file: frontend/src/components/ChatInput.tsx:745-762#mentionMatchesQuery]
+[src: file: frontend/src/components/ChatInput.tsx:752-769#mentionMatchesQuery]
 [src: file: frontend/src/components/NewDiscussionForm.tsx:231-234#matchingMentionTargets]
 [src: file: frontend/src/lib/mention-autocomplete.ts:7-10#mentionMatchRank]
 
@@ -284,8 +284,8 @@ same agent family and tier is still a real target change, not a no-op. Merely
 opening, editing or rereading the catalogue preserves the saved overrides.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:297-326#renderAgentTierPicker]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1153-1185#changeStepAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1606-1637#changeQuickPromptAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1159-1191#changeStepAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1612-1643#changeQuickPromptAgent]
 
 The creation wizard, full editor, inline inspector, pipeline and QP card receive
 the configured named targets. Their selectors display the saved explicit model

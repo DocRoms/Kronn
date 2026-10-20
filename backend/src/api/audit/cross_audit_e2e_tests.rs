@@ -178,6 +178,7 @@ async fn run_security(state: &AppState) -> String {
             resume_run_id: None,
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )

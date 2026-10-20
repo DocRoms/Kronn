@@ -37,7 +37,7 @@ the CAS inside that same `transition_execution` and is refused the ordinary
 way ("not a resumable worker state") rather than silently double-applying —
 this is NOT a test of two simultaneous callers racing each other.
 [src: file: backend/src/db/orchestration.rs:6856-6876#Provisioning]
-[src: file: backend/src/db/orchestration.rs:6945#cancel_live_offers_for_execution]
+[src: file: backend/src/db/orchestration.rs:6950#cancel_live_offers_for_execution]
 
 The caller decides what Provisioning becomes next, exactly like the initial
 launch: a native worker dispatches straight to `Working` (added to the

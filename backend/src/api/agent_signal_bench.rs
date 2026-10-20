@@ -48,6 +48,16 @@ impl ToolExecutor for ProposalTools {
 
 async fn proposal_fixture(kind: &str) -> (AppState, String) {
     let state = super::quick_prompt_tests::state_with_prompts().await;
+    // The Quick API names a real plugin config: the gate refuses an unknown one.
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute("INSERT INTO mcp_servers (id, name, transport) VALUES ('tracker','tracker','stdio')", [])?;
+            conn.execute("INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json, is_global) VALUES ('fixture','tracker','tracker','','[]',1)", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     let executor = KronnToolExecutor::new(state.clone(), Some("general".into()));
     let (name, arguments) = match kind {
         "quick_prompt" => return (state, "global".into()),

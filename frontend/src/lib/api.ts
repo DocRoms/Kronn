@@ -637,6 +637,9 @@ interface AuditSseEvent {
   success?: boolean;
   installed?: boolean;
   error?: string;
+  /** Typed kind of an `error` event (KT-1324: `agents_unverified`,
+   *  `agents_still_running`); the text stays for the human. */
+  error_code?: string;
   discussion_id?: string;
   template_was_installed?: boolean;
   /** Terminal status carried by the done event (`complete` | `interrupted` | `no_change`). */
@@ -1176,6 +1179,11 @@ export const projects = {
        *  Absent from a backend that predates it. */
       steps_to_redo?: number[];
       started_at: string;
+      /** KT-1320 — how the run was launched: a retry or a resume runs on the
+       *  same agent, tier and connection unless the human picks another. */
+      agent_type?: string;
+      tier?: string;
+      connection_id?: string;
       /** KT-1199 — the run is the one a colleague committed in the
        *  repository, not a row of this instance: the launch adopts it. */
       from_repository?: boolean;
@@ -1441,7 +1449,7 @@ export const projects = {
   /** Stream a partial re-audit for stale sections via SSE */
   partialAuditStream: async (
     id: string,
-    req: { agent: AgentType; tier?: ModelTier; steps: number[]; connection_id?: string },
+    req: { agent: AgentType; tier?: ModelTier; steps: number[]; connection_id?: string; accept_unverified_agents?: boolean },
     handlers: {
       onStepStart: (step: number, total: number, file: string) => void;
       onChunk: (text: string, step: number) => void;
@@ -1468,8 +1476,9 @@ export const projects = {
        * user abort (fetch cancelled before any done event). */
       onDone: (info?: PartialDoneInfo) => void;
       /** TERMINAL: the stream is over after this fires — onDone is sealed
-       * and never follows (no double cleanup). */
-      onError: (error: string) => void;
+       * and never follows (no double cleanup). `errorCode` is the backend's
+       * typed kind of the refusal, when it sends one. */
+      onError: (error: string, errorCode?: string) => void;
     },
     signal?: AbortSignal,
   ) => {
@@ -1484,8 +1493,12 @@ export const projects = {
     };
     // Terminal error: seal `finished` so the stream-close onDone is a no-op —
     // onError owns the cleanup, a second callback would double the toasts.
-    const fail = (error: string) => {
-      if (!finished) { finished = true; handlers.onError(error); }
+    const fail = (error: string, errorCode?: string) => {
+      if (finished) return;
+      finished = true;
+      // The code is passed only when the backend sent one.
+      if (errorCode === undefined) handlers.onError(error);
+      else handlers.onError(error, errorCode);
     };
 
     await fetchAndParseSSE(
@@ -1526,7 +1539,7 @@ export const projects = {
               else { done(info); }
               break;
             }
-            case 'error': fail(p.error ?? 'Unknown error'); break;
+            case 'error': fail(p.error ?? 'Unknown error', p.error_code); break;
           }
         },
         // Stream closure: a user abort stays the clean no-payload done; an
@@ -1556,8 +1569,8 @@ export const projects = {
       onCancelled: () => void;
       /** TERMINAL. Undefined on a user abort. */
       onDone: (info?: RevalidationDoneInfo) => void;
-      /** TERMINAL. */
-      onError: (error: string) => void;
+      /** TERMINAL. `errorCode` is the backend's typed kind of the refusal. */
+      onError: (error: string, errorCode?: string) => void;
     },
     signal?: AbortSignal,
   ) => {
@@ -1595,7 +1608,13 @@ export const projects = {
               else seal(() => handlers.onDone({ kind: 'agent', info }));
               break;
             }
-            case 'error': seal(() => handlers.onError(String(p.error ?? 'Unknown error'))); break;
+            case 'error': {
+              const message = String(p.error ?? 'Unknown error');
+              // The code is passed only when the backend sent one.
+              if (typeof p.error_code === 'string') seal(() => handlers.onError(message, p.error_code as string));
+              else seal(() => handlers.onError(message));
+              break;
+            }
           }
         },
         onDone: () => {
@@ -1673,8 +1692,9 @@ export const projects = {
        * carry a `discussionId` (KT-931): the validation of its successful steps. */
       onDone: (discussionId: string | null, templateWasInstalled: boolean, status?: string) => void;
       /** TERMINAL: the stream is over after this fires — onDone is sealed
-       * and never follows (no double cleanup). */
-      onError: (error: string) => void;
+       * and never follows (no double cleanup). `errorCode` is the backend's
+       * typed kind of the refusal, when it sends one. */
+      onError: (error: string, errorCode?: string) => void;
     },
     signal?: AbortSignal,
   ) => {
@@ -1689,8 +1709,12 @@ export const projects = {
     };
     // Terminal error: seal `finished` so the stream-close onDone is a no-op
     // — onError owns the cleanup, a second callback would double the toasts.
-    const fail = (error: string) => {
-      if (!finished) { finished = true; handlers.onError(error); }
+    const fail = (error: string, errorCode?: string) => {
+      if (finished) return;
+      finished = true;
+      // The code is passed only when the backend sent one.
+      if (errorCode === undefined) handlers.onError(error);
+      else handlers.onError(error, errorCode);
     };
 
     await fetchAndParseSSE(
@@ -1782,7 +1806,7 @@ export const projects = {
             case 'warning': handlers.onWarning?.(p.message ?? 'Audit warning'); break;
             case 'validation_created': handlers.onValidationCreated(p.discussion_id as string); break;
             case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false, p.status); break;
-            case 'error': fail(p.error ?? 'Unknown error'); break;
+            case 'error': fail(p.error ?? 'Unknown error', p.error_code); break;
           }
         },
         // Same closure rule as the partial stream: abort = clean done, EOF
@@ -3489,6 +3513,8 @@ export interface ExternalApiConnectionView {
   /** Override for a provider serving media from another host; absent or null
    * derives it from `endpoint`. */
   media_endpoint?: string | null;
+  /** The model Decision steps call (KT-1366); a capability, not a tier. */
+  decision_model?: string | null;
   created_at: string;
   updated_at: string;
   /** Whether a credential is currently stored; the value never crosses the wire. */
@@ -3507,6 +3533,7 @@ export interface UpsertExternalApiConnection {
   image_model?: string | null;
   video_model?: string | null;
   media_endpoint?: string | null;
+  decision_model?: string | null;
   /** Tri-state: omitted/null keeps the stored key, '' clears it, a value replaces it. */
   api_key?: string | null;
   /** Keep a tier model the proxy just refused; otherwise the save fails with `unreachable_model`. */

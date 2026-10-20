@@ -13103,6 +13103,7 @@ async fn external_api_test_state(endpoint: String) -> AppState {
         updated_at: chrono::Utc::now(),
         image_model: None,
         video_model: None,
+        decision_model: None,
         media_endpoint: None,
     };
     let insert = connection.clone();
@@ -13161,6 +13162,7 @@ async fn external_api_nvidia_update_refreshes_the_models_used_by_global_selector
         updated_at: chrono::Utc::now(),
         image_model: None,
         video_model: None,
+        decision_model: None,
         media_endpoint: None,
     };
     state
@@ -13203,7 +13205,7 @@ async fn external_api_nvidia_update_refreshes_the_models_used_by_global_selector
 
 #[tokio::test]
 async fn external_api_openrouter_validates_the_key_before_unlocking_the_catalogue() {
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, method, path, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let upstream = MockServer::start().await;
@@ -13218,6 +13220,7 @@ async fn external_api_openrouter_validates_the_key_before_unlocking_the_catalogu
         .await;
     Mock::given(method("GET"))
         .and(path("/v1/models"))
+        .and(query_param_is_missing("output_modalities"))
         .and(header("authorization", "Bearer sk-or-v1-valid"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "data": [{"id": "z-ai/glm-5.3"}]
@@ -13252,7 +13255,7 @@ async fn external_api_openrouter_validates_the_key_before_unlocking_the_catalogu
 
 #[tokio::test]
 async fn external_api_openrouter_keeps_dedicated_media_catalogues_capability_scoped() {
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let upstream = MockServer::start().await;
@@ -13283,12 +13286,30 @@ async fn external_api_openrouter_keeps_dedicated_media_catalogues_capability_sco
     ] {
         Mock::given(method("GET"))
             .and(path(route))
+            .and(query_param_is_missing("output_modalities"))
             .and(header("authorization", "Bearer sk-or-v1-media"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .expect(1)
             .mount(&upstream)
             .await;
     }
+    // KT-1366 — decision models only come when asked for by modality. The
+    // chat model in this answer stands for a server ignoring the filter.
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(query_param("output_modalities", "decisions"))
+        .and(header("authorization", "Bearer sk-or-v1-media"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+            {
+                "id": "perplexity/pplx-decider-flash-v1.2",
+                "name": "Perplexity: Decider Flash V1.2",
+                "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["decisions"]}
+            },
+            {"id": "text/chat", "name": "Chat", "architecture": {"output_modalities": ["text"]}}
+        ]})))
+        .expect(1)
+        .mount(&upstream)
+        .await;
     Mock::given(method("GET"))
         .and(path("/v1/key"))
         .and(header("authorization", "Bearer sk-or-v1-media"))
@@ -13320,6 +13341,15 @@ async fn external_api_openrouter_keeps_dedicated_media_catalogues_capability_sco
             .unwrap()
     };
     assert_eq!(capabilities("text/chat"), serde_json::json!(["chat"]));
+    assert_eq!(
+        capabilities("perplexity/pplx-decider-flash-v1.2"),
+        serde_json::json!(["decision", "vision"])
+    );
+    assert!(!response["data"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|model| model == "perplexity/pplx-decider-flash-v1.2"));
     assert_eq!(
         capabilities("image/generator"),
         serde_json::json!(["image"])
@@ -13735,7 +13765,7 @@ async fn external_api_test_route_probes_a_chat_model_not_the_first_one_listed() 
 
 #[tokio::test]
 async fn external_api_billing_error_stops_model_probes_without_leaking_upstream_details() {
-    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::matchers::{body_partial_json, header, method, path, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     for (preset, models) in [
@@ -13755,6 +13785,7 @@ async fn external_api_billing_error_stops_model_probes_without_leaking_upstream_
             .await;
         Mock::given(method("GET"))
             .and(path("/v1/models"))
+            .and(query_param_is_missing("output_modalities"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{"id": "mimo-v2.5"}, {"id": "mimo-v2.5-tts"}]
             })))
@@ -14165,6 +14196,7 @@ async fn litellm_saved_connection_state(endpoint: String) -> AppState {
         updated_at: chrono::Utc::now(),
         image_model: None,
         video_model: None,
+        decision_model: None,
         media_endpoint: None,
     };
     let insert = connection.clone();
@@ -23150,9 +23182,10 @@ mod cold_api_handlers_tests {
         std::fs::create_dir_all(repo.join("docs")).unwrap();
         std::fs::create_dir_all(repo.join("src")).unwrap();
         std::fs::write(repo.join("src/config.rs"), "pub const RETRIES: u32 = 3;\n").unwrap();
+        // Kronn's header: since KT-1299 a revalidation refuses a docs folder Kronn did not write.
         std::fs::write(
             repo.join("docs/AGENTS.md"),
-            "# AGENTS\nRetries are three [src: src/config.rs:1].\n",
+            "<!-- kronn:doc-version=\"1.0\" -->\n# AGENTS\nRetries are three [src: src/config.rs:1].\n",
         )
         .unwrap();
         let state = test_state();
@@ -23186,7 +23219,7 @@ mod cold_api_handlers_tests {
         // Reading the plan writes nothing.
         assert_eq!(
             std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
-            "# AGENTS\nRetries are three [src: src/config.rs:1].\n"
+            "<!-- kronn:doc-version=\"1.0\" -->\n# AGENTS\nRetries are three [src: src/config.rs:1].\n"
         );
 
         let req = Request::builder()
@@ -23211,7 +23244,7 @@ mod cold_api_handlers_tests {
         assert!(body.contains(r#""status":"clean""#), "{body}");
         assert_eq!(
             std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
-            "# AGENTS\nRetries are three [src: src/config.rs:2].\n"
+            "<!-- kronn:doc-version=\"1.0\" -->\n# AGENTS\nRetries are three [src: src/config.rs:2].\n"
         );
         let (_, json) = get_json(build_router_with_auth(state.clone(), false), &plan_url).await;
         assert_eq!(json["data"]["sections"], serde_json::json!([]), "{json}");
@@ -26449,7 +26482,8 @@ async fn media_model_slots_round_trip_through_the_connection_api() {
             "origin_preset": "open_router",
             "api_key": "sk-or-v1-testkeyforintegrationtests",
             "image_model": "meta/muse-image",
-            "video_model": "bytedance/seedance-2.0-mini"
+            "video_model": "bytedance/seedance-2.0-mini",
+            "decision_model": "clef-flash"
         }),
     )
     .await;
@@ -26463,6 +26497,7 @@ async fn media_model_slots_round_trip_through_the_connection_api() {
         .expect("connection listed");
     assert_eq!(mine["image_model"], "meta/muse-image");
     assert_eq!(mine["video_model"], "bytedance/seedance-2.0-mini");
+    assert_eq!(mine["decision_model"], "clef-flash");
 }
 
 #[tokio::test]

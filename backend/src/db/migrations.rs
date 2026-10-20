@@ -974,9 +974,26 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/267_discussion_project_grants.sql"),
     ),
     (
-        "268_message_kind",
-        include_str!("sql/268_message_kind.sql"),
+        "268_audit_run_launch",
+        include_str!("sql/268_audit_run_launch.sql"),
     ),
+    (
+        "269_audit_documentary_notes",
+        include_str!("sql/269_audit_documentary_notes.sql"),
+    ),
+    (
+        "270_discussion_general_grants",
+        include_str!("sql/270_discussion_general_grants.sql"),
+    ),
+    (
+        "271_general_resource_origins",
+        include_str!("sql/271_general_resource_origins.sql"),
+    ),
+    (
+        "272_external_api_decision_model",
+        include_str!("sql/272_external_api_decision_model.sql"),
+    ),
+    ("273_message_kind", include_str!("sql/273_message_kind.sql")),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

@@ -74,8 +74,17 @@ request body.
   another revision than the one validated: the API refuses a scope on it and
   the workflow page says why, rather than showing a validation that would never
   apply.
+- A workflow scope may also open **every project** (KT-1336), stored as the
+  reserved row `*`: read, or planning write behind the same typed confirmation
+  `ALL-PROJECTS-WRITE` and fingerprint of the scope seen as for a room, asked
+  again on every validation that keeps it. The fingerprint covers the stored
+  rows **and** the workflow's current revision, so a screen read before an edit
+  of the workflow is stale (409) and never validates code the human did not
+  see. Shown in
+  red on the workflow page and the launch card. It follows every rule above
+  (pinned revision, suspended by any change, never credentials).
 - Withdrawing is always possible (`POST /api/workflows/{id}/scope/revoke`, one
-  project or all), even once a workflow became global: it only removes, never
+  project, `{"all": true}` for the every-project entry, or `{}` for all), even once a workflow became global: it only removes, never
   validates the remaining entries again, and a run that pinned the validated
   revision loses the withdrawn project on its next call.
 - Nothing else gives a step another project.
@@ -83,7 +92,38 @@ request body.
   from a token that only holds a grant on it. A worker runs with its task
   project's credentials, which a planning grant must never hand out.
 
+## A room without a project: the general resources (KT-1346)
+
+A room without a project reaches no project. It reads the general resources:
+the Quick Prompts, Quick APIs, Pages and workflows with no project, which every
+project sees and runs. Writing them is therefore a cross-project write, and is
+a human's decision, like every project in write:
+
+- The grant is « General · write » (source `general`, no project, write only).
+  A human grants it from the room's Scope settings by typing `GENERAL-WRITE`,
+  together with the fingerprint of the scope they saw. The grant is shown in
+  red in the room header, recorded in the journal, and revocable. Migration 270
+  widens the grants table for it.
+- With it, the room's own agents (CLI and HTTP alike) may create general
+  Quick Prompts, Quick APIs, Pages and workflows, and edit or delete the ones
+  this room created. The gate records that provenance at creation
+  (`general_resource_origins`, migration 271), from the token, never from the
+  request. Every other general resource stays a human's to edit. Without the
+  grant, the bridge refuses with a message that names the grant to ask for.
+- A room with a project never gets it: its agents write their project, and a
+  creation without a project lands there. A worker, a workflow step or a run
+  without a project never holds a room's grant.
+- Credentials and API configs stay as before: the grant opens no project's.
+
 ## Enforcement
+
+- A refusal on another project names the way out that fits its caller
+  (`project_refusal` in `backend/src/core/bridge_token.rs`): `room_scope` for a
+  room's own agent, the workflow's scope (workflow page, Projects accessible)
+  for a workflow step, the principal for a worker. HTTP agents have the same
+  `room_scope` tool as CLI agents; a step or a worker is refused it. The
+  workflow guide (`workflow-architect` skill, section Reach) teaches this to
+  every agent.
 
 - The token's frozen project does not change (`freeze`). A token whose own
   discussions disagree on their primary project is still refused.

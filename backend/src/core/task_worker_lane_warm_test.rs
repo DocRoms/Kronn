@@ -545,6 +545,41 @@ fn an_existing_debug_directory_is_never_overwritten() {
     assert!(clone.calls().is_empty());
 }
 
+/// GNU `cp --reflink=always` on a file system without reflinks (ext4) makes
+/// the directories, then fails on the first file: the clone must remove them.
+#[cfg(unix)]
+#[test]
+fn a_failed_cp_reflink_leaves_no_partial_tree() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let cp = dir.path().join("cp");
+    // The last two arguments are the source and the destination.
+    std::fs::write(
+        &cp,
+        "#!/bin/sh\nfor last; do :; done\nmkdir -p \"$last/deps\"\n\
+         echo \"cp: failed to clone: Operation not supported\" >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&cp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let source = dir.path().join("src");
+    std::fs::create_dir_all(source.join("deps")).unwrap();
+    let destination = dir.path().join("dst");
+
+    let error = cp_reflink_tree(cp.as_os_str(), &source, &destination).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("not supported"), "{error}");
+    assert!(
+        !destination.exists(),
+        "a failed clone leaves nothing behind"
+    );
+
+    // An existing destination is refused, never filled nor removed.
+    std::fs::create_dir_all(destination.join("keep")).unwrap();
+    let error = cp_reflink_tree(cp.as_os_str(), &source, &destination).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert!(destination.join("keep").is_dir());
+}
+
 #[cfg(unix)]
 #[test]
 fn clone_tree_is_copy_on_write_not_a_shared_or_a_copied_tree() {

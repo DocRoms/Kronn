@@ -297,7 +297,7 @@ pub async fn full_audit(
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
     if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
-        return sse_error(error);
+        return sse_refusal(error);
     }
     // KT-1318 — a full audit writes a lot; below the configured free space Kronn
     // sweeps its orphaned lane build dirs first, then refuses with the reason.
@@ -335,7 +335,44 @@ pub async fn full_audit(
     // would be copied into a versioned `docs/AGENTS.md`.
     let linked_repos_block =
         crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
-    let audit_tier = req.tier.unwrap_or(crate::models::ModelTier::Reasoning);
+    // KT-1320 — a resume or a step retry runs on the footing of the run it
+    // continues, unless the request names another tier or connection.
+    let resumed_run = match req.resume_run_id.clone() {
+        Some(run_id) => state
+            .db
+            .with_read_conn(move |conn| crate::db::audit_runs::get_by_id(conn, &run_id))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let (audit_tier, mut requested_connection_id, connection_from_run) =
+        launch_footing(&req, resumed_run.as_ref());
+    // The run's connection may have been deleted since: the agent's default
+    // takes over, and the human is told, rather than the retry being refused.
+    let mut connection_note = None;
+    if let Some(id) = requested_connection_id
+        .clone()
+        .filter(|_| connection_from_run)
+    {
+        let lookup = id.clone();
+        let still_there = matches!(
+            state
+                .db
+                .with_read_conn(move |conn| {
+                    crate::db::external_api_connections::get(conn, &lookup)
+                })
+                .await,
+            Ok(Some(_))
+        );
+        if !still_there {
+            requested_connection_id = None;
+            connection_note = Some(format!(
+                "The external API connection {id} of the run you continue no longer exists: \
+                 this run uses the agent's default connection."
+            ));
+        }
+    }
     let agent_type = req.agent;
     if !super::agent_can_audit(&agent_type) {
         return sse_error(super::audit_refusal_message(&agent_type));
@@ -346,7 +383,7 @@ pub async fn full_audit(
     let agent_launcher = match super::agent_launch::AuditAgentLauncher::for_request(
         &state,
         &agent_type,
-        req.connection_id.as_deref(),
+        requested_connection_id.as_deref(),
     )
     .await
     {
@@ -383,6 +420,7 @@ pub async fn full_audit(
     let retry_steps_req = req.retry_steps.clone();
     let redo_steps_req = req.redo_steps.clone();
     let fresh_req = req.fresh.unwrap_or(false);
+    let accept_unverified_agents_req = req.accept_unverified_agents.unwrap_or(false);
     let requested_kind = req.kind;
     let db = state.db.clone();
     let audit_tracker = state.audit_tracker.clone();
@@ -419,10 +457,10 @@ pub async fn full_audit(
         drop_guard.hold_lease();
         if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
             drop_guard.disarm();
-            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+            yield Event::default().event("error").data(error.to_string());
             return;
         }
-
+        crate::api::projects::template_merge::clean_integrated_merge(&project_path);
 
         // Clear any stale cancellation flag for this project.
         if let Ok(mut tracker) = audit_tracker.lock() {
@@ -647,43 +685,16 @@ pub async fn full_audit(
         // back from the snapshot taken before that step, before this run
         // takes its own snapshots of the targets.
         {
-            let pid = project_id.clone();
-            let root = project_path.clone();
-            // Database reads and writes, with the file work between them
-            // outside the writer connection.
-            let pending = db.with_conn(move |conn| {
-                let Some(last) = crate::db::audit_runs::list_recent(conn, &pid, 1)?.into_iter().next() else {
-                    return Ok(None);
-                };
-                let pending = super::step_guard::pending_steps(conn, &last.id)?;
-                Ok(Some((last.id, pending)))
-            }).await;
-            let recovered = match pending {
-                Ok(Some((last_id, pending))) if !pending.is_empty() => {
-                    // Boot settles these already; this is the net for a backend
-                    // that did not go through boot (a run recorded since).
-                    let settled = super::step_guard::settle_pending(&root, &pending);
-                    if settled.is_empty() {
-                        Ok(settled)
-                    } else {
-                        let to_record = settled.clone();
-                        db.with_conn(move |conn| {
-                            super::step_guard::record_settled(conn, &last_id, &to_record)?;
-                            Ok(settled)
-                        }).await
-                    }
-                }
-                Ok(_) => Ok(Vec::new()),
-                Err(e) => Err(e),
-            };
-            match recovered {
-                Ok(settled) => for step in settled {
-                    tracing::warn!(
-                        "Step {} of the previous run was killed mid-write: {} — {:?}",
-                        step.step_index, step.target_file, step.outcome
-                    );
-                },
-                Err(e) => tracing::warn!("Could not check the previous run for killed steps: {e}"),
+            // Boot settles these already; this is the net for a backend that
+            // did not go through boot (a run recorded since), or for a run boot
+            // left open because an agent of it could not be stopped. Every open
+            // run of the project has its agents stopped again first: a survivor
+            // is still writing the very file being settled.
+            if let Err(error) = super::step_guard::settle_open_runs_before_launch(
+                &db, &project_id, &project_path, accept_unverified_agents_req,
+            ).await {
+                yield Event::default().event("error").data(error.event_data());
+                return;
             }
         }
         let audit_run_id = Uuid::new_v4().to_string();
@@ -692,10 +703,12 @@ pub async fn full_audit(
             let run_id = audit_run_id.clone();
             let pid = project_id.clone();
             let agent_name = agent_label.clone();
+            let connection = audit_connection_id.clone();
             db.with_conn(move |conn| {
                 crate::db::audit_runs::insert_running(
                     conn, &run_id, &pid, kind_label, &agent_name, audit_started_at,
-                )
+                )?;
+                crate::db::audit_runs::set_run_launch(conn, &run_id, audit_tier, connection.as_deref())
             }).await
         };
         if let Err(e) = inserted {
@@ -707,6 +720,7 @@ pub async fn full_audit(
             return;
         }
         drop_guard.set_run_id(audit_run_id.clone());
+        agent_launcher.bind_run(&audit_run_id);
 
         // KT-931 — a resumed run INHERITS the steps its predecessor completed
         // cleanly, recorded on its own row before anything else can interrupt
@@ -750,51 +764,6 @@ pub async fn full_audit(
                     }).to_string(),
                 );
                 return;
-            }
-        }
-
-        // KT-1021 — what this run audits; a resume says whether the sources
-        // moved since the run it continues.
-        {
-            let pp = project_path.clone();
-            let (head, branch, fingerprint) = tokio::task::spawn_blocking(move || {
-                let (head, branch) = crate::core::checksums::git_head_and_branch(&pp);
-                let fingerprint = crate::core::checksums::stable_source_tree_fingerprint(&pp)
-                    .ok()
-                    .flatten();
-                (head, branch, fingerprint)
-            }).await.unwrap_or_default();
-            let run_id = audit_run_id.clone();
-            let previous_id = resume_run_id_req.clone();
-            let (h, b, f) = (head.clone(), branch.clone(), fingerprint.clone());
-            let previous = db.with_conn(move |conn| {
-                crate::db::audit_runs::set_run_provenance(
-                    conn, &run_id, h.as_deref(), b.as_deref(), f.as_deref(), None,
-                )?;
-                match previous_id {
-                    Some(id) => crate::db::audit_runs::get_by_id(conn, &id),
-                    None => Ok(None),
-                }
-            }).await;
-            match previous {
-                Ok(Some(previous)) => {
-                    if let Some(message) = resume_drift_message(&previous, head.as_deref(), fingerprint.as_deref()) {
-                        tracing::warn!("{message}");
-                        // KT-1211 (M6) — saved on the run: the timeline and the
-                        // validation prompt say it after the toast is gone.
-                        let (run_id, saved) = (audit_run_id.clone(), message.clone());
-                        if let Err(e) = db.with_conn(move |conn| {
-                            crate::db::audit_runs::set_resume_drift(conn, &run_id, &saved)
-                        }).await {
-                            tracing::warn!("Could not record the resume's source drift: {e}");
-                        }
-                        yield Event::default().event("warning").data(
-                            serde_json::json!({ "message": message }).to_string(),
-                        );
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!("Could not record the audit run's provenance: {e}"),
             }
         }
 
@@ -1099,6 +1068,54 @@ pub async fn full_audit(
         }
         super::briefing_rules::sync_from_notes(&project_path, briefing_notes.as_deref());
 
+        // KT-1021, KT-1324 — what this run audits; a resume says whether the sources
+        // moved since the run it continues. Read once Kronn's own install is done:
+        // a fresh install writes the root `AGENTS.md` pointer, which counts as
+        // source, so a print taken before it never matched the next run's. Before
+        // the `.mcp.json` swap below, which rewrites a source file for the run.
+        {
+            let pp = project_path.clone();
+            let (head, branch, fingerprint) = tokio::task::spawn_blocking(move || {
+                let (head, branch) = crate::core::checksums::git_head_and_branch(&pp);
+                let fingerprint = crate::core::checksums::stable_source_tree_fingerprint(&pp)
+                    .ok()
+                    .flatten();
+                (head, branch, fingerprint)
+            }).await.unwrap_or_default();
+            let run_id = audit_run_id.clone();
+            let previous_id = resume_run_id_req.clone();
+            let (h, b, f) = (head.clone(), branch.clone(), fingerprint.clone());
+            let previous = db.with_conn(move |conn| {
+                crate::db::audit_runs::set_run_provenance(
+                    conn, &run_id, h.as_deref(), b.as_deref(), f.as_deref(), None,
+                )?;
+                match previous_id {
+                    Some(id) => crate::db::audit_runs::get_by_id(conn, &id),
+                    None => Ok(None),
+                }
+            }).await;
+            match previous {
+                Ok(Some(previous)) => {
+                    if let Some(message) = resume_drift_message(&previous, head.as_deref(), fingerprint.as_deref()) {
+                        tracing::warn!("{message}");
+                        // KT-1211 (M6) — saved on the run: the timeline and the
+                        // validation prompt say it after the toast is gone.
+                        let (run_id, saved) = (audit_run_id.clone(), message.clone());
+                        if let Err(e) = db.with_conn(move |conn| {
+                            crate::db::audit_runs::set_resume_drift(conn, &run_id, &saved)
+                        }).await {
+                            tracing::warn!("Could not record the resume's source drift: {e}");
+                        }
+                        yield Event::default().event("warning").data(
+                            serde_json::json!({ "message": message }).to_string(),
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("Could not record the audit run's provenance: {e}"),
+            }
+        }
+
         // 0.8.3 (#280) — MCP allowlist for the audit. On projects
         // with 10+ MCP servers wired (Fastly, Docker, GitLab, M365,
         // Playwright, …), the agent's system prompt balloons to 12-
@@ -1133,6 +1150,9 @@ pub async fn full_audit(
             &db, &project_id, &project_path, &project_path_str, &agent_launcher, &agent_type,
         ).await;
         tracing::info!("audit {}: version source {:?}", project_id, version_ctx.source);
+        // KT-1308 — the pages the run's agent fetched, held against the `url:`
+        // citations of what a step writes.
+        let mut fetch_tracker = crate::core::run_provenance::FetchTracker::default();
 
         if let Err(error) = crate::core::doc_provenance::note_snapshot_writes(
             &project_path, &run_docs_snapshot, crate::core::doc_provenance::DocWriter::FullAudit,
@@ -1273,6 +1293,11 @@ pub async fn full_audit(
             "started_at": audit_started_at.to_rfc3339(),
         });
         yield Event::default().event("start").data(start.to_string());
+        if let Some(note) = &connection_note {
+            yield Event::default().event("warning").data(
+                serde_json::json!({ "message": note }).to_string(),
+            );
+        }
 
         // 0.8.7 STEP 0 — anti-hallu canonical section maintenance.
         // Runs once at the start of every audit BEFORE the numbered
@@ -1358,8 +1383,36 @@ pub async fn full_audit(
         let mut doc_blame = if resume_run_id_req.is_some() {
             super::document_repair::Blame::load(&project_path)
         } else {
-            super::document_repair::Blame::reset(&project_path)
+            let mut blame = super::document_repair::Blame::reset(&project_path);
+            // KT-1353 — what the committed documents already got wrong is not
+            // the founding step's doing: it is recorded as pre-existing.
+            if should_optimize_documents(kind) {
+                // KT-1308 — against the run's provenance, as the step baseline is.
+                let run_provenance = crate::core::run_provenance::RunProvenance::of(&version_ctx.snapshot, &fetch_tracker);
+                match crate::core::document_optimization::analyze_with(&project_path, Some(&run_provenance)) {
+                    Ok(report) => {
+                        let held: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                        blame.seed_preexisting(&project_path, &held);
+                    }
+                    Err(e) => tracing::warn!("Pre-run documentary blockers not recorded: {e}"),
+                }
+            }
+            blame
         };
+
+        // KT-1353 — the exact gate replacements Kronn applied during this run,
+        // and the problems it let through, kept to be said to the human.
+        let mut documentary_autofixes: Vec<(u32, crate::core::document_optimization::AppliedFix)> = Vec::new();
+        let mut documentary_preexisting: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
+        // KT-1387 — the commands the documents still cite once a step's
+        // attempts are spent: told to the step, never a blocker.
+        let mut documentary_unverified_commands: Vec<(u32, crate::core::document_optimization::Diagnostic)> = Vec::new();
+        // KT-1388 — stack conflicts and unproven closures the documents still
+        // hold at the end: advice recorded for the human, never a blocker.
+        let mut documentary_advisories: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
+        // KT-1370 — the markers Kronn demoted to flagged backticked paths once a
+        // step's attempts were spent, with the step that left each one.
+        let mut unverified_references: Vec<(u32, crate::core::document_optimization::DemotedReference)> = Vec::new();
 
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // KT-1199 — what the previous step left, before anything else runs.
@@ -1506,6 +1559,9 @@ pub async fn full_audit(
             if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
                 full_prompt.push_str(&block);
             }
+            if let Some(block) = super::commit_context::block_for(&project_path, analysis_step.target_file, &docs_root) {
+                full_prompt.push_str(&block);
+            }
             full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline.decisions, &docs_root));
             full_prompt.push_str(&super::briefing_rules::prompt_block(analysis_step.target_file, project_rules.as_ref()));
             // 0.8.3 (#272) — pre-existing user docs are migrated to
@@ -1622,6 +1678,12 @@ pub async fn full_audit(
             let mut target_watch = super::step_guard::TargetWatch::new(
                 &project_path, analysis_step.target_file, pre_content.as_deref(),
             );
+            // KT-1360 — where HEAD and the files outside the docs root stand
+            // before the agent runs; settled after every attempt.
+            let step_remit = super::step_remit::StepRemit::capture(&project_path, &docs_root).await;
+            let mut remit_notes: Vec<String> = Vec::new();
+            // KT-1370 — what this step's documentary gate demoted after its last attempt.
+            let mut step_demotions: Vec<crate::core::document_optimization::DemotedReference> = Vec::new();
 
             // Correct blockers before final validation, at most twice per
             // step. Full's documentary gate also applies in off/warn mode;
@@ -1637,6 +1699,18 @@ pub async fn full_audit(
                     "Audit step {} ({}) re-verifies a filled target: {} stale reference(s) before the agent",
                     step, file_label, recovery_targets.iter().filter(|d| d.path == analysis_step.target_file).count()
                 );
+            }
+            // KT-1388 — the final review reads the documents side by side: a
+            // stack version the manifests or another document contradict is
+            // handed to it, whichever step wrote it, with both places named.
+            if should_optimize_documents(kind)
+                && super::ANALYSIS_STEPS.last().is_some_and(|last| last.prompt == analysis_step.prompt)
+            {
+                match super::document_repair::with_stack_conflicts(&project_path, recovery_targets.clone()) {
+                    Ok(targets) => recovery_targets = targets,
+                    // The end-of-run documentary gate still checks the stack versions.
+                    Err(e) => tracing::warn!("Audit step {} ({}): cross-document stack check skipped: {}", step, file_label, e),
+                }
             }
             // Taken before ANY write of the step, the cross-agent path's
             // included: what that path writes is the step's own doing.
@@ -1654,7 +1728,10 @@ pub async fn full_audit(
             // KT-1306 — the blockers already there before this step ran are not
             // its doing: reported, never blocking it unless handed to it.
             let documentary_baseline: Vec<crate::core::document_optimization::Diagnostic> = if documentary_snapshot.is_some() {
-                match crate::core::document_optimization::analyze(&project_path) {
+                // KT-1308 — held against what the run read so far, so an
+                // unbacked `deps:` / `url:` citation already there is in it.
+                let run_provenance = crate::core::run_provenance::RunProvenance::of(&version_ctx.snapshot, &fetch_tracker);
+                match crate::core::document_optimization::analyze_with(&project_path, Some(&run_provenance)) {
                     Ok(report) => report.blocking_diagnostics().cloned().collect(),
                     Err(e) => {
                         tracing::warn!("Audit step {} ({}): pre-step documentary baseline unavailable: {}", step, file_label, e);
@@ -1685,6 +1762,13 @@ pub async fn full_audit(
                         // of detection mode, which closes the prompt itself (KT-1278).
                         &full_prompt,
                     ).await;
+                    if let Some(remit) = &step_remit {
+                        let report = remit.settle().await;
+                        for event in super::step_remit::warning_events(step, file_label, &report) {
+                            yield event;
+                        }
+                        remit_notes.extend(report.messages());
+                    }
                     let briefing_warning = super::helpers::restore_step_briefing(&project_path, &validated_docs_snapshot).err();
                     let mut cross_unchanged = false;
                     let (mut success, mut warning, report) = match outcome {
@@ -1869,6 +1953,9 @@ pub async fn full_audit(
                     }
 
                     let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+                    if !is_stream_json && !agent_launcher.reports_tool_inputs() {
+                        fetch_tracker.mark_unobservable();
+                    }
                     // An agent without stream-json (HTTP, ACP) reports its tokens and
                     // tools on the run, not in its lines: looked at on every line and
                     // on every tick, so a tool chain without prose still shows progress.
@@ -2014,6 +2101,13 @@ pub async fn full_audit(
                         if is_stream_json {
                             let event = runner::parse_claude_stream_line(&line);
                             let _ = recent.on_stream_event(&event);
+                            fetch_tracker.ingest_line(&line);
+                            match &event {
+                                runner::StreamJsonEvent::ToolStart(name) => fetch_tracker.tool_started(name),
+                                runner::StreamJsonEvent::ToolInputDelta(fragment) => fetch_tracker.tool_input(fragment),
+                                runner::StreamJsonEvent::ToolEnd => fetch_tracker.tool_ended(),
+                                _ => {}
+                            }
                             match event {
                                 // A reading that counts nothing is no reading.
                                 runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, cost_usd }
@@ -2127,6 +2221,10 @@ pub async fn full_audit(
                     step_cost = step_cost.with_attempt(process.reported_cost_usd_micros().or(stream_cost));
                     let status = process.child.wait().await;
                     process.fix_ownership();
+                    if !is_stream_json {
+                        // An ACP-hosted agent's calls are in its process's traces.
+                        fetch_tracker.ingest_traces(&process.captured_stderr_flushed().await);
+                    }
 
                     // Unregister PID
                     if let Ok(mut tracker) = audit_tracker.lock() {
@@ -2183,6 +2281,15 @@ pub async fn full_audit(
                         }
                     }
 
+                    // KT-1360 — the agent's commits are undone and its edits outside
+                    // the docs root put back, before any gate reads the tree.
+                    if let Some(remit) = &step_remit {
+                        let report = remit.settle().await;
+                        for event in super::step_remit::warning_events(step, file_label, &report) {
+                            yield event;
+                        }
+                        remit_notes.extend(report.messages());
+                    }
                     // The rules section belongs to Kronn: an agent rewrite never keeps it.
                     super::briefing_rules::sync_from_notes(&project_path, briefing_notes.as_deref());
                     // Every write of the attempt stays; the docs a human
@@ -2314,6 +2421,14 @@ pub async fn full_audit(
                             analysis_step.target_file,
                             &chrono::Utc::now().format("%Y-%m-%d").to_string(),
                         );
+                        // KT-1364 — an outcome and its evidence merged in one cell
+                        // is split here, not sent back for a retry per row.
+                        if crate::api::audit::validation::repair_coverage_rows(
+                            &project_path,
+                            analysis_step.target_file,
+                        ) {
+                            tracing::info!("Audit step {} ({}): split merged coverage matrix rows", step, file_label);
+                        }
                     }
                     let (mut success, mut warning) = crate::api::audit::validation::validate_step_output(
                         cli_success,
@@ -2328,10 +2443,14 @@ pub async fn full_audit(
                     if cli_success && !success
                         && documentary_snapshot.is_some() && attempt < max_attempts
                     {
-                        if let Some(feedback) = super::validation::coverage_repair_feedback(&project_path, analysis_step.target_file) {
+                        let repair = super::validation::coverage_repair_feedback(&project_path, analysis_step.target_file)
+                            .map(|feedback| ("dimension_coverage", feedback))
+                            .or_else(|| super::validation::companion_repair_feedback(&project_path, analysis_step.target_file)
+                                .map(|feedback| ("unfilled_companion", feedback)));
+                        if let Some((reason, feedback)) = repair {
                             yield Event::default().event("step_retry").data(serde_json::json!({
                                 "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
-                                "reason":"dimension_coverage","diagnostic":warning.as_ref().map(|w| &w.reason),
+                                "reason":reason,"diagnostic":warning.as_ref().map(|w| &w.reason),
                             }).to_string());
                             citation_feedback = Some(feedback);
                             continue 'attempts;
@@ -2386,6 +2505,24 @@ pub async fn full_audit(
                                 citation_feedback = Some(gap.feedback);
                                 continue 'attempts;
                             }
+                            // KT-1357 — the attempts are spent: Kronn lists what is
+                            // left for a human to triage instead of failing the run.
+                            if let Some(listed) = crate::api::audit::validation::settle_unaddressed_signals(
+                                &project_path,
+                                &detector_signals,
+                            ) {
+                                tracing::warn!(
+                                    "Audit step {} ({}): {} detector signal(s) listed for triage: {}",
+                                    step, file_label, listed, w.reason
+                                );
+                                yield Event::default().event("warning").data(
+                                    serde_json::json!({
+                                        "message": format!(
+                                            "Step {step} ({file_label}): {listed} detector signal(s) were left unaddressed by the agent; Kronn listed them under \"Unaddressed detector signals\" for triage"
+                                        ),
+                                    }).to_string()
+                                );
+                            } else {
                             success = false;
                             tracing::warn!(
                                 "Audit step {} ({}) detector disposition gate failed: {}",
@@ -2406,6 +2543,7 @@ pub async fn full_audit(
                             // only runs when `success` was still true, i.e. the
                             // validation pass produced no warning.
                             warning = Some(w);
+                            }
                         }
                     }
 
@@ -2415,8 +2553,17 @@ pub async fn full_audit(
                     let mut documentary_repair_proven = false;
                     if success {
                         if let Some(before) = &documentary_snapshot {
-                            let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets, &documentary_baseline);
+                            // Whatever the anti-hallucination mode: a `deps:` row the
+                            // watch does not hold, or a `url:` page never fetched, blocks.
+                            let run_provenance = crate::core::run_provenance::RunProvenance::of(&version_ctx.snapshot, &fetch_tracker);
+                            let gate = super::document_repair::check_attempt(&project_path, before, &recovery_targets, &documentary_baseline, Some(&run_provenance));
                             if let Ok(check) = &gate {
+                                if !check.repaired.is_empty() {
+                                    documentary_autofixes.extend(check.repaired.iter().cloned().map(|fix| (step as u32, fix)));
+                                    yield Event::default().event("documentary_autofix").data(serde_json::json!({
+                                        "step":step,"file":file_label,"attempt":attempt,"fixes":check.repaired,
+                                    }).to_string());
+                                }
                                 if !check.preexisting.is_empty() && (check.blocking.is_empty() || attempt >= max_attempts) {
                                     tracing::info!(
                                         "Audit step {} ({}): {} documentary blocker(s) pre-date the step, reported without blocking it",
@@ -2427,15 +2574,78 @@ pub async fn full_audit(
                                     }).to_string());
                                 }
                             }
+                            // KT-1388 — advice, not a blocker: handed back while the
+                            // step can still correct, recorded when it cannot.
+                            let advisory = gate.as_ref().map(|check| check.advisory.clone()).unwrap_or_default();
+                            // KT-1387 — commands the repository does not define: the
+                            // same treatment, kept in their own list of the run's notes.
+                            let unverified_commands = gate
+                                .as_ref()
+                                .map(|check| check.unverified_commands.clone())
+                                .unwrap_or_default();
                             let reason = match gate.map(|check| check.blocking) {
+                                Ok(blocking) if blocking.is_empty() && (!advisory.is_empty() || !unverified_commands.is_empty()) && attempt < max_attempts => {
+                                    let (retry_reason, flagged) = if advisory.is_empty() {
+                                        citation_feedback = Some(super::document_repair::feedback(&unverified_commands));
+                                        ("documentary_unverified_commands", unverified_commands.clone())
+                                    } else {
+                                        let mut flagged = advisory.clone();
+                                        flagged.extend(unverified_commands.iter().cloned());
+                                        citation_feedback = Some(super::document_repair::advice(&flagged));
+                                        ("documentary_advisories", flagged)
+                                    };
+                                    yield Event::default().event("step_retry").data(serde_json::json!({
+                                        "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
+                                        "reason":retry_reason,"advisory_count":advisory.len(),
+                                        "fabricated_count":unverified_commands.len(),
+                                        "diagnostics":flagged,
+                                    }).to_string());
+                                    continue 'attempts;
+                                }
                                 Ok(blocking) if blocking.is_empty() => {
                                     documentary_repair_proven = super::document_repair::recovery_changed(
                                         &project_path, before, &recovery_targets,
                                     );
+                                    if !advisory.is_empty() {
+                                        // The last attempt leaves them: a step warning, the step stays done.
+                                        let notes: Vec<String> = advisory
+                                            .iter()
+                                            .map(|d| format!("Unverified: `{}` — {}", d.path, d.message))
+                                            .collect();
+                                        yield Event::default().event("documentary_advisory").data(serde_json::json!({
+                                            "step":step,"file":file_label,"diagnostics":advisory,
+                                        }).to_string());
+                                        remit_notes.extend(notes);
+                                    }
+                                    // The attempts are spent: the step stays done, the
+                                    // doubt is recorded and said to the human.
+                                    if !unverified_commands.is_empty() {
+                                        tracing::warn!(
+                                            "Audit step {} ({}): {} cited command(s) not defined by the repository, kept as a warning",
+                                            step, file_label, unverified_commands.len()
+                                        );
+                                        for diagnostic in &unverified_commands {
+                                            let entry = (step as u32, diagnostic.clone());
+                                            if !documentary_unverified_commands.contains(&entry) {
+                                                documentary_unverified_commands.push(entry);
+                                            }
+                                        }
+                                        yield Event::default().event("warning").data(serde_json::json!({
+                                            "message": format!(
+                                                "Step {step} ({file_label}): {} cited command(s) are not defined by the repository's Makefile or manifests; kept as a warning, listed in the run's documentary notes",
+                                                unverified_commands.len()
+                                            ),
+                                            "step":step,"file":file_label,
+                                            "diagnostics":unverified_commands,
+                                        }).to_string());
+                                    }
                                     None
                                 }
                                 Ok(blocking) if attempt < max_attempts => {
-                                    citation_feedback = Some(super::document_repair::feedback(&blocking));
+                                    // What is flagged beyond the blockers rides along.
+                                    let mut flagged = blocking.clone();
+                                    flagged.extend(unverified_commands.iter().cloned());
+                                    citation_feedback = Some(super::document_repair::feedback(&flagged));
                                     yield Event::default().event("step_retry").data(serde_json::json!({
                                         "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
                                         "reason":"documentary_blockers","fabricated_count":blocking.len(),
@@ -2443,7 +2653,45 @@ pub async fn full_audit(
                                     }).to_string());
                                     continue 'attempts;
                                 }
-                                Ok(blocking) => Some(super::document_repair::feedback(&blocking)),
+                                // KT-1370 — the last attempt is spent: what is left is
+                                // only citation markers neither the agent nor the exact
+                                // fixes could repair. They stop being citations (a flagged
+                                // backticked path) and the run goes on, instead of
+                                // ending Interrupted with every later step refused.
+                                Ok(blocking) => {
+                                    let target_holds = || matches!(
+                                        super::anti_hallu_enforce::evaluate_enforce_gate(
+                                            enforce_mode, true, analysis_step.target_file,
+                                            &project_path, attempt, max_attempts, version_ctx.snapshot.as_ref(),
+                                        ),
+                                        super::anti_hallu_enforce::EnforceGateOutcome::NotApplicable
+                                            | super::anti_hallu_enforce::EnforceGateOutcome::Pass { .. }
+                                    );
+                                    match super::document_repair::demote_last_attempt(
+                                        &project_path, &blocking, Some(&run_provenance), &target_holds,
+                                    ) {
+                                        Ok(demoted) if !demoted.is_empty() => {
+                                            tracing::warn!(
+                                                "Audit step {} ({}): {} citation marker(s) demoted to unverified references after the last attempt",
+                                                step, file_label, demoted.len()
+                                            );
+                                            documentary_repair_proven = super::document_repair::recovery_changed(
+                                                &project_path, before, &recovery_targets,
+                                            );
+                                            yield Event::default().event("documentary_demoted").data(serde_json::json!({
+                                                "step":step,"file":file_label,"attempt":attempt,"references":demoted,
+                                            }).to_string());
+                                            unverified_references.extend(demoted.iter().cloned().map(|r| (step as u32, r)));
+                                            step_demotions = demoted;
+                                            None
+                                        }
+                                        Ok(_) => Some(super::document_repair::feedback(&blocking)),
+                                        Err(error) => {
+                                            tracing::warn!("Audit step {step} ({file_label}): demotion failed: {error}");
+                                            Some(super::document_repair::feedback(&blocking))
+                                        }
+                                    }
+                                }
                                 Err(error) => Some(format!("Documentary correction failed: {error}")),
                             };
                             if let Some(reason) = reason {
@@ -2633,6 +2881,8 @@ pub async fn full_audit(
                         "total_tokens": run_tokens.total(),
                         // `null` — not 0 — when an attempt's agent reported no cost.
                         "cost_usd_micros": step_cost.usd_micros(),
+                        "remit": remit_notes,
+                        "unverified_references": step_demotions.len(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
 
@@ -2644,7 +2894,12 @@ pub async fn full_audit(
                     {
                         let run_id = audit_run_id.clone();
                         let log_run_id = run_id.clone();
-                        let warn_reason = warning.as_ref().map(|w| w.reason.clone());
+                        let warn_reason = {
+                            let mut reasons: Vec<String> = warning.as_ref().map(|w| w.reason.clone()).into_iter().collect();
+                            reasons.extend(remit_notes.iter().cloned());
+                            reasons.extend(super::document_repair::demotion_notes(&step_demotions));
+                            (!reasons.is_empty()).then(|| reasons.join("\n"))
+                        };
                         let repaired = warning.as_ref().map(|w| w.repaired).unwrap_or(false);
                         let ended = Utc::now();
                         let recorded_usage = combined_step_usage;
@@ -2843,10 +3098,14 @@ pub async fn full_audit(
             }
             // KT-1306 — charge what this step brought, now that its files are final.
             if documentary_snapshot.is_some() {
-                match crate::core::document_optimization::analyze(&project_path) {
+                // KT-1308 — the same provenance-aware analysis as the baseline,
+                // so an unbacked citation this step wrote is charged to it.
+                let run_provenance = crate::core::run_provenance::RunProvenance::of(&version_ctx.snapshot, &fetch_tracker);
+                match crate::core::document_optimization::analyze_with(&project_path, Some(&run_provenance)) {
                     Ok(report) => {
                         let after: Vec<_> = report.blocking_diagnostics().cloned().collect();
                         doc_blame.record_step(&project_path, step as u32, &documentary_baseline, &after);
+                        doc_blame.release(&project_path, step as u32, &recovery_targets);
                     }
                     Err(e) => tracing::warn!("Audit step {step} ({file_label}): documentary blame not recorded: {e}"),
                 }
@@ -3075,15 +3334,42 @@ pub async fn full_audit(
                     human_references = report.diagnostics.iter()
                         .filter(|d| d.code == crate::core::document_optimization::HUMAN_SECTION_REFERENCE)
                         .cloned().collect();
-                    let blocking: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                    let all_blocking: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                    // The gate's own deterministic write above is the run's: the
+                    // exemption is sealed on the documents as they stand now.
+                    doc_blame.seal(&project_path);
+                    // KT-1353 — what the committed documents held before the run
+                    // and the run left as it was is reported, never failing it.
+                    let (preexisting, blocking) = doc_blame.split_preexisting(&all_blocking);
                     yield Event::default().event("documentary_optimization").data(
                         serde_json::json!({
                             "phase": report.phase,
                             "agents": report.agents,
                             "diagnostics": report.diagnostics,
                             "blocking_count": blocking.len(),
+                            "preexisting_count": preexisting.len(),
                         }).to_string()
                     );
+                    if !preexisting.is_empty() {
+                        tracing::info!(
+                            "Audit final gate: {} documentary blocker(s) pre-date the run, reported without failing it",
+                            preexisting.len()
+                        );
+                        yield Event::default().event("documentary_preexisting").data(serde_json::json!({
+                            "step":0,"file":"","phase":"final_gate","diagnostics":preexisting,
+                        }).to_string());
+                    }
+                    // KT-1388 - what the documents still hold as advice: noted, never counted.
+                    documentary_advisories = report.advisory_diagnostics().cloned().collect();
+                    if let Some(notes) = super::document_repair::notes_json(&preexisting, &documentary_advisories, &documentary_autofixes, &unverified_references, &documentary_unverified_commands) {
+                        let run_id = audit_run_id.clone();
+                        if let Err(error) = db.with_conn(move |conn|
+                            crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes)
+                        ).await {
+                            tracing::warn!("Documentary notes of {audit_run_id} not recorded: {error}");
+                        }
+                    }
+                    documentary_preexisting = preexisting.clone();
                     if !blocking.is_empty() {
                         docs_blocked = true;
                         let recovery = super::document_repair::recovery_plan(&blocking, &steps, &doc_blame);
@@ -3377,7 +3663,11 @@ pub async fn full_audit(
         let validation_prompt = format!(
             "{}{}{validation_prompt}",
             unchanged_steps_block(&unchanged_listed, total_steps as u32, &language),
-            super::helpers::human_references_block(&human_references, &language)
+            super::helpers::human_references_block(&human_references, &language),
+        );
+        let validation_prompt = format!(
+            "{}{validation_prompt}",
+            super::helpers::documentary_notes_block(&documentary_preexisting, &documentary_advisories, &documentary_autofixes, &unverified_references, &documentary_unverified_commands, &language)
         );
         let accepted_listed: Vec<super::helpers::AcceptedStepLine> = accepted_rows
             .iter()
@@ -3667,6 +3957,7 @@ pub async fn full_audit(
             "discussion_id": disc_id,
             "template_was_installed": template_installed,
             "audit_run_id": audit_run_id,
+            "unverified_references": unverified_references.len(),
         });
         yield Event::default().event("done").data(done.to_string());
     });
@@ -4182,6 +4473,38 @@ pub(crate) fn rewrite_proof_verdict(
 /// missing / cross-project / non-Interrupted / unknown-kind row must never
 /// silently degrade to a fresh run (that would discard the work the user
 /// asked to resume). Returns `(kind, resume_from)` on success.
+/// The model tier and named connection a launch runs on: the request's own
+/// choice, else the run it resumes (KT-1320), else the historical audit default
+/// (Reasoning, no connection). A resume that names nothing keeps what the run
+/// had, so a retry of an economy audit never drifts to the costliest tier. The
+/// third value says the connection is the run's own (inherited, or echoed back
+/// by the client), so a deleted one may fall back to the agent's default.
+pub(crate) fn launch_footing(
+    req: &crate::models::LaunchAuditRequest,
+    resumed: Option<&crate::models::AuditRun>,
+) -> (crate::models::ModelTier, Option<String>, bool) {
+    let recorded_tier = resumed
+        .and_then(|run| run.tier.as_deref())
+        .and_then(crate::models::ModelTier::parse);
+    let tier = req
+        .tier
+        .or(recorded_tier)
+        .unwrap_or(crate::models::ModelTier::Reasoning);
+    // A connection belongs to its agent: another agent does not inherit it.
+    let inherited = resumed
+        .filter(|run| run.agent_type == format!("{:?}", req.agent))
+        .and_then(|run| run.connection_id.clone());
+    if let Some(connection) = req.connection_id.clone() {
+        // A client echoing the run's own connection back (the UI does when its
+        // picker is untouched) is still the run's choice: if it was deleted
+        // since, the fallback applies instead of a refusal.
+        let echoes_run = inherited.as_deref() == Some(connection.as_str());
+        return (tier, Some(connection), echoes_run);
+    }
+    let from_run = inherited.is_some();
+    (tier, inherited, from_run)
+}
+
 pub(crate) fn resolve_resume_row(
     run_id: &str,
     row: Option<&crate::models::AuditRun>,
@@ -5207,6 +5530,91 @@ mod resume_resolution_tests {
             "status": status, "last_completed_step": step,
         }))
         .unwrap()
+    }
+
+    fn request(
+        agent: &str,
+        tier: Option<&str>,
+        connection: Option<&str>,
+    ) -> crate::models::LaunchAuditRequest {
+        serde_json::from_value(serde_json::json!({
+            "agent": agent, "tier": tier, "connection_id": connection,
+            "resume_run_id": "r1",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_resume_without_a_tier_keeps_the_tier_of_the_run_it_continues() {
+        use crate::models::ModelTier;
+        let mut economy = run("Full", "Interrupted", "p1", 4);
+        economy.tier = Some("economy".into());
+        let req = request("ClaudeCode", None, None);
+        assert_eq!(
+            super::launch_footing(&req, Some(&economy)).0,
+            ModelTier::Economy
+        );
+        // The historical default only when nothing is recorded or there is no run.
+        let legacy = run("Full", "Interrupted", "p1", 4);
+        assert_eq!(
+            super::launch_footing(&req, Some(&legacy)).0,
+            ModelTier::Reasoning
+        );
+        assert_eq!(super::launch_footing(&req, None).0, ModelTier::Reasoning);
+    }
+
+    #[test]
+    fn a_tier_named_by_the_human_wins_over_the_run_s() {
+        use crate::models::ModelTier;
+        let mut economy = run("Full", "Interrupted", "p1", 4);
+        economy.tier = Some("economy".into());
+        let req = request("ClaudeCode", Some("reasoning"), None);
+        assert_eq!(
+            super::launch_footing(&req, Some(&economy)).0,
+            ModelTier::Reasoning
+        );
+    }
+
+    #[test]
+    fn a_resume_keeps_the_connection_of_its_agent_only() {
+        let mut http = run("Full", "Interrupted", "p1", 4);
+        http.agent_type = "LiteLlm".into();
+        http.connection_id = Some("conn-a".into());
+        let same = request("LiteLlm", None, None);
+        assert_eq!(
+            super::launch_footing(&same, Some(&http)).1.as_deref(),
+            Some("conn-a")
+        );
+        // Another agent, or another connection named by the human, is not overridden.
+        let other_agent = request("ClaudeCode", None, None);
+        assert_eq!(super::launch_footing(&other_agent, Some(&http)).1, None);
+        let other_conn = request("LiteLlm", None, Some("conn-b"));
+        assert_eq!(
+            super::launch_footing(&other_conn, Some(&http)).1.as_deref(),
+            Some("conn-b")
+        );
+    }
+
+    #[test]
+    fn a_connection_echoed_from_the_run_counts_as_the_run_s_own() {
+        let mut http = run("Full", "Interrupted", "p1", 4);
+        http.agent_type = "LiteLlm".into();
+        http.connection_id = Some("conn-a".into());
+        let echoed = request("LiteLlm", None, Some("conn-a"));
+        assert_eq!(
+            super::launch_footing(&echoed, Some(&http)),
+            (
+                crate::models::ModelTier::Reasoning,
+                Some("conn-a".into()),
+                true
+            )
+        );
+        // A different connection named by the human stays theirs (validated, not replaced).
+        let other = request("LiteLlm", None, Some("conn-b"));
+        assert!(!super::launch_footing(&other, Some(&http)).2);
+        // The same id on another agent is not the run's choice either.
+        let other_agent = request("ClaudeCode", None, Some("conn-a"));
+        assert!(!super::launch_footing(&other_agent, Some(&http)).2);
     }
 
     #[test]

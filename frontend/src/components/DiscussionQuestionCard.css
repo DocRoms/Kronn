@@ -85,6 +85,11 @@
   font-size: var(--kr-fs-xs);
 }
 
+.disc-question-td-errors-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .disc-question-unread-warning svg {
   flex: 0 0 auto;
   margin-top: 0.08rem;

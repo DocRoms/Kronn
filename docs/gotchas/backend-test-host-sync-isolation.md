@@ -83,14 +83,14 @@ and sends two ordinary concurrent create requests after initialization. The
 blocked child places a file inside the owned Codex fixture and verifies that a
 write failure leaves the outside sentinels unchanged. The parent re-executes its
 own test binary with `--exact`, has a 15-second deadline/kill path, and asserts
-that its own two overrides are unchanged after every child. [src: file: backend/tests/api_tests.rs:17691-17921#MCP_HOST_ISOLATION_CHILD]
+that its own two overrides are unchanged after every child. [src: file: backend/tests/api_tests.rs:17726-17956#MCP_HOST_ISOLATION_CHILD]
 
 The parent initializes the ordinary `OnceLock` before taking those environment
 snapshots. Otherwise a parallel non-serial router test can perform the first
 initialization during a child run and make the parent falsely report an
 environment leak. Keep that initialization inside the parent branch: doing it
 in the child before its RED control would hide the confinement regression.
-[src: file: backend/tests/api_tests.rs:17742-17747#isolate_config_dir]
+[src: file: backend/tests/api_tests.rs:17777-17782#isolate_config_dir]
 
 The focused regression is not a replacement for the principal's combined-suite
 qualification; it is the source-level confinement audit and regression proof

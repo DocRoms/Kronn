@@ -26,7 +26,7 @@ agent, regardless of which named connection backs it. It replaces an inline
 ternary that used to live inside `start_ollama_http`, mirroring
 `acp::resolve_acp_route` being the sole ACP route decision point.
 [src: file: backend/src/http_transport.rs:28-41]
-[src: file: backend/src/agents/runner.rs:9000-9003#resolve_chat_codec] (call site)
+[src: file: backend/src/agents/runner.rs:9027-9030#resolve_chat_codec] (call site)
 
 ### Pre-dispatch capability gate
 
@@ -105,7 +105,7 @@ the new `OrchestrationParticipant` type (replacing the bare
 `connection_id`, validated the same way and dispatched through the same
 `enqueue_with_connection`/`external_http_runtime` construction discussion
 dispatch already used. [src: file: backend/src/models/compare.rs:128-156]
-[src: file: backend/src/models/discussions.rs:876-891#OrchestrationParticipant] (`OrchestrationParticipant`)
+[src: file: backend/src/models/discussions.rs:942-957#OrchestrationParticipant] (`OrchestrationParticipant`)
 
 ## Consequences
 

@@ -92,14 +92,36 @@ export function catalogModelProvenance(model: CatalogModelEntry, target: ModelCa
     ? 'cached' : model.provenance;
 }
 
+/** A model can chat unless its catalogue entry lists capabilities without
+ *  `chat`; an empty list predates capability tags and stays usable. */
+export function isChatCapable(capabilities: readonly string[] | null | undefined): boolean {
+  return !capabilities?.length || capabilities.includes('chat');
+}
+
+export function isDecisionCapable(capabilities: readonly string[] | null | undefined): boolean {
+  return Boolean(capabilities?.includes('decision'));
+}
+
+/** Whether any catalogue (local Ollama or an HTTP connection) holds a decision model. */
+export function hasDecisionModel(snapshot: ModelCatalogSnapshot | null | undefined): boolean {
+  return Boolean(snapshot?.targets.some(target => target.models.some(model => isDecisionCapable(model.capabilities))));
+}
+
+/** Options for a model picker. `chat` (the tiers) lists chat models;
+ *  `decision` (the Decision slot) lists decision models only. */
 export function catalogModelOptions(
   target: ModelCatalogView | undefined,
   configured: string,
   t: (key: string, ...args: (string | number)[]) => string,
   observedCost: (model: string) => string,
+  kind: 'chat' | 'decision' = 'chat',
 ): SearchableSelectOption[] {
-  const options = (target?.models ?? [])
-    .filter(model => model.runtime_target_id === target?.runtime_target_id)
+  const listed = (target?.models ?? [])
+    .filter(model => model.runtime_target_id === target?.runtime_target_id);
+  const fits = (capabilities: readonly string[]) =>
+    kind === 'chat' ? isChatCapable(capabilities) : isDecisionCapable(capabilities);
+  const options = listed
+    .filter(model => fits(model.capabilities))
     .map(model => {
       const unavailable = model.availability === 'unavailable';
       const provenance = catalogModelProvenance(model, target);
@@ -133,7 +155,18 @@ export function catalogModelOptions(
         disabled: unavailable,
       };
     });
-  if (configured && !options.some(option => option.value === configured)) {
+  const nonChat = kind === 'chat' && configured
+    ? listed.find(model => model.model_id === configured && !isChatCapable(model.capabilities)) : undefined;
+  if (nonChat) {
+    // Keep a saved choice visible so the user sees why it cannot run.
+    options.push({
+      value: nonChat.model_id,
+      label: `❌ ${nonChat.display_alias ?? nonChat.display_name} — ${t('modelCatalog.notChatModel')}`,
+      keywords: nonChat.model_id,
+      description: nonChat.capabilities.join(', '),
+      disabled: true,
+    });
+  } else if (configured && !options.some(option => option.value === configured)) {
     options.push({
       value: configured,
       label: `${configured} — ${t('modelCatalog.notInCatalog')}`,

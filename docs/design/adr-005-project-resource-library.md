@@ -35,7 +35,7 @@ What the code does today:
   (`custom-<slug>`). Updating one rewrites the same file in place and
   atomically, so renaming keeps its id and a run that resolves it later still
   finds it
-  [src: file: backend/src/api/skills.rs:67-98#update]
+  [src: file: backend/src/api/skills.rs:85-116#update]
   [src: file: backend/src/core/skills.rs:831-892#update_custom_skill]
   [src: file: backend/src/core/directives.rs:345-380#update_custom_directive]
   [src: file: backend/src/core/profiles.rs:521-547#update_custom_profile].
@@ -468,9 +468,9 @@ Branch `archive/feat-0.13.0-portable-prototype-20260830`.
   [src: file: frontend/src/lib/projectRepositoryResourcesTab.ts:6-15#readProjectRepositoryResourcesTab]
   [src: file: frontend/src/lib/projectRepositoryResourcesTab.ts:17-23#rememberProjectRepositoryResourcesTab].
 - The Overview shows the linked MCP count and companion repositories, and owns
-  the project deletion controls [src: file: frontend/src/components/ProjectCard.tsx:2204-2208#projMcps]
-  [src: file: frontend/src/components/ProjectCard.tsx:2250-2265#ProjectLinkedRepos]
-  [src: file: frontend/src/components/ProjectCard.tsx:2267-2315#handleDeleteProject].
+  the project deletion controls [src: file: frontend/src/components/ProjectCard.tsx:2284-2288#projMcps]
+  [src: file: frontend/src/components/ProjectCard.tsx:2330-2345#ProjectLinkedRepos]
+  [src: file: frontend/src/components/ProjectCard.tsx:2316-2364#handleDeleteProject].
 - **Automations and Artifacts pages**: grouped by project; everything not
   linked to a project goes into « Général ».
 - Simple and fast first: the listing reads existing rows and a cheap hash

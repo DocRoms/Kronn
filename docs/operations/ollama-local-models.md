@@ -32,11 +32,11 @@ references for the lifecycle actions they steer. A worker is still offered
 `task_exec_status`, but it accepts a task reference as well as an execution id,
 so a local model never has to reconstruct an opaque UUID, and it answers only
 the execution's principal or its own native worker.
-`[src: file: backend/src/api/agent_tools.rs:1392-1522#worker_room_catalogue]`
-`[src: file: backend/src/api/agent_tools.rs:2710-2734#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:3850-3872#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:2680-2709#task_exec_status]`
-`[src: file: backend/src/api/agent_tools.rs:3812-3848#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:1430-1562#worker_room_catalogue]`
+`[src: file: backend/src/api/agent_tools.rs:2809-2833#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:3949-3971#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:2753-2782#task_exec_status]`
+`[src: file: backend/src/api/agent_tools.rs:3911-3947#native_execution_for_caller]`
 
 The discussion SSE path resolves this scope from the durable
 `task_executions.sub_discussion_id` lineage before it constructs the HTTP tool
@@ -293,8 +293,8 @@ actionable Settings/override message. Historical seeds are written once by the
 migration; no runner fallback revives them after deletion. Unit tests use the
 same resolver as production; the historical expectation helper itself is
 test-only and is not called by the resolver.
-[src: file: backend/src/agents/runner.rs:3659-3661#missing_ollama_model_error]
-[src: file: backend/src/agents/runner.rs:4201-4203#missing_ollama_model_error]
+[src: file: backend/src/agents/runner.rs:3663-3665#missing_ollama_model_error]
+[src: file: backend/src/agents/runner.rs:4205-4207#missing_ollama_model_error]
 [src: file: backend/src/core/model_catalog/mod.rs:140-260#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:107-110#migrated_default]
 
@@ -305,7 +305,7 @@ This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3348-3353#is_http_chat_agent]
 [src: file: backend/src/agents/runner.rs:4251-4272#start_ollama_http_with_idle]
 [src: file: backend/src/agents/runner.rs:4470-4483#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:13160-13169#Ollama]
+[src: file: backend/src/agents/runner.rs:13187-13196#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's
@@ -314,8 +314,8 @@ another model or a CLI default. Explicit operator settings still take priority;
 failed assignment reads refuse launch. A target with no selected or assigned
 identity keeps the existing no-model preflight behavior; this change does not
 introduce new discovery for unconfigured runtimes.
-[src: file: backend/src/core/model_catalog/mod.rs:1030-1059#requested_model]
-[src: file: backend/src/core/model_catalog/mod.rs:1231-1264#requested_launch_model]
+[src: file: backend/src/core/model_catalog/mod.rs:1078-1107#requested_model]
+[src: file: backend/src/core/model_catalog/mod.rs:1279-1312#requested_launch_model]
 
 The production integration fixture links the library without `cfg(test)` and
 uses isolated SQLite plus explicit loopback endpoints. It actually creates,
@@ -342,7 +342,7 @@ launch (`crud.rs` stamps `discussions.model` from the QP).
 
 ## "Stable output", NOT bit-exact determinism
 
-`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:7815-7875#build_ollama_chat_body] sends
+`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:7842-7902#build_ollama_chat_body] sends
 `temperature:0, top_k:1, seed:42` as INTERNAL constants (no per-step knob).
 On Apple Metal the float reduction order isn't guaranteed, so two logits within
 epsilon can flip the argmax (more so under Q4 quant) → output is *greedy-stable*,
@@ -456,8 +456,8 @@ gets depends on who runs the model, not only on the machine:
 
 | Rule | Window | Where |
 |---|---|---|
-| Memory band for 64 GiB, weights and cache cost not known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:6266-6291#ram_derived_ceiling] |
-| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` [src: file: backend/src/agents/runner.rs:6444-6484#resolve_ctx_cap_within] |
+| Memory band for 64 GiB, weights and cache cost not known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:6276-6301#ram_derived_ceiling] |
+| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` [src: file: backend/src/agents/runner.rs:6454-6494#resolve_ctx_cap_within] |
 | Same window, weights and attention shape known (KT-943) | 262,144, the whole window, origin `model_window` | `ceiling_for_model` [src: file: backend/src/agents/ollama_memory.rs:268-313#ceiling_for_model] |
 | Discussion principal (`ToolRunMode::General`) | the ceiling above — 262,144 once the model's shape is known, else 65,536 — requested up front because tools are declared | `worker_effective_ctx_cap` [src: file: backend/src/agents/runner.rs:227-237#worker_effective_ctx_cap] |
 | Task worker (`ToolRunMode::Worker`) on native MLX | 32,768 | `MLX_WORKER_EFFECTIVE_CTX_CAP` [src: file: backend/src/agents/runner.rs:97-104#MLX_WORKER_EFFECTIVE_CTX_CAP] |
@@ -475,7 +475,7 @@ the model has been loaded at two different windows, the cache cost measured on
 the server replaces the computed one in the formula of KT-943 (and, off Apple
 Silicon, the 70 %-of-memory rule: what is left of 70 % of memory after the
 weights, over that cost)
-[src: file: backend/src/agents/runner.rs:6529-6549#kv_bytes_per_token_from_samples] [src: file: backend/src/agents/runner.rs:6551-6567#RAM_SHARE_FOR_MODEL].
+[src: file: backend/src/agents/runner.rs:6539-6559#kv_bytes_per_token_from_samples] [src: file: backend/src/agents/runner.rs:6561-6577#RAM_SHARE_FOR_MODEL].
 
 So the 32K ceiling is a worker's and not a discussion's, and a discussion on this
 Mac is at the ceiling resolved above — the model's whole 262,144 when its
@@ -595,7 +595,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:3874-3902#count_arg] [src: file: backend/src/api/agent_tools.rs:3605-3648#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:3973-4001#count_arg] [src: file: backend/src/api/agent_tools.rs:3678-3721#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes
@@ -637,8 +637,8 @@ policy is unchanged: `Fail` rejects output that remains invalid, while
 `Continue` may keep invalid raw output. Prompt-based output is not a guarantee
 of schema compliance. Repeated launches, including a repair launch, negotiate
 the capability independently; no persistent capability cache is written.
-`[src: file: backend/src/agents/runner.rs:8662-8696#rejects_structured_output]`
-`[src: file: backend/src/agents/runner.rs:9375-9439#format_fallback_notice]`
+`[src: file: backend/src/agents/runner.rs:8689-8723#rejects_structured_output]`
+`[src: file: backend/src/agents/runner.rs:9392-9456#format_fallback_notice]`
 `[src: file: backend/src/workflows/steps.rs:1074-1097#ollama_envelope_format]`
 
 **Quality escalation** (`steps.rs::escalation_step`): if a LOCAL (Ollama)
@@ -756,7 +756,7 @@ answer is bounded to 8 s; whatever finished by then is used and cached. Answers 
 cached for 6 hours, a failure for 2 minutes (long enough that a blocked network is
 not asked again on every visit, short enough that it never sticks). The only thing
 that leaves the machine is a library tag name, sent by the Kronn backend, not the
-browser. [src: file: backend/src/api/ollama.rs:326-364#registry]
+browser. [src: file: backend/src/api/ollama.rs:332-370#registry]
 [src: file: backend/src/core/ollama_registry.rs:45-51#FETCH_TIMEOUT]
 [src: file: backend/src/core/ollama_registry.rs:76-89#MAX_CONCURRENT_LOOKUPS]
 
@@ -770,7 +770,7 @@ The card marks a recheck done only once its answer has landed, so a request that
 newer render supersedes is followed by another fresh one, never by a cached one
 that raced it. [src: file: backend/src/core/ollama_registry.rs:53-62#recheck]
 [src: file: backend/src/core/ollama_registry.rs:359-364#recheck_at]
-[src: file: backend/src/api/ollama.rs:305-312#fresh]
+[src: file: backend/src/api/ollama.rs:311-318#fresh]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:417-444#recheckedTick]
 
 To check one model by hand:
@@ -808,10 +808,52 @@ where Ollama runs. [src: file: backend/src/api/ollama.rs:62-84#fetch_server_vers
    9428 of 9500 prompt tokens on a second turn). Older MLX servers lack
    prompt-prefix reuse (ollama/ollama#17829), which is not what a suggestion
    should steer a user to.
-   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:6852-6856#mlx_prefix_cache_reused]
+   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:6879-6883#mlx_prefix_cache_reused]
 
 When it is, the `-mlx` builds are listed first with an "Optimized for Mac" mark,
 then the portable list. Everywhere else the list is exactly the portable one.
+
+## Decision models (KT-1366)
+
+A decision model (for example `clef-flash:9b`) answers typed questions (yes/no,
+choice, score) with a probability through Ollama's `POST /v1/systemone`; it
+cannot chat. Ollama says so in `/api/show`: `capabilities` lists `decision`
+without `completion`. [src: url: https://docs.ollama.com/capabilities/decision]
+
+- The catalogue refresh reads `/api/show` for every listed tag and stores its
+  capabilities in the catalogue's words (`completion` becomes `chat`; `vision`,
+  `decision`, `image` and `embedding` are kept; a list with none of these
+  keeps Ollama's own words, so it never reads as chat). A tag whose probe
+  fails keeps the capabilities already saved for it, and a tag never probed
+  stays `chat`.
+- Local image generation does not run: Ollama removed it on 2026-07-28
+  (#16615, "to be re-introduced on the new MLX runner"). 0.40.6 still pulls
+  `x/flux2-klein:4b` (`capabilities: ["image"]`) but `/api/generate` answers
+  `400 image generation models are not currently supported`. Kronn keeps such
+  a model out of the chat pickers.
+  [src: url: https://github.com/ollama/ollama/pull/16615]
+  [src: file: backend/src/core/model_catalog/ollama_discovery.rs:137-152#catalog_capabilities]
+  [src: file: backend/src/core/model_catalog/mod.rs:661-703#ollama_capabilities]
+- A catalogue entry without `chat` is refused by the chat preflight, and the
+  pickers leave it out; a saved choice stays visible, disabled, saying it is a
+  decision model. An entry with no capability list stays usable.
+  [src: file: backend/src/http_transport.rs:49-51#entry_supports_capability]
+  [src: file: frontend/src/lib/modelCatalogSelection.ts:97-99#isChatCapable]
+- The model Decision steps call is chosen like a tier, with the same picker:
+  a « 🧭 Décision » row in the Ollama card's tier grid (saved as
+  `model_tiers.ollama.decision`) and a Decision slot next to image and video
+  on an HTTP connection (`decision_model`). Both list decision models only.
+  The manual catalogue form offers the `decision` capability for HTTP entries.
+  OpenRouter leaves decision models out of its default `/v1/models` listing;
+  the connection test asks `/v1/models?output_modalities=decisions` and keeps
+  only the models that declare `decisions` (e.g.
+  `perplexity/pplx-decider-flash-v1.2`).
+  [src: url: https://openrouter.ai/api/v1/models?output_modalities=decisions]
+  `hasDecisionModel` tells the UI whether any catalogue holds one.
+  [src: file: frontend/src/lib/modelCatalogSelection.ts:106-108#hasDecisionModel]
+- Ollama 0.34.2 refuses to pull `clef-flash` with `412 … requires a newer
+  version of Ollama`; the card now says to update Ollama. Measured on
+  0.40.6: first call 8.5 s (load), then 0.2–0.6 s.
 
 ## Bench snapshot (M5 Max 64 GB, Q4_K_M, informational)
 

@@ -10604,6 +10604,7 @@ Suite de la réponse.";
             worker,
             room_agent,
             workflow_step,
+            None,
             &[],
             None,
         )
@@ -10641,6 +10642,7 @@ Suite de la réponse.";
             "ANTHROPIC_API_KEY",
             None,
             io,
+            None,
             None,
             None,
             None,
@@ -10706,6 +10708,7 @@ Suite de la réponse.";
             SpawnIo::Direct(None),
             None,
             Some(&worker),
+            None,
             None,
             None,
             &[],
@@ -12451,6 +12454,7 @@ Suite de la réponse.";
                 storage_format: Some("safetensors".into()),
                 kv_shape: None,
                 vision: crate::agents::vision::ImageSupport::Unknown,
+                capabilities: None,
             }
         );
 
@@ -12461,6 +12465,7 @@ Suite de la réponse.";
                 storage_format: None,
                 kv_shape: None,
                 vision: crate::agents::vision::ImageSupport::Unknown,
+                capabilities: None,
             }
         );
     }

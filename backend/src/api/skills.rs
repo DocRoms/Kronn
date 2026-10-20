@@ -1,7 +1,7 @@
 //! Skills API — list, create, update, delete skills.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 
@@ -13,6 +13,24 @@ use crate::AppState;
 pub async fn list(_state: State<AppState>) -> Json<ApiResponse<Vec<Skill>>> {
     let all = skills::list_all_skills();
     Json(ApiResponse::ok(all))
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct GuideQuery {
+    #[serde(default)]
+    pub section: Option<String>,
+}
+
+/// GET /api/skills/{id}/guide — a built-in skill read by section (KT-1341):
+/// its contents first, then the sections an agent asks for.
+pub async fn guide(
+    Path(id): Path<String>,
+    Query(query): Query<GuideQuery>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    match crate::core::skill_guide::guide(&id, query.section.as_deref()) {
+        Some(guide) => Json(ApiResponse::ok(guide)),
+        None => Json(ApiResponse::err(format!("no built-in skill `{id}`"))),
+    }
 }
 
 /// A skill may only name a project Kronn knows.

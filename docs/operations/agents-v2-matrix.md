@@ -97,7 +97,7 @@ The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
 execution, with no fallback to Custom; unknown provider strings remain errors.
 [src: file: backend/src/db/orchestration.rs:244-258#agent_type_from_db]
-[src: file: backend/src/db/orchestration_tests.rs:4253-4286#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
+[src: file: backend/src/db/orchestration_tests.rs:4271-4304#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
 
 ## Known asymmetries
 
@@ -118,7 +118,7 @@ the same job.
   negotiated `session/resume` contract and exact proof boundaries.
   [src: file: backend/src/agents/runner.rs:2764-2824#load_completed_checkpoint]
   [src: file: backend/src/api/discussions/streaming.rs:2593-2724#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:8674-8995#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:8687-9008#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP
@@ -128,7 +128,7 @@ the same job.
   never free. This is an implementation limit, not a protocol prohibition.
   [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
   [src: file: backend/src/acp.rs:1396-1418#usage_from_prompt_result]
-  [src: file: backend/src/acp/claude_adapter.rs:432-449#Cost]
+  [src: file: backend/src/acp/claude_adapter.rs:450-467#Cost]
 - **Statistics distinguish missing cost from a recorded zero.** Token-usage
   aggregates retain recorded amounts, fresh pricing estimates and unpriced
   tokens separately. A mixed total is partial; an existing recorded amount is
@@ -171,8 +171,8 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:5827-5837#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:14921-15202#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/agents/runner.rs:5837-5847#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:14950-15231#run_acp_session_streams_usage_through_agent_process]
 [src: file: backend/src/core/redact.rs:510-534#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
@@ -191,7 +191,7 @@ initialization-only SDK catalogue is independent of the ACP execution toggle.
 See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
 [src: file: frontend/src/components/settings/AgentsSection.tsx:197-198#useModelCatalogSnapshot]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1306-1331#SearchableSelect]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:95-145#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:110-172#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]
 [src: file: backend/src/core/model_catalog/mod.rs:363-373#discover_inner]
 
@@ -228,5 +228,5 @@ explicit null, and preserves historical message models. Isolated API tests
 cover this path, not provider inference or a new browser qualification.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
 [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1363-1371#currentConnectionId]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1157-1174#agentSettingsForSelection]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1163-1180#agentSettingsForSelection]
 [src: file: backend/tests/discussion_target_model.rs:98-219#changing_agent_clears_the_previous_explicit_model]

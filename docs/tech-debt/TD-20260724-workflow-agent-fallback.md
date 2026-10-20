@@ -69,7 +69,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:850-925#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:872-947#AgentDetection]
 
 ## Policy and precedence
 
@@ -118,7 +118,7 @@ The execution boundary currently exposes strings for start failures and only
 three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 `RuntimeUnavailable`). The richer rate-limit/auth/server detection is a
 presentation helper that scans raw output after execution; it is not a routing
-contract. [src: file: backend/src/agents/runner.rs:3761-3761#start_agent_with_config]
+contract. [src: file: backend/src/agents/runner.rs:3765-3765#start_agent_with_config]
 [src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
 [src: file: backend/src/api/discussions/orchestration.rs:1664-1804#detect_agent_error_hint]
 
@@ -231,7 +231,7 @@ This matters today because HTTP agents have a different execution path: since
 project/run-scoped catalogue without Planning mutations, and no per-model
 capability gate checks that the model can call tools. A local Ollama
 model therefore cannot safely replace every CLI step merely because the model
-is pulled. [src: file: backend/src/api/agent_tools.rs:165-186#workflow_arc]
+is pulled. [src: file: backend/src/api/agent_tools.rs:184-205#workflow_arc]
 [src: file: backend/src/workflows/runner.rs:2542-2547#workflow_arc]
 [src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:51-53#capability]
 
@@ -248,20 +248,20 @@ The current spawn audit found these distinct Kronn-owned paths:
 
 | Current spawn path | What it covers |
 |---|---|
-| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4457-4498#native_http_tools] |
+| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4461-4502#native_http_tools] |
 | Debate pre-summary | Compresses the shared context before debate. [src: file: backend/src/api/discussions/orchestration.rs:695-791#ToolFreeSummary] |
 | Debate participants | Starts every participant/round independently. [src: file: backend/src/api/discussions/orchestration.rs:803-1020#start_agent_with_config] |
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:1032-1189#synthesis_external_http] |
-| Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:490-514#SummaryStrategy] |
+| Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:510-534#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1291-1490#generate_summary_on_demand] |
 | Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1802-2043#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3700-3780#execute_step] |
-| Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-343#audit_tier] [src: file: backend/src/api/audit/full.rs:1809-1823#start] |
-| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:989-999#start] |
+| Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1893-1907#start] |
+| Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1112-1122#start] |
 
 Audits still refuse Vibe, which has no file tools Kronn can scope to the
 project; every HTTP provider is admitted since KT-924 and KT-980, a `Custom`
 target only with a validated named connection. Eligibility is therefore a
-property of each surface, not of an agent being installed. [src: file: backend/src/api/audit/mod.rs:734-765#agent_can_audit]
+property of each surface, not of an agent being installed. [src: file: backend/src/api/audit/mod.rs:740-771#agent_can_audit]
 
 | Surface | Desired behavior | Initial rollout |
 |---|---|---:|

@@ -3983,6 +3983,7 @@ mod tests {
                 updated_at: now,
                 image_model: None,
                 video_model: None,
+                decision_model: None,
                 media_endpoint: None,
             },
         )
@@ -4534,8 +4535,12 @@ mod tests {
         );
         assert_eq!(orch.kind, MessageKind::Orchestration);
         insert_message(&conn, "d-kind", &orch).unwrap();
-        insert_message(&conn, "d-kind", &make_message("m-human", MessageRole::User, None))
-            .unwrap();
+        insert_message(
+            &conn,
+            "d-kind",
+            &make_message("m-human", MessageRole::User, None),
+        )
+        .unwrap();
 
         let stored: Option<String> = conn
             .query_row(
@@ -4549,7 +4554,10 @@ mod tests {
         let messages = list_messages(&conn, "d-kind").unwrap();
         assert_eq!(messages.len(), 2, "display-only: no message is dropped");
         let kind_of = |id: &str| messages.iter().find(|m| m.id == id).unwrap().kind;
-        assert_eq!(kind_of("orch-review-request:exec-1:0"), MessageKind::Orchestration);
+        assert_eq!(
+            kind_of("orch-review-request:exec-1:0"),
+            MessageKind::Orchestration
+        );
         assert_eq!(kind_of("m-human"), MessageKind::Standard);
     }
 
@@ -4559,13 +4567,24 @@ mod tests {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-legacy")).unwrap();
         // Posted by code that predates the column: kind left Standard.
-        for id in ["orch-worker-undelivered:e1", "delivery-summary:e1:0", "plain-1"] {
-            insert_message(&conn, "d-legacy", &make_message(id, MessageRole::User, None))
-                .unwrap();
+        for id in [
+            "orch-worker-undelivered:e1",
+            "delivery-summary:e1:0",
+            "plain-1",
+        ] {
+            insert_message(
+                &conn,
+                "d-legacy",
+                &make_message(id, MessageRole::User, None),
+            )
+            .unwrap();
         }
         let messages = list_messages(&conn, "d-legacy").unwrap();
         let kind_of = |id: &str| messages.iter().find(|m| m.id == id).unwrap().kind;
-        assert_eq!(kind_of("orch-worker-undelivered:e1"), MessageKind::Orchestration);
+        assert_eq!(
+            kind_of("orch-worker-undelivered:e1"),
+            MessageKind::Orchestration
+        );
         assert_eq!(kind_of("delivery-summary:e1:0"), MessageKind::Orchestration);
         assert_eq!(kind_of("plain-1"), MessageKind::Standard);
         // An explicitly stored 'standard' beats the prefix guess.
@@ -4579,17 +4598,41 @@ mod tests {
     fn orchestration_messages_do_not_raise_the_unread_basis() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-unread")).unwrap();
-        insert_message(&conn, "d-unread", &make_message("m-1", MessageRole::User, None)).unwrap();
-        insert_message(&conn, "d-unread", &make_message("m-2", MessageRole::Agent, None)).unwrap();
+        insert_message(
+            &conn,
+            "d-unread",
+            &make_message("m-1", MessageRole::User, None),
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            "d-unread",
+            &make_message("m-2", MessageRole::Agent, None),
+        )
+        .unwrap();
         // Typed kind, legacy id prefix and a System breadcrumb: none count.
         let mut typed = make_message("typed-1", MessageRole::User, None);
         typed.kind = crate::models::MessageKind::Orchestration;
         insert_message(&conn, "d-unread", &typed).unwrap();
-        insert_message(&conn, "d-unread", &make_message("orch-x:1", MessageRole::User, None)).unwrap();
-        insert_message(&conn, "d-unread", &make_message("sys-1", MessageRole::System, None)).unwrap();
+        insert_message(
+            &conn,
+            "d-unread",
+            &make_message("orch-x:1", MessageRole::User, None),
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            "d-unread",
+            &make_message("sys-1", MessageRole::System, None),
+        )
+        .unwrap();
 
         let loaded = get_discussion(&conn, "d-unread").unwrap().unwrap();
-        assert_eq!(loaded.messages.len(), 5, "display-only: the transcript keeps all five");
+        assert_eq!(
+            loaded.messages.len(),
+            5,
+            "display-only: the transcript keeps all five"
+        );
         assert_eq!(loaded.non_system_message_count, 2);
         let listed = list_discussions_paginated(&conn, None, None).unwrap();
         let listed = listed.iter().find(|d| d.id == "d-unread").unwrap();

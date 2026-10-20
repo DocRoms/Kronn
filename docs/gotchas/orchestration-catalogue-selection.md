@@ -11,7 +11,7 @@ replaced.
 [src: file: frontend/src/components/TaskLaunchDialog.tsx:215-232#AgentSwitchPicker]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:397-403#selectReassignAgent]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:1143-1158#AgentSwitchPicker]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:136-144#configured]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:163-171#configured]
 
 The launch dialog must let picker-owned Escape handling finish first: the model
 picker prevents the event, while the agent picker’s portal is recognised before

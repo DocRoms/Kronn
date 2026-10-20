@@ -30,7 +30,7 @@ observer reports a fallback restore as `partial`, excluded from exact hot
 history, so the 10-minute SLO statistics stay honest.
 [src: file: .github/workflows/ci-test.yml:102-116#cache-backend-hot]
 [src: file: .github/workflows/ci-test.yml:243-262#mark-backend-cache]
-[src: file: .github/workflows/ci-test.yml:264-276#cache-backend-hot]
+[src: file: .github/workflows/ci-test.yml:279-291#cache-backend-hot]
 [src: file: .github/workflows/ci-test.yml:458-491#cache-clippy]
 [src: file: scripts/ci/backend_ci_slo.mjs:96-104#effectiveMeasurementMode]
 [src: file: scripts/ci/backend_ci_slo.mjs:179-185#comparableRuns]

@@ -1044,3 +1044,25 @@ pub struct AgentRunProgress {
     pub idle_limit_ms: Option<u32>,
     pub stopped: Option<AgentRunStop>,
 }
+
+#[cfg(test)]
+mod channel_wire_tests {
+    use super::{MessageChannel, SendMessageRequest};
+
+    /// KT-1357 — the matrix bench answered the validation discussion with
+    /// `"channel": "Main"`; every reply was a 422 and the agent never ran again.
+    #[test]
+    fn the_message_channel_is_written_in_lower_case() {
+        let main: SendMessageRequest =
+            serde_json::from_str(r#"{"content":"ok","channel":"main"}"#).unwrap();
+        assert_eq!(main.channel, MessageChannel::Main);
+        let note: SendMessageRequest =
+            serde_json::from_str(r#"{"content":"ok","channel":"note"}"#).unwrap();
+        assert_eq!(note.channel, MessageChannel::Note);
+        let refused =
+            serde_json::from_str::<SendMessageRequest>(r#"{"content":"ok","channel":"Main"}"#)
+                .unwrap_err()
+                .to_string();
+        assert!(refused.contains("unknown variant `Main`"), "{refused}");
+    }
+}

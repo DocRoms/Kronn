@@ -13,6 +13,9 @@ use crate::models::discussion_scope::{
     ScopeRequestStatus, WorkflowScope, WorkflowScopeEntry,
 };
 
+/// The workflow scope row that stands for every project (KT-1336).
+pub const ALL_PROJECTS: &str = "*";
+
 /// Pending requests a room may hold at once: an agent cannot flood the human.
 pub const MAX_PENDING_REQUESTS: usize = 5;
 
@@ -23,6 +26,11 @@ pub struct GrantedProjects {
     pub read: HashSet<String>,
     pub write: HashSet<String>,
     pub all: Option<ScopeAccess>,
+    /// A room without a project may write the general resources.
+    pub general: bool,
+    /// The general resources these rooms created, as `(kind, id)`: the only
+    /// ones « General · write » lets their agents edit.
+    pub general_own: HashSet<(String, String)>,
 }
 
 impl GrantedProjects {
@@ -30,6 +38,8 @@ impl GrantedProjects {
     pub fn merge(&mut self, other: GrantedProjects) {
         self.read.extend(other.read);
         self.write.extend(other.write);
+        self.general |= other.general;
+        self.general_own.extend(other.general_own);
         self.all = match (self.all, other.all) {
             (Some(ScopeAccess::Write), _) | (_, Some(ScopeAccess::Write)) => {
                 Some(ScopeAccess::Write)
@@ -112,16 +122,24 @@ pub fn granted_projects(conn: &Connection, discussion_ids: &[String]) -> Result<
     }
     let placeholders = vec!["?"; discussion_ids.len()].join(", ");
     let sql = format!(
-        "SELECT project_id, access FROM discussion_project_grants \
+        "SELECT project_id, access, source FROM discussion_project_grants \
          WHERE revoked_at IS NULL AND discussion_id IN ({placeholders})"
     );
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(rusqlite::params_from_iter(discussion_ids), |row| {
-        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })?;
     for row in rows {
-        let (project, access) = row?;
+        let (project, access, source) = row?;
         let access = ScopeAccess::parse(&access)?;
+        if ScopeGrantSource::parse(&source)? == ScopeGrantSource::General {
+            granted.general |= access == ScopeAccess::Write;
+            continue;
+        }
         match project {
             None => {
                 granted.all = Some(match (granted.all, access) {
@@ -137,7 +155,32 @@ pub fn granted_projects(conn: &Connection, discussion_ids: &[String]) -> Result<
             }
         }
     }
+    let mut statement = conn.prepare(&format!(
+        "SELECT kind, resource_id FROM general_resource_origins \
+         WHERE discussion_id IN ({placeholders})"
+    ))?;
+    let own = statement.query_map(rusqlite::params_from_iter(discussion_ids), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in own {
+        granted.general_own.insert(row?);
+    }
     Ok(granted)
+}
+
+/// Record the room a general resource was created from (KT-1346).
+pub fn record_general_origin(
+    conn: &Connection,
+    kind: &str,
+    resource_id: &str,
+    discussion_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO general_resource_origins(kind, resource_id, discussion_id, created_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![kind, resource_id, discussion_id, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
 }
 
 fn primary_project(conn: &Connection, discussion_id: &str) -> Result<Option<Option<String>>> {
@@ -198,10 +241,11 @@ pub fn fingerprint(grants: &[DiscussionProjectGrant]) -> String {
         .iter()
         .map(|grant| {
             format!(
-                "{}|{}|{}",
+                "{}|{}|{}|{}",
                 grant.id,
                 grant.project_id.as_deref().unwrap_or("*"),
-                grant.access.as_str()
+                grant.access.as_str(),
+                grant.source.as_str()
             )
         })
         .collect();
@@ -273,6 +317,18 @@ fn check_target(
     let Some(primary) = primary_project(conn, discussion_id)? else {
         return Err(ScopeError::NotFound("discussion not found".into()).into());
     };
+    // The general resources are a room without a project's own reach; a
+    // project's room writes its project.
+    match (primary.as_deref(), source) {
+        (None, ScopeGrantSource::General) if project.is_none() => return Ok(()),
+        (None, ScopeGrantSource::General) => {
+            return invalid("the general resources are granted without a project")
+        }
+        (Some(_), ScopeGrantSource::General) => {
+            return invalid("a room with a project writes its project, not the general resources")
+        }
+        _ => {}
+    }
     let Some(primary) = primary else {
         return invalid("a discussion without a project cannot reach other projects");
     };
@@ -330,6 +386,13 @@ fn insert_grant(
     Ok(id)
 }
 
+fn grant_target(conn: &Connection, grant: &DiscussionProjectGrant) -> Result<String> {
+    if grant.source == ScopeGrantSource::General {
+        return Ok("the general resources (seen by every project)".into());
+    }
+    project_label(conn, grant.project_id.as_deref())
+}
+
 fn project_label(conn: &Connection, project: Option<&str>) -> Result<String> {
     let Some(project) = project else {
         return Ok("every project".into());
@@ -377,18 +440,24 @@ fn receipt(conn: &Connection, discussion_id: &str, receipt_id: String, body: Str
 }
 
 fn grant_receipt(conn: &Connection, grant: &DiscussionProjectGrant) -> Result<()> {
-    let target = project_label(conn, grant.project_id.as_deref())?;
-    let what = match grant.access {
-        ScopeAccess::Read => "read",
-        ScopeAccess::Write => "write (planning)",
+    let target = grant_target(conn, grant)?;
+    let what = match (grant.source, grant.access) {
+        (ScopeGrantSource::General, _) => "write",
+        (_, ScopeAccess::Read) => "read",
+        (_, ScopeAccess::Write) => "write (planning)",
     };
     receipt(
         conn,
         &grant.discussion_id,
         format!("scope-grant:{}", grant.id),
         format!(
-            "{} granted {what} access to {target} — credentials and API configs stay this room's own project's",
-            grant.granted_by
+            "{} granted {what} access to {target} — {}",
+            grant.granted_by,
+            if grant.source == ScopeGrantSource::General {
+                "no project's credentials or API configs"
+            } else {
+                "credentials and API configs stay this room's own project's"
+            }
         ),
     )
 }
@@ -456,7 +525,7 @@ pub fn revoke(
         );
     }
     let revoked = grant_by_id(&tx, grant_id)?;
-    let target = project_label(&tx, revoked.project_id.as_deref())?;
+    let target = grant_target(&tx, &revoked)?;
     receipt(
         &tx,
         discussion_id,
@@ -746,28 +815,46 @@ pub fn workflow_scope(conn: &Connection, workflow_id: &str) -> Result<Option<Wor
         ))
     })?;
     let mut entries = Vec::new();
+    let mut all = None;
     let mut valid = true;
     let mut validated_by = None;
     let mut validated_at = None;
+    let mut digest_lines = Vec::new();
     for row in rows {
         let (project_id, project_name, access, fingerprint, set_by, set_at) = row?;
         valid &= fingerprint == current;
+        digest_lines.push(format!("{project_id}|{access}|{fingerprint}|{set_at}"));
         validated_by = Some(set_by);
         validated_at = Some(set_at);
-        entries.push(WorkflowScopeEntry {
-            project_id,
-            project_name,
-            access: ScopeAccess::parse(&access)?,
-        });
+        let access = ScopeAccess::parse(&access)?;
+        if project_id == ALL_PROJECTS {
+            all = Some(access);
+        } else {
+            entries.push(WorkflowScopeEntry {
+                project_id,
+                project_name,
+                access,
+            });
+        }
     }
+    digest_lines.sort();
+    // What the human confirms covers the workflow as it is now, not only the
+    // stored rows: an edit after the screen was read makes its fingerprint stale.
+    digest_lines.push(format!("workflow|{workflow_id}|{current}"));
+    let scope_fingerprint: String = Sha256::digest(digest_lines.join("\n").as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     let supported = crate::db::workflows::get_workflow(conn, workflow_id)?
         .as_ref()
         .is_some_and(scope_supported);
     Ok(Some(WorkflowScope {
         workflow_id: workflow_id.to_owned(),
         supported,
-        valid: supported && valid && !entries.is_empty(),
+        valid: supported && valid && (!entries.is_empty() || all.is_some()),
         entries,
+        all,
+        fingerprint: scope_fingerprint,
         validated_by,
         validated_at,
     }))
@@ -779,6 +866,7 @@ pub fn set_workflow_scope(
     conn: &Connection,
     workflow_id: &str,
     entries: &[(String, ScopeAccess)],
+    all: Option<ScopeAccess>,
     set_by: &str,
 ) -> Result<WorkflowScope> {
     let Some(workflow) = crate::db::workflows::get_workflow(conn, workflow_id)? else {
@@ -808,7 +896,8 @@ pub fn set_workflow_scope(
         [workflow_id],
     )?;
     let now = Utc::now().to_rfc3339();
-    for (project, access) in entries {
+    let every = all.map(|access| (ALL_PROJECTS.to_owned(), access));
+    for (project, access) in entries.iter().chain(every.iter()) {
         tx.execute(
             "INSERT INTO workflow_scopes \
              (workflow_id, project_id, access, workflow_fingerprint, set_by, set_at) \
@@ -835,7 +924,9 @@ pub fn revoke_workflow_scope(
     conn: &Connection,
     workflow_id: &str,
     project_id: Option<&str>,
+    all: bool,
 ) -> Result<Option<WorkflowScope>> {
+    let project_id = if all { Some(ALL_PROJECTS) } else { project_id };
     let removed = match project_id {
         Some(project) => conn.execute(
             "DELETE FROM workflow_scopes WHERE workflow_id = ?1 AND project_id = ?2",
@@ -885,6 +976,10 @@ pub fn run_granted_projects(conn: &Connection, run_id: &str) -> Result<GrantedPr
         .collect::<rusqlite::Result<_>>()?;
     for (project_id, access) in validated {
         let access = ScopeAccess::parse(&access)?;
+        if project_id == ALL_PROJECTS {
+            granted.all = Some(access);
+            continue;
+        }
         if access == ScopeAccess::Write {
             granted.write.insert(project_id.clone());
         }

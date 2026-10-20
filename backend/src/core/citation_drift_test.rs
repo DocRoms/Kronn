@@ -844,3 +844,286 @@ fn a_dash_range_is_tracked_under_its_hyphen_label() {
     assert!(labels.contains("src/a.rs:2-4"), "{labels:?}");
     assert!(labels.contains("src/b.rs:1-3"), "{labels:?}");
 }
+
+// ─── KT-1368: a line of a secret file is never read, hashed or stored ─────
+
+/// A synthetic key: a body line that a per-line redaction does not recognise.
+const KEY_BODY: &str = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW";
+
+fn secret_fixture() -> tempfile::TempDir {
+    let tmp = fixture();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join(".ssh")).unwrap();
+    fs::write(
+        dir.join(".ssh/review-key"),
+        format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{KEY_BODY}\n-----END OPENSSH PRIVATE KEY-----\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(".ssh/review-key", dir.join("key-view.txt")).unwrap();
+    fs::write(
+        dir.join("docs/glossary.md"),
+        "Key [src: file: .ssh/review-key:2] and a range [src: file: .ssh/review-key:1-3]. \
+         View [src: file: key-view.txt:2]. Timeout [src: src/lib.rs:6].\n",
+    )
+    .unwrap();
+    tmp
+}
+
+/// Every digest a line of the key could leave in the store: the raw line and the
+/// normalised forms the drift check hashes, alone and as a range.
+fn key_digests() -> Vec<String> {
+    let normalized = normalize_line(KEY_BODY);
+    vec![
+        sha256_hex(KEY_BODY.as_bytes()),
+        sha256_hex(normalized.as_bytes()),
+        block_hash(&[normalized]),
+        block_hash(&[
+            normalize_line("-----BEGIN OPENSSH PRIVATE KEY-----"),
+            normalize_line(KEY_BODY),
+            normalize_line("-----END OPENSSH PRIVATE KEY-----"),
+        ]),
+    ]
+}
+
+fn assert_no_secret_digest(dir: &Path) {
+    let stored = fs::read_to_string(citations_path(dir)).unwrap();
+    for digest in key_digests() {
+        assert!(!stored.contains(&digest), "{digest} leaked in {stored}");
+    }
+    let file = read_strict(dir).unwrap().unwrap();
+    for entry in file.docs.values() {
+        for fp in entry
+            .citations
+            .iter()
+            .filter(|c| c.file.starts_with(".ssh/") || c.file == "key-view.txt")
+        {
+            assert_eq!(
+                (fp.line, fp.end_line, fp.sha256.as_deref()),
+                (None, None, None),
+                "{fp:?} is presence only"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_secret_line_is_recorded_as_presence_by_a_validation() {
+    let tmp = secret_fixture();
+    record_all(tmp.path()).unwrap();
+    assert_no_secret_digest(tmp.path());
+    let file = read_strict(tmp.path()).unwrap().unwrap();
+    let cites: Vec<&str> = file.docs["docs/glossary.md"]
+        .citations
+        .iter()
+        .map(|c| c.cite.as_str())
+        .collect();
+    assert!(cites.contains(&".ssh/review-key:2"), "{cites:?}");
+    // Presence is tracked: the key staying put is not drift.
+    assert_eq!(check(tmp.path()).sources_state, SourcesState::Clean);
+}
+
+#[test]
+fn a_secret_line_is_recorded_as_presence_after_an_audit() {
+    let tmp = secret_fixture();
+    record_after_audit(tmp.path(), &["docs/glossary.md".to_string()]).unwrap();
+    assert_no_secret_digest(tmp.path());
+}
+
+#[test]
+fn a_secret_line_is_recorded_as_presence_by_a_revalidation() {
+    let tmp = secret_fixture();
+    record_docs(
+        tmp.path(),
+        &["docs/glossary.md".to_string()],
+        RecordReason::Revalidation,
+    )
+    .unwrap();
+    assert_no_secret_digest(tmp.path());
+}
+
+#[test]
+fn a_secret_line_is_recorded_as_presence_by_an_acknowledgement() {
+    let tmp = secret_fixture();
+    acknowledge(tmp.path(), "docs/glossary.md").unwrap();
+    assert_no_secret_digest(tmp.path());
+}
+
+#[test]
+fn a_fingerprint_recorded_before_is_dropped_at_the_next_record() {
+    // A repo audited before the fix: the digest of the key line is on disk, in
+    // the doc the next record rewrites and in one it leaves alone.
+    let legacy = |dir: &Path| {
+        record_all(dir).unwrap();
+        let mut file = read_strict(dir).unwrap().unwrap();
+        let entry = file.docs.get_mut("docs/glossary.md").unwrap();
+        for fp in &mut entry.citations {
+            if fp.file == ".ssh/review-key" || fp.file == "key-view.txt" {
+                fp.line = Some(2);
+                fp.end_line = Some(2);
+                fp.sha256 = Some(sha256_hex(KEY_BODY.as_bytes()));
+            }
+        }
+        let mut other = entry.clone();
+        other.citations.retain(|c| c.file == ".ssh/review-key");
+        file.docs.insert("docs/other.md".to_string(), other);
+        fs::write(
+            citations_path(dir),
+            serde_json::to_string_pretty(&file).unwrap(),
+        )
+        .unwrap();
+        assert!(fs::read_to_string(citations_path(dir))
+            .unwrap()
+            .contains(&sha256_hex(KEY_BODY.as_bytes())));
+    };
+    type Record = fn(&Path);
+    let paths: [(&str, Record); 5] = [
+        ("record_all", |d| record_all(d).unwrap()),
+        ("record_after_audit", |d| {
+            record_after_audit(d, &["docs/architecture.md".to_string()]).unwrap()
+        }),
+        ("record_after_audit, nothing rewritten", |d| {
+            record_after_audit(d, &[]).unwrap()
+        }),
+        ("record_docs", |d| {
+            record_docs(
+                d,
+                &["docs/architecture.md".to_string()],
+                RecordReason::Audit,
+            )
+            .unwrap()
+        }),
+        ("acknowledge", |d| {
+            acknowledge(d, "docs/architecture.md").unwrap();
+        }),
+    ];
+    for (name, record) in paths {
+        let tmp = secret_fixture();
+        legacy(tmp.path());
+        record(tmp.path());
+        let stored = fs::read_to_string(citations_path(tmp.path())).unwrap();
+        assert!(
+            !stored.contains(&sha256_hex(KEY_BODY.as_bytes())),
+            "{name} kept the digest: {stored}"
+        );
+    }
+}
+
+#[test]
+fn dropping_the_fingerprint_of_a_secret_keeps_the_others() {
+    let tmp = secret_fixture();
+    record_all(tmp.path()).unwrap();
+    let file = read_strict(tmp.path()).unwrap().unwrap();
+    let kept = file.docs["docs/glossary.md"]
+        .citations
+        .iter()
+        .find(|c| c.cite == "src/lib.rs:6")
+        .unwrap();
+    assert!(kept.sha256.is_some(), "{kept:?}");
+}
+
+/// `keys -> .ssh -> vault`: the canonical file is `vault/review-key`, which says
+/// nothing; the `.ssh` the chain passes through does.
+#[cfg(unix)]
+fn chain_fixture() -> tempfile::TempDir {
+    let tmp = fixture();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("vault")).unwrap();
+    fs::write(
+        dir.join("vault/review-key"),
+        format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{KEY_BODY}\n-----END OPENSSH PRIVATE KEY-----\n"
+        ),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("vault", dir.join(".ssh")).unwrap();
+    std::os::unix::fs::symlink(".ssh", dir.join("keys")).unwrap();
+    fs::write(
+        dir.join("docs/glossary.md"),
+        "Key [src: file: keys/review-key:2] and a range [src: file: keys/review-key:1-3]. \
+         Timeout [src: src/lib.rs:6].\n",
+    )
+    .unwrap();
+    tmp
+}
+
+#[cfg(unix)]
+fn assert_chain_presence_only(dir: &Path) {
+    let stored = fs::read_to_string(citations_path(dir)).unwrap();
+    for digest in key_digests() {
+        assert!(!stored.contains(&digest), "{digest} leaked in {stored}");
+    }
+    let file = read_strict(dir).unwrap().unwrap();
+    for entry in file.docs.values() {
+        for fp in entry
+            .citations
+            .iter()
+            .filter(|c| c.file == "keys/review-key")
+        {
+            assert_eq!(
+                (fp.line, fp.end_line, fp.sha256.as_deref()),
+                (None, None, None),
+                "{fp:?} is presence only"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn chain_directory_component_keeps_secret_names_and_never_hashes() {
+    type Record = fn(&Path);
+    let records: [(&str, Record); 4] = [
+        ("record_all", |d| record_all(d).unwrap()),
+        ("record_after_audit", |d| {
+            record_after_audit(d, &["docs/glossary.md".to_string()]).unwrap()
+        }),
+        ("record_docs", |d| {
+            record_docs(
+                d,
+                &["docs/glossary.md".to_string()],
+                RecordReason::Revalidation,
+            )
+            .unwrap()
+        }),
+        ("acknowledge", |d| {
+            acknowledge(d, "docs/glossary.md").unwrap();
+        }),
+    ];
+    for (name, record) in records {
+        let tmp = chain_fixture();
+        record(tmp.path());
+        let stored = fs::read_to_string(citations_path(tmp.path())).unwrap();
+        assert!(stored.contains("keys/review-key"), "{name}: {stored}");
+        assert_chain_presence_only(tmp.path());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fingerprint_stored_under_a_directory_chain_alias_is_dropped() {
+    let tmp = chain_fixture();
+    record_all(tmp.path()).unwrap();
+    let mut file = read_strict(tmp.path()).unwrap().unwrap();
+    for entry in file.docs.values_mut() {
+        for fp in &mut entry.citations {
+            if fp.file == "keys/review-key" {
+                fp.line = Some(2);
+                fp.end_line = Some(2);
+                fp.sha256 = Some(sha256_hex(KEY_BODY.as_bytes()));
+            }
+        }
+    }
+    fs::write(
+        citations_path(tmp.path()),
+        serde_json::to_string_pretty(&file).unwrap(),
+    )
+    .unwrap();
+    assert!(fs::read_to_string(citations_path(tmp.path()))
+        .unwrap()
+        .contains(&sha256_hex(KEY_BODY.as_bytes())));
+    record_after_audit(tmp.path(), &[]).unwrap();
+    assert_chain_presence_only(tmp.path());
+}

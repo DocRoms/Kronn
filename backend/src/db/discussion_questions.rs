@@ -41,6 +41,11 @@ struct QuestionSpec {
     task_ref: Option<String>,
     #[serde(default)]
     resume: Option<QuestionResumeSpec>,
+    /// KT-1348 — the TDs a partial audit card could not record. Written by
+    /// Kronn only (an agent's fence carrying it is refused), so it never mixes
+    /// with the agent's `context` nor eats its length budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    td_errors: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -142,6 +147,9 @@ pub struct DiscussionQuestion {
     pub key: String,
     pub question: String,
     pub context: Option<String>,
+    /// The TDs a partial audit card could not record, with the reason for each;
+    /// cleared once the card is fully answered.
+    pub td_errors: Option<String>,
     pub options: Vec<DiscussionQuestionOption>,
     pub items: Vec<DiscussionQuestionItem>,
     pub multiple: bool,
@@ -253,6 +261,7 @@ fn parse_spec(body: &str) -> Option<QuestionSpec> {
         .map(|item| item.id.as_str())
         .collect::<std::collections::HashSet<_>>();
     (spec.version == 1
+        && spec.td_errors.is_none()
         && stable_key(&spec.key)
         && nonempty_bounded(&spec.question, 1000)
         && spec
@@ -478,6 +487,7 @@ pub fn list(conn: &Connection, discussion_id: &str) -> Result<DiscussionQuestion
             key: spec.key,
             question: spec.question,
             context: spec.context,
+            td_errors: spec.td_errors,
             options: spec.options,
             items: spec.items,
             multiple: spec.multiple,
@@ -521,15 +531,25 @@ fn publish_human_resolution(
     // False when the decision leaves the asker nothing to do: keeping a
     // partial answer after a ceiling must not buy one more turn.
     dispatch: bool,
+    // A comment asks for an answer now: when the step that asked has ended,
+    // the room's own agent takes it rather than nobody.
+    room_agent_if_step_ended: bool,
 ) -> Result<(), AnswerError> {
-    if question
+    let step_ended = question
         .requester_workflow_step
         .as_ref()
-        .is_some_and(|source| !source.active)
-    {
-        content.push_str(
-            "\n\nL'étape qui a posé cette question est terminée ; personne ne lira cette réponse maintenant. Elle sera disponible au prochain run.",
-        );
+        .is_some_and(|source| !source.active);
+    let room_agent = if step_ended && room_agent_if_step_ended && dispatch {
+        room_native_agent(conn, discussion_id)?
+    } else {
+        None
+    };
+    if step_ended {
+        content.push_str(if room_agent.is_some() {
+            "\n\nL'étape qui a posé cette question est terminée : l'agent de la room répond. La question reste en attente pour le prochain run."
+        } else {
+            "\n\nL'étape qui a posé cette question est terminée ; personne ne lira cette réponse maintenant. Elle sera disponible au prochain run."
+        });
     }
     let message = crate::models::DiscussionMessage {
         id: message_id.to_string(),
@@ -558,6 +578,28 @@ fn publish_human_resolution(
     };
     let sort_order = super::discussions::insert_message(conn, discussion_id, &message)?;
     if !dispatch {
+        return Ok(());
+    }
+    if let Some((agent, connection_id)) = room_agent {
+        let mut target = crate::models::MessageTarget::agent(agent.clone());
+        target.connection_id = connection_id.clone();
+        super::discussions::replace_message_targets(conn, &message.id, &[target])?;
+        super::agent_dispatch::enqueue_with_connection(
+            conn,
+            super::agent_dispatch::NewAgentDispatchJob {
+                id: &uuid::Uuid::new_v4().to_string(),
+                discussion_id,
+                trigger_message_id: &message.id,
+                trigger_sort_order: sort_order,
+                dedupe_key,
+                agent_override: Some(&agent),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+            connection_id.as_deref(),
+        )?;
         return Ok(());
     }
     let cli_target = super::discussions::message_cli_author_target(
@@ -607,6 +649,30 @@ fn publish_human_resolution(
         connection_id.as_deref(),
     )?;
     Ok(())
+}
+
+/// The room's own native agent and its connection, unless the room has none.
+fn room_native_agent(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<Option<(crate::models::AgentType, Option<String>)>, AnswerError> {
+    use rusqlite::OptionalExtension;
+    if super::discussions::disc_is_no_agent(conn, discussion_id)? {
+        return Ok(None);
+    }
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT agent, connection_id FROM discussions WHERE id=?1",
+            [discussion_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    let Some((agent, connection_id)) = row else {
+        return Ok(None);
+    };
+    let agent = super::discussions::parse_agent_type(&agent).map_err(anyhow::Error::from)?;
+    Ok(Some((agent, connection_id)))
 }
 
 /// Reserved launch data for one question resolution. Claiming stores the run
@@ -759,6 +825,7 @@ pub fn comment(
         author_pseudo,
         author_avatar_email,
         true,
+        true,
     );
     match published {
         Ok(()) => {
@@ -909,6 +976,7 @@ fn decline_inner(
         author_pseudo,
         author_avatar_email,
         ceiling == super::discussion_ceiling_requests::Answered::NotACeiling,
+        false,
     )?;
     conn.execute(
         "UPDATE discussion_questions SET state='declined', answer_json=?2, \
@@ -991,6 +1059,47 @@ pub fn answer(
             Err(error)
         }
     }
+}
+
+/// Bound on the failure note a partial TD card carries.
+const TD_ERRORS_LIMIT: usize = 8000;
+
+/// Keeps only the failed items on a pending card and writes the reasons in its
+/// own `td_errors` field, replacing the previous partial's; `context` is the
+/// agent's and stays as it was. `note: None` clears the field (the card is
+/// complete). Returns the card's new `td_errors`.
+fn narrow_to_failed(
+    conn: &Connection,
+    question_id: &str,
+    failed_ids: &[&str],
+    note: Option<&str>,
+) -> Result<Option<String>, AnswerError> {
+    let payload: String = conn
+        .query_row(
+            "SELECT payload_json FROM discussion_questions WHERE id=?1",
+            [question_id],
+            |row| row.get(0),
+        )
+        .map_err(anyhow::Error::from)?;
+    let mut spec: QuestionSpec = serde_json::from_str(&payload).map_err(anyhow::Error::from)?;
+    spec.items
+        .retain(|item| failed_ids.contains(&item.id.as_str()));
+    spec.td_errors = note.map(|note| {
+        if note.chars().count() > TD_ERRORS_LIMIT {
+            note.chars().take(TD_ERRORS_LIMIT - 1).collect::<String>() + "…"
+        } else {
+            note.to_string()
+        }
+    });
+    conn.execute(
+        "UPDATE discussion_questions SET payload_json=?2 WHERE id=?1 AND state='pending'",
+        params![
+            question_id,
+            serde_json::to_string(&spec).map_err(anyhow::Error::from)?
+        ],
+    )
+    .map_err(anyhow::Error::from)?;
+    Ok(spec.td_errors)
 }
 
 fn answer_inner(
@@ -1176,13 +1285,87 @@ fn answer_inner(
             .map_err(AnswerError::Invalid)?;
     }
     if let Some(resolutions) = audit_resolutions.as_ref() {
-        crate::core::audit_validation::apply_td_resolutions(
+        let outcome = crate::core::audit_validation::apply_td_resolutions(
             conn,
             discussion_id,
             resolutions,
             text.as_deref(),
         )
         .map_err(|error| AnswerError::Invalid(error.to_string()))?;
+        // KT-1348 — a TD that could not be written does not undo the others,
+        // and it is not closed with them: the card stays pending, narrowed to
+        // the failed TDs with the reason on it, so a retry after the repair
+        // applies only those and the validation resumes once none is left.
+        let note = outcome.failure_note();
+        if !note.is_empty() {
+            tracing::warn!("Audit TD card partially recorded: {note}");
+            let applied_labels = item_answers
+                .iter()
+                .filter(|answer| outcome.applied.contains(&answer.item_id))
+                .filter_map(|answer| {
+                    let item = question.items.iter().find(|i| i.id == answer.item_id)?;
+                    let option = question
+                        .options
+                        .iter()
+                        .find(|o| o.id == answer.selected_option_id)?;
+                    Some(format!("- {}: {}", item.label, option.label))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let partial = format!(
+                "Décision humaine — {}\n\n{}\n\n{}{}",
+                question.question,
+                applied_labels,
+                text.as_deref()
+                    .map(|t| format!("{t}\n\n"))
+                    .unwrap_or_default(),
+                note
+            );
+            let failed_ids = outcome
+                .failed
+                .iter()
+                .map(|(td_id, _)| td_id.as_str())
+                .collect::<Vec<_>>();
+            question.td_errors = narrow_to_failed(conn, question_id, &failed_ids, Some(&note))?;
+            question
+                .items
+                .retain(|item| failed_ids.contains(&item.id.as_str()));
+            publish_human_resolution(
+                conn,
+                discussion_id,
+                &question,
+                &format!(
+                    "question-answer:{question_id}:partial:{}",
+                    now.timestamp_micros()
+                ),
+                partial,
+                &format!("question-answer:{question_id}"),
+                now,
+                author_pseudo,
+                author_avatar_email,
+                false,
+                false,
+            )?;
+            conn.execute(
+                "UPDATE discussion_questions SET updated_at=?2 WHERE id=?1 AND state='pending'",
+                params![question_id, answer.answered_at],
+            )
+            .map_err(anyhow::Error::from)?;
+            question.updated_at = answer.answered_at;
+            return Ok(question);
+        }
+    }
+    // The card is complete: a failure note left by an earlier partial is
+    // resolved, so the answered card must not keep alerting about it (its
+    // history stays in the partial receipts).
+    if question.td_errors.is_some() {
+        let item_ids = question
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+        narrow_to_failed(conn, question_id, &item_ids, None)?;
+        question.td_errors = None;
     }
     let ceiling =
         super::discussion_ceiling_requests::decide(conn, discussion_id, &question.key, &selected)?;
@@ -1226,6 +1409,7 @@ fn answer_inner(
         author_pseudo,
         author_avatar_email,
         dispatch,
+        false,
     )?;
     conn.execute("UPDATE discussion_questions SET state='answered', answer_json=?2, answer_idempotency_key=?3, updated_at=?4 WHERE id=?1 AND state='pending'",
         params![question_id, serde_json::to_string(&answer).map_err(anyhow::Error::from)?, request.idempotency_key, answer.answered_at])

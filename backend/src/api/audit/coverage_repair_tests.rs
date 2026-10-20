@@ -22,7 +22,8 @@ fn matrix(valid: bool) -> String {
         "Documentation drift",
     ] {
         if dimension == "Accessibility" && !valid {
-            content.push_str("| Accessibility | N/A: backend has no UI |\n");
+            // An outcome with no evidence: nothing Kronn can split or invent (KT-1364).
+            content.push_str("| Accessibility | findings |\n");
         } else if dimension == "Dependencies" {
             content.push_str("| Dependencies | scanned — nothing substantiable | Reviewed the manifests; source used: dependency watch dated 2026-10-04 |\n");
         } else {
@@ -171,6 +172,7 @@ async fn full_resume_repairs_coverage_with_bounded_feedback_and_preserves_prior_
                     resume_run_id: Some("before-coverage".into()),
                     retry_steps: None,
                     redo_steps: None,
+                    accept_unverified_agents: None,
                     fresh: None,
                 }),
             )

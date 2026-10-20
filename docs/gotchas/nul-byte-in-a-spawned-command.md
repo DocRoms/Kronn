@@ -4,7 +4,7 @@
 data` and names nothing. Four carriers produce that identical error — the
 program name, any argument, any environment entry, and the working directory —
 and Kronn's pre-spawn check examines all four.
-[src: file: backend/src/agents/runner.rs:13404-13452#nul_byte_offender]
+[src: file: backend/src/agents/runner.rs:13431-13479#nul_byte_offender]
 
 A `\0` is valid UTF-8, so `read_to_string` carries one out of a file without a
 word. Any value Kronn reads from disk or decrypts can therefore reach a command
@@ -19,7 +19,7 @@ into a C string, it substitutes the literal `<string-with-nul>`. Only
 
 A byte scan alone — the obvious implementation — therefore detects the
 environment case and stays blind to the other three, with nothing to signal it.
-Both checks are needed. [src: file: backend/src/agents/runner.rs:13380-13389#NUL_BEARING_PLACEHOLDER]
+Both checks are needed. [src: file: backend/src/agents/runner.rs:13407-13416#NUL_BEARING_PLACEHOLDER]
 
 A test pins that library behaviour, so a future Rust release that stops
 substituting the placeholder fails there instead of quietly blinding the
@@ -74,8 +74,8 @@ existing hard preflight refusal rather than being silently repaired.
 [src: file: backend/src/api/disc_prompts.rs:187-260#build_synthesis_prompt]
 [src: file: backend/src/api/disc_prompts.rs:387-398#build_agent_prompt]
 [src: file: backend/src/api/disc_prompts.rs:400-420#build_agent_delta_prompt]
-[src: file: backend/src/api/discussions/streaming.rs:2700-2700#build_agent_delta_prompt]
-[src: file: backend/src/api/discussions/streaming.rs:4007-4007#build_agent_prompt]
+[src: file: backend/src/api/discussions/streaming.rs:2701#build_agent_delta_prompt]
+[src: file: backend/src/api/discussions/streaming.rs:4011#build_agent_prompt]
 
 The new HTTP regressions use the real Router and SQLite with temporary config
 and files: upload preserves exact disk bytes, and export/import/re-export keeps
@@ -87,8 +87,8 @@ provider or claim a browser/full-runtime end-to-end demonstration. Truly absent
 runtimes still use the existing deferral policy; this patch does not cap it.
 [src: file: backend/tests/context_file_safety.rs:82-137#upload_utf16_and_binary_keeps_original_bytes_and_safe_durable_previews]
 [src: file: backend/tests/context_file_safety.rs:139-247#imported_legacy_preview_and_history_are_safe_without_rewriting_the_archive]
-[src: file: backend/src/api/discussions/streaming.rs:7322-7352#a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral]
-[src: file: backend/src/api/discussions/streaming.rs:7354-7446#kt633_nul_failure_persists_a_visible_error_and_settles_the_dispatch]
+[src: file: backend/src/api/discussions/streaming.rs:7334-7364#a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral]
+[src: file: backend/src/api/discussions/streaming.rs:7366-7458#kt633_nul_failure_persists_a_visible_error_and_settles_the_dispatch]
 
 Initial production-path regression replay: **9 failed / 0 passed** before the
 preview/prompt corrections. Expanded focused replay: **12 passed**; two HTTP

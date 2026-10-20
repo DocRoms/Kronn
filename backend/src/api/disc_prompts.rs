@@ -475,7 +475,7 @@ fn build_agent_prompt_inner(
 
     // Every runtime can publish a fence, even when it has no question reader.
     let human_question_notice = concat!(
-        "Blocking human decision — use a closed `kronn-question` JSON fence, never prose alone.\n",
+        "Any decision the human must arbitrate (choice, trade-off, approval, ambiguous scope) — whether or not it blocks you — goes in a closed `kronn-question` JSON fence, never prose alone.\n",
         "`version` MUST be the JSON number 1; the string \"1\" is INVALID (do not copy the version type from delivery/review manifests).\n",
         "Complete minimal example (replace key/question with this real decision):\n",
         "```kronn-question\n",
@@ -691,9 +691,9 @@ fn build_agent_prompt_inner(
     // agents like Gemini detect -p mode and refuse to interact on the first message.
     let interactive_hint = if user_msgs.len() > 1 || disc.pin_first_message {
         match disc.language.as_str() {
-            "fr" => "NOTE: Tu es dans une conversation multi-tours geree par Kronn. Tu PEUX poser des questions et attendre des reponses. Chaque tour inclut la fenetre d'historique disponible ; si les outils d'historique sont indiques plus haut, utilise-les seulement lorsqu'un contexte plus ancien te manque.\n\n",
-            "es" => "NOTA: Estas en una conversacion multi-turno gestionada por Kronn. PUEDES hacer preguntas y esperar respuestas. Cada turno incluye la ventana de historial disponible; si las herramientas de historial aparecen arriba, úsalas solo cuando te falte contexto anterior.\n\n",
-            _ => "NOTE: You are in a multi-turn conversation managed by Kronn. You CAN ask questions and wait for answers. Each turn includes the available history window; when history tools are listed above, use them only when older context is missing.\n\n",
+            "fr" => "NOTE: Tu es dans une conversation multi-tours geree par Kronn. Tu PEUX poser des questions et attendre des reponses ; une decision que l'humain doit arbitrer se pose dans une carte `kronn-question` (voir plus haut), pas en prose. Chaque tour inclut la fenetre d'historique disponible ; si les outils d'historique sont indiques plus haut, utilise-les seulement lorsqu'un contexte plus ancien te manque.\n\n",
+            "es" => "NOTA: Estas en una conversacion multi-turno gestionada por Kronn. PUEDES hacer preguntas y esperar respuestas; una decision que el humano debe arbitrar va en una tarjeta `kronn-question` (ver arriba), no en prosa. Cada turno incluye la ventana de historial disponible; si las herramientas de historial aparecen arriba, úsalas solo cuando te falte contexto anterior.\n\n",
+            _ => "NOTE: You are in a multi-turn conversation managed by Kronn. You CAN ask questions and wait for answers; a decision the human must arbitrate goes in a `kronn-question` card (see above), not prose. Each turn includes the available history window; when history tools are listed above, use them only when older context is missing.\n\n",
         }
     } else {
         ""
@@ -1233,6 +1233,23 @@ mod tests {
                     assert_eq!(value["version"].as_u64(), Some(1));
                     assert!(!value["key"].as_str().unwrap().is_empty());
                     assert!(!value["question"].as_str().unwrap().is_empty());
+                    // KT-1329 — the trigger is any decision the human must
+                    // arbitrate, not only one that blocks the agent, and the
+                    // multi-turn "you CAN ask questions" hint points at the card.
+                    assert!(
+                        prompt.contains("Any decision the human must arbitrate"),
+                        "{agent:?}/{language}/{turns}: widened trigger"
+                    );
+                    if turns > 1 {
+                        let hint = prompt
+                            .lines()
+                            .find(|line| line.starts_with("NOTE:") || line.starts_with("NOTA:"))
+                            .unwrap_or_else(|| panic!("{agent:?}/{language}: multi-turn hint"));
+                        assert!(
+                            hint.contains("`kronn-question`"),
+                            "{agent:?}/{language}: the hint must point to the card: {hint}"
+                        );
+                    }
                     for contract in [
                         "the string \"1\" is INVALID",
                         "Only the human answers",

@@ -61,11 +61,11 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:95-121#discover]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:123-208#run_handshake_and_list]
 [src: file: backend/src/api/external_api_connections.rs:274-441#probe_models]
-[src: file: backend/src/api/external_api_connections.rs:1306-1336#fetch_capability_catalogue]
-[src: file: backend/src/api/external_api_connections.rs:1338-1350#catalog_declares_modality]
-[src: file: backend/src/api/external_api_connections.rs:1352-1405#catalog_models_from_body]
-[src: file: backend/src/api/external_api_connections.rs:1407-1422#merge_catalog]
-[src: file: backend/src/core/model_catalog/mod.rs:657-672#reconcile_http_catalog]
+[src: file: backend/src/api/external_api_connections.rs:1319-1349#fetch_capability_catalogue]
+[src: file: backend/src/api/external_api_connections.rs:1351-1363#catalog_declares_modality]
+[src: file: backend/src/api/external_api_connections.rs:1365-1419#catalog_models_from_body]
+[src: file: backend/src/api/external_api_connections.rs:1421-1436#merge_catalog]
+[src: file: backend/src/core/model_catalog/mod.rs:705-720#reconcile_http_catalog]
 
 ## Where OpenCode's models come from (KT-928)
 
@@ -95,7 +95,7 @@ a project's own config — typically a local Ollama — was offered to every run
 that project and appeared in no selector. This, not a filter or a cache, is why
 models were missing: the Config UI applies no filter to what the catalogue
 holds (`catalogModelOptions`).
-[src: file: frontend/src/lib/modelCatalogSelection.ts:95-146#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 
 OpenCode discovery now runs in two kinds of directory at once, inside the
 single 20 s discovery bound: the neutral one, and every registered project that
@@ -128,7 +128,7 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5445-5499#offers_model_catalogue]
+[src: file: backend/src/agents/runner.rs:5455-5509#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1875-1884#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1886-1917#select_model]
 
@@ -147,7 +147,7 @@ model still recorded `Available`. The cached provenance and error remain visible
 this is permission to attempt execution, not proof of account access. Missing CLI,
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
-[src: file: backend/src/core/model_catalog/mod.rs:1083-1114#retained_claude_model]
+[src: file: backend/src/core/model_catalog/mod.rs:1131-1162#retained_claude_model]
 [src: file: backend/src/api/discussions/streaming.rs:4150-4196#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:1884-1969#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1174-1227#preflight_workflow_launch]
@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:733-763#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:755-785#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -217,11 +217,11 @@ adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:12875-12892#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:12945-12976#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:12902-12919#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:12972-13003#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:4853-4881#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:4863-4891#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -287,7 +287,7 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:1932-1966#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/migrations.rs:1952-1986#model_catalog_upgrades_from_its_immediate_predecessor]
 [src: file: backend/src/db/sql/162_model_catalog.sql:32-42#model_catalog_refresh_log]
 [src: file: backend/src/db/model_catalog.rs:1088-1134#reconcile_live_promotes_manual_entry_preserving_overrides]
 [src: file: backend/src/db/model_catalog.rs:1136-1158#reconcile_live_is_idempotent]

@@ -162,6 +162,7 @@ async fn prompt_of(kind: Kind, linked: bool) -> (String, tempfile::TempDir) {
                     resume_run_id: None,
                     retry_steps: None,
                     redo_steps: None,
+                    accept_unverified_agents: None,
                     fresh: None,
                 }),
             )

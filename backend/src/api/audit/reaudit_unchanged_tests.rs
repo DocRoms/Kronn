@@ -90,8 +90,20 @@ case "$prompt" in
         printf '\nChecked by the audit: scanned — nothing substantiable.\n' >> "$f.next"
       fi
       mv "$f.next" "$f"
+      if [ "$(basename "$target")" = coding-rules.md ]; then
+        c="$(dirname "$f")/workflow/commits.md"
+        if [ -f "$c" ]; then
+          sed -e '/TEMPLATE FILE/d' -e 's/<!-- Fill:[^>]*-->//g' \
+              -e 's/{{{{[A-Z0-9_]*}}}}/Not formalized - ask before assuming./g' "$c" > "$c.next"
+          mv "$c.next" "$c"
+        fi
+      fi
+      if [ "$target" = docs/AGENTS.md ] && [ -f '{state}/stack-table' ]; then
+        cat '{state}/stack-table' >> "$f"
+      fi
     fi
     if [ -f '{state}/after' ]; then sh '{state}/after' "$target"; fi
+    if [ -f '{state}/stream-extra' ]; then cat '{state}/stream-extra'; fi
     ;;
   *)
     while [ -f '{state}/validation-hold' ]; do sleep 0.1; done
@@ -161,6 +173,7 @@ async fn launch_full(
             resume_run_id,
             retry_steps,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh,
         }),
     )
@@ -1075,6 +1088,43 @@ async fn an_accepted_step_completes_the_run_and_the_project_validates() {
     );
 }
 
+/// KT-1353 — the validation honours the run's exemption only while the document
+/// is as the run left it: a pre-existing blocker is let through, the same key
+/// after a later edit is refused.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn the_validation_waves_through_a_preexisting_blocker_only_while_its_document_is_unchanged() {
+    let fx = Audited::new().await;
+    let notes = fx.project.path().join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\nGhost [src: file: ghost.rs:1]\n").unwrap();
+    arm(fx.tools.path(), "noop", &fx.targets);
+    settle_on_validation(fx.tools.path());
+    let second = run_full(&fx.state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(&fx.state, &done).await;
+    assert_eq!(done["status"], "complete", "{second}");
+
+    // Edited after the run, the citation still there: the exemption is gone.
+    std::fs::write(
+        &notes,
+        "# Notes\nGhost [src: file: ghost.rs:1]\nEdited since.\n",
+    )
+    .unwrap();
+    let refused = fx.validate().await;
+    assert!(!refused.success, "{refused:?}");
+    assert!(
+        refused.error.as_deref().unwrap_or("").contains("ghost.rs"),
+        "{:?}",
+        refused.error
+    );
+
+    // As the run left it, the problem is reported (run notes), not refused.
+    std::fs::write(&notes, "# Notes\nGhost [src: file: ghost.rs:1]\n").unwrap();
+    let validated = fx.validate().await;
+    assert!(validated.success, "{:?}", validated.error);
+}
+
 // ── KT-1169 — a launch never ignores an audit it could resume ────────────────
 
 /// Every file under `docs/`, by path, so a refused launch can prove it wrote nothing.
@@ -1154,6 +1204,7 @@ async fn a_launch_that_would_ignore_a_resumable_run_is_refused_unless_fresh() {
             connection_id: None,
             tier: None,
             steps: vec![1],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -1346,6 +1397,7 @@ async fn a_full_audit_goes_on_after_the_session_that_launched_it_is_closed() {
             resume_run_id: None,
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )
@@ -1623,6 +1675,7 @@ async fn a_reaudit_keeps_human_td_decisions_and_a_refresh_says_it_is_single_agen
             connection_id: None,
             tier: None,
             steps: vec![step],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -1651,6 +1704,115 @@ fn after_each_step(tools: &Path, hook: &str) {
     .unwrap();
 }
 
+/// KT-1388 round 2 — the partial refresh gives the same advice as Full: a stack
+/// conflict and an unproven closure in what a step wrote are handed back while
+/// it has attempts left, then left as a step warning, a documentary note and a
+/// line of the validation prompt; the step stays done and the run completes.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_partial_refresh_hands_back_and_records_the_advice_like_full() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("baseline done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    std::fs::write(
+        project.join("composer.json"),
+        "{\"require\":{\"symfony/framework-bundle\":\"^8.1\"}}",
+    )
+    .unwrap();
+    let target = "docs/inconsistencies-security.md";
+    let step = targets.iter().position(|t| *t == target).unwrap() + 1;
+    let attempts = crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS;
+    arm(tools, "noop", &vec![target; attempts]);
+    after_each_step(
+        tools,
+        &format!(
+            "{target}) printf '\\nSymfony 7.3\\nTD-20261020-review-proof — Resolved.\\n' >> '{}' ;;",
+            project.join(target).display()
+        ),
+    );
+    let response = crate::api::audit::drift::partial_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::PartialAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            steps: vec![step],
+            accept_unverified_agents: None,
+        }),
+    )
+    .await
+    .into_response();
+    let body = sse_body(response).await;
+    let done = sse_events(&body, "done").pop().expect("partial done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{body}");
+
+    // Handed back while attempts remain, never past the budget.
+    let retries: Vec<Value> = sse_events(&body, "step_retry")
+        .into_iter()
+        .filter(|e| e["reason"] == "documentary_advisories")
+        .collect();
+    assert_eq!(retries.len(), attempts - 1, "{body}");
+    let codes = |event: &Value| -> Vec<String> {
+        event["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["code"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for retry in &retries {
+        assert_eq!(retry["step"], step, "{retry}");
+        assert!(codes(retry).contains(&"stack_conflict".into()), "{retry}");
+        assert!(
+            codes(retry).contains(&"unproven_resolution".into()),
+            "{retry}"
+        );
+    }
+    // The last attempt leaves them: an event, and the step stays done.
+    let left = sse_events(&body, "documentary_advisory");
+    assert_eq!(left.len(), 1, "{body}");
+    assert!(codes(&left[0]).contains(&"stack_conflict".into()), "{body}");
+    let step_done = sse_events(&body, "step_done")
+        .into_iter()
+        .find(|e| e["step"] == step)
+        .unwrap();
+    assert_eq!(step_done["success"], true, "{step_done}");
+
+    // Recorded: the step warning, the run's notes and the validation prompt.
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, steps, prompt) = persisted(state, &run_id).await;
+    assert_eq!(run.status, "Completed");
+    let row = steps.iter().find(|s| s.step_index == step as u32).unwrap();
+    let warning = row.step_warning.as_deref().expect("step warning");
+    assert!(warning.contains("Symfony 7.3"), "{warning}");
+    assert!(warning.contains("TD-20261020-review-proof"), "{warning}");
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    for code in ["stack_conflict", "unproven_resolution"] {
+        assert!(
+            saved["advisories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["code"] == code),
+            "{saved}"
+        );
+    }
+    let prompt = prompt.expect("validation prompt");
+    assert!(prompt.contains("Symfony 7.3"), "{prompt}");
+    assert!(prompt.contains("TD-20261020-review-proof"), "{prompt}");
+}
+
 /// KT-1306 — the final documentary gate charges a blocker to the step that wrote
 /// the document, even one no step targets, and a resume redoes that step, never
 /// the founding one by default.
@@ -1667,7 +1829,7 @@ async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
     let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
     assert!(![writer_a, writer_b].contains(&founding));
 
-    // Two steps each leave a document no step targets, citing a file that does
+    // Two steps each leave a document no step targets, linking a page that does
     // not exist. A step that fails its gate retries: one scripted line per attempt.
     let mut targets: Vec<&str> = Vec::new();
     for (index, step) in chain.iter().enumerate() {
@@ -1683,8 +1845,8 @@ async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
     after_each_step(
         tools,
         &format!(
-            "docs/coding-rules.md) printf '# A\\nGhost [src: file: ghost-a.rs:1]\\n' > '{root}/docs/extra-a.md' ;;\n\
-             docs/glossary.md) mkdir -p '{root}/docs/workflow'; printf '# B\\nGhost [src: file: ghost-b.rs:1]\\n' > '{root}/docs/workflow/extra-b.md' ;;"
+            "docs/coding-rules.md) printf '# A\\nGhost [page](nowhere/ghost-a.md)\\n' > '{root}/docs/extra-a.md' ;;\n\
+             docs/glossary.md) mkdir -p '{root}/docs/workflow'; printf '# B\\nGhost [page](nowhere/ghost-b.md)\\n' > '{root}/docs/workflow/extra-b.md' ;;"
         ),
     );
     let run = run_full(state, None).await;
@@ -1731,8 +1893,11 @@ async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
     );
 }
 
-/// KT-1306 — a blocker that was in a document before a step ran is reported,
-/// not charged to that step when it touches the document.
+/// KT-1306 + KT-1353 (africanews) — a blocker that was in a document before the
+/// run, and that a step touches without fixing (a re-verification appends to the
+/// document and leaves the citation), is neither that step's nor the founding
+/// step's: the step is not retried, the final gate reports it, the run completes,
+/// and the human is told in the run's notes and in the validation prompt.
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]
@@ -1746,7 +1911,6 @@ async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
         .position(|s| s.target_file == "docs/glossary.md")
         .unwrap() as u32
         + 1;
-    let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
 
     arm(tools, "fill", &targets);
     let first = run_full(state, None).await;
@@ -1771,10 +1935,13 @@ async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
     validation_settled(state, &done).await;
 
     let reported = sse_events(&second, "documentary_preexisting");
-    assert_eq!(reported.len(), 1, "{second}");
-    assert_eq!(reported[0]["step"], touching, "{second}");
+    let in_step = reported
+        .iter()
+        .find(|e| e.get("phase").is_none())
+        .unwrap_or_else(|| panic!("{second}"));
+    assert_eq!(in_step["step"], touching, "{second}");
     assert_eq!(
-        reported[0]["diagnostics"][0]["path"], "docs/notes.md",
+        in_step["diagnostics"][0]["path"], "docs/notes.md",
         "{second}"
     );
     assert!(sse_events(&second, "step_retry").is_empty(), "{second}");
@@ -1783,10 +1950,224 @@ async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
         .find(|e| e["step"] == touching)
         .unwrap();
     assert_eq!(step_done["success"], true, "{step_done}");
-    // Nobody introduced it during this run: the run is still blocked on it
-    // (the entry point's step owns what no step wrote), but the toucher is not.
-    assert_eq!(done["status"], "interrupted", "{second}");
-    assert_eq!(done["steps_to_redo"], json!([founding]), "{second}");
+    assert!(std::fs::read_to_string(&notes)
+        .unwrap()
+        .contains("Another note."));
+    // The step rewrote the document and left the citation: still nobody's. The
+    // run is not interrupted and no step, the founding one included, is redone.
+    assert!(
+        reported.iter().any(|e| e["phase"] == "final_gate"),
+        "{second}"
+    );
+    assert_eq!(done["status"], "complete", "{second}");
+    assert!(sse_events(&second, "step_warning").is_empty(), "{second}");
+
+    // The human is told: on the run (audit timeline) and in the validation prompt.
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, _, prompt) = persisted(state, &run_id).await;
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    assert_eq!(saved["preexisting"][0]["path"], "docs/notes.md", "{saved}");
+    let prompt = prompt.expect("validation prompt");
+    assert!(prompt.contains("docs/notes.md"), "{prompt}");
+    assert!(prompt.contains("ghost.rs"), "{prompt}");
+}
+
+/// KT-1387 — a command a document cites and the repository does not define is
+/// feedback, never a blocker: the step is told on each retry, and when the
+/// attempts are spent it stays done, with a warning and a line in the run's
+/// notes and in the validation prompt. The end-of-run gate does not count it.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_unknown_command_is_told_to_the_step_then_kept_as_a_warning() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    let touching = chain
+        .iter()
+        .position(|s| s.target_file == "docs/glossary.md")
+        .unwrap() as u32
+        + 1;
+
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    // The glossary step cites a make target nothing defines, on every attempt.
+    let notes = project.join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\nPlain prose.\n").unwrap();
+    let attempts = crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS;
+    let mut scripted: Vec<&str> = Vec::new();
+    for step in &chain {
+        let times = if step.target_file == "docs/glossary.md" {
+            attempts
+        } else {
+            1
+        };
+        scripted.extend(std::iter::repeat_n(step.target_file, times));
+    }
+    arm(tools, "noop", &scripted);
+    after_each_step(
+        tools,
+        &format!(
+            "docs/glossary.md) printf 'Run `make ghost`.\\n' >> '{}' ;;",
+            notes.display()
+        ),
+    );
+    let second = run_full(state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    let retries: Vec<Value> = sse_events(&second, "step_retry")
+        .into_iter()
+        .filter(|e| e["reason"] == "documentary_unverified_commands")
+        .collect();
+    assert_eq!(retries.len(), attempts - 1, "{second}");
+    assert!(retries.iter().all(|e| e["step"] == touching), "{second}");
+    assert!(
+        retries[0]["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("make ghost"),
+        "{second}"
+    );
+    // Nothing fails: the step is done, the run completes, no blocker is counted.
+    assert!(sse_events(&second, "step_warning").is_empty(), "{second}");
+    let step_done = sse_events(&second, "step_done")
+        .into_iter()
+        .find(|e| e["step"] == touching)
+        .unwrap();
+    assert_eq!(step_done["success"], true, "{step_done}");
+    assert_eq!(done["status"], "complete", "{second}");
+    let optimization = sse_events(&second, "documentary_optimization")
+        .pop()
+        .unwrap();
+    assert_eq!(optimization["blocking_count"], 0, "{optimization}");
+
+    // Said as a warning, in the run's notes and in the validation prompt.
+    let warned = sse_events(&second, "warning")
+        .into_iter()
+        .find(|e| e["step"] == touching)
+        .unwrap_or_else(|| panic!("{second}"));
+    assert!(
+        warned["message"]
+            .as_str()
+            .unwrap()
+            .contains("cited command"),
+        "{warned}"
+    );
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, _, prompt) = persisted(state, &run_id).await;
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    assert_eq!(saved["unverified_commands"][0]["step"], touching, "{saved}");
+    assert_eq!(
+        saved["unverified_commands"][0]["path"], "docs/notes.md",
+        "{saved}"
+    );
+    assert!(prompt.expect("validation prompt").contains("make ghost"));
+}
+
+/// KT-1353 — a blocker the committed documents held before the run, in a
+/// document no step rewrote, is reported at the final gate and never charged to
+/// the founding step: the run completes (africanews: sheets citing vendor code).
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_blocker_in_a_document_the_run_never_rewrote_does_not_fail_the_run() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    let notes = project.join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\nGhost [src: file: ghost.rs:1]\n").unwrap();
+    arm(tools, "noop", &targets);
+    let second = run_full(state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    let reported = sse_events(&second, "documentary_preexisting");
+    assert_eq!(reported.len(), 1, "{second}");
+    assert_eq!(reported[0]["phase"], "final_gate", "{second}");
+    assert_eq!(
+        reported[0]["diagnostics"][0]["path"], "docs/notes.md",
+        "{second}"
+    );
+    let optimization = sse_events(&second, "documentary_optimization")
+        .pop()
+        .unwrap();
+    assert_eq!(optimization["blocking_count"], 0, "{optimization}");
+    assert_eq!(optimization["preexisting_count"], 1, "{optimization}");
+    assert_eq!(done["status"], "complete", "{second}");
+    assert!(sse_events(&second, "step_warning").is_empty(), "{second}");
+}
+
+/// KT-1353 — a link the gate would refuse with an exact replacement is
+/// corrected before the step is judged, logged, and the step is not retried.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_step_whose_link_the_gate_can_fix_exactly_is_corrected_not_retried() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    let touching = chain
+        .iter()
+        .position(|s| s.target_file == "docs/glossary.md")
+        .unwrap() as u32
+        + 1;
+
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    // The step writes a repository-root link from inside docs/.
+    let notes = project.join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\n").unwrap();
+    arm(tools, "noop", &targets);
+    after_each_step(
+        tools,
+        &format!(
+            "docs/glossary.md) printf 'See [glossary](docs/glossary.md).\\n' >> '{}' ;;",
+            notes.display()
+        ),
+    );
+    let second = run_full(state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    let fixed = sse_events(&second, "documentary_autofix");
+    assert_eq!(fixed.len(), 1, "{second}");
+    assert_eq!(fixed[0]["step"], touching, "{second}");
+    assert_eq!(fixed[0]["fixes"][0]["kind"], "link_base", "{second}");
+    assert_eq!(fixed[0]["fixes"][0]["to"], "glossary.md", "{second}");
+    assert!(sse_events(&second, "step_retry").is_empty(), "{second}");
+    assert!(std::fs::read_to_string(&notes)
+        .unwrap()
+        .contains("[glossary](glossary.md)"));
+    assert_eq!(done["status"], "complete", "{second}");
+    // The repair is kept on the run and said to the validation agent.
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, _, prompt) = persisted(state, &run_id).await;
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    assert_eq!(saved["autofixes"][0]["kind"], "link_base", "{saved}");
+    assert_eq!(saved["autofixes"][0]["step"], touching, "{saved}");
+    assert!(prompt.expect("validation prompt").contains("glossary.md"));
 }
 
 /// KT-1306 — the cross-agent path writes a step's documents itself, before any
@@ -1895,3 +2276,6 @@ async fn a_blocker_written_by_the_cross_agent_path_is_charged_to_its_step() {
         "{ledger}"
     );
 }
+
+#[path = "stack_provenance_tests.rs"]
+mod stack_provenance;

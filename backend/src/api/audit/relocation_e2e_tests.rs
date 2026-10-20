@@ -143,9 +143,17 @@ async fn a_full_audit_of_a_dot_ai_project_writes_everything_there_and_nothing_in
     let path = project.display().to_string();
     for (relocated, default) in prompts.iter().zip(&default_prompts) {
         assert!(!relocated.contains("`docs/"), "{relocated}");
+        // KT-1360 — the remit block names the root and the leftover folders
+        // itself: it is built per root, not rewritten.
         let expected = ai
-            .relocate(&default.replace(&reference_path, &path))
-            .into_owned();
+            .relocate(&default.replace(&reference_path, &path).replace(
+                &crate::api::audit::step_remit::remit_prompt_block(&DocsRoot::default_root()),
+                "\u{0}",
+            ))
+            .replace(
+                '\u{0}',
+                &crate::api::audit::step_remit::remit_prompt_block(&ai),
+            );
         assert_eq!(relocated, &expected);
     }
     assert!(prompts[0].contains("`.ai/AGENTS.md`"));
@@ -215,6 +223,9 @@ async fn a_partial_refresh_of_a_dot_ai_project_rewrites_its_section_there() {
     let glossary = ".ai/glossary.md";
     let step = targets.iter().position(|t| *t == glossary).unwrap() + 1;
     let before = std::fs::read_to_string(project.join(glossary)).unwrap();
+    // The source tree differs from the one the audit recorded (KT-1357: an
+    // unchanged tree would end the refresh `unchanged`, with no agent).
+    std::fs::write(project.join("README.md"), "# Fixture\n\nA new paragraph.\n").unwrap();
     arm(h.tools.path(), "fill", &[glossary]);
     let response = crate::api::audit::drift::partial_audit(
         axum::extract::State(h.state.clone()),
@@ -224,6 +235,7 @@ async fn a_partial_refresh_of_a_dot_ai_project_rewrites_its_section_there() {
             connection_id: None,
             tier: None,
             steps: vec![step],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -311,6 +323,7 @@ async fn a_revalidation_of_a_dot_ai_project_finds_and_fixes_its_citations_there(
         axum::extract::Path(PROJECT_ID.to_string()),
         axum::Json(crate::models::RevalidateAuditRequest {
             deterministic_only: None,
+            accept_unverified_agents: None,
             agent: AgentType::ClaudeCode,
             connection_id: None,
             tier: None,
@@ -414,6 +427,7 @@ async fn provenance_citations_td_review_and_step_8_follow_a_dot_ai_root() {
             connection_id: None,
             tier: None,
             steps: vec![step],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -757,6 +771,7 @@ async fn launch_route_fresh(h: &Harness, bridge: bool, fresh: Option<bool>) -> S
             resume_run_id: None,
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh,
         }),
     )
@@ -923,6 +938,7 @@ async fn an_ai_folder_is_migrated_first_or_refused_as_human_docs() {
             connection_id: None,
             tier: None,
             steps: vec![2],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -1118,6 +1134,9 @@ fn an_applied_template_merge_on_a_dot_ai_project_writes_and_commits_under_its_ro
     let project = tmp.path().join("repo");
     std::fs::create_dir_all(&project).unwrap();
     git_in(&project, &["init", "-q", "-b", "main"]);
+    // The merge commits with the repository's identity: CI has no global one.
+    git_in(&project, &["config", "user.name", "Test"]);
+    git_in(&project, &["config", "user.email", "test@example.com"]);
     std::fs::write(
         project.join("AGENTS.md"),
         "# Agent guide\n\n## Running tests\n\nmake test\n",
@@ -1166,7 +1185,7 @@ fn an_applied_template_merge_on_a_dot_ai_project_writes_and_commits_under_its_ro
         .collect();
     assert_eq!(
         committed,
-        [".ai/AGENTS.md", ".ai/glossary.md"]
+        [".ai/.kronn.json", ".ai/AGENTS.md", ".ai/glossary.md"]
             .into_iter()
             .map(str::to_string)
             .collect::<BTreeSet<_>>()
@@ -1624,6 +1643,7 @@ async fn partial_and_revalidation_wait_for_the_choice_on_human_docs() {
             connection_id: None,
             tier: None,
             steps: vec![1],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -1633,6 +1653,7 @@ async fn partial_and_revalidation_wait_for_the_choice_on_human_docs() {
         axum::extract::Path(PROJECT_ID.to_string()),
         axum::Json(crate::models::RevalidateAuditRequest {
             deterministic_only: Some(true),
+            accept_unverified_agents: None,
             agent: AgentType::ClaudeCode,
             connection_id: None,
             tier: None,
@@ -1731,3 +1752,7 @@ async fn the_default_root_snapshot_does_not_depend_on_the_day_of_the_audit() {
         "{after}"
     );
 }
+
+// KT-1310 — what follows an accepted template v2 merge.
+#[path = "template_merge_integration_e2e_tests.rs"]
+mod template_merge_integration_e2e_tests;

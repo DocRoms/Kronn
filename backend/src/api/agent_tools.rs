@@ -11,6 +11,7 @@
 //! task context honest.
 
 use crate::agents::tools::{ToolCall, ToolExecutor, ToolOutcome};
+use crate::core::skill_guide::WORKFLOW_GUIDE;
 use crate::models::{
     AddPlanningBlockerRequest, AgentType, CreatePlanningTaskRequest, LinkPlanningDiscussionRequest,
     PlanningActor, PlanningActorKind, PlanningTaskListQuery, RemovePlanningBlockerRequest,
@@ -39,6 +40,18 @@ mod quick_prompt_bench;
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_signal_bench.rs"]
 mod signal_bench;
+
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "agent_tools_scope_tests.rs"]
+mod tools_scope_tests;
+
+#[cfg(test)]
+#[path = "agent_tool_parity_tests.rs"]
+mod tool_parity_tests;
+
+#[path = "agent_tool_gate.rs"]
+mod tool_gate;
+pub(crate) use tool_gate::TEST_STEP_RUN_ID;
 
 #[path = "agent_workflow_tools.rs"]
 mod workflow_tools;
@@ -87,6 +100,9 @@ pub struct KronnToolExecutor {
     /// The agent and model the runner resolved for this launch, for API
     /// access policies; never re-read from the discussion afterwards.
     launch_identity: std::sync::Mutex<Option<crate::core::api_access::AgentIdentity>>,
+    /// This run's bridge token (KT-1346): minted on first use, held as long
+    /// as the executor, so its tools cross the same gate as a CLI agent's.
+    bridge_token: std::sync::Mutex<Option<crate::core::bridge_token::BridgeTokenGuard>>,
 }
 
 impl KronnToolExecutor {
@@ -105,6 +121,7 @@ impl KronnToolExecutor {
             audit_workspace: None,
             audit_step_target: None,
             launch_identity: Default::default(),
+            bridge_token: Default::default(),
         }
     }
 
@@ -131,6 +148,7 @@ impl KronnToolExecutor {
             audit_workspace: None,
             audit_step_target: None,
             launch_identity: Default::default(),
+            bridge_token: Default::default(),
         })
     }
 
@@ -160,6 +178,7 @@ impl KronnToolExecutor {
             audit_workspace: None,
             audit_step_target: None,
             launch_identity: Default::default(),
+            bridge_token: Default::default(),
         })
     }
 
@@ -186,6 +205,7 @@ impl KronnToolExecutor {
             audit_workspace: None,
             audit_step_target: None,
             launch_identity: Default::default(),
+            bridge_token: Default::default(),
         })
     }
 
@@ -264,6 +284,7 @@ impl KronnToolExecutor {
             audit_workspace: Some(workspace),
             audit_step_target: step_target.map(str::to_string),
             launch_identity: Default::default(),
+            bridge_token: Default::default(),
         })
     }
 }
@@ -612,7 +633,7 @@ fn build_tool_catalogue() -> Vec<Value> {
                         "api_query": { "type": "object", "additionalProperties": { "type": "string" } },
                         "api_path_params": { "type": "object", "additionalProperties": { "type": "string" } },
                         "api_body": { "type": "object" },
-                        "project_id": { "type": "string", "description": "Omit to make it general." },
+                        "project_id": { "type": "string", "description": "Omit: this room's project." },
                         "variables": {
                             "type": "array",
                             "items": { "type": "object" },
@@ -747,7 +768,7 @@ fn build_tool_catalogue() -> Vec<Value> {
                             "enum": ["text", "json", "csv", "lines"],
                             "description": "How the output is parsed for a caller.",
                         },
-                        "project_id": { "type": "string", "description": "Omit to make it general." },
+                        "project_id": { "type": "string", "description": "Omit: this room's project." },
                         "variables": {
                             "type": "array",
                             "items": { "type": "object" },
@@ -790,11 +811,12 @@ fn build_tool_catalogue() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "tool_manual",
-                "description": "Read one tool's contract, or `signals` for proposal schemas and UI actions. Omit `tool` to list manuals.",
+                "description": "Read one tool's contract, `signals` for proposal schemas and UI actions, or `workflow-architect`: the guide to read before building a workflow or a Page, by `section`. Omit `tool` to list manuals.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "tool": { "type": "string", "description": "Tool name or signals; omit to list." },
+                        "tool": { "type": "string", "description": "Tool name, signals or workflow-architect; omit to list." },
+                        "section": { "type": "string", "description": "workflow-architect only: a title from its contents." },
                     },
                     "required": [],
                 },
@@ -825,6 +847,22 @@ fn build_tool_catalogue() -> Vec<Value> {
                         },
                     },
                     "required": ["api_plugin_slug", "endpoint_path"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "room_scope",
+                "description": "This room's project reach. Without `project`: what it reaches and the pending requests. With `project`: ask a human for that project. See tool_manual.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project": { "type": "string", "description": "Project name or id to ask for." },
+                        "access": { "type": "string", "enum": ["read", "write"] },
+                        "reason": { "type": "string", "description": "Why, for the human deciding." },
+                    },
+                    "required": [],
                 },
             },
         }),
@@ -1402,6 +1440,8 @@ fn workflow_tool_catalogue(has_project: bool) -> Vec<Value> {
 /// stays: reading its own task's DoD is legitimate.
 fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
     const NOT_FOR_A_WORKER: &[&str] = &[
+        // A worker's room is not a room it is the agent of: no grants to ask for.
+        "room_scope",
         // Backlog browsing and shaping — the principal owns the plan.
         "task_list",
         "task_create",
@@ -1612,6 +1652,13 @@ impl ToolExecutor for KronnToolExecutor {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolOutcome {
+        // KT-1346 — the same gate as a CLI agent's bridge call, before the tool runs.
+        let gated = match self.gate(call).await {
+            Ok(gated) => gated,
+            Err(refusal) => return fail(call, refusal),
+        };
+        let call = gated.call.as_ref().unwrap_or(call);
+        let outcome = async {
         // A model can name a tool it was never offered. In an audit the catalogue
         // is the whole contract, so anything outside it is refused before dispatch
         // reaches a handler that would honour it (`api_call`, plan writes…).
@@ -1718,7 +1765,13 @@ impl ToolExecutor for KronnToolExecutor {
                     _ => fail(call, res.error.unwrap_or_else(|| "call failed".into())),
                 }
             }
-            "tool_manual" => ok(call, tool_manual(call.arguments["tool"].as_str())),
+            "tool_manual" => ok(
+                call,
+                tool_manual(
+                    call.arguments["tool"].as_str(),
+                    call.arguments["section"].as_str(),
+                ),
+            ),
             "page_list" | "page_get" | "page_create" | "page_update_html" | "page_add_dataset" => {
                 self.execute_page_tool(call).await
             }
@@ -2062,6 +2115,49 @@ impl ToolExecutor for KronnToolExecutor {
                 .await;
                 unwrap_api(call, res.success, res.data, res.error)
             }
+            "room_scope" => {
+                // Only a room's own agent holds or asks for the room's reach; a
+                // step or a worker reaches what its workflow or task allows.
+                let Some(discussion_id) = self.disc_id.clone().filter(|_| {
+                    !self.worker_room && self.workflow_run_id.is_none()
+                }) else {
+                    return fail(call, ROOM_SCOPE_NOT_HERE);
+                };
+                match required_string(call, "project") {
+                    None => {
+                        let (_, Json(res)) = crate::api::discussion_scope::get_scope(
+                            State(self.state.clone()),
+                            Path(discussion_id),
+                        )
+                        .await;
+                        unwrap_api(call, res.success, res.data, res.error)
+                    }
+                    Some(project) => {
+                        let request = match serde_json::from_value::<
+                            crate::models::discussion_scope::FileScopeRequest,
+                        >(json!({
+                            "project": project,
+                            "access": call.arguments.get("access").cloned().unwrap_or(json!("read")),
+                            "reason": call.arguments.get("reason").cloned().unwrap_or(json!("")),
+                        })) {
+                            Ok(request) => request,
+                            Err(error) => return fail(call, format!("invalid room_scope fields: {error}")),
+                        };
+                        let caller = gated
+                            .admitted
+                            .as_ref()
+                            .map(|admitted| axum::Extension(admitted.caller.clone()));
+                        let (_, Json(res)) = crate::api::discussion_scope::file_request(
+                            State(self.state.clone()),
+                            caller,
+                            Path(discussion_id),
+                            Json(request),
+                        )
+                        .await;
+                        unwrap_api(call, res.success, res.data, res.error)
+                    }
+                }
+            }
             "plan_get" => {
                 let Some(disc_id) = self.discussion_id(call) else {
                     return fail(call, "plan_get is available only inside a Kronn discussion");
@@ -2275,6 +2371,9 @@ impl ToolExecutor for KronnToolExecutor {
                 format!("unknown tool `{other}` — call only the tools you were given"),
             ),
         }
+            }
+        .await;
+        self.scope_outcome(gated.admitted, outcome).await
     }
 }
 
@@ -4149,13 +4248,21 @@ fn merged_definition<T: serde::Serialize, R: serde::de::DeserializeOwned>(
 /// this with `tool_manual` and so does this surface: the declaration carries
 /// the contract, the manual carries the detail, and only an agent that is
 /// about to author something pays for it.
-fn tool_manual(name: Option<&str>) -> Value {
+/// Why `room_scope` is refused to a workflow step or a worker.
+const ROOM_SCOPE_NOT_HERE: &str = "room_scope is for a room's own agent. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a worker reaches its task's project only.";
+
+/// Both reaches, as an agent needs them (KT-1341).
+pub(crate) const ROOM_SCOPE_MANUAL: &str = "A room has one primary project: its working directory, where what it creates lands, and the only project whose API configs and credentials it may use. A human may also grant the room other projects: read (tasks, rooms, runs, pages), write (planning only: create and edit tasks there, `project_ids` naming it), or every project. room_scope() returns the grants, the pending requests and the journal. When a call is refused as outside this room's project, ask with room_scope({project, access, reason}): it files a request the human approves, narrows or declines in the room, and grants nothing by itself; do not wait or retry, continue with what you can do. A grant never opens another project's credentials, never runs its workflows, and never reaches a workflow step or a worker posting in the room. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a room without a project writes general resources only once a human granted it « General · write ». Full doctrine: tool_manual({tool: \"workflow-architect\", section: \"Reach\"}).";
+
+fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
     const MANUALS: &[(&str, &str)] = &[
+        ("room_scope", ROOM_SCOPE_MANUAL),
         ("page_create", page_tools::CREATE_MANUAL),
         ("page_update_html", page_tools::UPDATE_MANUAL),
         (
             "workflow_create_draft",
-            "Read workflow_step_schema for the canonical step contracts; step_type narrows the result. \
+            "Before composing, read the workflow guide: tool_manual({tool: \"workflow-architect\"}), then the sections you need. \
+             Read workflow_step_schema for the canonical step contracts; step_type narrows the result. \
              Shared templating and data pipeline contracts are available by section. \
              Read workflow_get on an accessible example. Send name, trigger (e.g. {type: Manual}) \
              and 1–20 steps; each has name and step_type:{type: ...}. Optional authoring fields: \
@@ -4208,7 +4315,7 @@ fn tool_manual(name: Option<&str>) -> Value {
         ),
         (
             "qa_create_draft",
-            "A Quick API is a saved, replayable call through a configured plugin.              Kronn injects the credential server-side at run time — never put a key,              a token or an Authorization header in the definition.\n\n             Discovery order: `mcp_list` gives `api_plugin_slug` and `api_config_id`;              `api_endpoints` gives the exact `api_endpoint_path` for that plugin. Both              must come from those calls; a guessed path is a 404 at run time, not a              validation error here.\n\n             Variables are `{{name}}` placeholders anywhere in the path, query, headers              or body. Declare each one as `{\"name\": \"service_id\", \"label\":              \"Service\", \"placeholder\": \"abc123\", \"required\": true}`; `label`              and `placeholder` are what a human sees in the launcher, so write them for              a human. A variable used but not declared fails the launch.\n\n             `project_id` scopes it: set it and only that project's rooms see it, omit it              and every room does. A draft is saved disabled-safe — it runs only when              someone calls `qa_run` with it.",
+            "A Quick API is a saved, replayable call through a configured plugin.              Kronn injects the credential server-side at run time — never put a key,              a token or an Authorization header in the definition.\n\n             Discovery order: `mcp_list` gives `api_plugin_slug` and `api_config_id`;              `api_endpoints` gives the exact `api_endpoint_path` for that plugin. Both              must come from those calls; a guessed path is a 404 at run time, not a              validation error here.\n\n             Variables are `{{name}}` placeholders anywhere in the path, query, headers              or body. Declare each one as `{\"name\": \"service_id\", \"label\":              \"Service\", \"placeholder\": \"abc123\", \"required\": true}`; `label`              and `placeholder` are what a human sees in the launcher, so write them for              a human. A variable used but not declared fails the launch.\n\n             `project_id` scopes it to that project's rooms. Omitted, it takes this room's              project; only a room without a project saves a general one, seen by every room. A draft is saved disabled-safe — it runs only when              someone calls `qa_run` with it.",
         ),
         (
             "qe_create_draft",
@@ -4303,9 +4410,11 @@ fn tool_manual(name: Option<&str>) -> Value {
 
     match name.map(str::trim).filter(|name| !name.is_empty()) {
         None => json!({
-            "available": MANUALS.iter().map(|(name, _)| *name).chain(std::iter::once("signals")).collect::<Vec<_>>(),
-            "hint": "Pass `tool` to read one. signals lists structured proposal contracts; other entries document the named tool.",
+            "available": MANUALS.iter().map(|(name, _)| *name).chain(["signals", WORKFLOW_GUIDE]).collect::<Vec<_>>(),
+            "hint": "Pass `tool` to read one. signals lists structured proposal contracts; workflow-architect is the guide to build workflows and Pages, read by `section`; other entries document the named tool.",
         }),
+        Some(WORKFLOW_GUIDE) => crate::core::skill_guide::guide(WORKFLOW_GUIDE, section)
+            .unwrap_or_else(|| json!({"error": "the workflow guide is unavailable"})),
         Some("signals") => {
             json!({"tool": "signals", "catalogue": crate::api::signal_catalog::catalogue()})
         }
@@ -4313,7 +4422,7 @@ fn tool_manual(name: Option<&str>) -> Value {
             Some((name, manual)) => json!({ "tool": name, "manual": manual }),
             None => json!({
                 "error": format!("no manual for `{wanted}`"),
-                "available": MANUALS.iter().map(|(name, _)| *name).chain(std::iter::once("signals")).collect::<Vec<_>>(),
+                "available": MANUALS.iter().map(|(name, _)| *name).chain(["signals", WORKFLOW_GUIDE]).collect::<Vec<_>>(),
             }),
         },
     }
@@ -5023,6 +5132,7 @@ mod tests {
                     updated_at: chrono::Utc::now(),
                     image_model: None,
                     video_model: Some("google/veo-3.1-lite".into()),
+                    decision_model: None,
                     media_endpoint: None,
                 },
             )?;
@@ -5085,6 +5195,22 @@ mod tests {
             db.clone(),
             crate::DEFAULT_MAX_CONCURRENT_AGENTS,
         );
+        // A real room and task: the gate refuses a dead room before any schema check.
+        let reference = db
+            .with_conn(|conn| {
+                conn.execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('p','p','p','2026-10-18T00:00:00Z','2026-10-18T00:00:00Z')", [])?;
+                conn.execute("INSERT INTO discussions (id,title,project_id,created_at,updated_at) VALUES ('disc-parent','parent','p','2026-10-18T00:00:00Z','2026-10-18T00:00:00Z')", [])?;
+                let request: CreatePlanningTaskRequest =
+                    serde_json::from_value(json!({"title": "t", "project_ids": ["p"]}))?;
+                let task = crate::db::planning::create_task(conn, &request)?;
+                Ok(conn.query_row(
+                    "SELECT 'KT-' || task_number FROM planning_tasks WHERE id = ?1",
+                    [&task.summary.id],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .await
+            .unwrap();
         let executor = KronnToolExecutor::arc(
             state,
             Some("disc-parent".into()),
@@ -5097,7 +5223,7 @@ mod tests {
                 id: "stale-host-schema".into(),
                 name: "task_exec_launch".into(),
                 arguments: json!({
-                    "task_reference": "KT-466",
+                    "task_reference": reference,
                     "worker": {
                         "kind": "discussion_agent",
                         "agent_type": "Ollama"
@@ -5352,6 +5478,7 @@ mod tests {
             "qe_update",
             "tool_manual",
             "api_call",
+            "room_scope",
             "plan_get",
             "task_list",
             "task_get",
@@ -5679,11 +5806,11 @@ mod tests {
         // The catalogue is re-sent every turn, so the contract stays in the
         // declaration and the detail moves here — paid only by an agent that
         // is about to author something.
-        let listed = tool_manual(None);
+        let listed = tool_manual(None, None);
         let available = listed["available"].as_array().expect("available");
         assert!(!available.is_empty());
 
-        let page = tool_manual(Some("qe_create_draft"));
+        let page = tool_manual(Some("qe_create_draft"), None);
         let text = page["manual"].as_str().expect("manual text");
         assert!(
             text.contains("NO shell"),
@@ -5695,11 +5822,11 @@ mod tests {
         );
 
         assert!(
-            tool_manual(Some("task_list"))["error"].is_string(),
+            tool_manual(Some("task_list"), None)["error"].is_string(),
             "a tool whose description is its whole contract has no page"
         );
         assert_eq!(
-            tool_manual(Some("  "))["available"],
+            tool_manual(Some("  "), None)["available"],
             listed["available"],
             "a blank name lists rather than erroring"
         );
@@ -5709,7 +5836,7 @@ mod tests {
     /// because nothing told a principal that they run without a shell.
     #[test]
     fn the_task_exec_manual_states_how_a_validation_actually_runs() {
-        let page = tool_manual(Some("task_exec_prepare"));
+        let page = tool_manual(Some("task_exec_prepare"), None);
         let text = page["manual"].as_str().expect("task_exec_prepare manual");
         for fact in [
             "NOT run by a shell",
@@ -5747,11 +5874,11 @@ mod tests {
             );
         }
 
-        assert!(tool_manual(Some("task_exec_launch"))["manual"]
+        assert!(tool_manual(Some("task_exec_launch"), None)["manual"]
             .as_str()
             .expect("launch page")
             .contains("tool_manual({tool: \"task_exec_prepare\"})"));
-        let update = tool_manual(Some("task_exec_reassign"));
+        let update = tool_manual(Some("task_exec_reassign"), None);
         let update = update["manual"].as_str().expect("reassign page");
         for fact in [
             "ONE change per call",
@@ -5777,12 +5904,18 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
             .collect();
-        for page in tool_manual(None)["available"].as_array().unwrap() {
+        for page in tool_manual(None, None)["available"].as_array().unwrap() {
             let name = page.as_str().unwrap();
             if name == "signals" {
                 // This entry documents response fences, not a callable tool.
                 assert!(!declared.iter().any(|tool| tool == name));
-                assert!(tool_manual(Some(name))["catalogue"]["signals"].is_array());
+                assert!(tool_manual(Some(name), None)["catalogue"]["signals"].is_array());
+                continue;
+            }
+            if name == WORKFLOW_GUIDE {
+                // The guide to building workflows and Pages, not a callable tool.
+                assert!(!declared.iter().any(|tool| tool == name));
+                assert!(tool_manual(Some(name), None)["contents"].is_array());
                 continue;
             }
             assert!(

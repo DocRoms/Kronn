@@ -116,6 +116,70 @@ pub(crate) fn coverage_repair_feedback(project_path: &Path, target_file: &str) -
     ))
 }
 
+/// KT-1387 — documents a step must fill besides its target file, under the
+/// docs root. The coding-rules step owns the commit conventions: one sample
+/// of the A/B left `workflow/commits.md` as the untouched template.
+fn companion_docs(within_root: &str) -> &'static [&'static str] {
+    match within_root {
+        "coding-rules.md" => &[super::commit_context::COMMITS_DOC],
+        _ => &[],
+    }
+}
+
+/// Marker of the template banner, and of the hint comments, a filled file drops.
+const TEMPLATE_BANNER: &str = "**TEMPLATE FILE.**";
+const FILL_HINT: &str = "<!-- Fill:";
+
+/// Why a companion document of `target_file` is still the template (a raw
+/// `{{...}}` placeholder, the template banner or a `<!-- Fill: -->` hint), or
+/// `None` when each is filled or absent (a project without it owes nothing).
+pub(crate) fn unfilled_companion(project_path: &Path, target_file: &str) -> Option<String> {
+    let root = DocsRoot::of(project_path);
+    let within = root.strip(target_file)?;
+    for companion in companion_docs(within) {
+        let Ok(content) = std::fs::read_to_string(root.file(project_path, companion)) else {
+            continue;
+        };
+        let names = raw_placeholder_names(&content);
+        let banner = content.contains(TEMPLATE_BANNER);
+        let hints = content.matches(FILL_HINT).count();
+        if names.is_empty() && !banner && hints == 0 {
+            continue;
+        }
+        let mut left: Vec<String> = names
+            .iter()
+            .take(5)
+            .map(|n| format!("{{{{{n}}}}}"))
+            .collect();
+        if banner {
+            left.push("the template banner".into());
+        }
+        if hints > 0 {
+            left.push(format!("{hints} `<!-- Fill: -->` hint(s)"));
+        }
+        return Some(format!(
+            "step left `{}` as the template: {} still there",
+            root.path(companion),
+            left.join(", ")
+        ));
+    }
+    None
+}
+
+/// The targeted correction for [`unfilled_companion`], given back to the step
+/// within its attempt budget.
+pub(crate) fn companion_repair_feedback(project_path: &Path, target_file: &str) -> Option<String> {
+    let reason = unfilled_companion(project_path, target_file)?;
+    Some(format!(
+        "## Commit conventions — targeted correction required\n\n\
+         {reason}. Read the document and fill it from the `Commit facts` block of this prompt: \
+         the observed subject shape, the tooling and whether a CI step checks it (a local hook is not enforcement), the \
+         trailer policy. Where the facts establish nothing, write `Not formalized — ask before \
+         assuming.` in place of the placeholder. Remove the template banner and the `<!-- Fill: -->` \
+         hints. Correct this document only; do not repeat the rest of the step.\n"
+    ))
+}
+
 /// Retain safe provider and tool-budget causes alongside the artifact failure.
 /// A recovered ceiling or negotiated provider fallback does not fail a good step.
 pub(crate) fn with_http_diagnostics(
@@ -317,6 +381,16 @@ pub fn validate_step_output(
         }
     }
 
+    if let Some(reason) = unfilled_companion(project_path, target_file) {
+        return (
+            false,
+            Some(StepValidationWarning {
+                reason,
+                repaired: false,
+            }),
+        );
+    }
+
     (cli_success, None)
 }
 
@@ -349,28 +423,26 @@ pub struct DispositionGap {
     pub count: usize,
 }
 
-/// [`check_detector_disposition`] with the retry feedback naming the signals
-/// still to dispose of.
-pub fn detector_disposition_gap(
-    project_path: &Path,
-    signals: &[crate::core::audit_detectors::DetectedSignal],
-) -> Option<DispositionGap> {
-    if signals.is_empty() {
-        return None;
-    }
-    // Combined Step-8 output surface = the current index + ONLY the TD
-    // detail files still listed in it. On an in-place re-audit, an orphan
-    // historical `TD-*.md` (no longer referenced in the freshly-written
-    // index) must NOT count as "disposing" a signal — that's exactly the
-    // masking-by-history we're fighting (Codex 1b review 2026-06-04). We
-    // gate the detail files through `parse_index_td_ids` so only the
-    // current run's live findings contribute to disposition.
+/// The Step-8 output surface: the current index + ONLY the TD detail files
+/// still listed in it. On an in-place re-audit, an orphan historical `TD-*.md`
+/// (no longer referenced in the freshly-written index) must NOT count as
+/// "disposing" a signal — that's exactly the masking-by-history we're fighting
+/// (Codex 1b review 2026-06-04). We gate the detail files through
+/// `parse_index_td_ids` so only the current run's live findings contribute.
+///
+/// Kronn's own `## Unaddressed detector signals` section never disposes of
+/// anything (KT-1357): it is the record of what the agent left open, so it is
+/// read only when `count_fallback` is set, to verify a section just written.
+fn step8_surface(project_path: &Path, count_fallback: bool) -> (String, Vec<String>) {
     let docs_root = DocsRoot::of(project_path);
-    let index_content =
+    let mut index_content =
         std::fs::read_to_string(docs_root.file(project_path, "inconsistencies-tech-debt.md"))
             .unwrap_or_default();
+    if !count_fallback {
+        index_content = crate::core::audit_detectors::without_unaddressed_section(&index_content);
+    }
     let listed_ids = super::reconciliation::parse_index_td_ids(&index_content);
-    let mut combined = index_content;
+    let mut sheets = Vec::new();
     let td_dir = docs_root.file(project_path, "tech-debt");
     if let Ok(entries) = std::fs::read_dir(&td_dir) {
         for e in entries.flatten() {
@@ -386,21 +458,91 @@ pub fn detector_disposition_gap(
                 continue; // orphan history — not part of this run's output
             }
             if let Ok(body) = std::fs::read_to_string(&p) {
-                combined.push('\n');
-                combined.push_str(&body);
+                sheets.push(body);
             }
         }
     }
+    (index_content, sheets)
+}
 
-    let undisposed = crate::core::audit_detectors::undisposed_signals(signals, &combined);
-    if undisposed.is_empty() {
+/// The signals the Step-8 output surface does not address.
+fn undisposed_in_output<'a>(
+    project_path: &Path,
+    signals: &'a [crate::core::audit_detectors::DetectedSignal],
+    count_fallback: bool,
+) -> Vec<&'a crate::core::audit_detectors::DetectedSignal> {
+    if signals.is_empty() {
+        return Vec::new();
+    }
+    let (index, sheets) = step8_surface(project_path, count_fallback);
+    let mut combined = index;
+    for sheet in &sheets {
+        combined.push('\n');
+        combined.push_str(sheet);
+    }
+    crate::core::audit_detectors::undisposed_signals(signals, &combined)
+}
+
+/// KT-1388 — the signals the output names only to dismiss them (resolved,
+/// mitigated, false alarm, not applicable), without the code that proves it.
+fn unproven_in_output<'a>(
+    project_path: &Path,
+    signals: &'a [crate::core::audit_detectors::DetectedSignal],
+    count_fallback: bool,
+) -> Vec<&'a crate::core::audit_detectors::DetectedSignal> {
+    if signals.is_empty() {
+        return Vec::new();
+    }
+    let (index, sheets) = step8_surface(project_path, count_fallback);
+    crate::core::audit_detectors::unproven_dismissals(signals, &index, &sheets)
+}
+
+/// Every signal the output leaves open: never named, or dismissed unproven.
+fn unaddressed_in_output<'a>(
+    project_path: &Path,
+    signals: &'a [crate::core::audit_detectors::DetectedSignal],
+    count_fallback: bool,
+) -> Vec<&'a crate::core::audit_detectors::DetectedSignal> {
+    let undisposed = undisposed_in_output(project_path, signals, count_fallback);
+    let unproven = unproven_in_output(project_path, signals, count_fallback);
+    signals
+        .iter()
+        .filter(|sig| {
+            undisposed.iter().any(|other| std::ptr::eq(*other, *sig))
+                || unproven.iter().any(|other| std::ptr::eq(*other, *sig))
+        })
+        .collect()
+}
+
+/// [`check_detector_disposition`] with the retry feedback naming the signals
+/// still to dispose of.
+pub fn detector_disposition_gap(
+    project_path: &Path,
+    signals: &[crate::core::audit_detectors::DetectedSignal],
+) -> Option<DispositionGap> {
+    let undisposed = undisposed_in_output(project_path, signals, false);
+    let unproven = unproven_in_output(project_path, signals, false);
+    if undisposed.is_empty() && unproven.is_empty() {
         return None;
+    }
+    if undisposed.is_empty() {
+        return Some(unproven_gap(project_path, &unproven));
     }
     let list = undisposed
         .iter()
         .map(|s| format!("{} (`{}`)", s.title, s.evidence))
         .collect::<Vec<_>>()
         .join("; ");
+    // KT-1357 — each signal with the exact text the check looks for: docroms'
+    // agent wrote `poc.html.twig:6` and "all accounted for in TD-…" three times.
+    let wanted = undisposed
+        .iter()
+        .map(|s| match crate::core::audit_detectors::disposition_key(s) {
+            Some(key) => format!("- {} (`{}`): write `{key}`", s.title, s.evidence),
+            None => format!("- {} (`{}`)", s.title, s.evidence),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let feedback = format!(
         "## Detector signals — targeted correction required\n\n\
          Read `{index}` and the TD sheets it lists, then dispose of each detector signal \
@@ -408,17 +550,93 @@ pub fn detector_disposition_gap(
          For each one do ONE of: emit or refresh a TD, fold it into a baseline note, or cite \
          its file path in the `## Dimension coverage` matrix with a verifiable reason. Keep the \
          existing TD sheets and human-owned sections; correct only the missing dispositions, \
-         do not repeat the entire audit.\n",
-        index = docs_root.path("inconsistencies-tech-debt.md"),
+         do not repeat the entire audit.\n\n\
+         The check reads the index and the TD sheets the index lists (a sheet missing from the \
+         index is not read) and looks for this text, in any case. A count (\"all 12 signals\"), \
+         a TD id or a bare file name does not stand for it; the file name followed by the \
+         flagged line (`name.ext:12`) does:\n{wanted}\n",
+        index = DocsRoot::of(project_path).path("inconsistencies-tech-debt.md"),
     );
-    Some(DispositionGap {
+    let mut gap = DispositionGap {
         warning: StepValidationWarning {
             reason: undisposed_reason(undisposed.len(), &list),
             repaired: false,
         },
         feedback,
         count: undisposed.len(),
-    })
+    };
+    if !unproven.is_empty() {
+        let more = unproven_gap(project_path, &unproven);
+        gap.warning.reason = format!("{}; {}", gap.warning.reason, more.warning.reason);
+        gap.feedback = format!("{}\n{}", gap.feedback, more.feedback);
+        gap.count += more.count;
+    }
+    Some(gap)
+}
+
+/// KT-1388 — signals the output dismisses (resolved / mitigated / false alarm /
+/// not applicable) without citing the code that proves it. The agent is asked
+/// for the evidence or to keep the item open, never to close it on a word.
+fn unproven_gap(
+    project_path: &Path,
+    unproven: &[&crate::core::audit_detectors::DetectedSignal],
+) -> DispositionGap {
+    let list = unproven
+        .iter()
+        .map(|s| format!("{} (`{}`)", s.title, s.evidence))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let feedback = format!(
+        "## Detector signals dismissed without proof — targeted correction required\n\n\
+         Read `{index}` and the TD sheets it lists. These detector signals are only named to be \
+         dismissed (resolved, mitigated, false alarm, not applicable), and no line cites the code \
+         that proves it: {list}.\n\n\
+         For each one, read the flagged code, then {request}. A citation of the flagged line that \
+         shows the problem is absent is the proof; a comment, a documentation page or a file you \
+         did not read is not. If a fallback or a branch of that code still leaves the risk open, \
+         the finding stays open: emit or keep its TD instead of closing it. Correct only these \
+         dispositions, do not repeat the entire audit.\n",
+        index = DocsRoot::of(project_path).path("inconsistencies-tech-debt.md"),
+        request = crate::core::resolution_proof::EVIDENCE_REQUEST,
+    );
+    DispositionGap {
+        warning: StepValidationWarning {
+            reason: unproven_reason(unproven.len(), &list),
+            repaired: false,
+        },
+        feedback,
+        count: unproven.len(),
+    }
+}
+
+/// KT-1357 — the attempts are spent and the agent still left signals
+/// unaddressed: Kronn appends a deterministic `## Unaddressed detector signals`
+/// section to the tech-debt index, listing each one for a human to triage, and
+/// the step stands instead of failing the whole run over an omission. Returns
+/// how many signals it listed; `None` when nothing was left unaddressed or the
+/// index could not be written (the caller then keeps the failure).
+pub fn settle_unaddressed_signals(
+    project_path: &Path,
+    signals: &[crate::core::audit_detectors::DetectedSignal],
+) -> Option<usize> {
+    // Every current signal still lacking a disposition from the agent, whatever
+    // an earlier settlement listed: the section is rebuilt, never accumulated.
+    let undisposed = unaddressed_in_output(project_path, signals, false);
+    if undisposed.is_empty() {
+        return None;
+    }
+    let index = DocsRoot::of(project_path).file(project_path, "inconsistencies-tech-debt.md");
+    let content = std::fs::read_to_string(&index).ok()?;
+    let kept = crate::core::audit_detectors::without_unaddressed_section(&content);
+    let section = crate::core::audit_detectors::render_unaddressed_section(&undisposed);
+    let written = format!("{}\n\n{section}", kept.trim_end());
+    if written != content {
+        crate::core::mcp_scanner::atomic_write(&index, &written).ok()?;
+    }
+    // The listing must actually dispose of them, or the failure stands.
+    unaddressed_in_output(project_path, signals, true)
+        .is_empty()
+        .then_some(undisposed.len())
 }
 
 /// The reason of a step whose output is cut short (size floor).
@@ -445,6 +663,19 @@ pub(crate) fn undisposed_reason(count: usize, list: &str) -> String {
         count,
         super::step_guard::DETECTOR_FRAGMENT,
         list
+    )
+}
+
+/// The reason of a step that dismissed detector signals without proof. It
+/// carries the detector fragment so the accept flow reads it as an
+/// undisposed signal too.
+pub(crate) fn unproven_reason(count: usize, list: &str) -> String {
+    format!(
+        "{} {} with proof: dismissed as resolved / mitigated / false alarm / not applicable without citing the code, in the tech-debt output: {} — {} (Step 8 will be re-run)",
+        count,
+        super::step_guard::DETECTOR_FRAGMENT,
+        list,
+        crate::core::resolution_proof::EVIDENCE_REQUEST
     )
 }
 
@@ -545,19 +776,25 @@ const COVERAGE_DIMENSIONS: &[&str] = &[
     "Documentation drift",
 ];
 
+/// A table cell without its markdown emphasis: agents bold the label column
+/// (`**Security**`), which is still the Security row.
+fn plain_cell(cell: &str) -> &str {
+    cell.trim()
+        .trim_matches(|c| matches!(c, '*' | '_' | '`'))
+        .trim()
+}
+
 /// Structural validation of the `## Dimension coverage` matrix in
 /// `inconsistencies-tech-debt.md` (Codex review #26, 2026-06-03). Cheap, and
 /// does NOT prove the scan actually happened — it just catches a missing /
 /// short / ill-formed matrix so the prompt's "incomplete audit" promise is
 /// mechanically backed (the future detectors anchor ground truth). Returns
-/// `Err(reason)` on the first structural problem found.
+/// `Err(reason)` naming EVERY structural problem found (KT-1364): a retry that
+/// is told about one row per attempt runs out of attempts before the rows.
 fn validate_dimension_coverage(content: &str) -> Result<(), String> {
-    let Some(sec_start) = content.find("## Dimension coverage") else {
+    let Some(body) = coverage_section(content) else {
         return Err("`## Dimension coverage` matrix is missing".to_string());
     };
-    // Section body = from the heading until the next `## ` heading or EOF.
-    let after = &content[sec_start..];
-    let body = after.find("\n## ").map(|n| &after[..n]).unwrap_or(after);
 
     // N/A reasons we refuse when they stand alone (no verifiable content).
     const TRIVIAL: &[&str] = &[
@@ -571,31 +808,10 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
         "",
     ];
 
+    let mut problems: Vec<String> = Vec::new();
     let mut missing: Vec<&str> = Vec::new();
     for dim in COVERAGE_DIMENSIONS {
-        // Match the row by a case-insensitive PREFIX on the first cell, not an
-        // exact equality: agents naturally embellish the canonical label
-        // (e.g. `Accessibility (a11y)`, `Documentation drift / docs`) and an
-        // exact match would mis-count those as a missing row and FAIL Step 8.
-        // None of the 10 dimension names is a prefix of another, so a prefix
-        // match stays unambiguous. (Fixes the 2026-06-03 self-inflicted
-        // Step-8-red on DOCROMS_WEB: the agent wrote `Accessibility (a11y)`.)
-        let dim_lc = dim.to_ascii_lowercase();
-        let rows: Vec<&str> = body
-            .lines()
-            .filter(|l| {
-                let l = l.trim();
-                l.starts_with('|') && {
-                    let first = l
-                        .trim_start_matches('|')
-                        .split('|')
-                        .next()
-                        .unwrap_or("")
-                        .trim();
-                    first.to_ascii_lowercase().starts_with(&dim_lc)
-                }
-            })
-            .collect();
+        let rows = dimension_rows(body, dim);
         let row = match rows.as_slice() {
             [] => {
                 missing.push(dim);
@@ -603,18 +819,19 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
             }
             [r] => *r,
             _ => {
-                return Err(format!(
+                problems.push(format!(
                     "dimension `{}` appears {} times — exactly one row per dimension",
                     dim,
                     rows.len()
-                ))
+                ));
+                continue;
             }
         };
         let cells: Vec<&str> = row
             .trim()
             .trim_matches('|')
             .split('|')
-            .map(|c| c.trim())
+            .map(plain_cell)
             .collect();
         let outcome = cells.get(1).copied().unwrap_or("");
         let evidence = cells.get(2).copied().unwrap_or("");
@@ -628,21 +845,24 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
             || o.starts_with("scanned -- nothing substantiable")
             || o.starts_with("n/a");
         if outcome.is_empty() || !valid_prefix {
-            return Err(format!(
+            problems.push(format!(
                 "dimension `{}`: outcome must start with `findings` / `scanned — nothing substantiable` / `N/A:`, got `{}`",
                 dim, outcome
             ));
+            continue;
         }
         if evidence.is_empty() {
-            return Err(format!(
+            problems.push(format!(
                 "dimension `{}`: evidence/reason cell is empty",
                 dim
             ));
+            continue;
         }
         if *dim == "Dependencies" && !o.starts_with("n/a") && !states_version_source(row) {
-            return Err(format!(
+            problems.push(format!(
                 "dimension `Dependencies`: {DEPENDENCIES_SOURCE_FORMS}"
             ));
+            continue;
         }
         if o.starts_with("n/a") {
             // Reason after `N/A:` (or, failing that, the evidence cell) must be non-trivial.
@@ -652,7 +872,7 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
                 .filter(|s| !s.is_empty())
                 .unwrap_or(evidence);
             if TRIVIAL.contains(&reason.to_ascii_lowercase().trim()) {
-                return Err(format!(
+                problems.push(format!(
                     "dimension `{}`: N/A needs a human-verifiable reason, got `{}`",
                     dim, reason
                 ));
@@ -660,12 +880,179 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
         }
     }
     if !missing.is_empty() {
-        return Err(format!(
+        problems.push(format!(
             "coverage matrix missing rows: {}",
             missing.join(", ")
         ));
     }
-    Ok(())
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("; "))
+    }
+}
+
+/// The `## Dimension coverage` section: from its heading until the next `## `
+/// heading or EOF.
+fn coverage_section(content: &str) -> Option<&str> {
+    let sec_start = content.find("## Dimension coverage")?;
+    let after = &content[sec_start..];
+    Some(after.find("\n## ").map(|n| &after[..n]).unwrap_or(after))
+}
+
+/// The table rows of `body` whose first cell names `dim`.
+///
+/// Match the row by a case-insensitive PREFIX on the first cell, not an
+/// exact equality: agents naturally embellish the canonical label
+/// (e.g. `Accessibility (a11y)`, `Documentation drift / docs`) and an
+/// exact match would mis-count those as a missing row and FAIL Step 8.
+/// None of the 10 dimension names is a prefix of another, so a prefix
+/// match stays unambiguous. (Fixes the 2026-06-03 self-inflicted
+/// Step-8-red on DOCROMS_WEB: the agent wrote `Accessibility (a11y)`.)
+fn dimension_rows<'a>(body: &'a str, dim: &str) -> Vec<&'a str> {
+    let dim_lc = dim.to_ascii_lowercase();
+    body.lines()
+        .filter(|l| {
+            let l = l.trim();
+            l.starts_with('|') && {
+                let first = l.trim_start_matches('|').split('|').next().unwrap_or("");
+                plain_cell(first).to_ascii_lowercase().starts_with(&dim_lc)
+            }
+        })
+        .collect()
+}
+
+/// KT-1364 — the canonical outcomes a merged cell may start with: the length of
+/// the prefix to keep in the Outcome cell. `None` when the cell starts with
+/// anything else (`Scanned — large modules found…` is not a canonical outcome).
+fn canonical_outcome_prefix(cell: &str) -> Option<usize> {
+    let lower = cell.to_ascii_lowercase();
+    let boundary = |at: usize| {
+        lower[at..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric())
+    };
+    if lower.starts_with("findings") && boundary("findings".len()) {
+        return Some("findings".len());
+    }
+    for dash in ["—", "–", "--", "-"] {
+        let phrase = format!("scanned {dash} nothing substantiable");
+        if lower.starts_with(&phrase) && boundary(phrase.len()) {
+            return Some(phrase.len());
+        }
+    }
+    // `N/A` is the outcome only when a `:` or a dash follows it.
+    if lower.starts_with("n/a") && lower[3..].trim_start().starts_with([':', '—', '–', '-']) {
+        return Some(3);
+    }
+    None
+}
+
+/// `| Dimension | Outcome and evidence merged |` split into
+/// `| Dimension | Outcome | Evidence |`, when the second cell starts with a
+/// canonical outcome and something follows it. `None` for any other shape.
+fn split_two_column_row(row: &str) -> Option<String> {
+    let trimmed = row.trim();
+    if !trimmed.starts_with('|') {
+        return None;
+    }
+    let cells: Vec<&str> = trimmed.trim_matches('|').split('|').collect();
+    let [first, merged] = cells.as_slice() else {
+        return None;
+    };
+    let merged = merged.trim();
+    let cut = canonical_outcome_prefix(merged)?;
+    let (outcome, rest) = merged.split_at(cut);
+    let evidence = rest
+        .trim_start_matches(|c: char| {
+            c.is_whitespace() || matches!(c, ':' | ';' | ',' | '—' | '–' | '-')
+        })
+        .trim();
+    if evidence.is_empty() {
+        return None;
+    }
+    Some(format!("| {} | {} | {} |", first.trim(), outcome, evidence))
+}
+
+/// KT-1364 — the matrix with its unambiguous 2-column rows split. `None` when
+/// no row needed it.
+pub(crate) fn repaired_coverage_matrix(content: &str) -> Option<String> {
+    let sec_start = content.find("## Dimension coverage")?;
+    let body = coverage_section(content)?;
+    let body_end = sec_start + body.len();
+    let mut output = String::with_capacity(content.len() + 32);
+    output.push_str(&content[..sec_start]);
+    let mut changed = false;
+    for line in body.split_inclusive('\n') {
+        let (text, newline) = match line.strip_suffix('\n') {
+            Some(text) => (text, "\n"),
+            None => (line, ""),
+        };
+        let is_dimension_row = COVERAGE_DIMENSIONS
+            .iter()
+            .any(|dim| !dimension_rows(text, dim).is_empty());
+        let split = is_dimension_row
+            .then(|| split_two_column_row(text))
+            .flatten();
+        let sourced = with_dependencies_source(split.as_deref().unwrap_or(text));
+        match sourced.or(split) {
+            Some(row) => {
+                let indent = &text[..text.len() - text.trim_start().len()];
+                output.push_str(indent);
+                output.push_str(&row);
+                output.push_str(newline);
+                changed = true;
+            }
+            None => output.push_str(line),
+        }
+    }
+    output.push_str(&content[body_end..]);
+    changed.then_some(output)
+}
+
+/// The Dependencies row when it names no version source: Kronn says the
+/// versions are not verified rather than failing the step (docroms A/B, 19/10).
+/// `None` for any other row, an N/A row or a row that already states one.
+fn with_dependencies_source(row: &str) -> Option<String> {
+    let trimmed = row.trim();
+    if dimension_rows(trimmed, "Dependencies").is_empty() || states_version_source(trimmed) {
+        return None;
+    }
+    let cells: Vec<&str> = trimmed
+        .trim_matches('|')
+        .split('|')
+        .map(plain_cell)
+        .collect();
+    if cells.len() < 3 || cells[1].to_ascii_lowercase().starts_with("n/a") || cells[2].is_empty() {
+        return None;
+    }
+    let body = trimmed.strip_suffix('|')?.trim_end();
+    Some(format!(
+        "{body}; source used: not stated (versions not verified) |"
+    ))
+}
+
+/// Apply [`repaired_coverage_matrix`] to the tech-debt index of this step.
+/// Returns whether the file was rewritten.
+pub(crate) fn repair_coverage_rows(project_path: &Path, target_file: &str) -> bool {
+    if DocsRoot::of(project_path).strip(target_file) != Some("inconsistencies-tech-debt.md") {
+        return false;
+    }
+    let path = project_path.join(target_file);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Some(repaired) = repaired_coverage_matrix(&content) else {
+        return false;
+    };
+    match crate::core::mcp_scanner::atomic_write(&path, &repaired) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(target_file, %error, "could not repair the coverage matrix rows");
+            false
+        }
+    }
 }
 
 /// The forms a Dependencies row may state its source in, named in the refusal
@@ -960,6 +1347,129 @@ mod tests {
     }
 
     #[test]
+    fn the_retry_feedback_names_each_signal_with_the_text_the_gate_looks_for() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        std::fs::write(docs.join("inconsistencies-tech-debt.md"), "## Baseline\n").unwrap();
+        let signals = vec![
+            mk_signal(
+                "csp-unsafe",
+                "templates/Home/poc.html.twig:6",
+                "CSP unsafe-eval",
+            ),
+            mk_signal(
+                "inline-script",
+                "templates/home/index.html.twig:14",
+                "Inline script",
+            ),
+        ];
+        let gap = detector_disposition_gap(tmp.path(), &signals).expect("two signals");
+        assert_eq!(gap.count, 2);
+        assert!(gap
+            .feedback
+            .contains("CSP unsafe-eval (`templates/Home/poc.html.twig:6`): write `templates/home/poc.html.twig`"));
+        assert!(gap
+            .feedback
+            .contains("Inline script (`templates/home/index.html.twig:14`): write `templates/home/index.html.twig`"));
+        assert!(gap
+            .feedback
+            .contains("a sheet missing from the index is not read"));
+
+        // The file name with the flagged line is the other form the gate reads.
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "- poc.html.twig:6 and index.html.twig:14 are covered by the CSP note\n",
+        )
+        .unwrap();
+        assert!(detector_disposition_gap(tmp.path(), &signals).is_none());
+    }
+
+    #[test]
+    fn unaddressed_signals_are_listed_for_triage_once_and_the_gate_then_passes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        let index = docs.join("inconsistencies-tech-debt.md");
+        let original = "# Debt\n\n## Dimension coverage\n\n| a | b | c |\n\n## Notes\nKept.\n";
+        std::fs::write(&index, original).unwrap();
+        let signals = vec![
+            mk_signal("csp-unsafe", "src/Headers.php:87", "CSP unsafe-eval"),
+            mk_signal("blank-noopener", "templates/projets.html.twig:12", "_blank"),
+        ];
+        assert_eq!(settle_unaddressed_signals(tmp.path(), &signals), Some(2));
+        let written = std::fs::read_to_string(&index).unwrap();
+        assert!(written.starts_with(original.trim_end()), "{written}");
+        assert!(
+            written.contains("## Unaddressed detector signals"),
+            "{written}"
+        );
+        assert!(written.contains("src/Headers.php:87"), "{written}");
+        // Kronn's own record of the omissions is not a disposition by the agent.
+        assert!(check_detector_disposition(tmp.path(), &signals).is_some());
+        // Settling again rebuilds the same section: nothing is rewritten.
+        assert_eq!(settle_unaddressed_signals(tmp.path(), &signals), Some(2));
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), written);
+        // A later signal replaces the section instead of stacking another.
+        let more = vec![mk_signal(
+            "csp-unsafe",
+            "src/Other.php:3",
+            "CSP unsafe-eval",
+        )];
+        assert_eq!(settle_unaddressed_signals(tmp.path(), &more), Some(1));
+        let replaced = std::fs::read_to_string(&index).unwrap();
+        assert_eq!(
+            replaced.matches("## Unaddressed detector signals").count(),
+            1
+        );
+        assert!(replaced.contains("src/Other.php:3"));
+        assert!(!replaced.contains("src/Headers.php:87"));
+        // No index to append to: the failure stands.
+        let empty = tempfile::TempDir::new().unwrap();
+        assert_eq!(settle_unaddressed_signals(empty.path(), &signals), None);
+    }
+
+    #[test]
+    fn a_later_settlement_lists_every_signal_still_open_not_only_the_new_one() {
+        // Review of 41b23d78d: settle([A]) then settle([A, B]) kept only B and
+        // the recheck found A open again.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        let index = docs.join("inconsistencies-tech-debt.md");
+        std::fs::write(&index, "# Debt\n\n## Notes\nKept.\n").unwrap();
+        let a = mk_signal("csp-unsafe", "src/Headers.php:87", "CSP unsafe-eval");
+        let b = mk_signal("blank-noopener", "templates/p.html.twig:12", "_blank");
+        assert_eq!(
+            settle_unaddressed_signals(tmp.path(), std::slice::from_ref(&a)),
+            Some(1)
+        );
+        let both = vec![a.clone(), b.clone()];
+        assert_eq!(settle_unaddressed_signals(tmp.path(), &both), Some(2));
+        let written = std::fs::read_to_string(&index).unwrap();
+        assert_eq!(
+            written.matches("## Unaddressed detector signals").count(),
+            1
+        );
+        assert!(written.contains("src/Headers.php:87"), "{written}");
+        assert!(written.contains("templates/p.html.twig:12"), "{written}");
+        assert!(written.contains("## Notes\nKept."), "{written}");
+        // The agent's own disposition of A still removes it from the listing.
+        std::fs::write(
+            &index,
+            format!(
+                "# Debt\n\nsrc/Headers.php:87 is a TD.\n\n{}",
+                &written[written.find("## Unaddressed").unwrap()..]
+            ),
+        )
+        .unwrap();
+        assert_eq!(settle_unaddressed_signals(tmp.path(), &both), Some(1));
+        let narrowed = std::fs::read_to_string(&index).unwrap();
+        assert!(!narrowed.contains("| `src/Headers.php:87`"), "{narrowed}");
+        assert!(narrowed.contains("templates/p.html.twig:12"), "{narrowed}");
+    }
+
+    #[test]
     fn coverage_matrix_valid_passes() {
         assert!(validate_dimension_coverage(&valid_coverage_matrix()).is_ok());
     }
@@ -1027,6 +1537,20 @@ mod tests {
         assert!(
             validate_dimension_coverage(&m).is_ok(),
             "embellished labels must still match"
+        );
+    }
+
+    #[test]
+    fn coverage_matrix_with_bold_labels_and_outcomes_passes() {
+        let mut m = valid_coverage_matrix();
+        for dim in COVERAGE_DIMENSIONS {
+            m = m.replace(&format!("| {dim} |"), &format!("| **{dim}** |"));
+        }
+        let m = m.replace("| findings |", "| *findings* |");
+        assert!(
+            validate_dimension_coverage(&m).is_ok(),
+            "{:?}",
+            validate_dimension_coverage(&m)
         );
     }
 
@@ -1105,6 +1629,140 @@ mod tests {
                 assert!(err.contains(form), "{evidence}: {err}");
             }
         }
+    }
+
+    /// Apollo's step 8: the rows where the outcome and the evidence share one
+    /// cell, as the matrix came out of the bench.
+    fn apollo_matrix() -> String {
+        let mut s = valid_coverage_matrix();
+        for (dim, merged) in [
+            ("Security", "Findings: [TD-20261016-apache-root-user](tech-debt/TD-20261016-apache-root-user.md) (root user…) [src: file: docs/AGENTS.md:1] ; no hardcoded secrets found"),
+            ("Code quality", "Findings: [TD-20261016-large-modules](tech-debt/TD-20261016-large-modules.md) (modules over 800 lines)"),
+            ("Scalability", "Scanned - nothing substantiable ; no queue, no shared state"),
+            ("Maintainability", "findings — [TD-20261016-no-tests](tech-debt/TD-20261016-no-tests.md)"),
+            ("Accessibility", "N/A — backend API service, no rendered UI"),
+            ("Compliance", "N/A: no personal data processed"),
+            ("Documentation drift", "Findings: [TD-20261016-stale-readme](tech-debt/TD-20261016-stale-readme.md)"),
+        ] {
+            let row = s
+                .lines()
+                .find(|l| l.starts_with(&format!("| {dim} |")))
+                .unwrap()
+                .to_string();
+            s = s.replace(&row, &format!("| {dim} | {merged} |"));
+        }
+        s
+    }
+
+    /// KT-1364 — one feedback names every problem; one row per retry ran the
+    /// attempts out on apollo.
+    #[test]
+    fn coverage_matrix_reports_every_problem_at_once() {
+        let err = validate_dimension_coverage(&apollo_matrix()).unwrap_err();
+        for dim in [
+            "Security",
+            "Code quality",
+            "Scalability",
+            "Maintainability",
+            "Accessibility",
+            "Compliance",
+            "Documentation drift",
+        ] {
+            assert!(err.contains(&format!("dimension `{dim}`")), "{dim}: {err}");
+        }
+        // A missing row and a duplicated one are reported with the rest.
+        let broken = valid_coverage_matrix()
+            .replace("| Security | findings | TD-y |\n", "")
+            .replace(
+                "| Observability | findings | TD-z |\n",
+                "| Observability | findings | TD-z |\n| Observability | findings | TD-z2 |\n",
+            )
+            .replace(
+                "| Compliance | scanned — nothing substantiable | MIT only |",
+                "| Compliance | scanned — nothing substantiable | |",
+            );
+        let err = validate_dimension_coverage(&broken).unwrap_err();
+        assert!(err.contains("`Observability` appears 2 times"), "{err}");
+        assert!(
+            err.contains("`Compliance`: evidence/reason cell is empty"),
+            "{err}"
+        );
+        assert!(err.contains("missing rows: Security"), "{err}");
+    }
+
+    /// KT-1364 — apollo's 2-column rows are split on their canonical outcome.
+    #[test]
+    fn two_column_coverage_rows_are_split_on_their_canonical_outcome() {
+        let repaired = repaired_coverage_matrix(&apollo_matrix()).unwrap();
+        assert!(validate_dimension_coverage(&repaired).is_ok(), "{repaired}");
+        assert!(repaired.contains("| Security | Findings | [TD-20261016-apache-root-user]"));
+        assert!(repaired.contains(
+            "| Scalability | Scanned - nothing substantiable | no queue, no shared state |"
+        ));
+        assert!(repaired.contains("| Accessibility | N/A | backend API service, no rendered UI |"));
+        assert!(repaired.contains("| Compliance | N/A | no personal data processed |"));
+        // The rows already in three cells are untouched.
+        assert!(repaired.contains("| Observability | findings | TD-z |"));
+        assert!(repaired_coverage_matrix(&valid_coverage_matrix()).is_none());
+    }
+
+    /// KT-1364 — nothing but a canonical outcome is split.
+    #[test]
+    fn a_dependencies_row_without_a_version_source_says_it_is_not_verified() {
+        // docroms A/B (19/10): three retries never named the source.
+        let silent = valid_coverage_matrix().replace(
+            "| Dependencies | findings | TD-x; source used: dependency watch dated 2026-10-04 |",
+            "| Dependencies | scanned — nothing substantiable | symfony 8.1 current |",
+        );
+        assert!(validate_dimension_coverage(&silent).is_err());
+        let repaired = repaired_coverage_matrix(&silent).expect("the row is completed");
+        assert!(
+            repaired.contains("| Dependencies | scanned — nothing substantiable | symfony 8.1 current; source used: not stated (versions not verified) |"),
+            "{repaired}"
+        );
+        assert!(validate_dimension_coverage(&repaired).is_ok());
+        // A row that states its source, or an N/A row, is left alone.
+        assert!(repaired_coverage_matrix(&valid_coverage_matrix()).is_none());
+        let na = valid_coverage_matrix().replace(
+            "| Dependencies | findings | TD-x; source used: dependency watch dated 2026-10-04 |",
+            "| Dependencies | N/A: no manifest in the repo | ls shows none |",
+        );
+        assert!(repaired_coverage_matrix(&na).is_none());
+    }
+
+    #[test]
+    fn two_column_rows_without_a_canonical_outcome_are_left_for_the_feedback() {
+        for merged in [
+            "Scanned — large modules found in src/",
+            "Scanned later",
+            "Findingsish TD-x",
+            "N/A backend service",
+            "Findings",
+            "N/A —",
+            "TD-x only",
+        ] {
+            let m = valid_coverage_matrix().replace(
+                "| Security | findings | TD-y |",
+                &format!("| Security | {merged} |"),
+            );
+            assert!(repaired_coverage_matrix(&m).is_none(), "{merged}");
+            assert!(validate_dimension_coverage(&m).is_err(), "{merged}");
+        }
+    }
+
+    /// KT-1364 — the repair is written to the index, only to the index.
+    #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
+    fn the_index_is_rewritten_with_its_two_column_rows_split() {
+        let target = "docs/inconsistencies-tech-debt.md";
+        let (_tmp, project) = fixture(target, 0, 512);
+        std::fs::write(project.join(target), apollo_matrix()).unwrap();
+        assert!(repair_coverage_rows(&project, target));
+        let (_, warning) = validate_step_output(true, &project, target);
+        assert!(warning.is_none_or(|w| !w.reason.contains("coverage")));
+        assert!(!repair_coverage_rows(&project, target));
+        assert!(!repair_coverage_rows(&project, "docs/decisions.md"));
     }
 
     /// KT-1295 — the retry feedback carries the accepted forms.
@@ -1248,6 +1906,61 @@ mod tests {
             before, after,
             "user content must be untouched above threshold"
         );
+    }
+
+    const COMMITS_TEMPLATE: &str = "# Commits\n\n> **TEMPLATE FILE.** Fill `{{...}}`.\n\n\
+         ## Message convention\n\n<!-- Fill: message format only. -->\n{{COMMIT_CONVENTION}}\n\n\
+         ## Attribution\n\n{{COMMIT_ATTRIBUTION_POLICY}}\n\n## Sign-off\n\n{{SIGNOFF_POLICY}}\n";
+
+    const COMMITS_FILLED: &str = "# Commits\n\n## Message convention\n\n\
+         Subjects read `type(scope) subject`, without a colon, in French.\n\n\
+         ## Attribution\n\nNot formalized — ask before assuming.\n\n\
+         ## Sign-off\n\n`Signed-off-by` on every commit.\n";
+
+    #[test]
+    #[serial(kronn_templates_env)]
+    fn an_unfilled_commits_template_fails_the_coding_rules_step() {
+        // KT-1387 — one A/B sample left `workflow/commits.md` as the template.
+        let (_tmp, project) = fixture("docs/coding-rules.md", 1000, 1000);
+        std::fs::write(
+            project.join("docs/coding-rules.md"),
+            "# Rules\n".repeat(150),
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.join("docs/workflow")).unwrap();
+        std::fs::write(project.join("docs/workflow/commits.md"), COMMITS_TEMPLATE).unwrap();
+
+        let (success, warning) = validate_step_output(true, &project, "docs/coding-rules.md");
+        assert!(!success, "an unfilled commits.md must fail the step");
+        let reason = warning.expect("the failure says why").reason;
+        assert!(reason.contains("docs/workflow/commits.md"), "{reason}");
+        assert!(reason.contains("{{COMMIT_CONVENTION}}"), "{reason}");
+        assert!(reason.contains("template banner"), "{reason}");
+        assert!(reason.contains("`<!-- Fill: -->` hint"), "{reason}");
+
+        // It is sent back to the step with the exact failure.
+        let feedback = companion_repair_feedback(&project, "docs/coding-rules.md").unwrap();
+        assert!(feedback.contains("Commit facts"));
+        assert!(feedback.contains("Not formalized"));
+
+        // Filled from the facts, the step passes and nothing is sent back.
+        std::fs::write(project.join("docs/workflow/commits.md"), COMMITS_FILLED).unwrap();
+        let (success, warning) = validate_step_output(true, &project, "docs/coding-rules.md");
+        assert!(success, "{:?}", warning.map(|w| w.reason));
+        assert!(companion_repair_feedback(&project, "docs/coding-rules.md").is_none());
+    }
+
+    #[test]
+    #[serial(kronn_templates_env)]
+    fn only_the_coding_rules_step_answers_for_commits_md_and_only_when_it_exists() {
+        let (_tmp, project) = fixture("docs/glossary.md", 1000, 1000);
+        std::fs::write(project.join("docs/glossary.md"), "# Glossary\n".repeat(150)).unwrap();
+        std::fs::create_dir_all(project.join("docs/workflow")).unwrap();
+        std::fs::write(project.join("docs/workflow/commits.md"), COMMITS_TEMPLATE).unwrap();
+        assert!(unfilled_companion(&project, "docs/glossary.md").is_none());
+        // A project without the document owes nothing.
+        std::fs::remove_file(project.join("docs/workflow/commits.md")).unwrap();
+        assert!(unfilled_companion(&project, "docs/coding-rules.md").is_none());
     }
 
     #[test]
@@ -1546,5 +2259,129 @@ mod tests {
         assert!(!warning.reason.contains("sensitive output"));
         assert!(with_http_diagnostics(true, None, &trace).is_none());
         assert!(with_http_diagnostics(false, None, &[]).is_none());
+    }
+
+    /// KT-1388 — docroms D04: the SSH host-key signals dismissed as a false
+    /// alarm, the `ssh-keyscan` fallback unread.
+    fn ssh_signal() -> Vec<DetectedSignal> {
+        vec![mk_signal(
+            "ci-ssh-hostkey",
+            ".github/workflows/deploy.yml:186",
+            "SSH StrictHostKeyChecking=no",
+        )]
+    }
+
+    const FALSE_ALARM_ROW: &str = "| SSH `StrictHostKeyChecking=no` at deploy.yml:186 | FALSE ALARM | Line 186 is a comment. Actual SSH commands correctly use `StrictHostKeyChecking=yes`. |\n";
+
+    fn index_only(row: &str) -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        std::fs::write(docs.join("inconsistencies-tech-debt.md"), row).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn a_signal_dismissed_as_a_false_alarm_without_the_code_is_sent_back() {
+        let tmp = index_only(FALSE_ALARM_ROW);
+        let gap = detector_disposition_gap(tmp.path(), &ssh_signal())
+            .expect("a dismissal with no code is not a disposition");
+        assert_eq!(gap.count, 1);
+        assert!(
+            gap.warning.reason.contains("without citing the code"),
+            "{}",
+            gap.warning.reason
+        );
+        assert!(gap
+            .warning
+            .reason
+            .contains(super::super::step_guard::DETECTOR_FRAGMENT));
+        assert!(
+            gap.feedback.contains("keep the item open"),
+            "{}",
+            gap.feedback
+        );
+        assert!(gap.feedback.contains("`.github/workflows/deploy.yml:186`"));
+        assert!(
+            super::super::step_guard::AcceptBlocker::of_reason(&gap.warning.reason).is_some(),
+            "the accept flow reads it as an undisposed signal"
+        );
+    }
+
+    #[test]
+    fn the_code_cited_in_the_same_row_disposes_of_the_signal() {
+        let row = FALSE_ALARM_ROW.replace(
+            " |\n",
+            " [src: file: .github/workflows/deploy.yml:197-206] |\n",
+        );
+        let tmp = index_only(&row);
+        assert!(detector_disposition_gap(tmp.path(), &ssh_signal()).is_none());
+        // A documentation page is not the code.
+        let docs_only = FALSE_ALARM_ROW.replace(
+            " |\n",
+            " [src: file: docs/inconsistencies-security.md:61] |\n",
+        );
+        let tmp = index_only(&docs_only);
+        assert!(detector_disposition_gap(tmp.path(), &ssh_signal()).is_some());
+    }
+
+    #[test]
+    fn a_line_that_still_names_the_signal_as_a_finding_keeps_it_disposed() {
+        let tmp = index_only(&format!(
+            "{FALSE_ALARM_ROW}- deploy.yml:186 still disables host-key checks on the fallback path\n"
+        ));
+        assert!(detector_disposition_gap(tmp.path(), &ssh_signal()).is_none());
+    }
+
+    #[test]
+    fn a_sheet_that_closes_the_signal_needs_the_code_somewhere_in_the_sheet() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "| TD-20260719-ssh-stricthostkey-disabled | SSH | CI | High |\n",
+        )
+        .unwrap();
+        let sheet = docs.join("tech-debt/TD-20260719-ssh-stricthostkey-disabled.md");
+        let body = "---\nmetadata:\n  audit_history:\n    - date: 2026-10-19\n      status: Accepted decision\n      reviewer: Full audit\n      note: RESOLVED — issue fully mitigated, ssh-keyscan on first contact.\n---\n\n# TD-20260719-ssh-stricthostkey-disabled\n\n- **Status**: Accepted decision (RESOLVED)\n\nHost-key logic: .github/workflows/deploy.yml:186\n";
+        std::fs::write(&sheet, body).unwrap();
+        let gap = detector_disposition_gap(tmp.path(), &ssh_signal())
+            .expect("closed on a word, not on the code");
+        assert_eq!(gap.count, 1);
+        std::fs::write(
+            &sheet,
+            format!("{body}\nFallback read: [src: file: .github/workflows/deploy.yml:197-201]\n"),
+        )
+        .unwrap();
+        assert!(detector_disposition_gap(tmp.path(), &ssh_signal()).is_none());
+    }
+
+    #[test]
+    fn an_unproven_dismissal_after_every_attempt_is_listed_for_triage() {
+        let tmp = index_only(FALSE_ALARM_ROW);
+        assert_eq!(
+            settle_unaddressed_signals(tmp.path(), &ssh_signal()),
+            Some(1)
+        );
+        let written =
+            std::fs::read_to_string(tmp.path().join("docs/inconsistencies-tech-debt.md")).unwrap();
+        assert!(
+            written.contains("## Unaddressed detector signals"),
+            "{written}"
+        );
+        assert!(
+            written.contains(".github/workflows/deploy.yml:186"),
+            "{written}"
+        );
+        // Rebuilt, never stacked.
+        assert_eq!(
+            settle_unaddressed_signals(tmp.path(), &ssh_signal()),
+            Some(1)
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("docs/inconsistencies-tech-debt.md")).unwrap(),
+            written
+        );
     }
 }

@@ -138,6 +138,9 @@ pub(super) struct AuditAgentLauncher {
     )>,
     /// The models every step of the run reported serving (KT-997).
     provenance: crate::agents::provenance::AgentProvenanceCapture,
+    /// The run this launcher serves, once its row exists (KT-1324): the
+    /// agents it starts carry the run's tag so boot can stop them.
+    run_id: std::sync::OnceLock<String>,
 }
 
 impl AuditAgentLauncher {
@@ -170,7 +173,15 @@ impl AuditAgentLauncher {
             full_access,
             connection: None,
             provenance: Default::default(),
+            run_id: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Tag every agent this launcher starts from now on with the run's id. Set
+    /// once the run is recorded; a launcher never bound (a cross-audit call)
+    /// starts untagged agents.
+    pub(super) fn bind_run(&self, run_id: &str) {
+        let _ = self.run_id.set(run_id.to_string());
     }
 
     /// Launcher for one audit request. A named connection must exist and
@@ -253,6 +264,12 @@ impl AuditAgentLauncher {
         self.http.is_some() || self.acp
     }
 
+    /// Whether the run's tool calls, inputs included, reach Kronn as traces:
+    /// any agent in the ACP host. An HTTP agent's loop reports none.
+    pub(super) fn reports_tool_inputs(&self) -> bool {
+        self.acp
+    }
+
     /// Which live version sources this run's agent reaches (KT-1000). Read
     /// from the same `.mcp.json` the agent will be handed; `watch` says
     /// whether a dependency watch result is stored.
@@ -310,6 +327,7 @@ impl AuditAgentLauncher {
                 tools: None,
                 // A direct CLI is stopped by its PID and ignores the token.
                 cancel_token: if self.acp { cancel } else { None },
+                audit_run_id: self.run_id.get().map(String::as_str),
                 ..AgentStartConfig::new(agent_type, project_path_str, prompt, tokens)
             })
             .await;
