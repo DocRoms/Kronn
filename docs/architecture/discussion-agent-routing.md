@@ -87,7 +87,7 @@ host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
 [src: file: backend/src/api/disc_invite.rs:1071-1075#AWARENESS_MAX_MESSAGES]
 [src: file: backend/scripts/disc-introspection-mcp.py:7326-7357#_WAIT_PREEMPTED_NOTICE]
-[src: file: backend/scripts/disc-introspection-mcp.py:12120-12127#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:12125-12132#_with_wait_preempted]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server
@@ -166,7 +166,7 @@ on the root turn, or no marker), computed from `message_targets`.
 [src: file: backend/src/db/discussions.rs:1760-1804#native_agents_scheduled_for_root_turn]
 [src: file: backend/src/api/discussions/crud.rs:545-553#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/api/discussions/crud.rs:896-900#attach_discussion_participants]
+[src: file: backend/src/api/discussions/crud.rs:905-909#attach_discussion_participants]
 [src: file: backend/src/api/discussions/streaming.rs:2236-2348#independent_sibling_notice]
 [src: file: backend/src/api/discussions/streaming.rs:2129-2184#discussion_at_dispatch_trigger]
 [src: file: backend/src/api/discussions/streaming.rs:2191-2226#thread_under_trigger]
@@ -260,7 +260,7 @@ Two distinctions the reason must not blur, and does not:
   New-discussion `@alias` routing is persisted on the initial user message
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
-  [src: file: backend/src/api/discussions/crud.rs:611-652#replace_message_targets]
+  [src: file: backend/src/api/discussions/crud.rs:618-661#replace_message_targets]
   [src: file: backend/src/api/discussions/runtime.rs:636-655#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.

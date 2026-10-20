@@ -218,8 +218,8 @@ regular discussion replies, orchestration rounds and silent orchestration
 summaries; changing them requires no backend restart. The agent process is also
 killed on client-requested cancellation. Partial responses retain an explicit
 timeout notice.
-[src: file: backend/src/models/setup.rs:196-203#agent_global_timeout_min]
-[src: file: backend/src/models/setup.rs:390-403#MAX_AGENT_GLOBAL_TIMEOUT_MIN]
+[src: file: backend/src/models/setup.rs:199-206#agent_global_timeout_min]
+[src: file: backend/src/models/setup.rs:393-406#MAX_AGENT_GLOBAL_TIMEOUT_MIN]
 [src: file: backend/src/api/setup.rs:1471-1473#clamp_stall_timeout_min]
 [src: file: backend/src/api/discussions/streaming.rs:4383-4407#agent_stall_timeout_min]
 [src: file: backend/src/api/discussions/orchestration.rs:389-403#configured_agent_global_timeout]

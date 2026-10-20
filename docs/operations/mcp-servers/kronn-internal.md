@@ -506,9 +506,9 @@ decision, or an approved integration held on a coded cause. The principal may th
 the parent checkout and recorded SHAs, refuses dirty or unrelated states, and
 returns the existing terminal result when the same successful resume is
 retried. The tool cannot advance provisioning- or review-owned checkpoints.
-[src: file: backend/src/api/orchestration.rs:13148-13201#compact_next_action]
+[src: file: backend/src/api/orchestration.rs:13159-13212#compact_next_action]
 [src: file: backend/src/api/orchestration.rs:10367-10475#resume_blocked_apply]
-[src: file: backend/src/api/orchestration.rs:13457-13501#task_exec_resume]
+[src: file: backend/src/api/orchestration.rs:13468-13512#task_exec_resume]
 [src: file: backend/scripts/disc-introspection-mcp.py:6208-6286#call_task_exec_status]
 
 An approved delivery the integration sends back (a red validation, a merge
@@ -557,7 +557,7 @@ integration refusal, campaign pause, undelivered worker, terminal state)
 address the joined CLI that last launched, reviewed, resumed or reassigned it
 while that session remains in the room, so its `disc_wait_for_peer` wakes on
 them; without such a session they address the room's configured agent.
-`[src: file: backend/src/api/orchestration.rs:13029-13081#EXEC_WAIT_DEFAULT_SECS]`
+`[src: file: backend/src/api/orchestration.rs:13040-13092#EXEC_WAIT_DEFAULT_SECS]`
 `[src: file: backend/src/db/orchestration.rs:4917-4959#pin_principal_cli_session]`
 
 When the worker identity is not already known, call `agent_list()` first and
@@ -634,12 +634,12 @@ A running audit does not defer the reload: it runs detached on the
 backend and the bridge only subscribes to its SSE. Retry the refused mutation once with the same idempotency
 key. If preflight, handoff or reexec fails, the bridge stops automatic attempts and
 reports one precise manual reconnect/recovery action instead.
-`[src: file: backend/scripts/disc-introspection-mcp.py:10730-10739#_require_fresh_bridge]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11556-11613#_bridge_stale_result]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11340-11405#_schedule_bridge_reload]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11408-11527#_perform_scheduled_bridge_reload]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10735-10744#_require_fresh_bridge]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11561-11618#_bridge_stale_result]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11345-11410#_schedule_bridge_reload]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11413-11532#_perform_scheduled_bridge_reload]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:2868-2940#_restore_reload_handoff]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11530-11553#_close_inherited_reload_artifact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11535-11558#_close_inherited_reload_artifact]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:12185-12198#list_changed]`
 `[src: file: backend/scripts/test_disc_introspection_mcp.py:8545-8561#test_reload_is_not_deferred_by_a_detached_full_audit]`
 
@@ -715,14 +715,14 @@ input schema — the model supplies only `offer_id`; there is no fallback to
 agent-type/alias matching or any other permissive resolution if either is missing.
 [src: file: backend/src/api/orchestration.rs:5139-5481#accept_worker_offer_and_attach]
 [src: file: backend/src/api/orchestration.rs:5270-5288#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:13689-13745#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:13700-13756#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6346-6392#call_task_exec_accept_worker_offer]
 
 `task_exec_deliver` does not perform a room return: the execution transitions to
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration.rs:27589-27719#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration.rs:27647-27777#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:75-188#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,
@@ -733,7 +733,7 @@ and fails the request explicitly (`source_agent, source_session_id, and
 source_binding_session_id are required`), not silently with a stale or wrong
 attach. If `task_exec_accept_worker_offer` refuses this way, reconnect the
 `kronn-internal` MCP server for that session before retrying.
-`[src: file: backend/src/api/orchestration.rs:13689-13745#source_binding_session_id]`
+`[src: file: backend/src/api/orchestration.rs:13700-13756#source_binding_session_id]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:6347-6372#source_binding_session_id]`
 
 `task_exec_reassign(reason)` persists the reason and includes it verbatim in
@@ -852,11 +852,11 @@ catalogue does not pay for a long manual.
 `[src: file: frontend/src/components/MermaidDiagram.tsx:111-119#validRoots]`
 `[src: file: backend/src/api/disc_prompts.rs:469-474#rich_output_notice]`
 `[src: file: backend/src/api/disc_invite.rs:583-713#join_next_steps]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11804-11913#initialize]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11809-11918#initialize]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4438-4454#MAX_DISC_APPEND_ATTACHMENTS] [src: file: backend/scripts/disc-introspection-mcp.py:53#MAX_DISC_APPEND_ATTACHMENTS]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4529-4595#_attach_files_to_appended_message]`
 `[src: file: frontend/src/components/MessageAttachments.tsx:114-299#AttachmentThumb]`
-`[src: file: frontend/src/components/DiscussionAssetsPanel.tsx:119-130#filteredFiles] [src: file: frontend/src/components/DiscussionAssetsPanel.tsx:226-252#disc-assets-filters] [src: file: frontend/src/pages/DiscussionsPage.tsx:5703-5713#assets]`
+`[src: file: frontend/src/components/DiscussionAssetsPanel.tsx:138-149#filteredFiles] [src: file: frontend/src/components/DiscussionAssetsPanel.tsx:259-275#disc-assets-filters] [src: file: frontend/src/pages/DiscussionsPage.tsx:5741-5751#assets]`
 
 Agent-library catalogs deliberately stay compact:
 `skills_list` / `profiles_list` / `directives_list` omit their potentially long

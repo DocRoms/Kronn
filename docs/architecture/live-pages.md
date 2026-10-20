@@ -575,8 +575,8 @@ merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
 [src: file: backend/src/api/orchestration.rs:11421-11610#reassign_execution]
 [src: file: backend/src/api/orchestration.rs:12552-12594#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:12826-12868#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:12791-12844#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:12837-12879#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:12802-12855#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -743,7 +743,7 @@ Allowed sites. One global list per Kronn, `embed_allowed_origins` in
 `POST /api/config/embed-origins` with `{add, remove}`; each origin is
 normalized (lowercase host, default port dropped, IDN as punycode) and a
 malformed one rejects the whole change.
-[src: file: backend/src/models/setup.rs:70-76#embed_allowed_origins]
+[src: file: backend/src/models/setup.rs:73-79#embed_allowed_origins]
 [src: file: backend/src/core/embed_origins.rs:52-55#normalize_origin]
 [src: file: backend/src/api/live_pages.rs:866-868#change_embed_origins]
 The UI is Configuration → Artifacts → External content (Allowed sites): type an
