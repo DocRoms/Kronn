@@ -574,7 +574,7 @@ resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
 [src: file: backend/src/api/orchestration.rs:11421-11610#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:12552-12594#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:12554-12596#bounded_provider_quota_details]
 [src: file: backend/src/api/orchestration.rs:12837-12879#task_worker_catalogue]
 [src: file: backend/src/api/orchestration.rs:12802-12855#task_exec_prepare]
 
