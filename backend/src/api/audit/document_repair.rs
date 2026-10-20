@@ -339,14 +339,15 @@ pub(super) fn with_stale_target(
 
 /// KT-1388 — adds the stack versions the manifests or another document
 /// contradict, whichever step wrote them: the final review reads the documents
-/// side by side and is handed each one, both places named.
+/// side by side and is handed each one, both places named. Advice only: the
+/// run is never failed over them.
 pub(super) fn with_stack_conflicts(
     project: &Path,
     mut recovery: Vec<Diagnostic>,
 ) -> Result<Vec<Diagnostic>, String> {
     let report = document_optimization::analyze(project)?;
     for diagnostic in report
-        .blocking_diagnostics()
+        .advisory_diagnostics()
         .filter(|d| d.code == STACK_CONFLICT)
     {
         if !recovery.contains(diagnostic) {
@@ -354,6 +355,16 @@ pub(super) fn with_stack_conflicts(
         }
     }
     Ok(recovery)
+}
+
+/// KT-1388 — what is sent back for an advisory finding: the same evidence
+/// request as [`feedback`], told that it does not fail the step.
+pub(super) fn advice(diagnostics: &[Diagnostic]) -> String {
+    feedback(diagnostics).replacen(
+        "targeted correction required",
+        "advice, the step is not failed over it",
+        1,
+    )
 }
 
 pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
@@ -379,15 +390,21 @@ pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
 /// timeline. `None` when there is nothing to report.
 pub(super) fn notes_json(
     preexisting: &[Diagnostic],
+    advisories: &[Diagnostic],
     autofixes: &[(u32, document_optimization::AppliedFix)],
 ) -> Option<String> {
-    if preexisting.is_empty() && autofixes.is_empty() {
+    if preexisting.is_empty() && advisories.is_empty() && autofixes.is_empty() {
         return None;
     }
     serde_json::to_string(&serde_json::json!({
         "preexisting": preexisting
             .iter()
             .map(|d| serde_json::json!({"path": d.path, "message": d.message}))
+            .collect::<Vec<_>>(),
+        // KT-1388 — stack conflicts and unproven closures left in the documents.
+        "advisories": advisories
+            .iter()
+            .map(|d| serde_json::json!({"code": d.code, "path": d.path, "message": d.message}))
             .collect::<Vec<_>>(),
         "autofixes": autofixes
             .iter()
@@ -558,6 +575,9 @@ pub(super) struct AttemptCheck {
     pub blocking: Vec<Diagnostic>,
     /// Already there before the step ran: reported, never blocking it.
     pub preexisting: Vec<Diagnostic>,
+    /// KT-1388 — a stack conflict or an unproven closure in the step's
+    /// documents: sent back while the step can still correct, then recorded.
+    pub advisory: Vec<Diagnostic>,
     /// The gate's own exact replacements Kronn applied to the step's documents
     /// before judging them (KT-1353).
     pub repaired: Vec<document_optimization::AppliedFix>,
@@ -653,9 +673,15 @@ pub(super) fn check_attempt(
             preserve_original(project, content)?;
         }
     }
+    let advisory = report
+        .advisory_diagnostics()
+        .filter(|d| targets.contains(&d.path))
+        .cloned()
+        .collect();
     Ok(AttemptCheck {
         blocking,
         preexisting,
+        advisory,
         repaired,
     })
 }
@@ -1297,21 +1323,50 @@ mod tests {
                 to: "operations".into(),
             },
         )];
-        assert_eq!(notes_json(&[], &[]), None);
+        assert_eq!(notes_json(&[], &[], &[]), None);
         let json: serde_json::Value =
-            serde_json::from_str(&notes_json(&held, &fixes).unwrap()).unwrap();
+            serde_json::from_str(&notes_json(&held, &[], &fixes).unwrap()).unwrap();
         assert_eq!(json["preexisting"][0]["path"], "docs/tech-debt/TD-1.md");
         assert_eq!(json["autofixes"][0]["step"], 10);
         assert_eq!(json["autofixes"][0]["to"], "operations");
         for language in ["fr", "en", "es"] {
-            let block = super::super::helpers::documentary_notes_block(&held, &fixes, language);
+            let block =
+                super::super::helpers::documentary_notes_block(&held, &[], &fixes, language);
             assert!(
                 block.contains("docs/tech-debt/TD-1.md"),
                 "{language}: {block}"
             );
             assert!(block.contains("`operations`"), "{language}: {block}");
         }
-        assert!(super::super::helpers::documentary_notes_block(&[], &[], "en").is_empty());
+        assert!(super::super::helpers::documentary_notes_block(&[], &[], &[], "en").is_empty());
+    }
+
+    /// KT-1388 — what the documents still hold as advice is in the run's notes
+    /// and in the validation prompt, apart from what was let through.
+    #[test]
+    fn the_notes_of_a_run_list_the_advisories_apart() {
+        let advisory = Diagnostic {
+            code: STACK_CONFLICT.into(),
+            path: "docs/coding-rules.md".into(),
+            message: "Stack version conflict: `Symfony 7.3` at docs/coding-rules.md:5".into(),
+            blocking: false,
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&notes_json(&[], std::slice::from_ref(&advisory), &[]).unwrap())
+                .unwrap();
+        assert_eq!(json["advisories"][0]["code"], STACK_CONFLICT);
+        assert_eq!(json["advisories"][0]["path"], "docs/coding-rules.md");
+        assert_eq!(json["preexisting"].as_array().unwrap().len(), 0);
+        for language in ["fr", "en", "es"] {
+            let block = super::super::helpers::documentary_notes_block(
+                &[],
+                std::slice::from_ref(&advisory),
+                &[],
+                language,
+            );
+            assert!(block.contains("`Symfony 7.3`"), "{language}: {block}");
+        }
+        assert!(advice(std::slice::from_ref(&advisory)).contains("the step is not failed over it"));
     }
 
     #[test]
@@ -1372,8 +1427,9 @@ mod tests {
         }
     }
 
-    /// KT-1388 — a conflict written by step 4 is handed to the final review and
-    /// stays a blocker for it until the document is corrected against the source.
+    /// KT-1388 — a conflict written by step 4 is handed to the final review as
+    /// advice: reported by the attempt check until the document is corrected
+    /// against the source, never a blocker.
     #[test]
     fn the_final_review_is_handed_the_stack_conflicts_of_every_earlier_step() {
         let dir = tempfile::tempdir().unwrap();
@@ -1393,16 +1449,60 @@ mod tests {
         let handed = with_stack_conflicts(root, Vec::new()).unwrap();
         assert_eq!(handed.len(), 1, "{handed:#?}");
         assert_eq!(handed[0].path, "docs/coding-rules.md");
-        // Untouched by the review, the document still blocks it: it was handed over.
+        // Untouched by the review, the document is still reported to it as
+        // advice: it was handed over, and it never blocks the step.
         let check = check_attempt(root, &before, &handed, &handed, None).unwrap();
         assert!(
-            check.blocking.iter().any(|d| d.code == STACK_CONFLICT),
+            check.advisory.iter().any(|d| d.code == STACK_CONFLICT),
+            "{:#?}",
+            check.advisory
+        );
+        assert!(
+            check.blocking.iter().all(|d| d.code != STACK_CONFLICT),
             "{:#?}",
             check.blocking
         );
         // Corrected against the source, nothing is left to hand over.
         put(root, "docs/coding-rules.md", "## PHP (Symfony 8.1)\n");
         assert!(with_stack_conflicts(root, Vec::new()).unwrap().is_empty());
+    }
+
+    /// KT-1388 — the end-of-run gate and the recovery plan only count blockers: a
+    /// stack conflict and an unproven closure found in the final report neither
+    /// fail validation nor reopen a step.
+    #[test]
+    fn the_final_gate_and_the_recovery_plan_do_not_count_the_advisories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        put(
+            root,
+            "composer.json",
+            "{\n  \"require\": {\n    \"symfony/framework-bundle\": \"^8.1\"\n  }\n}\n",
+        );
+        put(
+            root,
+            "docs/AGENTS.md",
+            "# P\n\nSymfony 8.1\n\n[rules](coding-rules.md) [debt](inconsistencies-tech-debt.md)\n",
+        );
+        put(root, "docs/coding-rules.md", "## PHP (Symfony 7.3)\n");
+        put(
+            root,
+            "docs/inconsistencies-tech-debt.md",
+            "# Debt\n\n- `TD-20260719-no-tests` — no tests — RESOLVED (273 tests)\n",
+        );
+        let report = document_optimization::analyze(root).unwrap();
+        let advisory: Vec<_> = report.advisory_diagnostics().collect();
+        assert_eq!(advisory.len(), 2, "{advisory:#?}");
+        assert_eq!(report.blocking_diagnostics().count(), 0, "{report:#?}");
+        let blocking: Vec<_> = report.blocking_diagnostics().cloned().collect();
+        let steps = super::super::assemble_chained_steps(crate::models::AuditKind::Full);
+        let blame = Blame::default();
+        assert!(recovery_plan(&blocking, &steps, &blame).is_empty());
+        let all: Vec<_> = report.diagnostics.clone();
+        assert!(
+            recovery_plan(&all, &steps, &blame).is_empty(),
+            "an advisory diagnostic must never reopen a step"
+        );
     }
 
     #[test]

@@ -1206,8 +1206,10 @@ resume_drift?: string,
 /**
  * KT-1353 — JSON of what the documentary gate let through (blockers the
  * committed docs held before the run, in docs no step owns) and repaired
- * by itself (exact gate replacements) during this run:
- * `{"preexisting":[{path,message}],"autofixes":[{step,path,kind,from,to}]}`.
+ * by itself (exact gate replacements) during this run, and (KT-1388) the
+ * stack conflicts / unproven closures the documents still hold, which
+ * never fail the run:
+ * `{"preexisting":[{path,message}],"advisories":[{code,path,message}],"autofixes":[{step,path,kind,from,to}]}`.
  * Absent when there was nothing to report.
  */
 documentary_notes?: string,

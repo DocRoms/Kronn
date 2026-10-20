@@ -1404,6 +1404,9 @@ pub async fn full_audit(
         // and the problems it let through, kept to be said to the human.
         let mut documentary_autofixes: Vec<(u32, crate::core::document_optimization::AppliedFix)> = Vec::new();
         let mut documentary_preexisting: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
+        // KT-1388 — stack conflicts and unproven closures the documents still
+        // hold at the end: advice recorded for the human, never a blocker.
+        let mut documentary_advisories: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
 
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // KT-1199 — what the previous step left, before anything else runs.
@@ -2556,11 +2559,34 @@ pub async fn full_audit(
                                     }).to_string());
                                 }
                             }
+                            // KT-1388 — advice, not a blocker: handed back while the
+                            // step can still correct, recorded when it cannot.
+                            let advisory = gate.as_ref().map(|check| check.advisory.clone()).unwrap_or_default();
                             let reason = match gate.map(|check| check.blocking) {
+                                Ok(blocking) if blocking.is_empty() && !advisory.is_empty() && attempt < max_attempts => {
+                                    citation_feedback = Some(super::document_repair::advice(&advisory));
+                                    yield Event::default().event("step_retry").data(serde_json::json!({
+                                        "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
+                                        "reason":"documentary_advisories","advisory_count":advisory.len(),
+                                        "diagnostics":advisory,
+                                    }).to_string());
+                                    continue 'attempts;
+                                }
                                 Ok(blocking) if blocking.is_empty() => {
                                     documentary_repair_proven = super::document_repair::recovery_changed(
                                         &project_path, before, &recovery_targets,
                                     );
+                                    if !advisory.is_empty() {
+                                        // The last attempt leaves them: a step warning, the step stays done.
+                                        let notes: Vec<String> = advisory
+                                            .iter()
+                                            .map(|d| format!("Unverified: `{}` — {}", d.path, d.message))
+                                            .collect();
+                                        yield Event::default().event("documentary_advisory").data(serde_json::json!({
+                                            "step":step,"file":file_label,"diagnostics":advisory,
+                                        }).to_string());
+                                        remit_notes.extend(notes);
+                                    }
                                     None
                                 }
                                 Ok(blocking) if attempt < max_attempts => {
@@ -3238,7 +3264,9 @@ pub async fn full_audit(
                             "step":0,"file":"","phase":"final_gate","diagnostics":preexisting,
                         }).to_string());
                     }
-                    if let Some(notes) = super::document_repair::notes_json(&preexisting, &documentary_autofixes) {
+                    // KT-1388 - what the documents still hold as advice: noted, never counted.
+                    documentary_advisories = report.advisory_diagnostics().cloned().collect();
+                    if let Some(notes) = super::document_repair::notes_json(&preexisting, &documentary_advisories, &documentary_autofixes) {
                         let run_id = audit_run_id.clone();
                         if let Err(error) = db.with_conn(move |conn|
                             crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes)
@@ -3544,7 +3572,7 @@ pub async fn full_audit(
         );
         let validation_prompt = format!(
             "{}{validation_prompt}",
-            super::helpers::documentary_notes_block(&documentary_preexisting, &documentary_autofixes, &language)
+            super::helpers::documentary_notes_block(&documentary_preexisting, &documentary_advisories, &documentary_autofixes, &language)
         );
         let accepted_listed: Vec<super::helpers::AcceptedStepLine> = accepted_rows
             .iter()

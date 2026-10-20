@@ -9,25 +9,51 @@
 //! docs state about a framework / language / runtime, held against the
 //! manifests and lock files, then against one another.
 //!
-//! Conservative on purpose: a version stated on a line that talks about
-//! change (upgrade, EOL, "latest", "was", an arrow) is history or a target,
-//! not what is in place, and is not read.
+//! Precise before it is broad. Measured on 754 real audit docs, most of what a
+//! naive scan flags is not a contradiction: a port next to `php`, a test count,
+//! a version quoted as history (`Since Symfony 7.4`), the version a CI job runs
+//! (not the runtime), a constraint the stated version satisfies. So a number is
+//! a version only right after a technology name, is never read when its line
+//! is about change, CI, a tool or a count, and is compared with a manifest
+//! constraint the way the package manager would (`>=22` admits 24, `^8.1`
+//! admits 8.4, `8.x` admits 8.4).
 
 use std::path::Path;
+
+/// How a version is stated: the version in place, or a constraint on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// `8.4`, `8.x`, `8.4.*`, `22.3.0`: the version in place (maybe partial).
+    Exact,
+    /// `^8.4`: the same major, at least this.
+    Caret,
+    /// `~8.1.0`: the same minor (a two-part `~8.1` allows the major).
+    Tilde,
+    /// `>=22`, `22+`: this or anything later.
+    AtLeast,
+}
+
+impl Kind {
+    fn is_constraint(self) -> bool {
+        self != Kind::Exact
+    }
+}
 
 /// One version a document or a manifest states for a technology.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stated {
     /// Lower-case technology key (`php`, `symfony`, `node`…).
     pub tech: &'static str,
-    /// `8.4` → `[8, 4]`.
+    /// `8.4` → `[8, 4]`; `8.x` → `[8]`.
     pub version: Vec<u32>,
     /// The version as written (`^8.4`, `7.3`).
     pub raw: String,
     /// `path:line`.
     pub place: String,
-    /// A minimum (`^8.4`, `>=22`) rather than the version in place.
-    pub floor: bool,
+    pub kind: Kind,
+    /// Stated by a CI job: what is tested, not the runtime. It can vouch for a
+    /// document, never contradict one.
+    pub ci: bool,
 }
 
 /// A statement that contradicts the manifests or an earlier document.
@@ -46,6 +72,7 @@ const TECHS: &[(&str, &str)] = &[
     ("Laravel", "laravel"),
     ("Node.js", "node"),
     ("Node", "node"),
+    ("node", "node"),
     ("Python", "python"),
     ("React", "react"),
     ("Vue.js", "vue"),
@@ -54,12 +81,29 @@ const TECHS: &[(&str, &str)] = &[
     ("Next.js", "next"),
 ];
 
+/// A major version above this is not a version of that technology but a port,
+/// a count, a year (`PHP 443`, `PHP 24 methods`).
+fn plausible(tech: &str, major: u32) -> bool {
+    major
+        <= match tech {
+            "php" => 9,
+            "symfony" => 12,
+            "laravel" => 15,
+            "node" => 40,
+            "python" => 3,
+            "react" => 25,
+            "vue" => 5,
+            "angular" => 30,
+            "next" => 25,
+            _ => 0,
+        }
+}
+
 /// A line saying one of these talks about change, a target, a claim under
 /// review or a date, not the version in place.
 const HISTORY_WORDS: &[&str] = &[
     "upgrad",
     "migrat",
-    "eol",
     "end of life",
     "end-of-life",
     "support",
@@ -79,8 +123,109 @@ const HISTORY_WORDS: &[&str] = &[
     " not ",
     "no longer",
     "bump",
+    "since ",
+    "as of ",
+    "introduced",
+    "added in",
+    "available in",
+    "ships ",
+    "mismatch",
+    "discrepan",
+    "contradict",
+    "inconsisten",
+    "drift",
     "→",
     "->",
+];
+
+/// A word that makes the line about a CI job, a pipeline, a matrix or an end of
+/// life: the version it names is what is tested or retired, not the version in
+/// place.
+const CI_WORDS: &[&str] = &[
+    "ci",
+    "cd",
+    "jenkins",
+    "jenkinsfile",
+    "workflow",
+    "workflows",
+    "pipeline",
+    "pipelines",
+    "matrix",
+    "gitlab",
+    "circleci",
+    "travis",
+    "actions",
+    "eol",
+];
+
+/// A tool that runs on its own PHP / Node, whatever the project's.
+const TOOLS: &[&str] = &[
+    "phpstan", "phpunit", "paratest", "psalm", "rector", "eslint", "prettier", "xdebug", "jest",
+    "vitest",
+];
+
+/// What a number followed by one of these counts (or dates), never a version.
+const COUNT_WORDS: &[&str] = &[
+    "tests",
+    "test",
+    "methods",
+    "files",
+    "lines",
+    "errors",
+    "warnings",
+    "issues",
+    "classes",
+    "helpers",
+    "endpoints",
+    "routes",
+    "services",
+    "rules",
+    "cases",
+    "specs",
+    "checks",
+    "jobs",
+    "items",
+    "findings",
+    "hits",
+    "assertions",
+    "functions",
+    "pages",
+    "templates",
+    "commands",
+    "controllers",
+    "entities",
+    "bytes",
+    "kb",
+    "mb",
+    "ms",
+    "seconds",
+    "minutes",
+    "hours",
+    "days",
+    "requests",
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "may",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "oct",
+    "nov",
+    "dec",
+    "january",
+    "february",
+    "march",
+    "april",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
 ];
 
 /// Directories of the docs root that are dated snapshots, gabarits or history:
@@ -106,49 +251,102 @@ pub fn is_scanned(within_root: &str) -> bool {
 fn tech_key(name: &str) -> Option<&'static str> {
     TECHS
         .iter()
-        .find(|(display, _)| *display == name)
+        .find(|(display, _)| display.eq_ignore_ascii_case(name))
         .map(|(_, key)| *key)
 }
 
-/// Every `\d+(.\d+){0,2}` of `text`, with the operator written right before it.
-fn versions_in(text: &str) -> Vec<(Vec<u32>, bool, String)> {
-    static NUMBER: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r"(\^|~|>=|≥|>|=)?\s*[vV]?(\d{1,3}(?:\.\d+){0,2})").expect("regex")
-    });
-    NUMBER
-        .captures_iter(text)
-        .filter_map(|c| {
-            let whole = c.get(0)?;
-            let number = c.get(2)?;
-            // Not the tail of a longer token (`1.8-php8`, an id, a date).
-            let before = text[..whole.start()].chars().next_back();
-            let after = text[number.end()..].chars().next();
-            if before.is_some_and(|ch| ch.is_alphanumeric() || ch == '.')
-                || after.is_some_and(|ch| ch.is_ascii_digit())
-            {
-                return None;
-            }
-            let version = number
-                .as_str()
-                .split('.')
-                .filter_map(|part| part.parse().ok())
-                .collect::<Vec<u32>>();
-            let floor = c.get(1).is_some_and(|op| op.as_str() != "=");
-            Some((version, floor, whole.as_str().trim().to_string()))
-        })
+fn words(lower: &str) -> impl Iterator<Item = &str> {
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+}
+
+/// Whether a line (lower-cased) is about change, CI, a tool or a contradiction
+/// someone already noted: what it says about a version is not what is in place.
+fn off_topic(lower: &str) -> bool {
+    HISTORY_WORDS.iter().any(|word| lower.contains(word))
+        || lower.contains("php-cs-fixer")
+        || words(lower).any(|word| CI_WORDS.contains(&word) || TOOLS.contains(&word))
+}
+
+/// `8.4` → `[8, 4]`, `8.x` / `8.4.*` → the numbers before the wildcard.
+fn parse_number(number: &str) -> Vec<u32> {
+    number
+        .split('.')
+        .map_while(|part| part.parse().ok())
         .collect()
 }
 
-fn stated(tech: &'static str, place: String, text: &str) -> Vec<Stated> {
-    versions_in(text)
-        .into_iter()
-        .take(1)
-        .map(|(version, floor, raw)| Stated {
-            tech,
-            version,
-            raw,
-            place: place.clone(),
-            floor,
+/// The version a text begins with (`^8.4`, `>=22`, `8.x`, `22+`), none when
+/// what follows shows the number is not one (`443:443`, `2026-04`, `24
+/// methods`, `8.4abc`).
+fn leading_version(text: &str) -> Option<(Kind, Vec<u32>, String)> {
+    static LEAD: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+        regex_lite::Regex::new(r"^(\^|~>?|>=|≥|=)?\s*[vV]?(\d{1,3}(?:\.(?:\d+|[xX*]))*)(\+)?")
+            .expect("regex")
+    });
+    let c = LEAD.captures(text)?;
+    let whole = c.get(0)?;
+    let number = c.get(2)?.as_str();
+    let after = &text[whole.end()..];
+    let mut next = after.chars();
+    let first = next.next();
+    let second = next.next();
+    if first.is_some_and(|ch| ch.is_alphanumeric() || ch == '_') {
+        return None;
+    }
+    if matches!(first, Some(':' | '/' | '-' | '.')) && second.is_some_and(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+    let following = after
+        .trim_start_matches(|ch: char| !ch.is_alphanumeric() && ch != '(')
+        .split(|ch: char| !ch.is_alphabetic())
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if COUNT_WORDS.contains(&following.as_str()) {
+        return None;
+    }
+    let version = parse_number(number);
+    let kind = match c.get(1).map(|op| op.as_str()) {
+        Some("^") => Kind::Caret,
+        Some(op) if op.starts_with('~') => Kind::Tilde,
+        Some(">=" | "≥") => Kind::AtLeast,
+        _ if c.get(3).is_some() => Kind::AtLeast,
+        _ => Kind::Exact,
+    };
+    let raw = format!(
+        "{}{}{}",
+        c.get(1).map_or("", |op| op.as_str()),
+        number,
+        c.get(3).map_or("", |plus| plus.as_str())
+    );
+    Some((kind, version, raw))
+}
+
+fn claim(tech: &'static str, place: String, text: &str, ci: bool) -> Option<Stated> {
+    let (kind, version, raw) = leading_version(text.trim())?;
+    (!version.is_empty() && plausible(tech, version[0])).then_some(Stated {
+        tech,
+        version,
+        raw,
+        place,
+        kind,
+        ci,
+    })
+}
+
+/// One statement per alternative of a constraint (`^7.4|^8.0`, `>=8.2 <9`,
+/// `^20 || ^22`): the first lower bound of each, never an upper bound.
+fn constraint(tech: &'static str, place: &str, value: &str, ci: bool) -> Vec<Stated> {
+    value
+        .split('|')
+        .filter(|alt| !alt.trim().is_empty())
+        .filter_map(|alt| {
+            alt.split(|c: char| c.is_whitespace() || c == ',')
+                .filter(|token| !token.is_empty() && !token.starts_with('<'))
+                .find_map(|token| claim(tech, place.to_string(), token, ci))
         })
         .collect()
 }
@@ -170,15 +368,6 @@ fn line_of(content: &str, needle: &str) -> usize {
         .map_or(1, |i| i + 1)
 }
 
-/// A constraint (`^7.4|^8.0`, `>=8.2 <9`, `8.4.*`): one statement per alternative.
-fn constraint(tech: &'static str, place: &str, value: &str) -> Vec<Stated> {
-    value
-        .split('|')
-        .filter(|alt| !alt.trim().is_empty())
-        .flat_map(|alt| stated(tech, place.to_string(), alt))
-        .collect()
-}
-
 fn json(project: &Path, rel: &str) -> Option<(String, serde_json::Value)> {
     let text = read(project, rel)?;
     let value = serde_json::from_str(&text).ok()?;
@@ -190,7 +379,7 @@ fn composer_facts(project: &Path, out: &mut Vec<Stated>) {
         let place = |key: &str| format!("composer.json:{}", line_of(&text, &format!("\"{key}\"")));
         let require = value.get("require").and_then(|v| v.as_object());
         if let Some(php) = require.and_then(|r| r.get("php")).and_then(|v| v.as_str()) {
-            out.extend(constraint("php", &place("php"), php));
+            out.extend(constraint("php", &place("php"), php, false));
         }
         let framework = [
             "symfony/framework-bundle",
@@ -205,19 +394,24 @@ fn composer_facts(project: &Path, out: &mut Vec<Stated>) {
                 .map(|v| (name, v))
         });
         if let Some((name, version)) = framework {
-            out.extend(constraint("symfony", &place(name), version));
+            out.extend(constraint("symfony", &place(name), version, false));
         }
         if let Some(version) = require
             .and_then(|r| r.get("laravel/framework"))
             .and_then(|v| v.as_str())
         {
-            out.extend(constraint("laravel", &place("laravel/framework"), version));
+            out.extend(constraint(
+                "laravel",
+                &place("laravel/framework"),
+                version,
+                false,
+            ));
         }
         if let Some(pin) = value
             .pointer("/extra/symfony/require")
             .and_then(|v| v.as_str())
         {
-            out.extend(constraint("symfony", &place("require"), pin));
+            out.extend(constraint("symfony", &place("require"), pin, false));
         }
     }
     if let Some((text, value)) = json(project, "composer.lock") {
@@ -239,7 +433,7 @@ fn composer_facts(project: &Path, out: &mut Vec<Stated>) {
                         "composer.lock:{}",
                         line_of(&text, &format!("\"name\": \"{name}\""))
                     );
-                    out.extend(stated(tech, place, version));
+                    out.extend(claim(tech, place, version, false));
                 }
             }
         }
@@ -252,7 +446,7 @@ fn package_facts(project: &Path, out: &mut Vec<Stated>) {
     };
     let place = |key: &str| format!("package.json:{}", line_of(&text, &format!("\"{key}\"")));
     if let Some(node) = value.pointer("/engines/node").and_then(|v| v.as_str()) {
-        out.extend(constraint("node", &place("node"), node));
+        out.extend(constraint("node", &place("node"), node, false));
     }
     for (dep, tech) in [
         ("react", "react"),
@@ -266,7 +460,7 @@ fn package_facts(project: &Path, out: &mut Vec<Stated>) {
                 .and_then(|g| g.get(dep))
                 .and_then(|v| v.as_str())
             {
-                out.extend(constraint(tech, &place(dep), version));
+                out.extend(constraint(tech, &place(dep), version, false));
             }
         }
     }
@@ -280,7 +474,7 @@ fn runtime_files(project: &Path, out: &mut Vec<Stated>) {
         (".python-version", "python"),
     ] {
         if let Some(text) = read(project, file) {
-            out.extend(stated(tech, format!("{file}:1"), text.trim()));
+            out.extend(claim(tech, format!("{file}:1"), text.trim(), false));
         }
     }
     if let Some(text) = read(project, ".tool-versions") {
@@ -293,7 +487,12 @@ fn runtime_files(project: &Path, out: &mut Vec<Stated>) {
                 _ => continue,
             };
             if let Some(version) = words.next() {
-                out.extend(stated(tech, format!(".tool-versions:{}", n + 1), version));
+                out.extend(claim(
+                    tech,
+                    format!(".tool-versions:{}", n + 1),
+                    version,
+                    false,
+                ));
             }
         }
     }
@@ -322,11 +521,11 @@ fn dockerfile_facts(rel: &str, text: &str, out: &mut Vec<Stated>) {
                 _ => None,
             };
             if let Some(tech) = tech {
-                out.extend(stated(tech, place.clone(), tag));
+                out.extend(claim(tech, place.clone(), tag, false));
             }
             if let Some(at) = tag.find("php") {
                 if tech != Some("php") {
-                    out.extend(stated("php", place, &tag[at + 3..]));
+                    out.extend(claim("php", place, &tag[at + 3..], false));
                 }
             }
         } else if let Some(arg) = lower.strip_prefix("arg ") {
@@ -339,7 +538,7 @@ fn dockerfile_facts(rel: &str, text: &str, out: &mut Vec<Stated>) {
                 "python_version" => "python",
                 _ => continue,
             };
-            out.extend(stated(tech, place, value.trim().trim_matches('"')));
+            out.extend(claim(tech, place, value.trim().trim_matches('"'), false));
         }
     }
 }
@@ -400,14 +599,11 @@ fn ci_facts(project: &Path, out: &mut Vec<Stated>) {
                 "python-version" => "python",
                 _ => continue,
             };
-            for (version, floor, raw) in versions_in(value) {
-                out.push(Stated {
-                    tech,
-                    version,
-                    raw,
-                    place: format!("{rel}:{}", n + 1),
-                    floor,
-                });
+            let place = format!("{rel}:{}", n + 1);
+            for item in value
+                .split(|c: char| matches!(c, '[' | ']' | ',' | '\'' | '"') || c.is_whitespace())
+            {
+                out.extend(claim(tech, place.clone(), item, true));
             }
         }
     }
@@ -460,11 +656,33 @@ fn plain(cell: &str) -> &str {
         .trim()
 }
 
+/// The technology a table's first cell is about: its name alone, optionally
+/// followed by `version` / `runtime`… (`| PHP runtime | … |`), never
+/// `PHP unit/component tests`.
+fn subject_of(cell: &str) -> Option<&'static str> {
+    let without_note = cell.split('(').next().unwrap_or("");
+    let mut words = plain(without_note).split_whitespace();
+    let tech = tech_key(plain(words.next()?))?;
+    match words.next() {
+        None => Some(tech),
+        Some(second)
+            if words.next().is_none()
+                && matches!(
+                    second.to_lowercase().as_str(),
+                    "version" | "runtime" | "framework" | "language" | "core" | "engine"
+                ) =>
+        {
+            Some(tech)
+        }
+        Some(_) => None,
+    }
+}
+
 /// The statements of one document, in line order.
 pub fn doc_claims(rel: &str, content: &str) -> Vec<Stated> {
     static TECH: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
         regex_lite::Regex::new(
-            r"\b(PHP|php|Symfony|Laravel|Node\.js|Node|Python|React|Vue\.js|Vue|Angular|Next\.js)\s*(\^|~|>=|≥|=)?\s*[vV]?(\d{1,3}(?:\.\d+){0,2})",
+            r"\b(PHP|php|Symfony|Laravel|Node\.js|Node|node|Python|React|Vue\.js|Vue|Angular|Next\.js)\b\s*:?\s*",
         )
         .expect("regex")
     });
@@ -484,65 +702,43 @@ pub fn doc_claims(rel: &str, content: &str) -> Vec<Stated> {
         // place in the second: the cells after are notes, targets and dates.
         let scanned = if text.trim_start().starts_with('|') {
             let cells: Vec<&str> = text.trim().trim_matches('|').split('|').collect();
-            let first = cells.first().map_or("", |cell| plain(cell));
-            let name = first
-                .split(|c: char| c.is_whitespace() || c == '(' || c == '/')
-                .next()
-                .unwrap_or("");
-            let scanned = cells.iter().take(2).copied().collect::<Vec<_>>().join(" ");
-            if HISTORY_WORDS
+            let scanned = cells
                 .iter()
-                .any(|word| scanned.to_lowercase().contains(word))
-            {
+                .take(2)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" | ");
+            if off_topic(&scanned.to_lowercase()) {
                 continue;
             }
-            if let (Some(tech), Some(cell)) = (tech_key(name), cells.get(1)) {
+            if let (Some(tech), Some(cell)) =
+                (cells.first().and_then(|c| subject_of(c)), cells.get(1))
+            {
                 // `| PHP | 8.4 |`, not `| PHP | see composer.json:7 |`.
-                let value = plain(cell);
-                let numeric = value
-                    .trim_start_matches(['^', '~', '>', '=', '≥', 'v', 'V'])
-                    .starts_with(|c: char| c.is_ascii_digit());
-                if numeric && !TECH.is_match(cell) {
-                    out.extend(stated(tech, place.clone(), value));
+                if !TECH.is_match(cell) {
+                    out.extend(claim(tech, place.clone(), plain(cell), false));
                 }
             }
             scanned
         } else {
-            if HISTORY_WORDS
-                .iter()
-                .any(|word| text.to_lowercase().contains(word))
-            {
+            if off_topic(&text.to_lowercase()) {
                 continue;
             }
             text
         };
         for c in TECH.captures_iter(&scanned) {
-            let (Some(name), Some(number)) = (c.get(1), c.get(3)) else {
+            let (Some(whole), Some(name)) = (c.get(0), c.get(1)) else {
                 continue;
             };
+            // `FrankenPHP 1.8`, `foo/php 8`, `--php 8`: not the technology.
+            let before = scanned[..name.start()].chars().next_back();
+            if before.is_some_and(|ch| matches!(ch, '/' | '-' | '_' | '.' | '@')) {
+                continue;
+            }
             let Some(tech) = tech_key(name.as_str()) else {
                 continue;
             };
-            let after = scanned[number.end()..].chars().next();
-            if after.is_some_and(|ch| ch.is_alphanumeric()) {
-                continue;
-            }
-            let floor = c.get(2).is_some_and(|op| op.as_str() != "=");
-            out.push(Stated {
-                tech,
-                version: number
-                    .as_str()
-                    .split('.')
-                    .filter_map(|part| part.parse().ok())
-                    .collect(),
-                raw: format!(
-                    "{}{}",
-                    c.get(2).map_or("", |op| op.as_str()),
-                    number.as_str()
-                ),
-                place: place.clone(),
-                floor,
-            });
+            out.extend(claim(tech, place.clone(), &scanned[whole.end()..], false));
         }
     }
     out
@@ -550,33 +746,47 @@ pub fn doc_claims(rel: &str, content: &str) -> Vec<Stated> {
 
 // ─── Comparison ──────────────────────────────────────────────────────────
 
-fn same_prefix(a: &[u32], b: &[u32]) -> bool {
-    let n = a.len().min(b.len());
-    n > 0 && a[..n] == b[..n]
+/// `have` is at least `bound`, over the digits both state.
+fn at_least(have: &[u32], bound: &[u32]) -> bool {
+    let n = have.len().min(bound.len());
+    have[..n] >= bound[..n]
 }
 
-/// Whether a manifest statement leaves room for the version a document gives.
-fn agrees_with_fact(claim: &Stated, fact: &Stated) -> bool {
-    match (claim.floor, fact.floor) {
-        // Two minimums name the same requirement or they differ.
-        (true, true) | (false, false) => same_prefix(&claim.version, &fact.version),
-        // A version in place against a minimum: it must satisfy it.
-        (false, true) => {
-            claim.version.first() == fact.version.first()
-                && claim
-                    .version
-                    .get(1)
-                    .zip(fact.version.get(1))
-                    .is_none_or(|(have, floor)| have >= floor)
+/// Whether the version in place `have` is allowed by `kind bound`, the way a
+/// package manager reads it.
+fn satisfies(have: &[u32], kind: Kind, bound: &[u32]) -> bool {
+    if have.is_empty() || bound.is_empty() {
+        return true;
+    }
+    let n = have.len().min(bound.len());
+    match kind {
+        Kind::Exact => have[..n] == bound[..n],
+        Kind::AtLeast => at_least(have, bound),
+        Kind::Caret => {
+            have[0] == bound[0]
+                && at_least(have, bound)
+                // `^0.3` stays on its minor.
+                && (bound[0] != 0 || n < 2 || have[1] == bound[1])
         }
-        // A minimum the doc gives against a version in place: it must admit it.
-        (true, false) => {
-            claim.version.first() == fact.version.first()
-                && claim
-                    .version
-                    .get(1)
-                    .zip(fact.version.get(1))
-                    .is_none_or(|(floor, have)| have >= floor)
+        Kind::Tilde => {
+            have[0] == bound[0]
+                && at_least(have, bound)
+                // `~8.1.0` stays on its minor; `~8.1` may move to 8.9.
+                && (bound.len() < 3 || have.len() < 2 || have[1] == bound[1])
+        }
+    }
+}
+
+/// Whether one statement leaves room for the other.
+fn agrees(claim: &Stated, other: &Stated) -> bool {
+    match (claim.kind, other.kind) {
+        (Kind::Exact, Kind::Exact) => satisfies(&claim.version, Kind::Exact, &other.version),
+        (Kind::Exact, kind) => satisfies(&claim.version, kind, &other.version),
+        (kind, Kind::Exact) => satisfies(&other.version, kind, &claim.version),
+        // Two constraints name the same requirement or they differ.
+        _ => {
+            let n = claim.version.len().min(other.version.len());
+            n > 0 && claim.version[..n] == other.version[..n]
         }
     }
 }
@@ -600,30 +810,42 @@ pub fn conflicts(project: &Path, docs: &[(String, String)]) -> Vec<Conflict> {
     for (rel, content) in docs {
         for claim in doc_claims(rel, content) {
             let of_tech: Vec<&Stated> = facts.iter().filter(|f| f.tech == claim.tech).collect();
+            let runtime: Vec<&Stated> = of_tech.iter().filter(|f| !f.ci).copied().collect();
             // (the statement it contradicts, whether it is a manifest's)
-            let reference: Option<(Stated, bool)> = if of_tech.is_empty() {
+            let reference: Option<(Stated, bool)> = if runtime.is_empty() {
+                // Only a CI job (or nothing) states it: the documents decide
+                // among themselves.
+                if of_tech.iter().any(|fact| agrees(&claim, fact)) {
+                    continue;
+                }
                 match anchors.iter().find(|a| a.tech == claim.tech) {
-                    Some(anchor) => {
-                        (!agrees_with_fact(&claim, anchor)).then(|| (anchor.clone(), false))
-                    }
+                    Some(anchor) => (!agrees(&claim, anchor)).then(|| (anchor.clone(), false)),
                     None => {
                         anchors.push(claim.clone());
                         None
                     }
                 }
             } else {
-                // A minimum is compared with the minimums when the manifests
-                // state any: `PHP ^8.2` against an image tag proves nothing.
-                let minimums: Vec<&Stated> = of_tech.iter().filter(|f| f.floor).copied().collect();
-                let pool = if claim.floor && !minimums.is_empty() {
-                    minimums
+                // A constraint is compared with the constraints when the
+                // manifests state any: `PHP ^8.2` against an image tag proves
+                // nothing.
+                let constraints: Vec<&Stated> = runtime
+                    .iter()
+                    .filter(|f| f.kind.is_constraint())
+                    .copied()
+                    .collect();
+                let pool: Vec<&Stated> = if claim.kind.is_constraint() && !constraints.is_empty() {
+                    constraints
                 } else {
-                    of_tech
+                    of_tech.clone()
                 };
-                if pool.iter().any(|fact| agrees_with_fact(&claim, fact)) {
+                if pool.iter().any(|fact| agrees(&claim, fact)) {
                     None
                 } else {
-                    pool.first().map(|fact| ((*fact).clone(), true))
+                    pool.iter()
+                        .find(|fact| !fact.ci)
+                        .or(pool.first())
+                        .map(|fact| ((*fact).clone(), true))
                 }
             };
             let Some((reference, from_manifest)) = reference else {
@@ -685,6 +907,16 @@ mod tests {
         ]
     }
 
+    /// The conflicts of one document body against one manifest.
+    fn found_in(manifest: (&str, &str), body: &str) -> Vec<Conflict> {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), manifest.0, manifest.1);
+        conflicts(
+            tmp.path(),
+            &[("docs/overview.md".to_string(), body.to_string())],
+        )
+    }
+
     #[test]
     fn docroms_symfony_7_3_heading_contradicts_the_manifest_and_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
@@ -712,6 +944,22 @@ mod tests {
             found.iter().all(|c| c.path != "docs/AGENTS.md"),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn the_three_measured_symfony_7_3_headings_are_found_against_a_caret_constraint() {
+        // coding-rules.md:15 of docroms v1-r2, v2-r1 and v2-r2, composer.json:19.
+        let composer = "{\n\"name\": \"docroms\",\n\"require\": {\n    \"php\": \">=8.4\",\n    \"symfony/framework-bundle\": \"^8.1\"\n}\n}\n";
+        for heading in [
+            "## PHP (Symfony 7.3)",
+            "## PHP (Symfony 7.3).",
+            "## Symfony 7.3",
+        ] {
+            let found = found_in(("composer.json", composer), &format!("{heading}\n"));
+            assert_eq!(found.len(), 1, "{heading}: {found:?}");
+            assert!(found[0].message.contains("`Symfony 7.3`"), "{found:?}");
+            assert!(found[0].message.contains("composer.json:5"), "{found:?}");
+        }
     }
 
     #[test]
@@ -746,7 +994,7 @@ mod tests {
         let docs = vec![
             (
                 "docs/AGENTS.md".to_string(),
-                "Symfony 8.1 on PHP 8.4\n| PHP | ^8.4 per manifest; image frankenphp:1.8-php8.4-alpine; CI uses PHP 8.4 |\n".to_string(),
+                "Symfony 8.1 on PHP 8.4\n| PHP | ^8.4 per manifest; image frankenphp:1.8-php8.4-alpine |\n".to_string(),
             ),
             (
                 "docs/coding-rules.md".to_string(),
@@ -789,5 +1037,161 @@ mod tests {
         assert!(!is_scanned("reports/audit-2026.md"));
         assert!(!is_scanned("tech-debt/TD-1.md"));
         assert!(!is_scanned("learnings.md"));
+    }
+
+    // ── Measured false positives: the real lines of the A/B and matrix docs ──
+
+    #[test]
+    fn a_port_or_a_count_next_to_a_technology_is_not_a_version() {
+        for line in [
+            // docroms architecture/overview.md:11, debug-operations.md:32.
+            "| `php` | `443` (HTTPS) | FrankenPHP (worker mode) + bundled Caddy, PHP 8.4 image |",
+            "| `php` | `443:443` | HTTPS site server — FrankenPHP (worker mode) + bundled Caddy; serves `public/` |",
+            // africanews testing-quality.md:36.
+            "| PHP unit/component tests | 24 methods: 15 DFP builder, 4 Adobe Analytics, 3 video extension |",
+            "Xdebug listens on PHP :9003 for the IDE.",
+            "PHP 24 methods are covered; PHP 12 files changed on 2026-04-30.",
+        ] {
+            let found = found_in(("composer.json", COMPOSER), &format!("{line}\n"));
+            assert_eq!(found, Vec::new(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_historical_mention_is_not_the_version_in_place() {
+        for line in [
+            // docroms production-infrastructure.md:97.
+            "Since **Symfony 7.4**, `symfony/runtime` ships `FrankenPhpWorkerRunner` and",
+            "Symfony 7.4 deprecated the old runner.",
+            "The `--worker` flag was introduced in Symfony 7.3.",
+        ] {
+            let found = found_in(("composer.json", COMPOSER), &format!("{line}\n"));
+            assert_eq!(found, Vec::new(), "{line}");
+        }
+    }
+
+    #[test]
+    fn what_a_ci_job_runs_is_not_the_runtime() {
+        let package = "{\n  \"engines\": {\n    \"node\": \">=22\"\n  }\n}\n";
+        for line in [
+            // apollo docs, six repos' worth of the same shape.
+            "| Node.js (Jenkinsfile) | 18 | Behind stable | Medium — Jenkins pipeline uses EOL Node 18; package.json requires ≥22 |",
+            "| Node.js (CI Quality) | 20 | Behind stable | Medium — CI Quality test workflow uses Node 20; production requires ≥22 |",
+            "| TD-20261019-node-version-ci-mismatch | CI tests use Node.js 20 but package.json requires >=22; version compatibility gap. | CI/Infra |",
+            "      - Nodejs version: Node 22 pinned in CD workflows, Node 20 and 18 in other workflows",
+            "| Node.js (CI) | 20 | Supported | Low — LTS, maintained until 2026-04-30 |",
+            "| Node version (CI) | 20.x | .github/workflows/CI_Quality-test.yaml |",
+            "1. **Quality (CI)**: Triggered by PR label `ci-test`; runs linting (ESLint), tests (Jest), and build checks on Node 20.",
+            "| `.github/workflows/CI_Quality-test.yaml` | CI pipeline: runs lint and test on `ci-test` label. Runs on Node 20. |",
+            "| Node version (CI test) | 20 |",
+            "TD: CI tests on Node 20 but package.json requires Node >=22; deployment uses Node 22.",
+        ] {
+            let found = found_in(("package.json", package), &format!("{line}\n"));
+            assert_eq!(found, Vec::new(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_tool_running_on_its_own_php_is_not_the_project_runtime() {
+        // africanews TESTING.md:183 — the project runs PHP 7.3.
+        let found = found_in(
+            ("docker/php/Dockerfile", "FROM php:7.3-fpm\n"),
+            "installed, no `phpstan*.neon` config, php-cs-fixer v2 on PHP 8.3, no root\n",
+        );
+        assert_eq!(found, Vec::new());
+    }
+
+    #[test]
+    fn a_ci_matrix_never_contradicts_a_document_but_can_vouch_for_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            ".github/workflows/ci.yml",
+            "jobs:\n  t:\n    strategy:\n      matrix:\n        php-version: [8.3, 8.4]\n",
+        );
+        write(tmp.path(), "composer.json", COMPOSER);
+        let docs = vec![(
+            "docs/AGENTS.md".to_string(),
+            "PHP 8.4 in production.\nPHP 8.3 in production.\n".to_string(),
+        )];
+        let found = conflicts(tmp.path(), &docs);
+        // 8.4 matches ^8.4; 8.3 matches the matrix but not the constraint:
+        // the matrix vouches for it (it is a version the project runs).
+        assert_eq!(found, Vec::new(), "{found:?}");
+        // With no composer.json the matrix alone states no runtime.
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            ".github/workflows/ci.yml",
+            "jobs:\n  t:\n    strategy:\n      matrix:\n        php-version: [8.3]\n",
+        );
+        let found = conflicts(
+            tmp.path(),
+            &[(
+                "docs/AGENTS.md".to_string(),
+                "PHP 8.4 runs it.\n".to_string(),
+            )],
+        );
+        assert_eq!(found, Vec::new(), "{found:?}");
+    }
+
+    // ── Constraints are compared the way the package manager would ──
+
+    #[test]
+    fn a_constraint_is_satisfied_semantically() {
+        let node = "{\"engines\": {\"node\": \">=22\"}}";
+        let php = "{\"require\": {\"php\": \"^8.1\"}}";
+        let wildcard = "{\"require\": {\"php\": \"8.4.*\"}}";
+        for (manifest, doc) in [
+            (("package.json", node), "Node.js 24 in production."),
+            (("package.json", node), "Node 22.14.0 in production."),
+            (("package.json", node), "Node 22+ is required."),
+            (("composer.json", php), "PHP 8.4 in production."),
+            (("composer.json", php), "PHP 8 in production."),
+            (("composer.json", php), "PHP >=8.1 is required."),
+            (("composer.json", wildcard), "PHP 8.x in production."),
+            (("composer.json", wildcard), "PHP 8.4.2 in production."),
+        ] {
+            assert_eq!(found_in(manifest, &format!("{doc}\n")), Vec::new(), "{doc}");
+        }
+        // `lts/*` and `latest` state no version at all.
+        assert_eq!(
+            found_in(
+                ("package.json", "{\"engines\": {\"node\": \"lts/*\"}}"),
+                "Node 22 in production.\n"
+            ),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn a_stated_version_the_constraint_forbids_is_a_conflict() {
+        let node = "{\"engines\": {\"node\": \">=22\"}}";
+        let tilde = "{\"require\": {\"php\": \"~8.1.0\"}}";
+        let patch = "{\"require\": {\"php\": \"^8.1.2\"}}";
+        let major = "{\"require\": {\"symfony/framework-bundle\": \"^8.1\"}}";
+        for (manifest, doc) in [
+            (("package.json", node), "Node.js 18 in production."),
+            (("composer.json", tilde), "PHP 8.4 in production."),
+            (("composer.json", patch), "PHP 8.1.1 in production."),
+            (("composer.json", major), "Symfony 7.3 in production."),
+            (("composer.json", patch), "PHP ^8.4 is required."),
+        ] {
+            assert_eq!(found_in(manifest, &format!("{doc}\n")).len(), 1, "{doc}");
+        }
+    }
+
+    #[test]
+    fn version_contexts_are_php_8_4_caret_colon_and_lowercase_node() {
+        let found = found_in(
+            ("composer.json", COMPOSER),
+            "PHP 8.3 here.\nphp: 8.2\nPHP ^8.1\n",
+        );
+        assert_eq!(found.len(), 3, "{found:?}");
+        let found = found_in(
+            ("package.json", "{\"engines\": {\"node\": \">=22\"}}"),
+            "Install node 18 first.\n",
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
     }
 }

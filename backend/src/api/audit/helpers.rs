@@ -462,10 +462,11 @@ pub(crate) fn human_references_block(
 /// there is nothing of either.
 pub(crate) fn documentary_notes_block(
     preexisting: &[crate::core::document_optimization::Diagnostic],
+    advisories: &[crate::core::document_optimization::Diagnostic],
     autofixes: &[(u32, crate::core::document_optimization::AppliedFix)],
     language: &str,
 ) -> String {
-    if preexisting.is_empty() && autofixes.is_empty() {
+    if preexisting.is_empty() && advisories.is_empty() && autofixes.is_empty() {
         return String::new();
     }
     const SHOWN: usize = 30;
@@ -522,6 +523,30 @@ pub(crate) fn documentary_notes_block(
     let mut out = format!("{title}\n");
     if !preexisting.is_empty() {
         out.push_str(&format!("{held_title}\n{held}\n{held_rule}\n\n"));
+    }
+    if !advisories.is_empty() {
+        // KT-1388 — feedback the audit gave without failing: not verified.
+        let listed = lines(
+            advisories
+                .iter()
+                .map(|d| format!("- `{}` — {}", d.path, d.message))
+                .collect(),
+        );
+        let (advisory_title, advisory_rule) = match language {
+            "en" => (
+                format!("{} point(s) the documents still hold that Kronn could not confirm (a stack version the manifests or another document contradict, a debt closed without the code that proves it); they did not fail the audit:", advisories.len()),
+                "Do not present these as verified: name them to the user as claims to check against the source.",
+            ),
+            "es" => (
+                format!("{} punto(s) que los documentos aún mantienen y que Kronn no pudo confirmar (una versión del stack que contradicen los manifiestos u otro documento, una deuda cerrada sin el código que la prueba); no hicieron fallar la auditoría:", advisories.len()),
+                "No los presentes como verificados: nómbralos al usuario como afirmaciones por comprobar contra el código.",
+            ),
+            _ => (
+                format!("{} point(s) que les documents maintiennent encore et que Kronn n'a pas pu confirmer (une version du stack que les manifestes ou un autre document contredisent, une dette close sans le code qui le prouve) ; ils n'ont pas fait échouer l'audit :", advisories.len()),
+                "Ne les présente pas comme vérifiés : nomme-les à l'utilisateur comme des affirmations à confronter au code.",
+            ),
+        };
+        out.push_str(&format!("{advisory_title}\n{listed}\n{advisory_rule}\n\n"));
     }
     if !autofixes.is_empty() {
         out.push_str(&format!("{fixed_title}\n{fixed}\n\n"));
