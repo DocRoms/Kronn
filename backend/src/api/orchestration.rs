@@ -4037,7 +4037,7 @@ async fn release_finished_execution_checkout(
     let project_path =
         project_path.ok_or_else(|| format!("project {} is unavailable", workspace.project_id))?;
     let repo = scanner::resolve_host_path(&project_path);
-    release_terminal_checkout(
+    match release_terminal_checkout(
         db,
         exec_id,
         &repo,
@@ -4046,7 +4046,49 @@ async fn release_finished_execution_checkout(
         workspace.head_sha.clone(),
     )
     .await
-    .map(Some)
+    {
+        Ok(outcome) => Ok(Some(outcome)),
+        Err(reason) => {
+            // A refusal that rests on the checkout itself (an evidence cap, a
+            // diff that cannot be saved, a foreign branch) is the human's to
+            // see: recorded once per distinct reason, not once per sweep.
+            let id = exec_id.to_string();
+            let recorded = reason.clone();
+            if let Err(error) = db
+                .with_conn(move |conn| {
+                    crate::db::orchestration::record_release_kept_once(
+                        conn,
+                        &id,
+                        &recorded,
+                        &backend_actor(),
+                    )
+                })
+                .await
+            {
+                tracing::warn!(execution_id = %exec_id, "kept-worktree reason not recorded: {error}");
+            }
+            Err(reason)
+        }
+    }
+}
+
+/// The periodic counterpart of the boot pass (KT-1397): Kronn stays up for days,
+/// and a Failed or Cancelled execution reaches its terminal state at runtime.
+/// Uses the configured `server.disk_sweep_idle_hours`. Returns the checkouts
+/// released and kept, and logs what it released.
+pub async fn release_finished_worktrees(db: &Database) -> (usize, usize) {
+    let mut report = OrchestrationBootReport::default();
+    release_terminal_worktrees(db, crate::core::disk_usage::sweep_idle(), &mut report).await;
+    for error in &report.errors {
+        tracing::warn!("periodic worktree release: {error}");
+    }
+    for line in &report.lane_target_report {
+        tracing::info!("periodic worktree release: {line}");
+    }
+    (
+        report.terminal_worktrees_released,
+        report.terminal_worktrees_kept,
+    )
 }
 
 /// One pass over the finished executions that still hold a managed checkout
@@ -4098,21 +4140,35 @@ async fn release_terminal_worktrees(
     }
 }
 
-/// What a lane-target sweep needs from durable state: for each marked lane,
-/// why it must stay (absent = its execution is provably finished).
+/// What a lane-target sweep needs from durable state: for each lane Kronn can
+/// attribute, why it must stay (absent = its execution is provably finished),
+/// plus the lanes durable lineage attributes to an execution although no marker
+/// says so (KT-1397).
 pub(crate) async fn lane_target_claims(
     db: &Database,
     project_id: &str,
     repo_path: &std::path::Path,
-) -> Result<std::collections::HashMap<String, String>, String> {
+) -> Result<
+    (
+        std::collections::HashMap<String, String>,
+        worktree::LaneAttributions,
+    ),
+    String,
+> {
     let repo = repo_path.to_path_buf();
-    let owners = tokio::task::spawn_blocking(move || worktree::lane_target_owners(&repo))
+    let marked = tokio::task::spawn_blocking(move || worktree::lane_target_owners(&repo))
         .await
         .map_err(|error| format!("lane target scan failed: {error}"))?;
     let pid = project_id.to_string();
-    db.with_conn(move |conn| crate::db::orchestration::lane_target_claims(conn, &pid, &owners))
-        .await
-        .map_err(|error| format!("durable state unreadable: {error}"))
+    db.with_conn(move |conn| {
+        let attributions = crate::db::orchestration::lane_attributions(conn, &pid)?;
+        let mut owners = marked;
+        owners.extend(attributions.values().cloned());
+        let claims = crate::db::orchestration::lane_target_claims(conn, &pid, &owners)?;
+        Ok((claims, attributions))
+    })
+    .await
+    .map_err(|error| format!("durable state unreadable: {error}"))
 }
 
 /// Record, per lane target, what a sweep removed (an execution's event log
@@ -4164,14 +4220,14 @@ pub async fn sweep_project_lane_targets_idle(
     scope: worktree::LaneSweepScope,
     min_idle: std::time::Duration,
 ) -> Result<worktree::LaneTargetSweep, String> {
-    let claims = lane_target_claims(db, project_id, repo_path).await?;
+    let (claims, attributions) = lane_target_claims(db, project_id, repo_path).await?;
     let repo = repo_path.to_path_buf();
     let sweep = tokio::task::spawn_blocking(move || {
         let judge = |owner: &worktree::LaneOwner| match claims.get(&owner.lane) {
             Some(reason) => Err(reason.clone()),
             None => Ok(()),
         };
-        worktree::sweep_lane_targets_idle(&repo, &judge, scope, min_idle)
+        worktree::sweep_lane_targets_attributed(&repo, &judge, scope, min_idle, &attributions)
     })
     .await
     .map_err(|error| format!("lane target sweep failed: {error}"))?;
@@ -4188,7 +4244,7 @@ pub async fn reclaim_named_lane_targets(
     repo_path: &std::path::Path,
     targets: Vec<std::path::PathBuf>,
 ) -> Result<Vec<(std::path::PathBuf, worktree::LaneTargetOutcome)>, String> {
-    let claims = lane_target_claims(db, project_id, repo_path).await?;
+    let (claims, attributions) = lane_target_claims(db, project_id, repo_path).await?;
     let repo = repo_path.to_path_buf();
     let outcomes = tokio::task::spawn_blocking(move || {
         let judge = |owner: &worktree::LaneOwner| match claims.get(&owner.lane) {
@@ -4198,11 +4254,13 @@ pub async fn reclaim_named_lane_targets(
         targets
             .into_iter()
             .map(|target| {
-                let outcome = worktree::process_lane_target(
+                let outcome = worktree::process_lane_target_attributed(
                     &repo,
                     &target,
                     &judge,
                     worktree::LaneSweepScope::WorktreeGoneOrClean,
+                    std::time::Duration::ZERO,
+                    &attributions,
                 );
                 (target, outcome)
             })
@@ -11176,26 +11234,42 @@ async fn settle_cancelled_workspace(
         return outcome;
     };
     let repo = scanner::resolve_host_path(&project_path);
+    let checkout = scanner::resolve_host_path(path);
+    let checkout = checkout.to_string_lossy().to_string();
     // Whether the checkout is still on disk when this settles. Preserve keeps
     // it by policy; RemoveIfClean keeps it whenever the removal is refused.
     let mut survives = true;
     if cleanup == crate::models::CancellationCleanupPolicy::RemoveIfClean {
-        // KT-1397 — a dirty checkout is no longer kept: its uncommitted diff is
-        // saved as evidence and the checkout released, branch kept. The lane
-        // build dir (KT-1256) goes with it.
-        match release_terminal_checkout(
-            db,
-            exec_id,
-            &repo,
-            path,
-            &workspace.branch,
-            workspace.head_sha.clone(),
-        )
-        .await
-        {
-            Ok(released) => {
+        // Only a clean checkout goes at cancel time: the cancel merely signalled
+        // the worker, which may still be writing. A dirty tree (and every
+        // Preserve cancel) is left to the finished-execution sweep (KT-1397),
+        // which proves the execution terminal and idle before it saves the diff.
+        match worktree::remove_cancelled_task_worktree(&repo, &checkout, &workspace.branch) {
+            Ok(()) => {
                 survives = false;
-                outcome.push_str(&format!("; {released}"));
+                // KT-1256 — the checkout is gone, so is the lane it built in.
+                // The DB's own path string, because the audit looks the row up
+                // by that exact value.
+                reclaim_lane_target(db, &repo, path).await;
+                let id = exec_id.to_string();
+                let final_head = workspace.head_sha.clone();
+                if let Err(error) = db
+                    .with_conn(move |conn| {
+                        crate::db::discussion_workspaces::retire_managed_for_execution(
+                            conn,
+                            &id,
+                            final_head.as_deref(),
+                        )?;
+                        Ok(())
+                    })
+                    .await
+                {
+                    outcome.push_str(&format!(
+                        "; checkout removed but DB cleanup failed: {error}"
+                    ));
+                } else {
+                    outcome.push_str("; clean checkout removed, provenance preserved");
+                }
             }
             Err(error) => outcome.push_str(&format!("; workspace preserved: {error}")),
         }
@@ -32725,11 +32799,13 @@ pub(crate) mod tests {
         .await
     }
 
-    /// KT-1397 — DoD 1: a cancelled execution whose worktree holds uncommitted
-    /// work still releases it: the diff is saved as evidence, the branch is
-    /// kept, and the lane build dir goes with the checkout.
+    /// KT-1397 — the cancel-time contract is unchanged: `RemoveIfClean` takes a
+    /// clean checkout only. A dirty one survives the cancel, because the worker
+    /// the cancel merely signalled may still be writing to it; it is released
+    /// later by the sweep, which proves the execution finished and unused, with
+    /// its diff saved, its branch kept and its lane build dir purged.
     #[tokio::test]
-    async fn a_cancelled_dirty_worktree_is_released_with_its_diff_saved() {
+    async fn a_dirty_worktree_survives_the_cancel_and_is_released_by_the_sweep() {
         let repo = init_repo();
         let db = Database::open_in_memory().unwrap();
         let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
@@ -32747,7 +32823,22 @@ pub(crate) mod tests {
         )
         .await;
 
-        assert!(outcome.contains("uncommitted changes saved"), "{outcome}");
+        assert!(outcome.contains("workspace preserved"), "{outcome}");
+        assert!(std::path::Path::new(&path).exists(), "dirty: kept");
+        assert!(lane_target.exists(), "its lane stays with it");
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&path).join("README.md")).unwrap(),
+            "# edited"
+        );
+        assert_eq!(lane_target_events(&db, "worktree_released").await, 0);
+
+        // Finished and idle long enough, with no session left in it.
+        force_status(&db, &exec_id, "Cancelled").await;
+        worker_session_left(&db).await;
+        let mut report = OrchestrationBootReport::default();
+        release_terminal_worktrees(&db, std::time::Duration::ZERO, &mut report).await;
+
+        assert_eq!(report.terminal_worktrees_released, 1, "{report:?}");
         assert!(!std::path::Path::new(&path).exists(), "checkout released");
         assert!(!lane_target.exists(), "lane build dir purged");
         assert_eq!(
@@ -32767,19 +32858,14 @@ pub(crate) mod tests {
         assert_eq!(lane_target_events(&db, "worktree_released").await, 1);
     }
 
-    /// KT-1397 — a checkout whose diff cannot be saved is never removed.
+    /// KT-1397 — a clean cancel still removes its checkout and lane right away.
     #[tokio::test]
-    async fn an_unsaveable_diff_keeps_the_worktree() {
+    async fn a_clean_worktree_is_still_removed_at_cancel_time() {
         let repo = init_repo();
         let db = Database::open_in_memory().unwrap();
         let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
         let path = managed_worktree_path(&db, &exec_id).await;
-        std::fs::write(std::path::Path::new(&path).join("README.md"), "# edited").unwrap();
-        // A file where the evidence directory must be created.
-        let evidence = terminal_evidence_dir(&exec_id).unwrap();
-        std::fs::create_dir_all(evidence.parent().unwrap()).unwrap();
-        let _ = std::fs::remove_dir_all(&evidence);
-        std::fs::write(&evidence, b"in the way").unwrap();
+        let lane_target = seed_lane_target_of(repo.path(), &path);
 
         let outcome = cancelled_with_policy(
             &db,
@@ -32789,13 +32875,115 @@ pub(crate) mod tests {
         )
         .await;
 
-        assert!(outcome.contains("workspace preserved"), "{outcome}");
+        assert!(outcome.contains("clean checkout removed"), "{outcome}");
+        assert!(!std::path::Path::new(&path).exists());
+        assert!(!lane_target.exists());
+    }
+
+    /// A finished execution holding a dirty checkout, ready for the sweep.
+    async fn finished_dirty_execution(
+        db: &Database,
+        repo: &Path,
+    ) -> (String, String, std::path::PathBuf) {
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(db, repo).await;
+        let path = managed_worktree_path(db, &exec_id).await;
+        let lane_target = seed_lane_target_of(repo, &path);
+        std::fs::write(std::path::Path::new(&path).join("README.md"), "# edited").unwrap();
+        force_status(db, &exec_id, "Cancelled").await;
+        worker_session_left(db).await;
+        (exec_id, path, lane_target)
+    }
+
+    async fn kept_reasons(db: &Database, exec_id: &str) -> Vec<String> {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            Ok(crate::db::orchestration::list_execution_events(conn, &id)?
+                .into_iter()
+                .filter(|event| event.action == "worktree_release_kept")
+                .map(|event| event.changes.to_string())
+                .collect())
+        })
+        .await
+        .unwrap()
+    }
+
+    /// KT-1397 — a checkout whose diff cannot be saved is never removed, and
+    /// the reason is recorded once, however many sweeps meet it.
+    #[tokio::test]
+    async fn an_unsaveable_diff_keeps_the_worktree_and_records_why_once() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, path, lane_target) = finished_dirty_execution(&db, repo.path()).await;
+        // A file where the evidence directory must be created.
+        let evidence = terminal_evidence_dir(&exec_id).unwrap();
+        std::fs::create_dir_all(evidence.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&evidence);
+        std::fs::write(&evidence, b"in the way").unwrap();
+
+        for _ in 0..2 {
+            let mut report = OrchestrationBootReport::default();
+            release_terminal_worktrees(&db, std::time::Duration::ZERO, &mut report).await;
+            assert_eq!(report.terminal_worktrees_released, 0, "{report:?}");
+            assert_eq!(report.terminal_worktrees_kept, 1, "{report:?}");
+        }
+
         assert!(std::path::Path::new(&path).exists());
+        assert!(lane_target.exists());
         assert_eq!(
             std::fs::read_to_string(std::path::Path::new(&path).join("README.md")).unwrap(),
             "# edited"
         );
+        assert_eq!(kept_reasons(&db, &exec_id).await.len(), 1);
         std::fs::remove_file(&evidence).unwrap();
+    }
+
+    /// KT-1397 — the evidence is bounded: uncommitted files above the cap (a
+    /// sparse file stands for untracked build output `.gitignore` misses) keep
+    /// the checkout, write no patch, and record a kept reason once.
+    #[tokio::test]
+    async fn an_oversized_uncommitted_tree_keeps_the_worktree_and_records_why() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, path, lane_target) = finished_dirty_execution(&db, repo.path()).await;
+        let huge =
+            std::fs::File::create(std::path::Path::new(&path).join("build-output.bin")).unwrap();
+        huge.set_len(worktree::RELEASED_WORKTREE_PATCH_CAP_BYTES + 1)
+            .unwrap();
+        let _ = std::fs::remove_dir_all(terminal_evidence_dir(&exec_id).unwrap());
+
+        for _ in 0..2 {
+            let mut report = OrchestrationBootReport::default();
+            release_terminal_worktrees(&db, std::time::Duration::ZERO, &mut report).await;
+            assert_eq!(report.terminal_worktrees_released, 0, "{report:?}");
+        }
+
+        assert!(std::path::Path::new(&path)
+            .join("build-output.bin")
+            .exists());
+        assert!(lane_target.exists());
+        assert!(!terminal_evidence_dir(&exec_id)
+            .unwrap()
+            .join(worktree::RELEASED_WORKTREE_PATCH)
+            .exists());
+        let reasons = kept_reasons(&db, &exec_id).await;
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(reasons[0].contains("evidence cap"), "{reasons:?}");
+    }
+
+    /// KT-1397 — Failed executions reach their terminal state at runtime: the
+    /// periodic entry point (the one the disk scheduler calls) releases them.
+    #[tokio::test]
+    async fn the_periodic_release_takes_a_failed_executions_checkout() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, path, lane_target) = finished_dirty_execution(&db, repo.path()).await;
+        force_status(&db, &exec_id, "Failed").await;
+
+        let (released, kept) = release_finished_worktrees(&db).await;
+
+        assert_eq!((released, kept), (1, 0));
+        assert!(!std::path::Path::new(&path).exists());
+        assert!(!lane_target.exists());
     }
 
     /// KT-1397 — DoD 1/2: a Cancelled (kept by policy) and a Failed execution
@@ -33114,6 +33302,118 @@ pub(crate) mod tests {
         assert!(fx.human_target.exists());
         assert!(!fx.lane_target.exists());
         assert_eq!(lane_target_events(&fx.db, "lane_target_reclaimed").await, 1);
+    }
+
+    // ── KT-1397 — orphan lanes attributed by lineage, no marker needed ───────
+
+    impl LaneFixture {
+        /// The lane as 20/10 found them: built before the marker existed (or
+        /// without it), so only the database knows whose it is.
+        fn strip_marker(&self) {
+            std::fs::remove_file(self.lane_target.join(worktree::LANE_OWNER_MARKER)).unwrap();
+        }
+
+        async fn retire_workspace(&self) {
+            let eid = self.exec_id.clone();
+            self.db
+                .with_conn(move |conn| {
+                    crate::db::discussion_workspaces::retire_managed_for_execution(
+                        conn, &eid, None,
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    /// KT-1397 — DoD 2: an unmarked `target/wt-*` whose managed worktree is gone
+    /// and whose workspace row is retired is removed, though nothing on disk
+    /// says it is Kronn's; a dir no workspace row names is left alone.
+    #[tokio::test]
+    async fn an_unmarked_lane_whose_worktree_is_gone_is_removed_by_lineage() {
+        let fx = lane_fixture().await;
+        fx.strip_marker();
+        let stranger = fx.repo.path().join("target/wt-kt-9999-deadbeef");
+        std::fs::create_dir_all(stranger.join("debug")).unwrap();
+        std::fs::write(stranger.join("debug/kronn"), b"nobody's").unwrap();
+        fx.cancel().await;
+        worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, true).unwrap();
+        fx.retire_workspace().await;
+
+        let sweep = fx.sweep(worktree::LaneSweepScope::WorktreeGone).await;
+
+        assert!(!fx.lane_target.exists(), "{sweep:?}");
+        assert_eq!(sweep.removed.len(), 1, "{sweep:?}");
+        assert!(stranger.exists(), "no row attributes it: untouched");
+        assert!(sweep.unmarked.contains(&stranger), "{sweep:?}");
+        assert!(fx.human_target.exists());
+        assert_eq!(
+            lane_target_events(&fx.db, "lane_target_reclaimed").await,
+            1,
+            "the removal is audited against the attributed execution"
+        );
+    }
+
+    /// KT-1397 — an unmarked lane whose worktree still exists is never taken
+    /// on lineage alone, finished execution or not, whatever the scope.
+    #[tokio::test]
+    async fn an_unmarked_lane_with_a_live_worktree_survives_by_lineage() {
+        let fx = lane_fixture().await;
+        fx.strip_marker();
+        fx.cancel().await;
+        assert!(std::path::Path::new(&fx.path).exists());
+
+        for scope in [
+            worktree::LaneSweepScope::WorktreeGone,
+            worktree::LaneSweepScope::WorktreeGoneOrClean,
+        ] {
+            let sweep = fx.sweep(scope).await;
+            assert!(fx.lane_target.join("debug/kronn").exists(), "{sweep:?}");
+            assert!(sweep.removed.is_empty(), "{sweep:?}");
+        }
+    }
+
+    /// KT-1397 — an unmarked lane of a non-terminal execution stays even when
+    /// its worktree directory is missing: the claim is the execution's, not the
+    /// directory's.
+    #[tokio::test]
+    async fn an_unmarked_lane_of_a_live_execution_survives_by_lineage() {
+        let fx = lane_fixture().await;
+        fx.strip_marker();
+        worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, true).unwrap();
+        assert!(!exec_of(&fx.db, &fx.exec_id).await.status.is_terminal());
+
+        let sweep = fx.sweep(worktree::LaneSweepScope::WorktreeGone).await;
+
+        assert!(fx.lane_target.join("debug/kronn").exists(), "{sweep:?}");
+        assert!(sweep.removed.is_empty(), "{sweep:?}");
+        assert_eq!(sweep.claimed.len(), 1, "{sweep:?}");
+    }
+
+    /// KT-1397 — a workspace Kronn does not manage attributes nothing.
+    #[tokio::test]
+    async fn an_unmanaged_workspace_attributes_no_lane() {
+        let fx = lane_fixture().await;
+        fx.strip_marker();
+        fx.cancel().await;
+        worktree::remove_discussion_worktree(fx.repo.path(), &fx.path, true).unwrap();
+        fx.db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussion_workspaces SET ownership = 'external'
+                      WHERE task_execution_id IS NOT NULL",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let sweep = fx.sweep(worktree::LaneSweepScope::WorktreeGone).await;
+
+        assert!(fx.lane_target.join("debug/kronn").exists(), "{sweep:?}");
+        assert!(sweep.removed.is_empty(), "{sweep:?}");
     }
 
     // ── KT-1318 — idle-aware sweeps, the disk view and the launch guard ──────

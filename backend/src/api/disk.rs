@@ -213,6 +213,7 @@ fn is_plain_dir(path: &Path) -> bool {
 fn scan_lanes(
     repo: &Path,
     claims: &std::collections::HashMap<String, String>,
+    attributions: &worktree::LaneAttributions,
     report_deadline: Instant,
 ) -> Vec<RawLane> {
     let judge = |owner: &worktree::LaneOwner| match claims.get(&owner.lane) {
@@ -222,7 +223,8 @@ fn scan_lanes(
     worktree::lane_target_dirs(repo)
         .into_iter()
         .map(|path| {
-            let state = worktree::classify_lane_target(repo, &path, &judge);
+            let state =
+                worktree::classify_lane_target_attributed(repo, &path, &judge, attributions);
             let plain = is_plain_dir(&path);
             let bytes = if plain {
                 disk_usage::measure_bounded(&path, &[], entry_budget(report_deadline))
@@ -291,12 +293,15 @@ async fn project_entries(
     let mut entries = Vec::new();
 
     // Lane build dirs: ownership marker + durable claims + idle age.
-    let claims = crate::api::orchestration::lane_target_claims(db, &project.id, repo).await?;
+    let (claims, attributions) =
+        crate::api::orchestration::lane_target_claims(db, &project.id, repo).await?;
     let lanes = {
         let repo = repo.to_path_buf();
-        tokio::task::spawn_blocking(move || scan_lanes(&repo, &claims, report_deadline))
-            .await
-            .map_err(|error| format!("lane scan failed: {error}"))?
+        tokio::task::spawn_blocking(move || {
+            scan_lanes(&repo, &claims, &attributions, report_deadline)
+        })
+        .await
+        .map_err(|error| format!("lane scan failed: {error}"))?
     };
     for lane in lanes {
         let owner_row = match &lane.state {
@@ -856,9 +861,9 @@ pub async fn ensure_launch_headroom_with(
 
 // ─── Periodic sweep ─────────────────────────────────────────────────────────
 
-/// Sweep orphaned lane build dirs every [`PERIODIC_SWEEP_EVERY`]. The boot
-/// reconciliation does the first pass; this one keeps the disk from refilling
-/// between boots.
+/// Release finished executions' checkouts and sweep orphaned lane build dirs
+/// every [`PERIODIC_SWEEP_EVERY`]. The boot reconciliation does the first pass;
+/// this one keeps the disk from refilling between boots.
 pub fn spawn_periodic_sweep(db: std::sync::Arc<Database>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PERIODIC_SWEEP_EVERY);
@@ -872,6 +877,10 @@ pub fn spawn_periodic_sweep(db: std::sync::Arc<Database>) {
                     continue;
                 }
             };
+            // KT-1397 — finished executions' checkouts first (a dirty or
+            // Preserve-cancelled one is only ever released here, once idle),
+            // so the lane sweep below sees their worktrees gone.
+            crate::api::orchestration::release_finished_worktrees(&db).await;
             let (items, _) = sweep_orphans(&db, &projects).await;
             if !items.is_empty() {
                 tracing::info!(

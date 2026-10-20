@@ -708,6 +708,99 @@ pub fn lane_target_claims(
     Ok(claims)
 }
 
+/// The lanes durable lineage attributes to an execution, whatever is (or is not)
+/// written inside them (KT-1397): every managed workspace row of the project
+/// that still names its worktree (`workspace_path` survives the retirement that
+/// clears `canonical_path`) and belongs to an execution. The lane derives from
+/// that worktree name exactly as provisioning derived it.
+///
+/// Attribution only names an owner; whether that owner is finished and the
+/// worktree gone is still the claims' and the sweep's to prove. A row without
+/// an execution, an external workspace or a path no lane derives from is not
+/// attributed.
+pub fn lane_attributions(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<std::collections::HashMap<String, crate::core::worktree::LaneOwner>> {
+    let mut statement = conn.prepare(
+        "SELECT task_execution_id, workspace_path FROM discussion_workspaces
+          WHERE project_id = ?1 AND ownership = 'managed'
+            AND task_execution_id IS NOT NULL AND workspace_path IS NOT NULL
+          ORDER BY created_at, id",
+    )?;
+    let rows = statement
+        .query_map(params![project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut attributed = std::collections::HashMap::new();
+    for (execution_id, worktree) in rows {
+        let Ok(lane) =
+            crate::core::task_worker_env::WorkerLane::for_worktree(std::path::Path::new(&worktree))
+        else {
+            continue;
+        };
+        let owner = crate::core::worktree::LaneOwner {
+            version: 1,
+            lane: lane.name.clone(),
+            execution_id,
+            worktree,
+        };
+        // Two executions that derive the same lane name cannot both own it: the
+        // lane is then attributed to neither, and stays.
+        match attributed.entry(lane.name) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Some(owner));
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if slot
+                    .get()
+                    .as_ref()
+                    .is_some_and(|known| known.execution_id != owner.execution_id)
+                {
+                    slot.insert(None);
+                }
+            }
+        }
+    }
+    Ok(attributed
+        .into_iter()
+        .filter_map(|(lane, owner)| owner.map(|owner| (lane, owner)))
+        .collect())
+}
+
+/// Record, once per distinct reason, that a finished execution's checkout was
+/// kept by the release (KT-1397): a sweep that runs every half hour must not
+/// bury the event log under the same refusal. `true` when it was recorded now.
+pub fn record_release_kept_once(
+    conn: &Connection,
+    exec_id: &str,
+    reason: &str,
+    actor: &OrchestrationActor,
+) -> Result<bool> {
+    let changes = serde_json::json!({ "reason": reason });
+    let already: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_execution_events
+              WHERE task_execution_id = ?1 AND action = 'worktree_release_kept'
+                AND changes_json = ?2)",
+        params![exec_id, serde_json::to_string(&changes)?],
+        |row| row.get(0),
+    )?;
+    if already {
+        return Ok(false);
+    }
+    record_execution_event(
+        conn,
+        exec_id,
+        "worktree_release_kept",
+        None,
+        None,
+        actor,
+        changes,
+    )?;
+    Ok(true)
+}
+
 /// Managed checkouts that outlive a finished execution (KT-1397): one row per
 /// terminal (`Done`, `Failed`, `Cancelled`) execution whose managed workspace
 /// still names a path on disk. `finished_at` lets the caller leave a recent

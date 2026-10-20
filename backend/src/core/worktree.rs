@@ -728,6 +728,25 @@ pub fn classify_lane_target(
     lane_target: &Path,
     judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
 ) -> LaneTargetState {
+    classify_lane_target_attributed(repo_path, lane_target, judge, &LaneAttributions::new())
+}
+
+/// Lane owners durable state names without a marker on disk, by lane name
+/// (KT-1397): a managed workspace row of a finished execution remembers the
+/// worktree it had, and the lane derives from that name. Built from the
+/// database, never from the directory being judged.
+pub type LaneAttributions = std::collections::HashMap<String, LaneOwner>;
+
+/// [`classify_lane_target`] that also recognises an unmarked lane by its
+/// durable lineage. The `target/wt-*` dirs of 20/10 predate the marker, or lost
+/// it; their execution is nonetheless in the database. Such a lane is only
+/// reclaimable once its worktree is gone: it never rides on a present checkout.
+pub fn classify_lane_target_attributed(
+    repo_path: &Path,
+    lane_target: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    attributions: &LaneAttributions,
+) -> LaneTargetState {
     if let Err(reason) = assert_lane_target_path(repo_path, lane_target) {
         return LaneTargetState::Kept(None, reason);
     }
@@ -740,8 +759,19 @@ pub fn classify_lane_target(
             return LaneTargetState::Kept(None, format!("cannot read it ({error})"));
         }
     }
-    let Some(owner) = read_lane_owner(lane_target) else {
-        return LaneTargetState::Unmarked;
+    let (owner, by_lineage) = match read_lane_owner(lane_target) {
+        Some(owner) => (owner, false),
+        None => {
+            let attributed = lane_target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix(LANE_TARGET_PREFIX))
+                .and_then(|lane| attributions.get(lane));
+            match attributed {
+                Some(owner) => (owner.clone(), true),
+                None => return LaneTargetState::Unmarked,
+            }
+        }
     };
     if let Err(reason) = judge(&owner) {
         return LaneTargetState::Claimed(owner, reason);
@@ -751,6 +781,12 @@ pub fn classify_lane_target(
     };
     let worktree = worktree_base_dir(repo_path).join(name);
     match classify_lane_worktree(repo_path, &owner.lane, &worktree) {
+        Ok(true) if by_lineage => LaneTargetState::Kept(
+            Some(owner),
+            "no ownership marker, attributed by its workspace lineage, and its worktree \
+             still exists — left alone"
+                .to_string(),
+        ),
         Ok(worktree_present) => LaneTargetState::Reclaimable {
             owner,
             worktree_present,
@@ -880,7 +916,27 @@ pub fn process_lane_target_idle(
     scope: LaneSweepScope,
     min_idle: std::time::Duration,
 ) -> LaneTargetOutcome {
-    match classify_lane_target(repo_path, lane_target, judge) {
+    process_lane_target_attributed(
+        repo_path,
+        lane_target,
+        judge,
+        scope,
+        min_idle,
+        &LaneAttributions::new(),
+    )
+}
+
+/// [`process_lane_target_idle`] that also takes an unmarked lane Kronn can
+/// attribute from durable lineage (KT-1397).
+pub fn process_lane_target_attributed(
+    repo_path: &Path,
+    lane_target: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    scope: LaneSweepScope,
+    min_idle: std::time::Duration,
+    attributions: &LaneAttributions,
+) -> LaneTargetOutcome {
+    match classify_lane_target_attributed(repo_path, lane_target, judge, attributions) {
         LaneTargetState::Unmarked => LaneTargetOutcome::Unmarked,
         LaneTargetState::Claimed(owner, reason) => LaneTargetOutcome::Claimed(owner, reason),
         LaneTargetState::Kept(owner, reason) => LaneTargetOutcome::Kept(owner, reason),
@@ -953,9 +1009,22 @@ pub fn sweep_lane_targets_idle(
     scope: LaneSweepScope,
     min_idle: std::time::Duration,
 ) -> LaneTargetSweep {
+    sweep_lane_targets_attributed(repo_path, judge, scope, min_idle, &LaneAttributions::new())
+}
+
+/// [`sweep_lane_targets_idle`] that also reclaims the unmarked lanes of
+/// `attributions` once their worktree is gone (KT-1397).
+pub fn sweep_lane_targets_attributed(
+    repo_path: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    scope: LaneSweepScope,
+    min_idle: std::time::Duration,
+    attributions: &LaneAttributions,
+) -> LaneTargetSweep {
     let mut sweep = LaneTargetSweep::default();
     for path in lane_target_dirs(repo_path) {
-        match process_lane_target_idle(repo_path, &path, judge, scope, min_idle) {
+        match process_lane_target_attributed(repo_path, &path, judge, scope, min_idle, attributions)
+        {
             LaneTargetOutcome::Removed(owner, report) => sweep.removed.push((owner, report)),
             LaneTargetOutcome::WouldRemove(owner, report) => {
                 sweep.would_remove.push((owner, report))
@@ -2888,29 +2957,125 @@ pub enum TerminalWorktreeRelease {
 /// Name of the uncommitted-changes patch kept as evidence of a released worktree.
 pub const RELEASED_WORKTREE_PATCH: &str = "uncommitted-changes.patch";
 
+/// The most uncommitted state a release will turn into evidence. Untracked
+/// build output that `.gitignore` does not cover would otherwise become a
+/// multi-GB patch (and as many loose objects in the shared repository): above
+/// this the checkout is kept and the reason recorded (KT-1397).
+pub const RELEASED_WORKTREE_PATCH_CAP_BYTES: u64 = 256 * 1024 * 1024;
+
+fn run_git_in_index(wt: &Path, index: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = crate::core::cmd::git_cmd()
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .current_dir(wt)
+        .output()
+        .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
+}
+
+/// `Some(bytes)` once the content of the modified and untracked (not ignored)
+/// files of `wt` is known to exceed `cap`. Measured from file sizes before
+/// anything is staged, so an oversized tree is refused without copying a byte.
+fn uncommitted_content_over(wt: &Path, cap: u64) -> Result<Option<u64>, String> {
+    let output = crate::core::cmd::git_cmd()
+        .args([
+            "ls-files",
+            "-z",
+            "--modified",
+            "--others",
+            "--exclude-standard",
+        ])
+        .current_dir(wt)
+        .output()
+        .map_err(|e| format!("git ls-files failed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let mut total = 0u64;
+    for name in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+    {
+        let Ok(name) = std::str::from_utf8(name) else {
+            continue;
+        };
+        if let Ok(meta) = std::fs::symlink_metadata(wt.join(name)) {
+            if meta.is_file() {
+                total = total.saturating_add(meta.len());
+                if total > cap {
+                    return Ok(Some(total));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// The uncommitted state of a checkout (tracked edits and untracked files) as a
-/// binary-safe patch against `HEAD`, built in a scratch index so the worktree's
-/// own index is never touched.
-fn uncommitted_patch(wt: &Path, index: &Path) -> Result<Vec<u8>, String> {
-    let git = |args: &[&str]| -> Result<Vec<u8>, String> {
-        let output = crate::core::cmd::git_cmd()
-            .args(args)
-            .env("GIT_INDEX_FILE", index)
-            .current_dir(wt)
-            .output()
-            .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
-        if !output.status.success() {
+/// binary-safe patch against `HEAD`, written to `out`, built in a scratch index
+/// so the worktree's own index is never touched. The patch is streamed under
+/// `cap`: past it nothing is left behind and the result is an error. `Ok(false)`
+/// is "nothing to save".
+fn write_uncommitted_patch(wt: &Path, index: &Path, out: &Path, cap: u64) -> Result<bool, String> {
+    use std::io::Read;
+    run_git_in_index(wt, index, &["read-tree", "HEAD"])?;
+    run_git_in_index(wt, index, &["add", "-A"])?;
+    let mut child = crate::core::cmd::git_cmd()
+        .args(["diff", "--cached", "--binary", "--no-ext-diff", "HEAD"])
+        .env("GIT_INDEX_FILE", index)
+        .current_dir(wt)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("git diff failed: {e}"))?;
+    let mut stdout = child.stdout.take().ok_or("git diff has no output")?;
+    let staging = out.with_extension("patch.tmp");
+    let copied = std::fs::File::create(&staging)
+        .and_then(|mut file| std::io::copy(&mut stdout.by_ref().take(cap + 1), &mut file));
+    let abandon = |child: &mut std::process::Child| {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&staging);
+    };
+    let copied = match copied {
+        Ok(copied) => copied,
+        Err(e) => {
+            abandon(&mut child);
             return Err(format!(
-                "git {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr).trim()
+                "cannot write the patch to {}: {e}",
+                staging.display()
             ));
         }
-        Ok(output.stdout)
     };
-    git(&["read-tree", "HEAD"])?;
-    git(&["add", "-A"])?;
-    git(&["diff", "--cached", "--binary", "--no-ext-diff", "HEAD"])
+    if copied > cap {
+        abandon(&mut child);
+        return Err(format!("the patch exceeds the {cap}-byte evidence cap"));
+    }
+    let status = child.wait().map_err(|e| format!("git diff failed: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&staging);
+        return Err("git diff --cached failed".to_string());
+    }
+    if copied == 0 {
+        let _ = std::fs::remove_file(&staging);
+        return Ok(false);
+    }
+    std::fs::rename(&staging, out).map_err(|e| {
+        let _ = std::fs::remove_file(&staging);
+        format!("cannot save the patch to {}: {e}", out.display())
+    })?;
+    Ok(true)
 }
 
 /// Release the checkout of a task execution that has reached a terminal status
@@ -2921,13 +3086,31 @@ fn uncommitted_patch(wt: &Path, index: &Path) -> Result<Vec<u8>, String> {
 /// (`managed`); this proves the rest against Git: the path is in the managed
 /// layout and the checkout is on exactly `expected_branch`. Unlike
 /// [`remove_cancelled_task_worktree`] a dirty tree is not a reason to keep the
-/// directory, but a patch that cannot be written is: nothing is removed unless
-/// the evidence is on disk.
+/// directory, but a patch that cannot be written, or that would exceed
+/// [`RELEASED_WORKTREE_PATCH_CAP_BYTES`], is: nothing is removed unless the
+/// evidence is on disk.
 pub fn release_terminal_task_worktree(
     repo_path: &Path,
     worktree_path: &str,
     expected_branch: &str,
     evidence_dir: &Path,
+) -> Result<TerminalWorktreeRelease, String> {
+    release_terminal_task_worktree_capped(
+        repo_path,
+        worktree_path,
+        expected_branch,
+        evidence_dir,
+        RELEASED_WORKTREE_PATCH_CAP_BYTES,
+    )
+}
+
+/// [`release_terminal_task_worktree`] with the evidence cap injected.
+pub fn release_terminal_task_worktree_capped(
+    repo_path: &Path,
+    worktree_path: &str,
+    expected_branch: &str,
+    evidence_dir: &Path,
+    patch_cap_bytes: u64,
 ) -> Result<TerminalWorktreeRelease, String> {
     reject_option_like_rev(expected_branch)?;
     let wt = Path::new(worktree_path);
@@ -2949,6 +3132,12 @@ pub fn release_terminal_task_worktree(
     }
     let mut patch = None;
     if !worktree_dirty_files(wt)?.is_empty() {
+        if let Some(bytes) = uncommitted_content_over(wt, patch_cap_bytes)? {
+            return Err(format!(
+                "the uncommitted files of {worktree_path} hold {bytes}+ bytes, over the \
+                 {patch_cap_bytes}-byte evidence cap — preserving it"
+            ));
+        }
         std::fs::create_dir_all(evidence_dir).map_err(|e| {
             format!(
                 "cannot create {} for the uncommitted changes of {worktree_path}: {e} — preserving it",
@@ -2956,20 +3145,14 @@ pub fn release_terminal_task_worktree(
             )
         })?;
         let scratch_index = evidence_dir.join("patch-index.tmp");
-        let bytes = uncommitted_patch(wt, &scratch_index);
+        let out = evidence_dir.join(RELEASED_WORKTREE_PATCH);
+        let saved = write_uncommitted_patch(wt, &scratch_index, &out, patch_cap_bytes);
         let _ = std::fs::remove_file(&scratch_index);
-        let bytes = bytes
-            .map_err(|e| format!("cannot save the uncommitted changes of {worktree_path}: {e}"))?;
-        if !bytes.is_empty() {
-            let path = evidence_dir.join(RELEASED_WORKTREE_PATCH);
-            std::fs::write(&path, &bytes)
-                .map_err(|e| {
-                    format!(
-                        "cannot save the uncommitted changes of {worktree_path} to {}: {e} — preserving it",
-                        path.display()
-                    )
-                })?;
-            patch = Some(path);
+        let saved = saved.map_err(|e| {
+            format!("cannot save the uncommitted changes of {worktree_path}: {e} — preserving it")
+        })?;
+        if saved {
+            patch = Some(out);
         }
     }
     remove_discussion_worktree(repo_path, worktree_path, false)?;
@@ -5965,6 +6148,61 @@ mod tests {
         )
         .is_err());
         assert!(outside.path().exists());
+    }
+
+    /// KT-1397 — the evidence is bounded: uncommitted files above the cap are
+    /// neither saved nor is the checkout removed, and nothing is left staged.
+    #[test]
+    fn release_terminal_task_worktree_keeps_a_checkout_whose_diff_exceeds_the_cap() {
+        let repo = make_test_repo("task-release-cap");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-1397", "cap", &base).unwrap();
+        fs::write(Path::new(&info.path).join("build.bin"), vec![7u8; 4096]).unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+
+        let error = release_terminal_task_worktree_capped(
+            repo.path(),
+            &info.path,
+            &info.branch,
+            evidence.path(),
+            1024,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("evidence cap"), "{error}");
+        assert!(Path::new(&info.path).join("build.bin").exists());
+        assert!(!evidence.path().join(RELEASED_WORKTREE_PATCH).exists());
+        // Under a cap that fits, the same checkout is released.
+        let released = release_terminal_task_worktree_capped(
+            repo.path(),
+            &info.path,
+            &info.branch,
+            evidence.path(),
+            1024 * 1024,
+        )
+        .unwrap();
+        assert!(matches!(
+            released,
+            TerminalWorktreeRelease::Removed { patch: Some(_) }
+        ));
+        assert!(!Path::new(&info.path).exists());
+    }
+
+    /// KT-1397 — the patch itself is streamed under the cap: a tracked edit
+    /// whose diff outgrows it (the size pre-check passed) leaves no partial file.
+    #[test]
+    fn write_uncommitted_patch_stops_at_the_cap_and_leaves_nothing() {
+        let repo = make_test_repo("task-patch-cap");
+        fs::write(repo.path().join("big.txt"), "x".repeat(8192)).unwrap();
+        let out = repo.path().join("out.patch");
+        let index = repo.path().join("scratch-index");
+
+        let error = write_uncommitted_patch(repo.path(), &index, &out, 1024).unwrap_err();
+
+        assert!(error.contains("cap"), "{error}");
+        assert!(!out.exists());
+        assert!(!out.with_extension("patch.tmp").exists());
+        let _ = fs::remove_file(&index);
     }
 
     /// KT-514/KT-478 — the reclaim must succeed on a task worktree that carries a
