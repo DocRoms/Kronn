@@ -349,26 +349,17 @@ pub struct DispositionGap {
     pub count: usize,
 }
 
-/// The signals the Step-8 output surface does not address.
+/// The Step-8 output surface: the current index + ONLY the TD detail files
+/// still listed in it. On an in-place re-audit, an orphan historical `TD-*.md`
+/// (no longer referenced in the freshly-written index) must NOT count as
+/// "disposing" a signal — that's exactly the masking-by-history we're fighting
+/// (Codex 1b review 2026-06-04). We gate the detail files through
+/// `parse_index_td_ids` so only the current run's live findings contribute.
 ///
 /// Kronn's own `## Unaddressed detector signals` section never disposes of
 /// anything (KT-1357): it is the record of what the agent left open, so it is
 /// read only when `count_fallback` is set, to verify a section just written.
-fn undisposed_in_output<'a>(
-    project_path: &Path,
-    signals: &'a [crate::core::audit_detectors::DetectedSignal],
-    count_fallback: bool,
-) -> Vec<&'a crate::core::audit_detectors::DetectedSignal> {
-    if signals.is_empty() {
-        return Vec::new();
-    }
-    // Combined Step-8 output surface = the current index + ONLY the TD
-    // detail files still listed in it. On an in-place re-audit, an orphan
-    // historical `TD-*.md` (no longer referenced in the freshly-written
-    // index) must NOT count as "disposing" a signal — that's exactly the
-    // masking-by-history we're fighting (Codex 1b review 2026-06-04). We
-    // gate the detail files through `parse_index_td_ids` so only the
-    // current run's live findings contribute to disposition.
+fn step8_surface(project_path: &Path, count_fallback: bool) -> (String, Vec<String>) {
     let docs_root = DocsRoot::of(project_path);
     let mut index_content =
         std::fs::read_to_string(docs_root.file(project_path, "inconsistencies-tech-debt.md"))
@@ -377,7 +368,7 @@ fn undisposed_in_output<'a>(
         index_content = crate::core::audit_detectors::without_unaddressed_section(&index_content);
     }
     let listed_ids = super::reconciliation::parse_index_td_ids(&index_content);
-    let mut combined = index_content;
+    let mut sheets = Vec::new();
     let td_dir = docs_root.file(project_path, "tech-debt");
     if let Ok(entries) = std::fs::read_dir(&td_dir) {
         for e in entries.flatten() {
@@ -393,13 +384,60 @@ fn undisposed_in_output<'a>(
                 continue; // orphan history — not part of this run's output
             }
             if let Ok(body) = std::fs::read_to_string(&p) {
-                combined.push('\n');
-                combined.push_str(&body);
+                sheets.push(body);
             }
         }
     }
+    (index_content, sheets)
+}
 
+/// The signals the Step-8 output surface does not address.
+fn undisposed_in_output<'a>(
+    project_path: &Path,
+    signals: &'a [crate::core::audit_detectors::DetectedSignal],
+    count_fallback: bool,
+) -> Vec<&'a crate::core::audit_detectors::DetectedSignal> {
+    if signals.is_empty() {
+        return Vec::new();
+    }
+    let (index, sheets) = step8_surface(project_path, count_fallback);
+    let mut combined = index;
+    for sheet in &sheets {
+        combined.push('\n');
+        combined.push_str(sheet);
+    }
     crate::core::audit_detectors::undisposed_signals(signals, &combined)
+}
+
+/// KT-1388 — the signals the output names only to dismiss them (resolved,
+/// mitigated, false alarm, not applicable), without the code that proves it.
+fn unproven_in_output<'a>(
+    project_path: &Path,
+    signals: &'a [crate::core::audit_detectors::DetectedSignal],
+    count_fallback: bool,
+) -> Vec<&'a crate::core::audit_detectors::DetectedSignal> {
+    if signals.is_empty() {
+        return Vec::new();
+    }
+    let (index, sheets) = step8_surface(project_path, count_fallback);
+    crate::core::audit_detectors::unproven_dismissals(signals, &index, &sheets)
+}
+
+/// Every signal the output leaves open: never named, or dismissed unproven.
+fn unaddressed_in_output<'a>(
+    project_path: &Path,
+    signals: &'a [crate::core::audit_detectors::DetectedSignal],
+    count_fallback: bool,
+) -> Vec<&'a crate::core::audit_detectors::DetectedSignal> {
+    let undisposed = undisposed_in_output(project_path, signals, count_fallback);
+    let unproven = unproven_in_output(project_path, signals, count_fallback);
+    signals
+        .iter()
+        .filter(|sig| {
+            undisposed.iter().any(|other| std::ptr::eq(*other, *sig))
+                || unproven.iter().any(|other| std::ptr::eq(*other, *sig))
+        })
+        .collect()
 }
 
 /// [`check_detector_disposition`] with the retry feedback naming the signals
@@ -409,8 +447,12 @@ pub fn detector_disposition_gap(
     signals: &[crate::core::audit_detectors::DetectedSignal],
 ) -> Option<DispositionGap> {
     let undisposed = undisposed_in_output(project_path, signals, false);
-    if undisposed.is_empty() {
+    let unproven = unproven_in_output(project_path, signals, false);
+    if undisposed.is_empty() && unproven.is_empty() {
         return None;
+    }
+    if undisposed.is_empty() {
+        return Some(unproven_gap(project_path, &unproven));
     }
     let list = undisposed
         .iter()
@@ -441,14 +483,56 @@ pub fn detector_disposition_gap(
          flagged line (`name.ext:12`) does:\n{wanted}\n",
         index = DocsRoot::of(project_path).path("inconsistencies-tech-debt.md"),
     );
-    Some(DispositionGap {
+    let mut gap = DispositionGap {
         warning: StepValidationWarning {
             reason: undisposed_reason(undisposed.len(), &list),
             repaired: false,
         },
         feedback,
         count: undisposed.len(),
-    })
+    };
+    if !unproven.is_empty() {
+        let more = unproven_gap(project_path, &unproven);
+        gap.warning.reason = format!("{}; {}", gap.warning.reason, more.warning.reason);
+        gap.feedback = format!("{}\n{}", gap.feedback, more.feedback);
+        gap.count += more.count;
+    }
+    Some(gap)
+}
+
+/// KT-1388 — signals the output dismisses (resolved / mitigated / false alarm /
+/// not applicable) without citing the code that proves it. The agent is asked
+/// for the evidence or to keep the item open, never to close it on a word.
+fn unproven_gap(
+    project_path: &Path,
+    unproven: &[&crate::core::audit_detectors::DetectedSignal],
+) -> DispositionGap {
+    let list = unproven
+        .iter()
+        .map(|s| format!("{} (`{}`)", s.title, s.evidence))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let feedback = format!(
+        "## Detector signals dismissed without proof — targeted correction required\n\n\
+         Read `{index}` and the TD sheets it lists. These detector signals are only named to be \
+         dismissed (resolved, mitigated, false alarm, not applicable), and no line cites the code \
+         that proves it: {list}.\n\n\
+         For each one, read the flagged code, then {request}. A citation of the flagged line that \
+         shows the problem is absent is the proof; a comment, a documentation page or a file you \
+         did not read is not. If a fallback or a branch of that code still leaves the risk open, \
+         the finding stays open: emit or keep its TD instead of closing it. Correct only these \
+         dispositions, do not repeat the entire audit.\n",
+        index = DocsRoot::of(project_path).path("inconsistencies-tech-debt.md"),
+        request = crate::core::resolution_proof::EVIDENCE_REQUEST,
+    );
+    DispositionGap {
+        warning: StepValidationWarning {
+            reason: unproven_reason(unproven.len(), &list),
+            repaired: false,
+        },
+        feedback,
+        count: unproven.len(),
+    }
 }
 
 /// KT-1357 — the attempts are spent and the agent still left signals
@@ -463,7 +547,7 @@ pub fn settle_unaddressed_signals(
 ) -> Option<usize> {
     // Every current signal still lacking a disposition from the agent, whatever
     // an earlier settlement listed: the section is rebuilt, never accumulated.
-    let undisposed = undisposed_in_output(project_path, signals, false);
+    let undisposed = unaddressed_in_output(project_path, signals, false);
     if undisposed.is_empty() {
         return None;
     }
@@ -476,7 +560,7 @@ pub fn settle_unaddressed_signals(
         crate::core::mcp_scanner::atomic_write(&index, &written).ok()?;
     }
     // The listing must actually dispose of them, or the failure stands.
-    undisposed_in_output(project_path, signals, true)
+    unaddressed_in_output(project_path, signals, true)
         .is_empty()
         .then_some(undisposed.len())
 }
@@ -505,6 +589,19 @@ pub(crate) fn undisposed_reason(count: usize, list: &str) -> String {
         count,
         super::step_guard::DETECTOR_FRAGMENT,
         list
+    )
+}
+
+/// The reason of a step that dismissed detector signals without proof. It
+/// carries the detector fragment so the accept flow reads it as an
+/// undisposed signal too.
+pub(crate) fn unproven_reason(count: usize, list: &str) -> String {
+    format!(
+        "{} {} with proof: dismissed as resolved / mitigated / false alarm / not applicable without citing the code, in the tech-debt output: {} — {} (Step 8 will be re-run)",
+        count,
+        super::step_guard::DETECTOR_FRAGMENT,
+        list,
+        crate::core::resolution_proof::EVIDENCE_REQUEST
     )
 }
 
@@ -2033,5 +2130,129 @@ mod tests {
         assert!(!warning.reason.contains("sensitive output"));
         assert!(with_http_diagnostics(true, None, &trace).is_none());
         assert!(with_http_diagnostics(false, None, &[]).is_none());
+    }
+
+    /// KT-1388 — docroms D04: the SSH host-key signals dismissed as a false
+    /// alarm, the `ssh-keyscan` fallback unread.
+    fn ssh_signal() -> Vec<DetectedSignal> {
+        vec![mk_signal(
+            "ci-ssh-hostkey",
+            ".github/workflows/deploy.yml:186",
+            "SSH StrictHostKeyChecking=no",
+        )]
+    }
+
+    const FALSE_ALARM_ROW: &str = "| SSH `StrictHostKeyChecking=no` at deploy.yml:186 | FALSE ALARM | Line 186 is a comment. Actual SSH commands correctly use `StrictHostKeyChecking=yes`. |\n";
+
+    fn index_only(row: &str) -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        std::fs::write(docs.join("inconsistencies-tech-debt.md"), row).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn a_signal_dismissed_as_a_false_alarm_without_the_code_is_sent_back() {
+        let tmp = index_only(FALSE_ALARM_ROW);
+        let gap = detector_disposition_gap(tmp.path(), &ssh_signal())
+            .expect("a dismissal with no code is not a disposition");
+        assert_eq!(gap.count, 1);
+        assert!(
+            gap.warning.reason.contains("without citing the code"),
+            "{}",
+            gap.warning.reason
+        );
+        assert!(gap
+            .warning
+            .reason
+            .contains(super::super::step_guard::DETECTOR_FRAGMENT));
+        assert!(
+            gap.feedback.contains("keep the item open"),
+            "{}",
+            gap.feedback
+        );
+        assert!(gap.feedback.contains("`.github/workflows/deploy.yml:186`"));
+        assert!(
+            super::super::step_guard::AcceptBlocker::of_reason(&gap.warning.reason).is_some(),
+            "the accept flow reads it as an undisposed signal"
+        );
+    }
+
+    #[test]
+    fn the_code_cited_in_the_same_row_disposes_of_the_signal() {
+        let row = FALSE_ALARM_ROW.replace(
+            " |\n",
+            " [src: file: .github/workflows/deploy.yml:197-206] |\n",
+        );
+        let tmp = index_only(&row);
+        assert!(detector_disposition_gap(tmp.path(), &ssh_signal()).is_none());
+        // A documentation page is not the code.
+        let docs_only = FALSE_ALARM_ROW.replace(
+            " |\n",
+            " [src: file: docs/inconsistencies-security.md:61] |\n",
+        );
+        let tmp = index_only(&docs_only);
+        assert!(detector_disposition_gap(tmp.path(), &ssh_signal()).is_some());
+    }
+
+    #[test]
+    fn a_line_that_still_names_the_signal_as_a_finding_keeps_it_disposed() {
+        let tmp = index_only(&format!(
+            "{FALSE_ALARM_ROW}- deploy.yml:186 still disables host-key checks on the fallback path\n"
+        ));
+        assert!(detector_disposition_gap(tmp.path(), &ssh_signal()).is_none());
+    }
+
+    #[test]
+    fn a_sheet_that_closes_the_signal_needs_the_code_somewhere_in_the_sheet() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "| TD-20260719-ssh-stricthostkey-disabled | SSH | CI | High |\n",
+        )
+        .unwrap();
+        let sheet = docs.join("tech-debt/TD-20260719-ssh-stricthostkey-disabled.md");
+        let body = "---\nmetadata:\n  audit_history:\n    - date: 2026-10-19\n      status: Accepted decision\n      reviewer: Full audit\n      note: RESOLVED — issue fully mitigated, ssh-keyscan on first contact.\n---\n\n# TD-20260719-ssh-stricthostkey-disabled\n\n- **Status**: Accepted decision (RESOLVED)\n\nHost-key logic: .github/workflows/deploy.yml:186\n";
+        std::fs::write(&sheet, body).unwrap();
+        let gap = detector_disposition_gap(tmp.path(), &ssh_signal())
+            .expect("closed on a word, not on the code");
+        assert_eq!(gap.count, 1);
+        std::fs::write(
+            &sheet,
+            format!("{body}\nFallback read: [src: file: .github/workflows/deploy.yml:197-201]\n"),
+        )
+        .unwrap();
+        assert!(detector_disposition_gap(tmp.path(), &ssh_signal()).is_none());
+    }
+
+    #[test]
+    fn an_unproven_dismissal_after_every_attempt_is_listed_for_triage() {
+        let tmp = index_only(FALSE_ALARM_ROW);
+        assert_eq!(
+            settle_unaddressed_signals(tmp.path(), &ssh_signal()),
+            Some(1)
+        );
+        let written =
+            std::fs::read_to_string(tmp.path().join("docs/inconsistencies-tech-debt.md")).unwrap();
+        assert!(
+            written.contains("## Unaddressed detector signals"),
+            "{written}"
+        );
+        assert!(
+            written.contains(".github/workflows/deploy.yml:186"),
+            "{written}"
+        );
+        // Rebuilt, never stacked.
+        assert_eq!(
+            settle_unaddressed_signals(tmp.path(), &ssh_signal()),
+            Some(1)
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("docs/inconsistencies-tech-debt.md")).unwrap(),
+            written
+        );
     }
 }

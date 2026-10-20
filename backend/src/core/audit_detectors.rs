@@ -730,6 +730,59 @@ pub fn undisposed_signals<'a>(
     out
 }
 
+/// KT-1388 — the signals the output names ONLY to dismiss them (resolved,
+/// mitigated, false alarm, not applicable) without citing the code that proves
+/// it. docroms' agent closed an SSH host-key signal as a false alarm on a
+/// fallback it had not read; naming the file is not reading it. A signal is
+/// not listed when one line still names it as a finding, or when a dismissing
+/// line carries a `[src: file: path:line]` marker on code: in the same row of
+/// the index, or anywhere in the same TD sheet (`sheets` are whole sheets,
+/// `index` is judged line by line). Signals the output never names are
+/// [`undisposed_signals`]' business.
+pub fn unproven_dismissals<'a>(
+    signals: &'a [DetectedSignal],
+    index: &str,
+    sheets: &[String],
+) -> Vec<&'a DetectedSignal> {
+    use crate::core::resolution_proof::{cites_code, declares_settled, sheet_declares_settled};
+    let mut seen_anchors = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for sig in signals {
+        let Some(raw_anchor) = disposition_anchor(sig) else {
+            continue;
+        };
+        let anchor = escape_markdown_table_cell(&raw_anchor).to_lowercase();
+        if !seen_anchors.insert(anchor.clone()) {
+            continue;
+        }
+        let names = |line: &str| {
+            let lower = line.to_lowercase();
+            lower.contains(&anchor) || names_file_and_line(&lower, signals, sig)
+        };
+        let (mut mentioned, mut dismissed_only, mut proven) = (false, true, false);
+        for line in index.lines().filter(|line| names(line)) {
+            mentioned = true;
+            if declares_settled(line) {
+                proven |= cites_code(line);
+            } else {
+                dismissed_only = false;
+            }
+        }
+        for sheet in sheets.iter().filter(|sheet| sheet.lines().any(&names)) {
+            mentioned = true;
+            if sheet_declares_settled(sheet) {
+                proven |= cites_code(sheet);
+            } else {
+                dismissed_only = false;
+            }
+        }
+        if mentioned && dismissed_only && !proven {
+            out.push(sig);
+        }
+    }
+    out
+}
+
 /// The exact text whose presence in the tech-debt output disposes of the
 /// signal (lower-cased by the gate, so any case counts).
 pub fn disposition_key(sig: &DetectedSignal) -> Option<String> {

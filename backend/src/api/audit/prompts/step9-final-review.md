@@ -13,7 +13,12 @@ Check:
 - No duplicated facts across files (one canonical home per concept).
 - Consistent terminology with `glossary.md`.
 - Valid cross-references (clickable links resolve to existing files).
-- No contradictions between files (e.g. coding-rules says X is enforced but testing-quality says no linter exists).
+- **No contradictions between files.** Do this pass explicitly, not by impression. List every cross-document contradiction you find as the claim in doc A against the claim in doc B (`file:line` each), then resolve it against the SOURCE (manifest, config, code), never by picking the document you read last, and fix the wrong place. Check at least these families:
+  · **Stack versions**: the framework / language / runtime versions in `docs/AGENTS.md` (Stack table), every language section heading of `coding-rules.md`, the tech-debt index and `testing-quality.md` must all agree with each other and with `composer.json`/`composer.lock`, `package.json`, the Dockerfile `FROM`, `.node-version` and the CI `setup-*` versions. Kronn runs the same comparison after you and sends each mismatch back with both places named.
+  · **Absence claims** ("no test coverage gaps", "HTML has no Cache-Control", "no linter") against what other docs list (the TD index, the repo map) or what the code does (a `#[Cache]` attribute, a header subscriber).
+  · **Universal claims** ("every locale serves the same path") against the routes, configs or fixtures that show an exception.
+  · **Closed findings** (resolved, mitigated, false alarm): each cites the code that proves it, or is reopened.
+  Example: coding-rules says enforced X but testing-quality says no linter exists.
 - No empty critical sections.
 - Clean markdown (no broken tables, no stray HTML).
 - Each tech-debt entry in `inconsistencies-tech-debt.md` has a matching detail file under `tech-debt/`.

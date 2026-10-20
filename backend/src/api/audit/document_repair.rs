@@ -2,7 +2,9 @@
 //! Only unambiguous comma-bundled references are normalized automatically.
 //! Real missing paths/invalid lines require an agent retry and remain blocking.
 
-use crate::core::document_optimization::{self, Diagnostic, UNBACKED_PROVENANCE};
+use crate::core::document_optimization::{
+    self, Diagnostic, STACK_CONFLICT, UNBACKED_PROVENANCE, UNPROVEN_RESOLUTION,
+};
 use crate::core::run_provenance::RunProvenance;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -335,6 +337,25 @@ pub(super) fn with_stale_target(
     Ok(recovery)
 }
 
+/// KT-1388 — adds the stack versions the manifests or another document
+/// contradict, whichever step wrote them: the final review reads the documents
+/// side by side and is handed each one, both places named.
+pub(super) fn with_stack_conflicts(
+    project: &Path,
+    mut recovery: Vec<Diagnostic>,
+) -> Result<Vec<Diagnostic>, String> {
+    let report = document_optimization::analyze(project)?;
+    for diagnostic in report
+        .blocking_diagnostics()
+        .filter(|d| d.code == STACK_CONFLICT)
+    {
+        if !recovery.contains(diagnostic) {
+            recovery.push(diagnostic.clone());
+        }
+    }
+    Ok(recovery)
+}
+
 pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
     let mut text = String::from("## Documentary gate — targeted correction required\n\n");
     for d in diagnostics {
@@ -343,6 +364,12 @@ pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
     text.push_str("\nRead and correct EACH named document, including auxiliary findings. Use ONE `[src: file: path:line]` or `[src: file: path:start-end]` marker per reference; never bundle paths with commas. A binary file (.docx, .pdf, image) has no lines: cite it by bare path, `[src: file: path]`. Read the actual source before correcting a missing path or invalid line. If the evidence cannot be established, remove the unsupported claim entirely; do not invent a path or merely hide the citation. In a human-owned section, correct only what is wrong; Kronn asks its owner to reconfirm. A resolvable citation proves existence, not the truth of its claim.\n");
     if diagnostics.iter().any(|d| d.code == UNBACKED_PROVENANCE) {
         text.push_str("A `[src: deps: …]` row must be one the dependency watch holds, and a `[src: url: …]` page one you fetched in this run. For each one flagged above, fetch the page or keep the watch row; otherwise replace the value AND its citation with `not verified: no source`. Never write a version, date or support end from memory, and never attach a citation to it.\n");
+    }
+    if diagnostics.iter().any(|d| d.code == STACK_CONFLICT) {
+        text.push_str("A `Stack version conflict` names both places that disagree: read the manifest or lock file it cites (composer.json/lock, package.json, Dockerfile FROM, .node-version, CI setup-* versions), then correct the document that is wrong so every document gives the version in place. Do not touch the manifest and do not average the two: the source decides.\n");
+    }
+    if diagnostics.iter().any(|d| d.code == UNPROVEN_RESOLUTION) {
+        text.push_str("A debt declared resolved, mitigated, a false alarm or not applicable must cite the code that proves it: `[src: file: path:line]` on code (not a documentation page) in the same row or sheet. Re-read that code, branch and fallback included; if it does not settle the finding, or you cannot establish it, keep the item open and say what remains.\n");
     }
     text
 }
@@ -1343,6 +1370,65 @@ mod tests {
         for original in [security, sheet, index] {
             assert!(originals.iter().any(|o| o == original), "{original}");
         }
+    }
+
+    /// KT-1388 — a conflict written by step 4 is handed to the final review and
+    /// stays a blocker for it until the document is corrected against the source.
+    #[test]
+    fn the_final_review_is_handed_the_stack_conflicts_of_every_earlier_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        put(
+            root,
+            "composer.json",
+            "{\n  \"require\": {\n    \"symfony/framework-bundle\": \"^8.1\"\n  }\n}\n",
+        );
+        put(
+            root,
+            "docs/AGENTS.md",
+            "# P\n\nSymfony 8.1\n\n[rules](coding-rules.md)\n",
+        );
+        put(root, "docs/coding-rules.md", "## PHP (Symfony 7.3)\n");
+        let before = snapshot(root).unwrap();
+        let handed = with_stack_conflicts(root, Vec::new()).unwrap();
+        assert_eq!(handed.len(), 1, "{handed:#?}");
+        assert_eq!(handed[0].path, "docs/coding-rules.md");
+        // Untouched by the review, the document still blocks it: it was handed over.
+        let check = check_attempt(root, &before, &handed, &handed, None).unwrap();
+        assert!(
+            check.blocking.iter().any(|d| d.code == STACK_CONFLICT),
+            "{:#?}",
+            check.blocking
+        );
+        // Corrected against the source, nothing is left to hand over.
+        put(root, "docs/coding-rules.md", "## PHP (Symfony 8.1)\n");
+        assert!(with_stack_conflicts(root, Vec::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_feedback_for_a_stack_conflict_or_an_unproven_closure_says_what_to_do() {
+        let stack = Diagnostic {
+            code: STACK_CONFLICT.into(),
+            path: "docs/coding-rules.md".into(),
+            message: "Stack version conflict: `Symfony 7.3` at docs/coding-rules.md:5 contradicts the source states `^8.1` at composer.json:4".into(),
+            blocking: true,
+        };
+        let closed = Diagnostic {
+            code: UNPROVEN_RESOLUTION.into(),
+            path: "docs/tech-debt/TD-1.md".into(),
+            message: "`TD-1` is declared resolved without the code".into(),
+            blocking: true,
+        };
+        let text = feedback(std::slice::from_ref(&stack));
+        assert!(text.contains("`docs/coding-rules.md`: Stack version conflict"));
+        assert!(text.contains("the source decides"), "{text}");
+        assert!(!text.contains("keep the item open"), "{text}");
+        let text = feedback(&[closed]);
+        assert!(
+            text.contains("keep the item open and say what remains"),
+            "{text}"
+        );
+        assert!(!text.contains("the source decides"), "{text}");
     }
 
     #[test]

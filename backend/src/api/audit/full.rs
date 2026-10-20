@@ -1686,6 +1686,18 @@ pub async fn full_audit(
                     step, file_label, recovery_targets.iter().filter(|d| d.path == analysis_step.target_file).count()
                 );
             }
+            // KT-1388 — the final review reads the documents side by side: a
+            // stack version the manifests or another document contradict is
+            // handed to it, whichever step wrote it, with both places named.
+            if should_optimize_documents(kind)
+                && super::ANALYSIS_STEPS.last().is_some_and(|last| last.prompt == analysis_step.prompt)
+            {
+                match super::document_repair::with_stack_conflicts(&project_path, recovery_targets.clone()) {
+                    Ok(targets) => recovery_targets = targets,
+                    // The end-of-run documentary gate still checks the stack versions.
+                    Err(e) => tracing::warn!("Audit step {} ({}): cross-document stack check skipped: {}", step, file_label, e),
+                }
+            }
             // Taken before ANY write of the step, the cross-agent path's
             // included: what that path writes is the step's own doing.
             let documentary_snapshot = if should_optimize_documents(kind) {
