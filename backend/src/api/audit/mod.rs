@@ -1772,6 +1772,31 @@ mod prompt_tests {
         }
     }
 
+    /// KT-1388 — the final review lists each cross-document contradiction as
+    /// the claim in doc A against the claim in doc B and resolves it against the
+    /// source; step 8 refuses to close a finding on a word.
+    #[test]
+    fn the_review_resolves_contradictions_against_the_source_and_step8_wants_proof() {
+        let step9 = ANALYSIS_STEPS.last().expect("at least one step").prompt;
+        for needle in [
+            "claim in doc A against the claim in doc B",
+            "against the SOURCE",
+            "Stack versions",
+            "Absence claims",
+            "Universal claims",
+            "Closed findings",
+        ] {
+            assert!(step9.contains(needle), "Step 9 must say `{needle}`");
+        }
+        let step8 = ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
+            .unwrap()
+            .prompt;
+        assert!(step8.contains("Never close a finding on a word"));
+        assert!(step8.contains("`[src: file: path:line]` on the code"));
+    }
+
     #[test]
     fn preamble_documents_marker_discipline_three_types() {
         // 0.8.3 FIX — DOCROMS_WEB audit had 26 `<!-- TODO: verify -->` on
@@ -2692,13 +2717,15 @@ mod prompt_tests {
         // keeps the baseline from growing back into the prompt. KT-1353 added
         // the accepted forms of a sheet citation (+158 B, measured 11,114): the
         // ceiling moved by 200 B for that one sentence, not for new baseline.
+        // KT-1388 added the proof rule for a closed finding (+250 B, measured
+        // 11,364): the ceiling moved by 200 B more for that one sentence.
         let prompt = ANALYSIS_STEPS
             .iter()
             .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
             .unwrap()
             .prompt;
         assert!(
-            prompt.len() <= 11_200,
+            prompt.len() <= 11_400,
             "Step 8 prompt is {} bytes",
             prompt.len()
         );

@@ -1704,6 +1704,115 @@ fn after_each_step(tools: &Path, hook: &str) {
     .unwrap();
 }
 
+/// KT-1388 round 2 — the partial refresh gives the same advice as Full: a stack
+/// conflict and an unproven closure in what a step wrote are handed back while
+/// it has attempts left, then left as a step warning, a documentary note and a
+/// line of the validation prompt; the step stays done and the run completes.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_partial_refresh_hands_back_and_records_the_advice_like_full() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("baseline done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    std::fs::write(
+        project.join("composer.json"),
+        "{\"require\":{\"symfony/framework-bundle\":\"^8.1\"}}",
+    )
+    .unwrap();
+    let target = "docs/inconsistencies-security.md";
+    let step = targets.iter().position(|t| *t == target).unwrap() + 1;
+    let attempts = crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS;
+    arm(tools, "noop", &vec![target; attempts]);
+    after_each_step(
+        tools,
+        &format!(
+            "{target}) printf '\\nSymfony 7.3\\nTD-20261020-review-proof — Resolved.\\n' >> '{}' ;;",
+            project.join(target).display()
+        ),
+    );
+    let response = crate::api::audit::drift::partial_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::PartialAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            steps: vec![step],
+            accept_unverified_agents: None,
+        }),
+    )
+    .await
+    .into_response();
+    let body = sse_body(response).await;
+    let done = sse_events(&body, "done").pop().expect("partial done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{body}");
+
+    // Handed back while attempts remain, never past the budget.
+    let retries: Vec<Value> = sse_events(&body, "step_retry")
+        .into_iter()
+        .filter(|e| e["reason"] == "documentary_advisories")
+        .collect();
+    assert_eq!(retries.len(), attempts - 1, "{body}");
+    let codes = |event: &Value| -> Vec<String> {
+        event["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["code"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for retry in &retries {
+        assert_eq!(retry["step"], step, "{retry}");
+        assert!(codes(retry).contains(&"stack_conflict".into()), "{retry}");
+        assert!(
+            codes(retry).contains(&"unproven_resolution".into()),
+            "{retry}"
+        );
+    }
+    // The last attempt leaves them: an event, and the step stays done.
+    let left = sse_events(&body, "documentary_advisory");
+    assert_eq!(left.len(), 1, "{body}");
+    assert!(codes(&left[0]).contains(&"stack_conflict".into()), "{body}");
+    let step_done = sse_events(&body, "step_done")
+        .into_iter()
+        .find(|e| e["step"] == step)
+        .unwrap();
+    assert_eq!(step_done["success"], true, "{step_done}");
+
+    // Recorded: the step warning, the run's notes and the validation prompt.
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, steps, prompt) = persisted(state, &run_id).await;
+    assert_eq!(run.status, "Completed");
+    let row = steps.iter().find(|s| s.step_index == step as u32).unwrap();
+    let warning = row.step_warning.as_deref().expect("step warning");
+    assert!(warning.contains("Symfony 7.3"), "{warning}");
+    assert!(warning.contains("TD-20261020-review-proof"), "{warning}");
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    for code in ["stack_conflict", "unproven_resolution"] {
+        assert!(
+            saved["advisories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["code"] == code),
+            "{saved}"
+        );
+    }
+    let prompt = prompt.expect("validation prompt");
+    assert!(prompt.contains("Symfony 7.3"), "{prompt}");
+    assert!(prompt.contains("TD-20261020-review-proof"), "{prompt}");
+}
+
 /// KT-1306 — the final documentary gate charges a blocker to the step that wrote
 /// the document, even one no step targets, and a resume redoes that step, never
 /// the founding one by default.
@@ -1720,7 +1829,7 @@ async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
     let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
     assert!(![writer_a, writer_b].contains(&founding));
 
-    // Two steps each leave a document no step targets, citing a file that does
+    // Two steps each leave a document no step targets, linking a page that does
     // not exist. A step that fails its gate retries: one scripted line per attempt.
     let mut targets: Vec<&str> = Vec::new();
     for (index, step) in chain.iter().enumerate() {
@@ -1736,8 +1845,8 @@ async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
     after_each_step(
         tools,
         &format!(
-            "docs/coding-rules.md) printf '# A\\nGhost [src: file: ghost-a.rs:1]\\n' > '{root}/docs/extra-a.md' ;;\n\
-             docs/glossary.md) mkdir -p '{root}/docs/workflow'; printf '# B\\nGhost [src: file: ghost-b.rs:1]\\n' > '{root}/docs/workflow/extra-b.md' ;;"
+            "docs/coding-rules.md) printf '# A\\nGhost [page](nowhere/ghost-a.md)\\n' > '{root}/docs/extra-a.md' ;;\n\
+             docs/glossary.md) mkdir -p '{root}/docs/workflow'; printf '# B\\nGhost [page](nowhere/ghost-b.md)\\n' > '{root}/docs/workflow/extra-b.md' ;;"
         ),
     );
     let run = run_full(state, None).await;

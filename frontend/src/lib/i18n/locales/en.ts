@@ -6927,6 +6927,7 @@ End with [SIGNAL: OK].`,
   "auditTimeline.drift.redo": "Redo the {0} inherited step(s)",
   "auditTimeline.docnotes.preexisting": "{0} pre-existing citation problem(s) in docs no step owns",
   "auditTimeline.docnotes.autofixes": "{0} exact gate replacement(s) applied by Kronn",
+  "auditTimeline.docnotes.unverified": "{0} unverified reference(s): citation markers no attempt could make valid, now flagged backticked paths",
 };
 
 export default en;

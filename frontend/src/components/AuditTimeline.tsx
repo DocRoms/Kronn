@@ -46,6 +46,8 @@ interface LatestRunFacts {
 interface DocumentaryNotes {
   preexisting: { path: string; message: string }[];
   autofixes: { step: number; path: string; kind: string; from: string; to: string }[];
+  /** KT-1370 — markers demoted to flagged backticked paths after a step's last attempt. */
+  unverified: { step: number; doc: string; marker: string }[];
 }
 
 function parseDocumentaryNotes(raw: string | null): DocumentaryNotes | null {
@@ -55,8 +57,9 @@ function parseDocumentaryNotes(raw: string | null): DocumentaryNotes | null {
     const notes = {
       preexisting: Array.isArray(parsed.preexisting) ? parsed.preexisting : [],
       autofixes: Array.isArray(parsed.autofixes) ? parsed.autofixes : [],
+      unverified: Array.isArray(parsed.unverified) ? parsed.unverified : [],
     };
-    return notes.preexisting.length || notes.autofixes.length ? notes : null;
+    return notes.preexisting.length || notes.autofixes.length || notes.unverified.length ? notes : null;
   } catch {
     return null;
   }
@@ -750,6 +753,18 @@ export function AuditTimeline(props: AuditTimelineProps) {
                         {docNotes.autofixes.map((fix, i) => (
                           <li key={`${fix.path}-${i}`}>
                             <code>{fix.path}</code> — {fix.kind}: <code>{fix.from}</code> → <code>{fix.to}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {docNotes.unverified.length > 0 && (
+                    <details data-testid="audit-timeline-documentary-unverified">
+                      <summary>{t('auditTimeline.docnotes.unverified', docNotes.unverified.length)}</summary>
+                      <ul>
+                        {docNotes.unverified.map((item, i) => (
+                          <li key={`${item.doc}-${i}`}>
+                            <code>{item.doc}</code> — step {item.step}: <code>{item.marker}</code>
                           </li>
                         ))}
                       </ul>

@@ -8,7 +8,11 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::core::anti_halluc::parse_line_bounds;
 
+mod demotion;
 mod mechanical_fix;
+pub use demotion::{
+    demote_unverifiable, scrub_secret_markers, DemotedReference, Demotion, UNVERIFIED_FLAG,
+};
 pub use mechanical_fix::{mechanical_repair, AppliedFix, Repaired};
 
 const CONFIG_FILE: &str = "docs/.kronn-document-budgets.json";
@@ -85,6 +89,13 @@ pub struct DocumentaryOptimizationReport {
 impl DocumentaryOptimizationReport {
     pub fn blocking_diagnostics(&self) -> impl Iterator<Item = &Diagnostic> {
         self.diagnostics.iter().filter(|d| d.blocking)
+    }
+
+    /// KT-1388 — what is sent back to the agent but never blocks.
+    pub fn advisory_diagnostics(&self) -> impl Iterator<Item = &Diagnostic> {
+        self.diagnostics
+            .iter()
+            .filter(|d| is_advisory_code(&d.code))
     }
 }
 
@@ -205,6 +216,8 @@ pub fn analyze_with(
     inspect_docs(project, &docs, &adapters, &budgets, &mut diagnostics);
     inspect_stack_currency(project, &mut diagnostics);
     inspect_commands(project, &docs, &adapters, &mut diagnostics);
+    inspect_stack_consistency(project, &docs, &mut diagnostics);
+    inspect_unproven_resolutions(project, &docs, &mut diagnostics);
     if let Some(run) = run {
         inspect_run_provenance(project, &docs, &adapters, run, &mut diagnostics);
     }
@@ -1461,6 +1474,225 @@ fn inspect_stack_currency(project: &Path, diagnostics: &mut Vec<Diagnostic>) {
     }
 }
 
+/// Diagnostic code of a stack version a document states against the manifests
+/// or another document (KT-1388).
+pub const STACK_CONFLICT: &str = "stack_conflict";
+
+/// Diagnostic code of a tech debt declared resolved / mitigated / a false
+/// alarm / not applicable without the code that proves it (KT-1388).
+pub const UNPROVEN_RESOLUTION: &str = "unproven_resolution";
+
+/// The docs the stack versions are read from, the entry file first: it is the
+/// canonical home of the stack, the others are held against it.
+fn stack_documents(project: &Path, docs: &[PathBuf]) -> Vec<(String, String)> {
+    let root = docs_root(project);
+    let entry = under_root(project, "docs/AGENTS.md");
+    let mut out: Vec<(String, String)> = docs
+        .iter()
+        .map(|path| relative(project, path))
+        .filter(|rel| {
+            root.strip(rel)
+                .is_some_and(crate::core::stack_consistency::is_scanned)
+        })
+        .filter_map(|rel| read(&project.join(&rel)).ok().map(|content| (rel, content)))
+        .collect();
+    out.sort_by_key(|(rel, _)| rel != entry);
+    out
+}
+
+/// A statement of a stack version that contradicts the manifests or another
+/// document names both places. Advisory (KT-1388): the agent is told during a
+/// step's retries, but a run is never failed over it.
+fn inspect_stack_consistency(project: &Path, docs: &[PathBuf], out: &mut Vec<Diagnostic>) {
+    let documents = stack_documents(project, docs);
+    for conflict in crate::core::stack_consistency::conflicts(project, &documents) {
+        out.push(diag(STACK_CONFLICT, &conflict.path, conflict.message));
+    }
+}
+
+/// The deterministic block of the central index Kronn regenerates from the
+/// sheets: its rows are the sheets' own, judged through the sheets.
+fn in_generated_index(line: &str, inside: &mut bool) -> bool {
+    if line.contains("<!-- kronn:td-index:start") {
+        *inside = true;
+    }
+    let held = *inside;
+    if line.contains("<!-- kronn:td-index:end") {
+        *inside = false;
+    }
+    held
+}
+
+fn unproven_message(id: &str, where_: &str) -> String {
+    format!(
+        "`{id}` is declared resolved / mitigated / a false alarm / not applicable in {where_} without the code that proves it: {}",
+        crate::core::resolution_proof::EVIDENCE_REQUEST
+    )
+}
+
+/// KT-1388 — a tech debt that says it is closed must show why. Every `TD-*`
+/// line of an `inconsistencies-*.md` index (a table row of the generated block
+/// stands for its sheet) and every TD sheet that declares the finding
+/// resolved, mitigated, a false alarm or not applicable cites the code in the
+/// same row or sheet, or the item stays open. Advisory: sent back to the agent
+/// while it can still correct, then recorded, never failing the run.
+fn inspect_unproven_resolutions(project: &Path, docs: &[PathBuf], out: &mut Vec<Diagnostic>) {
+    use crate::core::resolution_proof::{cites_code, locates_code, sheet_declares_settled};
+    let root = docs_root(project);
+    for path in docs {
+        let rel = relative(project, path);
+        let Some(within) = root.strip(&rel) else {
+            continue;
+        };
+        let Ok(content) = read(path) else {
+            continue;
+        };
+        if let Some(stem) = within
+            .strip_prefix("tech-debt/")
+            .filter(|name| !name.contains('/'))
+            .and_then(crate::core::td_index::counted_sheet_stem)
+        {
+            if sheet_declares_settled(&content) && !cites_code(&content) {
+                out.push(diag(
+                    UNPROVEN_RESOLUTION,
+                    &rel,
+                    unproven_message(stem, "its sheet"),
+                ));
+            }
+            continue;
+        }
+        if !(within.starts_with("inconsistencies-") && !within.contains('/')) {
+            continue;
+        }
+        let (mut fenced, mut generated) = (false, false);
+        let mut reported = std::collections::BTreeSet::new();
+        for line in content.lines() {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+                continue;
+            }
+            let held = in_generated_index(line, &mut generated);
+            if fenced || (held && line.trim_start().starts_with('|')) || locates_code(line) {
+                continue;
+            }
+            for id in settled_td_ids(line) {
+                if reported.insert(id.clone()) {
+                    out.push(diag(
+                        UNPROVEN_RESOLUTION,
+                        &rel,
+                        unproven_message(&id, "the index"),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// A line with every `[src: …]` marker and markdown link target blanked (same
+/// byte length): they hold paths — often a sheet's own file name, `TD-…md` —
+/// not what the line says.
+fn without_markers(line: &str) -> String {
+    let mut blank = vec![false; line.len()];
+    let mut from = 0;
+    while let Some(at) = line[from..].find("[src:") {
+        let start = from + at;
+        let end = line[start..]
+            .find(']')
+            .map_or(line.len(), |e| start + e + 1);
+        blank[start..end].iter_mut().for_each(|b| *b = true);
+        from = end;
+    }
+    from = 0;
+    while let Some(at) = line[from..].find("](") {
+        let start = from + at + 1;
+        let end = line[start..]
+            .find(')')
+            .map_or(line.len(), |e| start + e + 1);
+        blank[start..end].iter_mut().for_each(|b| *b = true);
+        from = end;
+    }
+    line.char_indices()
+        .map(|(i, c)| {
+            if blank[i] {
+                " ".repeat(c.len_utf8())
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// The `TD-…` sheet ids a line declares settled, each for its own closure: a
+/// resolution word is about the debt named in its clause (the nearest one
+/// before it, else the only one after it), never the first debt of a sentence
+/// that names several; a line naming a single debt closes that one wherever
+/// the closure sits. Ids and citation markers are not prose: a slug such as
+/// `…-resolved-secret` is a name, not a declaration.
+fn settled_td_ids(line: &str) -> Vec<String> {
+    let masked = without_markers(line);
+    let mut ids: Vec<(usize, String)> = Vec::new();
+    let mut prose = masked.clone();
+    let mut from = 0;
+    while let Some(at) = masked[from..].find("TD-") {
+        let start = from + at;
+        from = start + 3;
+        if masked[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric())
+        {
+            continue;
+        }
+        let id: String = masked[start..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        let id = id.trim_end_matches('-').to_string();
+        if crate::core::td_index::is_td_id(&id) {
+            prose.replace_range(start..start + id.len(), &" ".repeat(id.len()));
+            from = start + id.len();
+            ids.push((start, id));
+        }
+    }
+    let mut settled: Vec<String> = Vec::new();
+    if ids.is_empty() {
+        return settled;
+    }
+    // One debt in the whole line (or row): whatever the line closes is that
+    // debt, a `;` or a full stop in its description notwithstanding.
+    let sole = ids
+        .iter()
+        .all(|(_, id)| *id == ids[0].1)
+        .then(|| ids[0].1.clone());
+    for at in crate::core::resolution_proof::settled_at(&prose) {
+        if let Some(id) = &sole {
+            if !settled.contains(id) {
+                settled.push(id.clone());
+            }
+            continue;
+        }
+        let clause = crate::core::resolution_proof::clause_bounds(&prose, at);
+        let named: Vec<&(usize, String)> = ids
+            .iter()
+            .filter(|(start, _)| clause.contains(start))
+            .collect();
+        let about = named
+            .iter()
+            .rfind(|(start, _)| *start < at)
+            .or(if named.len() == 1 {
+                named.first()
+            } else {
+                None
+            });
+        if let Some((_, id)) = about {
+            if !settled.contains(id) {
+                settled.push(id.clone());
+            }
+        }
+    }
+    settled
+}
+
 fn table_cells(line: &str) -> Vec<String> {
     line.trim()
         .trim_matches('|')
@@ -1566,12 +1798,24 @@ fn diag(code: &str, path: &str, message: String) -> Diagnostic {
 /// structure (orphans/duplicates), citation ranges and "obsolete" markers
 /// are real findings but surface as warnings instead: `full.rs` gates
 /// validation-discussion creation and the drift baseline on
-/// `blocking_diagnostics()` being empty (KT-840).
+/// `blocking_diagnostics()` being empty (KT-840). A claim the documents
+/// contradict (a stack version against the manifests or another document) and
+/// a debt closed without proof (KT-1388) are measured at about one false alarm
+/// in two on real audit docs, so they are advisory ([`is_advisory_code`]).
 fn is_blocking_code(code: &str) -> bool {
     matches!(
         code,
         "broken_link" | "broken_citation" | UNBACKED_PROVENANCE
     )
+}
+
+/// The diagnostics that are feedback, not blockers (KT-1388): a stack version
+/// the documents contradict and a debt closed without the code that proves it.
+/// They are sent back to the agent during a step's retries and recorded when
+/// the last attempt leaves them; the end-of-run gate and the recovery plan
+/// never count them.
+pub fn is_advisory_code(code: &str) -> bool {
+    matches!(code, STACK_CONFLICT | UNPROVEN_RESOLUTION)
 }
 
 #[cfg(all(test, feature = "full-tests"))]
@@ -3169,5 +3413,429 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.code == HUMAN_SECTION_REFERENCE && d.message.contains("make ghost")));
+    }
+
+    /// The advisory diagnostics of `code`: found, never blocking (KT-1388).
+    fn advisory_of<'a>(
+        report: &'a DocumentaryOptimizationReport,
+        code: &str,
+    ) -> Vec<&'a Diagnostic> {
+        assert!(
+            report
+                .blocking_diagnostics()
+                .all(|d| !is_advisory_code(&d.code)),
+            "an advisory diagnostic must never block: {report:#?}"
+        );
+        report
+            .advisory_diagnostics()
+            .filter(|d| d.code == code)
+            .collect()
+    }
+
+    /// KT-1388 — docroms: `AGENTS.md` says Symfony 8.1 / PHP ^8.4, `coding-rules.md`
+    /// heads its PHP section "Symfony 7.3", the tech-debt index says PHP ^8.2.
+    #[test]
+    fn a_stack_version_the_manifest_and_the_entry_file_contradict_is_feedback_never_a_blocker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("composer.json"),
+            "{\n  \"require\": {\n    \"php\": \"^8.4\",\n    \"symfony/framework-bundle\": \"^8.1\"\n  }\n}\n",
+        );
+        write(
+            &root.join("docs/AGENTS.md"),
+            "# Docroms\n\n**Project:** Symfony 8.1 + FrankenPHP 1.8 (PHP 8.4), multilingual.\n\n[rules](coding-rules.md) [debt](inconsistencies-tech-debt.md)\n",
+        );
+        write(
+            &root.join("docs/coding-rules.md"),
+            "# Coding rules\n\n- Small diffs.\n\n## PHP (Symfony 7.3)\n\nNo linter.\n",
+        );
+        write(
+            &root.join("docs/inconsistencies-tech-debt.md"),
+            "# Debt\n\n| PHP runtime | PHP ^8.2 per composer.json | aligned |\n",
+        );
+        let report = analyze(root).unwrap();
+        let conflicts = advisory_of(&report, STACK_CONFLICT);
+        assert_eq!(conflicts.len(), 2, "{conflicts:#?}");
+        let rules = conflicts
+            .iter()
+            .find(|d| d.path == "docs/coding-rules.md")
+            .expect("coding-rules.md is the wrong place");
+        assert!(rules
+            .message
+            .starts_with("Stack version conflict: `Symfony 7.3`"));
+        assert!(
+            rules.message.contains("docs/coding-rules.md:5"),
+            "{rules:?}"
+        );
+        assert!(rules.message.contains("composer.json:4"), "{rules:?}");
+        let debt = conflicts
+            .iter()
+            .find(|d| d.path == "docs/inconsistencies-tech-debt.md")
+            .expect("the index is the wrong place");
+        assert!(debt.message.contains("`PHP ^8.2`") && debt.message.contains("composer.json:3"));
+        // Fixed against the source, the same documents pass.
+        write(
+            &root.join("docs/coding-rules.md"),
+            "# Coding rules\n\n## PHP (Symfony 8.1)\n",
+        );
+        write(
+            &root.join("docs/inconsistencies-tech-debt.md"),
+            "# Debt\n\n| PHP runtime | PHP ^8.4 per composer.json | aligned |\n",
+        );
+        let fixed = analyze(root).unwrap();
+        assert!(advisory_of(&fixed, STACK_CONFLICT).is_empty(), "{fixed:#?}");
+    }
+
+    #[test]
+    fn a_legacy_document_is_not_read_for_stack_versions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("composer.json"),
+            "{\"require\": {\"php\": \"^8.4\"}}\n",
+        );
+        write(
+            &root.join("docs/AGENTS.md"),
+            "# P\n\n[g](legacy/guide.md)\n",
+        );
+        write(
+            &root.join("docs/legacy/guide.md"),
+            "# Guide\n\nRuns on PHP 7.4.\n",
+        );
+        let report = analyze(root).unwrap();
+        // `docs/legacy/` is a history: not read at all.
+        assert!(
+            report.diagnostics.iter().all(|d| d.code != STACK_CONFLICT),
+            "{report:#?}"
+        );
+    }
+
+    const KEYSCAN_SHEET: &str = "---\nname: td-20260719-ssh-stricthostkey-disabled\ndescription: Deploy CI disables SSH host-key verification.\nmetadata:\n  type: tech-debt\n  audit_history:\n    - date: 2026-10-19\n      status: Accepted decision\n      reviewer: Full audit\n      note: RESOLVED — code now uses StrictHostKeyChecking=yes everywhere. Host key pinning via SERVER_HOST_KEY secret or ssh-keyscan on first contact. Issue fully mitigated.\n---\n\n# TD-20260719-ssh-stricthostkey-disabled\n\n- **Area**: CI\n- **Status**: Accepted decision (RESOLVED)\n\n## Resolution (current state)\nFIXED. If `SERVER_HOST_KEY` is absent the key is discovered via `ssh-keyscan`.\n";
+
+    /// KT-1388 — docroms D04: "fully mitigated" over an `ssh-keyscan` fallback, no code cited.
+    #[test]
+    fn a_td_sheet_declared_resolved_without_the_code_is_refused_until_it_cites_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("docs/AGENTS.md"),
+            "# P\n\n[debt](inconsistencies-tech-debt.md)\n",
+        );
+        write(&root.join("docs/inconsistencies-tech-debt.md"), "# Debt\n");
+        let sheet = root.join("docs/tech-debt/TD-20260719-ssh-stricthostkey-disabled.md");
+        write(&sheet, KEYSCAN_SHEET);
+        write(
+            &root.join(".github/workflows/deploy.yml"),
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n",
+        );
+        let report = analyze(root).unwrap();
+        let refused = advisory_of(&report, UNPROVEN_RESOLUTION);
+        assert_eq!(refused.len(), 1, "{refused:#?}");
+        assert_eq!(
+            refused[0].path,
+            "docs/tech-debt/TD-20260719-ssh-stricthostkey-disabled.md"
+        );
+        assert!(refused[0]
+            .message
+            .starts_with("`TD-20260719-ssh-stricthostkey-disabled`"));
+        assert!(
+            refused[0].message.contains("keep the item open"),
+            "{refused:?}"
+        );
+
+        // A page of the documentation proves nothing about the code.
+        write(
+            &sheet,
+            &format!("{KEYSCAN_SHEET}\nSee [src: file: docs/inconsistencies-tech-debt.md:1].\n"),
+        );
+        let still = analyze(root).unwrap();
+        assert_eq!(advisory_of(&still, UNPROVEN_RESOLUTION).len(), 1);
+
+        // A sheet names the location of the problem it describes: that is not
+        // the code that settles it.
+        write(
+            &sheet,
+            &format!("{KEYSCAN_SHEET}\nProblem at `.github/workflows/deploy.yml:3`.\n"),
+        );
+        let located = analyze(root).unwrap();
+        assert_eq!(advisory_of(&located, UNPROVEN_RESOLUTION).len(), 1);
+
+        // The code, with its line, in the same sheet.
+        write(
+            &sheet,
+            &format!("{KEYSCAN_SHEET}\nFallback: [src: file: .github/workflows/deploy.yml:3-5]\n"),
+        );
+        let proven = analyze(root).unwrap();
+        assert!(
+            advisory_of(&proven, UNPROVEN_RESOLUTION).is_empty(),
+            "{proven:#?}"
+        );
+    }
+
+    #[test]
+    fn an_open_sheet_and_a_decision_a_human_took_are_not_judged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(&root.join("docs/AGENTS.md"), "# P\n");
+        write(
+            &root.join("docs/tech-debt/TD-20261001-open.md"),
+            "# TD-20261001-open\n\n- **Status**: Verified in source\n\n## Suggested direction\nThis must be fixed before launch; not resolved yet.\n",
+        );
+        write(
+            &root.join("docs/tech-debt/TD-20261001-human.md"),
+            "---\nmetadata:\n  audit_history:\n    - date: 2026-10-01\n      status: Accepted decision\n      reviewer: Kronn audit validation card\n      note: Accepted by the team: resolved by the infra migration.\n---\n\n# TD-20261001-human\n\n- **Status**: Accepted decision\n",
+        );
+        let report = analyze(root).unwrap();
+        assert!(
+            advisory_of(&report, UNPROVEN_RESOLUTION).is_empty(),
+            "{report:#?}"
+        );
+    }
+
+    #[test]
+    fn an_index_line_closing_a_td_needs_its_code_but_the_generated_rows_and_slugs_do_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("docs/AGENTS.md"),
+            "# P\n\n[debt](inconsistencies-tech-debt.md)\n",
+        );
+        write(&root.join("src/skip.html"), "<a>\n<b>\n<c>\n");
+        write(
+            &root.join("docs/inconsistencies-tech-debt.md"),
+            "# Debt\n\n<!-- kronn:td-index:start (generated) -->\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20260719-a | Gone | Infra | Low | Resolved |\n\nListed without a sheet in `tech-debt/` (kept as written):\n- `TD-20260719-a11y-no-skip-link` — No skip link — resolved in 2026-09-04 recovery\n- `TD-20260719-a11y-focus` — No focus ring — resolved [src: file: src/skip.html:2]\n- `TD-20260719-app-secret-resolved-default` — Real APP_SECRET committed\n<!-- kronn:td-index:end -->\n",
+        );
+        let report = analyze(root).unwrap();
+        let refused = advisory_of(&report, UNPROVEN_RESOLUTION);
+        assert_eq!(refused.len(), 1, "{refused:#?}");
+        assert!(
+            refused[0]
+                .message
+                .starts_with("`TD-20260719-a11y-no-skip-link`"),
+            "{refused:?}"
+        );
+    }
+
+    /// The ids an `inconsistencies-*.md` body leaves unproven.
+    fn unproven_in_index(body: &str, extra: &[(&str, &str)]) -> Vec<String> {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("docs/AGENTS.md"),
+            "# P\n\n[debt](inconsistencies-tech-debt.md)\n",
+        );
+        write(&root.join("src/skip.html"), "<a>\n<b>\n<c>\n");
+        for (path, content) in extra {
+            write(&root.join(path), content);
+        }
+        write(
+            &root.join("docs/inconsistencies-tech-debt.md"),
+            &format!("# Debt\n\n{body}\n"),
+        );
+        let report = analyze(root).unwrap();
+        advisory_of(&report, UNPROVEN_RESOLUTION)
+            .iter()
+            .map(|d| d.message.split('`').nth(1).unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// KT-1388 review — the lines of real audit docs (apollo, africanews,
+    /// docroms) that a closure word alone wrongly flagged.
+    #[test]
+    fn a_closure_word_about_another_clause_or_in_history_is_not_a_closure_of_the_debt() {
+        for line in [
+            // docroms v2-r1: RESOLVED is about the list before it, the debt is
+            // listed after as what remains.
+            "| Accessibility | findings | RESOLVED (2026-09-04): skip link, focus indicators, reduced-motion [src: file: docs/inconsistencies-tech-debt.md:131-138]. Remaining user-confirmed POC-route issues: [TD-20260719-a11y-map-markers-keyboard](tech-debt/TD-20260719-a11y-map-markers-keyboard.md) and [TD-20260719-a11y-poc-no-landmarks-heading](tech-debt/TD-20260719-a11y-poc-no-landmarks-heading.md). |",
+            // africanews: the debt is named only in a citation path.
+            "| Security | findings | Committed runtime secrets remain verified; the dispatch-input injection is resolved (DOPS-751). [src: file: docs/tech-debt/TD-20260828-committed-runtime-secrets.md:20-32] [src: file: docs/tech-debt/TD-20260828-composer-secure-http-disabled.md:20-30] |",
+            // africanews: `fixed` is an adjective.
+            "| [TD-20260828-inline-template-assets](tech-debt/TD-20260828-inline-template-assets.md) | Templates | Medium | Confirmed by user | Shared and feature Twig templates contain fixed CSS declarations and executable JavaScript bodies. [src: file: docs/tech-debt/TD-20260828-inline-template-assets.md:2-3] |",
+            // apollo: a previous outcome of the dimension, not of a debt.
+            "| Accessibility (a11y) | findings | Kronn resync: 5 active TDs on file: TD-20261019-button-div-nesting, TD-20261019-gallery-hidden-figcaption (previous outcome: N/A: not applicable — library/API-only project) |",
+            // docroms v2-r1: the false positive is the second signal, the debt the first.
+            "- Inline script blocks > 50 lines (2 signals): (1) `templates/home/poc-skiing.html.twig:45` — 536 lines application JS, linked to [TD-20260719-cq-inline-js-poc-skiing](tech-debt/TD-20260719-cq-inline-js-poc-skiing.md). (2) `templates/home/index.html.twig:14` — 60 lines LD-JSON, not executable JS; detector signal is false positive for this case",
+            // Open, reopened, partially done.
+            "- `TD-20260719-aaa` — headers not resolved yet, partially mitigated",
+            "- `TD-20260719-bbb` — fixed in 1.2 then reopened after the rewrite",
+        ] {
+            assert_eq!(unproven_in_index(line, &[]), Vec::<String>::new(), "{line}");
+        }
+    }
+
+    /// The closures the same docs make for real, with no code behind them.
+    #[test]
+    fn a_closure_of_its_own_debt_without_code_is_still_found() {
+        for (line, expected) in [
+            (
+                "- `TD-20260719-no-tests` — PHPUnit configured but `tests/` empty — RESOLVED (273 tests, 99.23% coverage 2026-09-04)",
+                vec!["TD-20260719-no-tests"],
+            ),
+            (
+                "- **1 entry marked RESOLVED** during 2026-09-04 recovery: `TD-20260719-ssh-stricthostkey-disabled` (SSH host-key checking now enabled) [src: file: docs/tech-debt/TD-20260719-ssh-stricthostkey-disabled.md:11-14]",
+                vec!["TD-20260719-ssh-stricthostkey-disabled"],
+            ),
+            (
+                "| [TD-20260828-gulp-missing-entrypoints](tech-debt/TD-20260828-gulp-missing-entrypoints.md) | Frontend | High | Resolved | Retired sports entries were removed. [src: file: docs/tech-debt/TD-20260828-gulp-missing-entrypoints.md:2-3] |",
+                vec!["TD-20260828-gulp-missing-entrypoints"],
+            ),
+            (
+                "| **TD-20260719-a11y-no-skip-link** | ✓ Fixed | Skip link added to the layout |",
+                vec!["TD-20260719-a11y-no-skip-link"],
+            ),
+            // A sentence naming two debts: the closure is for the one it is about.
+            (
+                "- `TD-20260719-aaa` is still open; `TD-20260719-bbb` — resolved in the 2026-09-04 recovery",
+                vec!["TD-20260719-bbb"],
+            ),
+            (
+                "- `TD-20260719-ccc` is open and `TD-20260719-ddd` was resolved",
+                vec!["TD-20260719-ddd"],
+            ),
+        ] {
+            assert_eq!(unproven_in_index(line, &[]), expected, "{line}");
+        }
+    }
+
+    /// Round 2 — a debt whose description holds a `;` or a full stop before
+    /// its closure still owns the closure when it is the only debt of the line.
+    #[test]
+    fn a_lone_debt_keeps_its_closure_across_a_semicolon_or_a_sentence_break() {
+        for (line, expected) in [
+            // docroms v2-r1 inconsistencies-tech-debt.md:58, :60, :61.
+            (
+                "- `TD-20260719-deploy-includes-env` — Deploy rsync bundle does not exclude `.env*`; `.env.dist` ships to prod — resolved in 2026-09-04 recovery",
+                "TD-20260719-deploy-includes-env",
+            ),
+            (
+                "- `TD-20260719-a11y-no-focus-visible` — No global focus indicator; `outline:none` on language options with no `:focus-visible` replacement — resolved in 2026-09-04 recovery",
+                "TD-20260719-a11y-no-focus-visible",
+            ),
+            (
+                "- `TD-20260719-a11y-no-skip-link` — No skip-to-main-content link; keyboard users tab through full sticky nav on every page — resolved in 2026-09-04 recovery",
+                "TD-20260719-a11y-no-skip-link",
+            ),
+            // extra-fixtures: after `;`, after a full stop, with a comma.
+            (
+                "- TD-20261020-one — No skip link; users tab through navigation — resolved in recovery",
+                "TD-20261020-one",
+            ),
+            (
+                "- TD-20261020-one — Missing skip link. Resolved in recovery.",
+                "TD-20261020-one",
+            ),
+            (
+                "- TD-20261020-one — No skip link, users tab through navigation — resolved in recovery",
+                "TD-20261020-one",
+            ),
+            // The same debt named twice is still one debt.
+            (
+                "- TD-20261020-one — No skip link; see TD-20261020-one above. Resolved in recovery.",
+                "TD-20261020-one",
+            ),
+        ] {
+            assert_eq!(unproven_in_index(line, &[]), vec![expected], "{line}");
+        }
+    }
+
+    #[test]
+    fn with_two_debts_a_closure_is_still_attributed_to_its_own_clause() {
+        // extra-fixtures/two_td_correct_subject: only the second is closed.
+        assert_eq!(
+            unproven_in_index(
+                "- TD-20261020-one remains open; TD-20261020-two — Resolved",
+                &[]
+            ),
+            vec!["TD-20261020-two"]
+        );
+        // A lone debt that says it is not closed stays open.
+        for line in [
+            "- TD-20261020-one — No skip link; not resolved yet. Still open.",
+            "- TD-20261020-one — No skip link; partially mitigated. Fixed CSS declarations remain.",
+        ] {
+            assert_eq!(unproven_in_index(line, &[]), Vec::<String>::new(), "{line}");
+        }
+    }
+
+    #[test]
+    fn an_anchored_or_en_dash_citation_on_code_proves_the_closure() {
+        for line in [
+            "- `TD-20260719-a11y-focus` — resolved [src: file: src/skip.html:2#a_tag]",
+            "- `TD-20260719-a11y-focus` — resolved [src: file: src/skip.html:2–3]",
+            "- `TD-20260719-a11y-focus` — resolved [src: file: src/skip.html:2-3#b.tag]",
+            // matrix-docroms: a closed row that opens the line of code it closed on.
+            "| **TD-20260719-a11y-anchor-link-hover-only** | ✓ Fixed | Anchor links respond to `:focus-visible` `app.css:191` |",
+        ] {
+            assert_eq!(unproven_in_index(line, &[]), Vec::<String>::new(), "{line}");
+        }
+        // Not code: still refused.
+        assert_eq!(
+            unproven_in_index(
+                "- `TD-20260719-a11y-focus` — resolved [src: file: docs/AGENTS.md:1#intro]",
+                &[]
+            ),
+            vec!["TD-20260719-a11y-focus"]
+        );
+    }
+
+    #[test]
+    fn a_sheet_with_an_en_dash_code_range_or_a_later_status_is_not_refused() {
+        let proven = "# TD-20260719-a11y-lang-banner-link-contrast\n\n**Status**: RESOLVED ✓\n\n## Resolution\nLink colour updated.\n[src: file: assets/styles/app.css:299–304]\n";
+        let reopened = "---\nname: td-x\nmetadata:\n  audit_history:\n    - date: 2026-07-19\n      status: Fixed in source\n      reviewer: Full audit\n      note: fixed\n---\n\n# TD-20260719-blank-noopener\n\n- **Status**: Open (reopened 2026-10-01)\n";
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(&root.join("docs/AGENTS.md"), "# P\n");
+        write(
+            &root.join("docs/tech-debt/TD-20260719-a11y-lang-banner-link-contrast.md"),
+            proven,
+        );
+        write(
+            &root.join("docs/tech-debt/TD-20260719-blank-noopener.md"),
+            reopened,
+        );
+        let report = analyze(root).unwrap();
+        assert!(
+            advisory_of(&report, UNPROVEN_RESOLUTION).is_empty(),
+            "{report:#?}"
+        );
+    }
+
+    /// The measured false positives of the stack check, through the gate: none
+    /// is reported, and the real contradiction still is — as advice only.
+    #[test]
+    fn the_measured_stack_false_positives_pass_and_the_symfony_contradiction_is_advice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("composer.json"),
+            "{\n  \"require\": {\n    \"php\": \"^8.4\",\n    \"symfony/framework-bundle\": \"^8.1\"\n  }\n}\n",
+        );
+        write(
+            &root.join("package.json"),
+            "{\n  \"engines\": {\n    \"node\": \">=22\"\n  }\n}\n",
+        );
+        write(
+            &root.join("docs/AGENTS.md"),
+            "# Docroms\n\n[a](architecture/overview.md) [b](coding-rules.md) [c](operations/production-infrastructure.md)\n",
+        );
+        write(
+            &root.join("docs/architecture/overview.md"),
+            "# Overview\n\n| `php` | `443` (HTTPS) | FrankenPHP (worker mode), PHP 8.4 image |\n| PHP unit/component tests | 24 methods: 15 DFP builder |\n| Node.js (CI) | 20 | Supported |\nRuns on Node 24.\n",
+        );
+        write(
+            &root.join("docs/operations/production-infrastructure.md"),
+            "# Prod\n\nSince **Symfony 7.4**, `symfony/runtime` ships `FrankenPhpWorkerRunner`.\n",
+        );
+        write(
+            &root.join("docs/coding-rules.md"),
+            "# Coding rules\n\n## PHP (Symfony 7.3)\n",
+        );
+        let report = analyze(root).unwrap();
+        let conflicts = advisory_of(&report, STACK_CONFLICT);
+        assert_eq!(conflicts.len(), 1, "{conflicts:#?}");
+        assert_eq!(conflicts[0].path, "docs/coding-rules.md");
+        assert!(conflicts[0].message.contains("`Symfony 7.3`"));
+        assert!(!conflicts[0].blocking);
     }
 }
