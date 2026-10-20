@@ -180,6 +180,7 @@ mod tests {
             reply_to_message_id: None,
             author_cli_ordinal: None,
             session_continuity: None,
+            kind: Default::default(),
         }
     }
 

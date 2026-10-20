@@ -58,6 +58,7 @@ fn message(id: &str, role: MessageRole, agent: Option<AgentType>) -> DiscussionM
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
     }
 }
 

@@ -14,7 +14,7 @@ responders may all be Codex without being interchangeable:
 `message_targets` preserves those identities in textual order.
 `messages.target_agent` and `target_agents` remain compatibility projections
 for older clients and peers.
-[src: file: backend/src/models/discussions.rs:676-702#MessageTargetKind]
+[src: file: backend/src/models/discussions.rs:742-768#MessageTargetKind]
 [src: file: backend/src/db/sql/099_typed_message_targets.sql:1-37#message_targets]
 
 The composer parses prose once and submits the typed target list. The backend
@@ -129,7 +129,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
 [src: file: backend/src/api/federation.rs:102-147#federate_message_revision]
 [src: file: backend/src/api/ws.rs:1164-1172#resolved_targets]
-[src: file: backend/src/api/ws.rs:919#target_agent]
+[src: file: backend/src/api/ws.rs:920#target_agent]
 
 New-discussion aliases follow the same independent fan-out contract. Creation
 persists the initial typed targets and keeps every native target visible as a
@@ -170,7 +170,7 @@ on the root turn, or no marker), computed from `message_targets`.
 [src: file: backend/src/api/discussions/streaming.rs:2236-2348#independent_sibling_notice]
 [src: file: backend/src/api/discussions/streaming.rs:2129-2184#discussion_at_dispatch_trigger]
 [src: file: backend/src/api/discussions/streaming.rs:2191-2226#thread_under_trigger]
-[src: file: backend/src/db/discussions.rs:2016-2040#already_scheduled]
+[src: file: backend/src/db/discussions.rs:2019-2043#already_scheduled]
 
 ## Joined agent turn (MCP)
 

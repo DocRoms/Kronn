@@ -416,6 +416,26 @@ pub struct DiscussionMessage {
     /// started a new one, and why. `None` for runtimes that never resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_continuity: Option<SessionContinuity>,
+    /// KT-1330 — who this message speaks for. `Orchestration` marks what the
+    /// orchestrator posts into a room (review requests, delivery summaries,
+    /// terminal events, bounces, timeouts…) so the UI can fold a campaign
+    /// room's machinery behind a marker WITHOUT sniffing the text. Display
+    /// only: every read path for agents (bridge, MCP, prompts) keeps the
+    /// message. Skipped on the wire while `Standard`.
+    #[serde(default, skip_serializing_if = "MessageKind::is_standard")]
+    pub kind: MessageKind,
+}
+
+impl DiscussionMessage {
+    /// KT-1330 — whether this message raises the "à lire" badge. System
+    /// breadcrumbs never did; orchestration posts no longer do either, so a
+    /// campaign room's machinery cannot keep a room looking unread, whether or
+    /// not the viewer folded it away (the badge is server-side, the fold is a
+    /// per-browser preference). Mirrors the `non_system_count` SQL in
+    /// `db::discussions`.
+    pub fn counts_as_unread(&self) -> bool {
+        !matches!(self.role, MessageRole::System) && self.kind.is_standard()
+    }
 }
 
 /// How an agent turn related to the CLI/ACP conversation of the previous one.
@@ -520,6 +540,52 @@ pub enum MessageChannel {
     #[default]
     Main,
     Note,
+}
+
+/// KT-1330 — the durable origin of a message, orthogonal to `role`/`channel`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum MessageKind {
+    #[default]
+    Standard,
+    /// Posted by the orchestrator, not typed by a human nor produced by an agent.
+    Orchestration,
+}
+
+impl MessageKind {
+    pub fn is_standard(&self) -> bool {
+        matches!(self, MessageKind::Standard)
+    }
+
+    /// Id prefixes the orchestrator has always minted its room messages with.
+    /// Only the fallback for rows stored before `messages.kind` existed; new
+    /// posts set the kind explicitly.
+    pub fn from_legacy_id(id: &str) -> Self {
+        if id.starts_with("orch-") || id.starts_with("delivery-summary:") {
+            MessageKind::Orchestration
+        } else {
+            MessageKind::Standard
+        }
+    }
+
+    /// Stored value wins; an unset column (legacy row) falls back to the id.
+    pub fn resolve(stored: Option<&str>, id: &str) -> Self {
+        match stored {
+            Some("orchestration") => MessageKind::Orchestration,
+            Some(_) => MessageKind::Standard,
+            None => Self::from_legacy_id(id),
+        }
+    }
+
+    /// `None` for `Standard`, leaving the column unset: a later read of such a
+    /// row applies the id fallback, which is a no-op for ordinary ids.
+    pub fn stored(self) -> Option<&'static str> {
+        match self {
+            MessageKind::Standard => None,
+            MessageKind::Orchestration => Some("orchestration"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]

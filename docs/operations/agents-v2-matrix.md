@@ -97,7 +97,7 @@ The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
 execution, with no fallback to Custom; unknown provider strings remain errors.
 [src: file: backend/src/db/orchestration.rs:244-258#agent_type_from_db]
-[src: file: backend/src/db/orchestration_tests.rs:4253-4286#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
+[src: file: backend/src/db/orchestration_tests.rs:4271-4304#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
 
 ## Known asymmetries
 
@@ -118,7 +118,7 @@ the same job.
   negotiated `session/resume` contract and exact proof boundaries.
   [src: file: backend/src/agents/runner.rs:2764-2824#load_completed_checkpoint]
   [src: file: backend/src/api/discussions/streaming.rs:2593-2724#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:8674-8995#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:8687-9008#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP

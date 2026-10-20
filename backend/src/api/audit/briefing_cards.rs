@@ -945,6 +945,7 @@ mod tests {
             model: None,
             lint_report: None,
             session_continuity: None,
+            kind: Default::default(),
         };
         crate::db::discussions::insert_message(conn, discussion, &msg).unwrap();
     }

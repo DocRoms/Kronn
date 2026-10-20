@@ -993,6 +993,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "272_external_api_decision_model",
         include_str!("sql/272_external_api_decision_model.sql"),
     ),
+    ("273_message_kind", include_str!("sql/273_message_kind.sql")),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

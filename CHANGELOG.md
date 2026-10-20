@@ -33,6 +33,17 @@ Release notes for 0.9.3 and earlier are available in the
   interrupt; downloads go only into the install folder of a ComfyUI on this
   machine, never through a link, and are checked against their SHA-256
   (macOS and Linux; Windows links to Hugging Face).
+- A « hide orchestration messages » toggle beside « hide notes » in the
+  discussion composer (KT-1330). What the orchestrator posts into a room
+  (review requests, delivery summaries, terminal events, bounces, timeouts,
+  worker-undelivered alerts) now carries a typed `kind: "orchestration"`
+  (`messages.kind`; rows older than the column resolve it from their `orch-…` /
+  `delivery-summary:…` id). Hiding folds each run of consecutive ones behind one
+  expandable marker, persisted like « hide notes » (`kronn:showOrchestrationMessages`).
+  A question card, a campaign gate waiting on a human, a message with an open
+  action and a search hit are never folded. Display only: agents and the
+  bridge/MCP read paths still get every message. Orchestration messages no
+  longer raise the unread badge. See `docs/architecture/orchestration-message-kind.md`.
 - Decision models are recognised (KT-1366). Kronn reads what Ollama's
   `/api/show` says each local model can do, so a decision model such as
   `clef-flash:9b` (which answers typed questions and cannot chat) is no longer

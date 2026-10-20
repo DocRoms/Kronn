@@ -39,7 +39,7 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   is spent. `[src: file: backend/src/models/orchestration.rs:1872-1878#ReviewVerdict]`
   `[src: file: backend/src/models/orchestration.rs:1915-1938#ReviewDecisionV1]`
   `[src: file: backend/src/api/orchestration.rs:6397-6404#decide_review]`
-  `[src: file: backend/src/db/orchestration.rs:3458-3467#ReviewCheckpoint]`
+  `[src: file: backend/src/db/orchestration.rs:3459-3468#ReviewCheckpoint]`
   `[src: file: backend/src/db/orchestration.rs:3490-3502#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
   decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:11421-11433#reassign_execution]`
