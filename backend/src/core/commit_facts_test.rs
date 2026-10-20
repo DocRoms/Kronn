@@ -269,7 +269,7 @@ fn a_commit_checker_action_is_enforcement_and_an_unrecognised_hook_is_only_confi
     put(
         dir.path(),
         ".github/workflows/pr.yml",
-        "name: pr\njobs:\n  lint:\n    steps:\n      - uses: wagoid/commitlint-github-action@v6\n",
+        "name: pr\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: wagoid/commitlint-github-action@v6\n",
     );
     put(
         dir.path(),
@@ -282,7 +282,7 @@ fn a_commit_checker_action_is_enforcement_and_an_unrecognised_hook_is_only_confi
     let ci = tools.iter().find(|t| t.name == "commitlint").unwrap();
     assert_eq!(
         ci.enforcement,
-        Enforcement::Enforced(".github/workflows/pr.yml:5".into())
+        Enforcement::Enforced(".github/workflows/pr.yml:6".into())
     );
     // A hook is listed as a local hook, never called enforcement.
     let hook = tools.iter().find(|t| t.name == "commit-msg hook").unwrap();
@@ -308,7 +308,7 @@ fn a_tool_named_only_in_a_ci_comment_is_not_enforcement() {
     put(
         dir.path(),
         ".github/workflows/lint.yml",
-        "name: commitlint reminder\njobs:\n  x:\n    steps:\n      - name: Run commitlint\n        run: make lint # commitlint comes later\n      - run: echo \"commitlint is not wired yet\"\n",
+        "name: commitlint reminder\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Run commitlint\n        run: make lint # commitlint comes later\n      - run: echo \"commitlint is not wired yet\"\n",
     );
     assert!(detect_tooling(dir.path()).is_empty());
 
@@ -325,13 +325,13 @@ fn an_install_step_or_an_env_key_does_not_run_the_checker() {
     put(dir.path(), "commitlint.config.js", "module.exports = {};\n");
     for (body, why) in [
         (
-            "jobs:\n  x:\n    steps:\n      - run: npm install --save-dev @commitlint/cli\n",
+            "jobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm install --save-dev @commitlint/cli\n",
             "install",
         ),
         ("steps:\n  - run: yarn add -D @commitlint/cli\n", "yarn add"),
         ("steps:\n  - run: pip install commitizen gitlint\n", "pip"),
         (
-            "jobs:\n  x:\n    steps:\n      - run: make lint\n        env:\n          COMMITLINT_DISABLED: true\n",
+            "jobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make lint\n        env:\n          COMMITLINT_DISABLED: true\n",
             "env key",
         ),
         ("steps:\n  - run: npm ci && echo commitlint\n", "echo"),
@@ -492,31 +492,31 @@ fn the_reviewers_adversarial_ci_and_hook_cases_are_never_enforced() {
     for (why, body) in [
         (
             "quoted semicolon echo",
-            "jobs:\n  t:\n    steps:\n      - run: echo 'example; commitlint --edit message'\n",
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo 'example; commitlint --edit message'\n",
         ),
         (
             "--help",
-            "jobs:\n  t:\n    steps:\n      - run: npx commitlint --help\n",
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --help\n",
         ),
         (
             "env block example",
-            "env:\n  DOCUMENTATION_EXAMPLE: |\n    npx commitlint --edit message\njobs:\n  t:\n    steps:\n      - run: echo tests\n",
+            "env:\n  DOCUMENTATION_EXAMPLE: |\n    npx commitlint --edit message\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo tests\n",
         ),
         (
             "env entry",
-            "jobs:\n  t:\n    env:\n      HOOK: npx commitlint\n    steps:\n      - run: make lint\n",
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n    env:\n      HOOK: npx commitlint\n    steps:\n      - run: make lint\n",
         ),
         (
             "run example inside an env block scalar",
-            "env:\n  EXAMPLE: |\n    run: npx commitlint --edit\njobs:\n  t:\n    steps:\n      - run: make lint\n",
+            "env:\n  EXAMPLE: |\n    run: npx commitlint --edit\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make lint\n",
         ),
         (
             "name label",
-            "jobs:\n  t:\n    steps:\n      - name: npx commitlint --edit\n        run: make lint\n",
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - name: npx commitlint --edit\n        run: make lint\n",
         ),
         (
             "heredoc body",
-            "jobs:\n  t:\n    steps:\n      - run: |\n          cat <<EOF\n          npx commitlint --edit\n          EOF\n",
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          cat <<EOF\n          npx commitlint --edit\n          EOF\n",
         ),
     ] {
         let tools = ci_tool(body, None);
@@ -533,7 +533,7 @@ fn the_reviewers_adversarial_ci_and_hook_cases_are_never_enforced() {
     put(
         configured.path(),
         ".github/workflows/ci.yml",
-        "jobs:\n  t:\n    steps:\n      - run: echo 'example; commitlint --edit message'\n      - run: npx commitlint --help\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo 'example; commitlint --edit message'\n      - run: npx commitlint --help\n",
     );
     put(
         configured.path(),
@@ -547,7 +547,8 @@ fn the_reviewers_adversarial_ci_and_hook_cases_are_never_enforced() {
 
 #[test]
 fn an_npm_script_that_only_echoes_is_configured_and_one_that_runs_is_enforced() {
-    let ci = "jobs:\n  t:\n    steps:\n      - run: npm run commitlint\n";
+    let ci =
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm run commitlint\n";
     let echoes = ci_tool(
         ci,
         Some(r#"{"scripts":{"commitlint":"echo checker is not configured"}}"#),
@@ -564,7 +565,7 @@ fn an_npm_script_that_only_echoes_is_configured_and_one_that_runs_is_enforced() 
     assert_eq!(runs.len(), 1, "{runs:?}");
     assert_eq!(
         runs[0].enforcement,
-        Enforcement::Enforced(".github/workflows/ci.yml:4".into())
+        Enforcement::Enforced(".github/workflows/ci.yml:5".into())
     );
 }
 
@@ -572,12 +573,12 @@ fn an_npm_script_that_only_echoes_is_configured_and_one_that_runs_is_enforced() 
 fn real_multi_line_and_list_ci_commands_are_enforcement_at_their_line() {
     // GitHub block scalar: the line of the command itself.
     let block = ci_tool(
-        "jobs:\n  t:\n    steps:\n      - run: |\n          echo Checking\n          npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          echo Checking\n          npx commitlint --from HEAD~1\n",
         None,
     );
     assert_eq!(
         block[0].enforcement,
-        Enforcement::Enforced(".github/workflows/ci.yml:6".into())
+        Enforcement::Enforced(".github/workflows/ci.yml:7".into())
     );
     // GitLab list under `script:`, indented or at the key's own column: found
     // at its line, but a CI system other than GitHub Actions is never proof.
@@ -653,14 +654,14 @@ fn a_ci_step_that_runs_commitlint_is_enforcement() {
     put(
         dir.path(),
         ".github/workflows/ci.yml",
-        "name: CI\njobs:\n  lint:\n    steps:\n      # commit messages\n      - run: npx commitlint --from origin/main\n",
+        "name: CI\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      # commit messages\n      - run: npx commitlint --from origin/main\n",
     );
     let tools = detect_tooling(dir.path());
     assert_eq!(tools.len(), 1, "{tools:?}");
     assert_eq!(tools[0].name, "commitlint");
     assert_eq!(
         tools[0].enforcement,
-        Enforcement::Enforced(".github/workflows/ci.yml:6".into())
+        Enforcement::Enforced(".github/workflows/ci.yml:7".into())
     );
 }
 
@@ -847,11 +848,11 @@ fn a_command_key_under_env_with_or_variables_is_not_a_command() {
     let cases = [
         // The reviewer's fixture: `run` is an environment variable.
         "name: CI\non: push\nenv:\n  run: npx commitlint --edit message\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo tests\n",
-        "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n        env:\n          run: npx commitlint --edit message\n        run: echo tests\n",
-        "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          script: npx commitlint --edit message\n",
+        "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        env:\n          run: npx commitlint --edit message\n        run: echo tests\n",
+        "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          script: npx commitlint --edit message\n",
         "variables:\n  script: npx commitlint --edit message\nbuild:\n  script:\n    - make build\n",
-        "jobs:\n  test:\n    env:\n      script:\n        - npx commitlint --edit message\n    steps:\n      - run: make test\n",
-        "jobs:\n  test:\n    env:\n      run: |\n        npx commitlint --edit message\n    steps:\n      - run: make test\n",
+        "jobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      script:\n        - npx commitlint --edit message\n    steps:\n      - run: make test\n",
+        "jobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      run: |\n        npx commitlint --edit message\n    steps:\n      - run: make test\n",
     ];
     for (index, body) in cases.iter().enumerate() {
         let dir = tempfile::tempdir().unwrap();
@@ -864,23 +865,23 @@ fn a_command_key_under_env_with_or_variables_is_not_a_command() {
     put(
         dir.path(),
         ".github/workflows/ci.yml",
-        "env:\n  CI: true\njobs:\n  test:\n    steps:\n      - name: lint\n        env:\n          FORCE_COLOR: 1\n        run: npx commitlint --from HEAD~1\n",
+        "env:\n  CI: true\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - name: lint\n        env:\n          FORCE_COLOR: 1\n        run: npx commitlint --from HEAD~1\n",
     );
     assert_eq!(
         detect_tooling(dir.path())[0].enforcement,
-        Enforcement::Enforced(".github/workflows/ci.yml:9".into())
+        Enforcement::Enforced(".github/workflows/ci.yml:10".into())
     );
 }
 
 #[test]
 fn a_step_switched_off_is_not_enforcement() {
     for body in [
-        "jobs:\n  t:\n    steps:\n      - if: false\n        run: npx commitlint --from HEAD~1\n",
-        "jobs:\n  t:\n    steps:\n      - if: ${{ false }}\n        run: npx commitlint --from HEAD~1\n",
-        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        if: \"false\"\n",
-        "jobs:\n  t:\n    steps:\n      - name: x\n        if: false # temporarily\n        run: |\n          npx commitlint --from HEAD~1\n",
-        "jobs:\n  t:\n    if: false\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
-        "jobs:\n  t:\n    steps:\n      - if: false\n        uses: wagoid/commitlint-github-action@v6\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - if: false\n        run: npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - if: ${{ false }}\n        run: npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n        if: \"false\"\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - name: x\n        if: false # temporarily\n        run: |\n          npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    if: false\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - if: false\n        uses: wagoid/commitlint-github-action@v6\n",
     ] {
         let dir = tempfile::tempdir().unwrap();
         put(dir.path(), ".github/workflows/ci.yml", body);
@@ -889,9 +890,9 @@ fn a_step_switched_off_is_not_enforcement() {
     // A condition that can be true, or a neighbour step switched off, changes
     // nothing for a live step.
     for body in [
-        "jobs:\n  t:\n    steps:\n      - if: github.event_name == 'pull_request'\n        run: npx commitlint --from HEAD~1\n",
-        "jobs:\n  t:\n    steps:\n      - if: false\n        run: echo skipped\n      - run: npx commitlint --from HEAD~1\n",
-        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n      - if: false\n        run: echo skipped\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - if: github.event_name == 'pull_request'\n        run: npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - if: false\n        run: echo skipped\n      - run: npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n      - if: false\n        run: echo skipped\n",
     ] {
         let dir = tempfile::tempdir().unwrap();
         put(dir.path(), ".github/workflows/ci.yml", body);
@@ -954,7 +955,7 @@ fn no_file_read_by_the_facts_follows_a_link_out_of_the_project() {
     use std::os::unix::fs::symlink;
     let (_outer, project, outside) = jailed_project();
     let hook = "#!/bin/sh\nnpx commitlint --edit \"$1\"\n";
-    let ci = "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n";
+    let ci = "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n";
     let lefthook = "commit-msg:\n  commands:\n    l:\n      run: npx commitlint --edit {1}\n";
     for (name, body) in [
         ("hook", hook),
@@ -1161,7 +1162,7 @@ fn an_unreachable_checker_in_a_hook_or_ci_is_configured_not_enforced() {
         ("inline true ||", "true || npx commitlint --edit"),
     ] {
         let tools = ci_tool(
-            &format!("jobs:\n  t:\n    steps:\n      - run: {run}\n"),
+            &format!("jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: {run}\n"),
             None,
         );
         assert!(
@@ -1181,7 +1182,7 @@ fn an_unreachable_checker_in_a_hook_or_ci_is_configured_not_enforced() {
     let tools = detect_tooling(dir.path());
     assert_eq!(tools[0].enforcement, Enforcement::ConfiguredOnly);
     let tools = ci_tool(
-        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --edit\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --edit\n",
         None,
     );
     assert!(
@@ -1246,12 +1247,12 @@ fn no_form_of_local_hook_is_ever_enforced() {
 
     // The same checker in a CI step IS enforcement: CI runs for everyone.
     let tools = ci_tool(
-        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --edit message\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --edit message\n",
         None,
     );
     assert_eq!(
         tools[0].enforcement,
-        Enforcement::Enforced(".github/workflows/ci.yml:4".into())
+        Enforcement::Enforced(".github/workflows/ci.yml:5".into())
     );
     let facts = CommitFacts {
         tooling: tools,
@@ -1259,7 +1260,7 @@ fn no_form_of_local_hook_is_ever_enforced() {
     };
     assert!(facts
         .render_block("c.md")
-        .contains("ENFORCED — checked in CI by .github/workflows/ci.yml:4"));
+        .contains("ENFORCED — checked in CI by .github/workflows/ci.yml:5"));
 }
 
 #[test]
@@ -1273,13 +1274,13 @@ fn a_hook_and_a_ci_step_on_the_same_tool_report_the_ci_step() {
     put(
         dir.path(),
         ".github/workflows/ci.yml",
-        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from origin/main\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from origin/main\n",
     );
     let tools = detect_tooling(dir.path());
     assert_eq!(tools.len(), 1, "{tools:?}");
     assert_eq!(
         tools[0].enforcement,
-        Enforcement::Enforced(".github/workflows/ci.yml:4".into())
+        Enforcement::Enforced(".github/workflows/ci.yml:5".into())
     );
 }
 
@@ -1296,7 +1297,7 @@ fn a_ci_step_runs_with_errexit_so_what_follows_the_checker_cannot_hide_it() {
         "echo start\n          npx commitlint --edit message\n          echo done",
     ] {
         let tools = ci_tool(
-            &format!("jobs:\n  t:\n    steps:\n      - run: |\n          {run}\n"),
+            &format!("jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          {run}\n"),
             None,
         );
         assert_eq!(tools.len(), 1, "{run}: {tools:?}");
@@ -1318,7 +1319,7 @@ fn a_ci_step_runs_with_errexit_so_what_follows_the_checker_cannot_hide_it() {
         "exit 0\n          npx commitlint --edit message",
     ] {
         let tools = ci_tool(
-            &format!("jobs:\n  t:\n    steps:\n      - run: |\n          {run}\n"),
+            &format!("jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          {run}\n"),
             None,
         );
         assert!(
@@ -1335,31 +1336,31 @@ fn a_ci_step_whose_failure_is_masked_is_not_enforcement() {
     for (why, body) in [
         (
             "continue-on-error step",
-            "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        continue-on-error: true\n",
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n        continue-on-error: true\n",
         ),
         (
             "continue-on-error before run",
-            "jobs:\n  t:\n    steps:\n      - continue-on-error: true\n        run: npx commitlint --from HEAD~1\n",
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - continue-on-error: true\n        run: npx commitlint --from HEAD~1\n",
         ),
         (
             "continue-on-error job",
-            "jobs:\n  t:\n    continue-on-error: true\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
         ),
         (
             "continue-on-error expression",
-            "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        continue-on-error: ${{ matrix.experimental }}\n",
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n        continue-on-error: ${{ matrix.experimental }}\n",
         ),
         (
             "custom shell",
-            "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        shell: pwsh\n",
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n        shell: pwsh\n",
         ),
         (
             "custom shell template",
-            "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        shell: bash {0}\n",
+            "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n        shell: bash {0}\n",
         ),
         (
             "default shell of every step",
-            "defaults:\n  run:\n    shell: pwsh\njobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
+            "defaults:\n  run:\n    shell: pwsh\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
         ),
         (
             "gitlab allow_failure",
@@ -1387,9 +1388,9 @@ fn a_ci_step_whose_failure_is_masked_is_not_enforcement() {
     }
     // The explicit defaults are not masking.
     for body in [
-        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        shell: bash\n",
-        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n        continue-on-error: false\n",
-        "defaults:\n  run:\n    shell: bash\njobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n        shell: bash\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n        continue-on-error: false\n",
+        "defaults:\n  run:\n    shell: bash\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n",
     ] {
         let dir = tempfile::tempdir().unwrap();
         put(dir.path(), ".github/workflows/ci.yml", body);
@@ -1402,7 +1403,7 @@ fn only_github_actions_is_proof_every_other_ci_system_is_configured() {
     // The same plain checker step, in every CI file other than a GitHub
     // workflow: found and cited, never ENFORCED, even as the last command.
     let gitlab = "lint:\n  script:\n    - npx commitlint --from HEAD~1\n";
-    let circle = "jobs:\n  lint:\n    steps:\n      - run:\n          command: npx commitlint --from HEAD~1\n";
+    let circle = "jobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run:\n          command: npx commitlint --from HEAD~1\n";
     let azure = "steps:\n  - script: |\n      echo start\n      npx commitlint --from HEAD~1\n";
     let bitbucket = "pipelines:\n  default:\n    - step:\n        script:\n          - npx commitlint --from HEAD~1\n";
     let drone = "steps:\n  - name: lint\n    commands:\n      - npx commitlint --from HEAD~1\n";
@@ -1445,7 +1446,7 @@ fn only_github_actions_is_proof_every_other_ci_system_is_configured() {
     put(
         dir.path(),
         ".github/workflows/pr.yml",
-        "jobs:\n  t:\n    steps:\n      - uses: wagoid/commitlint-github-action@v6\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: wagoid/commitlint-github-action@v6\n",
     );
     assert_eq!(enforced(dir.path()), vec!["commitlint".to_string()]);
 }
@@ -1464,7 +1465,9 @@ fn a_pr_title_action_is_configured_never_a_commit_check() {
         put(
             dir.path(),
             ".github/workflows/pr.yml",
-            &format!("jobs:\n  t:\n    steps:\n      - uses: {action}\n"),
+            &format!(
+                "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: {action}\n"
+            ),
         );
         assert!(enforced(dir.path()).is_empty(), "{action}");
         let tools = detect_tooling(dir.path());
@@ -1477,7 +1480,7 @@ fn a_pr_title_action_is_configured_never_a_commit_check() {
         );
         assert_eq!(
             tools[0].evidence,
-            vec![".github/workflows/pr.yml:4".to_string()],
+            vec![".github/workflows/pr.yml:5".to_string()],
             "{action}"
         );
         assert!(
@@ -1500,7 +1503,7 @@ fn a_pr_title_action_is_configured_never_a_commit_check() {
     put(
         dir.path(),
         ".github/workflows/pr.yml",
-        "jobs:\n  t:\n    steps:\n      - uses: amannn/action-semantic-pull-request@v5\n      - uses: wagoid/commitlint-github-action@v6\n",
+        "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: amannn/action-semantic-pull-request@v5\n      - uses: wagoid/commitlint-github-action@v6\n",
     );
     assert_eq!(enforced(dir.path()), vec!["commitlint".to_string()]);
     let tools = detect_tooling(dir.path());
@@ -1510,7 +1513,7 @@ fn a_pr_title_action_is_configured_never_a_commit_check() {
 }
 
 fn github_checker_step() -> &'static str {
-    "jobs:\n  t:\n    steps:\n      - run: npx commitlint --from HEAD~1\n"
+    "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n"
 }
 
 #[test]
@@ -1547,4 +1550,182 @@ fn a_nested_script_without_errexit_needs_its_checker_last() {
         runs_plain("npx commitlint --edit && make build; echo done"),
         None
     );
+}
+
+/// A one-job GitHub workflow around `job_head` (the lines before `steps:`) and
+/// the checker step the reviewer used: a linter, then another command.
+fn github_job(header: &str, job_head: &str, step_tail: &str) -> String {
+    format!(
+        "name: CI\n{header}jobs:\n  t:\n{job_head}    steps:\n      - run: |\n          gitlint --commits HEAD~1..HEAD\n          git --version\n{step_tail}"
+    )
+}
+
+fn ci_enforced(body: &str) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), ".github/workflows/ci.yml", body);
+    enforced(dir.path())
+}
+
+#[test]
+fn a_github_step_is_enforced_only_when_its_shell_is_established_as_bash_or_sh() {
+    // KT-1387 round 8. Linux/macOS implicit shell: `bash -e`.
+    for runs_on in [
+        "ubuntu-latest",
+        "ubuntu-22.04",
+        "\"ubuntu-24.04\"",
+        "macos-latest",
+        "macos-14 # arm",
+        "[self-hosted, linux, x64]",
+        "[ubuntu-latest]",
+    ] {
+        let body = github_job("", &format!("    runs-on: {runs_on}\n"), "");
+        assert_eq!(ci_enforced(&body), vec!["gitlint".to_string()], "{runs_on}");
+    }
+    // A Windows runner, a matrix or expression, an unknown or non-literal
+    // runner: the implicit shell is pwsh or unknown, a failing linter can be
+    // masked, so the step proves nothing.
+    for (why, head) in [
+        ("windows implicit", "    runs-on: windows-latest\n"),
+        ("windows 2022", "    runs-on: windows-2022\n"),
+        ("windows list", "    runs-on: [self-hosted, windows, x64]\n"),
+        (
+            "mixed list",
+            "    runs-on: [windows-latest, ubuntu-latest]\n",
+        ),
+        ("matrix", "    runs-on: ${{ matrix.os }}\n"),
+        ("variable", "    runs-on: ${{ vars.RUNNER }}\n"),
+        ("no runs-on", ""),
+        ("self-hosted alone", "    runs-on: self-hosted\n"),
+        (
+            "group mapping",
+            "    runs-on:\n      group: ci\n      labels: windows\n",
+        ),
+        ("block list", "    runs-on:\n      - ubuntu-latest\n"),
+    ] {
+        let body = github_job("", head, "");
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), ".github/workflows/ci.yml", &body);
+        let tools = detect_tooling(dir.path());
+        assert!(enforced(dir.path()).is_empty(), "{why}: {tools:?}");
+        assert!(
+            tools
+                .iter()
+                .any(|t| t.enforcement == Enforcement::ConfiguredOnly),
+            "{why} is still reported as configured: {tools:?}"
+        );
+    }
+}
+
+#[test]
+fn an_explicit_bash_or_sh_shell_is_established_whatever_the_runner() {
+    // Step level, on a Windows runner.
+    for shell in ["bash", "sh"] {
+        let body = github_job(
+            "",
+            "    runs-on: windows-latest\n",
+            &format!("        shell: {shell}\n"),
+        );
+        assert_eq!(
+            ci_enforced(&body),
+            vec!["gitlint".to_string()],
+            "step {shell}"
+        );
+    }
+    // Job level `defaults.run.shell`.
+    let job = github_job(
+        "",
+        "    runs-on: windows-latest\n    defaults:\n      run:\n        shell: bash\n",
+        "",
+    );
+    assert_eq!(
+        ci_enforced(&job),
+        vec!["gitlint".to_string()],
+        "job defaults"
+    );
+    // Workflow level `defaults.run.shell`, with a Windows runner, a matrix one
+    // and none.
+    for head in [
+        "    runs-on: windows-latest\n",
+        "    runs-on: ${{ matrix.os }}\n",
+        "",
+    ] {
+        let body = github_job("defaults:\n  run:\n    shell: bash\n", head, "");
+        assert_eq!(ci_enforced(&body), vec!["gitlint".to_string()], "{head}");
+    }
+    // The step's own shell wins: bash at the workflow does not rescue a step
+    // that sets pwsh itself.
+    let step_pwsh = github_job(
+        "defaults:\n  run:\n    shell: bash\n",
+        "    runs-on: ubuntu-latest\n",
+        "        shell: pwsh\n",
+    );
+    assert!(ci_enforced(&step_pwsh).is_empty());
+}
+
+#[test]
+fn a_non_bash_shell_is_never_established_on_any_runner() {
+    for shell in [
+        "pwsh",
+        "powershell",
+        "cmd",
+        "python",
+        "bash {0}",
+        "${{ matrix.shell }}",
+    ] {
+        for runner in ["ubuntu-latest", "windows-latest"] {
+            let step = github_job(
+                "",
+                &format!("    runs-on: {runner}\n"),
+                &format!("        shell: {shell}\n"),
+            );
+            assert!(ci_enforced(&step).is_empty(), "step {shell} on {runner}");
+            let job = github_job(
+                "",
+                &format!(
+                    "    runs-on: {runner}\n    defaults:\n      run:\n        shell: {shell}\n"
+                ),
+                "",
+            );
+            assert!(ci_enforced(&job).is_empty(), "job {shell} on {runner}");
+            let workflow = github_job(
+                &format!("defaults:\n  run:\n    shell: {shell}\n"),
+                &format!("    runs-on: {runner}\n"),
+                "",
+            );
+            assert!(
+                ci_enforced(&workflow).is_empty(),
+                "workflow {shell} on {runner}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_dedicated_commit_action_is_unchanged_by_the_runner() {
+    for runner in ["windows-latest", "${{ matrix.os }}", "ubuntu-latest"] {
+        let body = format!(
+            "jobs:\n  t:\n    runs-on: {runner}\n    steps:\n      - uses: wagoid/commitlint-github-action@v6\n"
+        );
+        assert_eq!(
+            ci_enforced(&body),
+            vec!["commitlint".to_string()],
+            "{runner}"
+        );
+        let title = format!(
+            "jobs:\n  t:\n    runs-on: {runner}\n    steps:\n      - uses: amannn/action-semantic-pull-request@v5\n"
+        );
+        assert!(ci_enforced(&title).is_empty(), "{runner}");
+    }
+}
+
+#[test]
+fn the_runner_of_one_job_does_not_leak_into_another() {
+    // Job `a` is a Windows job, job `b` a Linux one: only `b` proves it.
+    let body = "jobs:\n  a:\n    runs-on: windows-latest\n    steps:\n      - run: gitlint --commits HEAD~1..HEAD\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n";
+    assert_eq!(ci_enforced(body), vec!["commitlint".to_string()]);
+    let reverse = "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gitlint --commits HEAD~1..HEAD\n  b:\n    runs-on: windows-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n";
+    assert_eq!(ci_enforced(reverse), vec!["gitlint".to_string()]);
+    // A job-level `shell: bash` default does not extend to the next job.
+    let scoped = "jobs:\n  a:\n    runs-on: windows-latest\n    defaults:\n      run:\n        shell: bash\n    steps:\n      - run: gitlint --commits HEAD~1..HEAD\n  b:\n    runs-on: windows-latest\n    steps:\n      - run: npx commitlint --from HEAD~1\n";
+    assert_eq!(ci_enforced(scoped), vec!["gitlint".to_string()]);
 }

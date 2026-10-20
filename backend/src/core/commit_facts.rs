@@ -1314,8 +1314,10 @@ const DATA_KEYS: &[&str] = &[
 ];
 
 /// Whether the CI file `rel` is one whose semantics are read well enough to
-/// call a checker ENFORCED: a GitHub Actions workflow, whose default shell is
-/// `bash -e {0}` (the step stops at the first failing command). Any other CI
+/// call a checker ENFORCED: a GitHub Actions workflow, whose Linux/macOS
+/// default shell is `bash -e {0}` (the step stops at the first failing
+/// command; a Windows runner defaults to `pwsh`, which does not, see
+/// [`yaml_steps_shell`]). Any other CI
 /// system (GitLab, CircleCI, Azure, Bitbucket, Drone, Jenkins) has its own
 /// `allow_failure` / `when` / `rules` / `only` / `condition` / Groovy
 /// semantics that are not read here: a checker found there is listed as
@@ -1386,6 +1388,49 @@ fn switches_off(key: &str, value: &str) -> bool {
 /// A command key counts only when none of its ancestors is a data section
 /// ([`DATA_KEYS`]): `env: { run: … }` is an environment variable named `run`.
 fn yaml_steps(body: &str) -> Vec<Step> {
+    yaml_steps_shell(body)
+        .into_iter()
+        .map(|(step, _)| step)
+        .collect()
+}
+
+/// Whether a `runs-on:` value is a literal label of a runner whose default
+/// shell is `bash -e` (Linux or macOS): `ubuntu-*`, `macos-*`, or `self-hosted`
+/// with a `linux` label. A Windows label (default shell `pwsh`, which does not
+/// fail a step on a failing native command), an expression
+/// (`${{ matrix.os }}`), a mapping or nothing at all is not established.
+fn unix_runner(value: &str) -> bool {
+    let value = unquote_yaml(without_comment(value).trim()).trim();
+    if value.is_empty() || value.contains('$') {
+        return false;
+    }
+    let inner = value
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .unwrap_or(value);
+    let labels: Vec<String> = inner
+        .split(',')
+        .map(|label| unquote_yaml(label.trim()).trim().to_lowercase())
+        .filter(|label| !label.is_empty())
+        .collect();
+    if labels.is_empty() || labels.iter().any(|l| l.contains("windows")) {
+        return false;
+    }
+    let hosted = labels
+        .iter()
+        .any(|l| l.starts_with("ubuntu") || l.starts_with("macos"));
+    let linux_self_hosted =
+        labels.iter().any(|l| l == "self-hosted") && labels.iter().any(|l| l == "linux");
+    hosted || linux_self_hosted
+}
+
+/// [`yaml_steps`] with, for each step, whether its effective shell is
+/// established as `bash`/`sh` (so a failing command stops the step): the most
+/// specific of `steps[*].shell`, `jobs.<id>.defaults.run.shell` and the
+/// workflow's `defaults.run.shell`, else the implicit shell of a literal
+/// Linux/macOS `runs-on:`. A Windows, matrix or unknown runner without an
+/// explicit `bash`/`sh` is not established (KT-1387).
+fn yaml_steps_shell(body: &str) -> Vec<(Step, bool)> {
     struct Open {
         col: usize,
         commands: bool,
@@ -1407,6 +1452,10 @@ fn yaml_steps(body: &str) -> Vec<Step> {
     let mut keys: Vec<(usize, String)> = Vec::new();
     let mut next_id = 0usize;
     let mut everything_masked = false;
+    // The mapping that carries a `shell:` (a step, or the owner of a
+    // `defaults: run:`) and the one that carries a `runs-on:` (a job).
+    let mut shells: BTreeMap<usize, bool> = BTreeMap::new();
+    let mut runners: BTreeMap<usize, bool> = BTreeMap::new();
     for (index, raw) in body.lines().enumerate() {
         let number = index + 1;
         let trimmed = raw.trim_start();
@@ -1462,6 +1511,28 @@ fn yaml_steps(body: &str) -> Vec<Step> {
                 keys.pop();
             }
             data = keys.iter().any(|(_, k)| DATA_KEYS.contains(&k.as_str()));
+            if name == "shell" {
+                let owner = if !data {
+                    mappings.last().map(|m| m.id)
+                } else if let [.., (defaults_col, defaults), (_, run)] = keys.as_slice() {
+                    // `defaults: run: shell:` belongs to the mapping that holds
+                    // the `defaults:` key (the workflow or a job).
+                    (defaults == "defaults" && run == "run")
+                        .then(|| mappings.iter().rev().find(|m| m.col == *defaults_col))
+                        .flatten()
+                        .map(|m| m.id)
+                } else {
+                    None
+                };
+                if let Some(owner) = owner {
+                    shells.insert(owner, default_shell(rest));
+                }
+            }
+            if name == "runs-on" && !data {
+                if let Some(m) = mappings.last() {
+                    runners.insert(m.id, unix_runner(rest));
+                }
+            }
             // `defaults: run: shell: pwsh` changes the shell of every step.
             if data && masks_failure(name, rest) {
                 everything_masked = true;
@@ -1534,7 +1605,18 @@ fn yaml_steps(body: &str) -> Vec<Step> {
     }
     out.into_iter()
         .filter(|(_, ids)| !everything_masked && !ids.iter().any(|id| off.contains(id)))
-        .map(|(step, _)| step)
+        .map(|(step, ids)| {
+            let established = match ids.iter().rev().find_map(|id| shells.get(id)) {
+                Some(shell) => *shell,
+                None => ids
+                    .iter()
+                    .rev()
+                    .find_map(|id| runners.get(id))
+                    .copied()
+                    .unwrap_or(false),
+            };
+            (step, established)
+        })
         .collect()
 }
 
@@ -1705,12 +1787,15 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
         // comment, a `name:` label, an `env:` entry or an `echo` that mentions
         // a tool does not run it (KT-1387).
         let proves = ci_proves_enforcement(&rel);
-        let steps = if rel == "Jenkinsfile" {
+        let steps: Vec<(Step, bool)> = if rel == "Jenkinsfile" {
             jenkins_steps(&body)
+                .into_iter()
+                .map(|step| (step, false))
+                .collect()
         } else {
-            yaml_steps(&body)
+            yaml_steps_shell(&body)
         };
-        for step in steps {
+        for (step, established) in steps {
             match step {
                 Step::Uses(number, value) => {
                     if let Some(action) = action_used(&value) {
@@ -1737,8 +1822,11 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                     let cmds = shell_commands(&text, number);
                     // Only a GitHub Actions step is proof. Another CI system
                     // (and a Jenkinsfile, Groovy around its `sh` steps) decides
-                    // what a failing step does in ways not read here.
-                    let proven = if proves {
+                    // what a failing step does in ways not read here. And only
+                    // when its shell is established as bash/sh: the implicit
+                    // shell of a Windows, matrix or unknown runner is pwsh or
+                    // unknown, which can mask a failing checker.
+                    let proven = if proves && established {
                         script_checker(&cmds, &scripts, 0, true)
                     } else {
                         None
