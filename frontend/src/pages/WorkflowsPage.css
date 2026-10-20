@@ -8281,3 +8281,32 @@
 .wf-retention-label { min-width: 160px; font-size: var(--kr-fs-sm); }
 .wf-retention-unit { margin-left: 4px; font-size: var(--kr-fs-2xs, 11px); }
 .wf-retention-input { width: 100px; }
+
+/* KT-1398 — a line awaiting a human's approval is said, not just a checkbox. */
+.wf-unmodelled-block {
+  margin: var(--kr-sp-2) 0;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-left: 3px solid var(--kr-warning);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+}
+.wf-unmodelled-block[data-approved="true"] {
+  border-left-color: var(--kr-success);
+  background: rgba(var(--kr-success-rgb), 0.06);
+}
+.wf-unmodelled-title {
+  margin: 0 0 var(--kr-sp-1);
+  font-weight: 600;
+  color: var(--kr-text-primary);
+}
+.wf-unmodelled-block .wf-unmodelled-approval { margin: 0; }
+.qe-pending {
+  margin: var(--kr-sp-1) 0;
+  padding: var(--kr-sp-1) var(--kr-sp-2);
+  border-left: 3px solid var(--kr-warning);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+}
+.qe-pending strong { color: var(--kr-warning); }

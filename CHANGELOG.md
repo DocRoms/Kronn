@@ -667,6 +667,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- An Exec line awaiting a human's approval is visible before the run and can
+  be approved where it is used (KT-1398). Since KT-1017 a run value handed to
+  a program Kronn does not check alone (e.g. `aws`) is refused until a human
+  approves the line, but a saved Quick Exec used as a CollectApiData source was
+  invisible to the workflow's readiness, and its refusal said « approve this
+  step in the editor » without naming it. Now:
+  - the workflow page lists each such Quick Exec in its approval panel, with
+    a one-click approval (stored on the Quick Exec, the explicit confirmation
+    in the button);
+  - the readiness and the workflow list count it as a human approval;
+  - the Quick Exec library shows a « To approve » badge, and the Quick Exec
+    and Exec forms say what is asked and why above the checkbox;
+  - the run's refusal names the Quick Exec and where to approve it.
+  An agent still cannot approve: the server refuses it.
+
 - A comment on an arbitration card whose workflow step has ended is answered
   by the room's own agent instead of nobody. It used to go to the step's
   closed CLI session and wake no one ("personne ne lira cette réponse
