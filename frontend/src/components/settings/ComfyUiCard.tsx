@@ -100,6 +100,26 @@ export function ComfyUiCard({ t }: ComfyUiCardProps) {
     return () => { active = false; };
   }, []);
 
+  // Comfy Desktop takes a while to start its server: while it does not answer,
+  // re-read quietly, and again when the window regains focus.
+  const offline = !loading && status !== null && status.state !== 'online';
+  useEffect(() => {
+    if (!offline) return;
+    let active = true;
+    const recheck = () => {
+      comfyui.status()
+        .then(next => { if (active) setStatus(next); })
+        .catch(() => {});
+    };
+    const timer = window.setInterval(recheck, 5000);
+    window.addEventListener('focus', recheck);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', recheck);
+    };
+  }, [offline]);
+
   const pick = useCallback(async (modality: MediaModality, value: string | null) => {
     if (!status || savingRef.current) return;
     savingRef.current = true;
@@ -271,10 +291,10 @@ export function ComfyUiCard({ t }: ComfyUiCardProps) {
                       className="searchable-select--compact"
                       value={value}
                       options={options}
-                      disabled={saving !== null}
+                      disabled={saving !== null || !online}
                       onChange={next => void pick(modality, next || null)}
                       label={t(`comfyui.slot.${modality}`)}
-                      placeholder={t('comfyui.none')}
+                      placeholder={online ? t('comfyui.none') : t('comfyui.offlineModels')}
                       emptyLabel={online ? t('comfyui.noModel') : t('comfyui.offlineModels')}
                       clearLabel={t('comfyui.none')}
                       testId={`comfyui-slot-${modality}`}

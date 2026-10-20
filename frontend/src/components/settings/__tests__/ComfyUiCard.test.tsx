@@ -57,6 +57,22 @@ describe('ComfyUiCard (KT-1381)', () => {
     expect(screen.getByText('comfyui.notFound')).toBeInTheDocument();
   });
 
+  it('re-reads an offline ComfyUI on its own and lists its models once it answers', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      status
+        .mockResolvedValueOnce(online({ state: 'offline', version: null, models: [] }))
+        .mockResolvedValue(online());
+      await act(async () => { render(<ComfyUiCard t={t} />); });
+      expect(await screen.findByText('comfyui.offline')).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(await screen.findByText('comfyui.online:0.42.1')).toBeInTheDocument();
+      expect(status).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('asks to start ComfyUI when it is installed but down', async () => {
     status.mockResolvedValue(online({ state: 'offline', version: null, models: [] }));
     await act(async () => { render(<ComfyUiCard t={t} />); });
