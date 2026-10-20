@@ -963,7 +963,7 @@ approves, clears provenance or marks a line human-written. `ready:true` means no
 known refusal, not a guaranteed run: report the real outcome from
 `workflow_run_get`. The bridge forwards the backend's verdict and never
 re-derives it.
-[src: file: backend/src/workflows/readiness.rs:18-31#assess] [src: file: backend/src/workflows/readiness.rs:33-48#collection_failure] [src: file: backend/src/workflows/readiness.rs:121-208#visit]
+[src: file: backend/src/workflows/readiness.rs:18-31#assess] [src: file: backend/src/workflows/readiness.rs:47-63#collection_failure] [src: file: backend/src/workflows/readiness.rs:185-274#visit]
 [src: file: backend/scripts/disc-introspection-mcp.py:4391-4409#kronn_readiness] [src: file: backend/scripts/disc-introspection-mcp.py:7692-7699#call_workflow_validate]
 
 ## Workflow trigger agents
