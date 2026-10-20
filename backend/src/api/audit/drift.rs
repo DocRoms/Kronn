@@ -810,6 +810,9 @@ pub(crate) async fn run_partial_pipeline(
         // the section was re-verified, so it is done too (KT-1207).
         let mut succeeded_steps: Vec<usize> = Vec::new();
         let mut unchanged_steps: Vec<usize> = Vec::new();
+        // KT-1388 — the advice the steps left in their documents: noted on the
+        // run and in the validation prompt, never counted as a failure.
+        let mut documentary_advisories: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
         // KT-927 — unknown until an agent reports usage, never 0.
         let mut run_tokens = super::agent_launch::RunTokens::default();
         // The model last written on the run row, so a step writes it only when it changes.
@@ -958,6 +961,21 @@ pub(crate) async fn run_partial_pipeline(
             // before the agent runs; settled after every attempt.
             let step_remit = super::step_remit::StepRemit::capture(&project_path, &docs_root).await;
             let mut remit_notes: Vec<String> = Vec::new();
+            // KT-1388 — the documents as they stand before the agent runs: what
+            // the step then rewrites is what its advice (a stack conflict, an
+            // unproven closure) is read from. The pseudo-step `REVIEW` writes
+            // no document.
+            let documentary_before = if analysis_step.target_file == "REVIEW" {
+                None
+            } else {
+                match super::document_repair::snapshot(&project_path) {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(e) => {
+                        tracing::warn!("Partial audit step {step} ({file_label}): documents not read, no advice given: {e}");
+                        None
+                    }
+                }
+            };
             let validated_docs_snapshot =
                 match super::helpers::capture_validated_docs(&project_path) {
                     Ok(snapshot) => snapshot,
@@ -1063,6 +1081,7 @@ pub(crate) async fn run_partial_pipeline(
             // back to the agent on a miss (KT-1357).
             let max_attempts = if enforce_mode
                 || revalidation.is_some()
+                || documentary_before.is_some()
                 || detector_gated
                 || analysis_step.target_file.ends_with("inconsistencies-tech-debt.md")
             {
@@ -1580,6 +1599,49 @@ pub(crate) async fn run_partial_pipeline(
                         }
                     }
 
+                    // KT-1388 — Full parity: advice, not a blocker. A stack
+                    // conflict or an unproven closure in what the step wrote is
+                    // handed back while it can still correct; the last attempt
+                    // leaves it as a step warning and a documentary note, and
+                    // the step stays done.
+                    if success {
+                        if let Some(before) = &documentary_before {
+                            match super::document_repair::advisories_since(&project_path, before, analysis_step.target_file) {
+                                Ok(advisory) if !advisory.is_empty() && attempt < max_attempts => {
+                                    citation_feedback = Some(super::document_repair::advice(&advisory));
+                                    yield Event::default().event("step_retry").data(
+                                        serde_json::json!({
+                                            "step": step, "file": file_label,
+                                            "attempt": attempt, "max_attempts": max_attempts,
+                                            "reason": "documentary_advisories",
+                                            "advisory_count": advisory.len(),
+                                            "diagnostics": advisory,
+                                        }).to_string()
+                                    );
+                                    continue 'attempts;
+                                }
+                                Ok(advisory) if !advisory.is_empty() => {
+                                    remit_notes.extend(advisory.iter().map(|d| {
+                                        format!("Unverified: `{}` — {}", d.path, d.message)
+                                    }));
+                                    yield Event::default().event("documentary_advisory").data(
+                                        serde_json::json!({
+                                            "step": step, "file": file_label,
+                                            "diagnostics": advisory,
+                                        }).to_string()
+                                    );
+                                    for diagnostic in advisory {
+                                        if !documentary_advisories.contains(&diagnostic) {
+                                            documentary_advisories.push(diagnostic);
+                                        }
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(e) => tracing::warn!("Partial audit step {step} ({file_label}): documentary advice skipped: {e}"),
+                            }
+                        }
+                    }
+
                     // Final gate: the rewrite proof — only once every other
                     // gate is green; a failed step keeps its real reason.
                     let outcome = if success {
@@ -1901,6 +1963,16 @@ pub(crate) async fn run_partial_pipeline(
                 super::reconciliation::td_validation_scope(&pp, &idx).undecided
             }).await.unwrap_or_default()
         };
+        // KT-1388 — what the steps left as advice is noted on the run, as the
+        // Full pipeline's final gate does.
+        if let Some(notes) = super::document_repair::notes_json(&[], &documentary_advisories, &[]) {
+            let run_id = audit_run_id.clone();
+            if let Err(error) = state.db.with_conn(move |conn|
+                crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes)
+            ).await {
+                tracing::warn!("Documentary notes of {audit_run_id} not recorded: {error}");
+            }
+        }
         // Exact partition (matrix v2): requested = succeeded ⊎ unchanged ⊎ failed.
         let outcomes_json = serde_json::json!({
             "requested": requested_steps,
@@ -1916,7 +1988,8 @@ pub(crate) async fn run_partial_pipeline(
                 steps.iter().map(|&n| (n as u32, chain[n - 1].target_file.to_string())).collect()
             };
             let prompt = format!(
-                "{}{}{}",
+                "{}{}{}{}",
+                super::helpers::documentary_notes_block(&[], &documentary_advisories, &[], &language),
                 super::helpers::unchanged_steps_block(&listed(&unchanged_steps), total_chain, &language),
                 super::helpers::partial_refresh_failed_block(&listed(&failed_steps), total_chain, &language),
                 super::helpers::build_partial_validation_prompt(&scope_files, &run_td_ids, &language),

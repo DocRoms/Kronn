@@ -27,8 +27,11 @@ pub enum Kind {
     Exact,
     /// `^8.4`: the same major, at least this.
     Caret,
-    /// `~8.1.0`: the same minor (a two-part `~8.1` allows the major).
+    /// Composer's `~8.1.0`: the same minor; a two-part `~8.1` moves up to the
+    /// next major.
     Tilde,
+    /// npm's `~18.2`: `>=18.2.0 <18.3.0`, the same minor whatever the length.
+    NpmTilde,
     /// `>=22`, `22+`: this or anything later.
     AtLeast,
 }
@@ -51,9 +54,24 @@ pub struct Stated {
     /// `path:line`.
     pub place: String,
     pub kind: Kind,
-    /// Stated by a CI job: what is tested, not the runtime. It can vouch for a
-    /// document, never contradict one.
-    pub ci: bool,
+    pub origin: Origin,
+}
+
+/// Who states a version. The origins are not equal witnesses: a lock file is
+/// what is installed, a CI job only what is tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A lock file: the version actually resolved. It wins over its constraint.
+    Lock,
+    /// A manifest constraint (`composer.json`, `package.json`).
+    Declared,
+    /// What the project runs on: a Dockerfile, `.node-version`, `.tool-versions`.
+    Runtime,
+    /// A CI job: what is tested, not the runtime. With no runtime fact it can
+    /// vouch for a document; it never contradicts one.
+    Ci,
+    /// A document.
+    Doc,
 }
 
 /// A statement that contradicts the manifests or an earlier document.
@@ -325,7 +343,7 @@ fn leading_version(text: &str) -> Option<(Kind, Vec<u32>, String)> {
     Some((kind, version, raw))
 }
 
-fn claim(tech: &'static str, place: String, text: &str, ci: bool) -> Option<Stated> {
+fn claim(tech: &'static str, place: String, text: &str, origin: Origin) -> Option<Stated> {
     let (kind, version, raw) = leading_version(text.trim())?;
     (!version.is_empty() && plausible(tech, version[0])).then_some(Stated {
         tech,
@@ -333,20 +351,34 @@ fn claim(tech: &'static str, place: String, text: &str, ci: bool) -> Option<Stat
         raw,
         place,
         kind,
-        ci,
+        origin,
     })
 }
 
 /// One statement per alternative of a constraint (`^7.4|^8.0`, `>=8.2 <9`,
 /// `^20 || ^22`): the first lower bound of each, never an upper bound.
-fn constraint(tech: &'static str, place: &str, value: &str, ci: bool) -> Vec<Stated> {
+///
+/// `npm` is the ecosystem: a two-part `~18.2` is not read the way Composer's is.
+fn constraint(
+    tech: &'static str,
+    place: &str,
+    value: &str,
+    origin: Origin,
+    npm: bool,
+) -> Vec<Stated> {
     value
         .split('|')
         .filter(|alt| !alt.trim().is_empty())
         .filter_map(|alt| {
             alt.split(|c: char| c.is_whitespace() || c == ',')
                 .filter(|token| !token.is_empty() && !token.starts_with('<'))
-                .find_map(|token| claim(tech, place.to_string(), token, ci))
+                .find_map(|token| claim(tech, place.to_string(), token, origin))
+        })
+        .map(|mut stated| {
+            if npm && stated.kind == Kind::Tilde {
+                stated.kind = Kind::NpmTilde;
+            }
+            stated
         })
         .collect()
 }
@@ -379,7 +411,13 @@ fn composer_facts(project: &Path, out: &mut Vec<Stated>) {
         let place = |key: &str| format!("composer.json:{}", line_of(&text, &format!("\"{key}\"")));
         let require = value.get("require").and_then(|v| v.as_object());
         if let Some(php) = require.and_then(|r| r.get("php")).and_then(|v| v.as_str()) {
-            out.extend(constraint("php", &place("php"), php, false));
+            out.extend(constraint(
+                "php",
+                &place("php"),
+                php,
+                Origin::Declared,
+                false,
+            ));
         }
         let framework = [
             "symfony/framework-bundle",
@@ -394,7 +432,13 @@ fn composer_facts(project: &Path, out: &mut Vec<Stated>) {
                 .map(|v| (name, v))
         });
         if let Some((name, version)) = framework {
-            out.extend(constraint("symfony", &place(name), version, false));
+            out.extend(constraint(
+                "symfony",
+                &place(name),
+                version,
+                Origin::Declared,
+                false,
+            ));
         }
         if let Some(version) = require
             .and_then(|r| r.get("laravel/framework"))
@@ -404,6 +448,7 @@ fn composer_facts(project: &Path, out: &mut Vec<Stated>) {
                 "laravel",
                 &place("laravel/framework"),
                 version,
+                Origin::Declared,
                 false,
             ));
         }
@@ -411,7 +456,13 @@ fn composer_facts(project: &Path, out: &mut Vec<Stated>) {
             .pointer("/extra/symfony/require")
             .and_then(|v| v.as_str())
         {
-            out.extend(constraint("symfony", &place("require"), pin, false));
+            out.extend(constraint(
+                "symfony",
+                &place("require"),
+                pin,
+                Origin::Declared,
+                false,
+            ));
         }
     }
     if let Some((text, value)) = json(project, "composer.lock") {
@@ -433,12 +484,20 @@ fn composer_facts(project: &Path, out: &mut Vec<Stated>) {
                         "composer.lock:{}",
                         line_of(&text, &format!("\"name\": \"{name}\""))
                     );
-                    out.extend(claim(tech, place, version, false));
+                    out.extend(claim(tech, place, version, Origin::Lock));
                 }
             }
         }
     }
 }
+
+/// The npm package behind each tracked technology.
+const NPM_PACKAGES: &[(&str, &str)] = &[
+    ("react", "react"),
+    ("vue", "vue"),
+    ("next", "next"),
+    ("@angular/core", "angular"),
+];
 
 fn package_facts(project: &Path, out: &mut Vec<Stated>) {
     let Some((text, value)) = json(project, "package.json") else {
@@ -446,21 +505,123 @@ fn package_facts(project: &Path, out: &mut Vec<Stated>) {
     };
     let place = |key: &str| format!("package.json:{}", line_of(&text, &format!("\"{key}\"")));
     if let Some(node) = value.pointer("/engines/node").and_then(|v| v.as_str()) {
-        out.extend(constraint("node", &place("node"), node, false));
+        out.extend(constraint(
+            "node",
+            &place("node"),
+            node,
+            Origin::Declared,
+            true,
+        ));
     }
-    for (dep, tech) in [
-        ("react", "react"),
-        ("vue", "vue"),
-        ("next", "next"),
-        ("@angular/core", "angular"),
-    ] {
+    for (dep, tech) in NPM_PACKAGES {
         for group in ["dependencies", "devDependencies"] {
             if let Some(version) = value
                 .get(group)
-                .and_then(|g| g.get(dep))
+                .and_then(|g| g.get(*dep))
                 .and_then(|v| v.as_str())
             {
-                out.extend(constraint(tech, &place(dep), version, false));
+                out.extend(constraint(
+                    tech,
+                    &place(dep),
+                    version,
+                    Origin::Declared,
+                    true,
+                ));
+            }
+        }
+    }
+}
+
+/// The versions the JS lock files resolved for the tracked packages: only the
+/// project's own (top-level) install, never a nested copy a dependency pulled.
+fn js_lock_facts(project: &Path, out: &mut Vec<Stated>) {
+    if let Some((text, value)) = json(project, "package-lock.json") {
+        for (dep, tech) in NPM_PACKAGES {
+            // lockfileVersion 2/3 list `node_modules/<name>`; 1 lists `dependencies`.
+            let version = value
+                .pointer(&format!(
+                    "/packages/node_modules~1{}/version",
+                    dep.replace('/', "~1")
+                ))
+                .or_else(|| {
+                    value
+                        .get("dependencies")
+                        .and_then(|d| d.get(*dep))
+                        .and_then(|d| d.get("version"))
+                })
+                .and_then(|v| v.as_str());
+            if let Some(version) = version {
+                let at = line_of(&text, &format!("\"node_modules/{dep}\""));
+                out.extend(claim(
+                    tech,
+                    format!("package-lock.json:{at}"),
+                    version,
+                    Origin::Lock,
+                ));
+            }
+        }
+    }
+    if let Some(text) = read(project, "yarn.lock") {
+        // `react@^18.2.0, react@^18.0.0:` then `  version "18.2.0"`.
+        let lines: Vec<&str> = text.lines().collect();
+        for (dep, tech) in NPM_PACKAGES {
+            for (n, line) in lines.iter().enumerate() {
+                let head = line.trim_start_matches('"');
+                let is_entry = !line.starts_with(' ')
+                    && line.trim_end().ends_with(':')
+                    && head.starts_with(&format!("{dep}@"));
+                if !is_entry {
+                    continue;
+                }
+                let version = lines[n + 1..]
+                    .iter()
+                    .take_while(|l| l.starts_with(' '))
+                    .find_map(|l| {
+                        l.trim()
+                            .strip_prefix("version")
+                            .map(|v| v.trim().trim_matches(|c| matches!(c, '"' | ':')).trim())
+                    });
+                if let Some(version) = version {
+                    out.extend(claim(
+                        tech,
+                        format!("yarn.lock:{}", n + 1),
+                        version,
+                        Origin::Lock,
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(text) = read(project, "pnpm-lock.yaml") {
+        // `importers:` come first; `packages:` / `snapshots:` hold nested copies.
+        let lines: Vec<&str> = text
+            .lines()
+            .take_while(|l| !l.starts_with("packages:") && !l.starts_with("snapshots:"))
+            .collect();
+        for (dep, tech) in NPM_PACKAGES {
+            for (n, line) in lines.iter().enumerate() {
+                let unquoted = line.trim().replace('\'', "");
+                let Some(rest) = unquoted.strip_prefix(&format!("{dep}:")) else {
+                    continue;
+                };
+                let rest = rest.trim();
+                let version = if rest.is_empty() {
+                    lines[n + 1..].iter().take(3).find_map(|l| {
+                        l.trim()
+                            .strip_prefix("version:")
+                            .map(|v| v.trim().trim_matches('\''))
+                    })
+                } else {
+                    Some(rest.trim_matches('\''))
+                };
+                if let Some(version) = version {
+                    out.extend(claim(
+                        tech,
+                        format!("pnpm-lock.yaml:{}", n + 1),
+                        version,
+                        Origin::Lock,
+                    ));
+                }
             }
         }
     }
@@ -474,7 +635,12 @@ fn runtime_files(project: &Path, out: &mut Vec<Stated>) {
         (".python-version", "python"),
     ] {
         if let Some(text) = read(project, file) {
-            out.extend(claim(tech, format!("{file}:1"), text.trim(), false));
+            out.extend(claim(
+                tech,
+                format!("{file}:1"),
+                text.trim(),
+                Origin::Runtime,
+            ));
         }
     }
     if let Some(text) = read(project, ".tool-versions") {
@@ -491,7 +657,7 @@ fn runtime_files(project: &Path, out: &mut Vec<Stated>) {
                     tech,
                     format!(".tool-versions:{}", n + 1),
                     version,
-                    false,
+                    Origin::Runtime,
                 ));
             }
         }
@@ -521,11 +687,11 @@ fn dockerfile_facts(rel: &str, text: &str, out: &mut Vec<Stated>) {
                 _ => None,
             };
             if let Some(tech) = tech {
-                out.extend(claim(tech, place.clone(), tag, false));
+                out.extend(claim(tech, place.clone(), tag, Origin::Runtime));
             }
             if let Some(at) = tag.find("php") {
                 if tech != Some("php") {
-                    out.extend(claim("php", place, &tag[at + 3..], false));
+                    out.extend(claim("php", place, &tag[at + 3..], Origin::Runtime));
                 }
             }
         } else if let Some(arg) = lower.strip_prefix("arg ") {
@@ -538,7 +704,12 @@ fn dockerfile_facts(rel: &str, text: &str, out: &mut Vec<Stated>) {
                 "python_version" => "python",
                 _ => continue,
             };
-            out.extend(claim(tech, place, value.trim().trim_matches('"'), false));
+            out.extend(claim(
+                tech,
+                place,
+                value.trim().trim_matches('"'),
+                Origin::Runtime,
+            ));
         }
     }
 }
@@ -603,7 +774,7 @@ fn ci_facts(project: &Path, out: &mut Vec<Stated>) {
             for item in value
                 .split(|c: char| matches!(c, '[' | ']' | ',' | '\'' | '"') || c.is_whitespace())
             {
-                out.extend(claim(tech, place.clone(), item, true));
+                out.extend(claim(tech, place.clone(), item, Origin::Ci));
             }
         }
     }
@@ -614,6 +785,7 @@ pub fn manifest_facts(project: &Path) -> Vec<Stated> {
     let mut out = Vec::new();
     composer_facts(project, &mut out);
     package_facts(project, &mut out);
+    js_lock_facts(project, &mut out);
     runtime_files(project, &mut out);
     dockerfiles(project, &mut out);
     ci_facts(project, &mut out);
@@ -716,7 +888,7 @@ pub fn doc_claims(rel: &str, content: &str) -> Vec<Stated> {
             {
                 // `| PHP | 8.4 |`, not `| PHP | see composer.json:7 |`.
                 if !TECH.is_match(cell) {
-                    out.extend(claim(tech, place.clone(), plain(cell), false));
+                    out.extend(claim(tech, place.clone(), plain(cell), Origin::Doc));
                 }
             }
             scanned
@@ -738,7 +910,12 @@ pub fn doc_claims(rel: &str, content: &str) -> Vec<Stated> {
             let Some(tech) = tech_key(name.as_str()) else {
                 continue;
             };
-            out.extend(claim(tech, place.clone(), &scanned[whole.end()..], false));
+            out.extend(claim(
+                tech,
+                place.clone(),
+                &scanned[whole.end()..],
+                Origin::Doc,
+            ));
         }
     }
     out
@@ -773,6 +950,12 @@ fn satisfies(have: &[u32], kind: Kind, bound: &[u32]) -> bool {
                 && at_least(have, bound)
                 // `~8.1.0` stays on its minor; `~8.1` may move to 8.9.
                 && (bound.len() < 3 || have.len() < 2 || have[1] == bound[1])
+        }
+        // npm: `~18.2` is `>=18.2.0 <18.3.0`, `~18` is `>=18.0.0 <19.0.0`.
+        Kind::NpmTilde => {
+            have[0] == bound[0]
+                && at_least(have, bound)
+                && (bound.len() < 2 || have.len() < 2 || have[1] == bound[1])
         }
     }
 }
@@ -810,7 +993,11 @@ pub fn conflicts(project: &Path, docs: &[(String, String)]) -> Vec<Conflict> {
     for (rel, content) in docs {
         for claim in doc_claims(rel, content) {
             let of_tech: Vec<&Stated> = facts.iter().filter(|f| f.tech == claim.tech).collect();
-            let runtime: Vec<&Stated> = of_tech.iter().filter(|f| !f.ci).copied().collect();
+            let runtime: Vec<&Stated> = of_tech
+                .iter()
+                .filter(|f| f.origin != Origin::Ci)
+                .copied()
+                .collect();
             // (the statement it contradicts, whether it is a manifest's)
             let reference: Option<(Stated, bool)> = if runtime.is_empty() {
                 // Only a CI job (or nothing) states it: the documents decide
@@ -826,26 +1013,33 @@ pub fn conflicts(project: &Path, docs: &[(String, String)]) -> Vec<Conflict> {
                     }
                 }
             } else {
-                // A constraint is compared with the constraints when the
-                // manifests state any: `PHP ^8.2` against an image tag proves
-                // nothing.
+                // What is installed speaks before what is allowed: a
+                // permissive `^8.1` must not hide a lock at 8.1.0 behind a
+                // document saying 8.4. A constraint is compared with the
+                // constraints when the manifests state any (`PHP ^8.2` against
+                // an image tag proves nothing). A CI job is no witness of the
+                // runtime: it never vouches for a runtime claim.
                 let constraints: Vec<&Stated> = runtime
                     .iter()
                     .filter(|f| f.kind.is_constraint())
                     .copied()
                     .collect();
+                let locked: Vec<&Stated> = runtime
+                    .iter()
+                    .filter(|f| f.origin == Origin::Lock)
+                    .copied()
+                    .collect();
                 let pool: Vec<&Stated> = if claim.kind.is_constraint() && !constraints.is_empty() {
                     constraints
+                } else if !locked.is_empty() {
+                    locked
                 } else {
-                    of_tech.clone()
+                    runtime.clone()
                 };
                 if pool.iter().any(|fact| agrees(&claim, fact)) {
                     None
                 } else {
-                    pool.iter()
-                        .find(|fact| !fact.ci)
-                        .or(pool.first())
-                        .map(|fact| ((*fact).clone(), true))
+                    pool.first().map(|fact| ((*fact).clone(), true))
                 }
             };
             let Some((reference, from_manifest)) = reference else {
@@ -874,6 +1068,68 @@ pub fn conflicts(project: &Path, docs: &[(String, String)]) -> Vec<Conflict> {
         }
     }
     out
+}
+
+// ─── Prevention: the facts handed to the steps that state versions ───────
+
+/// The most a facts block may weigh: it rides in three step prompts.
+const FACTS_BUDGET: usize = 1_800;
+
+/// The versions of one origin, deduplicated and capped: `^8.1, ^8.4`.
+fn listed(facts: &[&Stated], origin: Origin) -> Option<String> {
+    let mut raws: Vec<&str> = Vec::new();
+    let mut first = None;
+    for fact in facts.iter().filter(|f| f.origin == origin) {
+        if !raws.contains(&fact.raw.as_str()) {
+            raws.push(&fact.raw);
+        }
+        first.get_or_insert(&fact.place);
+    }
+    raws.truncate(3);
+    first.map(|place| format!("{} ({place})", raws.join(", ")))
+}
+
+/// What the project's manifests, lock files, runtime files and CI say about
+/// its frameworks, languages and runtimes, worded for the steps that write
+/// those versions (the index, the coding rules, the final review). Computed,
+/// not asked: the agent copies it instead of recalling a version, which is how
+/// `Symfony 7.3` ended up under a project on 8.1. `None` when no file states
+/// any.
+pub fn facts_block(project: &Path) -> Option<String> {
+    let facts = manifest_facts(project);
+    let mut lines = Vec::new();
+    for key in [
+        "php", "symfony", "laravel", "node", "python", "react", "vue", "angular", "next",
+    ] {
+        let of_tech: Vec<&Stated> = facts.iter().filter(|f| f.tech == key).collect();
+        let parts: Vec<String> = [
+            ("locked", Origin::Lock),
+            ("declared", Origin::Declared),
+            ("runtime", Origin::Runtime),
+            ("CI-tested", Origin::Ci),
+        ]
+        .into_iter()
+        .filter_map(|(name, origin)| listed(&of_tech, origin).map(|text| format!("{name} {text}")))
+        .collect();
+        if !parts.is_empty() {
+            lines.push(format!("- {}: {}", label(key), parts.join("; ")));
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let mut block = String::from(
+        "## Stack facts (computed by Kronn from the manifests, lock files and runtime files)\n\
+State every framework, language and runtime version from these facts: the locked version when there is one, else the declared constraint. Never infer, recall or copy another version, and give the same one in every document. A CI-tested version is what a job runs, not the runtime.\n",
+    );
+    for line in lines {
+        if block.len() + line.len() + 1 > FACTS_BUDGET {
+            break;
+        }
+        block.push_str(&line);
+        block.push('\n');
+    }
+    Some(block)
 }
 
 #[cfg(test)]
@@ -1102,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ci_matrix_never_contradicts_a_document_but_can_vouch_for_one() {
+    fn a_ci_matrix_never_contradicts_a_document_and_vouches_only_without_a_runtime_fact() {
         let tmp = tempfile::tempdir().unwrap();
         write(
             tmp.path(),
@@ -1115,9 +1371,11 @@ mod tests {
             "PHP 8.4 in production.\nPHP 8.3 in production.\n".to_string(),
         )];
         let found = conflicts(tmp.path(), &docs);
-        // 8.4 matches ^8.4; 8.3 matches the matrix but not the constraint:
-        // the matrix vouches for it (it is a version the project runs).
-        assert_eq!(found, Vec::new(), "{found:?}");
+        // 8.4 matches ^8.4. 8.3 is in the matrix but the manifest states the
+        // runtime: a job that tests 8.3 does not make 8.3 the runtime.
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("`PHP 8.3`"), "{found:?}");
+        assert!(found[0].message.contains("composer.json:3"), "{found:?}");
         // With no composer.json the matrix alone states no runtime.
         let tmp = tempfile::tempdir().unwrap();
         write(
@@ -1179,6 +1437,175 @@ mod tests {
         ] {
             assert_eq!(found_in(manifest, &format!("{doc}\n")).len(), 1, "{doc}");
         }
+    }
+
+    // ── Round 2: the lock wins, CI is no runtime witness, tilde per ecosystem ──
+
+    const SYMFONY_CARET: &str =
+        "{\n  \"require\": {\n    \"symfony/framework-bundle\": \"^8.1\"\n  }\n}\n";
+    const SYMFONY_LOCK: &str = "{\n  \"packages\": [\n    {\n      \"name\": \"symfony/framework-bundle\",\n      \"version\": \"v8.1.0\"\n    }\n  ]\n}\n";
+
+    fn with_files(files: &[(&str, &str)], doc: &str) -> Vec<Conflict> {
+        let tmp = tempfile::tempdir().unwrap();
+        for (rel, body) in files {
+            write(tmp.path(), rel, body);
+        }
+        conflicts(
+            tmp.path(),
+            &[("docs/overview.md".to_string(), format!("{doc}\n"))],
+        )
+    }
+
+    #[test]
+    fn a_permissive_constraint_does_not_hide_a_contradicting_lock() {
+        // extra-fixtures/lock_disagrees_with_doc_while_constraint_allows:
+        // `^8.1` admits 8.4, but composer.lock pins 8.1.0.
+        let files = [
+            ("composer.json", SYMFONY_CARET),
+            ("composer.lock", SYMFONY_LOCK),
+        ];
+        let found = with_files(&files, "Symfony 8.4");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("`Symfony 8.4`"), "{found:?}");
+        assert!(
+            found[0].message.contains("`8.1.0` at composer.lock:"),
+            "{found:?}"
+        );
+        // extra-fixtures/lock_matches_doc: the control stays quiet, so does a
+        // partial or a patch-level statement of the locked version.
+        for doc in ["Symfony 8.1", "Symfony 8", "Symfony 8.1.0", "Symfony 8.x"] {
+            assert_eq!(with_files(&files, doc), Vec::new(), "{doc}");
+        }
+        // Without the lock the constraint is all there is.
+        assert_eq!(
+            with_files(&[("composer.json", SYMFONY_CARET)], "Symfony 8.4"),
+            Vec::new()
+        );
+        // A claim that is itself a constraint is held to the constraints.
+        assert_eq!(with_files(&files, "Symfony ^8.1 is required"), Vec::new());
+        assert_eq!(with_files(&files, "Symfony ^7.3 is required").len(), 1);
+    }
+
+    #[test]
+    fn a_ci_matrix_does_not_validate_a_runtime_claim() {
+        // extra-fixtures/ci_agreement_masks_production_disagreement: engines
+        // `>=22`, a CI job on Node 20, the doc says the runtime is Node.js 20.
+        let package = "{\n  \"engines\": {\n    \"node\": \">=22\"\n  }\n}\n";
+        let ci = ".github/workflows/test.yml";
+        let job = "jobs:\n  t:\n    steps:\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n";
+        let files = [("package.json", package), (ci, job)];
+        let found = with_files(&files, "Node.js 20");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("package.json:3"), "{found:?}");
+        // The runtime the manifest allows is still fine, CI or not.
+        assert_eq!(with_files(&files, "Node.js 22"), Vec::new());
+        assert_eq!(with_files(&files, "Node.js 24"), Vec::new());
+        // A line that says it is about CI is skipped, not flagged.
+        assert_eq!(with_files(&files, "CI runs Node.js 20"), Vec::new());
+    }
+
+    #[test]
+    fn tilde_follows_the_ecosystem_that_wrote_it() {
+        // extra-fixtures/npm_two_component_tilde: npm `~18.2` is >=18.2.0 <18.3.0.
+        let npm = "{\n  \"dependencies\": {\n    \"react\": \"~18.2\"\n  }\n}\n";
+        assert_eq!(
+            with_files(&[("package.json", npm)], "React 18.2"),
+            Vec::new()
+        );
+        assert_eq!(
+            with_files(&[("package.json", npm)], "React 18.2.4"),
+            Vec::new()
+        );
+        let found = with_files(&[("package.json", npm)], "React 18.3");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("package.json:3"), "{found:?}");
+        // `~18` is >=18.0.0 <19.0.0.
+        let npm_major = "{\"dependencies\": {\"react\": \"~18\"}}";
+        assert_eq!(
+            with_files(&[("package.json", npm_major)], "React 18.3"),
+            Vec::new()
+        );
+        assert_eq!(
+            with_files(&[("package.json", npm_major)], "React 19").len(),
+            1
+        );
+        // extra-fixtures/composer_two_component_tilde: Composer `~8.1` keeps
+        // its meaning, `>=8.1 <9.0`.
+        let composer = "{\"require\": {\"php\": \"~8.1\"}}";
+        assert_eq!(
+            with_files(&[("composer.json", composer)], "PHP 8.4"),
+            Vec::new()
+        );
+        assert_eq!(
+            with_files(&[("composer.json", composer)], "PHP 9.0").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_js_lock_files_state_the_resolved_top_level_version() {
+        let package = "{\"dependencies\": {\"react\": \"^18.0.0\"}}";
+        let npm_lock = "{\n  \"lockfileVersion\": 3,\n  \"packages\": {\n    \"node_modules/react\": {\n      \"version\": \"18.2.0\"\n    }\n  }\n}\n";
+        let yarn_lock = "# yarn lockfile v1\n\nreact@^18.0.0:\n  version \"18.2.0\"\n  resolved \"https://x\"\n\nother@^1:\n  version \"1.0.0\"\n";
+        let pnpm_lock = "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      react:\n        specifier: ^18.0.0\n        version: 18.2.0\n\npackages:\n  react@17.0.2:\n    resolution: {}\nsnapshots:\n  foo@1.0.0:\n    dependencies:\n      react: 17.0.2\n";
+        for (name, body) in [
+            ("package-lock.json", npm_lock),
+            ("yarn.lock", yarn_lock),
+            ("pnpm-lock.yaml", pnpm_lock),
+        ] {
+            let files = [("package.json", package), (name, body)];
+            assert_eq!(with_files(&files, "React 18.2"), Vec::new(), "{name}");
+            let found = with_files(&files, "React 18.4");
+            assert_eq!(found.len(), 1, "{name}: {found:?}");
+            assert!(found[0].message.contains(&format!("{name}:")), "{found:?}");
+        }
+    }
+
+    #[test]
+    fn the_facts_block_lists_lock_constraint_runtime_and_ci() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "composer.json", COMPOSER);
+        write(tmp.path(), "composer.lock", SYMFONY_LOCK);
+        write(
+            tmp.path(),
+            "Dockerfile",
+            "FROM dunglas/frankenphp:1.8-php8.4-alpine\n",
+        );
+        write(
+            tmp.path(),
+            ".github/workflows/ci.yml",
+            "jobs:\n  t:\n    strategy:\n      matrix:\n        php-version: [8.3, 8.4]\n",
+        );
+        write(
+            tmp.path(),
+            "package.json",
+            "{\"engines\": {\"node\": \">=22\"}}",
+        );
+        let block = facts_block(tmp.path()).expect("facts");
+        assert!(block.contains("Never infer"), "{block}");
+        let symfony = block.lines().find(|l| l.starts_with("- Symfony")).unwrap();
+        assert!(
+            symfony.contains("locked 8.1.0 (composer.lock:"),
+            "{symfony}"
+        );
+        assert!(
+            symfony.contains("declared ^8.1 (composer.json:"),
+            "{symfony}"
+        );
+        let php = block.lines().find(|l| l.starts_with("- PHP")).unwrap();
+        assert!(php.contains("declared ^8.4 (composer.json:3)"), "{php}");
+        assert!(php.contains("runtime 8.4 (Dockerfile:1)"), "{php}");
+        assert!(
+            php.contains("CI-tested 8.3, 8.4 (.github/workflows/ci.yml:"),
+            "{php}"
+        );
+        assert!(
+            block.contains("- Node.js: declared >=22 (package.json:"),
+            "{block}"
+        );
+        assert!(block.len() <= FACTS_BUDGET, "{} bytes", block.len());
+        // No file states a stack: no block.
+        assert_eq!(facts_block(tempfile::tempdir().unwrap().path()), None);
     }
 
     #[test]

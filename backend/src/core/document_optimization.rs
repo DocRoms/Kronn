@@ -1551,7 +1551,8 @@ fn without_markers(line: &str) -> String {
 /// The `TD-…` sheet ids a line declares settled, each for its own closure: a
 /// resolution word is about the debt named in its clause (the nearest one
 /// before it, else the only one after it), never the first debt of a sentence
-/// that names several. Ids and citation markers are not prose: a slug such as
+/// that names several; a line naming a single debt closes that one wherever
+/// the closure sits. Ids and citation markers are not prose: a slug such as
 /// `…-resolved-secret` is a name, not a declaration.
 fn settled_td_ids(line: &str) -> Vec<String> {
     let masked = without_markers(line);
@@ -1583,7 +1584,19 @@ fn settled_td_ids(line: &str) -> Vec<String> {
     if ids.is_empty() {
         return settled;
     }
+    // One debt in the whole line (or row): whatever the line closes is that
+    // debt, a `;` or a full stop in its description notwithstanding.
+    let sole = ids
+        .iter()
+        .all(|(_, id)| *id == ids[0].1)
+        .then(|| ids[0].1.clone());
     for at in crate::core::resolution_proof::settled_at(&prose) {
+        if let Some(id) = &sole {
+            if !settled.contains(id) {
+                settled.push(id.clone());
+            }
+            continue;
+        }
         let clause = crate::core::resolution_proof::clause_bounds(&prose, at);
         let named: Vec<&(usize, String)> = ids
             .iter()
@@ -3456,6 +3469,66 @@ mod tests {
             ),
         ] {
             assert_eq!(unproven_in_index(line, &[]), expected, "{line}");
+        }
+    }
+
+    /// Round 2 — a debt whose description holds a `;` or a full stop before
+    /// its closure still owns the closure when it is the only debt of the line.
+    #[test]
+    fn a_lone_debt_keeps_its_closure_across_a_semicolon_or_a_sentence_break() {
+        for (line, expected) in [
+            // docroms v2-r1 inconsistencies-tech-debt.md:58, :60, :61.
+            (
+                "- `TD-20260719-deploy-includes-env` — Deploy rsync bundle does not exclude `.env*`; `.env.dist` ships to prod — resolved in 2026-09-04 recovery",
+                "TD-20260719-deploy-includes-env",
+            ),
+            (
+                "- `TD-20260719-a11y-no-focus-visible` — No global focus indicator; `outline:none` on language options with no `:focus-visible` replacement — resolved in 2026-09-04 recovery",
+                "TD-20260719-a11y-no-focus-visible",
+            ),
+            (
+                "- `TD-20260719-a11y-no-skip-link` — No skip-to-main-content link; keyboard users tab through full sticky nav on every page — resolved in 2026-09-04 recovery",
+                "TD-20260719-a11y-no-skip-link",
+            ),
+            // extra-fixtures: after `;`, after a full stop, with a comma.
+            (
+                "- TD-20261020-one — No skip link; users tab through navigation — resolved in recovery",
+                "TD-20261020-one",
+            ),
+            (
+                "- TD-20261020-one — Missing skip link. Resolved in recovery.",
+                "TD-20261020-one",
+            ),
+            (
+                "- TD-20261020-one — No skip link, users tab through navigation — resolved in recovery",
+                "TD-20261020-one",
+            ),
+            // The same debt named twice is still one debt.
+            (
+                "- TD-20261020-one — No skip link; see TD-20261020-one above. Resolved in recovery.",
+                "TD-20261020-one",
+            ),
+        ] {
+            assert_eq!(unproven_in_index(line, &[]), vec![expected], "{line}");
+        }
+    }
+
+    #[test]
+    fn with_two_debts_a_closure_is_still_attributed_to_its_own_clause() {
+        // extra-fixtures/two_td_correct_subject: only the second is closed.
+        assert_eq!(
+            unproven_in_index(
+                "- TD-20261020-one remains open; TD-20261020-two — Resolved",
+                &[]
+            ),
+            vec!["TD-20261020-two"]
+        );
+        // A lone debt that says it is not closed stays open.
+        for line in [
+            "- TD-20261020-one — No skip link; not resolved yet. Still open.",
+            "- TD-20261020-one — No skip link; partially mitigated. Fixed CSS declarations remain.",
+        ] {
+            assert_eq!(unproven_in_index(line, &[]), Vec::<String>::new(), "{line}");
         }
     }
 

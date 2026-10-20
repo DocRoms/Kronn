@@ -357,6 +357,28 @@ pub(super) fn with_stack_conflicts(
     Ok(recovery)
 }
 
+/// KT-1388 — the advice (a stack conflict, an unproven closure) the documents a
+/// step rewrote, and its target, hold after it ran. Read-only: the partial
+/// refresh has no documentary gate to repair anything, only advice to give.
+pub(super) fn advisories_since(
+    project: &Path,
+    before: &Snapshot,
+    target: &str,
+) -> Result<Vec<Diagnostic>, String> {
+    let after = snapshot(project)?;
+    let changed: BTreeSet<&String> = after
+        .iter()
+        .filter(|(path, text)| before.get(*path) != Some(*text))
+        .map(|(path, _)| path)
+        .collect();
+    let report = document_optimization::analyze(project)?;
+    Ok(report
+        .advisory_diagnostics()
+        .filter(|d| d.path == target || changed.contains(&d.path))
+        .cloned()
+        .collect())
+}
+
 /// KT-1388 — what is sent back for an advisory finding: the same evidence
 /// request as [`feedback`], told that it does not fail the step.
 pub(super) fn advice(diagnostics: &[Diagnostic]) -> String {
