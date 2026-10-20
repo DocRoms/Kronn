@@ -619,6 +619,22 @@ struct Cmd {
     words: Vec<String>,
     /// Holds a `$( … )` or backtick substitution: what runs is not readable.
     doubtful: bool,
+    /// How it is joined to the command before it and to the one after it.
+    before: Join,
+    after: Join,
+}
+
+/// The operator between two commands. Only a newline or `;` runs the next one
+/// unconditionally: the others make a command depend on, or hide the status of,
+/// its neighbour.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum Join {
+    #[default]
+    Seq,
+    And,
+    Or,
+    Pipe,
+    Background,
 }
 
 #[derive(Default)]
@@ -633,6 +649,8 @@ struct Lexer {
     /// Here-document delimiters waiting for the end of their line, with `<<-`.
     heredocs: Vec<(String, bool)>,
     heredoc_next: Option<bool>,
+    /// The operator that opened the command being read.
+    pending: Join,
 }
 
 impl Lexer {
@@ -670,16 +688,30 @@ impl Lexer {
         self.words.push(word);
     }
 
-    fn end_command(&mut self) {
+    fn end_command(&mut self) -> bool {
         self.end_word();
-        if !self.words.is_empty() {
+        let pushed = !self.words.is_empty();
+        if pushed {
             self.out.push(Cmd {
                 line: self.cmd_line,
                 words: std::mem::take(&mut self.words),
                 doubtful: self.doubtful,
+                before: std::mem::take(&mut self.pending),
+                after: Join::Seq,
             });
         }
         self.doubtful = false;
+        pushed
+    }
+
+    /// An operator ends the command before it and opens the next one.
+    fn operator(&mut self, join: Join) {
+        if self.end_command() {
+            if let Some(last) = self.out.last_mut() {
+                last.after = join;
+            }
+        }
+        self.pending = join;
     }
 
     /// Take `chars[from..to]` into the current word as one raw piece.
@@ -721,6 +753,16 @@ fn skip_substitution(chars: &[char], at: usize) -> usize {
         i += 1;
     }
     chars.len()
+}
+
+/// Whether the `&` or `|` at `at` belongs to a redirection (`2>&1`, `<&3`,
+/// `&>file`, `>|file`) and not to an operator.
+fn is_redirection(chars: &[char], at: usize) -> bool {
+    let prev = at.checked_sub(1).map(|p| chars[p]);
+    match chars[at] {
+        '&' => matches!(prev, Some('>' | '<')) || chars.get(at + 1) == Some(&'>'),
+        _ => prev == Some('>'),
+    }
 }
 
 /// The simple commands of `text`, whose first line is `first_line`.
@@ -809,7 +851,27 @@ fn shell_commands(text: &str, first_line: usize) -> Vec<Cmd> {
                     i += 1;
                 }
             }
-            ';' | '|' | '&' => lex.end_command(),
+            // `2>&1`, `&>file` and `>|` are redirections, not operators.
+            '&' | '|' if is_redirection(&chars, i) => {
+                lex.begin_word();
+                lex.word.push(c);
+            }
+            ';' => lex.operator(Join::Seq),
+            '&' if next == Some('&') => {
+                lex.operator(Join::And);
+                i += 1;
+            }
+            '|' if next == Some('|') => {
+                lex.operator(Join::Or);
+                i += 1;
+            }
+            '|' => {
+                lex.operator(Join::Pipe);
+                if next == Some('&') {
+                    i += 1;
+                }
+            }
+            '&' => lex.operator(Join::Background),
             '\n' => {
                 lex.end_command();
                 lex.line += 1;
@@ -923,12 +985,6 @@ const LAUNCHERS: &[&str] = &[
     "env",
     "time",
     "nohup",
-    "if",
-    "then",
-    "do",
-    "else",
-    "elif",
-    "!",
     "poetry",
     "pipx",
     "pipenv",
@@ -985,9 +1041,7 @@ fn command_runs_checker(
         // `sh -c "<command>"` runs that command.
         if word == "-c" && i > 0 && matches!(words[i - 1].as_str(), "sh" | "bash" | "zsh") {
             let inner = words.get(i + 1)?;
-            return shell_commands(inner, cmd.line)
-                .iter()
-                .find_map(|c| command_runs_checker(c, scripts, depth));
+            return script_checker(&shell_commands(inner, cmd.line), scripts, depth);
         }
         if word.is_empty() || is_env_assignment(word) || word.starts_with(['-', '@']) {
             i += 1;
@@ -1013,9 +1067,7 @@ fn command_runs_checker(
                 if depth > 0 {
                     return None;
                 }
-                return shell_commands(body, cmd.line)
-                    .iter()
-                    .find_map(|c| command_runs_checker(c, scripts, depth + 1));
+                return script_checker(&shell_commands(body, cmd.line), scripts, depth + 1);
             }
             if manager == Some("npm") {
                 return None;
@@ -1037,11 +1089,89 @@ fn command_runs_checker(
     None
 }
 
-/// The first of `cmds` that runs a checker.
+/// Words that decide whether, or how far, the rest of a script runs. A script
+/// holding one is not read any further: Kronn does not interpret shell, so it
+/// cannot tell that the checker after `exit 0` never runs, or that one inside
+/// `if` is only sometimes run.
+const CONTROL_WORDS: &[&str] = &[
+    "exit", "return", "trap", "if", "then", "else", "elif", "fi", "case", "esac", "while", "until",
+    "for", "select", "do", "done", "function", "{", "}", "(", ")", "!", "break", "continue",
+    "eval", "exec", "true", "false", ":", "wait", "[[", "[", "test",
+];
+
+/// The first word a command runs, past environment assignments.
+fn program(cmd: &Cmd) -> Option<&str> {
+    cmd.words
+        .iter()
+        .map(String::as_str)
+        .find(|w| !is_env_assignment(w))
+}
+
+/// Whether `cmd` loads the hook runner or a version manager: it runs nothing
+/// that can end the script.
+fn loads_environment(cmd: &Cmd) -> bool {
+    matches!(program(cmd), Some("." | "source"))
+        && cmd
+            .words
+            .iter()
+            .any(|w| w.contains("husky.sh") || w.contains("nvm.sh"))
+}
+
+/// A command that cannot decide whether the following ones run: it prints,
+/// installs, moves, sets a variable or loads the environment.
+fn is_trivial(cmd: &Cmd) -> bool {
+    if loads_environment(cmd) {
+        return true;
+    }
+    match program(cmd) {
+        None | Some("echo" | "printf" | "cd" | "export" | "unset") => true,
+        Some("set") => !cmd.words.iter().any(|w| w.starts_with('+')),
+        Some(_) => installs(&cmd.words),
+    }
+}
+
+/// Whether `cmd` is, or opens, a control-flow construct: a keyword, a group or
+/// subshell, a function definition, an `exit`, `set +e`, a `source` of anything
+/// but the environment loaders.
+fn is_control_flow(cmd: &Cmd) -> bool {
+    if loads_environment(cmd) {
+        return false;
+    }
+    let Some(first) = program(cmd) else {
+        return false;
+    };
+    CONTROL_WORDS.contains(&first)
+        || matches!(first, "." | "source")
+        || first.starts_with(['(', '{'])
+        || first.ends_with("()")
+        || (first == "set" && cmd.words.iter().any(|w| w.starts_with('+')))
+}
+
+/// What a script (a hook, a CI `run:` text, a package script) answers to "does it
+/// run a commit-message checker?". `Some` ONLY for a straight-line script whose
+/// first non-trivial command is the checker: no `exit`/`return`, no `||`, pipe or
+/// `&`, no `&&` behind a command that can fail on its own, no `if`/`case`/loop,
+/// no function or group, no `set +e` anywhere in it. Anything else abstains
+/// (`None`, so "configured"): a false "enforced" is the harmful error.
+fn script_checker(cmds: &[Cmd], scripts: &Scripts, depth: usize) -> Option<Option<&'static str>> {
+    let first = cmds.iter().find(|cmd| !is_trivial(cmd))?;
+    if cmds.iter().any(|cmd| {
+        is_control_flow(cmd) && !std::ptr::eq(cmd, first)
+            || matches!(cmd.before, Join::Or | Join::Pipe | Join::Background)
+            || matches!(cmd.after, Join::Or | Join::Pipe | Join::Background)
+            // `a && checker`: the checker is conditional unless `a` cannot fail.
+            || (cmd.after == Join::And && !is_trivial(cmd) && !std::ptr::eq(cmd, first))
+    }) {
+        return None;
+    }
+    // `exec` is control flow unless it launches the checker itself.
+    command_runs_checker(first, scripts, depth)
+        .filter(|_| !is_control_flow(first) || program(first) == Some("exec"))
+}
+
+/// The first of `cmds` that runs a checker, under [`script_checker`]'s rules.
 fn first_checker(cmds: &[Cmd], scripts: &Scripts) -> Option<Option<&'static str>> {
-    cmds.iter()
-        .filter(|cmd| !is_inert(cmd))
-        .find_map(|cmd| command_runs_checker(cmd, scripts, 0))
+    script_checker(cmds, scripts, 0)
 }
 
 /// A CI step that `uses:` a commit-message action, same answer as
@@ -1496,18 +1626,28 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                     }
                 }
                 Step::Shell(number, text) => {
-                    for cmd in shell_commands(&text, number) {
-                        if is_inert(&cmd) {
-                            continue;
-                        }
-                        if let Some(tool) = command_runs_checker(&cmd, &scripts, 0) {
+                    // The step is read as one script: a checker after
+                    // `exit 0`, behind `||` or inside an `if` is not proven to
+                    // run, so the step is listed as configured, not enforced.
+                    let cmds = shell_commands(&text, number);
+                    if let Some(tool) = first_checker(&cmds, &scripts) {
+                        if let Some(first) = cmds.iter().find(|cmd| !is_trivial(cmd)) {
                             out.push(Enforcer {
-                                at: format!("{rel}:{}", cmd.line),
+                                at: format!("{rel}:{}", first.line),
                                 ci: true,
                                 tool,
                                 runs_checker: true,
                             });
                         }
+                    } else if let Some(cmd) = cmds.iter().find(|cmd| {
+                        !is_inert(cmd) && command_runs_checker(cmd, &scripts, 0).is_some()
+                    }) {
+                        out.push(Enforcer {
+                            at: format!("{rel}:{}", cmd.line),
+                            ci: true,
+                            tool: None,
+                            runs_checker: false,
+                        });
                     }
                 }
             }
@@ -1658,7 +1798,7 @@ fn detect_tooling(project: &Path) -> Vec<Tool> {
             (
                 Enforcement::ConfiguredOnly,
                 Some(
-                    "its commands are not recognised as a commit-message checker: read the hook before saying what it checks"
+                    "not proven to run a commit-message checker (other commands, control flow or an unknown tool around it): read the file before saying what it checks"
                         .to_string(),
                 ),
             )

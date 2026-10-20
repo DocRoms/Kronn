@@ -368,11 +368,13 @@ fn a_live_line_that_runs_the_checker_is_enforcement_in_every_form() {
         ),
         ("gitlint --commits origin/main..HEAD", "gitlint"),
         ("sh -c 'npx commitlint --edit'", "commitlint"),
+        ("echo checking; npx commitlint --from HEAD~1", "commitlint"),
+        ("npx commitlint --edit \"$1\" 2>&1", "commitlint"),
+        ("npx commitlint --edit \"$1\" &> /dev/null", "commitlint"),
         (
-            "if ! npx commitlint --edit \"$1\"; then exit 1; fi",
+            "npm ci && npx commitlint --edit \"$1\" && echo ok",
             "commitlint",
         ),
-        ("echo checking; npx commitlint --from HEAD~1", "commitlint"),
     ] {
         assert_eq!(runs(command, &[]), Some(Some(tool)), "{command}");
     }
@@ -1028,4 +1030,129 @@ fn a_script_evidence_outside_the_project_is_never_cited() {
     let tools = detect_tooling(&project);
     assert_eq!(tools.len(), 1, "{tools:?}");
     assert_eq!(tools[0].evidence, vec!["Makefile:1".to_string()]);
+}
+
+#[test]
+fn a_checker_behind_or_inside_control_flow_is_never_enforced() {
+    // KT-1387 round 5: Kronn does not interpret shell, so a script where
+    // control flow precedes or wraps the checker abstains.
+    for command in [
+        "exit 0\nnpx commitlint --edit",
+        "exit 0; npx commitlint --edit \"$1\"",
+        "true || npx commitlint --edit",
+        "false || npx commitlint --edit",
+        ": || npx commitlint --edit",
+        "[ -n \"$SKIP\" ] && exit 0\nnpx commitlint --edit",
+        "[ -f .commitlintrc ] && npx commitlint --edit",
+        "grep -q x file && npx commitlint --edit",
+        "return 0\nnpx commitlint --edit",
+        "set +e\nnpx commitlint --edit \"$1\"",
+        "if ! npx commitlint --edit \"$1\"; then exit 1; fi",
+        "if [ -n \"$CI\" ]; then npx commitlint --edit; fi",
+        "case \"$1\" in *) npx commitlint --edit ;; esac",
+        "for f in a b; do npx commitlint --edit \"$f\"; done",
+        "while false; do npx commitlint --edit; done",
+        "check() (\n  npx commitlint --edit\n)",
+        "check() ( npx commitlint --edit )\ncheck",
+        "(npx commitlint --edit)",
+        "npx commitlint --edit || true",
+        "npx commitlint --edit || exit 1",
+        "npx commitlint --edit | tee out.log",
+        "echo \"$1\" | npx commitlint",
+        "npx commitlint --edit &",
+        "npx commitlint --edit; true",
+        "npx commitlint --edit; exit 0",
+        "trap 'exit 0' EXIT\nnpx commitlint --edit",
+        "eval \"$SKIP\"\nnpx commitlint --edit",
+        "exec ./other-hook\nnpx commitlint --edit",
+        ". ./local.env\nnpx commitlint --edit",
+        "npm run build\nnpx commitlint --edit",
+    ] {
+        assert_eq!(runs(command, &[]), None, "{command:?}");
+    }
+    // Redirections are not operators, and the straight-line forms stay enforced.
+    for command in [
+        "npx commitlint --edit \"$1\" 2>&1",
+        "npx commitlint --edit \"$1\" >/dev/null 2>&1",
+        "echo start\nnpx commitlint --edit \"$1\"\necho done",
+        "set -e\nnpx commitlint --edit \"$1\"",
+        "cd app && npx commitlint --edit \"$1\"",
+        "export CI=1\nnpx commitlint --edit \"$1\"",
+        "exec npx commitlint --edit \"$1\"",
+        "#!/bin/sh\n. \"$(dirname \"$0\")/_/husky.sh\"\n\nnpx --no -- commitlint --edit \"$1\"",
+    ] {
+        assert_eq!(runs(command, &[]), Some(Some("commitlint")), "{command:?}");
+    }
+    // The same rule applies to the script an `npm run` resolves to, and to `sh -c`.
+    assert_eq!(
+        runs("npm run c", &[("c", "exit 0; commitlint --edit")]),
+        None
+    );
+    assert_eq!(runs("npm run c", &[("c", "true || commitlint")]), None);
+    assert_eq!(runs("sh -c 'exit 0; npx commitlint --edit'", &[]), None);
+}
+
+#[test]
+fn an_unreachable_checker_in_a_hook_or_ci_is_configured_not_enforced() {
+    for (why, hook) in [
+        (
+            "exit 0 first",
+            "#!/bin/sh\nexit 0\nnpx commitlint --edit \"$1\"\n",
+        ),
+        (
+            "true ||",
+            "#!/bin/sh\ntrue || npx commitlint --edit \"$1\"\n",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), "commitlint.config.js", "module.exports = {};\n");
+        put(dir.path(), ".husky/commit-msg", hook);
+        let tools = detect_tooling(dir.path());
+        assert!(!tools.is_empty(), "{why}");
+        for tool in tools {
+            assert!(
+                !matches!(tool.enforcement, Enforcement::Enforced(_)),
+                "{why}: {tool:?}"
+            );
+        }
+    }
+    for (why, run) in [
+        (
+            "exit 0 first",
+            "|\n          exit 0\n          npx commitlint --edit",
+        ),
+        ("true ||", "|\n          true || npx commitlint --edit"),
+        ("inline true ||", "true || npx commitlint --edit"),
+    ] {
+        let tools = ci_tool(
+            &format!("jobs:\n  t:\n    steps:\n      - run: {run}\n"),
+            None,
+        );
+        assert!(
+            tools
+                .iter()
+                .all(|t| !matches!(t.enforcement, Enforcement::Enforced(_))),
+            "{why}: {tools:?}"
+        );
+    }
+    // The two direct controls stay enforced.
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        ".husky/commit-msg",
+        "#!/bin/sh\nnpx commitlint --edit \"$1\"\n",
+    );
+    let tools = detect_tooling(dir.path());
+    assert!(
+        matches!(tools[0].enforcement, Enforcement::Enforced(_)),
+        "{tools:?}"
+    );
+    let tools = ci_tool(
+        "jobs:\n  t:\n    steps:\n      - run: npx commitlint --edit\n",
+        None,
+    );
+    assert!(
+        matches!(tools[0].enforcement, Enforcement::Enforced(_)),
+        "{tools:?}"
+    );
 }
