@@ -15,9 +15,60 @@ const HUMAN_APPROVAL_ACTION: &str = "Ask a human to review and approve this line
 const SCRIPT_APPROVAL_ACTION: &str = "Ask a human to open the step in the workflow editor and \
      save it, which approves the script's current content. An agent cannot pin a script hash.";
 
-/// The readiness of `root`, resolving sub-workflows through `workflows`
-/// (`root` itself need not be in it).
+const REPOSITORY_APPROVAL_ACTION: &str = "Ask a human to approve the workflow in the \
+     project's repository resources: it was imported from the repository and its current \
+     content is not approved. An agent cannot approve it.";
+const RETRY_CHECK_ACTION: &str =
+    "Retry the check (workflow_validate); do not report the workflow as ready.";
+
+/// The repository-import gate's refusal of one workflow, as the run applies
+/// it: `Ok(None)` when it may start, `Ok(Some(_))` with the run's message when
+/// a human approval is missing, `Err(_)` when the check itself failed.
+pub type ApprovalCheck<'a> = dyn FnMut(&Workflow) -> Result<Option<String>, String> + 'a;
+
+/// The readiness of `root` without the repository-import approval gate,
+/// which needs the database: production callers use [`assess_in_db`].
+/// Sub-workflows resolve through `workflows` (`root` need not be in it).
 pub fn assess(root: &Workflow, workflows: &HashMap<String, Workflow>) -> WorkflowReadiness {
+    assess_with_approvals(root, workflows, &mut |_| Ok(None))
+}
+
+/// [`assess`] plus the repository-import approval gate the run checks before
+/// its first step, against the database the run reads.
+pub fn assess_in_db(
+    conn: &rusqlite::Connection,
+    root: &Workflow,
+    workflows: &HashMap<String, Workflow>,
+) -> WorkflowReadiness {
+    assess_with_approvals(root, workflows, &mut |wf| {
+        repository_approval_refusal(conn, wf)
+    })
+}
+
+/// The run's own gate (`workflow_execution_refusal`, which the runner's
+/// `ensure_workflow_execution_approved` wraps), skipped without rendering for
+/// a workflow that was never imported from a repository. A failed check (the
+/// alignment, the approval or the rendering could not be read) is `Err(_)`,
+/// never a missing approval.
+pub fn repository_approval_refusal(
+    conn: &rusqlite::Connection,
+    wf: &Workflow,
+) -> Result<Option<String>, String> {
+    let alignment =
+        crate::db::repository_resources::find_alignment_by_target(conn, "workflow", &wf.id)
+            .map_err(|error| error.to_string())?;
+    if !alignment.is_some_and(|alignment| alignment.imported) {
+        return Ok(None);
+    }
+    crate::core::repository_resources::workflow_execution_refusal(conn, wf)
+}
+
+/// [`assess`] with the approval gate read through `approval`.
+pub fn assess_with_approvals(
+    root: &Workflow,
+    workflows: &HashMap<String, Workflow>,
+    approval: &mut ApprovalCheck<'_>,
+) -> WorkflowReadiness {
     let mut walk = Walk {
         workflows,
         root,
@@ -25,6 +76,7 @@ pub fn assess(root: &Workflow, workflows: &HashMap<String, Workflow>) -> Workflo
         checked: Vec::new(),
         blockers: Vec::new(),
         full_access_refusals: HashMap::new(),
+        approval,
     };
     walk.visit(root);
     finish(root, walk.checked, walk.blockers)
@@ -41,7 +93,7 @@ pub fn collection_failure(root: &Workflow, error: &str) -> WorkflowReadiness {
         phase: None,
         reason: None,
         message: format!("The readiness check could not run: {error}"),
-        action: "Retry the check (workflow_validate); do not report the workflow as ready.".into(),
+        action: RETRY_CHECK_ACTION.into(),
         human_only: false,
     };
     finish(root, vec![root.id.clone()], vec![blocker])
@@ -55,7 +107,7 @@ pub fn counts(readiness: &WorkflowReadiness) -> (u32, u32) {
     )
 }
 
-struct Walk<'a> {
+struct Walk<'a, 'b> {
     workflows: &'a HashMap<String, Workflow>,
     root: &'a Workflow,
     path: Vec<String>,
@@ -63,9 +115,43 @@ struct Walk<'a> {
     blockers: Vec<WorkflowBlocker>,
     /// Each agent's setting is read once per check, as the runner reads it.
     full_access_refusals: HashMap<String, bool>,
+    /// The repository-import gate every run of a checked workflow passes.
+    approval: &'a mut ApprovalCheck<'b>,
 }
 
-impl Walk<'_> {
+impl Walk<'_, '_> {
+    /// The workflow-level refusal of an imported workflow whose current
+    /// content no human approved: the run aborts before its first step.
+    fn approval_blocker(&mut self, wf: &Workflow) {
+        let (kind, message, action, human_only) = match (self.approval)(wf) {
+            Ok(None) => return,
+            Ok(Some(message)) => (
+                WorkflowBlockerKind::HumanApproval,
+                message,
+                REPOSITORY_APPROVAL_ACTION.to_string(),
+                true,
+            ),
+            Err(error) => (
+                WorkflowBlockerKind::CollectionError,
+                format!("The repository approval check could not run: {error}"),
+                RETRY_CHECK_ACTION.to_string(),
+                false,
+            ),
+        };
+        self.blockers.push(WorkflowBlocker {
+            workflow_id: wf.id.clone(),
+            workflow_name: wf.name.clone(),
+            step: None,
+            on_failure: false,
+            kind,
+            phase: None,
+            reason: human_only.then(|| "repository_approval_required".into()),
+            message,
+            action,
+            human_only,
+        });
+    }
+
     fn refused_for_full_access(&mut self, agent: &AgentType) -> bool {
         *self
             .full_access_refusals
@@ -124,6 +210,7 @@ impl Walk<'_> {
             return;
         }
         self.checked.push(wf.id.clone());
+        self.approval_blocker(wf);
         for (chain, on_failure) in [(&wf.steps, false), (&wf.on_failure, true)] {
             for step in chain {
                 self.blockers.extend(step_blockers(wf, step, on_failure));
