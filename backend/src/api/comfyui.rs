@@ -308,6 +308,20 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// `dir` as shown to the user: the home directory as `~`, so a placeholder
+/// never prints one person's own path.
+fn shown_dir(dir: &std::path::Path) -> String {
+    shown_under(dir, home_dir().as_deref())
+}
+
+fn shown_under(dir: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    match home.and_then(|home| dir.strip_prefix(home).ok().map(PathBuf::from)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => dir.display().to_string(),
+    }
+}
+
 /// Where ComfyUI is looked for when its server does not answer: the folder
 /// the user set, else Comfy Desktop's default `~/ComfyUI-Installs`. A leading
 /// `~/` is the home directory.
@@ -401,7 +415,7 @@ pub async fn status(State(state): State<AppState>) -> Json<ApiResponse<ComfyUiSt
         install_command: install_command(),
         download_url: DOWNLOAD_URL.into(),
         suggestions: suggestion_views(&[], false),
-        install_dir: dir.display().to_string(),
+        install_dir: shown_dir(&dir),
         configured_endpoint: slot(&config.endpoint),
         configured_install_dir: slot(&config.install_dir),
         image_settings: config.image_settings.clone(),
@@ -1157,6 +1171,24 @@ pub fn names_local(reference: &str) -> bool {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_install_folder_is_shown_under_a_tilde_never_with_the_home_path() {
+        let home = std::path::Path::new("/Users/someone");
+        assert_eq!(
+            shown_under(&home.join("ComfyUI-Installs"), Some(home)),
+            "~/ComfyUI-Installs"
+        );
+        assert_eq!(shown_under(home, Some(home)), "~");
+        assert_eq!(
+            shown_under(std::path::Path::new("/opt/comfy"), Some(home)),
+            "/opt/comfy"
+        );
+        assert_eq!(
+            shown_under(std::path::Path::new("/opt/comfy"), None),
+            "/opt/comfy"
+        );
+    }
 
     #[test]
     fn the_local_connection_exists_only_with_a_slot_and_never_carries_a_credential() {
