@@ -77,6 +77,67 @@ fn located(readiness: &WorkflowReadiness) -> Vec<(String, String, bool, bool)> {
         .collect()
 }
 
+/// A human saves a workflow of `steps`, allowed to run `bash`.
+async fn create_human(state: &AppState, name: &str, steps: serde_json::Value) -> String {
+    let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+        "name": name, "project_id": null, "trigger": {"type": "Manual"},
+        "exec_allowlist": ["bash"], "steps": steps
+    }))
+    .unwrap();
+    let Json(created) = create_as(state.clone(), request, WorkflowWriter::Human).await;
+    created.data.expect("created").id
+}
+
+fn bash_step() -> serde_json::Value {
+    serde_json::json!({"name": "t", "step_type": {"type": "Exec"},
+                       "exec_command": "bash", "exec_args": ["-c", "echo ok"]})
+}
+
+/// The workflow is now one imported from the `repo` repository as `slug`.
+async fn import(state: &AppState, id: &str, slug: &str) {
+    let (id, slug) = (id.to_string(), slug.to_string());
+    state
+        .db
+        .with_conn(move |conn| {
+            crate::db::repository_resources::upsert_alignment(
+                conn,
+                "repo",
+                "workflow",
+                &slug,
+                &id,
+                "repository-hash",
+                "database-hash",
+                "2026-10-14T10:00:00Z",
+                true,
+            )
+        })
+        .await
+        .unwrap();
+}
+
+/// A human approves the workflow's current content, as the run hashes it.
+async fn approve_current(state: &AppState, id: &str, slug: &str) {
+    let wf = load(state, id).await;
+    let slug = slug.to_string();
+    state
+        .db
+        .with_conn(move |conn| {
+            let mut portable = wf.clone();
+            crate::core::resource_refs::symbolize_workflow(conn, &mut portable)?;
+            let rendered = crate::core::repository_resources::render_workflow(&portable, &slug)
+                .map_err(anyhow::Error::msg)?;
+            crate::db::repository_resources::approve(
+                conn,
+                "repo",
+                "workflow",
+                &slug,
+                &crate::core::repository_resources::approval_hash(&rendered.document),
+            )
+        })
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn an_agent_bundle_reports_every_pending_approval_of_its_chain() {
     let state = state();
@@ -338,5 +399,150 @@ async fn a_triggered_child_s_blockers_reach_bundle_get_and_validate() {
     assert_eq!(
         got.readiness.map(|r| r.blockers),
         Some(from_bundle.blockers)
+    );
+}
+
+/// A workflow imported from a repository runs only once a human approved its
+/// current content: the run aborts before its first step, so readiness, the
+/// list card and the run must agree instead of reporting it READY.
+#[tokio::test]
+async fn an_unapproved_repository_import_is_not_ready_until_a_human_approves_it() {
+    let state = state();
+    let id = create_human(&state, "imported", serde_json::json!([bash_step()])).await;
+    assert!(verdict(&state, &id).await.ready, "not imported: no gate");
+
+    import(&state, &id, "imported").await;
+
+    let pending = verdict(&state, &id).await;
+    assert!(!pending.ready, "the run would abort: {}", pending.summary);
+    assert_eq!(pending.human_approval_count, 1);
+    let blocker = &pending.blockers[0];
+    assert_eq!(blocker.kind, WorkflowBlockerKind::HumanApproval);
+    assert_eq!(blocker.step, None, "a workflow-level refusal");
+    assert!(blocker.human_only);
+    assert_eq!(
+        blocker.reason.as_deref(),
+        Some("repository_approval_required")
+    );
+    assert!(
+        blocker.message.contains("must be approved"),
+        "{}",
+        blocker.message
+    );
+    let Json(list) = list_with_visibility(&state, None).await;
+    let card = list.data.unwrap().into_iter().find(|w| w.id == id).unwrap();
+    assert_eq!(card.blocker_count, Some(1));
+    assert_eq!(card.human_approval_count, Some(1));
+
+    approve_current(&state, &id, "imported").await;
+    let approved = verdict(&state, &id).await;
+    assert!(approved.ready, "{:?}", approved.blockers);
+}
+
+/// The gate applies to every workflow a run reaches: an imported child whose
+/// content no human approved blocks an approved root, whether the root nests
+/// it (SubWorkflow) or starts it (TriggerWorkflow), and the root's card
+/// counts both.
+#[tokio::test]
+async fn an_unapproved_imported_child_blocks_an_approved_root() {
+    let state = state();
+    let nested = create_human(&state, "nested", serde_json::json!([bash_step()])).await;
+    let started = create_human(&state, "started", serde_json::json!([bash_step()])).await;
+    let root = create_human(
+        &state,
+        "root",
+        serde_json::json!([
+            sub_step("nest", &nested),
+            {"name": "start", "step_type": {"type": "TriggerWorkflow"},
+             "sub_workflow_id": started}
+        ]),
+    )
+    .await;
+    assert!(
+        verdict(&state, &root).await.ready,
+        "nothing imported: no gate"
+    );
+
+    for (id, slug) in [(&root, "root"), (&nested, "nested"), (&started, "started")] {
+        import(&state, id, slug).await;
+    }
+    approve_current(&state, &root, "root").await;
+
+    let pending = verdict(&state, &root).await;
+    assert!(
+        !pending.ready,
+        "a child's run would abort: {}",
+        pending.summary
+    );
+    assert_eq!(pending.human_approval_count, 2);
+    let refused: Vec<(&str, bool, bool, bool)> = pending
+        .blockers
+        .iter()
+        .map(|b| {
+            (
+                b.workflow_id.as_str(),
+                b.step.is_none(),
+                b.kind == WorkflowBlockerKind::HumanApproval,
+                b.human_only,
+            )
+        })
+        .collect();
+    assert_eq!(
+        refused,
+        vec![
+            (nested.as_str(), true, true, true),
+            (started.as_str(), true, true, true)
+        ],
+        "the root itself is approved"
+    );
+    let Json(list) = list_with_visibility(&state, None).await;
+    let cards = list.data.unwrap();
+    let card = |id: &str| cards.iter().find(|w| w.id == id).unwrap();
+    assert_eq!(card(&root).blocker_count, Some(2));
+    assert_eq!(card(&root).human_approval_count, Some(2));
+    assert_eq!(card(&nested).human_approval_count, Some(1));
+
+    approve_current(&state, &nested, "nested").await;
+    approve_current(&state, &started, "started").await;
+    let approved = verdict(&state, &root).await;
+    assert!(approved.ready, "{:?}", approved.blockers);
+}
+
+/// A check that fails (the alignment, the approval or the rendering could not
+/// be read) is a collection error the card counts, never a missing approval
+/// and never READY: the action is to retry the check, not to approve.
+#[tokio::test]
+async fn a_failed_approval_check_is_a_blocker_not_a_missing_approval() {
+    let state = state();
+    let id = create_human(&state, "checked", serde_json::json!([bash_step()])).await;
+    let wf = load(&state, &id).await;
+    let failed =
+        crate::workflows::readiness::assess_with_approvals(&wf, &Default::default(), &mut |_| {
+            Err("repository_resource_alignments is locked".into())
+        });
+    assert!(!failed.ready, "{}", failed.summary);
+    assert_eq!(
+        failed.human_approval_count, 0,
+        "nothing for a human to approve"
+    );
+    assert_eq!(crate::workflows::readiness::counts(&failed), (1, 0));
+    let blocker = &failed.blockers[0];
+    assert_eq!(blocker.kind, WorkflowBlockerKind::CollectionError);
+    assert_eq!(blocker.workflow_id, id);
+    assert_eq!(blocker.step, None, "a workflow-level failure");
+    assert!(!blocker.human_only);
+    assert_eq!(blocker.reason, None);
+    assert!(
+        blocker.message.contains("could not run")
+            && blocker
+                .message
+                .contains("repository_resource_alignments is locked"),
+        "{}",
+        blocker.message
+    );
+    assert!(
+        blocker.action.contains("Retry") && !blocker.action.contains("approve"),
+        "{}",
+        blocker.action
     );
 }
