@@ -3109,6 +3109,48 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_to_an_outside_makefile_never_reaches_the_diagnostics() {
+        // KT-1387 — the public entry, not the reader: a hard link named like a
+        // Makefile (found by the walk) or listed by an `include` is the same
+        // file as one outside the project, and its targets must stay unread.
+        let outer = tempfile::tempdir().unwrap();
+        let proj = outer.path().join("proj");
+        let outside = outer.path().join("outside.rules");
+        write(&outside, "OUTSIDE_REVIEW_SENTINEL:\n\ttrue\nask:\n\ttrue\n");
+        write(
+            &proj.join("Makefile"),
+            "include linked.mk\ninclude linked.rules\nall:\n\ttrue\n",
+        );
+        write(
+            &proj.join("docs/AGENTS.md"),
+            "# Index\n\n[ops](operations/debug-operations.md)\n",
+        );
+        write(
+            &proj.join("docs/operations/debug-operations.md"),
+            "# Ops\n\n`make ask`\n",
+        );
+        for name in ["linked.mk", "linked.rules", "sub/Makefile", "package.json"] {
+            fs::create_dir_all(proj.join(name).parent().unwrap()).unwrap();
+            if fs::hard_link(&outside, proj.join(name)).is_err() {
+                return; // no hard links on this filesystem
+            }
+        }
+        let report = analyze_with(&proj, None).unwrap();
+        let found: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == UNKNOWN_COMMAND)
+            .collect();
+        assert_eq!(found.len(), 1, "{:#?}", report.diagnostics);
+        assert!(
+            !format!("{:#?}", report.diagnostics).contains("OUTSIDE_REVIEW_SENTINEL"),
+            "{:#?}",
+            report.diagnostics
+        );
+    }
+
     #[test]
     fn an_unknown_command_in_a_human_section_is_a_to_do_not_a_blocker() {
         let tmp = command_fixture();

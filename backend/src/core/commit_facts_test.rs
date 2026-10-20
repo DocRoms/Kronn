@@ -341,6 +341,15 @@ fn an_install_step_or_an_env_key_does_not_run_the_checker() {
     assert!(detect_tooling(hooked.path()).is_empty());
 }
 
+/// Whether a one-line shell text runs a checker, with the given scripts.
+fn runs(command: &str, scripts: &[(&str, &str)]) -> Option<Option<&'static str>> {
+    let scripts: Scripts = scripts
+        .iter()
+        .map(|(name, body)| (name.to_string(), body.to_string()))
+        .collect();
+    first_checker(&shell_commands(command, 1), &scripts)
+}
+
 #[test]
 fn a_live_line_that_runs_the_checker_is_enforcement_in_every_form() {
     for (command, tool) in [
@@ -349,7 +358,6 @@ fn a_live_line_that_runs_the_checker_is_enforcement_in_every_form() {
         ("yarn commitlint --from origin/main", "commitlint"),
         ("pnpm exec commitlint --edit", "commitlint"),
         ("npm exec -- commitlint --edit", "commitlint"),
-        ("npm run commitlint", "commitlint"),
         ("node_modules/.bin/commitlint --edit", "commitlint"),
         ("npm ci && npx commitlint --from main", "commitlint"),
         ("CI=1 commitlint --last", "commitlint"),
@@ -359,9 +367,14 @@ fn a_live_line_that_runs_the_checker_is_enforcement_in_every_form() {
             "commitizen",
         ),
         ("gitlint --commits origin/main..HEAD", "gitlint"),
+        ("sh -c 'npx commitlint --edit'", "commitlint"),
+        (
+            "if ! npx commitlint --edit \"$1\"; then exit 1; fi",
+            "commitlint",
+        ),
+        ("echo checking; npx commitlint --from HEAD~1", "commitlint"),
     ] {
-        let ran = runs_checker(command);
-        assert_eq!(ran, Some(Some(tool)), "{command}");
+        assert_eq!(runs(command, &[]), Some(Some(tool)), "{command}");
     }
     for command in [
         "npm install --save-dev @commitlint/cli",
@@ -371,9 +384,214 @@ fn a_live_line_that_runs_the_checker_is_enforcement_in_every_form() {
         "cz commit",
         "pip install gitlint",
         "make lint",
+        // KT-1387 round 3: only the executed program counts.
+        "echo 'example; commitlint --edit message'",
+        "echo \"npx commitlint\" && true",
+        "printf 'commitlint --edit' > note",
+        "npx commitlint --help",
+        "commitlint --version",
+        "npx commitlint --print-config",
+        "command -v commitlint",
+        "which commitlint",
+        "cat commitlint.config.js",
+        "rm node_modules/.bin/commitlint",
+        "x=$(npx commitlint --edit)",
+        "echo `npx commitlint`",
+        "npm run commitlint",
     ] {
-        assert_eq!(runs_checker(command), None, "{command}");
+        assert_eq!(runs(command, &[]), None, "{command}");
     }
+}
+
+#[test]
+fn a_package_script_counts_only_when_its_own_command_runs_the_checker() {
+    let real = [("commitlint", "commitlint --from HEAD~1")];
+    let echoes = [("commitlint", "echo checker is not configured")];
+    for command in [
+        "npm run commitlint",
+        "npm run-script commitlint",
+        "yarn commitlint",
+        "yarn run commitlint",
+        "pnpm run commitlint",
+    ] {
+        assert_eq!(runs(command, &real), Some(Some("commitlint")), "{command}");
+        assert_eq!(runs(command, &echoes), None, "{command}");
+    }
+    // A script under another name, calling the tool, counts as well.
+    assert_eq!(
+        runs(
+            "npm run lint:commit",
+            &[("lint:commit", "npx commitlint --edit")]
+        ),
+        Some(Some("commitlint"))
+    );
+    // One level only: a script that calls another script is not followed.
+    assert_eq!(
+        runs(
+            "npm run a",
+            &[("a", "npm run commitlint"), ("commitlint", "commitlint")]
+        ),
+        None
+    );
+    // A script the package does not define cannot be resolved.
+    assert_eq!(runs("npm run commitlint", &[("test", "jest")]), None);
+    assert_eq!(runs("npm run commitlint", &[]), None);
+    // A script that only echoes a command in a string.
+    assert_eq!(
+        runs("npm run c", &[("c", "echo 'commitlint --edit'")]),
+        None
+    );
+}
+
+fn ci_tool(body: &str, package: Option<&str>) -> Vec<Tool> {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), ".github/workflows/ci.yml", body);
+    if let Some(package) = package {
+        put(dir.path(), "package.json", package);
+    }
+    detect_tooling(dir.path())
+}
+
+#[test]
+fn the_reviewers_adversarial_ci_and_hook_cases_are_never_enforced() {
+    for (why, body) in [
+        (
+            "quoted semicolon echo",
+            "jobs:\n  t:\n    steps:\n      - run: echo 'example; commitlint --edit message'\n",
+        ),
+        (
+            "--help",
+            "jobs:\n  t:\n    steps:\n      - run: npx commitlint --help\n",
+        ),
+        (
+            "env block example",
+            "env:\n  DOCUMENTATION_EXAMPLE: |\n    npx commitlint --edit message\njobs:\n  t:\n    steps:\n      - run: echo tests\n",
+        ),
+        (
+            "env entry",
+            "jobs:\n  t:\n    env:\n      HOOK: npx commitlint\n    steps:\n      - run: make lint\n",
+        ),
+        (
+            "run example inside an env block scalar",
+            "env:\n  EXAMPLE: |\n    run: npx commitlint --edit\njobs:\n  t:\n    steps:\n      - run: make lint\n",
+        ),
+        (
+            "name label",
+            "jobs:\n  t:\n    steps:\n      - name: npx commitlint --edit\n        run: make lint\n",
+        ),
+        (
+            "heredoc body",
+            "jobs:\n  t:\n    steps:\n      - run: |\n          cat <<EOF\n          npx commitlint --edit\n          EOF\n",
+        ),
+    ] {
+        let tools = ci_tool(body, None);
+        assert!(tools.is_empty(), "{why}: {tools:?}");
+    }
+
+    // The same words with the checker configured: configured, never enforced.
+    let configured = tempfile::tempdir().unwrap();
+    put(
+        configured.path(),
+        "commitlint.config.js",
+        "module.exports = {};\n",
+    );
+    put(
+        configured.path(),
+        ".github/workflows/ci.yml",
+        "jobs:\n  t:\n    steps:\n      - run: echo 'example; commitlint --edit message'\n      - run: npx commitlint --help\n",
+    );
+    put(
+        configured.path(),
+        ".husky/commit-msg",
+        "#!/bin/sh\necho 'example; commitlint --edit message'\n",
+    );
+    let tools = detect_tooling(configured.path());
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert_eq!(tools[0].enforcement, Enforcement::ConfiguredOnly);
+}
+
+#[test]
+fn an_npm_script_that_only_echoes_is_configured_and_one_that_runs_is_enforced() {
+    let ci = "jobs:\n  t:\n    steps:\n      - run: npm run commitlint\n";
+    let echoes = ci_tool(
+        ci,
+        Some(r#"{"scripts":{"commitlint":"echo checker is not configured"}}"#),
+    );
+    // Named in package.json, run by nothing real: configured, not enforced.
+    assert_eq!(echoes.len(), 1, "{echoes:?}");
+    assert_eq!(echoes[0].enforcement, Enforcement::ConfiguredOnly);
+    let runs = ci_tool(
+        ci,
+        Some(
+            r#"{"scripts":{"commitlint":"commitlint --from HEAD~1"},"devDependencies":{"@commitlint/cli":"^19"}}"#,
+        ),
+    );
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(
+        runs[0].enforcement,
+        Enforcement::Enforced(".github/workflows/ci.yml:4".into())
+    );
+}
+
+#[test]
+fn real_multi_line_and_list_ci_commands_are_enforcement_at_their_line() {
+    // GitHub block scalar: the line of the command itself.
+    let block = ci_tool(
+        "jobs:\n  t:\n    steps:\n      - run: |\n          echo Checking\n          npx commitlint --from HEAD~1\n",
+        None,
+    );
+    assert_eq!(
+        block[0].enforcement,
+        Enforcement::Enforced(".github/workflows/ci.yml:6".into())
+    );
+    // GitLab list under `script:`, indented or at the key's own column.
+    for list in [
+        "lint:\n  script:\n    - echo go\n    - npx commitlint --from HEAD~1\n",
+        "lint:\n  script:\n  - echo go\n  - npx commitlint --from HEAD~1\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), ".gitlab-ci.yml", list);
+        let tools = detect_tooling(dir.path());
+        assert_eq!(tools.len(), 1, "{list}: {tools:?}");
+        assert_eq!(
+            tools[0].enforcement,
+            Enforcement::Enforced(".gitlab-ci.yml:4".into())
+        );
+    }
+    // Jenkins `sh` steps, single and triple quoted.
+    let dir = tempfile::tempdir().unwrap();
+    put(
+        dir.path(),
+        "Jenkinsfile",
+        "pipeline {\n  stages {\n    stage('x') {\n      steps {\n        // sh 'npx commitlint'\n        sh 'echo hi'\n        sh \"\"\"\n          npx commitlint --from HEAD~1\n        \"\"\"\n      }\n    }\n  }\n}\n",
+    );
+    let tools = detect_tooling(dir.path());
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert_eq!(
+        tools[0].enforcement,
+        Enforcement::Enforced("Jenkinsfile:8".into())
+    );
+}
+
+#[test]
+fn a_shell_text_is_split_like_a_shell_would() {
+    let cmds = shell_commands(
+        "#!/bin/sh\ncat <<'EOF'\nnpx commitlint\nEOF\necho \"a\\\nb\" ; ls \\\n -l\nx=$(date; npx commitlint)\nnpx commitlint\n",
+        1,
+    );
+    let words: Vec<(usize, Vec<&str>)> = cmds
+        .iter()
+        .map(|c| (c.line, c.words.iter().map(String::as_str).collect()))
+        .collect();
+    assert_eq!(words[0], (2, vec!["cat"]));
+    assert_eq!(words[1], (5, vec!["echo", "ab"]));
+    assert_eq!(words[2], (6, vec!["ls", "-l"]));
+    assert!(words.iter().any(|(_, w)| w[0] == "ls"), "{words:?}");
+    // The substitution is one doubtful command; the last line is its own.
+    assert!(cmds.iter().any(|c| c.doubtful));
+    let last = cmds.last().unwrap();
+    assert_eq!(last.words, ["npx", "commitlint"]);
+    assert_eq!(last.line, 9, "{words:?}");
 }
 
 #[test]

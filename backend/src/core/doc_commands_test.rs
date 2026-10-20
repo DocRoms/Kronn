@@ -608,3 +608,44 @@ fn what_includes_make_us_read_is_bounded() {
     assert!(found.included_files <= MAX_INCLUDE_FILES);
     assert!(!found.make_targets.contains("huge"));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_hard_link_is_read_by_no_path_at_all() {
+    let outside = outside_rules();
+    let (outer, proj) = jailed(
+        &[(
+            "Makefile",
+            "include linked.rules\ninclude linked.mk\ninclude glob/*.rules\n",
+        )],
+        &[("outside.rules", &outside)],
+    );
+    let target = outer.path().join("outside.rules");
+    for name in [
+        "linked.rules",
+        "linked.mk",
+        "glob/a.rules",
+        "sub/Makefile",
+        "pkg/package.json",
+        "php/composer.json",
+    ] {
+        fs::create_dir_all(proj.join(name).parent().unwrap()).unwrap();
+        if fs::hard_link(&target, proj.join(name)).is_err() {
+            return; // no hard links on this filesystem
+        }
+    }
+    let found = ProjectCommands::scan(&proj);
+    assert_eq!(found.makefiles, 1, "only the real Makefile is read");
+    assert_eq!(found.packages + found.composers, 0);
+    assert_nothing_leaks(&found.problems("`make ask`\n"));
+}
+
+#[test]
+fn a_makefile_the_walk_finds_is_read_through_the_same_single_path() {
+    // A regular, single-link Makefile and package.json still count.
+    let found = problems(
+        &[("api/Makefile", MAKEFILE), ("web/package.json", PACKAGE)],
+        "`make test` `yarn build`\n",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}

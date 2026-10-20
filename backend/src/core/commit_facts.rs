@@ -587,42 +587,242 @@ fn live_text(body: &str) -> String {
         .join("\n")
 }
 
-/// A command that checks nothing: every part of it prints, succeeds, loads the
-/// hook runner or only installs packages.
-fn is_inert(command: &str) -> bool {
-    let command = command.trim();
-    let parts = command_parts(command);
-    parts.is_empty()
-        || parts.iter().all(|part| {
-            let words = words_of(part);
-            match words.first().map(String::as_str) {
-                None => true,
-                Some("echo" | "printf" | "true" | ":" | "exit" | "set" | "source") => true,
-                Some(".") => command.contains("husky.sh"),
-                Some(_) => installs(&words),
+/// A command of a shell text, as the shell would split it: quoted strings stay
+/// one word (an `echo 'a; commitlint'` is an echo), comments and here-document
+/// bodies are gone.
+struct Cmd {
+    /// Line of the first word, counted from the text's first line.
+    line: usize,
+    words: Vec<String>,
+    /// Holds a `$( … )` or backtick substitution: what runs is not readable.
+    doubtful: bool,
+}
+
+#[derive(Default)]
+struct Lexer {
+    out: Vec<Cmd>,
+    words: Vec<String>,
+    word: String,
+    in_word: bool,
+    line: usize,
+    cmd_line: usize,
+    doubtful: bool,
+    /// Here-document delimiters waiting for the end of their line, with `<<-`.
+    heredocs: Vec<(String, bool)>,
+    heredoc_next: Option<bool>,
+}
+
+impl Lexer {
+    fn begin_word(&mut self) {
+        if !self.in_word {
+            if self.words.is_empty() {
+                self.cmd_line = self.line;
             }
-        })
+            self.in_word = true;
+        }
+    }
+
+    fn end_word(&mut self) {
+        if !self.in_word {
+            return;
+        }
+        self.in_word = false;
+        let word = std::mem::take(&mut self.word);
+        if let Some(dash) = self.heredoc_next.take() {
+            self.heredocs.push((word, dash));
+            return;
+        }
+        if let Some(rest) = word.strip_prefix("<<").filter(|r| !r.starts_with('<')) {
+            let (dash, delimiter) = match rest.strip_prefix('-') {
+                Some(delimiter) => (true, delimiter),
+                None => (false, rest),
+            };
+            if delimiter.is_empty() {
+                self.heredoc_next = Some(dash);
+            } else {
+                self.heredocs.push((delimiter.to_string(), dash));
+            }
+            return;
+        }
+        self.words.push(word);
+    }
+
+    fn end_command(&mut self) {
+        self.end_word();
+        if !self.words.is_empty() {
+            self.out.push(Cmd {
+                line: self.cmd_line,
+                words: std::mem::take(&mut self.words),
+                doubtful: self.doubtful,
+            });
+        }
+        self.doubtful = false;
+    }
+
+    /// Take `chars[from..to]` into the current word as one raw piece.
+    fn take_raw(&mut self, chars: &[char], from: usize, to: usize) {
+        self.line += chars[from..to].iter().filter(|c| **c == '\n').count();
+        self.word.extend(&chars[from..to]);
+    }
 }
 
-/// The parts of a shell line that are separate commands.
-fn command_parts(command: &str) -> Vec<&str> {
-    command
-        .split([';', '|', '&', '\n'])
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect()
+/// The index after the `$( … )` that opens at `at` (the `$`): up to its
+/// matching parenthesis, quotes and nesting honoured.
+fn skip_substitution(chars: &[char], at: usize) -> usize {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut i = at + 1;
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(open) => {
+                if c == '\\' && open == '"' {
+                    i += 1;
+                } else if c == open {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\\' => i += 1,
+                '\'' | '"' => quote = Some(c),
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    chars.len()
 }
 
-/// The words of one command, without quotes, brackets or `$(`.
-fn words_of(part: &str) -> Vec<String> {
-    part.split_whitespace()
-        .map(|word| {
-            word.trim_start_matches("$(")
-                .trim_matches(['"', '\'', '(', ')', '`'])
-                .to_string()
-        })
-        .filter(|word| !word.is_empty())
-        .collect()
+/// The simple commands of `text`, whose first line is `first_line`.
+fn shell_commands(text: &str, first_line: usize) -> Vec<Cmd> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut lex = Lexer {
+        line: first_line,
+        cmd_line: first_line,
+        ..Lexer::default()
+    };
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if let Some(open) = quote {
+            match c {
+                c if c == open => quote = None,
+                '\\' if open == '"' && next.is_some() => {
+                    i += 1;
+                    if chars[i] == '\n' {
+                        // A continuation: the line is joined to the next.
+                        lex.line += 1;
+                    } else {
+                        lex.word.push(chars[i]);
+                    }
+                }
+                '$' if open == '"' && next == Some('(') => {
+                    let end = skip_substitution(&chars, i);
+                    lex.doubtful = true;
+                    lex.take_raw(&chars, i, end);
+                    i = end;
+                    continue;
+                }
+                '`' if open == '"' => {
+                    lex.doubtful = true;
+                    lex.word.push(c);
+                }
+                '\n' => {
+                    lex.line += 1;
+                    lex.word.push(c);
+                }
+                _ => lex.word.push(c),
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '\\' => match next {
+                Some('\n') => {
+                    lex.line += 1;
+                    i += 1;
+                }
+                Some(escaped) => {
+                    lex.begin_word();
+                    lex.word.push(escaped);
+                    i += 1;
+                }
+                None => {}
+            },
+            '\'' | '"' => {
+                lex.begin_word();
+                quote = Some(c);
+            }
+            '`' => {
+                lex.begin_word();
+                lex.doubtful = true;
+                let end = chars[i + 1..]
+                    .iter()
+                    .position(|c| *c == '`')
+                    .map_or(chars.len(), |p| i + 2 + p);
+                lex.take_raw(&chars, i, end);
+                i = end;
+                continue;
+            }
+            '$' if next == Some('(') => {
+                lex.begin_word();
+                lex.doubtful = true;
+                let end = skip_substitution(&chars, i);
+                lex.take_raw(&chars, i, end);
+                i = end;
+                continue;
+            }
+            '#' if !lex.in_word => {
+                while i + 1 < chars.len() && chars[i + 1] != '\n' {
+                    i += 1;
+                }
+            }
+            ';' | '|' | '&' => lex.end_command(),
+            '\n' => {
+                lex.end_command();
+                lex.line += 1;
+                i += 1;
+                // The bodies of the here-documents opened on this line.
+                for (delimiter, dash) in std::mem::take(&mut lex.heredocs) {
+                    while i < chars.len() {
+                        let end = chars[i..]
+                            .iter()
+                            .position(|c| *c == '\n')
+                            .map_or(chars.len(), |p| i + p);
+                        let body: String = chars[i..end].iter().collect();
+                        i = (end + 1).min(chars.len());
+                        lex.line += 1;
+                        let body = if dash {
+                            body.trim_start_matches('\t')
+                        } else {
+                            body.as_str()
+                        };
+                        if body.trim_end() == delimiter {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            c if c.is_whitespace() => lex.end_word(),
+            _ => {
+                lex.begin_word();
+                lex.word.push(c);
+            }
+        }
+        i += 1;
+    }
+    lex.end_command();
+    lex.out
 }
 
 fn is_env_assignment(word: &str) -> bool {
@@ -665,6 +865,21 @@ fn installs(words: &[String]) -> bool {
             .is_some_and(|verb| VERBS.contains(&verb))
 }
 
+/// A command that checks nothing: it prints, succeeds, loads the hook runner or
+/// only installs packages.
+fn is_inert(cmd: &Cmd) -> bool {
+    let mut words = cmd
+        .words
+        .iter()
+        .skip_while(|w| is_env_assignment(w) || *w == "sudo");
+    match words.next().map(String::as_str) {
+        None => true,
+        Some("echo" | "printf" | "true" | ":" | "exit" | "set" | "source") => true,
+        Some(".") => cmd.words.iter().any(|w| w.contains("husky.sh")),
+        Some(_) => installs(&cmd.words),
+    }
+}
+
 /// Words that only launch another command: they never name the checker.
 const LAUNCHERS: &[&str] = &[
     "npx",
@@ -684,7 +899,6 @@ const LAUNCHERS: &[&str] = &[
     "zsh",
     "env",
     "time",
-    "command",
     "nohup",
     "if",
     "then",
@@ -701,66 +915,122 @@ const LAUNCHERS: &[&str] = &[
     "python3",
 ];
 
-/// Whether `command` RUNS a commit-message checker: `Some(Some(tool))` for a
-/// named one, `Some(None)` for a checker with no name here, `None` when no part
-/// of the line launches one. A checker only named (a package to install, an
-/// environment key, a comment's subject) is not run.
-fn runs_checker(command: &str) -> Option<Option<&'static str>> {
-    for part in command_parts(command) {
-        let words = words_of(part);
-        if installs(&words) {
+/// The `scripts` of the project's `package.json`, by name.
+type Scripts = BTreeMap<String, String>;
+
+fn package_scripts(project: &Path) -> Scripts {
+    let Some(body) = read_small(&project.join("package.json")) else {
+        return Scripts::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return Scripts::new();
+    };
+    json.get("scripts")
+        .and_then(|scripts| scripts.as_object())
+        .map(|scripts| {
+            scripts
+                .iter()
+                .filter_map(|(name, body)| Some((name.clone(), body.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A flag that asks the tool about itself instead of checking a message.
+const SELF_FLAGS: &[&str] = &["--help", "-h", "--version", "-V", "--print-config"];
+
+/// Whether `cmd` RUNS a commit-message checker: `Some(Some(tool))` for a named
+/// one, `Some(None)` for a checker with no name here, `None` otherwise. Only the
+/// program a command executes counts: not a word in a string, an install, an
+/// environment key, a `--help`. `npm run <script>` (and `yarn <script>`) is
+/// resolved one level to the script's own command. When unsure: `None`.
+fn command_runs_checker(
+    cmd: &Cmd,
+    scripts: &Scripts,
+    depth: usize,
+) -> Option<Option<&'static str>> {
+    if cmd.doubtful || installs(&cmd.words) {
+        return None;
+    }
+    let words = &cmd.words;
+    let mut manager: Option<&str> = None;
+    let mut via_run = false;
+    let mut binary = false;
+    let mut i = 0;
+    while i < words.len() {
+        let word = words[i].trim_start_matches(['(', '{']);
+        // `sh -c "<command>"` runs that command.
+        if word == "-c" && i > 0 && matches!(words[i - 1].as_str(), "sh" | "bash" | "zsh") {
+            let inner = words.get(i + 1)?;
+            return shell_commands(inner, cmd.line)
+                .iter()
+                .find_map(|c| command_runs_checker(c, scripts, depth));
+        }
+        if word.is_empty() || is_env_assignment(word) || word.starts_with(['-', '@']) {
+            i += 1;
             continue;
         }
-        let mut via_script = false;
-        let mut position = None;
-        for (at, word) in words.iter().enumerate() {
-            if is_env_assignment(word) || word.starts_with('-') || word.starts_with('@') {
-                continue;
+        if LAUNCHERS.contains(&word) {
+            match word {
+                "npm" | "yarn" | "pnpm" | "bun" => manager = Some(word),
+                "run" | "run-script" if manager.is_some() => via_run = true,
+                "npx" | "bunx" | "pnpx" | "exec" | "dlx" | "uvx" => binary = true,
+                _ => {}
             }
-            if LAUNCHERS.contains(&word.as_str()) {
-                via_script |= matches!(word.as_str(), "run" | "run-script");
-                continue;
-            }
-            position = Some(at);
-            break;
+            i += 1;
+            continue;
         }
-        let Some(at) = position else { continue };
-        let program = words[at].rsplit('/').next().unwrap_or("").to_lowercase();
-        let rest = &words[at + 1..];
-        let found = match program.as_str() {
+        let name = word;
+        if manager == Some("npm") && !via_run && !binary {
+            return None;
+        }
+        let by_script = via_run || (matches!(manager, Some("yarn" | "pnpm" | "bun")) && !binary);
+        if by_script {
+            if let Some(body) = scripts.get(name) {
+                if depth > 0 {
+                    return None;
+                }
+                return shell_commands(body, cmd.line)
+                    .iter()
+                    .find_map(|c| command_runs_checker(c, scripts, depth + 1));
+            }
+            if manager == Some("npm") {
+                return None;
+            }
+        }
+        let program = name.rsplit('/').next().unwrap_or("").to_lowercase();
+        let rest = &words[i + 1..];
+        if rest.iter().any(|w| SELF_FLAGS.contains(&w.as_str())) {
+            return None;
+        }
+        return match program.as_str() {
             "commitlint" => Some(Some("commitlint")),
             "gitlint" if !rest.iter().any(|w| w == "install-hook") => Some(Some("gitlint")),
             "cz" | "commitizen" if rest.iter().any(|w| w == "check") => Some(Some("commitizen")),
             "conventional-pre-commit" => Some(None),
-            // `npm run commitlint`: a script named for the tool.
-            name if via_script
-                && name.contains("commitlint")
-                && !["install", "setup", "disable", "init", "config"]
-                    .iter()
-                    .any(|skip| name.contains(skip)) =>
-            {
-                Some(Some("commitlint"))
-            }
             _ => None,
         };
-        if found.is_some() {
-            return found;
-        }
     }
     None
 }
 
+/// The first of `cmds` that runs a checker.
+fn first_checker(cmds: &[Cmd], scripts: &Scripts) -> Option<Option<&'static str>> {
+    cmds.iter()
+        .filter(|cmd| !is_inert(cmd))
+        .find_map(|cmd| command_runs_checker(cmd, scripts, 0))
+}
+
 /// A CI step that `uses:` a commit-message action, same answer as
-/// [`runs_checker`]. Only the action's own name counts, never its inputs.
-fn action_used(line: &str) -> Option<Option<&'static str>> {
-    let lowered = line.trim_start_matches('-').trim().to_lowercase();
-    let action = lowered.strip_prefix("uses:")?;
-    let action = action
+/// [`command_runs_checker`]. Only the action's own name counts, never its inputs.
+fn action_used(value: &str) -> Option<Option<&'static str>> {
+    let action = value
         .trim()
         .trim_matches(['"', '\''])
         .split('@')
         .next()
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_lowercase();
     if action.contains("commitlint") {
         Some(Some("commitlint"))
     } else if action.contains("gitlint") {
@@ -773,28 +1043,188 @@ fn action_used(line: &str) -> Option<Option<&'static str>> {
     }
 }
 
-/// The tool the live lines run, for a hook or a block of CI-like lines.
-fn tool_run_in<'a>(lines: impl IntoIterator<Item = &'a str>) -> Option<&'static str> {
-    lines
-        .into_iter()
-        .find_map(|line| runs_checker(line).flatten())
+/// What a CI file asks to run.
+enum Step {
+    /// Shell text starting at a line.
+    Shell(usize, String),
+    /// A `uses:` action.
+    Uses(usize, String),
 }
 
-/// The command a CI line carries: none for a label (`name:`) or an inert step.
-fn ci_command(text: &str) -> Option<&str> {
-    let text = text.trim_start_matches('-').trim();
-    for label in ["name:", "description:", "label:", "title:", "displayName:"] {
-        if text.starts_with(label) {
-            return None;
+/// Keys whose value is a command, in the CI systems that matter here.
+const COMMAND_KEYS: &[&str] = &[
+    "run",
+    "script",
+    "command",
+    "commands",
+    "before_script",
+    "after_script",
+    "bash",
+    "sh",
+    "pwsh",
+    "powershell",
+];
+
+fn is_block_indicator(value: &str) -> bool {
+    value.starts_with(['|', '>'])
+        && value[1..]
+            .chars()
+            .all(|c| c == '-' || c == '+' || c.is_ascii_digit())
+}
+
+/// `key: rest` when `item` opens with a bare YAML key.
+fn bare_key(item: &str) -> Option<(&str, &str)> {
+    let (key, rest) = item.split_once(':')?;
+    let bare = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    (bare && (rest.is_empty() || rest.starts_with(' '))).then_some((key, rest))
+}
+
+fn unquote_yaml(value: &str) -> &str {
+    for quote in ['"', '\''] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner;
         }
     }
-    let command = ["run:", "script:", "command:"]
-        .iter()
-        .find_map(|key| text.strip_prefix(key))
-        .unwrap_or(text)
-        .trim()
-        .trim_matches(['"', '\'']);
-    (!is_inert(command)).then_some(command)
+    value
+}
+
+/// The commands and actions of a YAML CI file: the value of a command key
+/// (inline, block scalar or list) and `uses:` lines. Any other value (an `env:`
+/// entry, an input, a block scalar holding an example) is not run by the file.
+fn yaml_steps(body: &str) -> Vec<Step> {
+    struct Open {
+        col: usize,
+        commands: bool,
+        first: usize,
+        text: String,
+    }
+    let mut out = Vec::new();
+    let mut open: Option<Open> = None;
+    let mut list_col: Option<usize> = None;
+    for (index, raw) in body.lines().enumerate() {
+        let number = index + 1;
+        let trimmed = raw.trim_start();
+        let indent = raw.len() - trimmed.len();
+        if let Some(block) = open.as_mut() {
+            if trimmed.is_empty() {
+                block.text.push('\n');
+                continue;
+            }
+            if indent > block.col {
+                if block.commands {
+                    block.text.push_str(trimmed);
+                    block.text.push('\n');
+                }
+                continue;
+            }
+            if let Some(block) = open.take().filter(|block| block.commands) {
+                out.push(Step::Shell(block.first, block.text));
+            }
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let dashed = trimmed == "-" || trimmed.starts_with("- ");
+        if let Some(col) = list_col {
+            if indent < col || (indent == col && !dashed) {
+                list_col = None;
+            }
+        }
+        let mut item = trimmed;
+        while let Some(rest) = item.strip_prefix("- ") {
+            item = rest.trim_start();
+        }
+        let col = raw.len() - item.len();
+        if let Some(value) = item.strip_prefix("uses:") {
+            out.push(Step::Uses(number, value.trim().to_string()));
+            continue;
+        }
+        match bare_key(item) {
+            Some((key, rest)) => {
+                let rest = without_comment(rest).trim();
+                let commands = COMMAND_KEYS.contains(&key);
+                if is_block_indicator(rest) {
+                    open = Some(Open {
+                        col,
+                        commands,
+                        first: number + 1,
+                        text: String::new(),
+                    });
+                } else if commands && rest.is_empty() {
+                    list_col = Some(col);
+                } else if commands {
+                    out.push(Step::Shell(number, unquote_yaml(rest).to_string()));
+                }
+            }
+            None if dashed && list_col.is_some() => {
+                let value = without_comment(item).trim();
+                if is_block_indicator(value) {
+                    open = Some(Open {
+                        col: indent,
+                        commands: true,
+                        first: number + 1,
+                        text: String::new(),
+                    });
+                } else {
+                    out.push(Step::Shell(number, unquote_yaml(item).to_string()));
+                }
+            }
+            None => {}
+        }
+    }
+    if let Some(block) = open.filter(|block| block.commands) {
+        out.push(Step::Shell(block.first, block.text));
+    }
+    out
+}
+
+/// The `sh '…'` / `sh """…"""` steps of a Jenkinsfile.
+fn jenkins_steps(body: &str) -> Vec<Step> {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        index += 1;
+        let Some(rest) = ["sh ", "sh(", "bat ", "bat(", "powershell ", "pwsh "]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+        else {
+            continue;
+        };
+        let rest = rest.trim_start().trim_start_matches("script:").trim_start();
+        if let Some((triple, after)) = ["'''", "\"\"\""]
+            .iter()
+            .find_map(|triple| rest.strip_prefix(triple).map(|after| (*triple, after)))
+        {
+            let number = index;
+            let mut text = String::new();
+            let mut current = after.to_string();
+            loop {
+                if let Some(end) = current.find(triple) {
+                    text.push_str(&current[..end]);
+                    break;
+                }
+                text.push_str(&current);
+                text.push('\n');
+                let Some(next) = lines.get(index) else { break };
+                index += 1;
+                current = next.to_string();
+            }
+            out.push(Step::Shell(number, text));
+        } else if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '\'' | '"')) {
+            if let Some(end) = rest[1..].find(quote) {
+                out.push(Step::Shell(index, rest[1..1 + end].to_string()));
+            }
+        }
+    }
+    out
 }
 
 const TOOL_KEYWORDS: &[(&str, &[&str])] = &[
@@ -812,6 +1242,7 @@ fn tool_named_in(text: &str) -> Option<&'static str> {
 
 fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
     let mut out = Vec::new();
+    let scripts = package_scripts(project);
     for rel in [
         ".husky/commit-msg",
         ".githooks/commit-msg",
@@ -821,16 +1252,13 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
             continue;
         };
         // A hook that only prints or loads the runner checks nothing, and a
-        // tool named in its comments is not run by it.
-        let live: Vec<(usize, String)> = live_lines(&body)
-            .into_iter()
-            .filter(|(_, text)| !is_inert(text))
-            .collect();
-        if let Some((first, _)) = live.first() {
+        // tool named in a comment or a string is not run by it.
+        let cmds = shell_commands(&body, 1);
+        if let Some(first) = cmds.iter().find(|cmd| !is_inert(cmd)) {
             out.push(Enforcer {
-                at: format!("{rel}:{first}"),
+                at: format!("{rel}:{}", first.line),
                 ci: false,
-                tool: tool_run_in(live.iter().map(|(_, text)| text.as_str())),
+                tool: first_checker(&cmds, &scripts).flatten(),
             });
         }
     }
@@ -853,25 +1281,21 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
                 .collect();
             // A `commit-msg:` header with no command under it (nothing but
             // comments, keys, an echo or an install) runs nothing.
-            let commands: Vec<String> = live_lines(&block[1..].join("\n"))
+            let cmds: Vec<Cmd> = yaml_steps(&block[1..].join("\n"))
                 .into_iter()
-                .filter_map(|(_, line)| {
-                    let value = line.trim_start_matches('-').trim();
-                    let command = ["run:", "script:"]
-                        .iter()
-                        .find_map(|key| value.strip_prefix(key))?
-                        .trim()
-                        .trim_matches(['"', '\'']);
-                    (!is_inert(command)).then(|| command.to_string())
+                .filter_map(|step| match step {
+                    Step::Shell(line, text) => Some(shell_commands(&text, line)),
+                    Step::Uses(..) => None,
                 })
+                .flatten()
                 .collect();
-            if commands.is_empty() {
+            if cmds.iter().all(is_inert) {
                 continue;
             }
             out.push(Enforcer {
                 at: format!("{rel}:{}", start + 1),
                 ci: false,
-                tool: tool_run_in(commands.iter().map(String::as_str)),
+                tool: first_checker(&cmds, &scripts).flatten(),
             });
         }
     }
@@ -910,18 +1334,39 @@ fn detect_enforcers(project: &Path) -> Vec<Enforcer> {
         let Some(body) = read_small(&project.join(&rel)) else {
             continue;
         };
-        // A CI step runs the tool: a comment, a `name:` label or an `echo`
-        // that mentions it does not (KT-1387).
-        for (number, line) in live_lines(&body) {
-            let Some(command) = ci_command(&line) else {
-                continue;
-            };
-            if let Some(tool) = action_used(&line).or_else(|| runs_checker(command)) {
-                out.push(Enforcer {
-                    at: format!("{rel}:{number}"),
-                    ci: true,
-                    tool,
-                });
+        // A CI file runs what its command keys and `uses:` lines say: a
+        // comment, a `name:` label, an `env:` entry or an `echo` that mentions
+        // a tool does not run it (KT-1387).
+        let steps = if rel == "Jenkinsfile" {
+            jenkins_steps(&body)
+        } else {
+            yaml_steps(&body)
+        };
+        for step in steps {
+            match step {
+                Step::Uses(number, value) => {
+                    if let Some(tool) = action_used(&value) {
+                        out.push(Enforcer {
+                            at: format!("{rel}:{number}"),
+                            ci: true,
+                            tool,
+                        });
+                    }
+                }
+                Step::Shell(number, text) => {
+                    for cmd in shell_commands(&text, number) {
+                        if is_inert(&cmd) {
+                            continue;
+                        }
+                        if let Some(tool) = command_runs_checker(&cmd, &scripts, 0) {
+                            out.push(Enforcer {
+                                at: format!("{rel}:{}", cmd.line),
+                                ci: true,
+                                tool,
+                            });
+                        }
+                    }
+                }
             }
         }
     }

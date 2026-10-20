@@ -48,9 +48,9 @@ pub(crate) struct ProjectCommands {
     /// Makefiles already read (found by the walk or by an `include`).
     read_makefiles: BTreeSet<PathBuf>,
     makefiles: usize,
-    /// Files and bytes read through `include` lines (bounded).
+    /// Files read through `include` lines, and bytes read overall (bounded).
     included_files: usize,
-    included_bytes: usize,
+    read_bytes: usize,
     make_targets: BTreeSet<String>,
     make_patterns: Vec<(String, String)>,
     /// A target name built by make itself (`$(…)`): the list cannot be closed.
@@ -126,25 +126,60 @@ impl ProjectCommands {
         if !is_makefile && name != "package.json" && name != "composer.json" {
             return;
         }
-        let Ok(body) = fs::read_to_string(path) else {
+        let Ok(rel) = path.strip_prefix(&self.root).map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(body) = self.read_text(&rel, false) else {
             return;
         };
         match name {
             "package.json" => self.read_package(&body),
             "composer.json" => self.read_composer(&body),
-            _ => self.read_makefile(path, &body, 0),
+            _ => self.read_makefile(&rel, &body, 0),
         }
+    }
+
+    /// THE way this module reads a file of the project (the walk's Makefiles,
+    /// `package.json`, `composer.json` and every `include`d file): through
+    /// [`rooted_io::read`], which opens nothing below the root through a link
+    /// and refuses anything but a regular file with a single link, so neither
+    /// a symlink nor a hard link can bring outside text into a diagnostic.
+    /// Bounded in bytes per file and overall; `included` also counts the file
+    /// against the include budget.
+    fn read_text(&mut self, rel: &Path, included: bool) -> Option<String> {
+        if included && self.included_files >= MAX_INCLUDE_FILES {
+            return None;
+        }
+        let size = fs::symlink_metadata(self.root.join(rel)).ok()?.len();
+        if size > MAX_INCLUDE_FILE_BYTES
+            || self.read_bytes.saturating_add(size as usize) > MAX_INCLUDE_TOTAL_BYTES
+        {
+            return None;
+        }
+        let bytes = rooted_io::read(&self.root, rel).ok()?;
+        if bytes.len() as u64 > MAX_INCLUDE_FILE_BYTES {
+            return None;
+        }
+        if included {
+            self.included_files += 1;
+        }
+        self.read_bytes += bytes.len();
+        String::from_utf8(bytes).ok()
     }
 
     /// The targets a Makefile declares: rules (indented or not), names listed
     /// in `.PHONY`, and whatever the files it `include`s declare.
-    fn read_makefile(&mut self, path: &Path, body: &str, depth: usize) {
-        let key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        if !self.read_makefiles.insert(key) {
+    ///
+    /// `rel` is the file's path under the project root (never a link: the
+    /// body came from [`Self::read_text`]) and doubles as the already-read key.
+    fn read_makefile(&mut self, rel: &Path, body: &str, depth: usize) {
+        if !self.read_makefiles.insert(rel.to_path_buf()) {
             return;
         }
         self.makefiles += 1;
-        let dir = path.parent().unwrap_or(&self.root).to_path_buf();
+        let dir = self
+            .root
+            .join(rel.parent().unwrap_or_else(|| Path::new("")));
         let mut raw_lines = body.lines();
         let mut in_define = 0usize;
         while let Some(first) = raw_lines.next() {
@@ -289,9 +324,8 @@ impl ProjectCommands {
                 continue;
             }
             for file in files {
-                if let Some(body) = self.read_included_file(&file) {
-                    let path = self.root.join(&file);
-                    self.read_makefile(&path, &body, depth);
+                if let Some(body) = self.read_text(&file, true) {
+                    self.read_makefile(&file, &body, depth);
                 }
             }
             return;
@@ -319,24 +353,6 @@ impl ProjectCommands {
             return None;
         }
         Some(parts.into_iter().collect())
-    }
-
-    /// One included file's text, within the bounds and without following any
-    /// link below the project root.
-    fn read_included_file(&mut self, rel: &Path) -> Option<String> {
-        if self.included_files >= MAX_INCLUDE_FILES {
-            return None;
-        }
-        let size = fs::symlink_metadata(self.root.join(rel)).ok()?.len();
-        if size > MAX_INCLUDE_FILE_BYTES
-            || self.included_bytes.saturating_add(size as usize) > MAX_INCLUDE_TOTAL_BYTES
-        {
-            return None;
-        }
-        let bytes = rooted_io::read(&self.root, rel).ok()?;
-        self.included_files += 1;
-        self.included_bytes += bytes.len();
-        String::from_utf8(bytes).ok()
     }
 
     fn read_package(&mut self, body: &str) {
