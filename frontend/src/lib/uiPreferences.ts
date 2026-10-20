@@ -29,6 +29,7 @@ export const SYNCED_KEYS: readonly string[] = [
   'kronn:new-discussion:default-project',
   'kronn:ttsEnabled',
   'kronn:showDiscussionNotes',
+  'kronn:showOrchestrationMessages',
   'kronn:searchScope',
   'kronn:discHeaderDetails',
   'kronn:projectDetailView',

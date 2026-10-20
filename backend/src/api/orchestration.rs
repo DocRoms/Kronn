@@ -9388,6 +9388,7 @@ pub(crate) fn orchestrator_message(id: String, content: String) -> DiscussionMes
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     }
 }
 
@@ -9447,6 +9448,7 @@ fn build_control_offer_message(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     }
 }
 
@@ -13022,6 +13024,16 @@ async fn bounded_media_capabilities(
     .collect()
 }
 
+/// The connections the catalogue lists, plus the local ComfyUI when a media
+/// slot is set (KT-1381): it is reached like a connection, never stored.
+fn with_local_media_source(
+    mut connections: Vec<crate::models::ExternalApiConnection>,
+    config: &crate::models::AppConfig,
+) -> Vec<crate::models::ExternalApiConnection> {
+    connections.extend(crate::api::comfyui::local_connection(&config.comfyui));
+    connections
+}
+
 pub(crate) async fn task_worker_catalogue_for_discussion(
     state: &AppState,
     parent_discussion_id: &str,
@@ -13041,13 +13053,14 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
                 .collect::<Result<Vec<_>>>()
         })
         .await?;
-    let connections = state
+    let mut connections = state
         .db
         .with_read_conn(crate::db::external_api_connections::list)
         .await
         .unwrap_or_default();
     let mut detections = crate::agents::detect_all_cached(false).await;
     let config = state.config.read().await.clone();
+    connections = with_local_media_source(connections, &config);
     crate::agents::apply_configured_status(&mut detections, &config);
     // The network reads share one window rather than adding up.
     let (reachability, connection_reachability, media_capabilities) = tokio::join!(
@@ -15503,6 +15516,53 @@ pub(crate) mod tests {
         let Json(accepted) = prepare(ModelTier::Economy).await;
         let preparation = accepted.data.expect("a preflight answers");
         assert!(preparation.launchable, "{:#?}", preparation.reasons);
+    }
+
+    /// KT-1381 — the local ComfyUI shows up in agent_list with its media and
+    /// the envelope its workflows accept, and only once a slot is set.
+    #[test]
+    fn the_local_comfyui_is_listed_with_its_media_once_a_slot_is_set() {
+        let mut config = crate::core::config::default_config();
+        assert!(with_local_media_source(Vec::new(), &config).is_empty());
+        config.comfyui.image_model = Some("RealVisXL_V5.0_fp16.safetensors".into());
+        let connections = with_local_media_source(Vec::new(), &config);
+        assert_eq!(connections.len(), 1);
+        let capabilities = vec![MediaCapabilityEntry {
+            connection_id: crate::core::comfyui::CONNECTION_ID.into(),
+            modality: crate::models::MediaModality::Image,
+            model: "RealVisXL_V5.0_fp16.safetensors".into(),
+            capabilities: crate::api::comfyui::capabilities(
+                "RealVisXL_V5.0_fp16.safetensors",
+                crate::models::MediaModality::Image,
+            ),
+        }];
+        let catalogue = build_task_worker_catalogue(
+            &config,
+            &[],
+            &[],
+            &connections,
+            &WorkerPreflight {
+                media_capabilities: &capabilities,
+                ..Default::default()
+            },
+        );
+        let entry = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.connection_id.as_deref() == Some("local:comfyui"))
+            .expect("the local ComfyUI entry");
+        assert_eq!(entry.label, "ComfyUI (local)");
+        assert_eq!(entry.media.len(), 1);
+        assert_eq!(entry.media[0].model, "RealVisXL_V5.0_fp16.safetensors");
+        let envelope = entry.media[0]
+            .capabilities
+            .as_ref()
+            .expect("the local envelope");
+        assert!(envelope.aspect_ratios.contains(&"16:9".to_string()));
+        assert!(
+            entry.tiers.iter().all(|tier| tier.resolved_model.is_none()),
+            "no chat tier"
+        );
     }
 
     #[test]

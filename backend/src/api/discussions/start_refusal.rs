@@ -314,6 +314,7 @@ pub(crate) async fn record_refusal_card(
         session_tokens_at_message: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
         model: start.model,
         lint_report: None,
         id: Uuid::new_v4().to_string(),

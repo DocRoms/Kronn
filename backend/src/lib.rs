@@ -2118,6 +2118,15 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // source that could not answer.
         .route("/api/rtk/state", get(api::rtk_state::rtk_state))
         // ── Ollama (local LLM) ──
+        .route("/api/comfyui/status", get(api::comfyui::status))
+        .route("/api/comfyui/slots", put(api::comfyui::set_slots))
+        .route("/api/comfyui/source", get(api::comfyui::source))
+        .route("/api/comfyui/pull", post(api::comfyui::pull))
+        .route("/api/comfyui/settings", put(api::comfyui::set_settings))
+        .route(
+            "/api/comfyui/model-family",
+            put(api::comfyui::set_model_family),
+        )
         .route("/api/ollama/health", get(api::ollama::health))
         .route("/api/ollama/models", get(api::ollama::models))
         .route("/api/ollama/registry", get(api::ollama::registry))
@@ -2601,6 +2610,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/quick-execs",
             get(api::quick_execs::list).post(api::quick_execs::create),
+        )
+        .route(
+            "/api/quick-execs/pending-approvals",
+            get(api::quick_execs::pending_approvals),
         )
         .route(
             "/api/quick-execs/{id}",

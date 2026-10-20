@@ -140,7 +140,13 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # KT-1347: `disk_usage` no longer exposes `purge_orphans` (the purge is a human
 # action; the route is not on the bridge), so its description and schema shrink;
 # re-measured on the tree merged with KT-1329/KT-1320 (84_894 -> 84_860).
-CATALOGUE_MAX_BYTES = 84_860
+# KT-1401: `disc_append` says a refused `kronn-question` comes back in
+# `invalid_cards`; paid for by dropping two schema descriptions that restated
+# the tool description (`content`, `wait_for_reply`): -14 B. The heaviest
+# declaration went 2_746 -> 2_732.
+# KT-1381: `media_generate` says "media source" (the local ComfyUI counts),
+# 3 B shorter than "HTTP connection"; the ComfyUI detail lives in its manual.
+CATALOGUE_MAX_BYTES = 84_843
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
@@ -149,7 +155,7 @@ CATALOGUE_MAX_BYTES = 84_860
 # Also corrected: this used to add raw `description` bytes to a separately
 # serialised schema, which counted neither the JSON envelope nor the escaping. It
 # now measures the whole declaration exactly as sent.
-DECLARATION_MAX_BYTES = 2_746
+DECLARATION_MAX_BYTES = 2_732
 
 # Tools allowed above DECLARATION_MAX_BYTES, with the reason. An entry here is a
 # debt acknowledged in writing, not an exemption to forget: shrink the tool and

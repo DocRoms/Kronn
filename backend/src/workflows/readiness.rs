@@ -6,20 +6,34 @@
 use std::collections::HashMap;
 
 use crate::models::{
-    AgentType, StepType, Workflow, WorkflowBlocker, WorkflowBlockerKind, WorkflowReadiness,
-    WorkflowStep,
+    AgentType, BlockedQuickExec, QuickExec, StepType, Workflow, WorkflowBlocker,
+    WorkflowBlockerKind, WorkflowReadiness, WorkflowStep,
 };
 
 const HUMAN_APPROVAL_ACTION: &str = "Ask a human to review and approve this line in the \
      workflow editor. An agent cannot approve it: never rewrite the line to dodge the approval.";
+const QUICK_EXEC_APPROVAL_ACTION: &str = "Ask a human to approve this saved Quick Exec, from \
+     the workflow page or the Quick Exec's own form. An agent cannot approve it: never rewrite \
+     the line to dodge the approval.";
 const SCRIPT_APPROVAL_ACTION: &str = "Ask a human to open the step in the workflow editor and \
      save it, which approves the script's current content. An agent cannot pin a script hash.";
 
 /// The readiness of `root`, resolving sub-workflows through `workflows`
 /// (`root` itself need not be in it).
 pub fn assess(root: &Workflow, workflows: &HashMap<String, Workflow>) -> WorkflowReadiness {
+    assess_with(root, workflows, &HashMap::new())
+}
+
+/// [`assess`] that also reads the saved Quick Execs CollectApiData sources run
+/// by id (KT-1398): a line awaiting a human's approval there is a blocker too.
+pub fn assess_with(
+    root: &Workflow,
+    workflows: &HashMap<String, Workflow>,
+    quick_execs: &HashMap<String, QuickExec>,
+) -> WorkflowReadiness {
     let mut walk = Walk {
         workflows,
+        quick_execs,
         root,
         path: Vec::new(),
         checked: Vec::new(),
@@ -43,6 +57,7 @@ pub fn collection_failure(root: &Workflow, error: &str) -> WorkflowReadiness {
         message: format!("The readiness check could not run: {error}"),
         action: "Retry the check (workflow_validate); do not report the workflow as ready.".into(),
         human_only: false,
+        quick_exec: None,
     };
     finish(root, vec![root.id.clone()], vec![blocker])
 }
@@ -57,6 +72,7 @@ pub fn counts(readiness: &WorkflowReadiness) -> (u32, u32) {
 
 struct Walk<'a> {
     workflows: &'a HashMap<String, Workflow>,
+    quick_execs: &'a HashMap<String, QuickExec>,
     root: &'a Workflow,
     path: Vec<String>,
     checked: Vec<String>,
@@ -106,6 +122,54 @@ impl Walk<'_> {
                      another agent for this step (workflow_update)."
                 ),
                 human_only: false,
+                quick_exec: None,
+            });
+        }
+    }
+
+    /// Saved Quick Execs a CollectApiData step runs by id, whose line waits for
+    /// a human's approval: the run refuses them, so the page lists them first.
+    fn quick_exec_blockers(&mut self, wf: &Workflow, step: &WorkflowStep, on_failure: bool) {
+        if step.step_type != StepType::CollectApiData {
+            return;
+        }
+        let Some(collect) = step.collect_api_data.as_ref() else {
+            return;
+        };
+        for source in &collect.sources {
+            let id = source.quick_exec_id.trim();
+            if source.quick_exec.is_some() || id.is_empty() {
+                continue;
+            }
+            let Some(exec) = self.quick_execs.get(id) else {
+                continue;
+            };
+            let Some((program, message)) = crate::core::inline_code::quick_exec_approval_needed(
+                &exec.name,
+                &exec.command,
+                &exec.args,
+                exec.unmodelled_args_approved == Some(true),
+                exec.agent_written == Some(true),
+            ) else {
+                continue;
+            };
+            self.blockers.push(WorkflowBlocker {
+                workflow_id: wf.id.clone(),
+                workflow_name: wf.name.clone(),
+                step: Some(step.name.clone()),
+                on_failure,
+                kind: WorkflowBlockerKind::HumanApproval,
+                phase: Some("source".into()),
+                reason: Some("unmodelled_program".into()),
+                message,
+                action: QUICK_EXEC_APPROVAL_ACTION.into(),
+                human_only: true,
+                quick_exec: Some(BlockedQuickExec {
+                    id: exec.id.clone(),
+                    name: exec.name.clone(),
+                    source_alias: source.alias.clone(),
+                    program,
+                }),
             });
         }
     }
@@ -127,6 +191,7 @@ impl Walk<'_> {
         for (chain, on_failure) in [(&wf.steps, false), (&wf.on_failure, true)] {
             for step in chain {
                 self.blockers.extend(step_blockers(wf, step, on_failure));
+                self.quick_exec_blockers(wf, step, on_failure);
                 self.full_access_blockers(wf, step, on_failure);
             }
         }
@@ -164,6 +229,7 @@ impl Walk<'_> {
             message,
             action: action.to_string(),
             human_only: false,
+            quick_exec: None,
         };
         if nested && self.path.iter().any(|ancestor| ancestor == target) {
             let cycle = blocker(
@@ -221,6 +287,7 @@ fn step_blockers(wf: &Workflow, step: &WorkflowStep, on_failure: bool) -> Vec<Wo
         message,
         action,
         human_only,
+        quick_exec: None,
     };
     let mut found = Vec::new();
     if let Err(message) = crate::api::workflows::validate_step_required_fields(step) {

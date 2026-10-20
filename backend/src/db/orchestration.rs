@@ -2854,6 +2854,7 @@ fn announce_integration_refusal(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -5005,6 +5006,7 @@ fn publish_campaign_gate_card(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -5157,6 +5159,7 @@ fn notify_principal_of_terminal(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -5278,6 +5281,7 @@ fn return_cli_worker_to_origin(
         recovered_partial: false,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let child_message = message(
         format!("orch-return-child:{exec_id}:{terminal}"),
@@ -6607,6 +6611,7 @@ fn notify_principal_of_timeout(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(

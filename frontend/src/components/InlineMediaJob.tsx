@@ -5,7 +5,7 @@
 // made the card disappear on success. The root stays stable for every state;
 // the completed asset opens through the canonical Assets viewer.
 import { useEffect, useState } from 'react';
-import { ExternalLink, Image as ImageIcon, Sparkles } from 'lucide-react';
+import { ExternalLink, Image as ImageIcon, RotateCcw, Sparkles } from 'lucide-react';
 import { RunStatusCard } from './RunStatusCard';
 import { useT } from '../lib/I18nContext';
 import { mediaRunDetails } from '../lib/mediaRunResult';
@@ -13,18 +13,23 @@ import { sharedRunStatusCardModel } from '../lib/runStatusCardModel';
 import { discussions as discussionsApi } from '../lib/api';
 import type { SharedRun } from '../types/generated';
 
+const FAILED_STATUSES = new Set<SharedRun['status']>(['failed', 'timeout', 'preflight_failed']);
+
 export function InlineMediaJob({
   discussionId,
   messageId,
   prompt,
   run,
   onOpenAsset,
+  onRetry,
 }: {
   discussionId: string;
   messageId: string;
   prompt: string;
   run: SharedRun;
   onOpenAsset: (assetId: string) => void;
+  /** KT-1214 — reopen the Creator with this prompt and modality. */
+  onRetry?: (prompt: string, modality: 'image' | 'video') => void;
 }) {
   const { t } = useT();
   const details = mediaRunDetails(run.result);
@@ -101,6 +106,28 @@ export function InlineMediaJob({
             {modality === 'video'
               ? <video src={previewUrl} controls aria-label={t('disc.media.playerLabel', prompt)} />
               : <img src={previewUrl} alt={prompt} />}
+          </div>
+        )}
+        {FAILED_STATUSES.has(run.status) && (
+          // The card already states why; this says with what, and offers the
+          // way out: the Creator, prefilled, where another source can be chosen.
+          <div className="disc-media-msg-failure" data-testid="media-bubble-failure">
+            {details?.model && (
+              <p className="disc-media-msg-source">
+                <span>{t('disc.media.failedModel')}</span> <code>{details.model}</code>
+              </p>
+            )}
+            {onRetry && modality && (
+              <button
+                type="button"
+                className="btn btn-sm disc-media-msg-open"
+                onClick={() => onRetry(prompt, modality)}
+                data-testid="media-bubble-retry"
+              >
+                <RotateCcw size={14} aria-hidden="true" />
+                <span>{t('disc.media.retry')}</span>
+              </button>
+            )}
           </div>
         )}
         {run.status === 'success' && assetId && (

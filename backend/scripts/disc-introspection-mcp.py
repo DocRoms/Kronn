@@ -679,7 +679,8 @@ TOOLS = [
         "name": "disc_append",
         "description": (
             "Post to the bound room. Human decision → `kronn-question` fence "
-            "(`tool_manual disc_question_list`). NEVER invent a pseudo: the human is `@user`; "
+            "(`tool_manual disc_question_list`); a refused one returns in `invalid_cards`: repost. "
+            "NEVER invent a pseudo: the human is `@user`; "
             "native aliases are `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
             "`@copilot`, `@ollama`; a joined CLI requires its exact `@…-cli[-N]` alias "
             "from `disc_meta`; ambiguous bare aliases are refused. POSTING ALSO LISTENS unless "
@@ -690,7 +691,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "Message text."},
+                "content": {"type": "string"},
                 "role": {"type": "string", "description": "Default Agent; User is for imports."},
                 "channel": {"type": "string", "enum": ["main", "note"], "description": "Default main; notes do not wake."},
                 "agent_type": {"type": "string", "description": "Normally inferred."},
@@ -715,7 +716,7 @@ TOOLS = [
                     "items": {"type": "string"},
                     "description": "Unique local files; atomic upload, max 8 × 10 MB.",
                 },
-                "wait_for_reply": {"type": "boolean", "description": "Default true."},
+                "wait_for_reply": {"type": "boolean"},
                 "source_msg_id": {"type": "string", "description": "Explicit dedup key."},
                 "wait_timeout_secs": {"type": "integer", "description": "Default 60 s."},
                 "disc_id": {"type": "string", "description": "Defaults to the bound discussion."},
@@ -2381,7 +2382,7 @@ TOOLS = [
     {
         "name": "media_generate",
         "description": (
-            "Generate an image/video on a configured HTTP connection; returns "
+            "Generate an image/video on a configured media source; returns "
             "`{job_id, status, model}`. The configured slot fixes the model; a "
             "missing one is refused with setup guidance. Billed: video per "
             "second, image per picture; audio (on unless `generate_audio: "
@@ -10644,6 +10645,11 @@ TOOL_MANUALS["media_generate"] = (
     "`agent_list` entry whose `media` has that modality — `agent_list` answers in "
     "every discussion — or pass its alias (`openrouter`) or display name. The "
     "answer says which connection was billed.\n\n"
+    "Local ComfyUI. When the operator set a ComfyUI model, `agent_list` also "
+    "lists `local:comfyui` (alias `comfyui`): images and videos generated on "
+    "this machine, billed nothing, with no source image (`reference_asset_ids` "
+    "is refused there). It is slow: about a minute for an image, around ten "
+    "for two seconds of video, so prefer `wake_when_ready` over `wait`.\n\n"
     "Parameters come from the model, not from habit. `agent_list` returns one "
     "entry per configured media slot, each carrying the `capabilities` the "
     "provider advertises: `durations_secs`, `resolutions`, `aspect_ratios`, "

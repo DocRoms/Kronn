@@ -315,6 +315,15 @@ pub fn fail(
     Ok(())
 }
 
+/// Adds what happened after a job settled (its status stays).
+pub fn note_error(conn: &Connection, id: &str, note: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE media_jobs SET last_error = ?2 WHERE id = ?1",
+        params![id, note],
+    )?;
+    Ok(())
+}
+
 /// Cancels a job that has not finished. Terminal jobs are left alone so a
 /// completed — and billed — generation is never rewritten as cancelled.
 pub fn cancel(conn: &Connection, id: &str, now: DateTime<Utc>) -> Result<bool> {

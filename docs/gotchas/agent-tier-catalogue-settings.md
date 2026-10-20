@@ -128,7 +128,7 @@ caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
 [src: file: frontend/src/components/ChatHeader.tsx:430-431#currentModel]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1612-1643#changeQuickPromptAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3227-3228#currentModel]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3230-3231#currentModel]
 
 KT-627 separately removed the HTTP runner's embedded fallback and qualified
 production-library resolution/preflight. The final migration and cross-surface
@@ -181,9 +181,9 @@ and an explicit error; typing within an open palette does not refetch.
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/components/MentionTierChoices.tsx:7-15#MentionTierChoices]
 [src: file: frontend/src/components/MentionTierChoices.tsx:39-44#lastChecked]
-[src: file: frontend/src/components/ChatInput.tsx:510#useModelCatalogSnapshot]
-[src: file: frontend/src/components/ChatInput.tsx:734-744#mentionTierResolution]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:197#useModelCatalogSnapshot]
+[src: file: frontend/src/components/ChatInput.tsx:517#useModelCatalogSnapshot]
+[src: file: frontend/src/components/ChatInput.tsx:741-751#mentionTierResolution]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:201#useModelCatalogSnapshot]
 
 Untouched principal insertion preserves its saved model override and does not
 write a tier preference. Explicit tier choices resolve their own configuration.
@@ -194,7 +194,7 @@ keep their exact session and stable ordinal, expose no model tier, and do not
 change native preferences. New-discussion submissions retain the immutable
 connection and explicitly selected tier.
 [src: file: frontend/src/lib/mentionTierSelection.ts:6-16#nextMentionTierIndex]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:874-880#applyMentionSuggestion]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:879-885#applyMentionSuggestion]
 [src: file: frontend/src/components/NewDiscussionForm.tsx:646-653#initialTargets]
 [src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:149-157#untouched]
 [src: file: frontend/src/components/__tests__/ComposerMentionCatalog.test.tsx:159-170#persists]
@@ -214,8 +214,8 @@ explicitly unverified. A joined CLI's results never inherit a native catalogue
 tier. Canonical alias prefixes rank before additional substring matches, so
 typing `@co` still highlights Codex before a Claude Code substring result.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:53-62#matchesCatalogSearch]
-[src: file: frontend/src/components/ChatInput.tsx:745-762#mentionMatchesQuery]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:231-234#matchingMentionTargets]
+[src: file: frontend/src/components/ChatInput.tsx:752-769#mentionMatchesQuery]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:235-238#matchingMentionTargets]
 [src: file: frontend/src/lib/mention-autocomplete.ts:7-10#mentionMatchRank]
 
 The unfinished search token accepts Unicode letters and common model-ID
@@ -332,7 +332,7 @@ Resending the same agent no longer clears an existing connection or invalidates
 the summary cache. A lightweight agent lookup avoids loading the transcript
 merely to compare targets.
 [src: file: backend/src/models/discussions.rs:609-618#connection_id]
-[src: file: backend/src/api/discussions/crud.rs:787-817#validate_connection_target]
+[src: file: backend/src/api/discussions/crud.rs:788-818#validate_connection_target]
 [src: file: backend/src/api/discussions/crud.rs:859-883#invalidate_summary_cache]
 [src: file: backend/src/db/discussions.rs:1094-1103#get_discussion_agent]
 

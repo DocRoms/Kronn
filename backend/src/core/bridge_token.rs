@@ -1920,6 +1920,8 @@ pub fn residence(
             .query_row("SELECT 1 FROM projects WHERE id = ?1", [id], |_| Ok(()))
             .optional()?
             .map(|()| single_or_global(Some(id.to_owned())))),
+        // The local ComfyUI media source (KT-1381) is a connection no row holds.
+        Kind::Connection if crate::api::comfyui::names_local(id) => Ok(Some(Residence::Global)),
         Kind::Connection => Ok(conn
             .query_row(
                 // The media route also takes a connection by alias or name.

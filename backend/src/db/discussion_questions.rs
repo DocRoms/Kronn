@@ -245,11 +245,85 @@ fn valid_resume_variable(key: &str, value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn parse_spec(body: &str) -> Option<QuestionSpec> {
-    if body.len() > 24_000 {
-        return None;
+const QUESTION_MAX: usize = 1000;
+const CONTEXT_MAX: usize = 4000;
+const LABEL_MAX: usize = 250;
+const DESCRIPTION_MAX: usize = 1000;
+
+/// `text` cut to at most `max` characters, at a word boundary when one lies in
+/// the second half of the cut, with an ellipsis saying it was cut.
+fn cut_at_word(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
     }
-    let spec: QuestionSpec = serde_json::from_str(body).ok()?;
+    let head: String = text.chars().take(max - 1).collect();
+    let on_boundary = text.chars().nth(max - 1).is_some_and(char::is_whitespace);
+    let kept = if on_boundary {
+        head.as_str()
+    } else {
+        match head.rfind(char::is_whitespace) {
+            Some(at) if at >= head.len() / 2 => &head[..at],
+            _ => head.as_str(),
+        }
+    };
+    format!("{}…", kept.trim_end())
+}
+
+/// A label too long for its bound is cut at a word and its full text moves to
+/// the description, ahead of whatever the agent wrote there. An over-long
+/// description has no further place to go: it is cut.
+fn spill_label(label: &mut String, description: &mut Option<String>) {
+    if label.chars().count() > LABEL_MAX {
+        let full = label.trim().to_string();
+        *label = cut_at_word(&full, LABEL_MAX);
+        *description = Some(match description.take().filter(|d| !d.trim().is_empty()) {
+            Some(existing) => format!("{full}\n\n{existing}"),
+            None => full,
+        });
+    }
+    if let Some(text) = description.as_mut() {
+        if text.chars().count() > DESCRIPTION_MAX {
+            *text = cut_at_word(text, DESCRIPTION_MAX);
+        }
+    }
+}
+
+/// KT-1401 — a card whose only fault is a text longer than its bound is
+/// recorded with that text shortened, never dropped: a card the human sees but
+/// cannot answer is worse than a shortened one. The full text of a label or a
+/// question stays readable (description / context).
+fn normalize_lengths(spec: &mut QuestionSpec) {
+    if spec.question.chars().count() > QUESTION_MAX {
+        let full = spec.question.trim().to_string();
+        spec.question = cut_at_word(&full, QUESTION_MAX);
+        spec.context = Some(match spec.context.take().filter(|c| !c.trim().is_empty()) {
+            Some(existing) => format!("{full}\n\n{existing}"),
+            None => full,
+        });
+    }
+    if let Some(context) = spec.context.as_mut() {
+        if context.chars().count() > CONTEXT_MAX {
+            *context = cut_at_word(context, CONTEXT_MAX);
+        }
+    }
+    for option in &mut spec.options {
+        spill_label(&mut option.label, &mut option.description);
+    }
+    for item in &mut spec.items {
+        spill_label(&mut item.label, &mut item.description);
+    }
+}
+
+/// Parse and validate one `kronn-question` fence. The error is the reason the
+/// card cannot be recorded, in words the agent can act on.
+fn parse_spec(body: &str) -> Result<QuestionSpec, String> {
+    if body.len() > 24_000 {
+        return Err("the fence is longer than 24000 characters".into());
+    }
+    let mut spec: QuestionSpec = serde_json::from_str(body)
+        .map_err(|e| cut_at_word(&format!("the fence is not a valid question: {e}"), 300))?;
+    normalize_lengths(&mut spec);
     let ids = spec
         .options
         .iter()
@@ -260,52 +334,71 @@ fn parse_spec(body: &str) -> Option<QuestionSpec> {
         .iter()
         .map(|item| item.id.as_str())
         .collect::<std::collections::HashSet<_>>();
-    (spec.version == 1
-        && spec.td_errors.is_none()
-        && stable_key(&spec.key)
-        && nonempty_bounded(&spec.question, 1000)
-        && spec
-            .context
+    let check = |ok: bool, reason: &str| ok.then_some(()).ok_or_else(|| reason.to_string());
+    check(spec.version == 1, "`version` must be the number 1")?;
+    check(
+        spec.td_errors.is_none(),
+        "`td_errors` is written by Kronn only",
+    )?;
+    check(
+        stable_key(&spec.key),
+        "`key` must be 1-100 characters among letters, digits, `-`, `_` and `.`",
+    )?;
+    check(
+        !spec.question.trim().is_empty(),
+        "`question` must not be empty",
+    )?;
+    check(
+        spec.task_ref
             .as_ref()
-            .is_none_or(|s| s.chars().count() <= 4000)
-        && spec
-            .task_ref
-            .as_ref()
-            .is_none_or(|s| nonempty_bounded(s, 100))
-        && spec.options.len() <= 8
-        && ids.len() == spec.options.len()
-        && spec.options.iter().all(|o| {
-            stable_key(&o.id)
-                && nonempty_bounded(&o.label, 250)
-                && o.description
-                    .as_ref()
-                    .is_none_or(|s| s.chars().count() <= 1000)
-        })
-        && spec.items.len() <= 8
-        && item_ids.len() == spec.items.len()
-        && spec.items.iter().all(|item| {
-            stable_key(&item.id)
-                && nonempty_bounded(&item.label, 250)
-                && item
-                    .description
-                    .as_ref()
-                    .is_none_or(|value| value.chars().count() <= 1000)
-        })
-        && (spec.items.is_empty() || !spec.options.is_empty())
-        && spec
-            .recommended_option_ids
+            .is_none_or(|s| nonempty_bounded(s, 100)),
+        "`task_ref` must be 1-100 characters",
+    )?;
+    check(spec.options.len() <= 8, "at most 8 options are allowed")?;
+    check(ids.len() == spec.options.len(), "option ids must be unique")?;
+    check(
+        spec.options
             .iter()
-            .all(|id| ids.contains(id.as_str()))
-        && (spec.multiple || spec.recommended_option_ids.len() <= 1)
-        && spec.resume.as_ref().is_none_or(|resume| {
+            .all(|o| stable_key(&o.id) && !o.label.trim().is_empty()),
+        "every option needs a stable `id` (letters, digits, `-`, `_`, `.`) and a non-empty `label`",
+    )?;
+    check(spec.items.len() <= 8, "at most 8 items are allowed")?;
+    check(
+        item_ids.len() == spec.items.len(),
+        "item ids must be unique",
+    )?;
+    check(
+        spec.items
+            .iter()
+            .all(|item| stable_key(&item.id) && !item.label.trim().is_empty()),
+        "every item needs a stable `id` (letters, digits, `-`, `_`, `.`) and a non-empty `label`",
+    )?;
+    check(
+        spec.items.is_empty() || !spec.options.is_empty(),
+        "items need options to choose from",
+    )?;
+    check(
+        spec.recommended_option_ids
+            .iter()
+            .all(|id| ids.contains(id.as_str())),
+        "`recommended_option_ids` must name existing options",
+    )?;
+    check(
+        spec.multiple || spec.recommended_option_ids.len() <= 1,
+        "only one option can be recommended unless `multiple` is true",
+    )?;
+    check(
+        spec.resume.as_ref().is_none_or(|resume| {
             nonempty_bounded(&resume.workflow_id, 128)
                 && resume.variables.len() <= 16
                 && resume
                     .variables
                     .iter()
                     .all(|(key, value)| valid_resume_variable(key, value))
-        }))
-    .then_some(spec)
+        }),
+        "`resume` is malformed",
+    )?;
+    Ok(spec)
 }
 
 /// Drop everything inside a `kronn:context` block.
@@ -367,19 +460,23 @@ fn question_fences(content: &str) -> Vec<String> {
     result
 }
 
+/// Record the cards of a message's `kronn-question` fences. A fence that
+/// cannot be recorded is returned with its reason — never skipped silently
+/// (KT-1401) — for the caller to report on the message.
 pub fn ingest_message_questions(
     conn: &Connection,
     discussion_id: &str,
     message_id: &str,
     content: &str,
-) -> Result<()> {
+) -> Result<Vec<crate::core::anti_halluc::InvalidCard>> {
+    let mut invalid = Vec::new();
     if !content.contains("kronn-question") {
-        return Ok(());
+        return Ok(invalid);
     }
     // Never ingest from folded technical context — see strip_context_blocks.
     let content = &strip_context_blocks(content);
     if !content.contains("kronn-question") {
-        return Ok(());
+        return Ok(invalid);
     }
     // A peer provider must not inherit the room's unrelated default connection.
     // Dispatch provenance, attached after message insertion, takes precedence at answer time.
@@ -390,8 +487,15 @@ pub fn ingest_message_questions(
         |row| row.get(0),
     )?;
     for (index, body) in question_fences(content).into_iter().take(64).enumerate() {
-        let Some(spec) = parse_spec(&body) else {
-            continue;
+        let spec = match parse_spec(&body) {
+            Ok(spec) => spec,
+            Err(reason) => {
+                let key = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("key")?.as_str().map(|k| cut_at_word(k, 100)));
+                invalid.push(crate::core::anti_halluc::InvalidCard { key, reason });
+                continue;
+            }
         };
         let now = Utc::now().to_rfc3339();
         conn.execute(
@@ -411,6 +515,28 @@ pub fn ingest_message_questions(
             ],
         )?;
     }
+    Ok(invalid)
+}
+
+/// Put the fences `ingest_message_questions` refused on the message's lint
+/// report, where the UI shows them as an invalid card instead of a dead one.
+pub fn report_invalid_cards(
+    conn: &Connection,
+    message_id: &str,
+    existing: Option<&crate::core::anti_halluc::LintReport>,
+    invalid: Vec<crate::core::anti_halluc::InvalidCard>,
+) -> Result<()> {
+    if invalid.is_empty() {
+        return Ok(());
+    }
+    let mut report = existing
+        .cloned()
+        .unwrap_or_else(crate::core::anti_halluc::LintReport::empty);
+    report.invalid_cards = invalid;
+    conn.execute(
+        "UPDATE messages SET lint_report=?2 WHERE id=?1",
+        params![message_id, serde_json::to_string(&report)?],
+    )?;
     Ok(())
 }
 
@@ -511,6 +637,21 @@ pub fn list(conn: &Connection, discussion_id: &str) -> Result<DiscussionQuestion
     })
 }
 
+/// Whether the room's own agent takes a resolution when the step that asked has
+/// ended, instead of nobody reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomAgentWake {
+    Never,
+    /// A comment asks for an answer now; the question stays pending.
+    ForComment,
+    /// The last pending card of the ended step's message was answered: the
+    /// asker will never read the set, the room's agent does (KT-1401).
+    ForAnswer,
+    /// An earlier card of that message was answered while others are pending:
+    /// nothing wakes now, the last answer carries this one to the room's agent.
+    Deferred,
+}
+
 /// Publish a human resolution of `question` and route it back to whoever asked.
 ///
 /// Shared by answering and refusing: both are decisions the asker must receive,
@@ -531,26 +672,36 @@ fn publish_human_resolution(
     // False when the decision leaves the asker nothing to do: keeping a
     // partial answer after a ceiling must not buy one more turn.
     dispatch: bool,
-    // A comment asks for an answer now: when the step that asked has ended,
-    // the room's own agent takes it rather than nobody.
-    room_agent_if_step_ended: bool,
+    // When the step that asked has ended, who reads this resolution now.
+    wake: RoomAgentWake,
 ) -> Result<(), AnswerError> {
     let step_ended = question
         .requester_workflow_step
         .as_ref()
         .is_some_and(|source| !source.active);
-    let room_agent = if step_ended && room_agent_if_step_ended && dispatch {
+    let room_agent = if step_ended && wake != RoomAgentWake::Never && dispatch {
         room_native_agent(conn, discussion_id)?
     } else {
         None
     };
     if step_ended {
-        content.push_str(if room_agent.is_some() {
-            "\n\nL'étape qui a posé cette question est terminée : l'agent de la room répond. La question reste en attente pour le prochain run."
-        } else {
-            "\n\nL'étape qui a posé cette question est terminée ; personne ne lira cette réponse maintenant. Elle sera disponible au prochain run."
+        content.push_str(match (room_agent.is_some(), wake) {
+            (true, RoomAgentWake::ForAnswer) => {
+                "\n\nL'étape qui a posé cette question est terminée : l'agent de la room reprend avec les réponses de ce message."
+            }
+            (true, RoomAgentWake::Deferred) => {
+                "\n\nL'étape qui a posé cette question est terminée : cette réponse sera transmise à l'agent de la room avec la dernière réponse de ce message."
+            }
+            (true, _) => {
+                "\n\nL'étape qui a posé cette question est terminée : l'agent de la room répond. La question reste en attente pour le prochain run."
+            }
+            (false, _) => {
+                "\n\nL'étape qui a posé cette question est terminée ; personne ne lira cette réponse maintenant. Elle sera disponible au prochain run."
+            }
         });
     }
+    // A deferred answer only takes the notice: the wake belongs to the last one.
+    let room_agent = room_agent.filter(|_| wake != RoomAgentWake::Deferred);
     let message = crate::models::DiscussionMessage {
         id: message_id.to_string(),
         role: crate::models::MessageRole::User,
@@ -572,6 +723,7 @@ fn publish_human_resolution(
         session_tokens_at_message: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
         model: None,
         lint_report: None,
     };
@@ -648,6 +800,51 @@ fn publish_human_resolution(
         connection_id.as_deref(),
     )?;
     Ok(())
+}
+
+/// One resolved card of a message, as the room's agent reads it with the
+/// others: the question, then what the human chose or said.
+fn recap_line(question: &DiscussionQuestion) -> String {
+    let Some(answer) = question.answer.as_ref() else {
+        return String::new();
+    };
+    let label_of = |id: &'_ str| -> String {
+        question
+            .options
+            .iter()
+            .find(|o| o.id == id)
+            .map_or(id, |o| o.label.as_str())
+            .to_string()
+    };
+    let mut parts = answer
+        .selected_option_ids
+        .iter()
+        .map(|id| label_of(id))
+        .collect::<Vec<_>>();
+    parts.extend(answer.item_answers.iter().map(|a| {
+        let item = question
+            .items
+            .iter()
+            .find(|i| i.id == a.item_id)
+            .map_or(a.item_id.as_str(), |i| i.label.as_str());
+        format!("{item}: {}", label_of(&a.selected_option_id))
+    }));
+    if let Some(text) = answer.text.as_deref() {
+        parts.push(text.to_string());
+    }
+    let outcome = if question.state == DiscussionQuestionState::Declined {
+        format!(
+            "refusée{}",
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", parts.join(" ; "))
+            }
+        )
+    } else {
+        parts.join(" ; ")
+    };
+    format!("- {} → {outcome}", question.question)
 }
 
 /// The room's own native agent and its connection, unless the room has none.
@@ -824,7 +1021,7 @@ pub fn comment(
         author_pseudo,
         author_avatar_email,
         true,
-        true,
+        RoomAgentWake::ForComment,
     );
     match published {
         Ok(()) => {
@@ -975,7 +1172,7 @@ fn decline_inner(
         author_pseudo,
         author_avatar_email,
         ceiling == super::discussion_ceiling_requests::Answered::NotACeiling,
-        false,
+        RoomAgentWake::Never,
     )?;
     conn.execute(
         "UPDATE discussion_questions SET state='declined', answer_json=?2, \
@@ -1343,7 +1540,7 @@ fn answer_inner(
                 author_pseudo,
                 author_avatar_email,
                 false,
-                false,
+                RoomAgentWake::Never,
             )?;
             conn.execute(
                 "UPDATE discussion_questions SET updated_at=?2 WHERE id=?1 AND state='pending'",
@@ -1397,6 +1594,38 @@ fn answer_inner(
                 super::discussion_ceiling_requests::Decision::Stop,
             )
     };
+    // KT-1401 — the step that asked has ended, so its agent will never read
+    // the answers; the last pending card of its message carries them all to
+    // the room's agent, once. Earlier cards only record theirs.
+    let mut wake = RoomAgentWake::Never;
+    let step_ended = question
+        .requester_workflow_step
+        .as_ref()
+        .is_some_and(|source| !source.active);
+    if step_ended && dispatch {
+        let siblings = list(conn, discussion_id)?
+            .questions
+            .into_iter()
+            .filter(|q| q.source_message_id == question.source_message_id && q.id != question.id)
+            .collect::<Vec<_>>();
+        wake = RoomAgentWake::Deferred;
+        if siblings
+            .iter()
+            .all(|q| q.state != DiscussionQuestionState::Pending)
+        {
+            wake = RoomAgentWake::ForAnswer;
+            let recap = siblings
+                .iter()
+                .map(recap_line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !recap.is_empty() {
+                content.push_str(&format!(
+                    "\n\nRéponses aux autres questions du même message :\n{recap}"
+                ));
+            }
+        }
+    }
     publish_human_resolution(
         conn,
         discussion_id,
@@ -1408,7 +1637,7 @@ fn answer_inner(
         author_pseudo,
         author_avatar_email,
         dispatch,
-        false,
+        wake,
     )?;
     conn.execute("UPDATE discussion_questions SET state='answered', answer_json=?2, answer_idempotency_key=?3, updated_at=?4 WHERE id=?1 AND state='pending'",
         params![question_id, serde_json::to_string(&answer).map_err(anyhow::Error::from)?, request.idempotency_key, answer.answered_at])

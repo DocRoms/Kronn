@@ -14,7 +14,7 @@ responders may all be Codex without being interchangeable:
 `message_targets` preserves those identities in textual order.
 `messages.target_agent` and `target_agents` remain compatibility projections
 for older clients and peers.
-[src: file: backend/src/models/discussions.rs:676-702#MessageTargetKind]
+[src: file: backend/src/models/discussions.rs:742-768#MessageTargetKind]
 [src: file: backend/src/db/sql/099_typed_message_targets.sql:1-37#message_targets]
 
 The composer parses prose once and submits the typed target list. The backend
@@ -87,7 +87,7 @@ host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
 [src: file: backend/src/api/disc_invite.rs:1071-1075#AWARENESS_MAX_MESSAGES]
 [src: file: backend/scripts/disc-introspection-mcp.py:7326-7357#_WAIT_PREEMPTED_NOTICE]
-[src: file: backend/scripts/disc-introspection-mcp.py:12120-12127#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:12125-12132#_with_wait_preempted]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server
@@ -123,13 +123,13 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
 [src: file: backend/src/db/discussions.rs:1305-1325#insert_user_message_with_dispatches]
 [src: file: backend/src/db/agent_dispatch.rs:677-826#recover_after_restart]
-[src: file: backend/src/db/discussions.rs:3569-3571#DispatchInProgress]
+[src: file: backend/src/db/discussions.rs:3590-3592#DispatchInProgress]
 [src: file: backend/src/api/discussions/messaging.rs:1013-1021#DispatchInProgress]
-[src: file: backend/src/db/discussions.rs:3520-3780#revise_message_with_dispatch]
+[src: file: backend/src/db/discussions.rs:3541-3801#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
 [src: file: backend/src/api/federation.rs:102-147#federate_message_revision]
 [src: file: backend/src/api/ws.rs:1164-1172#resolved_targets]
-[src: file: backend/src/api/ws.rs:919#target_agent]
+[src: file: backend/src/api/ws.rs:920#target_agent]
 
 New-discussion aliases follow the same independent fan-out contract. Creation
 persists the initial typed targets and keeps every native target visible as a
@@ -166,11 +166,11 @@ on the root turn, or no marker), computed from `message_targets`.
 [src: file: backend/src/db/discussions.rs:1760-1804#native_agents_scheduled_for_root_turn]
 [src: file: backend/src/api/discussions/crud.rs:545-553#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/api/discussions/crud.rs:896-900#attach_discussion_participants]
+[src: file: backend/src/api/discussions/crud.rs:905-909#attach_discussion_participants]
 [src: file: backend/src/api/discussions/streaming.rs:2236-2348#independent_sibling_notice]
 [src: file: backend/src/api/discussions/streaming.rs:2129-2184#discussion_at_dispatch_trigger]
 [src: file: backend/src/api/discussions/streaming.rs:2191-2226#thread_under_trigger]
-[src: file: backend/src/db/discussions.rs:2016-2040#already_scheduled]
+[src: file: backend/src/db/discussions.rs:2019-2043#already_scheduled]
 
 ## Joined agent turn (MCP)
 
@@ -260,7 +260,7 @@ Two distinctions the reason must not blur, and does not:
   New-discussion `@alias` routing is persisted on the initial user message
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
-  [src: file: backend/src/api/discussions/crud.rs:611-652#replace_message_targets]
+  [src: file: backend/src/api/discussions/crud.rs:618-661#replace_message_targets]
   [src: file: backend/src/api/discussions/runtime.rs:636-655#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.

@@ -58,6 +58,12 @@ appended to one base, because the media host can differ from the chat host.
 * OpenRouter videos: `POST /api/v1/videos` answers `202` with a handle, then
   polling until `completed`, then a content URL.
 * NVIDIA: its own visual routes, results under `data[]`.
+* LiteLLM (KT-1214): images on the OpenAI route `/v1/images/generations`
+  (`/v1/images` answers 404 on a LiteLLM proxy), OpenAI body only, answer
+  `data[].b64_json` (or a `data:` URI in `url`). Measured on 2026-10-20 with
+  `vertex_ai/gemini-3-pro-image`: `usage` carries tokens and no cost, so no
+  cost is recorded — a `usage` without `cost` is never stored as 0. Source
+  images and LiteLLM video are not measured yet; the former is refused.
 
 Codec tests replay captured real payloads. Provider error text is kept but
 bounded to 300 characters so a raw payload never reaches storage or the UI.
@@ -196,8 +202,8 @@ room to the existing generation endpoint. A successfully created room is kept
 across a generation error, and the same idempotency key is retained for an
 explicit identical retry; the UI never automatically repeats an ambiguous
 billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:400-419#createMediaDiscussion]`
-`[src: file: frontend/src/components/MediaGenerateForm.tsx:477-532#submit]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:2635-2654#handleCreateMediaDiscussion]`
+`[src: file: frontend/src/components/MediaGenerateForm.tsx:489-544#submit]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:2693-2712#handleCreateMediaDiscussion]`
 
 ## What a model accepts, read rather than assumed
 
@@ -226,7 +232,7 @@ trimmed and case-insensitively, so a caller is never refused over `720P`.
 
 The same read serves both surfaces. `agent_list` sweeps every configured media
 slot concurrently, each under its own 8 s window, and attaches what came back
-[src: file: backend/src/api/orchestration.rs:12645-12698#bounded_media_capabilities]; the catalogue builder
+[src: file: backend/src/api/orchestration.rs:12970-13023#bounded_media_capabilities]; the catalogue builder
 itself stays pure and is handed the result, like the reachability and quota
 preflights beside it. An envelope is attached only when the model it was read
 for is still the configured one — a connection whose model changed between the
@@ -398,3 +404,77 @@ make the film, in what order, and plays them through.
   be loaded is announced with a button to skip it. No file is produced:
   cutting and exporting a single video are separate work.
   [src: file: frontend/src/components/VideoSequenceEditor.tsx:460-541#SequencePlayer] [src: file: frontend/src/components/VideoSequenceEditor.tsx:519-523#clipUnavailable]
+
+## Local ComfyUI (KT-1381)
+
+A local ComfyUI is a media source like a connection, but never a row of
+`external_api_connections`: a row would make it a chat agent and a mention
+target. Config › Agents › Local holds a ComfyUI card next to Ollama (server
+state, installed models, an Image and a Video picker) that saves `[comfyui]`
+in config.toml. While a slot is set, `local_connection` builds an in-memory
+connection with the reserved id `local:comfyui` (alias `comfyui`, no
+credential, no text tier), and every media path resolves it: generation and
+its preflights, `/api/media/models`, the estimate, the worker, the bridge
+guard and the `agent_list` catalogue.
+[src: file: backend/src/api/comfyui.rs:1094-1118#local_connection]
+[src: file: backend/src/api/orchestration.rs:13027-13033#with_local_media_source]
+
+ComfyUI runs a node graph, so a model is usable only when Kronn has a
+measured workflow for its family (FLUX.1 schnell, SDXL such as RealVisXL,
+Wan 2.1 text-to-video). The family comes from the architecture a checkpoint's
+header declares (FLUX.1 schnell, any SDXL base), else from its exact file
+name in the measured list — never from what a name suggests. Anything else is
+listed on the card, disabled, until the user picks the workflow it runs with:
+that choice is saved per file under `model_families` and wins over detection.
+The family validated when the image slot is chosen is saved with it
+(`image_family`), so a job never depends on reading the header again.
+A Wan job also needs its text encoder and VAE; one missing is refused before
+submission.
+[src: file: backend/src/core/comfyui.rs:172-197#family_of]
+
+Nothing on the card assumes one machine. The server address (default
+`http://127.0.0.1:8188`, `host.docker.internal` from Docker) and the install
+folder checked when the server is down (default `~/ComfyUI-Installs`, Comfy
+Desktop's) are settings. Each slot keeps optional steps, guidance, sampler and
+scheduler overrides; an empty field uses the family's measured default, and
+the sampler lists come from the running ComfyUI's `/object_info/KSampler`.
+[src: file: backend/src/api/comfyui.rs:328-342#install_dir]
+[src: file: backend/src/api/comfyui.rs:1002-1035#set_settings]
+[src: file: backend/src/core/comfyui.rs:254-273#settings]
+
+Images are queued like videos: `POST /prompt` records ComfyUI's prompt id as
+the provider handle, `/history/<id>` is polled, and the file is fetched from
+`/view` on the configured origin. A local job stores no cost, so it never
+enters an estimate or the spend; the Creator form says it costs nothing.
+Source images are not taken yet.
+
+A local job fails with a sentence instead of waiting for its deadline:
+ComfyUI not answering before a submission, a prompt it no longer holds in its
+history or queue (restarted, queue cleared), or a job finished without an
+output file. Since nothing is billed, a submission whose handle was lost is
+simply sent again. Its deadline is 90 min (video is slow on a laptop GPU), and
+a job that times out or is cancelled is cancelled on ComfyUI by its id
+(`POST /api/jobs/<id>/cancel`, atomic). A ComfyUI without that route only
+gets a queued prompt deleted by id; a rendering one is left to finish, never
+interrupted globally (`/interrupt` without an id stops whatever runs), and the
+job says so. Measurements: `docs/research/comfyui-local-media-2026-10-19.md`.
+
+The card also offers measured models to download (RealVisXL V5, FLUX.1
+schnell, the Wan 2.1 1.3B pack), like the Ollama suggestions. Files go to the
+first model folder ComfyUI reports (`/internal/folder_paths`) that lies
+inside the install folder, symlinks resolved, and only when the address is
+this machine (loopback): a remote ComfyUI never chooses where Kronn writes.
+The folder is then opened from the install folder's handle, one directory
+at a time with `O_NOFOLLOW` (a link anywhere below the install folder, or
+`..`, is refused), held to the end of the download, and every file operation
+is relative to it (`core::model_dir`): a `.part` that is a symbolic or hard link is
+removed, never written through; an opened file is checked (regular, one link)
+before any byte is written; the hashed file is the one renamed. Each file
+comes from a pinned Hugging Face revision, resumes only from a
+`Content-Range` that continues the `.part` exactly, never grows past its
+size, and is installed only once its size and SHA-256 match; one pull holds a
+file at a time, and disk space is checked first. From Docker those folders
+are the host's, and Windows has no such handle here, so there the card only
+links to Hugging Face.
+[src: file: backend/src/agents/media_codec.rs:683-693#ComfyUiMediaCodec]
+[src: file: backend/src/agents/media_runner.rs:776-887#advance_local_comfyui]

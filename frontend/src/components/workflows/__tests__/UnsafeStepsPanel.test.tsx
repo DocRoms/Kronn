@@ -4,10 +4,16 @@ import type { UnsafeExecStep, Workflow, WorkflowBlocker, WorkflowReadiness } fro
 
 const unsafeSteps = vi.fn();
 const readiness = vi.fn();
+const listQuickExecs = vi.fn();
+const updateQuickExec = vi.fn();
 vi.mock('../../../lib/api', () => ({
   workflows: {
     unsafeSteps: (...args: unknown[]) => unsafeSteps(...args),
     readiness: (...args: unknown[]) => readiness(...args),
+  },
+  quickExecs: {
+    list: (...args: unknown[]) => listQuickExecs(...args),
+    update: (...args: unknown[]) => updateQuickExec(...args),
   },
 }));
 vi.mock('../../../lib/I18nContext', () => ({
@@ -217,5 +223,34 @@ describe('UnsafeStepsPanel', () => {
     await waitFor(() => expect(readiness).toHaveBeenCalledTimes(2));
     expect(screen.queryByTestId('readiness-local')).toBeNull();
     expect(screen.queryByText('dup')).toBeNull();
+  });
+
+  it('approves a saved Quick Exec source on the Quick Exec itself, then rechecks', async () => {
+    unsafeSteps.mockResolvedValue([]);
+    const blocker: WorkflowBlocker = {
+      workflow_id: 'wf-1', workflow_name: 'PR review', step: 'cw-start', on_failure: false,
+      kind: 'human_approval', phase: 'source', reason: 'unmodelled_program',
+      message: 'Quick Exec « CloudWatch » : `{{from}}` est passé à `aws`…',
+      action: 'Ask a human to approve this saved Quick Exec', human_only: true,
+      quick_exec: { id: 'qe-cw', name: 'CloudWatch', source_alias: 'q', program: 'aws' },
+    };
+    readiness
+      .mockResolvedValueOnce({ workflow_id: 'wf-1', workflow_name: 'PR review', enabled: true, ready: false, blockers: [blocker], human_approval_count: 1, checked_workflow_ids: ['wf-1'], summary: '' } as WorkflowReadiness)
+      .mockResolvedValue({ workflow_id: 'wf-1', workflow_name: 'PR review', enabled: true, ready: true, blockers: [], human_approval_count: 0, checked_workflow_ids: ['wf-1'], summary: '' } as WorkflowReadiness);
+    listQuickExecs.mockResolvedValue([{
+      id: 'qe-cw', name: 'CloudWatch', icon: '🔎', description: '', project_id: 'p1', command: 'aws',
+      args: ['logs', '{{from}}'], timeout_secs: 30, output_format: 'json', variables: [], pinned: false,
+      created_at: 'now', updated_at: 'now',
+    }]);
+    updateQuickExec.mockResolvedValue({});
+    render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
+
+    const approve = await screen.findByText('wf.qeApprove|CloudWatch|aws');
+    expect(updateQuickExec).not.toHaveBeenCalled();
+    fireEvent.click(approve);
+    await waitFor(() => expect(updateQuickExec).toHaveBeenCalledWith('qe-cw', expect.objectContaining({
+      command: 'aws', args: ['logs', '{{from}}'], project_id: 'p1', unmodelled_args_approved: true,
+    })));
+    await waitFor(() => expect(readiness).toHaveBeenCalledTimes(2));
   });
 });

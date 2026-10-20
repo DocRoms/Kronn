@@ -75,8 +75,8 @@ worktree's index is only copied, never written. If a patch cannot be written, ex
 holds unmerged paths, nothing is removed. Each distinct *kept* reason is recorded once as a
 `worktree_release_kept` event, a release as `worktree_released`. Evidence patches are not cleaned up by Kronn.
 
-[src: file: backend/src/api/orchestration.rs:3803-3815#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:10958-10969#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:3819-3831#cleanup_integrated_execution]
+[src: file: backend/src/api/orchestration.rs:11279-11290#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -99,12 +99,12 @@ managed workspaces that still name their worktree give the lane name Kronn would
 execution that owned it. It is then judged by the rules above (worktree gone, execution terminal, idle). A
 dir no managed workspace names, one that belongs to an unmanaged workspace, or a lane name two executions
 derive in common is attributed to nobody and stays `foreign`.
-[src: file: backend/src/core/worktree.rs:870-905#process_lane_target_idle]
-[src: file: backend/src/core/worktree.rs:819-855#lane_target_last_write]
+[src: file: backend/src/core/worktree.rs:906-961#process_lane_target_idle]
+[src: file: backend/src/core/worktree.rs:855-891#lane_target_last_write]
 [src: file: backend/src/api/disk.rs:129-140#lane_entry_state]
 
 The periodic sweep is started at boot, after the boot reconciliation:
-[src: file: backend/src/api/disk.rs:854-876#spawn_periodic_sweep]
+[src: file: backend/src/api/disk.rs:864-886#spawn_periodic_sweep]
 
 ## The launch guard
 
@@ -118,7 +118,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:791-857#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:7959-7982#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:8280-8303#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.
@@ -133,7 +133,7 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
   policy, `totals` by kind, and every `entries[]` largest first: `kind`, `path`, `bytes`
   (`bytes_are_partial` = a floor: the walk is bounded in entries and time), `idle_seconds`, `owner`
   (`task_ref`, `execution_id`, `status`), `state` and `purgeable`.
-  [src: file: backend/src/api/disk.rs:459-474#build_disk_report]
+  [src: file: backend/src/api/disk.rs:468-483#build_disk_report]
   An agent's bridge token gets a **scoped view** (KT-1347): free space, `policy`, `totals` and `orphan_*`
   stay whole-instance aggregates, but `volumes` and `entries` (paths, lane names, task refs) are those of
   the token's own project only — none for a project-less launch — and the report carries `scoped: true`.
@@ -143,7 +143,7 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
   those entries, and only with `confirm: true`; each is re-judged at deletion time, so a report never
   authorises a delete. **Human / UI only**: the route is deliberately not on `BRIDGE_ROUTES`, so a bridge
   token is refused (403). It deletes host files; even an own-project orphan purge was not worth giving to
-  an agent, which can tell the user instead. [src: file: backend/src/api/disk.rs:923-935#run_purge]
+  an agent, which can tell the user instead. [src: file: backend/src/api/disk.rs:932-944#run_purge]
 - MCP tool **`disk_usage`** (`project_id`) — the scoped report above, read-only, bounded to the 25 largest
   entries. It never calls the purge; a leftover `purge_orphans: true` argument returns a note that purging
   is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7725-7757#call_disk_usage]

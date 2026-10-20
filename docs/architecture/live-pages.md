@@ -573,10 +573,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:11421-11610#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:12552-12594#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:12826-12868#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:12791-12844#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:11746-11935#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:12879-12921#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:13162-13204#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:13127-13180#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -655,7 +655,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:4323-4331#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:4338-4346#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:127-129#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -703,7 +703,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:4483-4493#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:4498-4508#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
@@ -743,7 +743,7 @@ Allowed sites. One global list per Kronn, `embed_allowed_origins` in
 `POST /api/config/embed-origins` with `{add, remove}`; each origin is
 normalized (lowercase host, default port dropped, IDN as punycode) and a
 malformed one rejects the whole change.
-[src: file: backend/src/models/setup.rs:70-76#embed_allowed_origins]
+[src: file: backend/src/models/setup.rs:73-79#embed_allowed_origins]
 [src: file: backend/src/core/embed_origins.rs:52-55#normalize_origin]
 [src: file: backend/src/api/live_pages.rs:866-868#change_embed_origins]
 The UI is Configuration → Artifacts → External content (Allowed sites): type an
@@ -974,8 +974,8 @@ JSON parsing failures retain their respective diagnostics. The workflow history
 list deliberately omits outputs; expanding a run fetches its full detail and
 reports a failed detail read with a retry action. A focused navigation keeps
 the full run even when the compact list already contains its id.
-[src: file: backend/src/workflows/collect_api_data_step.rs:556-577#source_id]
-[src: file: backend/src/workflows/collect_api_data_step.rs:900-943#missing_required_api_keeps_its_alias_id_and_cause]
+[src: file: backend/src/workflows/collect_api_data_step.rs:578-599#source_id]
+[src: file: backend/src/workflows/collect_api_data_step.rs:922-965#missing_required_api_keeps_its_alias_id_and_cause]
 [src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:18-40#needsDetail]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1012-1022#focusedRun]
 

@@ -18,8 +18,8 @@ component when that table changed. The arbitration card was below this
 component, so changing its identity remounted the form instead of updating props.
 The form's draft, selection and in-flight guard are local state/refs.
 [src: commit: 6503ecd14af145a5f668e1afd845b6f839abc7ef]
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:1235-1250#reloadDiscussion]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:1017-1018#reconcileLoadedDiscussion]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:1281-1296#reloadDiscussion]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:1063-1064#reconcileLoadedDiscussion]`
 `[src: file: frontend/src/components/MessageBubble.tsx:1174-1184#sources]`
 `[src: file: frontend/src/components/DiscussionQuestionCard.tsx:100-114]`
 
@@ -51,10 +51,10 @@ stable, and supplies fresh values through a per-message React context. Polling
 is unchanged and citation verdicts still update. Question/planning-card keys
 include the discussion, message and fence identity, so changing the question
 does not transfer the previous draft.
-`[src: file: frontend/src/components/MessageBubble.tsx:2011-2027#MarkdownRenderContext]`
-`[src: file: frontend/src/components/MessageBubble.tsx:2037-2109#MarkdownPre]`
-`[src: file: frontend/src/components/MessageBubble.tsx:2111-2116#discussionMdComponents]`
-`[src: file: frontend/src/components/MessageBubble.tsx:2149-2151#renderContext]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2024-2040#MarkdownRenderContext]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2050-2122#MarkdownPre]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2124-2129#discussionMdComponents]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2162-2164#renderContext]`
 
 Seven product regressions cover question-store refresh, same-reference and
 repeated equivalent sources, changing citation verdicts in paragraphs/lists,

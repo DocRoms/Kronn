@@ -265,6 +265,7 @@ pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
                 reply_to_message_id: None,
                 author_cli_ordinal: None,
                 session_continuity: None,
+                kind: Default::default(),
             };
             // If the notice can't be persisted, KEEP awaiting_agent=1 so the
             // next boot retries: no notice landed, so retrying can't duplicate
@@ -389,6 +390,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             reply_to_message_id: trigger_message_id,
             author_cli_ordinal: None,
             session_continuity: None,
+            kind: Default::default(),
         };
         let recovery_result = (|| -> Result<()> {
             let transaction = conn.unchecked_transaction()?;
@@ -515,7 +517,11 @@ const DISC_SELECT_COLS: &str =
                 d.source_agent, d.source_session_id, d.imported_at, d.diverged_at,
                 d.model,
                 (SELECT COUNT(*) FROM messages m
-                   WHERE m.discussion_id = d.id AND m.role != 'System') AS non_system_count,
+                   WHERE m.discussion_id = d.id AND m.role != 'System'
+                     AND NOT (m.kind IS 'orchestration'
+                              OR (m.kind IS NULL
+                                  AND (m.id LIKE 'orch-%' OR m.id LIKE 'delivery-summary:%')))
+                ) AS non_system_count,
                 d.awaiting_agent,
                 EXISTS(SELECT 1 FROM agent_dispatch_jobs j
                         WHERE j.discussion_id = d.id
@@ -699,7 +705,7 @@ pub fn list_discussions_with_messages(conn: &Connection) -> Result<Vec<Discussio
             disc.non_system_message_count = disc
                 .messages
                 .iter()
-                .filter(|m| !matches!(m.role, crate::models::MessageRole::System))
+                .filter(|m| m.counts_as_unread())
                 .count() as u32;
         }
     }
@@ -794,11 +800,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
     if let Some(mut d) = disc {
         d.messages = list_messages(conn, &d.id)?;
         d.message_count = d.messages.len() as u32;
-        d.non_system_message_count = d
-            .messages
-            .iter()
-            .filter(|m| !matches!(m.role, crate::models::MessageRole::System))
-            .count() as u32;
+        d.non_system_message_count =
+            d.messages.iter().filter(|m| m.counts_as_unread()).count() as u32;
         Ok(Some(d))
     } else {
         Ok(None)
@@ -2485,6 +2488,10 @@ pub fn update_discussion_participants(
 
 // ─── Messages ───────────────────────────────────────────────────────────────
 
+fn resolve_message_kind(stored: Option<String>, id: &str) -> crate::models::MessageKind {
+    crate::models::MessageKind::resolve(stored.as_deref(), id)
+}
+
 /// An unreadable value is unknown, never a reason to drop the message.
 fn parse_session_continuity(raw: Option<String>) -> Option<crate::models::SessionContinuity> {
     raw.and_then(|value| serde_json::from_str(&value).ok())
@@ -2506,7 +2513,7 @@ fn list_all_messages(
                         SELECT 1 FROM workflow_step_room_sessions step_session
                          WHERE step_session.session_pk = mca.cli_session_id
                     )) AS author_cli_ordinal,
-                session_continuity
+                session_continuity, kind
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -2517,11 +2524,13 @@ fn list_all_messages(
         let role_str: String = row.get(2)?;
         let channel_str: String = row.get(3)?;
         let agent_type_str: Option<String> = row.get(5)?;
+        let id: String = row.get(1)?;
+        let kind = resolve_message_kind(row.get(19)?, &id);
 
         Ok((
             disc_id,
             DiscussionMessage {
-                id: row.get(1)?,
+                id,
                 role: parse_role(&role_str),
                 channel: parse_message_channel(&channel_str),
                 content: row.get(4)?,
@@ -2552,6 +2561,7 @@ fn list_all_messages(
                     .unwrap_or(false),
                 author_cli_ordinal: row.get::<_, Option<i64>>(17).unwrap_or(None),
                 session_continuity: parse_session_continuity(row.get(18)?),
+                kind,
             },
         ))
     })?;
@@ -2593,7 +2603,7 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                         SELECT 1 FROM workflow_step_room_sessions step_session
                          WHERE step_session.session_pk = mca.cli_session_id
                     )) AS author_cli_ordinal,
-                session_continuity
+                session_continuity, kind
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -2603,9 +2613,11 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
             let role_str: String = row.get(1)?;
             let channel_str: String = row.get(2)?;
             let agent_type_str: Option<String> = row.get(4)?;
+            let id: String = row.get(0)?;
+            let kind = resolve_message_kind(row.get(22)?, &id);
 
             Ok(DiscussionMessage {
-                id: row.get(0)?,
+                id,
                 role: parse_role(&role_str),
                 channel: parse_message_channel(&channel_str),
                 content: row.get(3)?,
@@ -2640,6 +2652,7 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                     .unwrap_or(false),
                 author_cli_ordinal: row.get::<_, Option<i64>>(20).unwrap_or(None),
                 session_continuity: parse_session_continuity(row.get(21)?),
+                kind,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2682,6 +2695,7 @@ pub fn list_notes(
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
                     session_continuity: None,
+                    kind: Default::default(),
                     id: row.get(1)?,
                     role: parse_role(&role),
                     channel: parse_message_channel(&channel),
@@ -2869,8 +2883,8 @@ fn insert_message_inner(
         crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, &msg.content)?;
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id, session_continuity)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+        "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id, session_continuity, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         params![
             msg.id,
             discussion_id,
@@ -2897,6 +2911,7 @@ fn insert_message_inner(
             msg.reply_to_message_id,
             msg.session_continuity
                 .and_then(|continuity| serde_json::to_string(&continuity).ok()),
+            msg.kind.stored(),
         ],
     )?;
     if let Some(target) = msg.target_agent.as_ref() {
@@ -2928,11 +2943,17 @@ fn insert_message_inner(
             &msg.id,
             &msg.content,
         )?;
-        super::discussion_questions::ingest_message_questions(
+        let invalid_cards = super::discussion_questions::ingest_message_questions(
             conn,
             discussion_id,
             &msg.id,
             &msg.content,
+        )?;
+        super::discussion_questions::report_invalid_cards(
+            conn,
+            &msg.id,
+            msg.lint_report.as_ref(),
+            invalid_cards,
         )?;
         super::audit_validation::on_agent_message(
             conn,

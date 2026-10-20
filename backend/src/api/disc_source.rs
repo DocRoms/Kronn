@@ -328,6 +328,11 @@ pub struct DiscAppendResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub important: Option<crate::db::discussion_important::ImportantIngest>,
+    /// KT-1401 — `kronn-question` fences of the appended message that no card
+    /// could be recorded from, each with its reason: the author reposts them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<crate::core::anti_halluc::InvalidCard>>", optional)]
+    pub invalid_cards: Vec<crate::core::anti_halluc::InvalidCard>,
     /// `sort_order` of the LAST appended message (stab-1). This is a write
     /// receipt, not a read cursor: another message may have landed between
     /// the caller's last read and this append. `None` when nothing was appended.
@@ -870,6 +875,7 @@ pub async fn disc_append(
     // KT-619 — reported back so a refused publisher learns it was refused. A
     // silently dropped fence would leave a worker believing it had published.
     let mut important_ingest: Option<crate::db::discussion_important::ImportantIngest> = None;
+    let mut invalid_cards: Vec<crate::core::anti_halluc::InvalidCard> = Vec::new();
     // Freshly-inserted messages, federated to peers after the loop IF this is a
     // single-message (live-turn) append on a shared disc — see the F3 gate below.
     let mut inserted_msgs: Vec<DiscussionMessage> = Vec::new();
@@ -896,6 +902,7 @@ pub async fn disc_append(
             session_tokens_at_message: None,
             author_cli_ordinal: None,
             session_continuity: None,
+            kind: Default::default(),
             model: None,
             // Only a live single Agent append carries a report (loop runs once).
             lint_report: live_lint_report.take(),
@@ -1021,12 +1028,27 @@ pub async fn disc_append(
                     Default::default()
                 };
 
+                // KT-1401 — what the question ingest refused rides the stored
+                // lint report; hand it back so the author can repost.
+                let invalid_cards = tx
+                    .query_row(
+                        "SELECT lint_report FROM messages WHERE id = ?1",
+                        rusqlite::params![msg_clone.id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )?
+                    .and_then(|json| {
+                        serde_json::from_str::<crate::core::anti_halluc::LintReport>(&json).ok()
+                    })
+                    .map(|report| report.invalid_cards)
+                    .unwrap_or_default();
+
                 tx.commit()?;
-                Ok((sort_order, ingest))
+                Ok((sort_order, ingest, invalid_cards))
             })
             .await;
         match insert_result {
-            Ok((sort_order, ingest)) => {
+            Ok((sort_order, ingest, invalid)) => {
+                invalid_cards.extend(invalid);
                 last_sort_order = Some(sort_order);
                 if !ingest.is_empty() {
                     important_ingest = Some(ingest);
@@ -1197,6 +1219,7 @@ pub async fn disc_append(
         diverged,
         lint: lint_summary,
         important: important_ingest,
+        invalid_cards,
     }))
 }
 
@@ -2210,6 +2233,7 @@ mod tests {
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
                     session_continuity: None,
+                    kind: Default::default(),
                 };
                 crate::db::discussions::insert_message(conn, "d-lint", &user)?;
                 Ok(())
@@ -2402,6 +2426,7 @@ mod tests {
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
                     session_continuity: None,
+                    kind: Default::default(),
                 };
                 let cursor = crate::db::discussions::insert_message(conn, "d-lint", &old)?;
                 let mut note = old.clone();
@@ -4395,6 +4420,39 @@ mod tests {
             );
         }
         crate::core::anti_halluc::set_mode("off");
+    }
+
+    #[tokio::test]
+    async fn an_append_with_an_invalid_question_fence_returns_its_reason_to_the_author() {
+        let (state, _tmp) = lint_state(true).await;
+        let invalid = "```kronn-question\n{\"version\":1,\"key\":\"quota-policy\",\
+            \"question\":\"Which ?\",\"options\":[{\"id\":\"a\",\"label\":\"A\"},\
+            {\"id\":\"b\",\"label\":\"B\"}],\"recommended_option_ids\":[\"missing\"]}\n```";
+        let out = append(&state, vec![agent_msg("m-invalid", invalid)]).await;
+        assert_eq!(out.appended, 1, "the message itself is never refused");
+        assert_eq!(out.invalid_cards.len(), 1, "{:?}", out.invalid_cards);
+        assert_eq!(out.invalid_cards[0].key.as_deref(), Some("quota-policy"));
+        assert!(
+            out.invalid_cards[0]
+                .reason
+                .contains("recommended_option_ids"),
+            "{:?}",
+            out.invalid_cards[0]
+        );
+        let wire = serde_json::to_value(&out).unwrap();
+        assert_eq!(wire["invalid_cards"][0]["key"], "quota-policy");
+
+        let valid = "```kronn-question\n{\"version\":1,\"key\":\"fine\",\"question\":\"Which ?\",\
+            \"options\":[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"}]}\n```";
+        let ok = append(&state, vec![agent_msg("m-valid", valid)]).await;
+        assert!(ok.invalid_cards.is_empty());
+        assert!(
+            serde_json::to_value(&ok)
+                .unwrap()
+                .get("invalid_cards")
+                .is_none(),
+            "nothing to report: the field stays off the wire"
+        );
     }
 
     #[tokio::test]

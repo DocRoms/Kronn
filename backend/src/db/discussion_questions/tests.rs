@@ -40,6 +40,7 @@ fn message(id: &str, content: String) -> DiscussionMessage {
         session_tokens_at_message: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
         model: None,
         lint_report: None,
     }
@@ -55,6 +56,11 @@ fn insert(conn: &Connection, id: &str, value: serde_json::Value) {
 }
 
 fn finished_step_question(value: serde_json::Value) -> Connection {
+    finished_step_cards(&[value])
+}
+
+/// One message of a workflow step carrying several cards, the step then ended.
+fn finished_step_cards(values: &[serde_json::Value]) -> Connection {
     let conn = database();
     conn.execute(
         "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
@@ -89,7 +95,14 @@ fn finished_step_question(value: serde_json::Value) -> Connection {
     crate::db::discussions::insert_cli_message_with_targets_and_dispatches(
         &conn,
         "d",
-        &message("step-question", format!("```kronn-question\n{value}\n```")),
+        &message(
+            "step-question",
+            values
+                .iter()
+                .map(|value| format!("```kronn-question\n{value}\n```"))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
         &[],
         &[],
         session.session_pk,
@@ -727,7 +740,7 @@ fn the_failure_note_is_its_own_field_and_goes_away_once_repaired() {
 #[test]
 fn an_agent_fence_cannot_write_the_failure_note() {
     let fence = r#"{"version":1,"key":"k","question":"Q?","td_errors":"forged","options":[{"id":"a","label":"A"}]}"#;
-    assert!(super::parse_spec(fence).is_none());
+    assert!(super::parse_spec(fence).is_err());
 }
 
 const GHOST_ROW: &str = "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20261016-ghost | Ghost one-liner | API | High | Open |\n";
@@ -859,39 +872,39 @@ fn first_card_in_replacement_validation_relinks_archived_run_and_updates_td() {
 
 #[test]
 fn question_spec_is_bounded_and_rejects_unknown_or_duplicate_choices() {
-    assert!(parse_spec(&payload().to_string()).is_some());
+    assert!(parse_spec(&payload().to_string()).is_ok());
     for field in ["version", "key", "question"] {
         let mut value = payload();
         value.as_object_mut().unwrap().remove(field);
         assert!(
-            parse_spec(&value.to_string()).is_none(),
+            parse_spec(&value.to_string()).is_err(),
             "{field} is required"
         );
     }
     let mut value = payload();
     value["options"][1]["id"] = "retry".into();
-    assert!(parse_spec(&value.to_string()).is_none());
+    assert!(parse_spec(&value.to_string()).is_err());
     value = payload();
     value["recommended_option_ids"] = serde_json::json!(["missing"]);
-    assert!(parse_spec(&value.to_string()).is_none());
+    assert!(parse_spec(&value.to_string()).is_err());
     value = payload();
-    value["question"] = "é".repeat(1001).into();
-    assert!(parse_spec(&value.to_string()).is_none());
+    value["question"] = "".into();
+    assert!(parse_spec(&value.to_string()).is_err());
     value = payload();
     value["run_command"] = "anything".into();
-    assert!(parse_spec(&value.to_string()).is_none());
+    assert!(parse_spec(&value.to_string()).is_err());
 
     value = payload();
     value["items"] = serde_json::json!([
         {"id":"TD-1","label":"First TD"},
         {"id":"TD-2","label":"Second TD"}
     ]);
-    assert!(parse_spec(&value.to_string()).is_some());
+    assert!(parse_spec(&value.to_string()).is_ok());
     value["items"] = serde_json::json!([
         {"id":"TD-1","label":"First TD"},
         {"id":"TD-1","label":"Duplicate TD"}
     ]);
-    assert!(parse_spec(&value.to_string()).is_none());
+    assert!(parse_spec(&value.to_string()).is_err());
 }
 
 #[test]
@@ -1505,14 +1518,22 @@ fn a_reply_to_a_finished_step_waits_but_a_comment_wakes_the_room_agent() {
         })
         .unwrap()
     };
-    // A decision waits for the next run; it wakes nobody.
-    for conn in [&answered, &declined] {
-        assert_eq!(
-            jobs(conn),
-            0,
-            "a revoked step session has no native dispatch to wake"
-        );
-    }
+    // A refusal waits for the next run; it wakes nobody.
+    assert_eq!(
+        jobs(&declined),
+        0,
+        "a revoked step session has no native dispatch to wake"
+    );
+    // KT-1401 — answering the last (here: only) pending card wakes the room's agent.
+    assert_eq!(
+        jobs(&answered),
+        1,
+        "the room's native agent takes the answer"
+    );
+    assert!(
+        answer_content.contains("l'agent de la room reprend"),
+        "{answer_content}"
+    );
     // A comment asks for an answer now: the room's own agent takes it.
     assert_eq!(
         jobs(&commented),
@@ -1599,4 +1620,261 @@ fn a_resolved_step_question_claims_exactly_one_resume_run() {
     assert!(claim_resume(&conn, "d", "question:step-question:0")
         .unwrap()
         .is_none());
+}
+
+fn card(key: &str) -> serde_json::Value {
+    serde_json::json!({"version":1,"key":key,"question":format!("Question {key} ?"),
+        "options":[{"id":"retry","label":"Réarmer"},{"id":"wait","label":"Attendre"}]})
+}
+
+fn answer_with(conn: &Connection, index: usize, option: &str) {
+    answer(
+        conn,
+        "d",
+        &format!("question:step-question:{index}"),
+        &AnswerDiscussionQuestionRequest {
+            selected_option_ids: vec![option.into()],
+            item_answers: vec![],
+            text: None,
+            idempotency_key: format!("answer-{index}"),
+        },
+        "Romu",
+        None,
+    )
+    .unwrap();
+}
+
+#[test]
+fn answering_the_last_card_of_an_ended_step_wakes_the_room_agent_once_with_every_answer() {
+    let conn = finished_step_cards(&[card("first"), card("second"), card("third")]);
+
+    answer_with(&conn, 0, "retry");
+    answer_with(&conn, 1, "wait");
+    assert_eq!(
+        dispatch_count(&conn),
+        0,
+        "a card still pending: nobody is woken yet"
+    );
+
+    answer_with(&conn, 2, "retry");
+    assert_eq!(
+        dispatch_count(&conn),
+        1,
+        "one wake for the whole message, not per card"
+    );
+    let (agent, trigger): (String, String) = conn
+        .query_row(
+            "SELECT agent_override_json, trigger_message_id FROM agent_dispatch_jobs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(agent.contains("Codex"), "{agent}");
+    assert_eq!(trigger, "question-answer:question:step-question:2");
+    let content: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE id=?1",
+            [&trigger],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(content.contains("l'agent de la room reprend"), "{content}");
+    assert!(content.contains("Question first ? → Réarmer"), "{content}");
+    assert!(
+        content.contains("Question second ? → Attendre"),
+        "{content}"
+    );
+    let targets = crate::db::discussions::list_message_targets(&conn, &trigger).unwrap();
+    assert_eq!(targets[0].agent_type, crate::models::AgentType::Codex);
+
+    // A retry of the last answer does not wake it a second time.
+    answer_with(&conn, 2, "retry");
+    assert_eq!(dispatch_count(&conn), 1);
+}
+
+fn answer_notice(conn: &Connection, index: usize) -> String {
+    conn.query_row(
+        "SELECT content FROM messages WHERE id=?1",
+        [format!("question-answer:question:step-question:{index}")],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn an_earlier_card_of_an_ended_step_says_its_answer_goes_to_the_room_agent_with_the_last_one() {
+    let conn = finished_step_cards(&[card("first"), card("second")]);
+    answer_with(&conn, 0, "retry");
+    assert_eq!(dispatch_count(&conn), 0, "the last answer wakes, not this");
+    let early = answer_notice(&conn, 0);
+    assert!(
+        early.contains(
+            "cette réponse sera transmise à l'agent de la room avec la dernière réponse de ce message"
+        ),
+        "{early}"
+    );
+    assert!(!early.contains("personne ne lira"), "{early}");
+
+    answer_with(&conn, 1, "wait");
+    assert!(answer_notice(&conn, 1).contains("l'agent de la room reprend"));
+
+    // Without a native agent nobody reads it: the old notice stays true.
+    let quiet = finished_step_cards(&[card("first"), card("second")]);
+    quiet
+        .execute("UPDATE discussions SET no_agent=1 WHERE id='d'", [])
+        .unwrap();
+    answer_with(&quiet, 0, "retry");
+    let quiet_notice = answer_notice(&quiet, 0);
+    assert!(quiet_notice.contains("personne ne lira"), "{quiet_notice}");
+    assert!(!quiet_notice.contains("sera transmise"), "{quiet_notice}");
+}
+
+#[test]
+fn a_refused_sibling_does_not_block_the_wake_and_a_room_without_agent_wakes_nobody() {
+    let conn = finished_step_cards(&[card("first"), card("second")]);
+    decline(
+        &conn,
+        "d",
+        "question:step-question:0",
+        &decline_request(),
+        "Romu",
+        None,
+    )
+    .unwrap();
+    assert_eq!(dispatch_count(&conn), 0);
+    answer_with(&conn, 1, "wait");
+    assert_eq!(dispatch_count(&conn), 1);
+    let content: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE id='question-answer:question:step-question:1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(content.contains("Question first ? → refusée"), "{content}");
+
+    let quiet = finished_step_cards(&[card("first")]);
+    quiet
+        .execute("UPDATE discussions SET no_agent=1 WHERE id='d'", [])
+        .unwrap();
+    answer_with(&quiet, 0, "retry");
+    assert_eq!(dispatch_count(&quiet), 0);
+}
+
+fn stored_lint_report(conn: &Connection) -> Option<crate::core::anti_halluc::LintReport> {
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT lint_report FROM messages WHERE discussion_id='d' ORDER BY sort_order LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    json.map(|json| serde_json::from_str(&json).unwrap())
+}
+
+#[test]
+fn a_label_over_its_bound_is_cut_at_a_word_and_its_full_text_moves_to_the_description() {
+    let long_label = format!("{} fin", "mot ".repeat(65));
+    assert!(long_label.chars().count() > 250);
+    let mut value = payload();
+    value["options"][0]["label"] = long_label.clone().into();
+    value["options"][0]["description"] = "précision".into();
+    let conn = database();
+    insert(&conn, "m", value);
+
+    let stored = list(&conn, "d").unwrap().questions.remove(0);
+    let option = &stored.options[0];
+    assert!(option.label.chars().count() <= 250, "{}", option.label);
+    assert!(option.label.ends_with("mot…"), "{}", option.label);
+    let description = option.description.as_deref().unwrap();
+    assert!(description.starts_with(long_label.trim()), "{description}");
+    assert!(description.ends_with("précision"), "{description}");
+    assert_eq!(
+        stored.options[1].label, "Attendre",
+        "other options untouched"
+    );
+    assert!(
+        stored_lint_report(&conn).is_none(),
+        "a normalised card is not invalid"
+    );
+}
+
+#[test]
+fn a_question_and_a_context_over_their_bound_are_kept_shortened_not_dropped() {
+    let long_question = format!("{} ?", "mot ".repeat(300));
+    let mut value = payload();
+    value["question"] = long_question.clone().into();
+    value["context"] = "c".repeat(4500).into();
+    let conn = database();
+    insert(&conn, "m", value);
+
+    let stored = list(&conn, "d").unwrap().questions.remove(0);
+    assert!(stored.question.chars().count() <= 1000);
+    assert!(stored.question.ends_with('…'));
+    assert!(stored.context.as_deref().unwrap().chars().count() <= 4000);
+
+    let mut value = payload();
+    value["question"] = long_question.clone().into();
+    let conn = database();
+    insert(&conn, "m", value);
+    let stored = list(&conn, "d").unwrap().questions.remove(0);
+    assert_eq!(stored.context.as_deref(), Some(long_question.trim()));
+}
+
+#[test]
+fn a_cut_without_a_word_boundary_is_still_within_the_bound() {
+    assert_eq!(cut_at_word("court", 250), "court");
+    let cut = cut_at_word(&"é".repeat(300), 250);
+    assert_eq!(cut.chars().count(), 250);
+    assert!(cut.ends_with('…'));
+}
+
+#[test]
+fn a_fence_still_invalid_is_reported_on_the_message_never_dropped_silently() {
+    let conn = database();
+    let mut broken = payload();
+    broken["recommended_option_ids"] = serde_json::json!(["missing"]);
+    let mut extra = card("extra-field");
+    extra["run_command"] = "anything".into();
+    let content = format!(
+        "```kronn-question\n{}\n```\n\n```kronn-question\n{}\n```\n\n```kronn-question\n{}\n```",
+        broken,
+        card("fine"),
+        extra
+    );
+    crate::db::discussions::insert_message(&conn, "d", &message("m", content)).unwrap();
+
+    let cards = list(&conn, "d").unwrap().questions;
+    assert_eq!(cards.len(), 1, "only the valid fence becomes a card");
+    assert_eq!(cards[0].key, "fine");
+    let report = stored_lint_report(&conn).expect("the author is told through the lint report");
+    assert_eq!(report.invalid_cards.len(), 2, "{:?}", report.invalid_cards);
+    assert_eq!(report.invalid_cards[0].key.as_deref(), Some("quota-policy"));
+    assert!(
+        report.invalid_cards[0]
+            .reason
+            .contains("recommended_option_ids"),
+        "{:?}",
+        report.invalid_cards[0]
+    );
+    assert_eq!(report.invalid_cards[1].key.as_deref(), Some("extra-field"));
+    assert!(
+        report.invalid_cards[1].reason.contains("run_command"),
+        "{:?}",
+        report.invalid_cards[1]
+    );
+    assert!(report.has_signal());
+}
+
+#[test]
+fn an_invalid_fence_keeps_the_existing_lint_report_of_the_message() {
+    let conn = database();
+    let mut msg = message("m", "```kronn-question\n{\"version\":2}\n```".into());
+    let mut lint = crate::core::anti_halluc::LintReport::empty();
+    lint.unsourced_count = 3;
+    msg.lint_report = Some(lint);
+    crate::db::discussions::insert_message(&conn, "d", &msg).unwrap();
+    let report = stored_lint_report(&conn).unwrap();
+    assert_eq!(report.unsourced_count, 3);
+    assert_eq!(report.invalid_cards.len(), 1);
 }

@@ -4676,6 +4676,37 @@ button.disc-contact-open {
   margin-left: -2px;
 }
 
+.disc-orchestration-visibility-btn {
+  margin-left: -2px;
+}
+
+/* KT-1330 — the folded run of orchestration messages. */
+.disc-orchestration-marker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 4px 0;
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px dashed var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  color: var(--kr-text-ghost);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.disc-orchestration-marker:hover,
+.disc-orchestration-marker:focus-visible {
+  color: var(--kr-text-secondary);
+  border-color: var(--kr-border-strong);
+}
+
+.disc-orchestration-marker[data-expanded="true"] {
+  color: var(--kr-text-secondary);
+}
+
 /* ── Send / stop buttons ──────────────────────────────── */
 .disc-stop-btn {
   background: rgba(var(--kr-error-rgb), 0.15);
@@ -7964,6 +7995,17 @@ button.disc-contact-open {
 .disc-msg-lint-detail[data-severity="fabricated"] {
   background: rgba(var(--kr-error-rgb), 0.06);
   border-color: rgba(var(--kr-error-rgb), 0.20);
+}
+/* KT-1401 — a kronn-question fence that could not be recorded as a card. */
+.disc-msg-invalid-card {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-error-rgb), 0.06);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.20);
+  color: var(--kr-error);
+  font-size: var(--kr-fs-2xs);
+  word-break: break-word;
 }
 .disc-lint-group + .disc-lint-group { margin-top: 8px; }
 .disc-lint-group-title {

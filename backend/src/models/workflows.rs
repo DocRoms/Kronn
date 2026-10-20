@@ -2450,6 +2450,23 @@ pub struct WorkflowBlocker {
     pub action: String,
     /// Only a human can lift it: an agent must report it, never work around it.
     pub human_only: bool,
+    /// A saved Quick Exec a CollectApiData source runs (KT-1398): the human
+    /// approves it there, so the page can approve it or open it directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub quick_exec: Option<BlockedQuickExec>,
+}
+
+/// The saved Quick Exec behind a blocker, and the program it hands run values to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BlockedQuickExec {
+    pub id: String,
+    pub name: String,
+    /// The CollectApiData source alias that runs it.
+    pub source_alias: String,
+    /// The program that receives run values, e.g. `aws`.
+    pub program: String,
 }
 
 /// Whether a saved workflow can start, as far as Kronn can tell before a run

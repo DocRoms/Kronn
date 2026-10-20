@@ -357,14 +357,29 @@ pub(super) fn with_stack_conflicts(
     Ok(recovery)
 }
 
-/// KT-1388 — the advice (a stack conflict, an unproven closure) the documents a
-/// step rewrote, and its target, hold after it ran. Read-only: the partial
-/// refresh has no documentary gate to repair anything, only advice to give.
-pub(super) fn advisories_since(
+/// What a step is told, without being failed over it, about the documents it
+/// rewrote and its target: KT-1388 advice and KT-1387 unverified commands.
+#[derive(Debug, Default)]
+pub(super) struct StepAdvice {
+    pub advisories: Vec<Diagnostic>,
+    pub unverified_commands: Vec<Diagnostic>,
+}
+
+impl StepAdvice {
+    pub(super) fn is_empty(&self) -> bool {
+        self.advisories.is_empty() && self.unverified_commands.is_empty()
+    }
+}
+
+/// KT-1388 / KT-1389 — the advice (a stack conflict, an unproven closure) and the
+/// commands the repository does not define that the documents a step rewrote,
+/// and its target, hold after it ran. Read-only: the partial refresh has no
+/// documentary gate to repair anything, only feedback to give.
+pub(super) fn advice_since(
     project: &Path,
     before: &Snapshot,
     target: &str,
-) -> Result<Vec<Diagnostic>, String> {
+) -> Result<StepAdvice, String> {
     let after = snapshot(project)?;
     let changed: BTreeSet<&String> = after
         .iter()
@@ -372,11 +387,25 @@ pub(super) fn advisories_since(
         .map(|(path, _)| path)
         .collect();
     let report = document_optimization::analyze(project)?;
-    Ok(report
-        .advisory_diagnostics()
-        .filter(|d| d.path == target || changed.contains(&d.path))
-        .cloned()
-        .collect())
+    let touched = |path: &String| path == target || changed.contains(path);
+    Ok(StepAdvice {
+        advisories: report
+            .advisory_diagnostics()
+            .filter(|d| touched(&d.path))
+            .cloned()
+            .collect(),
+        // As the Full gate: only a document Kronn owns is asked of the step.
+        unverified_commands: report
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                d.code == UNKNOWN_COMMAND
+                    && touched(&d.path)
+                    && document_optimization::kronn_owns(project, &d.path)
+            })
+            .cloned()
+            .collect(),
+    })
 }
 
 /// KT-1388 — what is sent back for an advisory finding: the same evidence
@@ -516,6 +545,96 @@ pub(super) fn merge_advisory_notes(
         ),
     );
     serde_json::to_string(notes).ok()
+}
+
+/// KT-1389 — the run's stored notes with `added` appended to the commands it
+/// already lists as unverified (the partial refresh records each step's as it
+/// goes, so an interruption keeps them). The other parts are left as they are.
+pub(super) fn merge_command_notes(
+    existing: Option<&str>,
+    added: &[(u32, Diagnostic)],
+) -> Option<String> {
+    let mut notes = existing
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(serde_json::Value::is_object);
+    let Some(notes) = notes.as_mut() else {
+        return notes_json(&[], &[], &[], &[], added);
+    };
+    if added.is_empty() {
+        return existing.map(str::to_string);
+    }
+    let listed = notes
+        .as_object_mut()
+        .map(|object| {
+            object
+                .entry("unverified_commands")
+                .or_insert_with(|| serde_json::json!([]))
+        })
+        .and_then(|value| value.as_array_mut())?;
+    listed.extend(
+        added.iter().map(
+            |(step, d)| serde_json::json!({"step": step, "path": d.path, "message": d.message}),
+        ),
+    );
+    serde_json::to_string(notes).ok()
+}
+
+/// KT-1389 — what a resumed Full run inherits of its predecessor's notes: the
+/// unverified references and commands of the steps it carries over as done (the
+/// steps it replays write their own again).
+#[derive(Debug, Default)]
+pub(super) struct CarriedNotes {
+    pub unverified: Vec<(u32, document_optimization::DemotedReference)>,
+    pub unverified_commands: Vec<(u32, Diagnostic)>,
+}
+
+pub(super) fn carried_notes(previous: Option<&str>, carried: impl Fn(u32) -> bool) -> CarriedNotes {
+    let Some(notes) = previous
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(serde_json::Value::is_object)
+    else {
+        return CarriedNotes::default();
+    };
+    let listed = |key: &str| -> Vec<(u32, serde_json::Value)> {
+        notes[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let step = u32::try_from(entry["step"].as_u64()?).ok()?;
+                carried(step).then(|| (step, entry.clone()))
+            })
+            .collect()
+    };
+    let text = |entry: &serde_json::Value, key: &str| entry[key].as_str().map(str::to_string);
+    CarriedNotes {
+        unverified: listed("unverified")
+            .into_iter()
+            .filter_map(|(step, entry)| {
+                Some((
+                    step,
+                    document_optimization::DemotedReference {
+                        doc: text(&entry, "doc")?,
+                        marker: text(&entry, "marker")?,
+                    },
+                ))
+            })
+            .collect(),
+        unverified_commands: listed("unverified_commands")
+            .into_iter()
+            .filter_map(|(step, entry)| {
+                Some((
+                    step,
+                    Diagnostic {
+                        code: UNKNOWN_COMMAND.to_string(),
+                        path: text(&entry, "path")?,
+                        message: text(&entry, "message")?,
+                        blocking: false,
+                    },
+                ))
+            })
+            .collect(),
+    }
 }
 
 /// KT-1370 — the lines a step records in its `step_warning` for the markers
@@ -2079,6 +2198,57 @@ mod tests {
             merge_unverified_notes(Some(full), &[]).as_deref(),
             Some(full)
         );
+    }
+
+    #[test]
+    fn the_command_notes_of_a_run_grow_step_by_step_and_keep_the_other_parts() {
+        let command = |message: &str| Diagnostic {
+            code: UNKNOWN_COMMAND.into(),
+            path: "docs/notes.md".into(),
+            message: message.into(),
+            blocking: false,
+        };
+        let first = merge_command_notes(None, &[(1, command("make a"))]).unwrap();
+        let both = merge_command_notes(Some(&first), &[(2, command("make b"))]).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&both).unwrap();
+        assert_eq!(saved["unverified_commands"].as_array().unwrap().len(), 2);
+        assert_eq!(saved["unverified_commands"][1]["step"], 2, "{saved}");
+        let stored = r#"{"unverified":[{"step":1,"doc":"d","marker":"m"}]}"#;
+        let merged = merge_command_notes(Some(stored), &[(3, command("make c"))]).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(saved["unverified"][0]["doc"], "d", "{saved}");
+        assert_eq!(saved["unverified_commands"][0]["step"], 3, "{saved}");
+        assert_eq!(
+            merge_command_notes(Some(stored), &[]).as_deref(),
+            Some(stored)
+        );
+    }
+
+    #[test]
+    fn a_resumed_run_inherits_the_notes_of_the_steps_it_carries_over_only() {
+        let stored = serde_json::json!({
+            "unverified": [
+                {"step": 1, "doc": "docs/a.md", "marker": "[src: file: a]"},
+                {"step": 5, "doc": "docs/b.md", "marker": "[src: file: b]"},
+            ],
+            "unverified_commands": [
+                {"step": 1, "path": "docs/notes.md", "message": "make ghost"},
+                {"step": 5, "path": "docs/notes.md", "message": "make replayed"},
+                {"step": "x", "path": "docs/notes.md", "message": "no step"},
+            ],
+        })
+        .to_string();
+        let carried = carried_notes(Some(&stored), |step| step < 5);
+        assert_eq!(carried.unverified.len(), 1, "{carried:?}");
+        assert_eq!(carried.unverified[0].1.doc, "docs/a.md");
+        assert_eq!(carried.unverified_commands.len(), 1, "{carried:?}");
+        assert_eq!(carried.unverified_commands[0].0, 1);
+        assert_eq!(carried.unverified_commands[0].1.message, "make ghost");
+        assert_eq!(carried.unverified_commands[0].1.code, UNKNOWN_COMMAND);
+        for unreadable in [None, Some("{not json"), Some("[]")] {
+            let none = carried_notes(unreadable, |_| true);
+            assert!(none.unverified.is_empty() && none.unverified_commands.is_empty());
+        }
     }
 
     #[test]

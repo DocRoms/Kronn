@@ -693,6 +693,10 @@ test_endpoint?: string, };
 
 export type AppConfig = { server: ServerConfig, tokens: TokensConfig, scan: ScanConfig, agents: AgentsConfig,
 /**
+ * Local ComfyUI media target (KT-1381).
+ */
+comfyui?: ComfyUiConfig,
+/**
  * Output language used by agents when they write their replies.
  * Separate from `ui_language` below which controls the Kronn UI locale.
  */
@@ -1512,6 +1516,19 @@ parent_workflow_id: string | null, parent_workflow_name: string | null,
 parent_run_sequence: number | null, };
 
 /**
+ * The saved Quick Exec behind a blocker, and the program it hands run values to.
+ */
+export type BlockedQuickExec = { id: string, name: string,
+/**
+ * The CollectApiData source alias that runs it.
+ */
+source_alias: string,
+/**
+ * The program that receives run values, e.g. `aws`.
+ */
+program: string, };
+
+/**
  * Structured discriminant for a non-terminal `Blocked` TaskExecution (KT-328). A
  * `Blocked` row also carries a human-readable `blocked_reason`, but a consumer
  * classifies the hold on THIS code — never by matching prose (KT-334 owns the
@@ -2150,6 +2167,130 @@ timeout_secs?: number | null,
  * Interprétation du stdout avant insertion dans `data.sources.<alias>`.
  */
 output_format: CollectQuickExecOutputFormat, };
+
+export type ComfyFamily = "flux_schnell" | "sdxl" | "wan21_t2v";
+
+/**
+ * Generation settings a user may override per slot in the card. Empty =
+ * the family's measured default.
+ */
+export type ComfyGenSettings = { steps?: number | null, cfg?: number | null, sampler?: string | null, scheduler?: string | null, };
+
+/**
+ * Saved under `[comfyui]` in config.toml. Empty slots mean "ComfyUI is not
+ * offered as a media source".
+ */
+export type ComfyUiConfig = {
+/**
+ * Base URL; `None` = the default local address (`http://127.0.0.1:8188`,
+ * `host.docker.internal` from Docker).
+ */
+endpoint?: string | null,
+/**
+ * Checkpoint file used for images (`models/checkpoints`).
+ */
+image_model?: string | null,
+/**
+ * Diffusion model file used for videos (`models/diffusion_models`).
+ */
+video_model?: string | null,
+/**
+ * The workflow validated when the image slot was chosen, so a job does
+ * not depend on reading the checkpoint header again.
+ */
+image_family?: ComfyFamily | null,
+/**
+ * Where ComfyUI is installed, to tell "installed but stopped" from "not
+ * installed"; `None` = `~/ComfyUI-Installs` (Comfy Desktop's default).
+ */
+install_dir?: string | null,
+/**
+ * The workflow the user chose for a model Kronn cannot recognise on its
+ * own, keyed `<folder>/<file>`.
+ */
+model_families?: { [key in string]: ComfyFamily },
+/**
+ * Overrides of the family defaults, per slot.
+ */
+image_settings?: ComfyGenSettings, video_settings?: ComfyGenSettings, };
+
+export type ComfyUiFamilyDefaults = { family: ComfyFamily, settings: ResolvedGenSettings, };
+
+/**
+ * One model file ComfyUI reports, and what Kronn can do with it.
+ */
+export type ComfyUiModel = {
+/**
+ * ComfyUI folder: `checkpoints` (image) or `diffusion_models` (video).
+ */
+folder: string, file: string,
+/**
+ * `None` = Kronn does not know how to run it until the user picks its
+ * workflow.
+ */
+family: ComfyFamily | null, modality: MediaModality | null,
+/**
+ * The family comes from the user's choice, not from the file.
+ */
+chosen: boolean, };
+
+/**
+ * What the ComfyUI card shows.
+ */
+export type ComfyUiStatus = {
+/**
+ * `online` (server answers), `offline` (installed, server down) or
+ * `not_found` (nothing detected on this machine).
+ */
+state: string, endpoint: string, version: string | null, models: Array<ComfyUiModel>, image_model: string | null, video_model: string | null,
+/**
+ * Why the chosen video model cannot run yet (a missing text encoder or
+ * VAE), in a sentence; `None` when it can.
+ */
+video_blocker: string | null,
+/**
+ * The one-command install for this OS, only where it was run and
+ * verified; elsewhere the card links to the official download page.
+ */
+install_command: string | null, download_url: string,
+/**
+ * Models the card offers to download (KT-1385).
+ */
+suggestions: Array<ComfyUiSuggestion>,
+/**
+ * The folder checked for an installation, as configured or defaulted.
+ */
+install_dir: string,
+/**
+ * What the user typed, `None` while the defaults above apply.
+ */
+configured_endpoint: string | null, configured_install_dir: string | null, image_settings: ComfyGenSettings, video_settings: ComfyGenSettings,
+/**
+ * Each family's measured defaults, shown as the placeholders.
+ */
+family_defaults: Array<ComfyUiFamilyDefaults>,
+/**
+ * What this ComfyUI's KSampler accepts (empty while it is down).
+ */
+samplers: Array<string>, schedulers: Array<string>, };
+
+/**
+ * One suggested model, as the card shows it.
+ */
+export type ComfyUiSuggestion = { id: string, family: ComfyFamily, modality: MediaModality,
+/**
+ * Total size of its files, as the source serves them.
+ */
+bytes: number,
+/**
+ * Every file is already in ComfyUI.
+ */
+installed: boolean,
+/**
+ * Kronn can write into ComfyUI's model folders from here (a native
+ * install; not from Docker, where those paths are the host's).
+ */
+downloadable: boolean, };
 
 /**
  * A remark on a question that is not a decision: it reaches the asker and
@@ -2916,6 +3057,11 @@ lint?: AppendLintSummary,
  */
 important?: ImportantIngest,
 /**
+ * KT-1401 — `kronn-question` fences of the appended message that no card
+ * could be recorded from, each with its reason: the author reposts them.
+ */
+invalid_cards?: Array<InvalidCard>,
+/**
  * `sort_order` of the LAST appended message (stab-1). This is a write
  * receipt, not a read cursor: another message may have landed between
  * the caller's last read and this append. `None` when nothing was appended.
@@ -3597,7 +3743,16 @@ author_cli_ordinal?: number | null,
  * KT-1202 — whether this agent turn continued its CLI/ACP conversation or
  * started a new one, and why. `None` for runtimes that never resume.
  */
-session_continuity?: SessionContinuity | null, };
+session_continuity?: SessionContinuity | null,
+/**
+ * KT-1330 — who this message speaks for. `Orchestration` marks what the
+ * orchestrator posts into a room (review requests, delivery summaries,
+ * terminal events, bounces, timeouts…) so the UI can fold a campaign
+ * room's machinery behind a marker WITHOUT sniffing the text. Display
+ * only: every read path for agents (bridge, MCP, prompts) keeps the
+ * message. Skipped on the wire while `Standard`.
+ */
+kind?: MessageKind, };
 
 /**
  * Lean surrounding-message shape for a `disc_get_message` window.
@@ -4756,6 +4911,15 @@ redirects_to: Array<string>, };
 export type IntegrationStrategy = "two_phase_ff_only";
 
 /**
+ * A `kronn-question` fence that no card could be recorded from.
+ */
+export type InvalidCard = {
+/**
+ * The fence's `key`, when it could still be read.
+ */
+key?: string, reason: string, };
+
+/**
  * Wire shape returned by the invite endpoint. The frontend displays
  * `instruction_text` directly in the copy-paste modal — the wording
  * lives server-side so we can tweak it (i18n, channel, etc.) without
@@ -5016,7 +5180,14 @@ export type LintReport = { unsourced_count: number, flagged_spans: Array<Flagged
  * honestly "couldn't verify" (typo? cross-repo? wrong line?), surfaced as
  * a soft amber pill, NOT a red "fabricated" one.
  */
-unverified_count: number, };
+unverified_count: number,
+/**
+ * KT-1401 — `kronn-question` fences of the message that Kronn could not
+ * turn into an arbitration card, each with the reason. Set when the
+ * message is stored, so the author is told instead of leaving a card the
+ * human sees but cannot answer.
+ */
+invalid_cards?: Array<InvalidCard>, };
 
 export type ListRequest = { authority: string, };
 
@@ -5646,7 +5817,11 @@ reference_asset_ids?: Array<string>,
  * Single-image form of the field above, kept readable for runs published
  * before a generation could start from several pictures.
  */
-reference_asset_id?: string | null, reference_mode?: MediaReferenceMode | null, };
+reference_asset_id?: string | null, reference_mode?: MediaReferenceMode | null,
+/**
+ * The model that ran, so a failed bubble says what failed (KT-1214).
+ */
+model?: string | null, };
 
 export type MergeBase = "local" | "remote";
 
@@ -5663,6 +5838,11 @@ outcome: WriteOutcome | null, imported_sections: number, diff: string, };
 export type MessageAttachment = { id: string, filename: string, mime_type: string, disk_path: string | null, };
 
 export type MessageChannel = "main" | "note";
+
+/**
+ * KT-1330 — the durable origin of a message, orthogonal to `role`/`channel`.
+ */
+export type MessageKind = "standard" | "orchestration";
 
 export type MessageRevisionReceipt = { event_id: string, message_id: string, revision: string, sort_order: number, duplicate: boolean, dispatch_job_id: string | null, };
 
@@ -7273,6 +7453,8 @@ export type PublishProjectRepositoryResourceRequest = { kind: ProjectRepositoryR
  */
 overwrite_repository_changes?: boolean, };
 
+export type PullComfyUiModelRequest = { suggestion: string, };
+
 /**
  * The sole accepted input for a local Ollama pull.  The endpoint never
  * accepts arbitrary upstream URLs: it always uses Kronn's configured Ollama
@@ -7359,6 +7541,15 @@ export type QuickExecExportEnvelope = { kind: string, version: number, exported_
  * Fields whose literal secret was replaced before export (never the value).
  */
 redacted_fields?: Array<RedactedField>, };
+
+/**
+ * One saved Quick Exec whose line waits for a human's approval (KT-1398).
+ */
+export type QuickExecPendingApproval = { id: string,
+/**
+ * The program that receives run values, e.g. `aws`.
+ */
+program: string, message: string, };
 
 export type QuickExecResult = { status: QuickExecStatus,
 /**
@@ -7912,6 +8103,11 @@ export type RepoSource = { id: string, label: string, provider: string, };
  * no value is ever read.
  */
 export type RequiredSecretStatus = { name: string, configured: boolean, };
+
+/**
+ * The settings a workflow actually runs with.
+ */
+export type ResolvedGenSettings = { steps: number, cfg: number, sampler: string, scheduler: string, };
 
 /**
  * ADR-005 portability tier. Deliberately serialized as the literal `N0` /
@@ -8906,6 +9102,27 @@ color?: string | null, };
 export type SetApiAccessPolicyRequest = { policy?: ApiAccessPolicy | null, };
 
 export type SetBriefingRequest = { notes?: string | null, };
+
+/**
+ * PUT /api/comfyui/model-family — run a model Kronn cannot recognise with
+ * one of its workflows; `family: null` forgets the choice.
+ */
+export type SetComfyUiModelFamilyRequest = { folder: string, file: string, family?: ComfyFamily | null, };
+
+/**
+ * PUT /api/comfyui/settings — the machine-dependent part of the card.
+ */
+export type SetComfyUiSettingsRequest = {
+/**
+ * Empty = the default local address.
+ */
+endpoint?: string | null,
+/**
+ * Empty = `~/ComfyUI-Installs`.
+ */
+install_dir?: string | null, image_settings?: ComfyGenSettings, video_settings?: ComfyGenSettings, };
+
+export type SetComfyUiSlotsRequest = { image_model?: string | null, video_model?: string | null, };
 
 export type SetOllamaContextOverrideRequest = { model: string,
 /**
@@ -11135,7 +11352,12 @@ reason?: string, message: string, action: string,
 /**
  * Only a human can lift it: an agent must report it, never work around it.
  */
-human_only: boolean, };
+human_only: boolean,
+/**
+ * A saved Quick Exec a CollectApiData source runs (KT-1398): the human
+ * approves it there, so the page can approve it or open it directly.
+ */
+quick_exec?: BlockedQuickExec, };
 
 /**
  * What keeps a run from starting (KT-1138).
