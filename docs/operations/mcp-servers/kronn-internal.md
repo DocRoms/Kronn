@@ -649,7 +649,7 @@ identical contents is not stale. `task_exec_status` remains available for
 recovery; every orchestration mutation stays fail-closed until the fresh bridge
 is ready.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4049-4135#_attempt_resume]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10717-10728#_bridge_freshness]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10720-10731#_bridge_freshness]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:10744-10755#_GUARDED_ORCHESTRATION_TOOLS]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
@@ -848,11 +848,11 @@ The MCP `initialize` instructions expose this contract before any room tool is
 called, and `disc_join` repeats it in the room protocol. The full document and
 diagram examples remain on demand in the Kronn Docs skill so the permanent MCP
 catalogue does not pay for a long manual.
-`[src: file: backend/scripts/disc-introspection-mcp.py:11966-11972#first_contact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11969-11975#first_contact]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:111-119#validRoots]`
 `[src: file: backend/src/api/disc_prompts.rs:469-474#rich_output_notice]`
 `[src: file: backend/src/api/disc_invite.rs:583-713#join_next_steps]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11809-11918#initialize]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11812-11921#initialize]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4438-4454#MAX_DISC_APPEND_ATTACHMENTS] [src: file: backend/scripts/disc-introspection-mcp.py:53#MAX_DISC_APPEND_ATTACHMENTS]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4529-4595#_attach_files_to_appended_message]`
 `[src: file: frontend/src/components/MessageAttachments.tsx:114-299#AttachmentThumb]`
@@ -966,7 +966,7 @@ provenance or marks a line human-written. `ready:true` means no
 known refusal, not a guaranteed run: report the real outcome from
 `workflow_run_get`. The bridge forwards the backend's verdict and never
 re-derives it.
-[src: file: backend/src/workflows/readiness.rs:18-31#assess] [src: file: backend/src/workflows/readiness.rs:47-63#collection_failure] [src: file: backend/src/workflows/readiness.rs:185-274#visit]
+[src: file: backend/src/workflows/readiness.rs:32-57#assess] [src: file: backend/src/workflows/readiness.rs:116-132#collection_failure] [src: file: backend/src/workflows/readiness.rs:289-379#visit]
 [src: file: backend/scripts/disc-introspection-mcp.py:4391-4409#kronn_readiness] [src: file: backend/scripts/disc-introspection-mcp.py:7692-7699#call_workflow_validate]
 
 ## Workflow trigger agents
