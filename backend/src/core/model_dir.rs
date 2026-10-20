@@ -1,10 +1,11 @@
 //! A model folder Kronn downloads into (KT-1381), held by a directory
 //! handle so every file operation stays inside it.
 //!
-//! The folder is opened once, without following a link at its last
-//! component, and must be the same directory (device, inode) that was
-//! checked when the download was planned. Files are then opened, removed and
-//! renamed relative to that handle with `O_NOFOLLOW`:
+//! The folder is opened from the install folder's handle, one plain
+//! directory at a time with `O_NOFOLLOW`, so no link anywhere below the
+//! install folder is followed and the path is never resolved again. Files
+//! are then opened, removed and renamed relative to that handle with
+//! `O_NOFOLLOW`:
 //! - a `.part` that is not a plain file with a single link (a symbolic link,
 //!   a hard link to another file) is removed, the link and never its target,
 //!   and the download starts over;
@@ -25,13 +26,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-/// Device and inode of a directory, recorded when a download is planned.
+/// Device and inode of an opened file.
 pub type Identity = (u64, u64);
-
-pub fn identity(dir: &Path) -> io::Result<Identity> {
-    let meta = std::fs::metadata(dir)?;
-    Ok((meta.dev(), meta.ino()))
-}
 
 fn cstring(name: &str) -> io::Result<CString> {
     if name.is_empty() || name.contains('/') || name == "." || name == ".." {
@@ -66,23 +62,27 @@ pub struct ModelDir {
 }
 
 impl ModelDir {
-    /// Opens `dir` and checks it is still the directory planned.
-    pub fn open(dir: &Path, expected: Identity) -> io::Result<Self> {
-        let path = CString::new(dir.as_os_str().as_bytes())
+    /// Opens `rel` below `root`: the root (a path Kronn checked, holding no
+    /// link), then each component from the previous handle as a plain
+    /// directory, never following a link. Anything but plain names (`..`, an
+    /// absolute part) is refused.
+    pub fn open_under(root: &Path, rel: &Path) -> io::Result<Self> {
+        let path = CString::new(root.as_os_str().as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))?;
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
         // SAFETY: valid NUL-terminated path; the result is checked.
-        let fd = owned(unsafe {
-            libc::open(
-                path.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        })?;
-        let meta = File::from(fd.try_clone()?).metadata()?;
-        if (meta.dev(), meta.ino()) != expected {
-            return Err(foreign(format!(
-                "{} is no longer the folder that was checked",
-                dir.display()
-            )));
+        let mut fd = owned(unsafe { libc::open(path.as_ptr(), flags) })?;
+        for component in rel.components() {
+            let std::path::Component::Normal(part) = component else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} is not a plain relative path", rel.display()),
+                ));
+            };
+            let name = CString::new(part.as_bytes())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))?;
+            // SAFETY: `fd` is an open directory and `name` NUL-terminated.
+            fd = owned(unsafe { libc::openat(fd.as_raw_fd(), name.as_ptr(), flags) })?;
         }
         Ok(Self { fd })
     }

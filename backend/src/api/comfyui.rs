@@ -499,26 +499,30 @@ fn is_loopback(base: &str) -> bool {
 }
 
 /// The first folder ComfyUI reports for `folder` that is a real directory
-/// inside the install folder, symlinks resolved. Anything else, a folder
-/// elsewhere on the disk included, is never written to.
+/// inside the install folder, as a path relative to it (symlinks resolved
+/// for this check only). Anything else, a folder elsewhere on the disk
+/// included, is never written to.
 fn confined_model_dir(
     paths: &Value,
     folder: &str,
     install_root: &std::path::Path,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, PathBuf)> {
     let root = install_root.canonicalize().ok()?;
-    paths[folder]
+    let dir = paths[folder]
         .as_array()?
         .iter()
         .filter_map(Value::as_str)
         .filter_map(|dir| std::path::Path::new(dir).canonicalize().ok())
-        .find(|dir| dir.is_dir() && dir.starts_with(&root))
+        .find(|dir| dir.is_dir() && dir.starts_with(&root))?;
+    let rel = dir.strip_prefix(&root).ok()?.to_path_buf();
+    Some((root, rel))
 }
 
 /// Where a model of `folder` is downloaded, if Kronn may write it: a
 /// ComfyUI on this machine (not Docker, whose paths are the host's) and a
-/// folder inside the configured install folder.
-async fn model_dir(base: &str, config: &ComfyUiConfig, folder: &str) -> Option<PathBuf> {
+/// folder inside the configured install folder, as (install folder, path
+/// below it).
+async fn model_dir(base: &str, config: &ComfyUiConfig, folder: &str) -> Option<(PathBuf, PathBuf)> {
     if cfg!(not(unix)) || crate::core::env::is_docker() || !is_loopback(base) {
         return None;
     }
@@ -599,7 +603,7 @@ async fn pull_into(
     base: &str,
     config: &ComfyUiConfig,
 ) -> Sse<PullStream> {
-    use crate::core::model_dir::{identity, ModelDir};
+    use crate::core::model_dir::ModelDir;
     use std::sync::Arc;
 
     let installed = installed_files(base).await;
@@ -611,21 +615,29 @@ async fn pull_into(
         {
             continue;
         }
-        let Some(dir) = model_dir(base, config, file.folder).await else {
+        let Some((root, rel)) = model_dir(base, config, file.folder).await else {
             return pull_error(
                 "Kronn writes models only into a ComfyUI running on this machine, inside its \
                  install folder: download the files from Hugging Face instead.",
             );
         };
-        let Ok(id) = identity(&dir) else {
-            return pull_error(format!("cannot read {}", dir.display()));
+        // Opened now, from the install folder down, and held to the end:
+        // every operation is relative to this handle, never to the path.
+        let handle = match ModelDir::open_under(&root, &rel) {
+            Ok(handle) => Arc::new(handle),
+            Err(e) => {
+                return pull_error(format!(
+                    "{}: {e}; nothing was written",
+                    root.join(&rel).display()
+                ))
+            }
         };
-        plan.push((*file, dir, id));
+        plan.push((*file, handle, root.join(rel)));
     }
     // One download per file at a time: two writers on one `.part` corrupt it.
     let Some(lease) = PullLease::take(
         plan.iter()
-            .map(|(file, dir, _)| dir.join(file.file))
+            .map(|(file, _, dir)| dir.join(file.file))
             .collect(),
     ) else {
         return pull_error("This model is already downloading.");
@@ -633,13 +645,9 @@ async fn pull_into(
     let total: u64 = plan.iter().map(|(file, _, _)| file.bytes).sum();
     let already: u64 = plan
         .iter()
-        .filter_map(|(file, dir, id)| {
-            ModelDir::open(dir, *id)
-                .and_then(|handle| handle.part_len(&part_name(file.file)))
-                .ok()
-        })
+        .filter_map(|(file, handle, _)| handle.part_len(&part_name(file.file)).ok())
         .sum();
-    if let Some((_, dir, _)) = plan.first() {
+    if let Some((_, _, dir)) = plan.first() {
         let free = fs2::available_space(dir).unwrap_or(0);
         if free < total.saturating_sub(already) + DISK_MARGIN_BYTES {
             return pull_error(format!(
@@ -656,16 +664,7 @@ async fn pull_into(
             .build()
             .unwrap_or_default();
         let mut done_before: u64 = 0;
-        for (file, dir, id) in plan {
-            // Held for the whole file: every operation below is relative to
-            // this handle, so swapping the folder for a link changes nothing.
-            let handle = match ModelDir::open(&dir, id) {
-                Ok(handle) => Arc::new(handle),
-                Err(e) => {
-                    yield pull_event("error", serde_json::json!({ "message": format!("{e}; nothing was written") }));
-                    return;
-                }
-            };
+        for (file, handle, _) in plan {
             match download_file(&http, &file, handle.clone(), total, done_before).await {
                 Ok(mut progress) => {
                     while let Some(event) = progress.next().await {
@@ -1242,8 +1241,8 @@ mod tests {
     ) {
         let scratch = tempfile::tempdir().unwrap();
         let dir = scratch.path().canonicalize().unwrap();
-        let id = crate::core::model_dir::identity(&dir).unwrap();
-        let handle = crate::core::model_dir::ModelDir::open(&dir, id).unwrap();
+        let handle =
+            crate::core::model_dir::ModelDir::open_under(&dir, std::path::Path::new("")).unwrap();
         (scratch, dir, std::sync::Arc::new(handle))
     }
 
@@ -1465,29 +1464,40 @@ mod tests {
             b"twenty-five bytes, intact"
         );
 
-        // The folder checked at planning, swapped for a link to elsewhere
-        // before the download opens it: refused, nothing written.
+        // A folder anywhere below the install folder swapped for a link to
+        // elsewhere — the last one or one in between — and `..`: refused,
+        // nothing written.
         let scratch = tempfile::tempdir().unwrap();
-        let planned = scratch.path().canonicalize().unwrap().join("checkpoints");
-        std::fs::create_dir(&planned).unwrap();
-        let id = crate::core::model_dir::identity(&planned).unwrap();
-        std::fs::rename(&planned, scratch.path().join("moved")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), &planned).unwrap();
-        assert!(crate::core::model_dir::ModelDir::open(&planned, id).is_err());
-        // And a real folder put in its place is not the one checked either.
-        std::fs::remove_file(&planned).unwrap();
-        std::fs::create_dir(&planned).unwrap();
-        assert!(crate::core::model_dir::ModelDir::open(&planned, id).is_err());
+        let root = scratch.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("models/checkpoints")).unwrap();
+        std::fs::create_dir_all(outside.path().join("checkpoints")).unwrap();
+        let open = |rel: &str| {
+            crate::core::model_dir::ModelDir::open_under(&root, std::path::Path::new(rel))
+        };
+        assert!(open("models/checkpoints").is_ok());
+        std::fs::rename(root.join("models"), root.join("moved")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("models")).unwrap();
+        assert!(open("models/checkpoints").is_err());
+        std::fs::rename(root.join("moved/checkpoints"), root.join("moved/held")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("checkpoints"),
+            root.join("moved/checkpoints"),
+        )
+        .unwrap();
+        assert!(open("moved/checkpoints").is_err());
+        assert!(open("moved/../moved/held").is_err());
+        assert!(open("moved/held").is_ok());
 
         // Swapped after the download opened it: writes stay in the folder
         // the handle holds, never in the link's target.
         let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path().canonicalize().unwrap().join("checkpoints");
+        let root = scratch.path().canonicalize().unwrap();
+        let dir = root.join("checkpoints");
         std::fs::create_dir(&dir).unwrap();
         let handle = std::sync::Arc::new(
-            crate::core::model_dir::ModelDir::open(
-                &dir,
-                crate::core::model_dir::identity(&dir).unwrap(),
+            crate::core::model_dir::ModelDir::open_under(
+                &root,
+                std::path::Path::new("checkpoints"),
             )
             .unwrap(),
         );
@@ -1545,7 +1555,10 @@ mod tests {
                 "checkpoints",
                 install.path()
             ),
-            Some(inside.canonicalize().unwrap())
+            Some((
+                install.path().canonicalize().unwrap(),
+                PathBuf::from("ComfyUI/models/checkpoints")
+            ))
         );
         assert_eq!(
             confined_model_dir(&paths(&[elsewhere.path()]), "checkpoints", install.path()),

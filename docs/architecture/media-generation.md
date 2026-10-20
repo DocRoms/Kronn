@@ -464,9 +464,10 @@ schnell, the Wan 2.1 1.3B pack), like the Ollama suggestions. Files go to the
 first model folder ComfyUI reports (`/internal/folder_paths`) that lies
 inside the install folder, symlinks resolved, and only when the address is
 this machine (loopback): a remote ComfyUI never chooses where Kronn writes.
-The folder is then held by a directory handle checked against the one
-planned (device, inode), and every file operation is relative to it with
-`O_NOFOLLOW` (`core::model_dir`): a `.part` that is a symbolic or hard link is
+The folder is then opened from the install folder's handle, one directory
+at a time with `O_NOFOLLOW` (a link anywhere below the install folder, or
+`..`, is refused), held to the end of the download, and every file operation
+is relative to it (`core::model_dir`): a `.part` that is a symbolic or hard link is
 removed, never written through; an opened file is checked (regular, one link)
 before any byte is written; the hashed file is the one renamed. Each file
 comes from a pinned Hugging Face revision, resumes only from a
