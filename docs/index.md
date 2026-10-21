@@ -7,7 +7,7 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - **[AGENTS.md](AGENTS.md)** — Tiered context loader read by Claude Code, Codex, Gemini, Vibe, Copilot, Kiro and any agent that follows the `AGENTS.md` convention. Start here if you're an LLM.
 - **This file (`index.md`)** — Plain landing page for humans browsing the folder. Extend it with whatever helps onboarding.
 
-## Current release: 0.15.0
+## Current release: 0.15.1
 
 - A Live Page action can run without its card once a human approves it, and
   Kronn ships « Ma Todo », a task board that runs without an agent. See

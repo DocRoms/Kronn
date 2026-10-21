@@ -634,12 +634,12 @@ A running audit does not defer the reload: it runs detached on the
 backend and the bridge only subscribes to its SSE. Retry the refused mutation once with the same idempotency
 key. If preflight, handoff or reexec fails, the bridge stops automatic attempts and
 reports one precise manual reconnect/recovery action instead.
-`[src: file: backend/scripts/disc-introspection-mcp.py:10735-10744#_require_fresh_bridge]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11561-11618#_bridge_stale_result]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11345-11410#_schedule_bridge_reload]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11413-11532#_perform_scheduled_bridge_reload]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10742-10751#_require_fresh_bridge]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11568-11625#_bridge_stale_result]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11352-11417#_schedule_bridge_reload]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11420-11539#_perform_scheduled_bridge_reload]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:2868-2940#_restore_reload_handoff]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11535-11558#_close_inherited_reload_artifact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11542-11565#_close_inherited_reload_artifact]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:12185-12198#list_changed]`
 `[src: file: backend/scripts/test_disc_introspection_mcp.py:8545-8561#test_reload_is_not_deferred_by_a_detached_full_audit]`
 
@@ -649,8 +649,8 @@ identical contents is not stale. `task_exec_status` remains available for
 recovery; every orchestration mutation stays fail-closed until the fresh bridge
 is ready.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4049-4135#_attempt_resume]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10720-10731#_bridge_freshness]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10744-10755#_GUARDED_ORCHESTRATION_TOOLS]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10728-10739#_bridge_freshness]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10747-10758#_GUARDED_ORCHESTRATION_TOOLS]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
 process that loaded the preceding schema. After upgrading to 0.11.0, reconnect
@@ -684,7 +684,7 @@ concurrent sessions of the same provider remain distinguishable in the audit
 trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5748-5763#_task_exec_identity]`
 `[src: file: backend/src/api/orchestration.rs:12186-12196#principal_cli_is_authorized]`
-`[src: file: backend/src/api/agent_tools.rs:3911-3947#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:3921-3957#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`
 
 For a native HTTP worker, the execution id is also server-derived. The executor
@@ -694,7 +694,7 @@ worker schema contains no execution-id field; if a client nevertheless injects
 one, it has no influence. The regression test uses two real concurrent
 executions and forges B's valid id in worker A's call to prove that A remains
 the only target.
-`[src: file: backend/src/api/agent_tools.rs:3949-3971#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:3959-3981#native_worker_execution_for_trusted_dispatch]`
 `[src: file: backend/src/api_tests.rs:6972-7111#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
@@ -796,7 +796,7 @@ discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
 `[src: file: backend/src/agents/runner.rs:12793-12843#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2640-2668#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:5851-5883#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:12033-12046#_spawned_task_worker_mode]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:5851-5883#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:12036-12049#_spawned_task_worker_mode]`
 
 Native HTTP workers can finish the Git side of that contract without receiving
 a shell. Their catalogue includes `git_commit`, but execution is refused unless
@@ -848,11 +848,11 @@ The MCP `initialize` instructions expose this contract before any room tool is
 called, and `disc_join` repeats it in the room protocol. The full document and
 diagram examples remain on demand in the Kronn Docs skill so the permanent MCP
 catalogue does not pay for a long manual.
-`[src: file: backend/scripts/disc-introspection-mcp.py:11969-11975#first_contact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11972-11978#first_contact]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:111-119#validRoots]`
 `[src: file: backend/src/api/disc_prompts.rs:469-474#rich_output_notice]`
 `[src: file: backend/src/api/disc_invite.rs:583-713#join_next_steps]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11812-11921#initialize]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11815-11924#initialize]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4438-4454#MAX_DISC_APPEND_ATTACHMENTS] [src: file: backend/scripts/disc-introspection-mcp.py:53#MAX_DISC_APPEND_ATTACHMENTS]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4529-4595#_attach_files_to_appended_message]`
 `[src: file: frontend/src/components/MessageAttachments.tsx:114-299#AttachmentThumb]`

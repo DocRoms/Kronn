@@ -9,8 +9,8 @@ cells also failed, so this is not evidence of general reliability for either
 prompt style.
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]
 [src: file: backend/src/api/signal_catalog.rs:66-69#get]
-[src: file: backend/src/api/agent_tools.rs:4418-4420#signals]
-[src: file: backend/scripts/disc-introspection-mcp.py:10715-10716#signals]
+[src: file: backend/src/api/agent_tools.rs:4428-4430#signals]
+[src: file: backend/scripts/disc-introspection-mcp.py:10718-10719#signals]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:579#decision]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:275-339]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:24-72]

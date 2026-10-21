@@ -23,7 +23,7 @@ includes external Git metadata for linked worktrees. Missing/non-Git paths,
 permission-pattern characters, overlap with the working directory, unsupported
 agents and native Windows launches are rejected before dispatch. The list does
 not accept workflow template expressions.
-[src: file: backend/src/agents/read_only_repos.rs:170-267#resolve_with_dirs]
+[src: file: backend/src/agents/read_only_repos.rs:176-273#resolve_with_dirs]
 [src: file: backend/src/agents/read_only_repos.rs:205-235#canonical_directory]
 [src: file: backend/src/api/workflow_step_schema.json:31#read_only_repos]
 
@@ -35,7 +35,7 @@ extending `:workspace`, with explicit `read` entries and approval policy `never`
 It keeps the standard broad filesystem read access; the declared directories
 are never added as writable roots, including when they live under a temporary
 directory. `--strict-config` rejects unsupported Codex settings.
-[src: file: backend/src/agents/read_only_repos.rs:306-374#args]
+[src: file: backend/src/agents/read_only_repos.rs:312-380#args]
 [Claude permission rules](https://code.claude.com/docs/en/permissions)
 [Claude sandbox](https://code.claude.com/docs/en/sandboxing)
 [Codex permissions](https://learn.chatgpt.com/docs/permissions)
@@ -50,7 +50,7 @@ this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
 [src: file: backend/src/agents/runner.rs:4483-4487#read_only_repos]
 [src: file: backend/src/agents/runner.rs:4517-4519#read_only_repos]
-[src: file: backend/src/agents/read_only_repos.rs:297-304#apply]
+[src: file: backend/src/agents/read_only_repos.rs:303-310#apply]
 [src: file: backend/src/agents/runner.rs:13730-13735#sandbox_required]
 [src: file: backend/src/agents/runner.rs:13913-13923#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
@@ -101,7 +101,7 @@ requirement: `--add-dir`, `Edit` deny rule and sandbox `denyWrite` for Claude,
 an explicit `read` entry for Codex. Other agents receive no grant.
 [src: file: backend/src/workflows/run_artifacts.rs:46-61#ensure]
 [src: file: backend/src/workflows/steps.rs:126-147#artifacts_read_only_dirs]
-[src: file: backend/src/agents/read_only_repos.rs:170-200#resolve_with_dirs]
+[src: file: backend/src/agents/read_only_repos.rs:176-206#resolve_with_dirs]
 
 ```json
 [
@@ -170,7 +170,7 @@ path, since the cwd is the copy. The copy goes with the artifacts directory.
 The automated policy and dispatch regressions use temporary repositories and
 fake CLI processes. They verify declarations and arguments; they do not prove
 vendor sandbox enforcement.
-[src: file: backend/src/agents/read_only_repos.rs:413-434#fixture]
+[src: file: backend/src/agents/read_only_repos.rs:419-440#fixture]
 [src: file: backend/tests/adapter_worker_policy.rs:41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 The dispatch regression checks initial and resumed Codex adapter arguments:
