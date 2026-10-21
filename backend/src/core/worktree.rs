@@ -4415,6 +4415,13 @@ mod tests {
             .current_dir(dir.path())
             .output()
             .unwrap();
+        // Windows runners convert line endings by default: a reapplied patch
+        // would then differ from the checkout it was taken from.
+        std::process::Command::new("git")
+            .args(["config", "core.autocrlf", "false"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
         // Need at least one commit for worktrees to work
         fs::write(dir.path().join("README.md"), "# test").unwrap();
         std::process::Command::new("git")
@@ -6579,10 +6586,7 @@ mod tests {
         fs::write(root.join("src/deep/lib.rs"), "fn main() {}").unwrap();
         fs::write(root.join(".git"), "gitdir: elsewhere").unwrap();
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
-        let age = |path: &Path| {
-            let file = fs::File::open(path).unwrap();
-            file.set_modified(old).unwrap();
-        };
+        let age = |path: &Path| set_mtime(path, old);
         // Deepest first: a child write bumps its parent's mtime.
         age(&root.join("src/deep/lib.rs"));
         age(&root.join("src/deep"));
