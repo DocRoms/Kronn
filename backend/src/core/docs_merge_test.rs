@@ -34,7 +34,7 @@ fn documented_repo() -> TempDir {
     write(
         root,
         "README.md",
-        b"# Front Apollo\n\nHapi API over OpenSearch.\n\n## License\n\nProprietary.\n",
+        b"# Front Node\n\nHapi API over OpenSearch.\n\n## License\n\nProprietary.\n",
     );
     write(
         root,

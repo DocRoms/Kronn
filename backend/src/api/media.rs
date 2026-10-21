@@ -1907,16 +1907,44 @@ async fn resolve_references(
     };
     let discussion_id = discussion_id.to_string();
 
+    // KT-1418 — an HTTP agent only ever sees an attached image's filename, so a
+    // reference that is not a context file id is also tried as the exact
+    // filename of an image of THIS discussion. The room's own list is the only
+    // thing consulted, so membership is unchanged; zero or several matches are
+    // the same refusal as an unknown id, and it lists what can be used.
+    let mut resolved_ids: Vec<String> = Vec::new();
     for asset_id in &asset_ids {
         let lookup = asset_id.clone();
-        let file = state
+        let found = state
             .db
             .with_read_conn(move |conn| {
                 Ok(crate::db::discussions::get_context_file(conn, &lookup)?)
             })
             .await
-            .map_err(|e| format!("failed to read the source image: {e}"))?
-            .ok_or_else(|| format!("unknown reference asset: {asset_id}"))?;
+            .map_err(|e| format!("failed to read the source image: {e}"))?;
+        let file = match found {
+            Some(file) => file,
+            None => {
+                let room = discussion_id.clone();
+                let siblings = state
+                    .db
+                    .with_read_conn(move |conn| {
+                        Ok(crate::db::discussions::list_context_files(conn, &room)?)
+                    })
+                    .await
+                    .map_err(|e| format!("failed to read the source image: {e}"))?;
+                let mut named = siblings.iter().filter(|file| {
+                    file.filename == *asset_id && file.mime_type.starts_with("image/")
+                });
+                match (named.next(), named.next()) {
+                    (Some(file), None) => file.clone(),
+                    _ => return Err(unknown_reference_error(asset_id, &siblings)),
+                }
+            }
+        };
+        if !resolved_ids.contains(&file.id) {
+            resolved_ids.push(file.id.clone());
+        }
 
         // Membership is the security boundary: an id is guessable, a room is
         // not shared. Same message for "absent" and "elsewhere" would leak
@@ -2008,5 +2036,26 @@ async fn resolve_references(
         }
     }
 
-    Ok(Some((asset_ids, mode)))
+    Ok(Some((resolved_ids, mode)))
+}
+
+/// The refusal for a reference that is neither a context file id nor the exact
+/// filename of one image of the room. It lists this room's images — id and
+/// filename — so the agent can correct itself instead of repeating the call.
+fn unknown_reference_error(reference: &str, room_files: &[crate::models::ContextFile]) -> String {
+    let usable: Vec<String> = room_files
+        .iter()
+        .filter(|file| file.mime_type.starts_with("image/") && file.disk_path.is_some())
+        .map(|file| format!("`{}` ({})", file.id, file.filename))
+        .collect();
+    if usable.is_empty() {
+        format!(
+            "unknown reference asset: {reference}. This discussion has no image to use as a reference"
+        )
+    } else {
+        format!(
+            "unknown reference asset: {reference}. Pass one of this discussion's image context file ids in `reference_asset_ids` (id (filename)): {}",
+            usable.join(", ")
+        )
+    }
 }

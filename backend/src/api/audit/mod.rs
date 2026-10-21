@@ -1390,6 +1390,71 @@ mod prompt_tests {
     }
 
     #[test]
+    fn the_prompts_hand_secrets_tests_and_ci_to_the_computed_facts() {
+        // KT-1404 — the security step never writes "no secrets" over a
+        // committed one: it is given the facts Kronn detects, and told what to
+        // do with them. The steps that state tests and CI copy the computed
+        // facts, and the final review makes every document agree with them.
+        let security = SECURITY_STEPS[0].prompt;
+        for needle in [
+            "`Secret facts` block",
+            "NEVER write \"no secrets\"",
+            "whatever its name says",
+            "never dismiss it as \"a test key\"",
+            "[src: file: <path>:exists]",
+        ] {
+            assert!(security.contains(needle), "security prompt lost `{needle}`");
+        }
+        let step = |target: &str| {
+            ANALYSIS_STEPS
+                .iter()
+                .find(|s| s.target_file.ends_with(target))
+                .unwrap()
+                .prompt
+        };
+        for (target, needles) in [
+            (
+                "AGENTS.md",
+                &["`Test facts`", "`CI facts`", "Project version"][..],
+            ),
+            (
+                "testing-quality.md",
+                &["`Test facts`", "`CI facts`", "branch protection"][..],
+            ),
+            ("debug-operations.md", &["`CI facts`", "`Test facts`"][..]),
+            (
+                "inconsistencies-tech-debt.md",
+                &[
+                    "`Secret facts`",
+                    "`CI facts`",
+                    "`Old pinned dependencies`",
+                    "premise cites the code",
+                    "#[Cache]",
+                ][..],
+            ),
+            (
+                "decisions.md",
+                &[
+                    "Kronn's computed facts",
+                    "`Test facts`",
+                    "`Secret facts`",
+                    "Fix the document that disagrees with the facts",
+                ][..],
+            ),
+        ] {
+            let prompt = step(target);
+            for needle in needles {
+                assert!(prompt.contains(needle), "{target} prompt lost `{needle}`");
+            }
+        }
+        // A purpose no file states is not an example any prompt offers.
+        for prompt in ANALYSIS_STEPS.iter().map(|s| s.prompt) {
+            assert!(!prompt.contains("budget guard as"), "{prompt}");
+            assert!(!prompt.contains("as a budget guard"), "{prompt}");
+        }
+    }
+
+    #[test]
     fn security_prompt_never_pulls_secret_values_into_context() {
         // Codex r7 P0 — the agent runs full-access and its context leaves
         // the machine: the checklist must detect secrets by metadata only.
@@ -2154,7 +2219,7 @@ mod prompt_tests {
     #[test]
     fn the_security_checklist_finds_keys_without_an_extension() {
         // A/B s10 on qwen3.6:35b, 3 runs per arm: without this hint 0/3 found
-        // `.ssh/vr-v2njs01-s` and 0/3 `security/devlpt-nodeapi`; with it 3/3 and 2/3.
+        // `.ssh/deploy-key` and 0/3 `keys/service-key`; with it 3/3 and 2/3.
         let steps = assemble_chained_steps(crate::models::AuditKind::Full);
         let security = steps
             .iter()
@@ -2719,13 +2784,17 @@ mod prompt_tests {
         // ceiling moved by 200 B for that one sentence, not for new baseline.
         // KT-1388 added the proof rule for a closed finding (+250 B, measured
         // 11,364): the ceiling moved by 200 B more for that one sentence.
+        // KT-1404 added the pointers to the computed `Secret facts`, `CI facts`
+        // and `Stack facts` blocks and the rule that a debt's premise cites the
+        // code (+1,061 B, measured 12,425): the ceiling moved by 1,100 B. The
+        // rules themselves travel with the computed blocks, not in this prompt.
         let prompt = ANALYSIS_STEPS
             .iter()
             .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
             .unwrap()
             .prompt;
         assert!(
-            prompt.len() <= 11_400,
+            prompt.len() <= 12_500,
             "Step 8 prompt is {} bytes",
             prompt.len()
         );

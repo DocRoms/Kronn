@@ -14460,6 +14460,224 @@ async fn a_litellm_test_reads_each_model_mode_and_reports_its_progress() {
     assert_eq!(unknown["data"], serde_json::json!({"done": 0, "total": 0}));
 }
 
+/// A LiteLLM proxy listing the given models in that order; each answers with
+/// its own chat template, the key being `proxy-secret`.
+async fn mount_litellm_with_order(
+    upstream: &wiremock::MockServer,
+    listed: &[(&'static str, wiremock::ResponseTemplate)],
+) {
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let data: Vec<_> = listed
+        .iter()
+        .map(|(id, _)| serde_json::json!({"id": id}))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": data})))
+        .mount(upstream)
+        .await;
+    for (model, response) in listed {
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer proxy-secret"))
+            .and(body_partial_json(serde_json::json!({"model": model})))
+            .respond_with(response.clone())
+            .mount(upstream)
+            .await;
+    }
+}
+
+fn litellm_denial() -> wiremock::ResponseTemplate {
+    wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
+        "error": {"message": LITELLM_PRIVATE_TAGS, "code": "401"}
+    }))
+}
+
+fn litellm_pong() -> wiremock::ResponseTemplate {
+    wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "choices": [{"message": {"content": "pong"}}]
+    }))
+}
+
+#[tokio::test]
+async fn a_litellm_model_access_refusal_on_the_first_listed_model_does_not_reject_the_key() {
+    // KT-1412 — with no tier models the test walks the catalogue. The first
+    // entry answering "Not allowed … tags configuration" is a verdict on that
+    // model, not on the key: the next entry is tried and the denial reported.
+    let upstream = wiremock::MockServer::start().await;
+    mount_litellm_with_order(
+        &upstream,
+        &[
+            ("claude-haiku-4-5", litellm_denial()),
+            ("gemini-3.6-flash", litellm_pong()),
+        ],
+    )
+    .await;
+
+    let (status, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "proxy-secret",
+            "origin_preset": "lite_llm",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["data"]["ok"], true, "{response}");
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    let hint = response["data"]["hint"].as_str().unwrap();
+    assert!(hint.contains("gemini-3.6-flash"), "{hint}");
+    assert!(hint.contains("1 listed model(s) are not allowed"), "{hint}");
+    assert!(hint.contains("claude-haiku-4-5"), "{hint}");
+    assert!(!response.to_string().contains("private-team-tag"));
+}
+
+#[tokio::test]
+async fn a_litellm_key_refused_for_every_listed_model_tried_is_not_called_rejected() {
+    let upstream = wiremock::MockServer::start().await;
+    mount_litellm_with_order(
+        &upstream,
+        &[
+            ("claude-haiku-4-5", litellm_denial()),
+            ("vertex_ai/claude-fable-5", litellm_denial()),
+        ],
+    )
+    .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "proxy-secret",
+            "origin_preset": "lite_llm",
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "model_error", "{response}");
+    let hint = response["data"]["hint"].as_str().unwrap();
+    assert!(hint.contains("2 listed model(s) are not allowed"), "{hint}");
+    // The catalogue stays so another model can be chosen.
+    assert_eq!(
+        response["data"]["models"],
+        serde_json::json!(["claude-haiku-4-5", "vertex_ai/claude-fable-5"])
+    );
+}
+
+#[tokio::test]
+async fn a_litellm_refusal_the_classifier_cannot_read_is_the_models_when_another_model_answers() {
+    // A proxy's wording varies: whatever the body says, a later model answering
+    // with the same key proves the key works.
+    let upstream = wiremock::MockServer::start().await;
+    mount_litellm_with_order(
+        &upstream,
+        &[
+            (
+                "claude-haiku-4-5",
+                wiremock::ResponseTemplate::new(401)
+                    .set_body_string("team cannot call this deployment"),
+            ),
+            ("gemini-3.6-flash", litellm_pong()),
+        ],
+    )
+    .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "proxy-secret",
+            "origin_preset": "lite_llm",
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["ok"], true, "{response}");
+    let hint = response["data"]["hint"].as_str().unwrap();
+    assert!(hint.contains("gemini-3.6-flash"), "{hint}");
+    assert!(hint.contains("claude-haiku-4-5"), "{hint}");
+}
+
+#[tokio::test]
+async fn a_bare_litellm_401_on_every_model_tried_is_still_a_credential_verdict() {
+    // Nothing answers and nothing attributes the refusals to the models: the
+    // key itself may be wrong.
+    let upstream = wiremock::MockServer::start().await;
+    mount_litellm_with_order(
+        &upstream,
+        &[
+            (
+                "claude-haiku-4-5",
+                wiremock::ResponseTemplate::new(401).set_body_string("Invalid proxy server token"),
+            ),
+            (
+                "gemini-3.6-flash",
+                wiremock::ResponseTemplate::new(401).set_body_string("Invalid proxy server token"),
+            ),
+        ],
+    )
+    .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "proxy-secret",
+            "origin_preset": "lite_llm",
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["ok"], false, "{response}");
+    assert_eq!(response["data"]["status"], "auth_error", "{response}");
+}
+
+#[tokio::test]
+async fn testing_a_saved_litellm_connection_calls_its_configured_tier_models() {
+    // KT-1412 — a saved connection's test checks each configured tier, not
+    // whichever model the proxy lists first. The client sends the tiers (see
+    // the ExternalApiSection saved-card test); the route then answers per tier.
+    let upstream = wiremock::MockServer::start().await;
+    mount_litellm_with_order(
+        &upstream,
+        &[
+            ("claude-haiku-4-5", litellm_denial()),
+            ("gemini-3.6-flash", litellm_pong()),
+            ("deepseek-r1", litellm_pong()),
+        ],
+    )
+    .await;
+    let state = litellm_saved_connection_state(upstream.uri()).await;
+
+    let (_, response) = post_json(
+        build_router_with_auth(state, false),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "connection_id": "litellm-saved",
+            "origin_preset": "lite_llm",
+            "tier_models": [
+                {"tier": "economy", "model": "gemini-3.6-flash"},
+                {"tier": "default", "model": "deepseek-r1"},
+            ],
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    let checks = response["data"]["tier_checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 2, "{response}");
+    assert!(checks.iter().all(|check| check["ok"] == true), "{response}");
+}
+
 #[tokio::test]
 async fn a_slow_refusal_still_blocks_a_litellm_save() {
     // The proxy took 9 s to refuse `vertex_ai/claude-fable-5@default` on 02/10;
@@ -27311,6 +27529,136 @@ async fn media_generate_records_every_reference_image_for_an_image() {
     // The plural list is the contract now; the single-image field is only ever
     // read, never written again.
     assert!(stored.params.reference_asset_id.is_none());
+}
+
+/// KT-1418 — an HTTP agent is shown filenames. The exact filename of ONE image of
+/// the room is accepted as the reference, never one of another room, and every
+/// refusal names the ids that would have worked.
+#[tokio::test]
+async fn media_generate_accepts_an_exact_filename_of_this_rooms_image_only() {
+    let state = test_state();
+    seed_media_connection(&state, Some("google/gemini-3-pro-image"), None).await;
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-other', 'Another room', ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    seed_reference_image(
+        &state,
+        "asset-mine",
+        "disc-media",
+        "image/png",
+        Some("/tmp/m.png"),
+    )
+    .await;
+    seed_reference_image(
+        &state,
+        "asset-dup-1",
+        "disc-media",
+        "image/png",
+        Some("/tmp/d1.png"),
+    )
+    .await;
+    seed_reference_image(
+        &state,
+        "asset-dup-2",
+        "disc-media",
+        "image/png",
+        Some("/tmp/d2.png"),
+    )
+    .await;
+    seed_reference_image(
+        &state,
+        "asset-theirs",
+        "disc-other",
+        "image/png",
+        Some("/tmp/t.png"),
+    )
+    .await;
+    state
+        .db
+        .with_conn(|connection| {
+            for (id, name) in [
+                ("asset-mine", "image-7b163056.png"),
+                ("asset-dup-1", "twin.png"),
+                ("asset-dup-2", "twin.png"),
+                ("asset-theirs", "image-of-another-room.png"),
+            ] {
+                connection.execute(
+                    "UPDATE context_files SET filename = ?2 WHERE id = ?1",
+                    rusqlite::params![id, name],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let generate = |reference: &str| {
+        let app = app.clone();
+        let body = serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "une princesse", "discussion_id": "disc-media",
+            "reference_asset_ids": [reference], "reference_mode": "reference"
+        });
+        async move { post_json(app, "/api/media/generate", body).await.1 }
+    };
+
+    // The filename the agent was shown resolves to the stored context file id.
+    let accepted = generate("image-7b163056.png").await;
+    assert_eq!(accepted["success"], true, "got {accepted}");
+    let job_id = accepted["data"]["job_id"].as_str().unwrap().to_string();
+    let stored = state
+        .db
+        .with_read_conn(move |connection| kronn::db::media_jobs::get(connection, &job_id))
+        .await
+        .unwrap()
+        .expect("the job was written");
+    assert_eq!(
+        stored.params.reference_ids(),
+        vec!["asset-mine".to_string()]
+    );
+
+    // The id keeps working, and naming one image both ways sends it once.
+    let by_id = generate("asset-mine").await;
+    assert_eq!(by_id["success"], true, "got {by_id}");
+
+    // Another room's filename is refused, and its id is not disclosed.
+    let elsewhere = generate("image-of-another-room.png").await;
+    assert_eq!(elsewhere["success"], false);
+    let error = elsewhere["error"].as_str().unwrap_or_default();
+    assert!(error.contains("unknown reference asset"), "{error}");
+    assert!(!error.contains("asset-theirs"), "{error}");
+
+    // Two images with that name: ambiguous, so refused — with the ids to choose from.
+    let ambiguous = generate("twin.png").await;
+    assert_eq!(ambiguous["success"], false);
+    let error = ambiguous["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("unknown reference asset")
+            && error.contains("`asset-dup-1` (twin.png)")
+            && error.contains("`asset-dup-2` (twin.png)"),
+        "{error}"
+    );
+
+    // An unknown reference lists this room's usable images, and only this room's.
+    let unknown = generate("image-ghost.png").await;
+    assert_eq!(unknown["success"], false);
+    let error = unknown["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("`asset-mine` (image-7b163056.png)")
+            && error.contains("reference_asset_ids")
+            && !error.contains("asset-theirs"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

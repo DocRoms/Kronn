@@ -645,7 +645,7 @@ pub fn detect_tracked_dotenv(listing: &[u8]) -> Vec<DetectedSignal> {
     sink.finish()
 }
 
-fn is_tracked_env_file(path: &str) -> bool {
+pub(crate) fn is_tracked_env_file(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or_default().to_lowercase();
     let suffix = if name == ".env" {
         return true;

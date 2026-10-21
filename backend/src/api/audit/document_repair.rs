@@ -1229,7 +1229,7 @@ mod tests {
 
     #[test]
     fn a_list_of_bare_lines_of_one_file_becomes_one_marker_per_line() {
-        // Africanews step 11: `[src: file: .github/workflows/deploy.yml:210,214,218]`.
+        // PHP site step 11: `[src: file: .github/workflows/deploy.yml:210,214,218]`.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("deploy.yml"), "a\nb\nc\nd\ne\n").unwrap();
         assert_eq!(
@@ -1256,7 +1256,7 @@ mod tests {
 
     #[test]
     fn the_comma_lists_of_the_matrix_split_and_an_ambiguous_mix_is_left_alone() {
-        // Bc matrix 682170025: apollo step 5, docroms step 8, africanews step 8.
+        // Bc matrix 682170025: Node service step 5, docroms step 8, PHP site step 8.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
@@ -1539,7 +1539,7 @@ mod tests {
 
     #[test]
     fn a_sheet_cited_bare_stays_charged_to_the_step_that_wrote_the_citation() {
-        // KT-1353, africanews: step 8 wrote the index with bare sheet citations;
+        // KT-1353, PHP site: step 8 wrote the index with bare sheet citations;
         // step 10 then grew a sheet, so the gate's message (it restates the line
         // count) changed and the same citation was charged to step 10.
         let dir = tempfile::tempdir().unwrap();
@@ -1585,7 +1585,7 @@ mod tests {
     #[test]
     fn the_blockers_of_the_committed_docs_never_fail_the_run_even_when_a_step_rewrites_the_document(
     ) {
-        // KT-1353, africanews: TD-20260828-* sheets cite a gitignored vendor path
+        // KT-1353, PHP site: TD-20260828-* sheets cite a gitignored vendor path
         // and an out-of-range line; the final gate charged them to step 1.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1637,7 +1637,7 @@ mod tests {
         assert_eq!(plan.keys().copied().collect::<Vec<_>>(), vec![2]);
 
         // Step 8 re-verifies the sheet: it appends a history entry and leaves the
-        // vendor citation as it was (africanews). The blocker is the same one
+        // vendor citation as it was (PHP site). The blocker is the same one
         // (code, document, subject), so it is still nobody's: not charged to the
         // founding step, not failing the run.
         let text = std::fs::read_to_string(root.join(sheet)).unwrap();
@@ -1827,7 +1827,7 @@ mod tests {
 
     #[test]
     fn a_step_gets_the_exact_replacements_of_the_gate_applied_before_it_fails() {
-        // KT-1353, apollo step 10 (link base, secret file) and africanews step 8
+        // KT-1353, Node service step 10 (link base, secret file) and PHP site step 8
         // (sheet cited bare): applied at once, recorded, the original preserved.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1835,7 +1835,7 @@ mod tests {
         put(root, "docs/operations/http.md", "# Http\n");
         put(
             root,
-            ".ssh/vr-v2njs01-s",
+            ".ssh/deploy-key",
             "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n",
         );
         put(
@@ -1847,7 +1847,7 @@ mod tests {
         let before = snapshot(root).unwrap();
 
         let security = "# Security\n[ops](docs/operations/)\n";
-        let sheet = "# TD\nTracked key [src: file: .ssh/vr-v2njs01-s]\n";
+        let sheet = "# TD\nTracked key [src: file: .ssh/deploy-key]\n";
         let index = "# Debt\nSheet [src: file: docs/tech-debt/TD-20261018-ssh-key-tracked.md]\n\
                      Ambiguous [src: file: tests/x.js:1, invented.rs:2]\n";
         put(root, "docs/inconsistencies-security.md", security);
@@ -1863,7 +1863,7 @@ mod tests {
         let read = |rel: &str| std::fs::read_to_string(root.join(rel)).unwrap();
         assert!(read("docs/inconsistencies-security.md").contains("[ops](operations)"));
         assert!(read("docs/tech-debt/TD-20261018-ssh-key-tracked.md")
-            .contains("[src: file: .ssh/vr-v2njs01-s:exists]"));
+            .contains("[src: file: .ssh/deploy-key:exists]"));
         assert!(read("docs/inconsistencies-tech-debt.md")
             .contains("TD-20261018-ssh-key-tracked.md:exists]"));
         // The comma bundle with an invented path is ambiguous: still blocking.
@@ -1884,7 +1884,7 @@ mod tests {
             assert!(originals.iter().any(|o| o == original), "{original}");
         }
         assert!(
-            originals.iter().all(|o| !o.contains(".ssh/vr-v2njs01-s")),
+            originals.iter().all(|o| !o.contains(".ssh/deploy-key")),
             "{originals:?}"
         );
     }

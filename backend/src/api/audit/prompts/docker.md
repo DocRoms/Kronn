@@ -20,7 +20,7 @@ For EACH `Dockerfile`, `*.dockerfile`, or `*/Dockerfile` (use `git ls-files | gr
 - **Resource limits**: services that can realistically starve the host (app, workers, DB) carry `mem_limit`/`cpus` or `deploy.resources.limits.*`. Not a finding on clearly dev-only compose files or when the deployment platform owns limits — state which case applies.
 - **No `:latest`** image tags (reproducibility).
 - **Healthchecks**: critical services (DB, app, gateway) have `healthcheck:` blocks AND `depends_on` uses `condition: service_healthy` instead of bare `depends_on: [svc]`.
-- **Secrets handling**: `Not evaluated safely (requires Kronn's local secret scanner)` — never grep for credential literals (the match line would be the secret). Safe signal: `grep -lE 'secrets:|env_file:'` (filename-only) shows whether the safe mechanisms are present.
+- **Secrets handling**: the `Secret facts` block (when present) lists by path the files holding a literal credential: a path detected by content is a finding, a candidate matched by name only or a path in a test location is `to verify` as the block words it; for the rest, `Not evaluated safely` — never grep for credential literals (the match line would be the secret). Safe signal: `grep -lE 'secrets:|env_file:'` (filename-only) shows whether the safe mechanisms are present.
 - **Read-only rootfs**: stateless services have `read_only: true` (or note exceptions). Worth a TD only when the service is obviously stateless (gateway, static-asset proxy).
 - **Restart policy**: services have `restart: unless-stopped` or `restart: always` (otherwise a crash stops them silently).
 - **Logging cap**: `logging.options.max-size` + `max-file` set somewhere — either per-service or via a default driver — otherwise the host disk fills up.

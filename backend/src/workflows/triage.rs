@@ -1,6 +1,6 @@
 //! Feasibility-Gated Implementation — triage step contract.
 //!
-//! Designed 0.8.3 against EW-7247 (Africanews→Euronews multi-brand
+//! Designed 0.8.3 against EW-7247 (Acme News→Euronews multi-brand
 //! migration) — see `project_feasibility_gated_implementation` memory.
 //!
 //! The triage step forces an agent into "feasibility audit" mode: read
@@ -144,7 +144,7 @@ RULES:
 CROSS-REPO EVIDENCE (when this project has linked repositories — see `## Linked repositories` block above):
 - Linked repos are READ-ONLY reference codebases. NEVER modify them.
 - If the ticket describes a MIGRATION (e.g. porting brand X from legacy_repo into current_repo), READ the legacy repo's `docs/AGENTS.md` FIRST, then concrete files (color tokens, templates, constants) that the migration must preserve. Lift real values — do NOT invent them.
-- For EVERY `decided` or `mocked` item where evidence COULD exist in a linked repo, you MUST cite the source as a file:line reference in the `why` (decided) or `strategy` (mocked) field. Format: `evidence: <linked_repo_name>/<path>:<line>` — e.g. `evidence: front_africanews/assets/css/tokens.css:12 (--brand-primary: #f5a623)`.
+- For EVERY `decided` or `mocked` item where evidence COULD exist in a linked repo, you MUST cite the source as a file:line reference in the `why` (decided) or `strategy` (mocked) field. Format: `evidence: <linked_repo_name>/<path>:<line>` — e.g. `evidence: front_acme/assets/css/tokens.css:12 (--brand-primary: #f5a623)`.
 - When a value lifted from a linked repo is concrete and unambiguous, the item moves from `mocked` to `decided` (or even `clear` if no alternative exists). A mocked item must explain why evidence does NOT exist in the linked repos.
 - If the ticket is unrelated to any linked repo, ignore them. Do not invent ties.
 
@@ -743,7 +743,7 @@ mod tests {
     #[test]
     fn triage_schema_validates_a_minimal_valid_manifest() {
         let manifest = json!({
-            "clear": [{ "id": "scss-tokens", "what": "create _tokens.africanews.scss" }],
+            "clear": [{ "id": "scss-tokens", "what": "create _tokens.acme.scss" }],
             "decided": [{
                 "id": "brand-context-impl",
                 "what": "hostname → brand resolution",

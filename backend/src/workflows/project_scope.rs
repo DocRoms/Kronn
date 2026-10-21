@@ -197,12 +197,12 @@ mod tests {
         let listed = workflow(
             Some("home"),
             Some(WorkflowProjectScope::Projects {
-                project_ids: vec!["front-apollo".into()],
+                project_ids: vec!["front-node".into()],
             }),
         );
         assert_eq!(
-            resolve_run_project(&listed, &launch(Some("front-apollo"), None)).unwrap(),
-            Some("front-apollo".into())
+            resolve_run_project(&listed, &launch(Some("front-node"), None)).unwrap(),
+            Some("front-node".into())
         );
         assert!(resolve_run_project(&listed, &launch(Some("other"), None))
             .unwrap_err()

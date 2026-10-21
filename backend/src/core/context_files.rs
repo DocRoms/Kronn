@@ -760,6 +760,8 @@ pub fn suggest_skills(filename: &str) -> Vec<String> {
 
 /// A context file entry for prompt building (text or image reference).
 pub struct ContextEntry {
+    /// The context file's id — what `media_generate` takes as a reference.
+    pub id: String,
     pub filename: String,
     pub text: String,
     pub disk_path: Option<String>,
@@ -902,6 +904,7 @@ mod tests {
     #[test]
     fn build_context_prompt_single() {
         let files = vec![ContextEntry {
+            id: String::new(),
             filename: "test.sql".into(),
             text: "SELECT 1".into(),
             disk_path: None,
@@ -915,11 +918,13 @@ mod tests {
     fn build_context_prompt_multiple() {
         let files = vec![
             ContextEntry {
+                id: String::new(),
                 filename: "a.txt".into(),
                 text: "AAA".into(),
                 disk_path: None,
             },
             ContextEntry {
+                id: String::new(),
                 filename: "b.txt".into(),
                 text: "BBB".into(),
                 disk_path: None,
@@ -936,11 +941,13 @@ mod tests {
     fn build_context_prompt_with_image() {
         let files = vec![
             ContextEntry {
+                id: String::new(),
                 filename: "data.csv".into(),
                 text: "a,b\n1,2".into(),
                 disk_path: None,
             },
             ContextEntry {
+                id: String::new(),
                 filename: "screenshot.png".into(),
                 text: "[Image: screenshot.png]".into(),
                 disk_path: Some("/tmp/abc.png".into()),
@@ -958,6 +965,7 @@ mod tests {
         // A non-image file with a disk_path → referenced by path + preview,
         // NOT treated as an image, NOT fully inlined.
         let files = vec![ContextEntry {
+            id: String::new(),
             filename: "trace.har".into(),
             text: "{\"log\":{\"entries\":[".into(), // the preview, not the whole file
             disk_path: Some("/work/.kronn/context-files/ab_trace.har".into()),
@@ -1098,6 +1106,7 @@ mod tests {
     fn kt633_legacy_context_is_safe_without_mutating_stored_text() {
         for disk_path in [Some("/tmp/legacy.json".to_string()), None] {
             let entries = vec![ContextEntry {
+                id: String::new(),
                 filename: "legacy\0.json".into(),
                 text: "x\0y".into(),
                 disk_path,
@@ -1126,6 +1135,7 @@ mod tests {
             assert!(std::ffi::CString::new(safe).is_ok());
         }
         let entries = [ContextEntry {
+            id: String::new(),
             filename: "legacy\0.png".into(),
             text: String::new(),
             disk_path: Some("/tmp/legacy\0.png".into()),
@@ -1138,6 +1148,7 @@ mod tests {
     #[test]
     fn kt633_preview_caption_counts_characters_not_utf8_bytes() {
         let prompt = build_context_prompt(&[ContextEntry {
+            id: String::new(),
             filename: "unicode.txt".into(),
             text: "été😀".into(),
             disk_path: Some("/tmp/unicode.txt".into()),

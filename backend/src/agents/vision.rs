@@ -59,6 +59,8 @@ pub(crate) const IMAGE_PROMPT_BYTES: usize = 6_000;
 /// `None` for a legacy row whose bytes were never stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextImage {
+    /// The context file id — the value `media_generate` takes in `reference_asset_ids`.
+    pub id: String,
     pub filename: String,
     pub path: Option<String>,
 }
@@ -106,6 +108,7 @@ pub(crate) enum Withheld {
 /// One image ready for the wire.
 #[derive(Debug, Clone)]
 pub(crate) struct SentImage {
+    pub id: String,
     pub filename: String,
     pub mime: &'static str,
     pub base64: String,
@@ -117,6 +120,8 @@ pub(crate) struct PreparedImages {
     pub sent: Vec<SentImage>,
     /// In attachment order.
     pub withheld: Vec<(String, Withheld)>,
+    /// Context file id of each `withheld` entry, same order.
+    pub withheld_ids: Vec<String>,
     /// Where the answer to "can it see" came from, for the log.
     pub support_source: &'static str,
     pub total_items: usize,
@@ -221,9 +226,7 @@ pub(crate) async fn prepare(
     prepared.support_source = source;
     if support != ImageSupport::Supported {
         for image in &images.items {
-            prepared
-                .withheld
-                .push((image.filename.clone(), Withheld::ModelCannotSee));
+            prepared.withhold(image, Withheld::ModelCannotSee);
         }
         tracing::info!(
             target: "kronn::agent::vision",
@@ -237,46 +240,33 @@ pub(crate) async fn prepare(
     let mut total = 0usize;
     for (index, image) in images.items.iter().enumerate() {
         if index < skipped {
-            prepared
-                .withheld
-                .push((image.filename.clone(), Withheld::TooMany));
+            prepared.withhold(image, Withheld::TooMany);
             continue;
         }
         let Some(path) = image.path.as_deref() else {
-            prepared
-                .withheld
-                .push((image.filename.clone(), Withheld::Unreadable));
+            prepared.withhold(image, Withheld::Unreadable);
             continue;
         };
         if tokio::fs::symlink_metadata(path)
             .await
             .is_ok_and(|meta| meta.file_type().is_symlink())
         {
-            prepared
-                .withheld
-                .push((image.filename.clone(), Withheld::Unreadable));
+            prepared.withhold(image, Withheld::Unreadable);
             continue;
         }
         match tokio::fs::metadata(path).await {
             Ok(meta) if !meta.is_file() || meta.len() > MAX_SOURCE_BYTES as u64 => {
-                prepared.withheld.push((
-                    image.filename.clone(),
-                    Withheld::TooLarge { bytes: meta.len() },
-                ));
+                prepared.withhold(image, Withheld::TooLarge { bytes: meta.len() });
                 continue;
             }
             Ok(_) => {}
             Err(_) => {
-                prepared
-                    .withheld
-                    .push((image.filename.clone(), Withheld::Unreadable));
+                prepared.withhold(image, Withheld::Unreadable);
                 continue;
             }
         }
         let Ok(file) = tokio::fs::File::open(path).await else {
-            prepared
-                .withheld
-                .push((image.filename.clone(), Withheld::Unreadable));
+            prepared.withhold(image, Withheld::Unreadable);
             continue;
         };
         let mut bytes = Vec::new();
@@ -286,37 +276,33 @@ pub(crate) async fn prepare(
             .await
             .is_err()
         {
-            prepared
-                .withheld
-                .push((image.filename.clone(), Withheld::Unreadable));
+            prepared.withhold(image, Withheld::Unreadable);
             continue;
         }
         // The size was checked from metadata; the read can race a replacement.
         if bytes.len() > MAX_SOURCE_BYTES {
-            prepared.withheld.push((
-                image.filename.clone(),
+            prepared.withhold(
+                image,
                 Withheld::TooLarge {
                     bytes: bytes.len() as u64,
                 },
-            ));
+            );
             continue;
         }
         let Some(mut mime) = sniff_image_mime(&bytes) else {
-            prepared
-                .withheld
-                .push((image.filename.clone(), Withheld::UnsupportedFormat));
+            prepared.withhold(image, Withheld::UnsupportedFormat);
             continue;
         };
         if bytes.len() > MAX_IMAGE_BYTES {
             let original_bytes = bytes.len();
             let resized = tokio::task::spawn_blocking(move || downscale_image(&bytes)).await;
             let Ok(Some(resized)) = resized else {
-                prepared.withheld.push((
-                    image.filename.clone(),
+                prepared.withhold(
+                    image,
                     Withheld::TooLarge {
                         bytes: original_bytes as u64,
                     },
-                ));
+                );
                 continue;
             };
             tracing::info!(target: "kronn::agent::vision", image = %image.filename, original_bytes, sent_bytes = resized.len(), "image downscaled for model input");
@@ -324,13 +310,12 @@ pub(crate) async fn prepare(
             mime = "image/png";
         }
         if total + bytes.len() > MAX_TOTAL_BYTES {
-            prepared
-                .withheld
-                .push((image.filename.clone(), Withheld::TotalBudget));
+            prepared.withhold(image, Withheld::TotalBudget);
             continue;
         }
         total += bytes.len();
         prepared.sent.push(SentImage {
+            id: image.id.clone(),
             filename: image.filename.clone(),
             mime,
             base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -389,6 +374,11 @@ fn megabytes(bytes: u64) -> String {
 }
 
 impl PreparedImages {
+    fn withhold(&mut self, image: &ContextImage, reason: Withheld) {
+        self.withheld.push((image.filename.clone(), reason));
+        self.withheld_ids.push(image.id.clone());
+    }
+
     /// The size the request's images add to the prompt estimates, in bytes of text.
     pub(crate) fn prompt_bytes(&self) -> usize {
         self.sent.len() * IMAGE_PROMPT_BYTES
@@ -404,22 +394,57 @@ impl PreparedImages {
         let french = self.language == "fr";
         let mut lines: Vec<String> = Vec::new();
         for image in &self.sent {
+            let id = id_label(&image.id, french);
             lines.push(if french {
                 format!(
-                    "- `{}` : image jointe au message de l'utilisateur sous forme d'image, tu la vois.",
+                    "- `{}`{id} : image jointe au message de l'utilisateur sous forme d'image, tu la vois.",
                     image.filename
                 )
             } else {
                 format!(
-                    "- `{}`: attached to the user's message as an image; you can see it.",
+                    "- `{}`{id}: attached to the user's message as an image; you can see it.",
                     image.filename
                 )
             });
         }
-        for (name, reason) in &self.withheld {
-            lines.push(withheld_sentence(name, reason, french));
+        for (index, (name, reason)) in self.withheld.iter().enumerate() {
+            let id = self
+                .withheld_ids
+                .get(index)
+                .map(|id| id_label(id, french))
+                .unwrap_or_default();
+            lines.push(
+                format!("{} {}", withheld_sentence(name, reason, french), id.trim())
+                    .trim_end()
+                    .to_string(),
+            );
         }
-        format!("=== ATTACHED IMAGES ===\n\n{}", lines.join("\n"))
+        let has_ids = self.sent.iter().any(|image| !image.id.is_empty())
+            || self.withheld_ids.iter().any(|id| !id.is_empty());
+        let footer = match (has_ids, french) {
+            (false, _) => "",
+            (true, true) => {
+                "\n\nL'identifiant de fichier de contexte de chaque image est la valeur à passer \
+                 dans `reference_asset_ids` de `media_generate` pour la prendre comme image source : \
+                 jamais le nom de fichier."
+            }
+            (true, false) => {
+                "\n\nEach image's context file id is the value to pass in `media_generate`'s \
+                 `reference_asset_ids` to use it as a source image — never the filename."
+            }
+        };
+        format!("=== ATTACHED IMAGES ===\n\n{}{footer}", lines.join("\n"))
+    }
+}
+
+/// ` (id de fichier de contexte : `…`)`, or nothing for an image without an id.
+fn id_label(id: &str, french: bool) -> String {
+    if id.is_empty() {
+        String::new()
+    } else if french {
+        format!(" (id de fichier de contexte : `{id}`)")
+    } else {
+        format!(" (context file id: `{id}`)")
     }
 }
 

@@ -493,3 +493,93 @@ fn migration_270_keeps_every_grant_and_accepts_only_a_general_write() {
     // The active-grant index survived the rebuild.
     assert!(insert("g4", None, "write", "general").is_err());
 }
+
+#[test]
+fn a_room_reaches_the_granted_projects_and_can_ask_for_the_others() {
+    let conn = connection();
+    let names = |reach: &RoomReach| -> Vec<String> {
+        reach.granted.iter().map(|p| p.name.clone()).collect()
+    };
+
+    let reach = room_reach(&conn, "room").unwrap();
+    assert!(reach.granted.is_empty());
+    assert_eq!(reach.requestable, vec!["p2", "p3"], "never the primary");
+
+    grant(
+        &conn,
+        "room",
+        Some("p2"),
+        ScopeAccess::Read,
+        ScopeGrantSource::Link,
+        "romu",
+    )
+    .unwrap();
+    let reach = room_reach(&conn, "room").unwrap();
+    assert_eq!(names(&reach), vec!["p2"]);
+    assert_eq!(reach.granted[0].access, ScopeAccess::Read);
+    assert_eq!(reach.granted[0].path, "p2");
+    assert_eq!(reach.requestable, vec!["p3"]);
+
+    grant(
+        &conn,
+        "room",
+        Some("p2"),
+        ScopeAccess::Write,
+        ScopeGrantSource::Link,
+        "romu",
+    )
+    .unwrap();
+    assert_eq!(
+        room_reach(&conn, "room").unwrap().granted[0].access,
+        ScopeAccess::Write
+    );
+
+    let current = scope_of(&conn, "room").unwrap().unwrap().grants;
+    revoke(&conn, "room", &current[0].id, "romu", None).unwrap();
+    let reach = room_reach(&conn, "room").unwrap();
+    assert!(
+        reach.granted.is_empty(),
+        "a revoke applies at the next read"
+    );
+    assert_eq!(reach.requestable, vec!["p2", "p3"]);
+}
+
+#[test]
+fn every_project_grant_reaches_the_registered_projects_but_the_primary() {
+    let conn = connection();
+    grant(
+        &conn,
+        "room",
+        None,
+        ScopeAccess::Read,
+        ScopeGrantSource::All,
+        "romu",
+    )
+    .unwrap();
+    let reach = room_reach(&conn, "room").unwrap();
+    let ids: Vec<&str> = reach.granted.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(ids, vec!["p2", "p3"]);
+    assert!(reach.requestable.is_empty());
+}
+
+#[test]
+fn a_grant_on_a_deleted_project_reaches_nothing_and_a_general_room_reaches_no_project() {
+    let conn = connection();
+    grant(
+        &conn,
+        "room",
+        Some("p3"),
+        ScopeAccess::Read,
+        ScopeGrantSource::Link,
+        "romu",
+    )
+    .unwrap();
+    conn.execute("DELETE FROM projects WHERE id = 'p3'", [])
+        .unwrap();
+    let reach = room_reach(&conn, "room").unwrap();
+    assert!(reach.granted.is_empty());
+    assert_eq!(reach.requestable, vec!["p2"]);
+
+    assert_eq!(room_reach(&conn, "general").unwrap(), RoomReach::default());
+    assert_eq!(room_reach(&conn, "missing").unwrap(), RoomReach::default());
+}

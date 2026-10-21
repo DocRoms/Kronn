@@ -9,7 +9,7 @@ import { WorkflowProjectScopeControl } from '../WorkflowProjectScopeControl';
 
 const projects = [
   { id: 'home', name: 'Front Euronews' },
-  { id: 'apollo', name: 'Front Apollo' },
+  { id: 'node', name: 'Front Node' },
   { id: 'api', name: 'API' },
 ];
 
@@ -37,8 +37,8 @@ describe('WorkflowProjectScopeControl (KT-851)', () => {
     );
     expect(screen.queryByLabelText('Front Euronews')).not.toBeInTheDocument();
     expect(screen.getByLabelText('API')).toBeChecked();
-    fireEvent.click(screen.getByLabelText('Front Apollo'));
-    expect(onChange).toHaveBeenLastCalledWith({ type: 'Projects', project_ids: ['api', 'apollo'] });
+    fireEvent.click(screen.getByLabelText('Front Node'));
+    expect(onChange).toHaveBeenLastCalledWith({ type: 'Projects', project_ids: ['api', 'node'] });
     fireEvent.click(screen.getByLabelText('API'));
     expect(onChange).toHaveBeenLastCalledWith({ type: 'Projects', project_ids: [] });
     fireEvent.click(screen.getByLabelText('wiz.projectScope.home'));

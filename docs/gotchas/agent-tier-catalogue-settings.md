@@ -92,7 +92,7 @@ that distinction, including an existing historical identity assigned to another
 tier and a refusal for the explicitly configured unavailable model.
 [src: file: backend/tests/model_catalog_migration.rs:220-271#an_existing_historical_identity_keeps_its_other_tier_and_explicit_configuration]
 [src: file: backend/tests/model_catalog_migration.rs:273-332#one_configured_identity_can_still_resolve_multiple_explicit_tiers]
-[src: file: backend/src/agents/runner.rs:3388-3460#configured_model_flag]
+[src: file: backend/src/agents/runner.rs:3403-3475#configured_model_flag]
 
 Qualification on backend tree `189eb0f577ac44372ea5e85540ff5052321729e7`:
 the first five migration controls produced four failures on unchanged code;

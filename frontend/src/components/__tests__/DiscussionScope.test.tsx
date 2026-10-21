@@ -32,7 +32,7 @@ function grant(overrides: Partial<DiscussionProjectGrant>): DiscussionProjectGra
 
 function scope(overrides: Partial<DiscussionScope> = {}): DiscussionScope {
   return {
-    discussion_id: 'd1', primary_project_id: 'p1', grants: [], revoked: [], requests: [], fingerprint: 'fp-1',
+    discussion_id: 'd1', primary_project_id: 'p1', grants: [], revoked: [], requests: [], fingerprint: 'fp-1', requestable: [],
     ...overrides,
   };
 }

@@ -9,7 +9,7 @@ TD sheet is settled). The agent opens the discussion detached, right after the
 script driving the validation answers in the discussion
 (`POST /api/discussions/:id/messages`) and waits for the agent to go idle again.
 
-18/10 evening matrix, apollo `validate` cell (`agent_messages: 0` in its result):
+18/10 evening matrix, Node service `validate` cell (`agent_messages: 0` in its result):
 nothing waited for a human and nothing stalled. Two bench causes, in the order
 they hit:
 

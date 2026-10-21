@@ -2297,7 +2297,7 @@ fn path_has_segment_suffix(full: &str, needle: &str) -> bool {
 /// path cited relative to an app SUBDIR (project code lives under `application/`
 /// but the verify root is the project root → `apps/x/Foo.php` is really at
 /// `application/apps/x/Foo.php`), or a sibling-repo path written with the repo
-/// name (`front_apollo/plugins/…`, resolved once that linked repo is a root).
+/// name (`front_node/plugins/…`, resolved once that linked repo is a root).
 ///
 /// Guards mirror `resolve_unique_basename` — heavy/`.kronn` dirs pruned (the
 /// worktree copies would otherwise make everything ambiguous), walk capped, and
@@ -2619,7 +2619,7 @@ fn verify_file_ref_as_written(
         // Multi-segment relative path unresolved at root level — it may live
         // deeper (cited relative to an app subdir, e.g. `apps/x/Foo.php` actually
         // at `application/apps/x/Foo.php`) or in a sibling repo by name
-        // (`front_apollo/plugins/…`). Walk for a UNIQUE segment-aligned suffix
+        // (`front_node/plugins/…`). Walk for a UNIQUE segment-aligned suffix
         // match across the roots (incl. linked_repos) before giving up.
         match resolve_unique_path_suffix(path_str, roots) {
             BasenameResolution::Unique(found) => {
@@ -3086,7 +3086,7 @@ pub fn finalize_lint_report(
     }
     // 0.8.8 — also resolve citations against the project's declared linked_repos
     // (filesystem locations only). Triage/dev agents legitimately cite sibling
-    // repos they were told about (front_apollo, …); without these as roots a
+    // repos they were told about (front_node, …); without these as roots a
     // real cross-repo path reads as "couldn't verify". resolve_host_path-
     // translated; kept only if it actually exists in-container (repos under
     // $HOME are mounted at /host-home), else skipped so a genuinely-unavailable
@@ -5007,21 +5007,22 @@ mod tests {
     #[test]
     fn verify_cross_repo_path_via_linked_root() {
         // A sibling repo passed as a second root: a repo-name-prefixed citation
-        // `front_apollo/plugins/...` resolves against the linked root.
+        // `front_node/plugins/...` resolves against the linked root.
         let main = temp_project();
-        let parent = std::env::temp_dir().join(format!("kronn_apollo_{}", uuid::Uuid::new_v4()));
-        let apollo = parent.join("front_apollo");
-        std::fs::create_dir_all(apollo.join("plugins/timeline")).unwrap();
-        std::fs::write(apollo.join("plugins/timeline/index.js"), "a\nb\n").unwrap();
+        let parent =
+            std::env::temp_dir().join(format!("kronn_node_service_{}", uuid::Uuid::new_v4()));
+        let sibling = parent.join("front_node");
+        std::fs::create_dir_all(sibling.join("plugins/timeline")).unwrap();
+        std::fs::write(sibling.join("plugins/timeline/index.js"), "a\nb\n").unwrap();
         let c = verify_source_marker_roots(
-            "front_apollo/plugins/timeline/index.js:1",
-            &[main.as_path(), apollo.as_path()],
+            "front_node/plugins/timeline/index.js:1",
+            &[main.as_path(), sibling.as_path()],
         );
         assert_eq!(c.status, SourceStatus::Verified, "{c:?}");
         // A genuinely absent cross-repo path still fails.
         let ghost = verify_source_marker_roots(
-            "front_apollo/plugins/ghost/nope.js",
-            &[main.as_path(), apollo.as_path()],
+            "front_node/plugins/ghost/nope.js",
+            &[main.as_path(), sibling.as_path()],
         );
         assert_eq!(ghost.status, SourceStatus::NotFound, "{ghost:?}");
         std::fs::remove_dir_all(&main).ok();

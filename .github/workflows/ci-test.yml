@@ -627,6 +627,11 @@ jobs:
       - name: Run backend CI SLO unit test
         run: node scripts/ci/test_backend_ci_slo.mjs
 
+      - name: Lint — no private third-party repository identifier (KT-1413)
+        run: |
+          python3 scripts/ci/test_lint_private_identifiers.py
+          python3 scripts/ci/lint_private_identifiers.py
+
       - name: Run MCP helper tests
         run: python3 -m unittest discover -s backend/scripts -p 'test_*.py' -v
 

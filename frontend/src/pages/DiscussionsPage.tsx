@@ -4251,7 +4251,7 @@ export function DiscussionsPage({
     globalSearchTarget, handleDiscussionActionChanged, handleMsgCopy, handleMsgDelete, handleMsgEditCancel,
     handleMsgEditStart, handleMsgExpandSummary, handleMsgReply, handleMsgTts, handleReplyNavigate,
     handleRetryAgentDispatch, handleStopDispatch, hasFullAccess, locale, mediaJobsByMessage,
-    messageSearchIndex, messageSearchMatches, stableNavigate, openMediaAsset, orchState, pendingFileMsgIds,
+    messageSearchIndex, messageSearchMatches, stableNavigate, openMediaAsset, retryMediaGeneration, orchState, pendingFileMsgIds,
     pendingReplySlots, recoveryAgentLabel, replyIds, resilientStreamingText, sending, sendingElapsed, streamLost,
     showLogs, stableEditMessage, stableLaunchQp, stableOpenActionDiscussion, stableRetry,
     stoppingDispatchIds, t, transcriptIndex, ttsPlayingMsgId, ttsState, visibleStreamingReply,

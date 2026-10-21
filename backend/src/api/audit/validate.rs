@@ -1331,7 +1331,7 @@ mod validate_gate_tests {
     }
 
     // KT-1122: the signal is recorded when it arrives; the later commit note
-    // or DoD update (front-africanews) never makes the validation unfinished.
+    // or DoD update (front-php) never makes the validation unfinished.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_finished_validation_stays_finished_after_later_agent_messages() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1421,7 +1421,7 @@ mod validate_gate_tests {
 
     // KT-1122: "resume validation" targets the discussion linked to the latest
     // run — a sub-audit's included — never an older, still open discussion that
-    // merely carries a generated validation title (front-africanews, April).
+    // merely carries a generated validation title (front-php, April).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_resumed_validation_is_the_runs_link_even_for_a_sub_audit() {
         let tmp = tempfile::TempDir::new().unwrap();

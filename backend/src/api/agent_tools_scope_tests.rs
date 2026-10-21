@@ -546,6 +546,23 @@ async fn a_room_agent_reads_its_reach_and_asks_a_human_with_room_scope() {
         "{}",
         reach.content
     );
+    // The prompt names no ungranted project (KT-1417): this is where the agent
+    // learns the requestable ones, by name, on demand.
+    assert_eq!(
+        reach.content["requestable"],
+        json!(["b"]),
+        "{}",
+        reach.content
+    );
+    let general_agent = room_agent(&state, "general");
+    let general = call(general_agent.as_ref(), "room_scope", json!({})).await;
+    assert!(general.ok, "{}", general.content);
+    assert_eq!(
+        general.content["requestable"],
+        json!([]),
+        "{}",
+        general.content
+    );
     let asked = call(
         agent.as_ref(),
         "room_scope",
@@ -580,6 +597,16 @@ async fn a_room_agent_reads_its_reach_and_asks_a_human_with_room_scope() {
         "{}",
         refused_task.content
     );
+}
+
+#[tokio::test]
+async fn a_granted_project_leaves_the_requestable_list() {
+    let World { state, .. } = two_projects().await;
+    let agent = room_agent(&state, "room-a");
+    grant_write(&state, "room-a", "b").await;
+    let reach = call(agent.as_ref(), "room_scope", json!({})).await;
+    assert!(reach.ok, "{}", reach.content);
+    assert_eq!(reach.content["requestable"], json!([]), "{}", reach.content);
 }
 
 #[tokio::test]

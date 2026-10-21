@@ -144,6 +144,10 @@ pub struct DiscussionScope {
     pub requests: Vec<DiscussionScopeRequest>,
     /// Digest of the active grants: a human decision names the scope it saw.
     pub fingerprint: String,
+    /// Names of the registered projects this room could ask for (KT-1417):
+    /// none granted, never the primary, and none for a room without a project.
+    /// The only place an agent learns them, on demand: the prompt names none.
+    pub requestable: Vec<String>,
 }
 
 /// The confirmation a human types to grant write access to every project.

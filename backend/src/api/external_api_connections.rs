@@ -418,10 +418,38 @@ async fn probe_models(
                 // catalogue that declares its modalities usually puts a chat
                 // model first anyway; this holds when it declares nothing,
                 // which is the common case for an OpenAI-compatible proxy.
+                //
+                // A LiteLLM proxy adds a third verdict: its allow-list answers
+                // 401/403 "not allowed" for a model THIS key may not use. That
+                // is the model's verdict too, not the key's (KT-1412), so the
+                // next entry is tried and the denied ones are reported.
+                let is_lite_llm = origin_preset == Some(ExternalApiConnectionPreset::LiteLlm);
                 let mut inconclusive: Option<TestConnectionResponse> = None;
                 let mut answered: Option<String> = None;
-                for entry in catalogue.catalog.iter().take(MAX_FALLBACK_PROBES) {
-                    match probe_auth(endpoint, key, &entry.id, None).await {
+                let mut denied: Vec<String> = Vec::new();
+                // A LiteLLM refusal the classifier cannot read is held back,
+                // not returned: if another model answers with the same key,
+                // the key works and that refusal was about the model.
+                let mut unattributed: Option<TestConnectionResponse> = None;
+                let probes = if is_lite_llm {
+                    LITE_LLM_FALLBACK_PROBES
+                } else {
+                    MAX_FALLBACK_PROBES
+                };
+                for entry in catalogue.catalog.iter().take(probes) {
+                    let probe = chat_probe(endpoint, key, &entry.id).await;
+                    if is_lite_llm {
+                        if let ChatProbe::Refused { status, body } = &probe {
+                            denied.push(entry.id.clone());
+                            if crate::api::lite_llm::classify_model_failure(*status, body).is_none()
+                                && unattributed.is_none()
+                            {
+                                unattributed = failure_response(&entry.id, &probe, None);
+                            }
+                            continue;
+                        }
+                    }
+                    match failure_response(&entry.id, &probe, None) {
                         None => {
                             answered = Some(entry.id.clone());
                             break;
@@ -434,11 +462,22 @@ async fn probe_models(
                         Some(failure) => return failure,
                     }
                 }
+                let denied_note = (!denied.is_empty()).then(|| {
+                    format!(
+                        "{} listed model(s) are not allowed for this key: {}.",
+                        denied.len(),
+                        denied.join(", ")
+                    )
+                });
                 match answered {
                     Some(model) => {
-                        catalogue.hint = Some(format!(
+                        let mut hint = format!(
                             "The credential works: {model} answered. Select the tier models to verify the ones you will use."
-                        ));
+                        );
+                        if let Some(note) = denied_note {
+                            hint = format!("The key works, {note} {hint}");
+                        }
+                        catalogue.hint = Some(hint);
                     }
                     // Every entry tried refused the request shape. That is not
                     // an authentication verdict and must not be dressed as one.
@@ -446,8 +485,22 @@ async fn probe_models(
                     // selectors no models, so they cannot offer a choice the
                     // probe was unable to verify.
                     None => {
+                        // Nothing answered and one refusal is unexplained: it
+                        // may well be the key, as before.
+                        if let Some(failure) = unattributed {
+                            return failure;
+                        }
                         if let Some(failure) = inconclusive {
                             return failure;
+                        }
+                        // Only allow-list refusals: the proxy recognised the
+                        // key, but nothing it was asked to run is open to it.
+                        // The catalogue stays so another model can be chosen.
+                        if let Some(note) = denied_note {
+                            catalogue.status = "model_error".into();
+                            catalogue.hint = Some(format!(
+                                "The key is accepted, but no model tried is allowed for it. {note} Select tier models this key can use."
+                            ));
                         }
                     }
                 }
@@ -463,6 +516,10 @@ async fn probe_models(
 /// must stay bounded. Four is enough to walk past a run of embedding or rerank
 /// deployments without turning the test into a catalogue sweep.
 const MAX_FALLBACK_PROBES: usize = 4;
+
+/// A LiteLLM proxy often lists, first, a run of models a given key may not
+/// use (a whole provider family); the walk goes further before concluding.
+const LITE_LLM_FALLBACK_PROBES: usize = 12;
 
 const BILLING_ERROR_HINT: &str = "The provider requires payment or additional credits (HTTP 402). Check your API account balance and billing, then test again.";
 

@@ -4,7 +4,7 @@ The settings test endpoint serves two different purposes. A draft tests the
 submitted endpoint and key without owning a durable runtime target. An unchanged
 saved connection can refresh its own `http:<connection-id>` catalogue. Passing
 `connection_id` alone does not authorize a draft to replace that catalogue.
-[src: file: backend/src/api/external_api_connections.rs:1468-1500#saved_connection]
+[src: file: backend/src/api/external_api_connections.rs:1525-1557#saved_connection]
 [src: file: backend/src/db/model_catalog.rs:49-51#http_runtime_target_id]
 
 An explicit `api_key`, including an empty value, is a draft credential. The probe
@@ -14,15 +14,15 @@ The saved connection is captured before discovery; its row and active credential
 are checked again before persistence. A changed or deleted connection, or a
 rotated credential, makes the result ineligible for durable reconciliation.
 The response still describes the submitted test, not a new saved configuration.
-[src: file: backend/src/api/external_api_connections.rs:1468-1507#saved_connection]
-[src: file: backend/src/api/external_api_connections.rs:1592-1637#persisted]
+[src: file: backend/src/api/external_api_connections.rs:1505-1544#saved_connection]
+[src: file: backend/src/api/external_api_connections.rs:1649-1694#persisted]
 
 Credential comparison is held under the configuration read lock, while the row
 comparison, catalogue reconciliation and refresh log use one SQLite transaction.
 A persistence error is surfaced instead of reporting a partially updated or
 silently cached catalogue. This is a probe commit boundary, not a claim that all
 connection CRUD and the separate configuration file form one transaction.
-[src: file: backend/src/api/external_api_connections.rs:1578-1672#persisted]
+[src: file: backend/src/api/external_api_connections.rs:1598-1692#persisted]
 
 Successful empty discovery marks previously live models as disappeared without
 deleting them. A failed saved probe preserves availability and last-seen values,

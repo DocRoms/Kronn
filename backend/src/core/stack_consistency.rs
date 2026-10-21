@@ -20,6 +20,8 @@
 
 use std::path::Path;
 
+mod versions;
+
 /// How a version is stated: the version in place, or a constraint on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -1217,7 +1219,7 @@ pub fn conflicts(project: &Path, docs: &[(String, String)]) -> Vec<Conflict> {
 
 // ─── Prevention: the facts handed to the steps that state versions ───────
 
-/// The most a facts block may weigh: it rides in three step prompts.
+/// The most a facts block may weigh: it rides in four step prompts.
 const FACTS_BUDGET: usize = 1_800;
 
 /// The versions of one origin, deduplicated and capped: `^8.1, ^8.4`.
@@ -1260,7 +1262,8 @@ pub fn facts_block(project: &Path) -> Option<String> {
             lines.push(format!("- {}: {}", label(key), parts.join("; ")));
         }
     }
-    if lines.is_empty() {
+    let (version_line, pins_line) = versions::facts_lines(project);
+    if lines.is_empty() && version_line.is_none() && pins_line.is_none() {
         return None;
     }
     let mut block = String::from(
@@ -1273,6 +1276,16 @@ State every framework, language and runtime version from these facts: the locked
         }
         block.push_str(&line);
         block.push('\n');
+    }
+    // KT-1404 — the application's own version and what it pins that is old:
+    // outside the budget of the stack lines, which they do not displace.
+    if version_line.is_some() || pins_line.is_some() {
+        block.push_str(
+            "State the application's own version as given under `Project version` (never another), and cite every `Old pinned dependencies` entry below, with its version and lock-file place, in the Dependencies dimension and the tech-debt index: never write that no dependency is old while one is listed.\n",
+        );
+        for line in [version_line, pins_line].into_iter().flatten() {
+            block.push_str(&line);
+        }
     }
     Some(block)
 }
@@ -1448,7 +1461,7 @@ mod tests {
             // docroms architecture/overview.md:11, debug-operations.md:32.
             "| `php` | `443` (HTTPS) | FrankenPHP (worker mode) + bundled Caddy, PHP 8.4 image |",
             "| `php` | `443:443` | HTTPS site server — FrankenPHP (worker mode) + bundled Caddy; serves `public/` |",
-            // africanews testing-quality.md:36.
+            // PHP site testing-quality.md:36.
             "| PHP unit/component tests | 24 methods: 15 DFP builder, 4 Adobe Analytics, 3 video extension |",
             "Xdebug listens on PHP :9003 for the IDE.",
             "PHP 24 methods are covered; PHP 12 files changed on 2026-04-30.",
@@ -1475,7 +1488,7 @@ mod tests {
     fn what_a_ci_job_runs_is_not_the_runtime() {
         let package = "{\n  \"engines\": {\n    \"node\": \">=22\"\n  }\n}\n";
         for line in [
-            // apollo docs, six repos' worth of the same shape.
+            // Node service docs, six repos' worth of the same shape.
             "| Node.js (Jenkinsfile) | 18 | Behind stable | Medium — Jenkins pipeline uses EOL Node 18; package.json requires ≥22 |",
             "| Node.js (CI Quality) | 20 | Behind stable | Medium — CI Quality test workflow uses Node 20; production requires ≥22 |",
             "| TD-20261019-node-version-ci-mismatch | CI tests use Node.js 20 but package.json requires >=22; version compatibility gap. | CI/Infra |",
@@ -1494,7 +1507,7 @@ mod tests {
 
     #[test]
     fn a_tool_running_on_its_own_php_is_not_the_project_runtime() {
-        // africanews TESTING.md:183 — the project runs PHP 7.3.
+        // PHP site TESTING.md:183 — the project runs PHP 7.3.
         let found = found_in(
             ("docker/php/Dockerfile", "FROM php:7.3-fpm\n"),
             "installed, no `phpstan*.neon` config, php-cs-fixer v2 on PHP 8.3, no root\n",

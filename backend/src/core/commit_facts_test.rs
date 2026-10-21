@@ -167,7 +167,7 @@ fn a_short_history_establishes_no_pattern() {
 
 #[test]
 fn an_opt_in_commit_target_is_not_enforcement() {
-    // apollo: `make commit` -> nicommitizen.sh, with Commitizen in package.json;
+    // Node service: `make commit` -> nicommitizen.sh, with Commitizen in package.json;
     // nothing forces it, yet the doc said it enforces every commit.
     let dir = tempfile::tempdir().unwrap();
     put(

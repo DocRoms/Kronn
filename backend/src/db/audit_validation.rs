@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn repair_recognises_an_old_signal_and_archives_only_proven_stale_validations() {
         let conn = conn();
-        // front-africanews: the linked validation signalled, then got more
+        // front-php: the linked validation signalled, then got more
         // agent messages; an April validation of an older audit is still open.
         discussion(
             &conn,

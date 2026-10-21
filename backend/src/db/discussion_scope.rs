@@ -168,6 +168,88 @@ pub fn granted_projects(conn: &Connection, discussion_ids: &[String]) -> Result<
     Ok(granted)
 }
 
+/// A registered project a room reaches through an active grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReachedProject {
+    pub id: String,
+    pub name: String,
+    /// The checkout registered for the project.
+    pub path: String,
+    pub access: ScopeAccess,
+}
+
+/// What a room's agent may be told it reaches (KT-1406): the projects granted
+/// now, and the registered ones it could ask for. Read on every turn, so a
+/// grant or a revoke applies at the next one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoomReach {
+    pub granted: Vec<ReachedProject>,
+    /// Names only: nothing else about a project nobody granted. Never put in a
+    /// prompt (KT-1417): the agent reads them through `room_scope()`.
+    pub requestable: Vec<String>,
+}
+
+/// The projects `discussion_id` reaches besides its primary one. A room
+/// without a project reaches none and may not ask for any (see
+/// `check_target`), so it gets an empty reach. Every path comes from the
+/// `projects` table, never from a request.
+pub fn room_reach(conn: &Connection, discussion_id: &str) -> Result<RoomReach> {
+    let Some(Some(primary)) = primary_project(conn, discussion_id)? else {
+        return Ok(RoomReach::default());
+    };
+    let mut every: Option<ScopeAccess> = None;
+    let mut by_project: std::collections::HashMap<String, ScopeAccess> = Default::default();
+    for grant in active_grants(conn, discussion_id)? {
+        if grant.source == ScopeGrantSource::General {
+            continue;
+        }
+        let stronger = |current: Option<ScopeAccess>| match (current, grant.access) {
+            (Some(ScopeAccess::Write), _) | (_, ScopeAccess::Write) => ScopeAccess::Write,
+            _ => ScopeAccess::Read,
+        };
+        match &grant.project_id {
+            None => every = Some(stronger(every)),
+            Some(project) => {
+                let access = stronger(by_project.get(project).copied());
+                by_project.insert(project.clone(), access);
+            }
+        }
+    }
+    let mut statement = conn.prepare("SELECT id, name, path FROM projects ORDER BY name, id")?;
+    let projects = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut reach = RoomReach::default();
+    for (id, name, path) in projects {
+        if id == primary {
+            continue;
+        }
+        let access = match (by_project.get(&id).copied(), every) {
+            (Some(ScopeAccess::Write), _) | (_, Some(ScopeAccess::Write)) => {
+                Some(ScopeAccess::Write)
+            }
+            (Some(_), _) | (_, Some(_)) => Some(ScopeAccess::Read),
+            (None, None) => None,
+        };
+        match access {
+            Some(access) => reach.granted.push(ReachedProject {
+                id,
+                name,
+                path,
+                access,
+            }),
+            None => reach.requestable.push(name),
+        }
+    }
+    Ok(reach)
+}
+
 /// Record the room a general resource was created from (KT-1346).
 pub fn record_general_origin(
     conn: &Connection,
@@ -283,6 +365,7 @@ pub fn scope_of(conn: &Connection, discussion_id: &str) -> Result<Option<Discuss
         .query_map([discussion_id], request_from_row)?
         .collect::<rusqlite::Result<_>>()?;
     let fingerprint = fingerprint(&grants);
+    let requestable = room_reach(conn, discussion_id)?.requestable;
     Ok(Some(DiscussionScope {
         discussion_id: discussion_id.to_owned(),
         primary_project_id: primary,
@@ -290,6 +373,7 @@ pub fn scope_of(conn: &Connection, discussion_id: &str) -> Result<Option<Discuss
         revoked,
         requests,
         fingerprint,
+        requestable,
     }))
 }
 

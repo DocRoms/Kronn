@@ -7,7 +7,7 @@ fn write(root: &Path, rel: &str, body: &str) {
     fs::write(path, body).unwrap();
 }
 
-/// The repository the apollo and africanews evidence describes, reduced.
+/// The repository the Node service and PHP site evidence describes, reduced.
 fn project() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -16,7 +16,7 @@ fn project() -> tempfile::TempDir {
     write(root, "docs/repo-map.md", &"line\n".repeat(60));
     write(
         root,
-        ".ssh/vr-v2njs01-s",
+        ".ssh/deploy-key",
         "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n",
     );
     write(
@@ -40,7 +40,7 @@ fn repair(root: &Path, rel: &str, text: &str) -> Option<Repaired> {
 
 #[test]
 fn a_link_resolved_from_the_repository_root_is_rewritten_from_the_documents_folder() {
-    // Apollo step 10: "broken link target `docs/operations/` … write `operations`".
+    // Node service step 10: "broken link target `docs/operations/` … write `operations`".
     let dir = project();
     let text = "See [ops](docs/operations/) and [page](docs/operations/http.md#top).\n";
     let fixed = repair(dir.path(), "docs/inconsistencies-security.md", text).unwrap();
@@ -61,9 +61,9 @@ fn a_link_resolved_from_the_repository_root_is_rewritten_from_the_documents_fold
 
 #[test]
 fn a_secret_file_cited_bare_gets_its_presence_form() {
-    // Apollo step 10: "this file may hold secrets … write [src: file: .ssh/x:exists]".
+    // Node service step 10: "this file may hold secrets … write [src: file: .ssh/x:exists]".
     let dir = project();
-    let text = "Key [src: file: .ssh/vr-v2njs01-s] is tracked.\n";
+    let text = "Key [src: file: .ssh/deploy-key] is tracked.\n";
     let fixed = repair(
         dir.path(),
         "docs/tech-debt/TD-20261018-ssh-key-tracked.md",
@@ -72,17 +72,17 @@ fn a_secret_file_cited_bare_gets_its_presence_form() {
     .unwrap();
     assert_eq!(
         fixed.content,
-        "Key [src: file: .ssh/vr-v2njs01-s:exists] is tracked.\n"
+        "Key [src: file: .ssh/deploy-key:exists] is tracked.\n"
     );
     assert_eq!(fixed.fixes[0].kind, "secret_presence");
-    assert_eq!(fixed.fixes[0].from, ".ssh/vr-v2njs01-s");
+    assert_eq!(fixed.fixes[0].from, ".ssh/deploy-key");
 }
 
 #[test]
 fn a_secret_file_cited_by_line_gets_its_presence_form() {
-    // Apollo matrix 19/10: `.ssh/vr-v2njs01-s:1` passed the gate.
+    // Node service matrix 19/10: `.ssh/deploy-key:1` passed the gate.
     let dir = project();
-    let text = "Key [src: file: .ssh/vr-v2njs01-s:1] is tracked.\n";
+    let text = "Key [src: file: .ssh/deploy-key:1] is tracked.\n";
     let fixed = repair(
         dir.path(),
         "docs/tech-debt/TD-20261019-ssh-private-key-tracked.md",
@@ -91,7 +91,7 @@ fn a_secret_file_cited_by_line_gets_its_presence_form() {
     .unwrap();
     assert_eq!(
         fixed.content,
-        "Key [src: file: .ssh/vr-v2njs01-s:exists] is tracked.\n"
+        "Key [src: file: .ssh/deploy-key:exists] is tracked.\n"
     );
     assert_eq!(fixed.fixes[0].kind, "secret_presence");
 }
@@ -99,9 +99,9 @@ fn a_secret_file_cited_by_line_gets_its_presence_form() {
 #[cfg(unix)]
 #[test]
 fn a_symlink_to_a_secret_file_gets_its_presence_form() {
-    // `key-view.txt -> .ssh/vr-v2njs01-s`: the written name hides the key.
+    // `key-view.txt -> .ssh/deploy-key`: the written name hides the key.
     let dir = project();
-    std::os::unix::fs::symlink(".ssh/vr-v2njs01-s", dir.path().join("key-view.txt")).unwrap();
+    std::os::unix::fs::symlink(".ssh/deploy-key", dir.path().join("key-view.txt")).unwrap();
     let doc = "docs/tech-debt/TD-20261019-ssh-private-key-tracked.md";
     for (text, repaired) in [
         (
@@ -144,7 +144,7 @@ fn a_directory_link_chain_to_a_secret_gets_its_presence_form() {
 
 #[test]
 fn a_tech_debt_sheet_cited_bare_is_a_presence_citation() {
-    // Africanews steps 8 and 10: the index cites the sheets by bare path.
+    // PHP site steps 8 and 10: the index cites the sheets by bare path.
     let dir = project();
     let text = "Root user: [src: file: docs/tech-debt/TD-20260828-apache-root-user.md] \
                 and [src: file: docs/tech-debt/TD-20260828-apache-root-user.md:2].\n";
@@ -160,7 +160,7 @@ fn a_tech_debt_sheet_cited_bare_is_a_presence_citation() {
 
 #[test]
 fn a_single_did_you_mean_path_is_applied_and_several_are_not() {
-    // Apollo step 5: "citation path does not exist `repo-map.md` … did you mean
+    // Node service step 5: "citation path does not exist `repo-map.md` … did you mean
     // `docs/repo-map.md:36-50`?".
     let dir = project();
     let fixed = repair(
@@ -218,10 +218,10 @@ fn ambiguous_or_quoted_references_are_never_touched() {
     let dir = project();
     let doc = "docs/AGENTS.md";
     for text in [
-        "[src: file: notes.md:1, .ssh/vr-v2njs01-s]\n",
-        "[src: file: .ssh/vr-v2njs01-s — the tracked key]\n",
-        "```md\n[src: file: .ssh/vr-v2njs01-s]\n[bad](docs/operations/)\n```\n",
-        "Write `[src: file: .ssh/vr-v2njs01-s]` and `[x](docs/operations/)`.\n",
+        "[src: file: notes.md:1, .ssh/deploy-key]\n",
+        "[src: file: .ssh/deploy-key — the tracked key]\n",
+        "```md\n[src: file: .ssh/deploy-key]\n[bad](docs/operations/)\n```\n",
+        "Write `[src: file: .ssh/deploy-key]` and `[x](docs/operations/)`.\n",
         "[src: file: invented.rs:1]\n",
     ] {
         assert!(repair(dir.path(), doc, text).is_none(), "{text}");
@@ -230,12 +230,12 @@ fn ambiguous_or_quoted_references_are_never_touched() {
     let fixed = repair(
         dir.path(),
         doc,
-        "Write `[src: file: .ssh/vr-v2njs01-s]`; here [src: file: .ssh/vr-v2njs01-s].\n",
+        "Write `[src: file: .ssh/deploy-key]`; here [src: file: .ssh/deploy-key].\n",
     )
     .unwrap();
     assert_eq!(
         fixed.content,
-        "Write `[src: file: .ssh/vr-v2njs01-s]`; here [src: file: .ssh/vr-v2njs01-s:exists].\n"
+        "Write `[src: file: .ssh/deploy-key]`; here [src: file: .ssh/deploy-key:exists].\n"
     );
 }
 
@@ -367,7 +367,7 @@ fn a_missing_extension_is_not_added_when_it_would_be_a_guess() {
 
 #[test]
 fn a_directory_cited_in_a_marker_is_named_in_backticks() {
-    // Africanews step 8: "`docs/tech-debt/` is a directory … name the directory
+    // PHP site step 8: "`docs/tech-debt/` is a directory … name the directory
     // in backticks without a marker".
     let dir = project();
     let doc = "docs/inconsistencies-tech-debt.md";

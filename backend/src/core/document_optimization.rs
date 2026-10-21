@@ -2036,7 +2036,7 @@ mod tests {
     }
 
     #[test]
-    fn africanews_baseline_accepts_613_word_router_and_755_word_path() {
+    fn php_site_baseline_accepts_613_word_router_and_755_word_path() {
         let tmp = tempfile::tempdir().unwrap();
         let router = std::iter::repeat_n("router", 612)
             .collect::<Vec<_>>()
@@ -2055,7 +2055,7 @@ mod tests {
             r#"{
                 "adapter_max_words": 620,
                 "exception": {
-                    "justification": "Reviewed Africanews baseline",
+                    "justification": "Reviewed PHP site baseline",
                     "provenance": "KT-524 fixture",
                     "reviewed_by": "test reviewer",
                     "reviewed_at": "2026-08-30"
@@ -2516,7 +2516,7 @@ mod tests {
              and binary [src: file: brief.pdf:exists].",
         );
         assert!(messages.is_empty(), "{messages:#?}");
-        // A line of it is refused too (apollo matrix: `.ssh/vr-v2njs01-s:1`).
+        // A line of it is refused too (Node service matrix: `.ssh/deploy-key:1`).
         let messages = citation_messages(&project, "[src: file: .ssh/deploy-key:1]");
         assert_eq!(messages.len(), 1, "{messages:#?}");
         assert!(
@@ -2585,7 +2585,7 @@ mod tests {
 
     #[test]
     fn a_citation_into_a_git_ignored_path_is_told_why_it_cannot_be_checked() {
-        // KT-1353 (africanews): committed sheets cite `application/vendor/...`,
+        // KT-1353 (PHP site): committed sheets cite `application/vendor/...`,
         // which git ignores and a clone does not have.
         let tmp = document_project();
         let project = tmp.path().join("proj");
@@ -3072,7 +3072,7 @@ mod tests {
 
     #[test]
     fn a_comment_after_a_non_numeric_line_is_not_split_into_a_citation_the_gate_refuses() {
-        // Apollo step 12: told to write `[src: file: docs/AGENTS.md:Focused]`, then
+        // Node service step 12: told to write `[src: file: docs/AGENTS.md:Focused]`, then
         // refused with "Focused is not a line number".
         let tmp = tempfile::tempdir().unwrap();
         write(&tmp.path().join("docs/AGENTS.md"), "a\nb\n");
@@ -3225,7 +3225,7 @@ mod tests {
 
     #[test]
     fn a_broken_relative_link_names_where_it_lands_and_the_link_that_exists() {
-        // Apollo step 11: `../tech-debt/TD-1.md` from docs/ failed three times.
+        // Node service step 11: `../tech-debt/TD-1.md` from docs/ failed three times.
         let tmp = tempfile::tempdir().unwrap();
         write(&tmp.path().join("docs/AGENTS.md"), "x\n");
         write(&tmp.path().join("docs/tech-debt/TD-1.md"), "# t\n");
@@ -3640,7 +3640,7 @@ mod tests {
             .collect()
     }
 
-    /// KT-1388 review — the lines of real audit docs (apollo, africanews,
+    /// KT-1388 review — the lines of real audit docs (Node service, PHP site,
     /// docroms) that a closure word alone wrongly flagged.
     #[test]
     fn a_closure_word_about_another_clause_or_in_history_is_not_a_closure_of_the_debt() {
@@ -3648,11 +3648,11 @@ mod tests {
             // docroms v2-r1: RESOLVED is about the list before it, the debt is
             // listed after as what remains.
             "| Accessibility | findings | RESOLVED (2026-09-04): skip link, focus indicators, reduced-motion [src: file: docs/inconsistencies-tech-debt.md:131-138]. Remaining user-confirmed POC-route issues: [TD-20260719-a11y-map-markers-keyboard](tech-debt/TD-20260719-a11y-map-markers-keyboard.md) and [TD-20260719-a11y-poc-no-landmarks-heading](tech-debt/TD-20260719-a11y-poc-no-landmarks-heading.md). |",
-            // africanews: the debt is named only in a citation path.
+            // PHP site: the debt is named only in a citation path.
             "| Security | findings | Committed runtime secrets remain verified; the dispatch-input injection is resolved (DOPS-751). [src: file: docs/tech-debt/TD-20260828-committed-runtime-secrets.md:20-32] [src: file: docs/tech-debt/TD-20260828-composer-secure-http-disabled.md:20-30] |",
-            // africanews: `fixed` is an adjective.
+            // PHP site: `fixed` is an adjective.
             "| [TD-20260828-inline-template-assets](tech-debt/TD-20260828-inline-template-assets.md) | Templates | Medium | Confirmed by user | Shared and feature Twig templates contain fixed CSS declarations and executable JavaScript bodies. [src: file: docs/tech-debt/TD-20260828-inline-template-assets.md:2-3] |",
-            // apollo: a previous outcome of the dimension, not of a debt.
+            // Node service: a previous outcome of the dimension, not of a debt.
             "| Accessibility (a11y) | findings | Kronn resync: 5 active TDs on file: TD-20261019-button-div-nesting, TD-20261019-gallery-hidden-figcaption (previous outcome: N/A: not applicable — library/API-only project) |",
             // docroms v2-r1: the false positive is the second signal, the debt the first.
             "- Inline script blocks > 50 lines (2 signals): (1) `templates/home/poc-skiing.html.twig:45` — 536 lines application JS, linked to [TD-20260719-cq-inline-js-poc-skiing](tech-debt/TD-20260719-cq-inline-js-poc-skiing.md). (2) `templates/home/index.html.twig:14` — 60 lines LD-JSON, not executable JS; detector signal is false positive for this case",
