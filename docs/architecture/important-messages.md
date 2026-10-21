@@ -7,7 +7,7 @@ mints a NEW message and its card row together, in one transaction; no service
 path attaches a card to a message that already exists, so a `delivery_summary`
 never becomes an important card retroactively.
 [src: file: backend/src/db/sql/172_discussion_important_messages.sql:14-52#discussion_important_messages]
-[src: file: backend/src/db/discussion_important.rs:260-334#is_newest_message]
+[src: file: backend/src/db/discussion_important.rs:260-334#publish]
 
 ## The template
 
@@ -21,6 +21,9 @@ artifact — every field optional). `author`, `created_at` and `schema_version`
 are NOT accepted from the payload — `#[serde(deny_unknown_fields)]` fails the
 whole parse if a caller tries to inject them; Kronn derives them server-side.
 [src: file: backend/src/db/discussion_important.rs:143-165#ImportantSpec]
+[src: file: backend/src/db/discussion_important.rs:30-43#ImportantCategory]
+[src: file: backend/src/db/discussion_important.rs:127-141#ImportantAction]
+[src: file: backend/src/db/discussion_important.rs:107-125#ImportantReferences]
 
 ## Who can publish
 
@@ -69,12 +72,13 @@ reported (not the message id). A structured event that fires again on restart
 or resume collapses onto the existing row instead of creating a duplicate
 card; `ingest_message_important` reports `deduplicated` back to the caller so
 this is visible, not a silent no-op.
-[src: file: backend/src/db/discussion_important.rs:786-833#ingest_message_important]
+[src: file: backend/src/db/discussion_important.rs:783-848#ingest_message_important]
 
 Only the FIRST `kronn-important` fence in a message publishes; extras are
 refused (`refused_extra`) rather than silently collapsed by the unique index —
 one card is one message. A fence nested inside a fenced example (for
 instance, one showing the format) never publishes.
+[src: file: backend/src/db/discussion_important.rs:751-781#important_fences]
 
 ## Frontend: filter, counter, navigation
 
@@ -95,7 +99,10 @@ past the list's end; if a selected card disappears, the first remaining match
 is selected without moving the transcript. A page reload starts navigation
 fresh. Publication invalidations during a pending GET coalesce into a fresh
 follow-up read rather than accepting the old snapshot as the final state.
+[src: file: frontend/src/components/ImportantMessageCard.tsx:194-264#goTo]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4693-4697#ImportantMessagesBar]
 [src: file: frontend/src/components/ImportantMessageCard.tsx:151-180#selections]
+[src: file: frontend/src/lib/importantMessages.ts:50-75#load]
 [src: file: frontend/src/lib/importantMessages.ts:84-90#refreshImportantMessages]
 
 `ImportantMessageCard` renders the DURABLE row for a `kronn-important` fence
@@ -107,8 +114,9 @@ card is rendered beside the folded report, visible without opening its details.
 Only a matching row with `source_kind: orchestration` enables that path; an
 orchestrator display label or ordinary notification alone renders no card and
 no false refusal notice.
-[src: file: frontend/src/components/ImportantMessageCard.tsx:36-60#ImportantMessageCard]
-[src: file: frontend/src/components/MessageBubble.tsx:1115-1122#serverEventOnly]
+[src: file: frontend/src/components/MessageBubble.tsx:2082-2089#ImportantMessageCard]
+[src: file: frontend/src/components/ImportantMessageCard.tsx:36-130#ImportantMessageCard]
+[src: file: frontend/src/components/MessageBubble.tsx:1109-1119#serverEventOnly]
 
 The bar re-fetches when the transcript's newest durable message id changes
 (`messageRevision`, the same idiom `DiscussionQuestionBanner` uses) — one
@@ -119,22 +127,24 @@ first GET while a new card lands.
 
 ## Human form (0.13.0, KT-643)
 
-Use **Important message** above the ordinary composer to highlight information,
+Use **Important message**, the affordance under the ordinary composer, to highlight information,
 a decision or a blocker. Enter plain text, choose the category, and optionally
 select an existing task from this discussion's plan. This does not create,
 complete or otherwise modify a task. The card's task link resolves a fresh plan
 and opens that exact task; a removed link or unavailable plan is explained
 instead of selecting an unrelated task.
-[src: file: frontend/src/components/ImportantMessageForm.tsx:19#ImportantMessageForm]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:1456-1483#openPlan]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:5615-5639#ImportantMessageForm]
+[src: file: frontend/src/components/ImportantMessageForm.tsx:90-104#taskRef]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:1469-1499#openPlan]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:87-90#initialTaskId]
 
 The publication-key field appears only inside the open form. It uses the
 existing enrolled credential and single-use proof; Settings remains the place
 to obtain that credential. No grant or proof enters browser storage, card text
 or the draft store. The normal composer keeps its own text and send lifecycle.
+[src: file: frontend/src/components/ImportantMessageForm.tsx:87-110#grant]
 [src: file: frontend/src/lib/submitImportantMessage.ts:36-43#preparePublication]
-[src: file: frontend/src/lib/importantMessageDraft.ts:5-18#drafts]
+[src: file: frontend/src/lib/importantMessageDraft.ts:5-18#Draft]
 
 Closing the form, switching discussion or visiting Settings preserves its text
 in memory, separately for each discussion. Reloading the browser discards this
@@ -153,9 +163,10 @@ The form bounds text by Unicode scalar values and does not split an emoji at
 the title/highlight limits. Migration 175 adds the closed `information`
 category without rewriting migrations 172/174, preserving the previous rows,
 identities, foreign keys, category checks and indexes.
-[src: file: frontend/src/lib/importantMessageDraft.ts:54-60#takeScalars]
-[src: file: backend/src/db/sql/175_important_message_information_category.sql:1-3#discussion_important_messages_next]
-[src: file: backend/src/db/migrations.rs:1758-1762#migration_175_preserves_populated_cards_and_closes_information_category]
+[src: file: frontend/src/lib/importantMessageDraft.ts:54-72#takeScalars]
+[src: file: backend/src/db/sql/175_important_message_information_category.sql:3-24#discussion_important_messages_next]
+[src: file: backend/src/db/sql/175_important_message_information_category.sql:25-33#idx_disc_important_message]
+[src: file: backend/src/db/migrations.rs:1761-1893#migration_175_preserves_populated_cards_and_closes_information_category]
 
 ## Tests
 

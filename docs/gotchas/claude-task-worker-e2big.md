@@ -16,18 +16,26 @@ worker. A catalogue over either bound is refused with the stable
 path does not exist is skipped with a warning: it has no worktree catalogue for
 the sandbox to enumerate. Any other unreadable Git root still fails closed with
 `claude_sandbox_catalogue_unreadable`, naming the project or linked repository
-(never its path). [src: file: backend/src/agents/runner.rs:7155]
-[src: file: backend/src/api/orchestration.rs:5454]
+(never its path).
+[src: file: backend/src/agents/runner.rs:12270-12300#ClaudeSandboxCatalogueReceipt]
+[src: file: backend/src/agents/runner.rs:12306-12355#claude_sandbox_catalogue_receipt]
+[src: file: backend/src/agents/runner.rs:12357-12386#claude_sandbox_catalogue_roots]
+[src: file: backend/src/agents/runner.rs:12388-12395#claude_task_worker_catalogue_preflight]
+[src: file: backend/src/api/orchestration.rs:9122-9132#worker_project_refusal]
 
 The worker remains fail-closed: sandbox availability is mandatory,
 unsandboxed commands are disabled, and the explicit write roots are the
 canonical managed task worktree and its lane's private Cargo target (see
-"Build and test policy" below). [src: file: backend/src/agents/runner.rs:7090-7112]
+"Build and test policy" below). [src: file: backend/src/agents/runner.rs:12181-12216#claude_task_worker_settings]
 
 Regression coverage uses real synthetic Git common directories to exercise
 accepted and refused catalogue sizes, common-directory deduplication and
-path-free diagnostics, and separately preserves the single task-worktree write
-boundary. [src: file: backend/src/agents/runner_test.rs:5399]
+path-free diagnostics, and separately preserves the write boundary: an
+unmanaged worktree is the only write root, a managed one adds only its lane
+target.
+[src: file: backend/src/agents/runner_test.rs:9998-10197#synthetic_git_worktree_catalogue]
+[src: file: backend/src/agents/runner_test.rs:9714-9764#claude_task_worker_uses_fail_closed_workspace_sandbox]
+[src: file: backend/src/agents/runner_test.rs:9778-9819#claude_task_worker_sandbox_allows_loopback_and_its_lane_without_a_network_domain]
 
 ## Build and test policy (KT-1246)
 

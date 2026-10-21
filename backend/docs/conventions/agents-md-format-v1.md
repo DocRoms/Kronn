@@ -142,12 +142,22 @@ names, versions, behaviour). The grammar:
 - `[src: <path>:<line>]` — the `file:` type is the default.
 - `[src: file: backend/src/api/mod.rs:14-22#context_audit]` — line or range + **symbol anchor**.
   The anchor (an identifier; `.` and `-` allowed inside, e.g. `Type.method`, `check-version`)
-  must appear as a whole word inside the cited lines. It is only read after a line spec. Use it
+  must appear as a whole word inside the cited lines. When the range *contains* a definition
+  of the symbol (`fn`, `def`, `class`, `struct`, `enum`, `const`, `interface`, `function` or
+  `type`, after any visibility or `async` modifier), that definition must open the range: its
+  doc comment and attributes, then up to 5 sibling lines (a constant and its comment), may
+  sit above it. A range that holds no definition of the symbol only has to name it, so a call
+  site or a usage backs a claim about wiring. It is only read after a line spec. Use it
   to say *what* the lines hold: when code moves, a stale range fails instead of silently
   pointing beside the claim.
 - `[src: file: <path>.docx]` — file only. Required for a binary file (.docx,
   .pdf, images), which has no lines; detected by content, not extension. In audited `docs/`
   a text file always takes a line, and a binary file never does.
+- To cite an **absence** ("no audit step in `ci.yaml`"), cite the whole file as
+  `[src: file: <path>:1-N]` with `N` its line count and state the absence outside the brackets. En and
+  em dashes are accepted in ranges, and a `#symbol` anchor may follow a range (`path:1-2#name`). A
+  whole-file range backing a claim that is not an absence draws a non-blocking warning. Paths are
+  repository-root relative, never relative to the citing document.
 - Percent-encoded paths (`My%20File.docx`) are decoded before resolving.
 
 Mechanical verification is **path-jailed to the project root**: a citation that escapes the
@@ -157,16 +167,19 @@ under the root is verified like a relative one. This is the ungameable core — 
 fabricate a file or line that actually exists.
 
 An anchor absent from the cited lines makes the citation `out_of_bounds` (the range is wrong
-for what it names); the detail says where the symbol does appear, if anywhere. The check is
+for what it names); the detail says where the symbol does appear, if anywhere. The same goes
+for a range that contains the definition without opening with it (`a definition anchor must
+start the range`); `make docs-reanchor` then proposes the range that starts at its doc comment
+or attributes. The check is
 textual and deterministic: no code is parsed.
 
 **One anchor rule, no tolerance window.** The runtime verifier, the `verified` badge it feeds
-and Kronn's docs check apply this same rule: the symbol is inside the cited lines, or the
-citation fails; one line past the range fails everywhere. A tool that re-anchors a moved
+and Kronn's docs check apply this same rule: the symbol is inside the cited lines (and opens them
+when they contain its definition), or the citation fails; one line past the range fails everywhere. A tool that re-anchors a moved
 citation first rewrites the range when the symbol occurs once in the cited file. If the symbol
 occurs several times, the tool may instead map the old range's endpoints through a zero-context
 Git diff from the chosen base to `HEAD`; a line inside a changed hunk has no mapping, and the
-rewrite is allowed only when the mapped range still contains the symbol as a whole word. The
+rewrite is allowed only when the mapped range still passes the anchor rule. The
 path and anchor stay unchanged, and a single-line citation stays single-line while a range stays
 a range. Anything still ambiguous is listed with its candidate lines for a human to choose; a
 missing file or line is never re-anchored.
@@ -209,7 +222,7 @@ mode (`Settings → Anti-hallucination`, or `config.toml anti_hallucination_mode
 **P2 lint, concretely** — what is mechanically checked on each agent reply:
 1. A prose heuristic flags confident technical claims left **unsourced** (one confidence tier).
 2. Every `[src: …]` marker present is **mechanically verified**: file exists, path is jailed to
-   the project root, line/range is in bounds, a `#symbol` anchor appears in the range. A citation pointing at a non-existent or
+   the project root, line/range is in bounds, a `#symbol` anchor appears in the range (and opens it when the range contains its definition). A citation pointing at a non-existent or
    out-of-project path is flagged **fabricated**; a `training-data` source is **rejected**.
 
 **Convention vs enforcement.** The markers and citation grammar above are a *writing

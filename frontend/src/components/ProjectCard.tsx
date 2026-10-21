@@ -519,6 +519,7 @@ export function ProjectCard({
     proj.audit_status,
     !auditActive && (detailMode ? detailView === 'audit' : isSectionOpen('aiContext')),
   );
+  const gateTemplateLaunch = templateMerge.gateLaunch;
 
   // Keep the latest terminal result visible on an opened project card. The
   // live tracker owns the in-progress state; history owns the durable result
@@ -1135,19 +1136,23 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion]);
+  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
 
   const startPartialAudit = useCallback(async (steps: number[]) => {
-    await templateMerge.gateLaunch(() => void launchPartialAudit(steps));
-  }, [templateMerge.gateLaunch, launchPartialAudit]);
+    await gateTemplateLaunch(() => void launchPartialAudit(steps));
+  }, [gateTemplateLaunch, launchPartialAudit]);
 
   const acknowledgeDrift = useCallback(async (drift: DriftCheckResponse) => {
     if (driftAckRef.current || auditActiveRef.current) return;
     driftAckRef.current = true;
     setDriftAcking(true);
     const sections = [...new Set(drift.stale_sections.map(s => s.ai_file))];
+    // KT-1168 — only the gone paths the stale block displayed are accepted,
+    // as listed here, not as they are at the click.
+    const shownPaths = drift.stale_sections.flatMap(s =>
+      (s.missing_paths ?? []).flatMap(m => m.paths.map(path => ({ doc: s.ai_file, section: m.section, path }))));
     try {
-      await projectsApi.acknowledgeDrift(proj.id, sections);
+      await projectsApi.acknowledgeDrift(proj.id, sections, shownPaths);
       toast(t('audit.driftAckDone', String(sections.length)), 'success');
       onRefetchDrift(proj.id);
     } catch (e) {
@@ -1382,7 +1387,7 @@ export function ProjectCard({
   const docStateCounts: DocStateCounts | null = docStateUnknown
     ? null
     : {
-      broken: driftStatus.broken_citations ?? 0,
+      broken: (driftStatus.broken_citations ?? 0) + (driftStatus.missing_paths ?? 0),
       reanchor: headerRevalidationPlan?.reanchor_count ?? 0,
       stale: (driftStatus.stale_sections ?? []).length,
       reconfirm: docProvenanceCount,
@@ -1391,6 +1396,7 @@ export function ProjectCard({
     && docStateNeedsAttention(docStateCounts)
     && ((driftStatus?.stale_sections.length ?? 0) > 0
       || (driftStatus?.broken_citations ?? 0) > 0
+      || (driftStatus?.missing_paths ?? 0) > 0
       || (headerRevalidationPlan?.reanchor_count ?? 0) > 0
       || (docProvenanceCount ?? 0) > 0
       || driftStatus?.sources_state === 'needs_reverification');

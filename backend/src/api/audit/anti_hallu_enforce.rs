@@ -403,31 +403,6 @@ pub fn enforce_human_owned_sections(
     Some((out_lines.join("\n"), diffs))
 }
 
-/// Render the audit-proposed changes for a human to review by hand.
-pub fn format_human_section_diff_report(
-    file_label: &str,
-    diffs: &[HumanSectionDiff],
-    today: &str,
-) -> String {
-    let mut out = format!(
-        "# Proposed changes to human-owned sections — {today}\n\n\
-The audit tried to update the following `owner=\"human\"` section(s) in \
-`{file_label}` but left them untouched, as the convention requires. Review \
-each diff below and apply it by hand if you agree with it.\n"
-    );
-    for d in diffs {
-        out.push_str(&format!(
-            "\n## Section `{}`\n\n### Kept (current)\n\n```\n{}\n```\n\n### Audit-proposed\n\n```\n{}\n```\n",
-            d.name,
-            d.pre_block,
-            d.post_block
-                .as_deref()
-                .unwrap_or("(the audit removed this section — it was restored)"),
-        ));
-    }
-    out
-}
-
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
@@ -444,6 +419,22 @@ mod tests {
             verdict.is_clean(),
             "verified citation must not be fabricated"
         );
+    }
+
+    #[test]
+    fn a_dash_range_passes_the_enforce_gate_like_a_hyphen_range() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("long.md"), "x\n".repeat(30)).unwrap();
+        for ok in ["17\u{2013}23", "17\u{2014}23", "17-23", "1\u{2013}30"] {
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: long.md:{ok}]."), &[dir.path()]);
+            assert!(verdict.is_clean(), "{ok}: {:?}", verdict.fabricated);
+        }
+        for bad in ["17\u{2013}31", "31\u{2014}40", "23\u{2013}17"] {
+            let verdict =
+                lint_step_file(&format!("Claim [src: file: long.md:{bad}]."), &[dir.path()]);
+            assert!(!verdict.is_clean(), "{bad} must still be refused");
+        }
     }
 
     #[test]
@@ -966,6 +957,43 @@ mod tests {
     }
 
     #[test]
+    fn a_mistyped_kind_over_a_missing_file_is_retried_then_failed() {
+        // `fil:` / `path:` / `source:` are not known kinds: their path is judged
+        // as a file, so the step is retried and finally failed, not waved through.
+        for raw in [
+            "fil: src/ghost.rs:1",
+            "path: src/ghost.rs",
+            "source: ghost.rs",
+        ] {
+            let dir = tempdir().unwrap();
+            fs::write(
+                dir.path().join("AGENTS.md"),
+                format!("Claim [src: {raw}].\n"),
+            )
+            .unwrap();
+            let gate = |attempt| {
+                evaluate_enforce_gate(true, true, "AGENTS.md", dir.path(), attempt, 2, None)
+            };
+            assert!(
+                matches!(gate(1), EnforceGateOutcome::Retry { fabricated: 1, .. }),
+                "{raw}"
+            );
+            assert!(matches!(gate(2), EnforceGateOutcome::Fail { .. }), "{raw}");
+        }
+        // A listed non-file kind is not a path: the gate passes it.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("AGENTS.md"),
+            "Recent [src: command: git log --oneline].\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            evaluate_enforce_gate(true, true, "AGENTS.md", dir.path(), 1, 2, None),
+            EnforceGateOutcome::Pass { .. }
+        ));
+    }
+
+    #[test]
     fn gate_fails_after_exhausting_attempts_without_stamping() {
         // The agent never fixes the fabricated citation. After MAX_ATTEMPTS the
         // step must Fail (→ audit ends Interrupted) and NEVER stamp the doc as
@@ -1062,6 +1090,17 @@ pub fn evaluate_enforce_gate(
     }
 }
 
+/// The reason of a step that still holds fabricated citations once its
+/// attempts are spent.
+pub(crate) fn enforce_failure_reason(count: usize, max_attempts: usize) -> String {
+    format!(
+        "{} {}(s) still present after {} attempts (enforce mode)",
+        count,
+        super::step_guard::FABRICATED_FRAGMENT,
+        max_attempts
+    )
+}
+
 #[cfg(all(test, feature = "full-tests"))]
 mod enforce_gate_tests {
     use super::*;
@@ -1109,10 +1148,46 @@ mod enforce_gate_tests {
                 current: "18.2.0".into(),
                 latest: "19.1.0".into(),
                 major: true,
+                declared_only: false,
             }],
             unchecked: vec![],
             up_to_date: vec![],
         }
+    }
+
+    /// KT-1295 — the bench row: the npm manager is labelled `JS / TS` by the
+    /// producer, and the citation it emits (a `/` in the label) passes the gate.
+    #[test]
+    fn deps_citations_with_the_real_js_ts_label_pass_the_gate() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let roots = [tmp.path()];
+        let mut snap = watch();
+        snap.checked_on = "2026-10-16".into();
+        snap.packages = ["argparse", "joi", "@types/node"]
+            .iter()
+            .map(|name| crate::core::version_sources::WatchedPackage {
+                manager: "JS / TS".into(),
+                manifest: "package.json".into(),
+                name: (*name).into(),
+                current: "1.0.0".into(),
+                latest: "2.0.0".into(),
+                major: true,
+                declared_only: false,
+            })
+            .collect();
+        let cited: String = snap
+            .packages
+            .iter()
+            .map(|p| format!("{} lags {}.\n", p.name, snap.citation(p)))
+            .collect();
+        assert!(cited.contains("[src: deps: JS / TS/argparse@2026-10-16]"));
+        assert!(lint_step_file_with_deps(&cited, &roots, Some(&snap)).is_clean());
+
+        let absent = "Vue lags [src: deps: JS / TS/vue@2026-10-16].";
+        assert_eq!(
+            lint_step_file_with_deps(absent, &roots, Some(&snap)).count(),
+            1
+        );
     }
 
     /// KT-1000 — a `deps:` row the injected watch holds passes; one it does

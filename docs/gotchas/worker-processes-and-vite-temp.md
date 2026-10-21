@@ -11,9 +11,12 @@ so does everything it starts. When the dispatch ends (completed, failed,
 cancelled) or the watchdog finds its run gone, the processes carrying that id
 get SIGTERM, then SIGKILL, and the table is re-read for what was started
 meanwhile. Only the ended dispatch's id is matched.
-[src: file: backend/src/core/dispatch_reaper.rs:30]
-[src: file: backend/src/core/child_env.rs:941]
-[src: file: backend/src/api/discussions/runtime.rs:632]
+[src: file: backend/src/core/dispatch_reaper.rs:29-30#DISPATCH_ENV]
+[src: file: backend/src/core/child_env.rs:938-943#DISPATCH_ENV]
+[src: file: backend/src/api/discussions/runtime.rs:551-553#reap_task_worker_processes]
+[src: file: backend/src/api/orchestration.rs:778-780#reap_task_worker_processes]
+[src: file: backend/src/api/discussions/runtime.rs:618-634#reap_task_worker_processes]
+[src: file: backend/src/core/dispatch_reaper.rs:442-487#reap_dispatch]
 
 What is taken, and what is not:
 
@@ -35,8 +38,9 @@ What is taken, and what is not:
   (`agent_orphans::start_stamp`) is compared at kill time, and the tag or the
   session is read again right before each signal (SIGTERM and SIGKILL).
   A process whose stamp could not be read is never a target.
-[src: file: backend/src/core/dispatch_reaper.rs:75]
-[src: file: backend/src/core/dispatch_reaper.rs:390]
+[src: file: backend/src/core/dispatch_reaper.rs:71-111#run_processes]
+[src: file: backend/src/core/dispatch_reaper.rs:274-310#macos_procargs]
+[src: file: backend/src/core/dispatch_reaper.rs:387-420#is_still_ours]
 
 - macOS hides the environment of platform binaries (`/bin/sh`, `/bin/sleep`,
   `/usr/bin/*`), as `ps eww` does: such a process is found only as a descendant
@@ -44,6 +48,9 @@ What is taken, and what is not:
   visible. A test that needs a tagged process must not use a system binary.
 - The table is read with libproc and `KERN_PROCARGS2` on macOS and `/proc` on
   Linux: no `ps`, which the worker sandbox refuses to execute.
+  [src: file: backend/src/core/dispatch_reaper.rs:194-227#process_table]
+  [src: file: backend/src/core/dispatch_reaper.rs:229-272#process_table]
+[src: file: backend/src/core/dispatch_reaper_test.rs:183-187#start_python_under_shell]
 - Nothing sweeps at boot: a lane's own backend (started by a worker, with its
   own scratch database) would otherwise kill every worker of the host.
 - A daemon that also calls `setsid` *and* clears its environment cannot be told
@@ -60,8 +67,9 @@ lane and no `--configLoader native` is needed. A whole-directory link from an
 earlier launch is replaced; packages installed in the main checkout since are
 linked at the next launch. An entry the lane already holds as a real directory
 is left alone and does not stop the entries after it.
-[src: file: backend/src/core/task_worker_env.rs:404]
-[src: file: backend/src/core/task_worker_env.rs:439]
+[src: file: backend/src/core/task_worker_env.rs:359-397#link_frontend_deps]
+[src: file: backend/src/core/task_worker_env.rs:399-434#layer_frontend_deps]
+[src: file: backend/src/core/task_worker_env.rs:437-455#link_entries]
 
 The smoke check also loads the config (`vitest run --passWithNoTests <no
 match>`), which `--version` never did. That executes the worker-authored
@@ -69,5 +77,5 @@ match>`), which `--version` never did. That executes the worker-authored
 lane's first build (KT-1255): the deny-default profile, never the backend's own
 rights. If vitest cannot load its config under that profile the frontend reads
 as unavailable, with the command's output as the reason.
-[src: file: backend/src/core/task_worker_env.rs:985]
-[src: file: backend/src/api/orchestration.rs:2017]
+[src: file: backend/src/core/task_worker_env.rs:985-1045#check_frontend]
+[src: file: backend/src/api/orchestration.rs:2128-2148#worker_probe_runner]

@@ -5,8 +5,10 @@ Adding the five workflow tools increased the full catalogue from 39,841 to
 models, all fourteen scenario outcomes matched their earlier full-catalogue
 observations: qwen3.5:2b passed 6/7 and gemma4:e2b passed 5/7. This bounded check
 found no lost action success; it does not establish general non-regression.
-[src: file: docs/research/native-catalogue-growth-2026-09-22.json:1]
-[src: file: docs/research/native-tool-catalogue-2026-09-22.json:1]
+[src: file: docs/research/native-catalogue-growth-2026-09-22.json:26-456#reports]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:217-267#measure_workflow_catalogue_surface]
+[src: file: docs/research/native-tool-catalogue-2026-09-22.json:45-441#catalogue_bytes]
+[src: file: docs/research/native-tool-catalogue-2026-09-22.json:902-1273#catalogue_bytes]
 
 ## Protocol
 
@@ -21,9 +23,9 @@ and finished at 2026-09-22T11:54:26.689256+00:00. The initial sandbox attempt
 failed to connect to Ollama before producing any inference observation. Both
 host benchmark processes exit 101 because their final assertion requires every
 scenario to pass; all fourteen measurements were nevertheless completed.
-[src: file: backend/src/api/agent_quick_prompt_bench.rs:250-335]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:269-335#bench_quick_prompt_native_catalogue]
 [src: commit: 70763655]
-[src: file: docs/research/native-catalogue-growth-2026-09-22.json:1]
+[src: file: docs/research/native-catalogue-growth-2026-09-22.json:2-24#metadata]
 
 This is one observation per cell, in a fixed order, against a historical build.
 The new build also includes the intervening fixes, notably saved QP generation
@@ -35,7 +37,7 @@ not completed inference or generated media. The prior campaign's other scoring
 limits still apply.
 [src: file: backend/src/api/agent_quick_prompt_bench.rs:309-329#modes]
 [src: file: backend/src/api/agent_quick_prompt_bench.rs:139-163#campaign_state]
-[src: file: docs/research/native-tool-catalogue-2026-09-22.md:1]
+[src: file: docs/research/native-tool-catalogue-2026-09-22.md:114-122#Limits]
 
 ## Observations
 
@@ -60,8 +62,9 @@ Every first request grew by 841 reported tokens on qwen3.5:2b and 793 on
 gemma4:e2b compared with the corresponding earlier full-mode cell. These are
 provider-reported request counts; the 3,020-byte declaration increase is a
 separate measurement. No token or latency saving is claimed.
-[src: file: docs/research/native-catalogue-growth-2026-09-22.json:1]
-[src: file: docs/research/native-tool-catalogue-2026-09-22.json:1]
+[src: file: docs/research/native-catalogue-growth-2026-09-22.json:26-456#first_prompt_tokens]
+[src: file: docs/research/native-tool-catalogue-2026-09-22.json:45-441#first_prompt_tokens]
+[src: file: docs/research/native-tool-catalogue-2026-09-22.json:902-1273#first_prompt_tokens]
 
 The failures are retained, not repaired in scoring. Qwen inspected blocked tasks
 with `task_list` rather than calling `agent_resume_status`. Gemma changed
@@ -69,7 +72,9 @@ with `task_list` rather than calling `agent_resume_status`. Gemma changed
 success. In the edit cell it passed a literal backslash-n in `new_string`, so
 the resulting file did not have the requested bytes. Both tool calls succeeded;
 the persisted-result assertions correctly rejected the outcomes.
-[src: file: docs/research/native-catalogue-growth-2026-09-22.json:1]
+[src: file: docs/research/native-catalogue-growth-2026-09-22.json:220-244#task_list]
+[src: file: docs/research/native-catalogue-growth-2026-09-22.json:336-368#prompt_template]
+[src: file: docs/research/native-catalogue-growth-2026-09-22.json:396-432#new_string]
 
 These observations support including the new authoring tools with their measured
 cost and the documented local-model limitations. They do not replace the still

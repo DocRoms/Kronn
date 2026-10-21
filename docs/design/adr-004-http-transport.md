@@ -14,7 +14,7 @@ statement. `backend/src/http_transport.rs` is the module that owns this seam
 explicitly: `acp::production_route`/`resolve_acp_route` already return
 `AcpProductionRoute::HttpModelProvider` for every agent type it covers
 (`Ollama`, `LiteLlm`, `Nvidia`, `Custom`), and this module is what those
-routes hand off to. [src: file: backend/src/acp.rs:94-106]
+routes hand off to. [src: file: backend/src/acp.rs:197-242#production_route]
 [src: file: backend/src/http_transport.rs:1-16]
 
 ### Codec selection is explicit
@@ -26,7 +26,7 @@ agent, regardless of which named connection backs it. It replaces an inline
 ternary that used to live inside `start_ollama_http`, mirroring
 `acp::resolve_acp_route` being the sole ACP route decision point.
 [src: file: backend/src/http_transport.rs:28-41]
-[src: file: backend/src/agents/runner.rs:5204] (call site)
+[src: file: backend/src/agents/runner.rs:8977-8980#resolve_chat_codec] (call site)
 
 ### Pre-dispatch capability gate
 
@@ -49,11 +49,11 @@ named-connection model Custom connections use (`external_api_connections`,
 KT-339), but keep their own dedicated `AgentType` — so their fixed UI color
 (`AGENT_COLORS.LiteLlm` / `.Nvidia`) and their per-agent-type concurrency
 limit (`agent_concurrency_limits`'s `REMOTE` array) are untouched by this
-work. [src: file: backend/src/agents/runner.rs:2355-2407]
-[src: file: frontend/src/lib/constants.ts:11-24] Their credential is resolved
+work. [src: file: backend/src/agents/runner.rs:3294-3346#agent_concurrency_limits]
+[src: file: frontend/src/lib/constants.ts:10-24#AGENT_COLORS] Their credential is resolved
 through `credential_slug` → `TokensConfig.active_key_for`, the same
 indirection every named connection already uses.
-[src: file: backend/src/models/setup.rs:346-353]
+[src: file: backend/src/http_transport.rs:74-93#external_http_runtime]
 
 ### Stable target: connection + runtime + model + tier
 
@@ -69,14 +69,13 @@ way:
   the fallback-to-Default-tier-model behavior. It replaced three independent,
   subtly inconsistent copies (discussion dispatch, Quick Prompt, workflow/
   batch-compare retry) — the copies disagreed on whether an empty
-  Economy/Reasoning slot fell back to Default. [src: file:
-  backend/src/http_transport.rs:53-71]
+  Economy/Reasoning slot fell back to Default. [src: file: backend/src/http_transport.rs:53-72#connection_tier_model]
 - `http_transport::validate_connection_target` is the single "does this
   connection exist and match the requested agent type" guard, shared by
   Compare's judge/improve launch, multi-agent orchestration, and discussion
   create/update — previously each surface either lacked the check or
   reimplemented it. [src: file: backend/src/http_transport.rs:95-126]
-- `discussions.connection_id` (migration 165) is the durable "sticky"
+- `discussions.connection_id` (migration 166) is the durable "sticky"
   connection a discussion's *implicit* target resolves to. Before this
   column existed, `MessageTarget::discussion_agent()` — the canonical target
   for an ordinary reply with no explicit `@mention` — always constructed
@@ -86,7 +85,7 @@ way:
   message (an explicit `Agent`-kind target from New Discussion) but lost the
   connection on every ordinary follow-up reply. Both resolution points now
   read the discussion's sticky `connection_id` instead.
-  [src: file: backend/src/api/discussions/messaging.rs:284-293]
+  [src: file: backend/src/api/discussions/messaging.rs:259-268#DiscussionAgent]
   (`canonical_targets`'s `DiscussionAgent` branch)
   [src: file: backend/src/api/discussions/messaging.rs:78-91]
   (`native_dispatch_agents_for_targets`'s empty-target fallback)
@@ -106,7 +105,7 @@ the new `OrchestrationParticipant` type (replacing the bare
 `connection_id`, validated the same way and dispatched through the same
 `enqueue_with_connection`/`external_http_runtime` construction discussion
 dispatch already used. [src: file: backend/src/models/compare.rs:128-156]
-[src: file: backend/src/models/discussions.rs:800-816] (`OrchestrationParticipant`)
+[src: file: backend/src/models/discussions.rs:876-891#OrchestrationParticipant] (`OrchestrationParticipant`)
 
 ## Consequences
 
@@ -123,11 +122,18 @@ steps fail closed when their named connection cannot be resolved; their initial
 and immediate pre-dispatch checks use its `http:<connection-id>` target and
 effective model. The guard remains caller-owned; centralizing it
 at the runner boundary is a possible follow-up once overlapping runner work is
-integrated. [src: file: backend/src/api/discussions/orchestration.rs:60-130]
-[src: file: backend/src/api/discussions/orchestration.rs:650-1035]
-[src: file: backend/src/workflows/steps.rs:241-330]
-[src: file: backend/src/workflows/steps.rs:888-930]
-[src: file: backend/src/workflows/runner.rs:815-850]
+integrated. [src: file: backend/src/api/discussions/orchestration.rs:66-132#checked_launch_connection]
+(summary: [src: file: backend/src/api/discussions/orchestration.rs:710-718#checked_launch_connection],
+participant round: [src: file: backend/src/api/discussions/orchestration.rs:814-822#checked_launch_connection],
+synthesis: [src: file: backend/src/api/discussions/orchestration.rs:1049-1057#checked_launch_connection])
+Workflow Agent steps: the connection resolver
+[src: file: backend/src/workflows/steps.rs:1132-1172#resolve_step_connection],
+the run-start check
+[src: file: backend/src/workflows/runner.rs:1884-1932#resolve_step_connection],
+the check immediately before dispatch
+[src: file: backend/src/workflows/steps.rs:402-414#preflight_workflow_launch]
+and the preflight on the `http:<connection-id>` target and effective model
+[src: file: backend/src/workflows/steps.rs:1174-1227#preflight_workflow_launch]
 
 ## Sources
 

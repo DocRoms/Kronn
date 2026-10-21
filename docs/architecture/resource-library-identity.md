@@ -2,8 +2,10 @@
 
 Custom skills, directives and profiles are Markdown+frontmatter files under
 `~/.config/kronn/{skills,directives,profiles}/`. Each one's id (`custom-<slug>`)
-is derived from the **filename**, not stored inside the file
-[src: file: `backend/src/core/skills.rs`].
+is derived from the **filename**, not stored inside the file.
+[src: file: backend/src/core/skills.rs:477-486]
+[src: file: backend/src/core/directives.rs:153-158]
+[src: file: backend/src/core/profiles.rs:249-254]
 
 ## Stable id, in-place update
 

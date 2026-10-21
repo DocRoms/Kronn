@@ -22,7 +22,7 @@ Account for EACH of the 10 dimensions in the `## Dimension coverage` matrix of t
 - **N/A: <verifiable reason>**: a reason a human can check ("no Dockerfile", "no DB/ORM layer", "no web surface"), never "not relevant".
 A missing row, a short matrix or an unverifiable reason is an incomplete audit: the validator fails and re-runs this step. On a non-trivial codebase, "scanned — nothing substantiable" deserves a second look before you write it.
 
-- **Dependencies**: EOL/deprecated runtimes, frameworks, packages, or versions significantly behind stable — judged ONLY from the dated sources of the `Technologies and standards` block below, never from memory; the row's evidence states `source used: …` or `not verified: no source`.
+- **Dependencies**: EOL/deprecated runtimes, frameworks, packages, or versions significantly behind stable — judged ONLY from the dated sources of the `Technologies and standards` block below, never from memory; the row's evidence states `source used: …` (or `source: …`, or a `[src: deps: …]` citation from the dependency watch table) or `not verified: no source`.
 - **Security**: hardcoded secrets (regex: API keys, tokens, OAuth client_secret), missing auth checks, injection (SQL/XSS/command), insecure defaults, exposed debug endpoints, default credentials.
 - **Code quality**: functions over 50 lines, files over 500 lines, god classes, dead code, swallowed errors (empty catch, `let _ =`, `unwrap_or_default` on a Result).
 - **Scalability**: N+1 queries, unbounded loops, missing pagination, memory leaks, missing indexes on hot queries.

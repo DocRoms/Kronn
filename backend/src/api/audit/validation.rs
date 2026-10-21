@@ -593,6 +593,8 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
         let valid_prefix = o.starts_with("findings")
             || o.starts_with("scanned — nothing substantiable")
             || o.starts_with("scanned - nothing substantiable")
+            || o.starts_with("scanned – nothing substantiable")
+            || o.starts_with("scanned -- nothing substantiable")
             || o.starts_with("n/a");
         if outcome.is_empty() || !valid_prefix {
             return Err(format!(
@@ -607,10 +609,9 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
             ));
         }
         if *dim == "Dependencies" && !o.starts_with("n/a") && !states_version_source(row) {
-            return Err(
-                "dimension `Dependencies`: evidence must state `source used: …` or `not verified: no source`"
-                    .to_string(),
-            );
+            return Err(format!(
+                "dimension `Dependencies`: {DEPENDENCIES_SOURCE_FORMS}"
+            ));
         }
         if o.starts_with("n/a") {
             // Reason after `N/A:` (or, failing that, the evidence cell) must be non-trivial.
@@ -636,11 +637,38 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The forms a Dependencies row may state its source in, named in the refusal
+/// so the retry knows exactly what to write (KT-1295).
+const DEPENDENCIES_SOURCE_FORMS: &str = "evidence must state its source in one of these forms: \
+`source used: …` or `source: …` (any case), a `[src: deps: <manager>/<package>@<YYYY-MM-DD>]` \
+citation from the dependency watch table, or `not verified: no source`";
+
 /// KT-1000 — a Dependencies verdict names where its versions came from. A
 /// row Kronn's TD-index resync rewrote keeps the TDs, which carry the source.
+/// KT-1295 — the wording is not the test: a `source:` label or a well-formed
+/// `[src: deps: …]` citation states a source as well as `source used:` does.
+/// The citation is only parsed here; the citation gate checks it against the
+/// watch table and refuses a fabricated one.
 fn states_version_source(row: &str) -> bool {
-    let row = row.to_lowercase();
-    row.contains("source used:") || row.contains("not verified") || row.contains("kronn resync:")
+    let row_lc = row.to_lowercase();
+    has_source_label(&row_lc, "source used:")
+        || has_source_label(&row_lc, "source:")
+        || row_lc.contains("not verified")
+        || row_lc.contains("kronn resync:")
+        || crate::core::anti_halluc::extract_source_markers(row)
+            .iter()
+            .any(|marker| crate::core::anti_halluc::dep_citation(marker).is_some())
+}
+
+/// `label` (`source:`, `source used:`) as a word of its own: `resource:`,
+/// `resource used:` and `open-source:` are not a label.
+fn has_source_label(row_lc: &str, label: &str) -> bool {
+    row_lc.match_indices(label).any(|(at, _)| {
+        row_lc[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+    })
 }
 
 /// Resolve the source-of-truth template path for a project-relative
@@ -1001,6 +1029,88 @@ mod tests {
             "| Dependencies | findings | Kronn resync: 1 active TD on file after the dimension audits: TD-1 (previous outcome: scanned) |",
         );
         assert!(validate_dimension_coverage(&resynced).is_ok());
+    }
+
+    /// KT-1295 — the row the bench refused (a `source:` label, three `deps:`
+    /// citations) passes; so does a bare citation or a `Source:` in any case;
+    /// a cell with no source at all still fails, naming every accepted form.
+    #[test]
+    fn coverage_matrix_dependencies_source_is_accepted_in_every_stated_form() {
+        let row =
+            "| Dependencies | findings | TD-x; source used: dependency watch dated 2026-10-04 |";
+        let with = |cells: &str| valid_coverage_matrix().replace(row, cells);
+
+        let bench_row = "| Dependencies | findings: TD-20261016-outdated-dependencies | Declared dependencies significantly behind latest; source: [src: deps: JS / TS/argparse@2026-10-16], [src: deps: JS / TS/joi@2026-10-16], [src: deps: JS / TS/qs@2026-10-16] |";
+        assert!(validate_dimension_coverage(&with(bench_row)).is_ok());
+
+        for evidence in [
+            "TD-x; Source: dependency watch dated 2026-10-16",
+            "TD-x; SOURCE USED: dependency watch",
+            "TD-x behind latest [src: deps: npm/react@2026-10-16]",
+            "TD-x behind latest [SRC: deps: npm/@types/node@2026-10-16]",
+        ] {
+            let m = with(&format!("| Dependencies | findings | {evidence} |"));
+            assert!(validate_dimension_coverage(&m).is_ok(), "{evidence}");
+        }
+
+        for evidence in [
+            "TD-x behind latest",
+            "TD-x; resource: the lockfile; open-source: yes",
+            "TD-x; resource used: the lockfile",
+            "TD-x; open-source used: yes",
+            "TD-x [src: file: package.json:12]",
+            "TD-x [src: deps: npm/react]",
+            "TD-x; no source available",
+        ] {
+            let m = with(&format!("| Dependencies | findings | {evidence} |"));
+            let err = validate_dimension_coverage(&m).unwrap_err();
+            assert!(err.contains("Dependencies"), "{evidence}: {err}");
+            for form in [
+                "source used: …",
+                "source: …",
+                "[src: deps:",
+                "not verified: no source",
+            ] {
+                assert!(err.contains(form), "{evidence}: {err}");
+            }
+        }
+    }
+
+    /// KT-1295 — the retry feedback carries the accepted forms.
+    #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
+    fn coverage_feedback_names_the_accepted_dependencies_source_forms() {
+        let target = "docs/inconsistencies-tech-debt.md";
+        let (_tmp, project) = fixture(target, 0, 512);
+        let silent = valid_coverage_matrix().replace(
+            "| Dependencies | findings | TD-x; source used: dependency watch dated 2026-10-04 |",
+            "| Dependencies | findings | TD-x |",
+        );
+        std::fs::write(project.join(target), silent).unwrap();
+        let feedback = coverage_repair_feedback(&project, target).unwrap();
+        assert!(
+            feedback.contains("`source: …`")
+                && feedback.contains("[src: deps:")
+                && feedback.contains("not verified: no source"),
+            "{feedback}"
+        );
+    }
+
+    /// KT-1295 — the dash of `scanned — nothing substantiable` may be an
+    /// en-dash or a double hyphen; the phrase itself stays required.
+    #[test]
+    fn coverage_matrix_scanned_outcome_tolerates_dash_variants() {
+        let canonical = "| Code quality | scanned — nothing substantiable | read src/, clean |";
+        for dash in ["–", "--", "-"] {
+            let m = valid_coverage_matrix().replace(
+                canonical,
+                &format!(
+                    "| Code quality | scanned {dash} nothing substantiable | read src/, clean |"
+                ),
+            );
+            assert!(validate_dimension_coverage(&m).is_ok(), "{dash}");
+        }
     }
 
     #[test]

@@ -5,8 +5,8 @@
 use std::path::Path;
 
 use crate::core::version_sources::{
-    ci_runtime_versions, render_version_block_for, select_version_source, DependencySnapshot,
-    VersionPurpose, VersionSource,
+    ci_files_present, ci_runtime_versions, render_version_block_with_ci, select_version_source,
+    DependencySnapshot, VersionPurpose, VersionSource,
 };
 use crate::models::AgentType;
 
@@ -44,9 +44,11 @@ impl VersionContext {
             }
         };
         let root = project_path.to_path_buf();
-        let runtimes = tokio::task::spawn_blocking(move || ci_runtime_versions(&root))
-            .await
-            .unwrap_or_default();
+        let (runtimes, ci_files) = tokio::task::spawn_blocking(move || {
+            (ci_runtime_versions(&root), ci_files_present(&root))
+        })
+        .await
+        .unwrap_or_default();
         let inputs = launcher.version_source_inputs(
             agent,
             project_path,
@@ -56,7 +58,14 @@ impl VersionContext {
         let source = select_version_source(inputs);
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let render = |purpose| {
-            render_version_block_for(purpose, source, snapshot.as_ref(), &runtimes, &today)
+            render_version_block_with_ci(
+                purpose,
+                source,
+                snapshot.as_ref(),
+                &runtimes,
+                &ci_files,
+                &today,
+            )
         };
         let block = render(VersionPurpose::Judgement);
         let stack_block = render(VersionPurpose::StackTable);

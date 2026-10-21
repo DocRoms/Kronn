@@ -181,6 +181,10 @@ pub(crate) fn build_step_prompt(
                 serde_json::to_string(path).unwrap_or_default()
             ));
         }
+        // KT-1278 — a list is reference material: an ACP session joins its
+        // context and this prompt into one message, and a message that ends on
+        // a list reads as context to answer, not as work to run.
+        prompt.push_str("\nThe list above is reference only. Carry out the task stated before it now; there is no human in this turn to ask.\n");
     }
 
     // Auto-inject structured output format instructions when output_format
@@ -2792,6 +2796,25 @@ mod tests {
         assert!(prompt.contains("\"/repos/API équipe\""));
         assert!(prompt.contains("Never edit them"));
         assert!(prompt.contains("not a filesystem permission grant"));
+    }
+
+    #[test]
+    fn build_step_prompt_never_ends_on_the_read_only_repository_list() {
+        // KT-1278 — a free-text step with declared repositories used to end on
+        // the list itself; over ACP that list is the last thing the model read.
+        let mut step = make_step("Review the ticket");
+        step.read_only_repos = vec!["/repos/api".into(), "/repos/web".into()];
+        let prompt = build_step_prompt(&step, &TemplateContext::new()).unwrap();
+        let list_end = prompt.rfind("\"/repos/web\"").unwrap();
+        let tail = &prompt[list_end..];
+        assert!(
+            tail.contains("Carry out the task stated before it now"),
+            "{tail}"
+        );
+        assert!(
+            prompt.trim_end().ends_with("no human in this turn to ask."),
+            "{prompt}"
+        );
     }
 
     #[test]

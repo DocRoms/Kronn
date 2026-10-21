@@ -243,8 +243,32 @@ export function RevalidateAudit({
         )}
       </div>
       {s.action === 'manual' && <p className="rv-hint">{t(s.doc_missing ? 'audit.revalidate.docMissing' : 'audit.revalidate.manualHint')}</p>}
-      {s.action === 'agent' && s.broken.length === 0 && s.reanchor.length === 0 && s.human.length === 0 && (
+      {s.action === 'agent' && s.broken.length === 0 && s.reanchor.length === 0 && s.human.length === 0
+        && (s.relevance ?? []).length === 0 && (
         <p className="rv-hint" data-testid="revalidate-prose-changed">{t('audit.revalidate.proseChanged')}</p>
+      )}
+      {(s.relevance ?? []).length > 0 && (
+        <ul className="rv-relevance" data-testid="revalidate-relevance-sections">
+          {(s.relevance ?? []).map(r => (
+            <li key={`${r.doc}:${r.heading}`} data-testid="revalidate-relevance-section" data-verdict={r.verdict}>
+              <strong>{r.heading || '—'}</strong>{' '}
+              <span className="rv-chip" data-verdict={r.verdict}>{t(`audit.revalidate.relevance.${r.verdict}`)}</span>
+              {r.untouched_since_code_changed && (
+                <span className="rv-hint" data-testid="revalidate-untouched"> {t('audit.revalidate.relevance.untouched')}</span>
+              )}
+              <ul>
+                {r.evidence.map(e => (
+                  <li key={e.reference}><code>{e.reference}</code> — {t(`audit.revalidate.state.${e.state}`)}</li>
+                ))}
+                {r.corrections.map(c => (
+                  <li key={`${c.kind}:${c.reference}`} className="rv-hint">
+                    {t('audit.revalidate.relevance.proposed')}: {c.proposal}
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
       )}
       <ul className="rv-cites">
         {[...s.broken, ...s.reanchor].map(c => (
@@ -315,7 +339,7 @@ export function RevalidateAudit({
     || plan === null || plan.sources_state === 'unknown'
     ? null
     : {
-      broken: drift.broken_citations ?? 0,
+      broken: (drift.broken_citations ?? 0) + (drift.missing_paths ?? 0),
       reanchor: plan.reanchor_count,
       stale: (drift.stale_sections ?? []).length,
       reconfirm: reconfirmCount,
@@ -406,6 +430,18 @@ export function RevalidateAudit({
                       <ul>
                         {section.changed_sources.map(source => <li key={source}><code>{source}</code></li>)}
                       </ul>
+                      {(section.missing_paths ?? []).length > 0 && (
+                        <div data-testid="revalidate-stale-missing-paths">
+                          <span>{t('docState.stale.missingPaths')}</span>
+                          <ul>
+                            {(section.missing_paths ?? []).map(m => m.paths.map(path => (
+                              <li key={`${m.section}:${path}`}>
+                                <code>{path}</code>{m.section ? <> — <em>{m.section}</em></> : null}
+                              </li>
+                            )))}
+                          </ul>
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -463,6 +499,40 @@ export function RevalidateAudit({
                   <p className="rv-hint" data-testid="revalidate-unknown">
                     {t(hasTargetedAgentWork ? 'audit.revalidate.unknownWithAgentWork' : 'audit.revalidate.unknown')}
                   </p>
+                )}
+                {plan.relevance && plan.relevance.sections > 0 && (
+                  <p className="rv-hint" data-testid="revalidate-relevance-counts">
+                    {t('audit.revalidate.relevance',
+                      String(plan.relevance.anchors_intact),
+                      String(plan.relevance.anchors_intact + plan.relevance.outdated + plan.relevance.no_longer_relevant),
+                      String(plan.relevance.outdated), String(plan.relevance.no_longer_relevant),
+                      String(plan.relevance.unanchored), String(plan.relevance.untouched_stale))}
+                  </p>
+                )}
+                {(plan.unanchored ?? []).length > 0 && (
+                  <details className="rv-unanchored" data-testid="revalidate-unanchored">
+                    <summary>{t('audit.revalidate.relevance.unanchored.title', String(plan.unanchored.length))}</summary>
+                    <p className="rv-hint">{t('audit.revalidate.relevance.unanchored.hint')}</p>
+                    <ul>
+                      {plan.unanchored.map(u => (
+                        <li key={`${u.doc}:${u.heading}`} data-testid="revalidate-unanchored-section" data-verdict={u.verdict}>
+                          <code>{u.doc}</code> › {u.heading || '—'}
+                        </li>
+                      ))}
+                    </ul>
+                    <ul data-testid="revalidate-unanchored-docs">
+                      {(plan.unanchored_docs ?? []).map(u => (
+                        <li key={u.doc} data-testid="revalidate-unanchored-doc">
+                          <code>{u.doc}</code> — {u.reviewed_at
+                            ? t('audit.revalidate.relevance.unanchored.reread',
+                              new Date(u.reviewed_at).toLocaleDateString(locale))
+                            : t(u.owned
+                              ? 'audit.revalidate.relevance.unanchored.pending'
+                              : 'audit.revalidate.relevance.unanchored.unowned')}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
                 )}
                 {plan.sections.length === 0
                   ? plan.sources_state !== 'unknown' && (

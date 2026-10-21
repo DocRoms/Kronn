@@ -310,6 +310,22 @@ pub fn message_cost(
     CostOutcome::Known(usd)
 }
 
+/// The model a reply is priced at: the one its runtime reported serving, when it
+/// reported exactly one, else the requested model. What a discussion stores as
+/// its model can be a tier alias (`haiku`) that names no rate; the reported id
+/// (`claude-haiku-4-5-20251001`) does. Several reported models leave one
+/// aggregate usage that no single rate prices, so there is no model then.
+pub fn serving_model_for_pricing<'a>(
+    requested: Option<&'a str>,
+    observed: &'a [String],
+) -> Option<&'a str> {
+    match observed {
+        [] => requested,
+        [only] => Some(only.as_str()),
+        _ => None,
+    }
+}
+
 /// The pricing decision for one finished reply: what to persist as its cost, the
 /// counters worth keeping, and why the cost is missing when it is.
 #[derive(Debug, Clone, Copy, PartialEq)]

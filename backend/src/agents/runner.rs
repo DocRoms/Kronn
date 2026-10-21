@@ -6063,34 +6063,54 @@ pub(crate) fn disc_introspection_mcp_path() -> Option<String> {
     if std::path::Path::new(docker_path).exists() {
         return Some(docker_path.to_string());
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidates = [
-                dir.join("scripts").join("disc-introspection-mcp.py"),
-                dir.join("..")
-                    .join("scripts")
-                    .join("disc-introspection-mcp.py"),
-                dir.join("..")
-                    .join("Resources")
-                    .join("scripts")
-                    .join("disc-introspection-mcp.py"),
-                dir.join("disc-introspection-mcp.py"),
-            ];
-            for c in &candidates {
-                if c.exists() {
-                    return Some(c.to_string_lossy().to_string());
-                }
-            }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let cwd = std::env::current_dir().ok();
+    disc_introspection_mcp_path_near(exe_dir.as_deref(), cwd.as_deref())
+}
+
+/// How far up from the binary or the working directory a source checkout's
+/// `scripts/` is looked for: deep enough for `<repo>/target/<lane>/debug/`.
+const BRIDGE_SOURCE_SEARCH_DEPTH: usize = 6;
+
+/// Find the bridge script from where the process actually runs: next to the
+/// installed binary, then in the source checkout it is run from (its working
+/// directory, then the checkout its binary sits in). Never from a path baked in
+/// at build time: a binary built in one checkout and run from another would
+/// launch the first checkout's script (KT-1316).
+fn disc_introspection_mcp_path_near(exe_dir: Option<&Path>, cwd: Option<&Path>) -> Option<String> {
+    const SCRIPT: &str = "disc-introspection-mcp.py";
+    let found = |candidate: PathBuf| {
+        candidate
+            .is_file()
+            .then(|| candidate.to_string_lossy().into_owned())
+    };
+    if let Some(dir) = exe_dir {
+        let installed = [
+            dir.join("scripts").join(SCRIPT),
+            dir.join("..").join("scripts").join(SCRIPT),
+            dir.join("..")
+                .join("Resources")
+                .join("scripts")
+                .join(SCRIPT),
+            dir.join(SCRIPT),
+        ];
+        if let Some(path) = installed.into_iter().find_map(found) {
+            return Some(path);
         }
     }
-    let dev_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/scripts/disc-introspection-mcp.py"
-    );
-    if std::path::Path::new(dev_path).exists() {
-        return Some(dev_path.to_string());
-    }
-    None
+    let in_source_tree = |start: &Path| {
+        start
+            .ancestors()
+            .take(BRIDGE_SOURCE_SEARCH_DEPTH)
+            .find_map(|dir| {
+                found(dir.join("backend").join("scripts").join(SCRIPT))
+                    .or_else(|| found(dir.join("scripts").join(SCRIPT)))
+            })
+    };
+    cwd.and_then(in_source_tree)
+        .or_else(|| exe_dir.and_then(in_source_tree))
 }
 
 pub(crate) struct InternalMcpCommand {
@@ -14110,6 +14130,14 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
     }
 }
 
+/// Whether a Claude stream-json line is the final `result` line, whose usage is
+/// the whole run's, as opposed to one turn's.
+pub fn is_claude_result_line(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()
+        .is_some_and(|json| json.get("type").and_then(|v| v.as_str()) == Some("result"))
+}
+
 /// Remove literal `<thinking>` / `</thinking>` tags from a text delta.
 ///
 /// When Claude Opus runs with extended thinking enabled, the internal
@@ -14617,6 +14645,62 @@ mod acp_resume_tests {
             output.push_str(&line);
         }
         output
+    }
+
+    /// KT-1278 — over ACP the context and the task are ONE user message. An
+    /// audit step hands the session a prompt whose last words are its own
+    /// instruction, and the session puts that prompt last, after the context
+    /// (the workflow step and the task worker brief are pinned at their own
+    /// assembly: `build_step_prompt`, `worker_brief_markdown`).
+    #[tokio::test]
+    async fn an_acp_message_with_context_ends_with_the_tasks_own_instruction() {
+        let docs_root = crate::core::docs_location::DocsRoot::default_root();
+        let step = crate::api::audit::ANALYSIS_STEPS[7];
+        let prompt = crate::api::audit::finish_step_prompt(
+            "Step 8 instructions\n\n### Runtime versions pinned in the repository\n\nNone found.\n",
+            None,
+            8,
+            &step,
+            &docs_root,
+        );
+        let context = "=== ANTI-HALLUCINATION (pointer) ===\n\nCite your sources.\n\n=== AVAILABLE TOOLS ===\n\nA table of tools.";
+        let fixture = transport(ResumeOutcome::Ok, PromptOutcome::Complete);
+        let mut process = run_acp_session(
+            AcpSessionRequest {
+                step_tools: None,
+                agent_type: &AgentType::OpenCode,
+                work_dir: Path::new("."),
+                prompt: &prompt,
+                system_context: context,
+                project_path: "",
+                model_flag: None,
+                reasoning_effort: None,
+                parent_cancel: None,
+                discussion_id: None,
+                resume_id: None,
+                session_store: None,
+                fallback_prompt: None,
+                provenance: None,
+                activity: None,
+                idle_timeout: None,
+                run_progress: None,
+            },
+            fixture.clone(),
+        )
+        .await
+        .expect("run ACP fixture");
+        collect_output(&mut process).await;
+        let sent = fixture.prompts.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].starts_with(context), "context first");
+        assert!(sent[0].ends_with(&prompt), "the task's prompt comes last");
+        assert!(
+            sent[0]
+                .trim_end()
+                .ends_with("Stop once the work is written."),
+            "the message must end on the task's instruction, got …{}",
+            &sent[0][sent[0].len().saturating_sub(200)..]
+        );
     }
 
     #[tokio::test]

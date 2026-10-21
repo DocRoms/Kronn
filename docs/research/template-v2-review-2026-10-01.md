@@ -11,29 +11,31 @@ agent files. [src: commit: 1b67e8d3]
   language. It now refers to `docs/AGENTS.md` for project parameters and rules.
   The existing replacement regression covers an old English-only block above
   French user instructions, preserving those user bytes.
-  [src: file: backend/src/core/root_agent_files.rs:299]
-  [src: file: backend/src/core/root_agent_files.rs:519]
+  [src: file: backend/src/core/root_agent_files.rs:299-305#KRONN_BLOCK_BODY]
+  [src: file: backend/src/core/root_agent_files.rs:571-596#rerenders_block_in_place_when_markers_already_present]
 - **A second working-language value in adapter files.** New adapters copied
   `PROJECT_LANGUAGE`, whose bootstrap replacement is English. A later audit
   can choose another language in `docs/AGENTS.md`, leaving the adapter stale.
   The ten adapter templates now point to the canonical parameter instead.
-  [src: file: backend/src/core/docs_migration.rs:660]
+  [src: file: backend/src/core/docs_migration.rs:660-662]
   [src: file: templates/AGENTS.md:3]
-  [src: file: backend/src/core/template_homogeneity_test.rs:86]
+  [src: file: backend/src/core/template_homogeneity_test.rs:17-29#INSTRUCTION_FILES]
+  [src: file: backend/src/core/template_homogeneity_test.rs:73-140#all_instruction_files_contain_required_sections]
 - **A checklist overriding the configured test policy.** The test selection
   examples and completion checklist now apply only where required by the
   project policy and CI; they no longer introduce a universal full-suite gate.
-  [src: file: templates/docs/testing-quality.md:23]
+  [src: file: templates/docs/testing-quality.md:23-49]
 - **Broken parameter anchors.** `Project parameters` was bold text, despite
   three workflow links targeting `#project-parameters`. It is now a heading.
-  [src: file: templates/docs/AGENTS.md:14]
+  [src: file: templates/docs/AGENTS.md:10]
   [src: file: templates/docs/workflow/commits.md:10]
   [src: file: templates/docs/workflow/tickets.md:12]
+  [src: file: templates/docs/workflow/tickets.md:16]
 
 ## Qualification boundary
 
 Validation: 22 instruction-file tests and 273 template-related tests pass.
-The three `#project-parameters` links and the nine source citations above
+The three `#project-parameters` links and the source citations above
 resolve. `cargo fmt --check`, Clippy with `--all-targets -- -D warnings`,
 `make check-version` and `git diff --check` pass.
 

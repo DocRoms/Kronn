@@ -12,8 +12,8 @@ quality. Existing deterministic work should remain `ApiCall`, `Exec`, or
 `JsonData`; Ollama is for bounded semantic work, not for replacing mechanics
 with another model. Kronn already supports explicit per-step Ollama models and
 grammar-constrained `TypedSchema` output. [src: file:
-docs/operations/ollama-local-models.md:8-31] [src: file:
-docs/operations/ollama-local-models.md:64-79]
+backend/src/workflows/steps.rs:107-124#step_model_override] [src: file:
+backend/src/workflows/steps.rs:1070-1093#ollama_envelope_format]
 
 ## Core safety invariant
 
@@ -101,5 +101,5 @@ reasoning tier before applying `on_invalid`. A future strict zero-Claude mode
 therefore needs an explicit configurable escalation target (`Claude`, `Codex`,
 human gate, or none/fail-closed) rather than relying only on the existing
 automatic schema-repair policy. [src: file:
-docs/operations/ollama-local-models.md:64-79]
+backend/src/workflows/steps.rs:656-754#escalation_step]
 

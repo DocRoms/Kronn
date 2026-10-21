@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -27,6 +27,9 @@ pub struct DriftResult {
     pub total_sections: usize,
     pub sources_state: crate::core::citation_drift::SourcesState,
     pub broken_citations: usize,
+    /// Paths a doc's prose names that are gone, no citation fingerprint
+    /// covers them (KT-1168). Kept apart from `broken_citations`.
+    pub missing_paths: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +37,10 @@ pub struct StaleSection {
     pub ai_file: String,
     pub audit_step: usize,
     pub changed_sources: Vec<String>,
+    /// The gone paths the doc's prose names that no acknowledgement accepted
+    /// (KT-1168): shown with the stale block, and the only ones the
+    /// acknowledgement from the card accepts.
+    pub missing_paths: Vec<crate::core::doc_relevance::VanishedPaths>,
 }
 
 /// Compute the SHA-256 hex digest of a file. Returns None if the file cannot be read.
@@ -546,6 +553,23 @@ fn compute_step_checksums_impl(
     map
 }
 
+/// One digest over everything an audit step reads: changes when any of its
+/// sources changes, appears or disappears (KT-1292).
+pub fn step_sources_fingerprint(project_path: &Path, patterns: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for (key, hash) in compute_step_checksums(project_path, patterns) {
+        hasher.update(key.as_bytes());
+        hasher.update([0]);
+        hasher.update(hash.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Write a `checksums.json` to the project's docs folder (post-pivot
 /// `docs/`, legacy `ai/`). Path-agnostic via `detect_docs_dir`.
 /// `rewritten_docs`: the docs a step of the run proved it rewrote.
@@ -740,6 +764,13 @@ pub fn read_checksums_file_strict(project_path: &Path) -> Result<Option<Checksum
         .map_err(|e| format!("checksums manifest malformed ({}): {e}", path.display()))
 }
 
+/// The `ai_file` of every section of the drift baseline.
+pub fn baseline_ai_files(project_path: &Path) -> BTreeSet<String> {
+    read_checksums_file(project_path)
+        .map(|f| f.mappings.into_iter().map(|m| m.ai_file).collect())
+        .unwrap_or_default()
+}
+
 /// « Vérifié, inchangé » on stale sections: their mappings are recomputed from
 /// the current sources. The docs and the audit date stay as they are.
 pub fn acknowledge_sections(project_path: &Path, ai_files: &[String]) -> Result<(), String> {
@@ -773,9 +804,51 @@ pub fn acknowledge_sections(project_path: &Path, ai_files: &[String]) -> Result<
     Ok(())
 }
 
+/// « Vérifié, inchangé » from the project card. The checks judge every doc,
+/// recorded or not: a doc added since the validation is acknowledged by its
+/// citations and prose paths alone, or it would stay "to re-verify" with no
+/// way to clear it. A section of the drift baseline also has its mappings
+/// recomputed. A gone path the prose names is accepted only when `shown` lists
+/// it for its section: the human accepts what was displayed, nothing else.
+pub fn acknowledge_stale(
+    project_path: &Path,
+    sections: &[String],
+    shown: &crate::core::citation_drift::ShownPaths,
+) -> Result<(), String> {
+    let baseline = baseline_ai_files(project_path);
+    let (known, added): (Vec<String>, Vec<String>) =
+        sections.iter().cloned().partition(|s| baseline.contains(s));
+    if known.is_empty() && added.is_empty() {
+        return Err("no section to acknowledge".into());
+    }
+    if !known.is_empty() {
+        acknowledge_sections(project_path, &known)?;
+        crate::core::citation_drift::acknowledge_docs(project_path, &known, shown)?;
+    }
+    let none = BTreeMap::new();
+    for doc in &added {
+        crate::core::citation_drift::acknowledge_accepting(
+            project_path,
+            doc,
+            Some(shown.get(doc).unwrap_or(&none)),
+        )?;
+    }
+    DRIFT_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(project_path);
+    Ok(())
+}
+
 /// Check whether any audited sources have drifted since the last checksums were recorded.
 pub fn check_drift(project_path: &Path) -> DriftResult {
     let citations = crate::core::citation_drift::check(project_path);
+    // KT-1168 — the badge also weighs the relevance of each section: prose
+    // naming a path that is gone needs a re-check though no citation broke.
+    let relevance = crate::core::doc_relevance::analyze(project_path, &citations);
+    let sources_state = relevance.escalate(citations.sources_state);
+    let broken_citations = citations.broken_count;
+    let missing_paths = relevance.counts.prose_missing;
     let checksums_file = match read_checksums_file(project_path) {
         Some(f) => f,
         None => {
@@ -784,8 +857,9 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
                 stale_sections: Vec::new(),
                 fresh_sections: Vec::new(),
                 total_sections: 0,
-                sources_state: citations.sources_state,
-                broken_citations: citations.broken_count,
+                sources_state,
+                broken_citations,
+                missing_paths,
             };
         }
     };
@@ -813,6 +887,10 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
                     ai_file: mapping.ai_file.clone(),
                     audit_step: mapping.audit_step,
                     changed_sources: crate::core::citation_drift::changed_sources(section),
+                    missing_paths: crate::core::doc_relevance::vanished_paths(
+                        project_path,
+                        &mapping.ai_file,
+                    ),
                 });
             } else {
                 fresh_sections.push(format!("{}#step{}", mapping.ai_file, mapping.audit_step));
@@ -855,6 +933,10 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
             stale_sections.push(StaleSection {
                 ai_file: mapping.ai_file.clone(),
                 audit_step: mapping.audit_step,
+                missing_paths: crate::core::doc_relevance::vanished_paths(
+                    project_path,
+                    &mapping.ai_file,
+                ),
                 changed_sources,
             });
         }
@@ -867,8 +949,9 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
         stale_sections,
         fresh_sections,
         total_sections: total,
-        sources_state: citations.sources_state,
-        broken_citations: citations.broken_count,
+        sources_state,
+        broken_citations,
+        missing_paths,
     }
 }
 

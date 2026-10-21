@@ -4631,7 +4631,7 @@ mod inject_context_tests {
 }
 
 #[cfg(all(test, feature = "full-tests"))]
-mod host_sync_tests {
+pub(crate) mod host_sync_tests {
     use super::*;
     use serial_test::serial;
     use std::collections::{HashMap, HashSet};

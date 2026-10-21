@@ -80,12 +80,14 @@ fn drift_response(
                 ai_file: s.ai_file,
                 audit_step: s.audit_step,
                 changed_sources: s.changed_sources,
+                missing_paths: s.missing_paths,
             })
             .collect(),
         fresh_sections: drift.fresh_sections,
         total_sections: drift.total_sections,
         sources_state: drift.sources_state,
         broken_citations: drift.broken_citations,
+        missing_paths: Some(drift.missing_paths),
         placeholder_docs,
     }
 }
@@ -116,14 +118,16 @@ pub async fn acknowledge_drift(
         };
     let result = lease
         .blocking(move || {
-            crate::core::checksums::acknowledge_sections(&project_path, &req.sections)?;
-            // A section with recorded citations is judged by them: acknowledge those too.
-            let recorded = crate::core::citation_drift::read_strict(&project_path)?
-                .map(|f| f.docs)
-                .unwrap_or_default();
-            for doc in req.sections.iter().filter(|d| recorded.contains_key(*d)) {
-                crate::core::citation_drift::acknowledge(&project_path, doc)?;
+            let mut shown = crate::core::citation_drift::ShownPaths::new();
+            for p in &req.shown_paths {
+                shown
+                    .entry(p.doc.clone())
+                    .or_default()
+                    .entry(p.section.clone())
+                    .or_default()
+                    .push(p.path.clone());
             }
+            crate::core::checksums::acknowledge_stale(&project_path, &req.sections, &shown)?;
             if let Err(e) = crate::core::doc_provenance::record_validation(
                 &project_path,
                 &req.sections,
@@ -297,6 +301,13 @@ pub async fn partial_audit(
         }));
         return Sse::new(stream);
     }
+    // The folder's human docs wait for the briefing's choice, as for a Full run.
+    let recorded_run = super::has_recorded_full_run(&state, &project.id).await;
+    if let Some(refusal) =
+        super::docs_folder_choice_refusal(&project_path, &docs_root, recorded_run)
+    {
+        return super::full::sse_refusal(refusal);
+    }
 
     // Validate requested step numbers against the FULL chained pipeline
     // (foundation 1..9 + chained sub-audits 10..16), not just the 9
@@ -438,6 +449,9 @@ pub(crate) async fn run_partial_pipeline(
     let project_path = scanner::resolve_host_path(&project.path);
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    // KT-999 — same documentation switch as the Full pipeline.
+    let briefing_docs_on =
+        super::briefing_docs::prompt_enabled(state.config.read().await.audit_briefing_docs);
     // KT-1193 — same rules inputs as the Full pipeline.
     let project_rules = briefing_notes
         .as_deref()
@@ -833,7 +847,12 @@ pub(crate) async fn run_partial_pipeline(
             let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now(), &docs_root);
 
             if let Some(ref notes) = briefing_notes {
-                full_prompt.push_str(&super::briefing::briefing_prompt_section(notes, &docs_root));
+                full_prompt.push_str(&super::briefing::briefing_prompt_section_for(
+                    notes,
+                    &docs_root,
+                    analysis_step.target_file,
+                    briefing_docs_on,
+                ));
             }
             if let Some(ref block) = linked_repos_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));
@@ -957,10 +976,10 @@ pub(crate) async fn run_partial_pipeline(
             'attempts: loop {
             attempt += 1;
             let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
-            let attempt_prompt = match &citation_feedback {
-                Some(fb) => format!("{full_prompt}\n\n{fb}"),
-                None => full_prompt.clone(),
-            };
+            let mut stream_turns = super::agent_launch::StreamTurns::default();
+            let attempt_prompt = super::finish_step_prompt(
+                &full_prompt, citation_feedback.as_deref(), step, analysis_step, &docs_root,
+            );
             // Stop reaches an HTTP or ACP agent through this token and a direct
             // CLI agent through its PID — the same registration as the Full
             // pipeline, made BEFORE the start so a Stop during the handshake
@@ -1101,18 +1120,18 @@ pub(crate) async fn run_partial_pipeline(
                             }
                             if let runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, .. } = event
                             {
-                                // Claude reports cumulative usage per call:
-                                // the largest reading is the step's.
-                                if input_tokens + output_tokens > 0
-                                    && step_usage.total().is_none_or(|seen| input_tokens + output_tokens >= seen)
-                                {
-                                    step_usage = crate::db::audit_runs::StepTokens {
+                                // KT-1313 — a turn adds to the step; only the final
+                                // line states the whole run, so a stopped step keeps
+                                // every turn it consumed.
+                                if input_tokens + output_tokens > 0 {
+                                    let reading = crate::db::audit_runs::StepTokens {
                                         input: Some(input_tokens),
                                         output: Some(output_tokens),
                                         cache_read: prompt_cache.cached_prompt_tokens,
                                         cache_write: prompt_cache.cache_write_prompt_tokens,
                                         accounting: Default::default(),
                                     }.inclusive_for(&agent_type);
+                                    step_usage = stream_turns.fold(step_usage, reading, runner::is_claude_result_line(&line));
                                 }
                             }
                         }
@@ -1229,6 +1248,7 @@ pub(crate) async fn run_partial_pipeline(
                             let duration_ms = step_started_at.elapsed().as_millis() as u64;
                             let recorded_total = run_tokens.total();
                             let usage = step_usage;
+                            let killed_cost = step_cost.usd_micros();
                             let killed_state = outcome.target_state();
                             let keep_snapshot = outcome.keeps_snapshot();
                             if let Err(e) = state.db.with_conn(move |conn| {
@@ -1236,6 +1256,9 @@ pub(crate) async fn run_partial_pipeline(
                                     conn, &run_id, step_n, Utc::now(), duration_ms, &usage,
                                     recorded_total, false, Some(&reason), false,
                                 )?;
+                                if let Some(cost) = killed_cost {
+                                    crate::db::audit_runs::set_step_cost(conn, &run_id, step_n, cost)?;
+                                }
                                 crate::db::audit_runs::set_step_target_state(conn, &run_id, step_n, killed_state)?;
                                 if !keep_snapshot {
                                     crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step_n)?;
@@ -1881,6 +1904,28 @@ pub(crate) async fn run_partial_pipeline(
                 yield Event::default().event("warning").data(
                     serde_json::json!({ "message": format!("Citation fingerprints not refreshed: {e}") }).to_string(),
                 );
+            }
+        }
+
+        // KT-1292 — a doc sent only to be re-read is stamped once its step ran,
+        // whether or not the agent anchored it: the plan does not queue it again
+        // until the doc or the step's sources change.
+        if let Some(run) = &revalidation {
+            let reread: Vec<(usize, String)> = run.rereads.iter()
+                .filter(|(step, _)| succeeded_steps.contains(step) || unchanged_steps.contains(step))
+                .cloned()
+                .collect();
+            if !reread.is_empty() {
+                let pp = project_path.clone();
+                let steps = chain.clone();
+                let stamped = tokio::task::spawn_blocking(move || {
+                    super::revalidate::stamp_rereads(&pp, &steps, &reread)
+                }).await.unwrap_or_else(|e| Err(format!("review task failed: {e}")));
+                if let Err(e) = stamped {
+                    yield Event::default().event("warning").data(
+                        serde_json::json!({ "message": format!("Re-read stamps not recorded: {e}") }).to_string(),
+                    );
+                }
             }
         }
 

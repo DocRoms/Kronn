@@ -5,8 +5,11 @@ Kronn exports one discussion as a self-contained JSON document with
 transcript, message authors and model metadata, attachment bytes when Kronn
 still has them (otherwise the extracted text), message-revision audit events,
 and the tasks directly attached to the discussion plan.
-[src: file: backend/src/api/disc_portability.rs:36-114#DiscussionExportEnvelope]
-[src: file: backend/src/api/disc_portability.rs:189-289#export_attachments]
+[src: file: backend/src/api/disc_portability.rs:36-37#DISCUSSION_EXPORT_KIND]
+[src: file: backend/src/api/disc_portability.rs:94-113#DiscussionExportEnvelope]
+[src: file: backend/src/api/disc_portability.rs:225-271#export_attachments]
+[src: file: backend/src/api/disc_portability.rs:273-299#export_revision_events]
+[src: file: backend/src/api/disc_portability.rs:315-325#export_plan]
 
 ## Secret boundary
 
@@ -16,7 +19,7 @@ CLI session ownership, local workspace/worktree paths, sharing identifiers,
 workflow-run linkage and partial execution state. This policy is written into
 every bundle as `secret_policy` so a receiver can inspect it before import.
 [src: file: backend/src/api/disc_portability.rs:38-39#SECRET_POLICY]
-[src: file: backend/src/api/disc_portability.rs:327-366#build_export_envelope]
+[src: file: backend/src/api/disc_portability.rs:327-367#build_export_envelope]
 
 ## Import and conflicts
 
@@ -25,11 +28,12 @@ identities. Source message ids are retained as lineage, and references in
 attachments, revision events and task events are remapped to those fresh ids.
 Unknown projects and relationships outside the exported plan become explicit
 warnings instead of dangling foreign keys.
-[src: file: backend/src/api/disc_portability.rs:439-764#import_bundle]
+[src: file: backend/src/api/disc_portability.rs:527-881#import_bundle]
 
 The `discussion_imports` ledger stores the source discussion id, a semantic
 SHA-256 of the bundle and the created local discussion. Replaying the same
 bundle returns that discussion without duplicating data. Reusing the source id
 with changed content returns a conflict and does not mutate the existing copy.
 [src: file: backend/src/db/sql/093_discussion_imports.sql:1-15#discussion_imports]
-[src: file: backend/src/api/disc_portability.rs:504-537#import_bundle]
+[src: file: backend/src/api/disc_portability.rs:205-223#content_fingerprint]
+[src: file: backend/src/api/disc_portability.rs:527-560#import_bundle]

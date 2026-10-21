@@ -8,15 +8,15 @@ the durable source binding and live membership stay in the principal room. The
 child remains the task/evidence room, and acceptance returns the work instructions
 directly to the CLI. A bridge reload therefore resumes the principal room instead
 of the child.
-[src: file: backend/src/api/orchestration.rs:4710-4730#accept_worker_offer_and_attach]
-[src: file: backend/src/api/orchestration.rs:4848-4866#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:12748-12760#source_binding_session_id]
-[src: file: backend/scripts/disc-introspection-mcp.py:6288-6323#call_task_exec_accept_worker_offer]
+[src: file: backend/src/api/orchestration.rs:5083-5103#accept_worker_offer_and_attach]
+[src: file: backend/src/api/orchestration.rs:5221-5240#worker_cli_session_id]
+[src: file: backend/src/api/orchestration.rs:13680-13709#source_binding_session_id]
+[src: file: backend/scripts/disc-introspection-mcp.py:6302-6337#call_task_exec_accept_worker_offer]
 
 The terminal return path remains compatibility code for offers accepted by older
 bridges. It emits return messages only when it actually moved legacy child-owned
 state; an execution-scoped worker already in its origin is a no-op.
-[src: file: backend/src/db/orchestration.rs:4775-4818#return_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:5033-5076#return_cli_worker_to_origin]
 
 ## Historical pre-KT-837 recovery contract
 
@@ -48,6 +48,10 @@ The four `cli_restart_*` tests in `backend/src/api/orchestration.rs` exercise:
 - Departed, third-room, wrong-provider and missing-child refusals, plus retained
   quota arbitration even when another same-provider CLI is present.
 - Preservation of an unaccepted offer in the principal room.
+[src: file: backend/src/api/orchestration.rs:27065-27156#cli_restart_recovers_the_exact_worker_after_accepted_child_handoff]
+[src: file: backend/src/api/orchestration.rs:27158-27279#cli_restart_same_worker_reassignment_keeps_principal_room_and_requires_acceptance]
+[src: file: backend/src/api/orchestration.rs:27281-27385#cli_restart_keeps_foreign_left_missing_and_quota_workers_gated]
+[src: file: backend/src/api/orchestration.rs:27387-27427#cli_restart_preserves_the_unaccepted_offer_in_the_parent]
 
 Run with `cargo test --manifest-path backend/Cargo.toml --lib cli_restart`.
 These are isolated SQLite/Git protocol tests, not a live provider or host-reboot
@@ -76,8 +80,8 @@ Two regression tests reproduced the resulting stale child binding on cancellatio
 and CLI-to-native reassignment; both passed after the identity fix. This is a
 separate defect from KT-615's accepted-child eligibility check and from the stale
 session catalogue observed after a reload.
-[src: file: backend/src/api/orchestration.rs:14885]
-[src: file: backend/src/api/orchestration.rs:14905]
+[src: file: backend/src/api/orchestration.rs:26495-26513#cli_durable_return_terminal_preserves_the_distinct_binding_identity]
+[src: file: backend/src/api/orchestration.rs:26515-26537#cli_durable_return_reassignment_preserves_the_distinct_binding_identity]
 
 Migration 171 adds `task_execution_cli_bindings`, keyed by execution and exact CLI
 session primary key. Offer acceptance records the server-derived source identity
@@ -87,10 +91,11 @@ assignments remain recorded when a replacement is explicitly selected. The two
 legacy return paths use this retained key in their existing terminal/reassignment
 transaction, without selecting an owner by agent or room. New KT-837 acceptances
 do not require a return because they never transfer the session.
-[src: file: backend/src/db/sql/171_cli_worker_bindings.sql:1]
-[src: file: backend/src/db/worker_offers.rs:526]
-[src: file: backend/src/db/cli_worker_bindings.rs:35]
-[src: file: backend/src/db/orchestration.rs:4478]
+[src: file: backend/src/db/sql/171_cli_worker_bindings.sql:1-11#task_execution_cli_bindings]
+[src: file: backend/src/db/worker_offers.rs:523-533#pin]
+[src: file: backend/src/db/cli_worker_bindings.rs:33-73#pin]
+[src: file: backend/src/db/orchestration.rs:4478-4485#return_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:6695-6719#restore_reassigned_cli_worker_to_origin]
 
 The return refuses a source binding or active membership moved to a third room,
 and rolls back the associated state transition. An explicitly unlinked known
@@ -107,9 +112,10 @@ assigned worker; a different PK or a third-room binding is not repaired through
 this path. The migration itself never infers this information. Historical offers
 cannot recapture workers after completion or replacement. Already terminal
 deliveries and their evidence are never rewritten.
-[src: file: backend/src/db/cli_worker_bindings.rs:77]
-[src: file: backend/src/api/orchestration.rs:15045]
-[src: file: backend/src/api/orchestration.rs:15131]
+[src: file: backend/src/db/cli_worker_bindings.rs:110-115#was_pinned]
+[src: file: backend/src/db/cli_worker_bindings.rs:150-165#unresolved_child_binding]
+[src: file: backend/src/api/orchestration.rs:26655-26696#cli_durable_return_legacy_worker_can_explicitly_reconfirm_its_accepted_offer]
+[src: file: backend/src/api/orchestration.rs:26741-26749#cli_durable_return_old_offer_cannot_recapture_a_terminal_worker]
 
 The original KT-618 report remains a historical independent review: it did not
 execute these later regressions and did not establish the subsequently reproduced

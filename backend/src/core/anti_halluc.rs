@@ -1189,12 +1189,21 @@ pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
     let mut i = 0usize;
     while i + needle.len() <= chars.len() {
         if lower[i..i + needle.len()] == needle[..] {
-            // Read until the matching ']' (balance nested '[').
+            // Read until the matching ']' (balance nested '['). A marker never
+            // swallows the next `[src:` nor a paragraph break: an unclosed one
+            // (a truncated banner, a half-typed citation) ends there, so the
+            // markers after it are still read.
             let mut depth = 1i32;
             let mut j = i + needle.len();
             let mut buf = String::new();
             let mut closed = false;
             while j < chars.len() {
+                if j + needle.len() <= chars.len() && lower[j..j + needle.len()] == needle[..] {
+                    break;
+                }
+                if chars[j] == '\n' && blank_line_at(&chars, j) {
+                    break;
+                }
                 match chars[j] {
                     '[' => {
                         depth += 1;
@@ -1220,13 +1229,26 @@ pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
                 if !inner.is_empty() {
                     out.push((i, inner.to_string()));
                 }
+                i = j + 1;
+            } else {
+                // Resync right after the opening: whatever stopped the scan
+                // (next marker, blank line, end of text) is read normally.
+                i += needle.len();
             }
-            i = j + 1;
         } else {
             i += 1;
         }
     }
     out
+}
+
+/// Whether the newline at `at` is followed by a blank line (`\n` + optional
+/// spaces + `\n`).
+fn blank_line_at(chars: &[char], at: usize) -> bool {
+    chars[at + 1..]
+        .iter()
+        .find(|c| **c == '\n' || !c.is_whitespace())
+        == Some(&'\n')
 }
 
 /// Classify a marker's inner content into a kind + the bare reference, stripping
@@ -1276,7 +1298,74 @@ fn classify_source(raw: &str) -> (SourceKind, String) {
     if let Some(r) = match_type_keyword(s, "file") {
         return (SourceKind::File, r);
     }
+    // `<word>: <text>`: only a CLOSED list of non-file kinds (`command: git log`)
+    // is never a path to resolve. Any other word is a typo or an invented kind
+    // (`fil:`, `path:`, `source:`): if its text can be a path it is verified as
+    // a file and fabricated when missing, so a mistyped kind is never a free
+    // pass through the enforce gate.
+    if let Some(kind_word) = typed_prefix(s) {
+        if NON_FILE_KINDS.contains(&kind_word.to_ascii_lowercase().as_str())
+            || !text_can_be_a_path(s)
+        {
+            return (SourceKind::Other, s.to_string());
+        }
+    }
     (SourceKind::File, s.to_string())
+}
+
+/// Kinds that cite something other than a file (a command, a test run…), so
+/// their text is never resolved as a path. Closed on purpose: a word outside
+/// this list whose text looks like a path is judged as a file.
+const NON_FILE_KINDS: &[&str] = &[
+    "command",
+    "cmd",
+    "shell",
+    "bash",
+    "cli",
+    "run",
+    "test",
+    "tests",
+    "test-run",
+    "output",
+    "log",
+    "query",
+    "sql",
+    "grep",
+    "tool",
+    "mcp",
+    "benchmark",
+    "measurement",
+];
+
+/// The `kind` of a `kind: text` marker: a bare identifier followed by a colon
+/// and whitespace. A path (`a/b.rs:3`, `C:\x`, `a.rs: 3`) never has that
+/// shape: it carries a `/`, a `.` or has no space after its colon.
+fn typed_prefix(s: &str) -> Option<&str> {
+    let (head, rest) = s.split_once(':')?;
+    (rest.starts_with(char::is_whitespace)
+        && !rest.trim().is_empty()
+        && head.starts_with(|c: char| c.is_ascii_alphabetic())
+        && head.len() > 1
+        && head
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    .then_some(head)
+}
+
+/// Whether the text after an unknown `kind:` could name a file: it holds a
+/// path separator, a file extension or a `:line` spec, or it is a single
+/// whitespace-free token (`Makefile`). Prose with spaces is not a path.
+fn text_can_be_a_path(s: &str) -> bool {
+    let text = s.split_once(':').map_or(s, |(_, t)| t).trim();
+    let single_token = !text.contains(char::is_whitespace);
+    let (path, lines) = split_path_and_lines(text);
+    text.contains('/')
+        || text.contains('\\')
+        || single_token
+        || lines.is_some()
+        || std::path::Path::new(path)
+            .extension()
+            .is_some_and(|e| !e.is_empty())
 }
 
 /// The cited path and line span of a `file:` or `code-comment:` marker,
@@ -1300,22 +1389,56 @@ pub(crate) fn file_citation_anchored(raw: &str) -> Option<FileCitation> {
 /// Path, line span and symbol anchor of a file citation.
 pub(crate) type FileCitation = (String, Option<(usize, usize)>, Option<String>);
 
-/// `(manager, package, checked date)` of a `deps:` marker. Package names may
-/// hold `/` and `@` (`@types/node`), so the manager ends at the first `/` and
-/// the date starts after the last `@`.
-pub(crate) fn dep_citation(raw: &str) -> Option<(String, String, String)> {
+/// `(manager/package, checked date)` of a `deps:` marker, the manager and the
+/// package left joined: the manager label may itself hold a `/` (`JS / TS`), so
+/// only the producer's snapshot can tell where one ends and the other starts.
+/// The date starts after the last `@`, since a package name may hold `@`
+/// (`@types/node`).
+pub(crate) fn dep_reference(raw: &str) -> Option<(String, String)> {
     let (kind, reference) = classify_source(raw);
     if kind != SourceKind::Deps {
         return None;
     }
     let reference = clean_reference(&reference);
     let (head, date) = reference.rsplit_once('@')?;
-    let (manager, package) = head.split_once('/')?;
-    let (manager, package, date) = (manager.trim(), package.trim(), date.trim());
-    if manager.is_empty() || package.is_empty() || date.is_empty() {
+    let (head, date) = (head.trim(), date.trim());
+    if head.is_empty() || date.is_empty() {
         return None;
     }
-    Some((manager.to_string(), package.to_string(), date.to_string()))
+    Some((head.to_string(), date.to_string()))
+}
+
+/// `(manager, package, checked date)` of a `deps:` marker, split at the first
+/// `/`. Right for a bare manager (`npm`, `cargo`) and enough to tell a
+/// well-formed marker from a partial one; a label holding a `/` is split
+/// wrongly, so a check against the watch uses [`dep_reference`].
+pub(crate) fn dep_citation(raw: &str) -> Option<(String, String, String)> {
+    let (head, date) = dep_reference(raw)?;
+    let (manager, package) = head.split_once('/')?;
+    let (manager, package) = (manager.trim(), package.trim());
+    if manager.is_empty() || package.is_empty() {
+        return None;
+    }
+    Some((manager.to_string(), package.to_string(), date))
+}
+
+/// The address a `url:` marker (or a bare `https://…` one) cites, without the
+/// `url:` keyword or any trailing comment. `None` for any other kind, or an
+/// empty reference.
+pub(crate) fn url_reference(raw: &str) -> Option<String> {
+    let (kind, reference) = classify_source(raw);
+    if kind != SourceKind::Url {
+        return None;
+    }
+    let reference = clean_reference(&reference);
+    let lower = reference.to_ascii_lowercase();
+    let start = ["https://", "http://"]
+        .iter()
+        .filter_map(|scheme| lower.find(scheme))
+        .min()
+        .unwrap_or(0);
+    let url = clean_reference(reference[start..].split_whitespace().next()?);
+    (!url.is_empty()).then(|| url.to_string())
 }
 
 /// If `s` starts (case-insensitively) with `keyword` AT A TOKEN BOUNDARY
@@ -1353,21 +1476,33 @@ fn split_path_and_lines(reference: &str) -> (&str, Option<(usize, usize)>) {
     (reference, None)
 }
 
-fn parse_line_spec(s: &str) -> Option<(usize, usize)> {
-    if let Some((a, b)) = s.split_once('-') {
-        let start = a.trim().parse::<usize>().ok()?;
-        let end = b.trim().parse::<usize>().ok()?;
-        if start == 0 || end < start {
-            return None;
-        }
-        Some((start, end))
-    } else {
-        let n = s.trim().parse::<usize>().ok()?;
-        if n == 0 {
-            return None;
-        }
-        Some((n, n))
+/// The en and em dash, which models write where a line range wants a hyphen.
+pub(crate) const RANGE_DASHES: [char; 2] = ['\u{2013}', '\u{2014}'];
+
+/// A line spec with its en/em dashes turned into the hyphen they stand for. The
+/// one place every gate (verifier, citation drift, documentary gate) reads a
+/// range through, so none of them disagrees on what a range is.
+pub(crate) fn normalize_range_dashes(s: &str) -> String {
+    s.replace(RANGE_DASHES, "-")
+}
+
+/// `12` or `12-20` as written, without judging the numbers: `None` when a bound
+/// is missing or not a number, so a caller can say "not a line number".
+pub(crate) fn parse_line_bounds(s: &str) -> Option<(usize, usize)> {
+    let normalized = normalize_range_dashes(s);
+    let bounds: Vec<_> = normalized
+        .split('-')
+        .map(|bound| bound.trim().parse::<usize>())
+        .collect();
+    match bounds.as_slice() {
+        [Ok(line)] => Some((*line, *line)),
+        [Ok(start), Ok(end)] => Some((*start, *end)),
+        _ => None,
     }
+}
+
+fn parse_line_spec(s: &str) -> Option<(usize, usize)> {
+    parse_line_bounds(s).filter(|&(start, end)| start != 0 && end >= start)
 }
 
 /// Peel a `#symbol` anchor off `path:line#symbol` / `path:start-end#symbol`.
@@ -1386,7 +1521,7 @@ fn split_anchor(reference: &str) -> (&str, Option<&str>) {
 }
 
 /// An identifier, optionally dotted or dashed (`fn_name`, `Type.method`, `check-version`).
-fn is_anchor_symbol(s: &str) -> bool {
+pub(crate) fn is_anchor_symbol(s: &str) -> bool {
     let mut chars = s.chars();
     chars
         .next()
@@ -1409,29 +1544,181 @@ fn contains_word(line: &str, symbol: &str) -> bool {
     })
 }
 
-/// 1-based lines of `path` holding `symbol` as a word; `None` when the file
-/// is unreadable or above the line-count cap.
-pub(crate) fn symbol_lines(path: &Path, symbol: &str) -> Option<Vec<usize>> {
+/// Why a `#symbol` anchor does not hold for its range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AnchorMiss {
+    /// What the message reports: the definitions of the symbol inside the
+    /// range when one of them fails to open it, else every line holding the
+    /// symbol. Possibly none.
+    pub lines: Vec<usize>,
+    /// Where a corrected range would start for each of `lines`: the top of
+    /// the doc comment and attributes of a definition, the line itself for a
+    /// reference.
+    pub starts: Vec<usize>,
+    /// The range contains a definition of the symbol that does not open it.
+    pub definition: bool,
+}
+
+/// Sibling lines (a constant and its comment, say) a range may open with
+/// before the prelude of the definition it anchors on.
+const ANCHOR_SIBLING_LINES: usize = 5;
+
+/// How far above a definition its doc comment and attributes are searched.
+const PRELUDE_SEARCH_LINES: usize = 80;
+
+/// Words that open a definition: the name after one of them is defined there.
+const DEFINITION_KEYWORDS: &[&str] = &[
+    "fn",
+    "def",
+    "class",
+    "struct",
+    "enum",
+    "const",
+    "interface",
+    "function",
+    "type",
+];
+
+/// Tokens that may sit between the start of a line and its definition keyword.
+const DEFINITION_MODIFIERS: &[&str] = &[
+    "pub", "async", "unsafe", "extern", "export", "default", "declare", "abstract",
+];
+
+/// `line` defines `symbol`: a definition keyword, after any visibility or
+/// `async`-like modifier, then the symbol as the whole name. Comments and prose
+/// never match.
+fn defines_symbol(line: &str, symbol: &str) -> bool {
+    let mut tokens = line.split_whitespace().peekable();
+    while let Some(token) = tokens.next() {
+        // `pub(in crate::api)`: the space after `in` splits the path.
+        if token.starts_with("pub(") && !token.contains(')') {
+            for next in tokens.by_ref() {
+                if next.contains(')') {
+                    break;
+                }
+            }
+            continue;
+        }
+        let modifier = DEFINITION_MODIFIERS.contains(&token)
+            || token.starts_with("pub(")
+            || token.starts_with('"')
+            || (token == "const"
+                && tokens
+                    .peek()
+                    .is_some_and(|next| matches!(*next, "fn" | "async" | "unsafe" | "extern")));
+        if modifier {
+            continue;
+        }
+        // `function* run` (generator): the star may hug the keyword or the name.
+        if !DEFINITION_KEYWORDS.contains(&token.trim_end_matches('*')) {
+            return false;
+        }
+        let name = tokens.next().unwrap_or("").trim_start_matches('*');
+        let end = name.find(|c: char| !is_word_char(c)).unwrap_or(name.len());
+        return !symbol.is_empty() && &name[..end] == symbol;
+    }
+    false
+}
+
+/// Every line of `lines` is a doc comment or an attribute, so a definition
+/// right below them still opens the range. A multi-line attribute counts until
+/// its brackets close; brackets in a comment never count.
+fn is_definition_prelude(lines: &[&str]) -> bool {
+    let mut depth = 0i32;
+    let mut in_block_comment = false;
+    for line in lines {
+        let text = line.trim_start();
+        if in_block_comment {
+            in_block_comment = !text.contains("*/");
+            continue;
+        }
+        let attribute = text.starts_with("#[") || text.starts_with("#![") || text.starts_with('@');
+        if depth > 0 || attribute {
+            let opened = text.matches(['(', '[', '{']).count() as i32;
+            let closed = text.matches([')', ']', '}']).count() as i32;
+            depth = (depth + opened - closed).max(0);
+        } else if text.starts_with("/*") {
+            in_block_comment = !text.contains("*/");
+        } else if !(text.starts_with("//") || text.starts_with('*') || text.starts_with('#')) {
+            return false;
+        }
+    }
+    depth == 0 && !in_block_comment
+}
+
+/// The first line of the doc comment and attributes sitting right above the
+/// definition at `line` (1-based), else `line` itself.
+fn prelude_start(text: &[&str], line: usize) -> usize {
+    // A prelude is a handful of lines: stop looking well before the file start.
+    (line.saturating_sub(PRELUDE_SEARCH_LINES).max(1)..line)
+        .find(|&first| is_definition_prelude(&text[first - 1..line - 1]))
+        .unwrap_or(line)
+}
+
+/// `None` when the anchor holds (or cannot be checked), else why not.
+///
+/// A range that contains no definition of the symbol (see [`defines_symbol`])
+/// only has to hold the word: a call site, a field or a heading backs a claim
+/// about wiring. A range that contains a definition must open with it, a doc
+/// comment or attributes allowed above and up to [`ANCHOR_SIBLING_LINES`]
+/// sibling lines before them: a range that starts a whole function early
+/// drifts from the function it names.
+pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Option<AnchorMiss> {
     if std::fs::metadata(path).ok()?.len() > LINE_COUNT_SIZE_CAP_BYTES {
         return None;
     }
     let content = std::fs::read_to_string(path).ok()?;
-    Some(
-        content
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| contains_word(line, symbol))
-            .map(|(index, _)| index + 1)
-            .collect(),
-    )
-}
-
-/// `None` when `symbol` is inside `span` (or cannot be checked), else the
-/// lines of the file that do hold it, possibly none.
-pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Option<Vec<usize>> {
-    let lines = symbol_lines(path, symbol)?;
+    let text: Vec<&str> = content.lines().collect();
     let (start, end) = span;
-    (!lines.iter().any(|l| (start..=end).contains(l))).then_some(lines)
+    let holding: Vec<usize> = text
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| contains_word(line, symbol))
+        .map(|(index, _)| index + 1)
+        .collect();
+    let in_range = |line: &usize| (start..=end).contains(line);
+    let is_defined = |line: &usize| defines_symbol(text[line - 1], symbol);
+    let defined_here: Vec<usize> = holding
+        .iter()
+        .copied()
+        .filter(|l| in_range(l) && is_defined(l))
+        .collect();
+    if defined_here.is_empty() {
+        if holding.iter().any(in_range) {
+            return None;
+        }
+        let starts = holding
+            .iter()
+            .map(|&l| {
+                if is_defined(&l) {
+                    prelude_start(&text, l)
+                } else {
+                    l
+                }
+            })
+            .collect();
+        return Some(AnchorMiss {
+            lines: holding,
+            starts,
+            definition: false,
+        });
+    }
+    let opens_range = defined_here.iter().any(|&line| {
+        (start.max(1)..=line.min(start + ANCHOR_SIBLING_LINES))
+            .any(|from| is_definition_prelude(&text[from - 1..line - 1]))
+    });
+    if opens_range {
+        return None;
+    }
+    let starts = defined_here
+        .iter()
+        .map(|&l| prelude_start(&text, l))
+        .collect();
+    Some(AnchorMiss {
+        lines: defined_here,
+        starts,
+        definition: true,
+    })
 }
 
 /// [`line_bounds_status`], then the anchor: a symbol absent from the cited
@@ -1447,35 +1734,36 @@ pub(crate) fn anchored_bounds_status(
     };
     match anchor_miss(candidate, span, symbol) {
         None => verdict,
-        Some(elsewhere) => (
+        Some(miss) => (
             SourceStatus::OutOfBounds,
-            anchor_miss_detail(span, symbol, &elsewhere),
+            anchor_miss_detail(span, symbol, &miss),
         ),
     }
 }
 
-pub(crate) fn anchor_miss_detail(
-    span: (usize, usize),
-    symbol: &str,
-    elsewhere: &[usize],
-) -> String {
+pub(crate) fn anchor_miss_detail(span: (usize, usize), symbol: &str, miss: &AnchorMiss) -> String {
     let (start, end) = span;
     let range = if start == end {
         format!("line {start}")
     } else {
         format!("lines {start}-{end}")
     };
-    match elsewhere {
-        [] => format!("symbol `{symbol}` not in {range}, nor anywhere in the file"),
-        lines => {
-            let shown: Vec<String> = lines.iter().take(5).map(usize::to_string).collect();
-            let noun = if lines.len() == 1 { "line" } else { "lines" };
-            format!(
-                "symbol `{symbol}` not in {range}; it appears at {noun} {}",
-                shown.join(", ")
-            )
-        }
+    let lines = &miss.lines;
+    if lines.is_empty() {
+        return format!("symbol `{symbol}` not in {range}, nor anywhere in the file");
     }
+    let shown: Vec<String> = lines.iter().take(5).map(usize::to_string).collect();
+    let noun = if lines.len() == 1 { "line" } else { "lines" };
+    if !miss.definition {
+        return format!(
+            "symbol `{symbol}` not in {range}; it appears at {noun} {}",
+            shown.join(", ")
+        );
+    }
+    format!(
+        "symbol `{symbol}` is defined at {noun} {}, not at the start of {range}: a definition anchor must start the range",
+        shown.join(", ")
+    )
 }
 
 /// Purely lexical path normalisation (resolves `.`/`..` without touching the
@@ -2265,6 +2553,30 @@ fn foreign_worktree_path(cleaned: &str, roots: &[&Path]) -> Option<String> {
         .then(|| format!("{path_part} is in a worktree of another project — refused"))
 }
 
+/// The `.git` file a worktree registration (`<repo>/.git/worktrees/<name>/`)
+/// points at. Git may store that path relative to the registration directory
+/// (`../../../.kronn/worktrees/task-kt-9/.git`): such a path is joined to its
+/// directory and normalized here, not handed to `resolve_host_path`, which
+/// refuses every `..` and would log a warning per registered worktree. An
+/// absolute path is the host path it always was.
+fn registered_worktree_dot_git(registration: &Path, recorded: &str) -> PathBuf {
+    let recorded = Path::new(recorded);
+    if recorded.is_absolute() {
+        return crate::core::scanner::resolve_host_path(&recorded.to_string_lossy());
+    }
+    let mut normalized = PathBuf::new();
+    for component in registration.join(recorded).components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
 /// The worktrees of the project checked out at `checkout`: every directory
 /// under its `.kronn/worktrees/`, plus the worktrees git registers for it
 /// (`.git/worktrees/*/gitdir`). Read from disk, no subprocess; symlinked
@@ -2280,7 +2592,7 @@ pub fn project_lane_roots(checkout: &Path) -> Vec<LaneRoot> {
             let Ok(gitdir) = std::fs::read_to_string(entry.path().join("gitdir")) else {
                 continue;
             };
-            let dot_git = crate::core::scanner::resolve_host_path(gitdir.trim());
+            let dot_git = registered_worktree_dot_git(&entry.path(), gitdir.trim());
             if let Some(worktree) = dot_git.parent() {
                 paths.push(worktree.to_path_buf());
             }
@@ -2406,6 +2718,10 @@ pub fn analyze_roots_lanes(text: &str, roots: &[&Path], lanes: &[LaneRoot]) -> L
         let check = verify_source_marker_lanes(&raw, roots, lanes);
         if check.status.is_fabricated() {
             fabricated += 1;
+        }
+        // A kind Kronn cannot check is surfaced as unverifiable, never silent.
+        if check.kind == SourceKind::Other {
+            unverified += 1;
         }
         // Dedup inline anchors against [src:] file refs by their bare PATH (no
         // line spec, no type prefix) — otherwise `[src: file: a.rs:2]` and an
@@ -3221,6 +3537,41 @@ mod tests {
         assert_eq!(m, vec!["arr[0].field"]);
     }
 
+    // KT-1311 — an unclosed marker (a banner cut at 240 chars) must not blind
+    // the markers after it.
+    #[test]
+    fn an_unclosed_marker_does_not_swallow_the_markers_after_it() {
+        let txt = "banner (… [src: file: .github/wor).\n\n- a [src: file: a.rs:1]\n- b [src: file: b.rs:2]\n";
+        assert_eq!(
+            extract_source_markers(txt),
+            vec!["file: a.rs:1", "file: b.rs:2"]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_marker_ends_at_the_next_marker_on_the_same_line() {
+        let txt = "cut [src: file: .gi then [src: file: a.rs:1] and [src: file: b.rs:2]";
+        assert_eq!(
+            extract_source_markers(txt),
+            vec!["file: a.rs:1", "file: b.rs:2"]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_marker_stops_at_a_paragraph_break_not_at_a_stray_bracket() {
+        let txt = "cut [src: file: .gi\n\nlater stray ] bracket [src: file: a.rs:1]";
+        assert_eq!(extract_source_markers(txt), vec!["file: a.rs:1"]);
+        assert!(extract_source_markers("tail [src: file: a.rs:1").is_empty());
+    }
+
+    #[test]
+    fn a_marker_wrapped_over_two_lines_is_still_read() {
+        assert_eq!(
+            extract_source_markers("see [src:\nfile: a.rs:7] ok"),
+            vec!["file: a.rs:7"]
+        );
+    }
+
     #[test]
     fn extract_empty_when_none() {
         assert!(extract_source_markers("no markers here at all").is_empty());
@@ -3369,6 +3720,51 @@ mod tests {
         assert_eq!(split_path_and_lines("foo.rs:20-10"), ("foo.rs:20-10", None));
     }
 
+    // KT-1307: the en and em dash a model writes for a range hyphen are read the
+    // same way by every gate (verifier, citation drift, documentary gate).
+    #[test]
+    fn en_and_em_dash_ranges_are_line_ranges() {
+        assert_eq!(parse_line_bounds("17\u{2013}23"), Some((17, 23)));
+        assert_eq!(parse_line_bounds("17\u{2014}23"), Some((17, 23)));
+        assert_eq!(parse_line_bounds("17 \u{2013} 23"), Some((17, 23)));
+        assert_eq!(parse_line_bounds("9-3"), Some((9, 3)));
+        assert_eq!(parse_line_bounds("extends"), None);
+        assert_eq!(parse_line_bounds("5\u{2013}"), None);
+        assert_eq!(
+            split_path_and_lines("a/foo.rs:10\u{2013}20"),
+            ("a/foo.rs", Some((10, 20)))
+        );
+        assert_eq!(
+            split_path_and_lines("foo.rs:20\u{2014}10"),
+            ("foo.rs:20\u{2014}10", None)
+        );
+        assert_eq!(
+            file_citation("file: src/a.rs:2\u{2013}4"),
+            Some(("src/a.rs".into(), Some((2, 4))))
+        );
+        assert_eq!(
+            file_citation_anchored("file: src/a.rs:2\u{2014}4#retry_once"),
+            Some(("src/a.rs".into(), Some((2, 4)), Some("retry_once".into())))
+        );
+    }
+
+    #[test]
+    fn analyze_verifies_a_dash_range_like_a_hyphen_range() {
+        let root = temp_project(); // src/foo.rs = 5 lines
+        let green = analyze(
+            "Claim [src: file: src/foo.rs:2\u{2013}4] and [src: file: src/foo.rs:1\u{2014}5].",
+            Some(&root),
+        );
+        assert_eq!(green.sources.len(), 2, "{green:?}");
+        assert!(
+            green.sources.iter().all(|s| !s.status.is_fabricated()),
+            "{green:?}"
+        );
+        let red = analyze("Claim [src: file: src/foo.rs:4\u{2013}9].", Some(&root));
+        assert!(red.sources[0].status.is_fabricated(), "{red:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     // ── Niveau 1 — classification ─────────────────────────────────────
 
     #[test]
@@ -3385,6 +3781,106 @@ mod tests {
         let (k, r) = classify_source("file: src/a.rs:1");
         assert_eq!(k, SourceKind::File);
         assert_eq!(r, "src/a.rs:1");
+    }
+
+    #[test]
+    fn an_unknown_typed_kind_is_other_never_a_file() {
+        for raw in [
+            "command: git log --oneline -5",
+            "Command: git log",
+            "shell: ls -la docs/",
+            "test-run: cargo test",
+        ] {
+            assert_eq!(classify_source(raw).0, SourceKind::Other, "{raw}");
+            assert_eq!(file_citation(raw), None, "{raw}");
+        }
+        let check = verify_source_marker("command: git log --oneline", Some(Path::new("/tmp")));
+        assert_eq!(check.kind, SourceKind::Other);
+        assert_eq!(check.status, SourceStatus::Unchecked);
+    }
+
+    #[test]
+    fn a_mistyped_kind_is_verified_as_a_file_never_a_free_pass() {
+        // `fil:` / `path:` / `source:` … are not on the closed list: a path-like
+        // text is judged as a file and is fabricated when it is missing.
+        let root = temp_project();
+        for raw in [
+            "fil: src/ghost.rs:1",
+            "path: src/ghost.rs",
+            "source: src/ghost.rs:3",
+            "ref: src/ghost.rs",
+            "files: src/ghost.rs:1-2",
+            "src: src/ghost.rs:1",
+            "path: Ghostfile",
+            "path: ghost.rs:4",
+        ] {
+            assert_eq!(classify_source(raw).0, SourceKind::File, "{raw}");
+            let check = verify_source_marker(raw, Some(&root));
+            assert!(check.status.is_fabricated(), "{raw}: {check:?}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_mistyped_kind_is_fabricated_under_the_enforce_gate() {
+        let root = temp_project();
+        for raw in [
+            "fil: src/ghost.rs:1",
+            "path: src/ghost.rs",
+            "source: src/ghost.rs",
+        ] {
+            let text = format!("Claim [src: {raw}].");
+            let report = analyze(&text, Some(&root));
+            assert_eq!(report.fabricated_count, 1, "{raw}: {report:?}");
+            let verdict = crate::api::audit::anti_hallu_enforce::lint_step_file(&text, &[&root]);
+            assert_eq!(verdict.count(), 1, "{raw}");
+            assert_eq!(
+                crate::api::audit::anti_hallu_enforce::decide(&verdict, 1, 3),
+                crate::api::audit::anti_hallu_enforce::GateDecision::Retry,
+                "{raw}"
+            );
+            assert_eq!(
+                crate::api::audit::anti_hallu_enforce::decide(&verdict, 3, 3),
+                crate::api::audit::anti_hallu_enforce::GateDecision::Fail,
+                "{raw}"
+            );
+        }
+        // The text is judged as written, prefix included: even over a real file
+        // a mistyped kind is refused, so the retry feedback makes the agent fix it.
+        let real = analyze("See [src: path: src/foo.rs:2].", Some(&root));
+        assert_eq!(real.fabricated_count, 1, "{real:?}");
+        let fixed = analyze("See [src: file: src/foo.rs:2].", Some(&root));
+        assert_eq!(fixed.fabricated_count, 0, "{fixed:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_listed_non_file_kind_stays_other_and_is_counted_unverified() {
+        let root = temp_project();
+        let text = "Recent work [src: command: git log --oneline -5] and \
+                    [src: test-run: cargo test --lib].";
+        let r = analyze(text, Some(&root));
+        assert_eq!(r.fabricated_count, 0, "{r:?}");
+        assert_eq!(r.unverified_count, 2, "{r:?}");
+        assert!(r.sources.iter().all(|s| s.kind == SourceKind::Other));
+        // Unknown word + prose (no path in it) is unverifiable too, and counted.
+        let prose = analyze("[src: note: the team agreed in standup]", Some(&root));
+        assert_eq!(prose.fabricated_count, 0, "{prose:?}");
+        assert_eq!(prose.unverified_count, 1, "{prose:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn paths_and_known_kinds_are_not_swallowed_by_the_unknown_kind_rule() {
+        for raw in [
+            "src/a.rs:10",
+            "a.rs:10",
+            "Dockerfile",
+            "docker-compose.yml:2-25",
+            "file: src/a.rs:1",
+        ] {
+            assert_eq!(classify_source(raw).0, SourceKind::File, "{raw}");
+        }
     }
 
     #[test]
@@ -6095,6 +6591,31 @@ mod lane_origin {
         std::fs::remove_dir_all(&elsewhere).ok();
     }
 
+    /// KT-1316 — git can record a worktree's `.git` relative to its registration;
+    /// that is a lane like any other, found without a `resolve_host_path` refusal.
+    #[test]
+    fn a_relative_worktree_registration_is_a_lane() {
+        let checkout = temp_dir("checkout");
+        write(&checkout, ".kronn/worktrees/task-kt-9/src/here.rs", 2);
+        let meta = checkout.join(".git/worktrees/task-kt-9");
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(
+            meta.join("gitdir"),
+            "../../../.kronn/worktrees/task-kt-9/.git\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            registered_worktree_dot_git(&meta, "../../../.kronn/worktrees/task-kt-9/.git"),
+            checkout.join(".kronn/worktrees/task-kt-9/.git")
+        );
+        let lanes = project_lane_roots(&checkout);
+        // Found through both the directory listing and the registration: once.
+        assert_eq!(lanes.len(), 1, "{lanes:?}");
+        assert_eq!(lanes[0].name, "task-kt-9");
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+
     #[test]
     fn legacy_row_without_origin_reads_as_checkout() {
         let legacy = r#"{"unsourced_count":0,"flagged_spans":[],"sources":[
@@ -6376,5 +6897,137 @@ mod anchor_citations {
         assert!(!contains_word("pre_retry_once", "retry_once"));
         assert!(contains_word("make check-version:", "check-version"));
         assert!(contains_word("é retry_once é", "retry_once"));
+    }
+
+    fn miss(file: &str, span: (usize, usize), symbol: &str) -> Option<AnchorMiss> {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f"), file).unwrap();
+        anchor_miss(&tmp.path().join("f"), span, symbol)
+    }
+
+    #[test]
+    fn a_range_containing_the_definition_must_start_at_it() {
+        let file = "use x;\n\nfn run() {\n    step();\n}\n";
+        assert_eq!(miss(file, (3, 5), "run"), None);
+        assert_eq!(miss(file, (3, 3), "run"), None);
+        // Two lines above are within the sibling allowance.
+        assert_eq!(miss(file, (1, 5), "run"), None);
+        // Past it, the definition is merely inside the range.
+        let mut long = String::from("a\n").repeat(8);
+        long.push_str(file);
+        let late = miss(&long, (1, 13), "run").unwrap();
+        assert_eq!(
+            (late.lines, late.starts, late.definition),
+            (vec![11], vec![11], true)
+        );
+    }
+
+    #[test]
+    fn a_definition_thirty_lines_in_fails() {
+        let mut file = String::new();
+        for index in 0..30 {
+            file.push_str(&format!("let v{index} = {index};\n"));
+        }
+        file.push_str("fn run() {\n    step();\n}\n");
+        let late = miss(&file, (1, 33), "run").unwrap();
+        assert_eq!((late.lines, late.definition), (vec![31], true));
+        // 5 siblings are forgiven, the 6th is not.
+        assert_eq!(miss(&file, (26, 33), "run"), None);
+        assert!(miss(&file, (25, 33), "run").is_some());
+    }
+
+    #[test]
+    fn a_call_site_of_a_function_the_file_defines_passes() {
+        let defined = "fn run() {\n    step();\n}\nfn step() {}\n";
+        // The range holds the call, not the definition: wiring is citable.
+        assert_eq!(miss(defined, (1, 3), "step"), None);
+        assert_eq!(miss(defined, (2, 2), "step"), None);
+        assert_eq!(miss(defined, (4, 4), "step"), None);
+        // A range holding neither is wrong, and the proposal opens at the doc comment.
+        let none = miss("fn run() {}\n\n/// Docs.\nfn step() {}\n", (1, 1), "step").unwrap();
+        assert_eq!(
+            (none.lines, none.starts, none.definition),
+            (vec![4], vec![3], false)
+        );
+    }
+
+    #[test]
+    fn a_reference_passes_when_the_file_has_no_definition() {
+        let calls = "fn run() {\n    step();\n}\n";
+        assert_eq!(miss(calls, (2, 2), "step"), None);
+        let gone = miss(calls, (3, 3), "step").unwrap();
+        assert_eq!((gone.lines, gone.starts), (vec![2], vec![2]));
+    }
+
+    #[test]
+    fn doc_comments_and_attributes_may_sit_above_the_definition() {
+        let file =
+            "x\n/// Docs.\n#[derive(\n    Debug,\n)]\n#[cfg(test)]\npub(crate) struct Run;\n";
+        assert_eq!(miss(file, (2, 7), "Run"), None);
+        assert_eq!(miss(file, (6, 7), "Run"), None);
+        let py = "x\n@cache\n# note\ndef load():\n    pass\n";
+        assert_eq!(miss(py, (2, 5), "load"), None);
+        let ts = "x\n/**\n * Docs.\n */\nexport default async function main() {}\n";
+        assert_eq!(miss(ts, (2, 5), "main"), None);
+    }
+
+    #[test]
+    fn a_constant_and_its_comment_above_the_definition_pass() {
+        let file = "a\nb\nc\nd\n/// How long.\nconst WAIT: u64 = 30;\n// Then run.\nfn run() {}\n";
+        // The constant and its comment sit right above `run`: siblings.
+        assert_eq!(miss(file, (5, 8), "run"), None);
+        assert_eq!(miss(file, (5, 8), "WAIT"), None);
+        assert_eq!(miss(file, (6, 8), "WAIT"), None);
+        // `d` sits above the doc comment of WAIT: one sibling line.
+        assert_eq!(miss(file, (4, 6), "WAIT"), None);
+    }
+
+    #[test]
+    fn an_unbalanced_bracket_in_a_comment_does_not_break_the_prelude() {
+        let file =
+            "x\n/// See the `foo(` call (and [this.\n// still prose )\n#[inline]\nfn run() {}\n";
+        assert_eq!(miss(file, (2, 5), "run"), None);
+        let lone = miss(file, (1, 1), "run").unwrap();
+        assert_eq!(lone.starts, vec![2]);
+        let block = "x\n/* open (\n  prose\n*/\nfn run() {}\n";
+        assert_eq!(miss(block, (2, 5), "run"), None);
+        let py = "x\n# note (see\n@cache\ndef load():\n    pass\n";
+        assert_eq!(miss(py, (2, 5), "load"), None);
+    }
+
+    #[test]
+    fn a_range_starting_at_the_prelude_is_what_a_miss_proposes() {
+        let file = "a\n\n\n\n\n\n\n\n/// Docs.\n#[test]\nfn run() {}\n";
+        // Too far above the definition, no definition inside: the proposal.
+        let m = miss(file, (1, 2), "run").unwrap();
+        assert_eq!((m.lines, m.starts), (vec![11], vec![9]));
+        assert_eq!(miss(file, (9, 11), "run"), None);
+    }
+
+    #[test]
+    fn definition_keywords_and_modifiers_are_recognised() {
+        for (line, symbol, defined) in [
+            ("pub async fn run() {}", "run", true),
+            ("pub(crate) const fn run() {}", "run", true),
+            ("pub(in crate::api) fn run() {}", "run", true),
+            ("pub(in crate :: api) async fn run() {}", "run", true),
+            ("pub(super) struct Run;", "Run", true),
+            ("pub const RUN: u8 = 1;", "RUN", true),
+            ("extern \"C\" fn run() {}", "run", true),
+            ("    struct Run<T>(T);", "Run", true),
+            ("enum Run {", "Run", true),
+            ("export interface Run {", "Run", true),
+            ("export function* run() {}", "run", true),
+            ("async def run():", "run", true),
+            ("class Run:", "Run", true),
+            ("type Run = u8;", "Run", true),
+            ("fn runner() {}", "run", false),
+            ("let run = 1;", "run", false),
+            ("// fn run() {}", "run", false),
+            ("run();", "run", false),
+            ("fn", "run", false),
+        ] {
+            assert_eq!(defines_symbol(line, symbol), defined, "{line}");
+        }
     }
 }
