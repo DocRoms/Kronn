@@ -1,0 +1,392 @@
+{
+  "task": "KT-1403",
+  "date": "2026-10-21",
+  "implementation_commit": "451c5bea9e5be78deeabd2a06c0b0e79e3d5e538",
+  "runner_commit_before_rebase": "de4f5a1ab",
+  "status": "video_transport_verified_image_recipe_pending",
+  "sources": [
+    {
+      "id": "a",
+      "filename": "a.png",
+      "sha256": "605a5c9203d22ccc8afaaeb93b269ff80da8030a2cc9e80c665ab3a8111c81f9",
+      "bytes": 4171,
+      "uploaded_filename": "kronn-de8e3c70ca504577f80a3a4cf871e2c938a446d4f50e454f56ff3c99644d0641-0.png",
+      "uploaded_bytes_match": true
+    },
+    {
+      "id": "b",
+      "filename": "b.png",
+      "sha256": "db86364c233c463e52b06f6a31d6d5bb582f17ef9961c3b549dd3268a44f198a",
+      "bytes": 4005,
+      "uploaded_filename": "kronn-de8e3c70ca504577f80a3a4cf871e2c938a446d4f50e454f56ff3c99644d0641-1.png",
+      "uploaded_bytes_match": true
+    },
+    {
+      "id": "c",
+      "filename": "c.png",
+      "sha256": "1d2ed0800f50b12488ee63b5d146b56937832090b711c9ef689504e87d4b76d8",
+      "bytes": 4210,
+      "uploaded_filename": "kronn-de8e3c70ca504577f80a3a4cf871e2c938a446d4f50e454f56ff3c99644d0641-2.png",
+      "uploaded_bytes_match": true
+    }
+  ],
+  "request": {
+    "aspect_ratio": "1:1",
+    "connection_id": "local:comfyui",
+    "discussion_id": "disc-media",
+    "duration_secs": 2,
+    "modality": "video",
+    "prompt": "A clean white tabletop holding a red circle, a blue square and a green triangle from the reference images, side by side, slow smooth camera movement, all three objects visible.",
+    "reference_asset_ids": [
+      "a",
+      "b",
+      "c"
+    ],
+    "reference_mode": "reference"
+  },
+  "receipt": {
+    "data": {
+      "attempts": 142,
+      "context_file_id": "fb5894a2-3ec0-468f-8c9d-d1a48a26e43b",
+      "cost_usd": null,
+      "discussion_id": "disc-media",
+      "duration_ms": 2063,
+      "height": 624,
+      "id": "bb0095cc-2144-43ac-9f13-a248c5334940",
+      "is_byok": null,
+      "last_error": null,
+      "message_id": "9565b5a5-1096-4501-b86d-c76da71e172c",
+      "modality": "video",
+      "model": "wan2.1_vace_1.3B_fp16.safetensors",
+      "status": "completed",
+      "width": 624
+    },
+    "error": null,
+    "success": true
+  },
+  "comfyui_history": {
+    "0b1f5dc0-b8ee-4dda-91a7-9f63419b2df5": {
+      "meta": {
+        "11": {
+          "display_node": "11",
+          "node_id": "11",
+          "parent_node": null,
+          "real_node_id": "11"
+        }
+      },
+      "outputs": {
+        "11": {
+          "animated": [
+            true
+          ],
+          "images": [
+            {
+              "filename": "video_00002_.mp4",
+              "id": "1bb73187-ce2a-4b54-a6b6-be2e41d57e53",
+              "metadata": {
+                "duration": 2.0625,
+                "fps": 16.0,
+                "frame_count": 33,
+                "height": 624,
+                "kind": "video",
+                "width": 624
+              },
+              "subfolder": "kronn",
+              "type": "output"
+            }
+          ]
+        }
+      },
+      "prompt": [
+        6,
+        "0b1f5dc0-b8ee-4dda-91a7-9f63419b2df5",
+        {
+          "1": {
+            "class_type": "UNETLoader",
+            "inputs": {
+              "unet_name": "wan2.1_vace_1.3B_fp16.safetensors",
+              "weight_dtype": "default"
+            }
+          },
+          "10": {
+            "class_type": "CreateVideo",
+            "inputs": {
+              "fps": 16.0,
+              "images": [
+                "9",
+                0
+              ]
+            }
+          },
+          "11": {
+            "class_type": "SaveVideo",
+            "inputs": {
+              "filename_prefix": "kronn/video",
+              "format": "auto",
+              "format.codec": "auto",
+              "video": [
+                "10",
+                0
+              ]
+            }
+          },
+          "2": {
+            "class_type": "CLIPLoader",
+            "inputs": {
+              "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+              "type": "wan"
+            }
+          },
+          "3": {
+            "class_type": "VAELoader",
+            "inputs": {
+              "vae_name": "wan_2.1_vae.safetensors"
+            }
+          },
+          "4": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+              "clip": [
+                "2",
+                0
+              ],
+              "text": "A clean white tabletop holding a red circle, a blue square and a green triangle from the reference images, side by side, slow smooth camera movement, all three objects visible."
+            }
+          },
+          "5": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+              "clip": [
+                "2",
+                0
+              ],
+              "text": "blurry, low quality, distorted, static, worst quality"
+            }
+          },
+          "6": {
+            "class_type": "EmptyHunyuanLatentVideo",
+            "inputs": {
+              "batch_size": 1,
+              "height": 624,
+              "length": 33,
+              "width": 624
+            }
+          },
+          "7": {
+            "class_type": "ModelSamplingSD3",
+            "inputs": {
+              "model": [
+                "1",
+                0
+              ],
+              "shift": 8.0
+            }
+          },
+          "8": {
+            "class_type": "KSampler",
+            "inputs": {
+              "cfg": 6.0,
+              "denoise": 1.0,
+              "latent_image": [
+                "reference_vace_2",
+                2
+              ],
+              "model": [
+                "7",
+                0
+              ],
+              "negative": [
+                "reference_vace_2",
+                1
+              ],
+              "positive": [
+                "reference_vace_2",
+                0
+              ],
+              "sampler_name": "uni_pc",
+              "scheduler": "simple",
+              "seed": 103234831464972,
+              "steps": 8
+            }
+          },
+          "9": {
+            "class_type": "VAEDecode",
+            "inputs": {
+              "samples": [
+                "reference_trim",
+                0
+              ],
+              "vae": [
+                "3",
+                0
+              ]
+            }
+          },
+          "reference_load_0": {
+            "class_type": "LoadImage",
+            "inputs": {
+              "image": "kronn-de8e3c70ca504577f80a3a4cf871e2c938a446d4f50e454f56ff3c99644d0641-0.png"
+            }
+          },
+          "reference_load_1": {
+            "class_type": "LoadImage",
+            "inputs": {
+              "image": "kronn-de8e3c70ca504577f80a3a4cf871e2c938a446d4f50e454f56ff3c99644d0641-1.png"
+            }
+          },
+          "reference_load_2": {
+            "class_type": "LoadImage",
+            "inputs": {
+              "image": "kronn-de8e3c70ca504577f80a3a4cf871e2c938a446d4f50e454f56ff3c99644d0641-2.png"
+            }
+          },
+          "reference_trim": {
+            "class_type": "TrimVideoLatent",
+            "inputs": {
+              "samples": [
+                "8",
+                0
+              ],
+              "trim_amount": [
+                "reference_vace_2",
+                3
+              ]
+            }
+          },
+          "reference_vace_0": {
+            "class_type": "WanVaceToVideo",
+            "inputs": {
+              "batch_size": 1,
+              "height": 624,
+              "length": 33,
+              "negative": [
+                "5",
+                0
+              ],
+              "positive": [
+                "4",
+                0
+              ],
+              "reference_image": [
+                "reference_load_0",
+                0
+              ],
+              "strength": 0.3333333333333333,
+              "vae": [
+                "3",
+                0
+              ],
+              "width": 624
+            }
+          },
+          "reference_vace_1": {
+            "class_type": "WanVaceToVideo",
+            "inputs": {
+              "batch_size": 1,
+              "height": 624,
+              "length": 33,
+              "negative": [
+                "reference_vace_0",
+                1
+              ],
+              "positive": [
+                "reference_vace_0",
+                0
+              ],
+              "reference_image": [
+                "reference_load_1",
+                0
+              ],
+              "strength": 0.3333333333333333,
+              "vae": [
+                "3",
+                0
+              ],
+              "width": 624
+            }
+          },
+          "reference_vace_2": {
+            "class_type": "WanVaceToVideo",
+            "inputs": {
+              "batch_size": 1,
+              "height": 624,
+              "length": 33,
+              "negative": [
+                "reference_vace_1",
+                1
+              ],
+              "positive": [
+                "reference_vace_1",
+                0
+              ],
+              "reference_image": [
+                "reference_load_2",
+                0
+              ],
+              "strength": 0.3333333333333333,
+              "vae": [
+                "3",
+                0
+              ],
+              "width": 624
+            }
+          }
+        },
+        {
+          "client_id": "kronn",
+          "create_time": 1792566284073
+        },
+        [
+          "11"
+        ]
+      ],
+      "status": {
+        "completed": true,
+        "messages": [
+          [
+            "execution_start",
+            {
+              "prompt_id": "0b1f5dc0-b8ee-4dda-91a7-9f63419b2df5",
+              "timestamp": 1792566284073
+            }
+          ],
+          [
+            "execution_cached",
+            {
+              "nodes": [],
+              "prompt_id": "0b1f5dc0-b8ee-4dda-91a7-9f63419b2df5",
+              "timestamp": 1792566284076
+            }
+          ],
+          [
+            "execution_success",
+            {
+              "prompt_id": "0b1f5dc0-b8ee-4dda-91a7-9f63419b2df5",
+              "timestamp": 1792566986606
+            }
+          ]
+        ],
+        "status_str": "success"
+      }
+    }
+  },
+  "result": {
+    "filename": "result.mp4",
+    "sha256": "a2b2625c2db448215aae1829a54cf3bb652ff29d02407f3f7cda029e4973e401",
+    "bytes": 89312,
+    "codec": "h264",
+    "width": 624,
+    "height": 624,
+    "frames": 33,
+    "fps": 16,
+    "duration_seconds": 2.0625,
+    "comfy_execution_seconds": 702.533
+  },
+  "visual_review": "At eight sampling steps, the output is nearly static. A red circular shape and triangular forms are visible; the blue square is not faithfully reproduced. This validates execution and transport of three sources, not reference fidelity, identity preservation or production video quality.",
+  "image_recipe": {
+    "status": "pending",
+    "missing_file": "style_models/flux1-redux-dev.safetensors",
+    "reason": "Official gated repository requires user access; no license accepted or gate bypassed."
+  },
+  "local_artifacts": ".kronn/artifacts/kt1403/video"
+}
