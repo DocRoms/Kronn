@@ -111,6 +111,10 @@ names, versions, behaviour). The grammar:
 - `[src: file: backend/src/api/mod.rs:14]` — file + single line.
 - `[src: file: backend/src/api/mod.rs:14-22]` — file + line range.
 - `[src: backend/src/api/mod.rs]` — file only (type defaulted).
+- `[src: file: docs/specs/brief.docx]` — file only. Required for a binary file (.docx,
+  .pdf, images), which has no lines; detected by content, not extension. In audited `docs/`
+  a text file always takes a line, and a binary file never does.
+- Percent-encoded paths (`My%20File.docx`) are decoded before resolving.
 
 Mechanical verification is **path-jailed to the project root**: a citation that escapes the
 root (`../../etc/passwd`) is rejected as `outside_project` without ever touching the

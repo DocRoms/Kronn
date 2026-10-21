@@ -622,7 +622,7 @@ async fn start_backend(
         format!("http://127.0.0.1:{port}"),
     );
 
-    // Load or create config; also arms the process timezone (KT-1103).
+    // Load or create config; also arms the process timezone and anti-hallucination mode.
     let mut app_config = kronn::load_startup_config().await?;
 
     // Embedded mode: bind loopback by default, but HONOR the network-exposure
@@ -1182,8 +1182,7 @@ fn main() {
                 let backend_port = port;
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_multi_thread()
-                        .enable_all()
+                    let rt = kronn::runtime_builder()
                         .build()
                         .expect("Failed to create Tokio runtime");
                     rt.block_on(async {

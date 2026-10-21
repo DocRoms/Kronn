@@ -455,6 +455,10 @@ pub(crate) fn apply_td_resolutions(
     if let Some((path, content)) = decision_update {
         crate::core::mcp_scanner::atomic_write(&path, &content).map_err(|error| anyhow!(error))?;
     }
+    // The decision is on the sheets; the index status column follows them.
+    if let Err(error) = crate::core::td_index::resync(&docs_dir) {
+        tracing::warn!("Tech-debt index resync after a TD card failed: {error}");
+    }
     Ok(())
 }
 

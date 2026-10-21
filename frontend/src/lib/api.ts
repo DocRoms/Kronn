@@ -1,4 +1,6 @@
 import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
+import type { WorkerConnectivity } from '../types/generated';
+import type { MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   AssistantConversation,
@@ -888,8 +890,10 @@ export const config = {
   setModelTiers: (tiers: ModelTiersConfig) => api<void>('POST', '/config/model-tiers', tiers),
   dbInfo: () => api<DbInfo>('GET', '/config/db-info'),
   /** Where the database's weight sits, one entry per table. Measured with
-   *  `dbstat` on demand — never on page load, since it reads the b-trees. */
-  dbUsage: () => api<DbUsage>('GET', '/config/db-usage'),
+   *  `dbstat` on demand — never on page load, since it reads the b-trees.
+   *  `sizeOnly` skips that walk and answers the file sizes with no table. */
+  dbUsage: (options: { sizeOnly?: boolean } = {}) =>
+    api<DbUsage>('GET', options.sizeOnly ? '/config/db-usage?tables=false' : '/config/db-usage'),
   /** SQLite online-backup snapshot. Backend writes to
    *  `<data_dir>/backups/kronn-YYYYMMDD-HHMMSS.db`. Returns the
    *  resulting path so the Settings UI can toast it. */
@@ -1037,6 +1041,19 @@ export const projects = {
   migrateDocs: (id: string, req: { create_symlink?: boolean }) =>
     api<MigrateDocsResponse>('POST', `/projects/${id}/migrate-docs`, req),
   delete: (id: string, hard?: boolean) => api<void>('DELETE', `/projects/${id}${hard ? '?hard=true' : ''}`),
+  /** Template v2 merge into an already-documented repo (KT-1172): the
+   *  read-only correspondence table, computed on the checkout. */
+  templateMergePlan: (id: string) =>
+    api<TemplateMergeView>('GET', `/projects/${encodeURIComponent(id)}/template-merge/plan`),
+  /** Apply the merge in its worktree; a second call resumes the same worktree. */
+  templateMergeStart: (id: string, base: MergeBase) =>
+    api<TemplateMergeView>('POST', `/projects/${encodeURIComponent(id)}/template-merge`, { base } satisfies TemplateMergeRequest),
+  /** Commit only these proposed files on the merge branch. */
+  templateMergeAccept: (id: string, paths: string[]) =>
+    api<TemplateMergeAccepted>('POST', `/projects/${encodeURIComponent(id)}/template-merge/accept`, { paths } satisfies TemplateMergeAcceptRequest),
+  /** Drop the merge worktree; the checkout is untouched. */
+  templateMergeDiscard: (id: string) =>
+    api<void>('DELETE', `/projects/${encodeURIComponent(id)}/template-merge`),
   clone: (req: CloneProjectRequest) => api<CloneProjectResponse>('POST', '/projects/clone', req),
   discoverRepos: (req?: DiscoverReposRequest) => api<DiscoverReposResponse>('POST', '/projects/discover-repos', req ?? { source_ids: [] }),
   installTemplate: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/install-template`),
@@ -1474,6 +1491,9 @@ export const projects = {
        * surfaces the warning. Optional for backwards-compat.
        */
       onStepWarning?: (step: number, file: string, reason: string, repaired: boolean) => void;
+      /** KT-1130 — the step checked its target and found it already up to
+       * date: neither written nor failed. Its `step_done` follows. */
+      onStepUnchanged?: (step: number, file: string) => void;
       /** NON-terminal per-step failure (spawn error): the step closes with
        * its own `step_done success=false` and the loop continues. */
       onStepError?: (error: string, step?: number) => void;
@@ -1584,6 +1604,9 @@ export const projects = {
                 );
               }
               break;
+            case 'step_unchanged':
+              if (typeof p.step === 'number' && typeof p.file === 'string') handlers.onStepUnchanged?.(p.step, p.file);
+              break;
             // NON-terminal: the step closes with its own `step_done
             // success=false` and the pipeline continues — terminal cleanup
             // here would race the `done interrupted` that follows.
@@ -1619,7 +1642,22 @@ export const agents = {
   toggle: (agentType: AgentType) => api<boolean>('POST', '/agents/toggle', agentType),
   readiness: (request: AgentReadinessRequest) =>
     api<AgentReadiness[]>('POST', '/agents/readiness', request),
+  /** Transport state of the HTTP agents a draft names (KT-1154), probed and cached 30 s server-side. */
+  reachability: (targets: ReachabilityTarget[]) =>
+    api<TargetReachability[]>('POST', '/agents/reachability', { targets }),
 };
+
+export interface ReachabilityTarget {
+  agent_type: AgentType;
+  connection_id?: string | null;
+}
+
+export interface TargetReachability {
+  agent_type: AgentType;
+  connection_id: string | null;
+  /** `null` for an agent without an address Kronn probes. */
+  connectivity: WorkerConnectivity | null;
+}
 
 // ─── MCPs ───────────────────────────────────────────────────────────────────
 

@@ -42,20 +42,29 @@ pub use crate::models::AppConfig;
 pub use crate::workflows::WorkflowEngine;
 
 /// Loads the config (defaults when none is saved) and arms the process-wide
-/// timezone from it. Every entry point (standalone, desktop) loads its config
-/// through this, so no scheduler tick or preview runs in the wrong zone.
+/// timezone and anti-hallucination mode from it. Every entry point (standalone,
+/// desktop) loads its config through this, so no scheduler tick or preview runs
+/// in the wrong zone and the first agent run already honours the saved mode.
 pub async fn load_startup_config() -> anyhow::Result<AppConfig> {
-    load_startup_config_with(crate::core::timezone::detect_machine_timezone).await
+    load_startup_config_with(
+        crate::core::timezone::detect_machine_timezone,
+        crate::core::anti_halluc::set_mode,
+    )
+    .await
 }
 
+// `arm_mode` is injected so tests observe the arming without touching the
+// process-global mode that many other tests set.
 async fn load_startup_config_with(
     detect: impl FnOnce() -> chrono_tz::Tz,
+    arm_mode: impl FnOnce(&str),
 ) -> anyhow::Result<AppConfig> {
     let config = match crate::core::config::load().await? {
         Some(cfg) => cfg,
         None => crate::core::config::default_config_without_key(),
     };
     crate::core::timezone::apply_with(config.server.timezone.as_deref(), detect());
+    arm_mode(&config.server.anti_hallucination_mode);
     Ok(config)
 }
 
@@ -194,6 +203,20 @@ pub async fn bootstrap_external_api_connections(
 
 /// Default maximum concurrent agent processes.
 pub const DEFAULT_MAX_CONCURRENT_AGENTS: usize = 5;
+
+/// Worker stack size. In a debug build one nested workflow run costs about
+/// 1 MiB of stack, so a foreach child overflowed the 2 MiB default (KT-1161).
+pub const RUNTIME_THREAD_STACK_SIZE: usize = 8 << 20;
+
+/// The multi-threaded runtime the backend runs on, shared by the server and
+/// desktop entry points so both get the same worker configuration.
+pub fn runtime_builder() -> tokio::runtime::Builder {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
+        .enable_all()
+        .thread_stack_size(RUNTIME_THREAD_STACK_SIZE);
+    builder
+}
 
 /// Tracks running audit processes so they can be cancelled AND inspected.
 ///
@@ -1785,6 +1808,19 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/install-template",
             post(api::projects::install_template),
         )
+        .route(
+            "/api/projects/{id}/template-merge",
+            post(api::projects::template_merge::template_merge_start)
+                .delete(api::projects::template_merge::template_merge_discard),
+        )
+        .route(
+            "/api/projects/{id}/template-merge/plan",
+            get(api::projects::template_merge::template_merge_plan),
+        )
+        .route(
+            "/api/projects/{id}/template-merge/accept",
+            post(api::projects::template_merge::template_merge_accept),
+        )
         // 0.8.7 anti-hallu migration : inject the canonical section into
         // pre-existing projects + re-sync redirectors. Both idempotent.
         .route(
@@ -2042,6 +2078,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/agents/uninstall", post(api::agents::uninstall))
         .route("/api/agents/toggle", post(api::agents::toggle))
         .route("/api/agents/readiness", post(api::agents::readiness))
+        .route("/api/agents/reachability", post(api::agents::reachability))
         // ── Dynamic model catalogs (KT-531) ──
         .route("/api/model-catalogs", get(api::model_catalog::list))
         .route(
@@ -3717,12 +3754,48 @@ mod startup_config_tests {
         let previous = fresh_config_dir("empty");
         crate::core::timezone::apply_with(None, Tz::UTC);
 
-        let loaded = load_startup_config_with(|| Tz::Etc__UCT).await.unwrap();
+        let loaded = load_startup_config_with(|| Tz::Etc__UCT, |_| {})
+            .await
+            .unwrap();
         let (zone, preview) = (crate::core::timezone::current(), preview_zone());
         restore(previous);
         assert_eq!(loaded.server.timezone, None);
         assert_eq!(zone, Tz::Etc__UCT);
         assert_eq!(preview, "Etc/UCT");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn startup_arms_the_saved_anti_hallucination_mode() {
+        let previous = fresh_config_dir("antihalluc");
+        let mut cfg = crate::core::config::default_config();
+        cfg.server.anti_hallucination_mode = "enforce".into();
+        crate::core::config::save(&cfg).await.unwrap();
+
+        let mut armed = None;
+        let loaded = load_startup_config_with(|| Tz::UTC, |mode| armed = Some(mode.to_string()))
+            .await
+            .unwrap();
+        restore(previous);
+        assert_eq!(loaded.server.anti_hallucination_mode, "enforce");
+        assert_eq!(armed.as_deref(), Some("enforce"));
+    }
+
+    #[test]
+    fn the_public_startup_arms_the_real_mode_flag_and_no_entry_point_does_it_alone() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let lib = std::fs::read_to_string(root.join("backend/src/lib.rs")).unwrap();
+        assert!(
+            lib.contains("crate::core::anti_halluc::set_mode,\n    )\n    .await"),
+            "load_startup_config must arm the real anti-hallucination flag"
+        );
+        for entry in ["backend/src/main.rs", "desktop/src-tauri/src/main.rs"] {
+            let source = std::fs::read_to_string(root.join(entry)).unwrap();
+            assert!(
+                !source.contains("anti_halluc::set_mode"),
+                "{entry} arms the mode itself: it belongs to the shared startup"
+            );
+        }
     }
 
     #[test]

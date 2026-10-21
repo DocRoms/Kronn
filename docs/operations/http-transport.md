@@ -75,7 +75,7 @@ each step. Comma-bundled file references (including a repeated `file:` prefix)
 are split only when every individual path and line resolves; documents containing
 human-owned sections and fenced examples are excluded from this automatic edit.
 Originals are saved by content hash under
-`docs/.kronn-citation-originals/*.bak`. Remaining blockers receive at most two
+`.kronn/audit/citation-originals/*.bak`, outside the audited `docs/`. Remaining blockers receive at most two
 agent correction attempts, with existing human-section protection. Invalid
 paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).

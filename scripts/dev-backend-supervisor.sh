@@ -27,12 +27,17 @@ HEALTH_URL="${KRONN_DEV_BACKEND_HEALTH_URL:-http://localhost:3140/api/health}"
 export KRONN_DEV_UI_URL="${KRONN_DEV_UI_URL:-http://localhost:${VITE_DEV_PORT:-5173}}"
 
 failure_file="${KRONN_DEV_BACKEND_FAILURE_FILE:-}"
+# Bash 5.2 can run a trap while it parses a `$(...)` or `<(...)`, then fails to
+# parse the trap itself and drops the signal. Nothing after the traps below
+# uses either form: command output goes through files in this directory.
+state_dir="$(mktemp -d "${TMPDIR:-/tmp}/kronn-dev-backend.XXXXXX")" || exit 1
 backend_pid=""
 watcher_pid=""
 reload_requested=0
 bootstrap_started=0
 bootstrap_fingerprint=""
 serving_fingerprint=""
+fingerprint=""
 
 record_failure() {
     local status="${1:-1}"
@@ -59,19 +64,46 @@ cleanup() {
     stop_child "$backend_pid"
     # A signal can arrive after a fork but before its PID is recorded.
     local child
-    for child in $(jobs -pr); do
-        stop_child "$child"
-    done
+    if jobs -pr >"$state_dir/jobs" 2>/dev/null; then
+        while IFS= read -r child; do
+            stop_child "$child"
+        done <"$state_dir/jobs"
+    fi
+    rm -rf "$state_dir"
 }
 
+# Sets `fingerprint` to the binary's checksum, or to "" when it is unreadable.
 binary_fingerprint() {
-    cksum <"$BACKEND_BINARY" 2>/dev/null || true
+    fingerprint=""
+    if cksum 2>/dev/null <"$BACKEND_BINARY" >"$state_dir/fingerprint"; then
+        IFS= read -r fingerprint <"$state_dir/fingerprint" || true
+    fi
 }
 
 start_backend() {
-    serving_fingerprint="$(binary_fingerprint)"
+    binary_fingerprint
+    serving_fingerprint="$fingerprint"
     (cd "$BACKEND_DIR" && exec "$BACKEND_BINARY") &
     backend_pid=$!
+}
+
+# A trap waits for a foreground command to finish, but interrupts `wait` at
+# once: a blocking step runs in the background so TERM/INT stop a long build.
+run_and_wait() {
+    "$@" &
+    local pid=$! status
+    wait "$pid"
+    status=$?
+    # USR1 interrupts `wait` too; the child is still running.
+    while (( status > 128 )) && kill -0 "$pid" 2>/dev/null; do
+        wait "$pid"
+        status=$?
+    done
+    return "$status"
+}
+
+build_backend() {
+    cd "$BACKEND_DIR" && exec cargo build
 }
 
 backend_ready() {
@@ -98,20 +130,21 @@ trap cleanup EXIT
 # whether the initial build actually replaced the executable and therefore
 # needs one swap; an up-to-date build must not interrupt a run for no reason.
 if [[ -x "$BACKEND_BINARY" ]]; then
-    bootstrap_fingerprint="$(cksum <"$BACKEND_BINARY" 2>/dev/null || true)"
+    binary_fingerprint
+    bootstrap_fingerprint="$fingerprint"
     echo "  Starting the last successful backend while Cargo checks for updates..."
     start_backend
     bootstrap_started=1
 fi
 
 echo "  Building initial backend..."
-if ! "$SCRIPT_DIR/dev-backend-build-guard.sh"; then
+if ! run_and_wait "$SCRIPT_DIR/dev-backend-build-guard.sh"; then
     record_failure 102
     if (( bootstrap_started == 0 )) || ! kill -0 "$backend_pid" 2>/dev/null; then
         exit 102
     fi
     echo "  Initial backend build refused for low disk — keeping the last successful backend online." >&2
-elif ! (cd "$BACKEND_DIR" && cargo build); then
+elif ! run_and_wait build_backend; then
     if (( bootstrap_started == 0 )) || ! kill -0 "$backend_pid" 2>/dev/null; then
         record_failure 101
         exit 101
@@ -120,8 +153,8 @@ elif ! (cd "$BACKEND_DIR" && cargo build); then
 elif (( bootstrap_started == 0 )); then
     start_backend
 else
-    current_fingerprint="$(cksum <"$BACKEND_BINARY" 2>/dev/null || true)"
-    if [[ -z "$bootstrap_fingerprint" || "$current_fingerprint" != "$bootstrap_fingerprint" ]]; then
+    binary_fingerprint
+    if [[ -z "$bootstrap_fingerprint" || "$fingerprint" != "$bootstrap_fingerprint" ]]; then
         echo "  Initial backend build ready — swapping to the updated binary..."
         stop_child "$backend_pid"
         backend_pid=""
@@ -150,13 +183,15 @@ else
 fi
 
 while true; do
-    if (( reload_requested == 1 )) \
-        && dev_backend_binary_unchanged "$serving_fingerprint" "$(binary_fingerprint)"; then
-        # Any watched file can trigger a build that changes nothing, such as a
-        # generated source under a target directory; restarting would only
-        # cut the agents the running backend serves.
-        reload_requested=0
-        echo "  Backend build left the binary unchanged — keeping the running backend."
+    if (( reload_requested == 1 )); then
+        binary_fingerprint
+        if dev_backend_binary_unchanged "$serving_fingerprint" "$fingerprint"; then
+            # Any watched file can trigger a build that changes nothing, such as
+            # a generated source under a target directory; restarting would only
+            # cut the agents the running backend serves.
+            reload_requested=0
+            echo "  Backend build left the binary unchanged — keeping the running backend."
+        fi
     fi
     if (( reload_requested == 1 )); then
         reload_requested=0

@@ -919,7 +919,7 @@ pub fn apply_agent_launch(
     let agent_tmpdir = work_dir.join(".kronn/tmp");
     let _ = std::fs::create_dir_all(&agent_tmpdir);
     if let Some(project_path) = work_dir.to_str() {
-        crate::core::mcp_scanner::ensure_gitignore_public(project_path, ".kronn/tmp/");
+        crate::core::mcp_scanner::ensure_local_exclude(project_path, ".kronn/tmp/");
     }
     command.env("TMPDIR", &agent_tmpdir);
     command.env("TEMP", &agent_tmpdir);

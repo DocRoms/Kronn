@@ -23,9 +23,12 @@ pub fn config_dir() -> Result<PathBuf> {
         return Ok(std::env::temp_dir().join(format!("kronn-test-data-{}", std::process::id())));
     }
 
-    ProjectDirs::from("com", "kronn", "kronn")
-        .map(|d| d.config_dir().to_path_buf())
-        .context("Cannot determine config directory")
+    default_config_dir().context("Cannot determine config directory")
+}
+
+/// The platform data directory an instance uses when `KRONN_DATA_DIR` is unset.
+pub fn default_config_dir() -> Option<PathBuf> {
+    ProjectDirs::from("com", "kronn", "kronn").map(|d| d.config_dir().to_path_buf())
 }
 
 /// Refuses a write into the real data directory from a test binary: a test

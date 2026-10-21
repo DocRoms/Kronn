@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -150,6 +152,9 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
         self.assertIn(
             "needs: [release-checks, build-desktop, verify-installers]",
             workflow,
+        )
+        self.assertIn(
+            "needs: [release-checks, tested-tree, quality-gates, build-gates]", workflow
         )
 
     def test_version_gate_runs_first_and_checks_the_tag(self) -> None:

@@ -5,6 +5,9 @@ name: CI Tests
 # under their own label. Label and edit events never start this workflow: its
 # skipped jobs would hide the real results. CI Verdict (ci-verdict.yml)
 # answers them, re-running this run once when the label arrived after it.
+# A push to main runs CI Cache (ci-cache.yml) instead: the pull request already
+# tested that tree. A release tag reruns this workflow only when no pull-request
+# run proves its tree (desktop-build.yml).
 on:
   pull_request:
     # `opened`/`reopened` exist for the require-ci-label guard below: a fresh

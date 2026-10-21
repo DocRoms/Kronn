@@ -371,7 +371,7 @@ Frontend modal includes **drag & drop file upload** for documents. Files uploade
 
 ### CI pipeline
 
-GitHub Actions workflow (`.github/workflows/ci-test.yml`) triggered on push to `main` + all PRs:
+GitHub Actions workflow (`.github/workflows/ci-test.yml`) triggered on pull requests (a push to `main` only warms caches, see CONTRIBUTING):
 - `test-backend`: cargo clippy + cargo test (with sccache)
 - `test-frontend`: tsc --noEmit + pnpm test (Node 24 LTS)
 - `test-shell`: make test-shell (bats)

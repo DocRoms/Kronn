@@ -113,6 +113,104 @@ class ReleaseNotesTest(unittest.TestCase):
             (assets / FULL[2]).unlink()
             self.assertNotEqual(subprocess.run(cmd, capture_output=True).returncode, 0)
 
+    def test_plain_aliases_are_wrapped(self):
+        text = 'Say "@opencode lance @codex et @claude" or (@a, @b).'
+        self.assertEqual(
+            release_notes.neutralize_mentions(text),
+            'Say "`@opencode` lance `@codex` et `@claude`" or (`@a`, `@b`).',
+        )
+
+    def test_email_is_untouched(self):
+        text = "Write to a@b.com or first.last@corp.example.org."
+        self.assertEqual(release_notes.neutralize_mentions(text), text)
+
+    def test_url_with_at_is_untouched(self):
+        text = "See https://user@host.example/x and https://medium.com/@someone/post now."
+        self.assertEqual(release_notes.neutralize_mentions(text), text)
+
+    def test_existing_code_is_untouched(self):
+        text = (
+            "Inline `@codex` and ``@a `x` @b`` stay.\n"
+            "```bash\n@claude run\n```\n"
+            "~~~\n@litellm\n~~~\n"
+            "- tail `span across\n  lines @z` end @out\n"
+        )
+        want = text.replace("end @out", "end `@out`")
+        self.assertEqual(release_notes.neutralize_mentions(text), want)
+
+    def test_allowlisted_handle_is_untouched(self):
+        text = "Thanks @DocRoms and @docroms, not @codex."
+        self.assertEqual(
+            release_notes.neutralize_mentions(text),
+            "Thanks @DocRoms and @docroms, not `@codex`.",
+        )
+
+    def test_build_body_wraps_only_the_changelog_section(self):
+        log = CHANGELOG.replace("A thing (KT-1).", 'A thing "@a et @b" (KT-1).')
+        body = release_notes.build_body("1.2.3", log, FULL)
+        self.assertIn('"`@a` et `@b`"', body)
+        self.assertNotIn(" @a", body)
+
+    def test_real_0150_section_matches_the_hand_fixed_body(self):
+        # The 0.15.0 release was fixed by hand: exactly these 12 aliases wrapped
+        # in code, every other byte unchanged.
+        hand_fixed = ["@opencode", "@codex", "@claude", "@codex", "@claude", "@opencode",
+                      "@codex", "@litellm", "@a", "@b", "@a", "@b"]
+        root = pathlib.Path(__file__).resolve().parents[3]
+        section = release_notes.changelog_section(
+            (root / "CHANGELOG.md").read_text(encoding="utf-8"), "0.15.0"
+        )
+        out = release_notes.neutralize_mentions(section)
+        self.assertEqual(re.findall(r"`(@\w+)`", out), hand_fixed)
+        self.assertEqual(re.sub(r"`(@\w+)`", r"\1", out), section)
+        self.assertEqual(release_notes.neutralize_mentions(out), out)
+
+    def test_contributor_handle_stays_a_mention_and_alias_is_wrapped(self):
+        allow = release_notes.parse_allowlist(["@Alice", "bob"])
+        out = release_notes.neutralize_mentions("@alice and @BOB ask @codex", allow)
+        self.assertEqual(out, "@alice and @BOB ask `@codex`")
+
+    def test_empty_list_falls_back_to_the_maintainer(self):
+        self.assertEqual(release_notes.parse_allowlist([]), release_notes.MENTION_ALLOWLIST)
+        self.assertEqual(release_notes.parse_allowlist(["", "  "]), release_notes.MENTION_ALLOWLIST)
+
+    def test_lone_backtick_before_a_mention_does_not_leave_it_bare(self):
+        out = release_notes.neutralize_mentions("see `@user here")
+        self.assertEqual(out, "see \\``@user` here")
+        out = release_notes.neutralize_mentions("a`@other end")
+        self.assertEqual(out, "a\\``@other` end")
+        self.assertEqual(release_notes.neutralize_mentions("`@ok` fine"), "`@ok` fine")
+
+    def test_cli_allowlist_options_and_missing_file(self):
+        script = pathlib.Path(release_notes.__file__)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            log = CHANGELOG.replace("A thing (KT-1).", "Ask @alice, @carol and @codex.")
+            (root / "CHANGELOG.md").write_text(log, encoding="utf-8")
+            assets = root / "artifacts"
+            assets.mkdir()
+            for name in FULL:
+                (assets / name).write_text("x")
+            (root / "c.txt").write_text("alice\n", encoding="utf-8")
+            base = [sys.executable, str(script), "--tag", "1.2.3",
+                    "--changelog", str(root / "CHANGELOG.md"), "--assets-dir", str(assets)]
+            run = lambda *extra: subprocess.run(base + list(extra), capture_output=True, text=True)
+            r = run("--allow-mentions-file", str(root / "c.txt"), "--allow-mention", "@Carol")
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("Ask @alice, @carol and `@codex`.", r.stdout)
+            r = run("--allow-mentions-file", str(root / "missing.txt"))
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("`@alice`", r.stdout)
+            self.assertIn("warning", r.stderr)
+
+    def test_workflow_lists_contributors_before_the_body_and_passes_them(self):
+        wf = (pathlib.Path(__file__).resolve().parents[3] / ".github/workflows/desktop-build.yml").read_text()
+        lookup, body = wf.index("repos/$GH_REPO/contributors"), wf.index("release_notes.py")
+        self.assertLess(lookup, body)
+        self.assertIn("--allow-mentions-file contributors.txt", wf)
+        self.assertIn("endswith(\"[bot]\")", wf)
+        self.assertIn("|| echo", wf[lookup:body])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

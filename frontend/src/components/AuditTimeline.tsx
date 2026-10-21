@@ -23,7 +23,7 @@ import type {
 } from '../types/generated';
 import './AuditTimeline.css';
 
-type StepStatus = 'done' | 'failed' | 'warned' | 'running' | 'pending' | 'todo';
+type StepStatus = 'done' | 'unchanged' | 'failed' | 'warned' | 'running' | 'pending' | 'todo';
 
 interface StepRow {
   step_index: number;
@@ -33,6 +33,8 @@ interface StepRow {
   duration_ms?: number | null;
   cli_success: boolean;
   step_warning?: string | null;
+  /** The target was already up to date: checked, nothing to fix (KT-1130). */
+  unchanged?: boolean;
   step_tokens?: number | null;
   input_tokens?: number | null;
   output_tokens?: number | null;
@@ -117,6 +119,11 @@ const TIER_KEY: Partial<Record<AgentType, keyof ModelTiersConfig>> = {
   Nvidia: 'nvidia',
 };
 
+/** A step that needs nothing more: written, checked unchanged, or warned. */
+function isDoneStatus(status: StepStatus): boolean {
+  return status === 'done' || status === 'unchanged' || status === 'warned';
+}
+
 function readNewsDismissed(): boolean {
   try { return localStorage.getItem(NEWS_KEY) === '1'; } catch { return false; }
 }
@@ -125,6 +132,8 @@ function stepStatus(row: StepRow | undefined, index: number, redo: Set<number>, 
   if (!row) return redo.has(index) ? 'todo' : 'pending';
   // Without a live audit, a step that never ended was interrupted.
   if (!row.ended_at) return active ? 'running' : 'failed';
+  // Neither written nor failed: a neutral outcome, whatever the run made of it.
+  if (row.unchanged) return 'unchanged';
   if (!row.cli_success) return 'failed';
   return row.step_warning ? 'warned' : 'done';
 }
@@ -281,7 +290,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
 
   const cost = useMemo(() => summarizeAuditCost(rows.flatMap(r => (r.row ? [r.row] : []))), [rows]);
   const failed = rows.filter(r => r.status === 'failed' || r.status === 'todo').map(r => r.index);
-  const done = rows.filter(r => r.status === 'done' || r.status === 'warned').length;
+  const done = rows.filter(r => isDoneStatus(r.status)).length;
   const consolidationIndex = rows.find(r => stepGroup(r.file) === 'consolidation')?.index;
   const consolidationRedone = consolidationIndex !== undefined && redo.has(consolidationIndex)
     && [...redo].some(i => i !== consolidationIndex);
@@ -468,7 +477,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
             {groups.map(group => {
               const groupFailed = group.rows.some(r => r.status === 'failed' || r.status === 'todo');
               const open = openGroups[group.key] ?? (groupFailed || group.rows.some(r => r.status === 'running'));
-              const groupDone = group.rows.filter(r => r.status === 'done' || r.status === 'warned').length;
+              const groupDone = group.rows.filter(r => isDoneStatus(r.status)).length;
               return (
                 <div key={group.key} className="audit-tl-group">
                   <div className="audit-tl-group-row">
@@ -506,7 +515,9 @@ export function AuditTimeline(props: AuditTimelineProps) {
                             {r.status === 'running' && (
                               <AuditStepActivity projectId={projectId} recent={props.liveActivity ?? null} />
                             )}
-                            {r.row?.step_warning ? (
+                            {r.status === 'unchanged' ? (
+                              <span className="audit-tl-reason is-unchanged">{t('auditTimeline.reason.verified')}</span>
+                            ) : r.row?.step_warning ? (
                               <span className={`audit-tl-reason is-${r.status}`} title={r.row.step_warning}>
                                 {stepReason(r.row.step_warning, t)}
                               </span>

@@ -243,6 +243,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         error: null,
       }),
       installTemplate: resolve({}),
+      templateMergePlan: resolve(null),
+      templateMergeStart: resolve(null),
+      templateMergeAccept: resolve(null),
+      templateMergeDiscard: resolve(undefined),
       auditInfo: resolve({ files: [], todos: [] }),
       contextAudit: resolve({
         project_id: '',
@@ -370,6 +374,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     agents: {
       listAll: resolve([]),
       versionCheck: resolve([]),
+      reachability: resolve([]),
     },
 
     mcps: {

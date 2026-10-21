@@ -738,6 +738,60 @@ fn on_big_stack<F: std::future::Future<Output = ()> + Send + 'static>(test: F) {
         .unwrap();
 }
 
+// ─── KT-1161 — an Agent step inside a foreach child fits a worker's stack ──
+
+const STACK_CHILD_ENV: &str = "KRONN_TEST_FOREACH_AGENT_STACK_CHILD";
+
+/// Root → foreach → child run → Agent step (full tool catalogue), run on a
+/// worker of the production runtime. A stack overflow aborts the process, so
+/// the scenario runs in a re-executed copy of this test binary.
+#[test]
+fn an_agent_step_in_a_foreach_child_fits_the_production_worker_stack() {
+    if std::env::var_os(STACK_CHILD_ENV).is_some() {
+        crate::runtime_builder()
+            .build()
+            .unwrap()
+            .block_on(async { tokio::spawn(agent_in_a_foreach_child()).await.unwrap() });
+        return;
+    }
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("an_agent_step_in_a_foreach_child_fits_the_production_worker_stack")
+        .args(["--test-threads=1", "--nocapture"])
+        .env(STACK_CHILD_ENV, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    assert!(
+        child.status.success() && stdout.contains("1 passed"),
+        "the foreach child run died ({}):\nstdout:\n{stdout}\nstderr:\n{}",
+        child.status,
+        String::from_utf8_lossy(&child.stderr),
+    );
+}
+
+async fn agent_in_a_foreach_child() {
+    let (_, tokens, agents) = test_state_and_configs();
+    let tree = foreach_tree("stack-foreach-agent").await;
+    let (_route, prompts) = item_route(&tree.worktree, None);
+    let mut run = pending_run("run-stack-foreach-agent", &tree.workflow.id);
+    run.workspace_path = Some(tree.worktree.to_string_lossy().into_owned());
+    insert_wf_and_run(&tree.state, &tree.workflow, &run).await;
+    execute_run(
+        tree.state.clone(),
+        &tree.workflow,
+        &mut run,
+        &tokens,
+        &agents,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(*prompts.lock().unwrap(), vec!["T1", "T2", "T3"]);
+    assert!(child_succeeded(&tree.state, "run-stack-foreach-agent", "T1").await);
+}
+
 /// Limit of this proof: it covers calls that FINISHED before the crash. T2,
 /// in flight when the backend died, is dispatched again on resume, so an
 /// interrupted call can be billed twice; the cap holds on completed calls.
