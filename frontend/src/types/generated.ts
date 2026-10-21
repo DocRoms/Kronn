@@ -5,6 +5,25 @@
 // ║  Regenerate: `make typegen`. CI fails if this file drifts from the models.  ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 
+export type AcceptAuditStepRequest = {
+/**
+ * Why the step is accepted; optional.
+ */
+reason?: string, };
+
+export type AcceptAuditStepResponse = { step: number, accepted_by: string, accepted_at: string,
+/**
+ * Failed steps of the run still neither retried nor accepted. Empty: a
+ * resume now only finalizes the run.
+ */
+remaining_failed: Array<number>, };
+
+/**
+ * `POST /api/projects/:id/citation-drift/acknowledge` body: the doc whose
+ * citations were checked by hand and still hold.
+ */
+export type AcknowledgeCitationsRequest = { doc: string, };
+
 export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string,
 /**
  * Number of times this durable dispatch has been claimed. A value above
@@ -873,6 +892,74 @@ export type AuditInfo = { files: Array<AuditFileInfo>, todos: Array<AuditTodo>, 
 export type AuditKind = "Full" | "Drift" | "Security" | "Docker" | "Performance" | "Accessibility" | "Rgaa" | "Database" | "ApiDesign" | "CodeQuality" | "Custom";
 
 /**
+ * What a client needs to tell where a project's audits stand.
+ */
+export type AuditLatest = {
+/**
+ * The newest run of any status: a Cancelled, Failed or Interrupted run
+ * after a Completed one is the project's state, not history.
+ */
+latest: AuditRun | null,
+/**
+ * The newest Completed run, the health snapshot.
+ */
+latest_completed: AuditRun | null,
+/**
+ * 1-based steps a resume of `latest` runs; empty when it is not resumable.
+ */
+steps_to_redo: Array<number>,
+/**
+ * The lease is held by a run nobody can settle: every launch is refused
+ * until the cleanup action releases it (KT-1134).
+ */
+lease_orphaned: boolean, };
+
+/**
+ * What one phase of an audit (briefing, audit steps, validation discussion)
+ * consumed (KT-1084). Every figure is absent when nothing reported it: a phase
+ * whose agents reported no usage is "not measured", never 0. A sum over items
+ * some of which reported nothing is a floor, and `cost_unknown_items` says so.
+ */
+export type AuditPhaseCost = {
+/**
+ * Finished steps, or agent replies, the phase is made of.
+ */
+items: number,
+/**
+ * Of those, the ones that reported token usage.
+ */
+measured_items: number,
+/**
+ * Fresh traffic (uncached input plus output); input as reported when an
+ * item's cache split is unknown.
+ */
+total_tokens?: number,
+/**
+ * Uncached input, summed over the items whose cache split is known.
+ */
+input_tokens?: number, output_tokens?: number, cache_read_tokens?: number, cache_write_tokens?: number,
+/**
+ * Measured items whose cache split is unknown: the parts above leave them out.
+ */
+split_unknown_items: number,
+/**
+ * Reported cost, else Kronn's estimate, summed over the items that have one.
+ */
+cost_usd_micros?: number,
+/**
+ * At least one summed cost is an estimate, not an agent-reported figure.
+ */
+cost_estimated: boolean,
+/**
+ * Items with no cost at all: the sum above is a floor.
+ */
+cost_unknown_items: number,
+/**
+ * Steps a resume inherited from another run, counted once, at their origin's figures.
+ */
+carried_items: number, };
+
+/**
  * Live progress of a running audit, exposed via `GET /api/projects/:id/audit-status`.
  *
  * Produced by the SSE streams (`full_audit`, `partial_audit`)
@@ -1054,6 +1141,23 @@ model?: string | null,
 project_profile_draft?: string | null, };
 
 /**
+ * An audit run's tokens and cost per phase and in total (KT-1084).
+ */
+export type AuditRunCost = { run_id: string,
+/**
+ * The project's briefing discussion(s) opened since the previous Full run.
+ */
+briefing: AuditPhaseCost,
+/**
+ * The run's steps, its own and the ones it carried, each counted once.
+ */
+audit: AuditPhaseCost,
+/**
+ * The agent replies of the run's validation discussion.
+ */
+validation: AuditPhaseCost, total: AuditPhaseCost, };
+
+/**
  * 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
  *
  * One row per step per `audit_runs` row. Inserted at `step_start`
@@ -1088,6 +1192,11 @@ step_repaired_from_template: boolean,
  * nothing to change (KT-1130). Neither a success that wrote nor a failure.
  */
 unchanged: boolean,
+/**
+ * A human accepted this failed step as it stands (KT-1131): when, who and
+ * why. It counts as done; `cli_success` and `step_warning` keep the failure.
+ */
+accepted_at?: string, accepted_by?: string, accepted_reason?: string,
 /**
  * The step's cost in millionths of a dollar, when its agent reported one.
  */
@@ -1140,7 +1249,12 @@ recorded_audits: Array<AuditEntry>, recorded_validated_at: string | null,
  * Completed, archived or not: the timeline offers to validate once it
  * has finished.
  */
-latest_validation: AuditTimelineValidation | null, };
+latest_validation: AuditTimelineValidation | null,
+/**
+ * The project's audit lease is held by a run that could not be settled:
+ * every launch is refused until the cleanup action releases it (KT-1134).
+ */
+lease_orphaned: boolean, };
 
 export type AuditTimelineValidation = { discussion_id: string,
 /**
@@ -1295,6 +1409,96 @@ export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_c
 export type BootstrapProjectRequest = { name: string, description: string, agent: AgentType, mcp_config_ids?: Array<string>, skill_ids?: Array<string>, };
 
 export type BootstrapProjectResponse = { project_id: string, discussion_id: string, };
+
+export type BriefingCommitConvention = "unknown" | "conventional" | "ticket_prefixed" | "free";
+
+export type BriefingDefaultBranch = "unknown" | "main" | "master" | "develop" | "trunk";
+
+/**
+ * A location found in the repository, offered as a pre-filled answer.
+ */
+export type BriefingDetectedDoc = { path: string, kind: BriefingDocKind, is_dir: boolean, last_commit: string | null, };
+
+/**
+ * What a documentation location is, classified by Kronn from its path.
+ */
+export type BriefingDocKind = "readme" | "docs" | "wiki" | "adr" | "api" | "contributing" | "markdown";
+
+/**
+ * One documentation location recorded in the briefing.
+ */
+export type BriefingDocLocation = {
+/**
+ * Repository-relative, normalised, `/`-separated.
+ */
+path: string,
+/**
+ * Recomputed by Kronn on save; the client's value is ignored.
+ */
+kind: BriefingDocKind, state: BriefingDocState, note: string,
+/**
+ * At most one source of truth per kind.
+ */
+source_of_truth: boolean,
+/**
+ * `YYYY-MM-DD` of the last commit touching the path, read by Kronn on save.
+ */
+last_commit: string | null, };
+
+export type BriefingDocsAnswers = { locations: Array<BriefingDocLocation>, };
+
+/**
+ * The state the user gives a location. `Unknown` is an unanswered state.
+ */
+export type BriefingDocState = "unknown" | "recent" | "old" | "obsolete" | "partial" | "reference";
+
+export type BriefingEnvironment = { kind: BriefingEnvironmentKind, url: string, };
+
+export type BriefingEnvironmentKind = "local" | "dev" | "staging" | "preprod" | "production" | "preview";
+
+/**
+ * A project fact a briefing note can be attached to (KT-1196).
+ */
+export type BriefingFact = "tracker" | "tracker_key" | "forge" | "forge_repo" | "default_branch" | "commit_convention" | "signoff" | "merge_strategy" | "review" | "release_cadence" | "environments" | "people";
+
+export type BriefingForge = "unknown" | "github" | "gitlab" | "bitbucket" | "azure_devops" | "other";
+
+export type BriefingMergeStrategy = "unknown" | "squash" | "rebase" | "merge_commit";
+
+/**
+ * A role and the name/contact the user typed; nothing else is recorded.
+ */
+export type BriefingPerson = { role: BriefingPersonRole, name: string, contact: string, };
+
+export type BriefingPersonRole = "arbiter" | "tech_lead" | "devops" | "product_owner" | "qa";
+
+/**
+ * The answers `docs/project.md` is rendered from.
+ */
+export type BriefingProjectAnswers = { tracker: BriefingTracker,
+/**
+ * Jira project key, Linear team key, …: checked when a connection exists.
+ */
+tracker_key: string, forge: BriefingForge,
+/**
+ * `owner/name`; inferred from the project's git remote when empty.
+ */
+forge_repo: string, default_branch: BriefingDefaultBranch, commit_convention: BriefingCommitConvention, signoff_required: BriefingYesNo, merge_strategy: BriefingMergeStrategy, review_policy: BriefingReviewPolicy, release_cadence: BriefingReleaseCadence, environments: Array<BriefingEnvironment>, people: Array<BriefingPerson>,
+/**
+ * KT-1196 — optional free-text note per fact: the "how" a closed option
+ * cannot say. Omitted when empty so older machine copies stay identical.
+ */
+notes?: { [key in BriefingFact]?: string }, };
+
+export type BriefingProjectRules = { rules: Array<ProjectRule>, };
+
+export type BriefingReleaseCadence = "unknown" | "continuous" | "scheduled" | "on_demand";
+
+export type BriefingReviewPolicy = "unknown" | "no_review" | "one_approval" | "two_approvals";
+
+export type BriefingTracker = "unknown" | "jira" | "github_issues" | "gitlab_issues" | "linear" | "other" | "none";
+
+export type BriefingYesNo = "unknown" | "yes" | "no";
 
 export type BrowseEntry = { name: string, path: string,
 /**
@@ -1654,11 +1858,29 @@ detail?: string | null,
  */
 notice?: string | null, };
 
+export type CheckBriefingDocRequest = { path: string, };
+
 /**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
  * could read is not a passing one.
  */
 export type CiState = "passing" | "failing" | "unknown";
+
+export type CitationDriftReport = { sources_state: SourcesState, sections: Array<SectionCitations>, broken_count: number, moved_count: number, unchanged_count: number, };
+
+/**
+ * `GET /api/projects/:id/citation-drift`: broken and moved citations per
+ * section, plus the last scheduled re-verification.
+ */
+export type CitationDriftResponse = { last_scheduled_check: ScheduledCheck | null, sources_state: SourcesState, sections: Array<SectionCitations>, broken_count: number, moved_count: number, unchanged_count: number, };
+
+export type CitationState = "unchanged" | "moved" | "changed" | "removed" | "file_missing";
+
+export type CitationStatus = { cite: string, file: string, line: number | null, end_line: number | null, state: CitationState,
+/**
+ * Where a moved citation now starts.
+ */
+current_line: number | null, };
 
 /**
  * Body of `POST /api/disc/claim-by-token`. A PEER calls this to ask "do you
@@ -1790,6 +2012,12 @@ export type CompareImprovementAvailability = "available" | "different_prompts" |
 export type ComparePromptCompatibility = "identical" | "different" | "missing";
 
 export type ConditionAction = { "type": "Stop" } | { "type": "Skip" } | { "type": "Goto", step_name: string, max_iterations?: number | null, };
+
+export type ConfirmDocsRequest = {
+/**
+ * Docs to confirm; empty confirms every doc to reconfirm.
+ */
+docs?: Array<string>, };
 
 export type Contact = { id: string, pseudo: string, avatar_email: string | null, kronn_url: string, invite_code: string, status: string, created_at: string, updated_at: string, };
 
@@ -2093,6 +2321,34 @@ export type CronPreviewRequest = { schedule: string,
  * The trigger's own zone; absent means Kronn's global zone.
  */
 timezone?: string, };
+
+/**
+ * The cost of a cross-agent audit, before launch (KT-1183, experimental).
+ * Detection runs each cross-checked step once per agent; the cross-check and
+ * the reply add at most one call per agent each: the range goes from N to 2N
+ * times the step's single-agent cost.
+ */
+export type CrossAuditEstimate = { agents: number,
+/**
+ * The steps run cross-agent (finding steps only).
+ */
+cross_checked_steps: Array<string>, low_factor: number, high_factor: number,
+/**
+ * Findings challenged per step; the rest are listed as not cross-checked.
+ */
+max_cross_checked: number,
+/**
+ * The single-agent run the range scales (its cost: `GET /api/audit-runs/{id}/cost`).
+ */
+base_run_id?: string, base_tokens?: number, base_cost_usd_micros?: number, low_tokens?: number, high_tokens?: number, low_cost_usd_micros?: number, high_cost_usd_micros?: number,
+/**
+ * A past cross-agent run of the step with as many agents, as measured.
+ */
+measured_run_id?: string, measured_tokens?: number, measured_cost_usd_micros?: number,
+/**
+ * No comparable cross-agent run was measured: the range is an estimate.
+ */
+estimated: boolean, };
 
 export type CustomApiField = { label: string, value: string, };
 
@@ -3439,6 +3695,24 @@ export type DiscWorkspaceSetResponse = { workspace: DiscussionWorkspace, blocker
 
 export type DiscWorkspaceState = { disc_id: string, session_pk: number, current: DiscussionWorkspace | null, workspaces: Array<DiscussionWorkspace>, };
 
+export type DocProvenanceReport = { docs: Array<DocProvenanceStatus>, to_reconfirm: number, };
+
+export type DocProvenanceStatus = { doc: string, state: ProvenanceState, reason: ValidationReason, scope: ProvenanceScope, validated_at: string,
+/**
+ * The sections in scope (`sections` scope only).
+ */
+sections: Array<string>,
+/**
+ * Kronn writes since the validation; empty when edited outside Kronn.
+ */
+kronn_writes: Array<KronnWrite>,
+/**
+ * Filled on request, for docs to reconfirm only.
+ */
+changes: Array<ProvenanceChange>, };
+
+export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
+
 /**
  * What changed since a previous audit — KT-194 drift.
  */
@@ -3463,7 +3737,11 @@ unused_files: Array<string>,
  */
 paid_agent_growth: Array<AgentContextGrowth>, };
 
-export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number, };
+export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number,
+/**
+ * "Sources clean" badge, recomputed from the cited lines.
+ */
+sources_state: SourcesState, broken_citations: number, };
 
 export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>, };
 
@@ -3522,7 +3800,11 @@ export type Evidence = { kind: string, ref: string, quote?: string | null, };
 /**
  * Gate-1 verdict for one evidence row (rendered per-row in the validation modal).
  */
-export type EvidenceCheck = { reference: string, status: string, fabricated: boolean, };
+export type EvidenceCheck = { reference: string, status: string, fabricated: boolean,
+/**
+ * A source inside the project docs: human-validated or AI-generated (KT-1079).
+ */
+doc_provenance?: SourceProvenance, };
 
 /**
  * What a run may be evidence for.
@@ -3944,6 +4226,12 @@ export type HostScope = { "kind": "ClaudeUser" } | { "kind": "ClaudeLocal", "val
 export type HostSyncMode = "None" | "GlobalOnly" | "MirrorAll";
 
 /**
+ * A citation inside a human-owned section, listed for its owner: Kronn may
+ * correct it, and its owner then reconfirms the doc.
+ */
+export type HumanCitationTodo = { section: string, citation: CitationStatus, };
+
+/**
  * A credential as the UI may see it. No hash, no plaintext — a list of these
  * is safe to return.
  */
@@ -4222,6 +4510,8 @@ export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in
 
 export type KronnOwnership = { "type": "NotManaged" } | { "type": "ManagedByMarker", "config_id": string } | { "type": "ManagedByHash", "config_id": string };
 
+export type KronnWrite = { writer: DocWriter, at: string, };
+
 export type LaunchAuditRequest = { agent: AgentType,
 /**
  * KT-980 — the named external API connection an HTTP agent uses. Required
@@ -4251,7 +4541,18 @@ custom_prompt?: string | null,
  * makes resume impossible to misuse: no client-supplied step count to
  * oversize, and no way to graft a checkpoint onto the wrong pipeline.
  */
-resume_run_id?: string | null, };
+resume_run_id?: string | null,
+/**
+ * KT-1131 — with `resume_run_id`: retry only these 1-based failed steps.
+ * The run's other failed steps stay failed, unrun. Absent = every one.
+ */
+retry_steps?: Array<number>,
+/**
+ * KT-1169 — a launch without `resume_run_id` is refused while the
+ * project's latest run can be resumed, unless this explicit choice says
+ * to run the whole audit again.
+ */
+fresh?: boolean, };
 
 export type LaunchDiscussionActionRequest = { variables?: Record<string, string>,
 /**
@@ -4360,6 +4661,11 @@ location: string,
 description?: string, };
 
 /**
+ * The context entry point Kronn found in a linked repository.
+ */
+export type LinkedRepoAiDoc = "agents_md" | "legacy_ai_index" | "readme_only" | "no_ai_doc" | "remote" | "missing";
+
+/**
  * 0.8.6 (#27) — One row in the linked-repos picker. Surfaces the
  * minimum needed for autocomplete : project id (for stable React
  * keys), human name, path, and a `proximity_hint` (`'same-parent'` |
@@ -4367,6 +4673,12 @@ description?: string, };
  * the top of the dropdown vs an "Other projects" group at the bottom.
  */
 export type LinkedRepoCandidate = { id: string, name: string, path: string, proximity_hint: string, };
+
+export type LinkedRepoDocStatus = { id: string, ai_doc: LinkedRepoAiDoc,
+/**
+ * Path of the entry point relative to the repository, when there is one.
+ */
+doc_path: string | null, };
 
 export type LinkLivePageDiscussionRequest = { discussion_id: string, relation?: LivePageDiscussionRelation | null, };
 
@@ -6255,6 +6567,27 @@ repository_fingerprint?: string, kronn_fingerprint?: string, };
 
 export type ProjectRepositorySkillProvenance = "repository" | "kronn" | "both";
 
+export type ProjectRule = { kind: ProjectRuleKind, text: string,
+/**
+ * Only on a ban.
+ */
+pattern: ProjectRulePattern | null, };
+
+/**
+ * A line the team states about the code: something always done, or never.
+ */
+export type ProjectRuleKind = "rule" | "ban";
+
+/**
+ * A deterministic pattern Kronn checks for a ban, read-only.
+ */
+export type ProjectRulePattern = { kind: ProjectRulePatternKind, value: string, };
+
+/**
+ * What a ban's verifiable pattern names.
+ */
+export type ProjectRulePatternKind = "dependency" | "import" | "file_glob";
+
 /**
  * The `SKILL.md` of a used skill, as the repository holds it now: masked the
  * way every repository text is, and cut when it is larger than a sheet can
@@ -6429,6 +6762,24 @@ pending_proposal_count: number,
 pending_item_count: number, };
 
 export type ProposeResult = { accepted: boolean, reason: string | null, warnings: Array<string>, evidence_checks: Array<EvidenceCheck>, learning: Learning | null, };
+
+export type ProvenanceChange = {
+/**
+ * `None`: the whole doc.
+ */
+section: string | null,
+/**
+ * `None`: the validated text is not kept on this machine.
+ */
+before: string | null,
+/**
+ * `None`: the doc or section was removed.
+ */
+after: string | null, truncated: boolean, };
+
+export type ProvenanceScope = "doc" | "sections";
+
+export type ProvenanceState = "human_validated" | "to_reconfirm";
 
 /**
  * Read-only quota state shown to a human in Agent settings.  Re-arming is a
@@ -6713,6 +7064,8 @@ export type RecentMessagePreview = { sort_order: number, role: string, agent_typ
  */
 preview: string, };
 
+export type RecordReason = "validation" | "audit" | "acknowledged" | "revalidation";
+
 export type RecoveryStatus = { configured: boolean,
 /**
  * `recovery.key` is known (by its fingerprint) to wrap the key in use. An
@@ -6828,9 +7181,40 @@ restored_from_files: number, };
 
 export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 
+export type ReinstallAction = "create" | "replace" | "unchanged";
+
+export type ReinstallFile = {
+/**
+ * Project-relative path.
+ */
+path: string, action: ReinstallAction,
+/**
+ * Set for `replace` only.
+ */
+kind: ReinstallKind | null,
+/**
+ * `owner="human"` sections of the current file this reinstall rewrites.
+ */
+human_sections: Array<string>,
+/**
+ * The current file is human-validated: replacing it asks to reconfirm.
+ */
+human_validated: boolean, };
+
+/**
+ * Why an existing file differs from the template.
+ */
+export type ReinstallKind = "damaged_or_template" | "filled";
+
 export type RemoteRepo = { name: string, full_name: string, clone_url: string, ssh_url: string, description: string | null, language: string | null, stargazers_count: number, updated_at: string, source: string, already_cloned: boolean, };
 
 export type RemovePlanningBlockerRequest = { actor?: PlanningActor, };
+
+export type ReplacedFile = { path: string,
+/**
+ * Project-relative path of the copy of the original.
+ */
+backup: string, };
 
 export type ReportTelemetryRequest = {
 /**
@@ -7078,6 +7462,41 @@ idempotency_key: string, };
 export type RetryAgentDispatchResponse = { dispatch_id: string, trigger_message_id: string, agent_type: AgentType, duplicate: boolean, };
 
 export type RetryConfig = { max_retries: number, backoff: string, };
+
+export type RevalidateAuditRequest = { agent: AgentType, connection_id?: string, tier?: ModelTier | null, };
+
+/**
+ * What "Revalider l'audit" does with one section (KT-1168).
+ */
+export type RevalidationAction = "reanchor" | "agent" | "human" | "manual";
+
+/**
+ * `GET /api/projects/:id/revalidation`: the deterministic part of
+ * "Revalider l'audit", computed without writing anything.
+ */
+export type RevalidationPlan = { sources_state: SourcesState,
+/**
+ * Sections with something to do; clean ones are left out.
+ */
+sections: Array<RevalidationSection>,
+/**
+ * Full audit steps the bounded agent pass runs, in chain order.
+ */
+agent_steps: number[], reanchor_count: number, human_count: number, };
+
+export type RevalidationSection = { doc: string,
+/**
+ * The Full audit step that owns the doc, when one does.
+ */
+step: number | null, action: RevalidationAction, doc_missing: boolean,
+/**
+ * Moved citations outside human sections, re-anchored without an agent.
+ */
+reanchor: Array<CitationStatus>,
+/**
+ * Broken citations outside human sections.
+ */
+broken: Array<CitationStatus>, human: Array<HumanCitationTodo>, };
 
 /**
  * Principal → backend review (ADR §5, KT-319). `comment` is schema-optional but
@@ -7411,6 +7830,16 @@ export type SagaResumeAction = "RebuildCandidate" | "RunValidations" | "ApplyFas
 
 export type SaveApiKeyRequest = { id?: string | null, name: string, provider: string, value: string, };
 
+/**
+ * The saved briefing as the form's answers (KT-1196), read back from
+ * `docs/briefing.md` or the DB notes so the form opens pre-filled.
+ */
+export type SavedBriefing = { purpose: string, team: string, maturity: string, dependencies: string, traps: string, additional: string, project: BriefingProjectAnswers | null, existing_docs: BriefingDocsAnswers | null,
+/**
+ * KT-1193 rules and bans, from their machine copy.
+ */
+project_rules: BriefingProjectRules | null, td_to_tasks: boolean, cross_audit_agents: Array<AgentType>, };
+
 export type ScanConfig = { paths: Array<string>, ignore: Array<string>,
 /**
  * Max depth when scanning for git repos (2–10, default 4)
@@ -7419,12 +7848,36 @@ scan_depth: number, };
 
 export type ScheduleAgentWakeRequest = { delay_seconds: number, reason: string, dedupe_key: string, task_execution_id?: string | null, };
 
+/**
+ * Last scheduled result per project path; the report itself is recomputed
+ * on every read, the cron only records when it last looked and what it saw.
+ */
+export type ScheduledCheck = { checked_at: string, sources_state: SourcesState, broken_count: number, };
+
 export type Section = { heading: string, bytes: number, class: SectionClass,
 /**
  * Why it was classed that way. Kept because a classification a human cannot
  * check is a classification they will either trust blindly or ignore.
  */
 because: string, };
+
+export type SectionCitations = {
+/**
+ * Doc path relative to the project root, as `ai_file` in the drift report.
+ */
+doc: string, recorded_at: string, reason: RecordReason, stale: boolean, doc_missing: boolean,
+/**
+ * The doc was edited since its citations were recorded.
+ */
+doc_changed: boolean, unchanged_count: number,
+/**
+ * Broken and moved citations only; unchanged ones are counted above.
+ */
+citations: Array<CitationStatus>,
+/**
+ * Citations the doc carries now that were never fingerprinted.
+ */
+unrecorded: Array<string>, };
 
 /**
  * What a section is, for the purpose of deciding whether it must be loaded every
@@ -8057,7 +8510,12 @@ raw: string, kind: SourceKind, status: SourceStatus,
 /**
  * Human-readable reason (shown in the pill drawer).
  */
-detail: string, };
+detail: string,
+/**
+ * Tree the cited file was found in. Absent on non-file sources, on
+ * unresolved files and on rows stored before it existed: read as checkout.
+ */
+origin?: SourceOrigin, };
 
 /**
  * One directory of the project source browser, and whether it is all of it.
@@ -8087,7 +8545,29 @@ export type SourceFileNode = { path: string, name: string, is_dir: boolean, chil
 /**
  * What kind of source a `[src: …]` marker points at.
  */
-export type SourceKind = "file" | "url" | "user" | "commit" | "api" | "code_comment" | "inferred" | "hypothesis" | "training_data" | "other";
+export type SourceKind = "file" | "url" | "user" | "commit" | "api" | "deps" | "code_comment" | "inferred" | "hypothesis" | "training_data" | "other";
+
+export type SourceOrigin = { kind: SourceOriginKind,
+/**
+ * Worktree directory name; absent for the checkout.
+ */
+name?: string, };
+
+/**
+ * Which tree held a cited file.
+ */
+export type SourceOriginKind = "checkout" | "worktree";
+
+/**
+ * How a learning source counts (KT-1079 §4).
+ */
+export type SourceProvenance = "human_validated" | "ai_generated";
+
+/**
+ * "Sources clean" badge, recomputed on every read. Distinct from the dated
+ * "audit complete" milestone (`validated_at` in `.kronn.json`).
+ */
+export type SourcesState = "unknown" | "clean" | "needs_reverification";
 
 /**
  * One source's contribution, or a stated reason it has none.
@@ -8750,6 +9230,112 @@ requested_model?: string,
  */
 warning?: CampaignTaskReason, };
 
+export type TdDecideOutcome = { results: Array<TdDecisionResult>, gate: TdValidationGate, };
+
+/**
+ * `POST /api/projects/:id/audit/tds/decide`: settled together or not at all.
+ */
+export type TdDecideRequest = { items: Array<TdDecisionItem>, };
+
+export type TdDecisionItem = { td_id: string, decision: TdReviewDecision, reason?: string, };
+
+export type TdDecisionResult = { td_id: string, state: TdReviewState, };
+
+/**
+ * The Kronn task tracking a sheet (`audit:<project>:<TD-id>`).
+ */
+export type TdLinkedTask = { id: string, reference: string, };
+
+/**
+ * A `file[:line]` the sheet's "Where" section cites.
+ */
+export type TdPointer = { path: string, line: number | null, };
+
+/**
+ * A decision taken from the review screen.
+ */
+export type TdReviewDecision = "confirm" | "accept_decision" | "defer" | "reject";
+
+export type TdReviewItem = { id: string, title: string, area: string,
+/**
+ * `Critical`, `High`, `Medium`, `Low` or `Unknown`.
+ */
+severity: string, status: string, effort: string | null, blast_radius: string | null, state: TdReviewState, problem: string | null, impact: string | null, verification: string | null, pointers: Array<TdPointer>, source_path: string, task: TdLinkedTask | null,
+/**
+ * Messages about this sheet: validation mentions plus its own discussion.
+ */
+talk_count: number, talk_discussion_id: string | null, };
+
+/**
+ * `GET /api/projects/:id/audit/tds`.
+ */
+export type TdReviewList = { items: Array<TdReviewItem>, counts: TdStateCounts, by_severity: Array<TdSeverityCount>, gate: TdValidationGate, validated: boolean, audit_date: string | null, validation_discussion_id: string | null, };
+
+/**
+ * KT-982 — where a tech-debt sheet stands in the human review.
+ */
+export type TdReviewState = "pending" | "confirmed" | "accepted_decision" | "deferred" | "rejected";
+
+export type TdSeverityCount = { severity: string, total: number,
+/**
+ * Pending or deferred.
+ */
+remaining: number, };
+
+export type TdStateCounts = { pending: number, confirmed: number, accepted_decision: number, deferred: number, rejected: number, };
+
+/**
+ * `GET /api/projects/:id/audit/tds/:td_id/talk`.
+ */
+export type TdTalk = { validation_discussion_id: string | null, discussion_id: string | null, messages: Array<TdTalkMessage>, };
+
+export type TdTalkMessage = { id: string, discussion_id: string, source: TdTalkSource, role: string, agent_type: string | null, author: string | null, content: string,
+/**
+ * The content is the lines around the mention, not the whole message.
+ */
+excerpt: boolean, timestamp: string, };
+
+/**
+ * `POST /api/projects/:id/audit/tds/:td_id/talk`: the sheet's own discussion,
+ * created with the first message when it does not exist yet.
+ */
+export type TdTalkRequest = { message: string, targets: Array<MessageTarget>, };
+
+export type TdTalkSource = "validation" | "td";
+
+export type TdTalkStart = { discussion_id: string,
+/**
+ * The message is already its first turn: run it instead of sending it.
+ */
+created: boolean, };
+
+export type TdTaskItem = { td_id: string, theme: string, state: TdTaskState, task_reference: string | null,
+/**
+ * `rejected` or `accepted_decision` for a skipped sheet.
+ */
+reason: string | null, };
+
+/**
+ * `POST /api/projects/:id/audit/td-tasks`: tech-debt sheets turned into tasks.
+ */
+export type TdTasksOutcome = { created: number, already_linked: number, skipped: number, themes: Array<TdTaskTheme>, items: Array<TdTaskItem>, };
+
+/**
+ * What the conversion did with one tech-debt sheet (KT-1167).
+ */
+export type TdTaskState = "created" | "already_linked" | "skipped";
+
+/**
+ * The parent task grouping the sheets of one theme.
+ */
+export type TdTaskTheme = { theme: string, label: string, task_reference: string, created: boolean, };
+
+/**
+ * The rule that lets a project be validated without the discussion marker:
+ * every Critical and High sheet settled (a deferral does not count).
+ */
+export type TdValidationGate = { blocking_total: number, blocking_settled: number, met: boolean, };
+
 export type TechDebtItem = { id: string, problem: string, area: string, severity: string, };
 
 /**
@@ -8780,11 +9366,56 @@ paths: Array<string>, };
 
 export type TemplateMergeRequest = { base?: MergeBase, };
 
+/**
+ * Where a merge stands, read from git without fetching or writing anything.
+ */
+export type TemplateMergeState = { branch: string, worktree_exists: boolean, worktree_path: string | null, branch_exists: boolean,
+/**
+ * Commits on the merge branch that neither the checkout's current branch
+ * nor the remote default branch contains yet.
+ */
+branch_ahead_commits: number,
+/**
+ * Files proposed in the merge worktree and not accepted yet.
+ */
+pending_files: number,
+/**
+ * `None` when the checkout is detached or not a git repository.
+ */
+checkout_branch: string | null, };
+
 export type TemplateMergeView = { docs_dir: string, base: MergeBase, base_ref: string, worktree_path: string | null, branch: string | null, resumed: boolean, correspondence: Array<Correspondence>, files: Array<MergeFileDiff>, existing_targets: Array<string>,
 /**
  * Docs that only exist untracked in the checkout: a worktree cannot see them.
  */
-untracked_in_checkout: Array<string>, table_markdown: string, };
+untracked_in_checkout: Array<string>, table_markdown: string, merge: TemplateMergeState, };
+
+export type TemplateReinstallPlan = { docs_dir: string, files: Array<ReinstallFile>,
+/**
+ * An audit holds the project's lease: the reinstall would be refused.
+ */
+audit_running: boolean, };
+
+export type TemplateReinstallReport = {
+/**
+ * Project-relative; `None` when nothing was replaced.
+ */
+backup_dir: string | null, replaced: Array<ReplacedFile>, created: Array<string>, unchanged: Array<string>,
+/**
+ * Differing files that were not selected, left as they are.
+ */
+skipped: Array<string>,
+/**
+ * Human-validated docs this reinstall rewrote, now to reconfirm.
+ */
+to_reconfirm: Array<string>, };
+
+export type TemplateReinstallRequest = {
+/**
+ * Existing files to replace. `None`: the damaged ones only. Missing
+ * files are always created; a path the plan does not offer is refused.
+ */
+paths?: Array<string> | null, };
 
 export type TestApiCallRequest = {
 /**
@@ -9289,6 +9920,8 @@ model_breakdowns: Array<UsageModelBreakdown>, input_tokens: number, output_token
  * Aggregate totals across all rows.
  */
 export type UsageTotals = { input_tokens: number, output_tokens: number, cache_creation_tokens: number, cache_read_tokens: number, total_tokens: number, total_cost: number, };
+
+export type ValidationReason = "audit_validation" | "validation_card" | "acknowledged" | "revalidation" | "confirmed" | "human_owned";
 
 /**
  * One validation to run on the candidate before the parent is advanced (§6).

@@ -13,7 +13,8 @@
 //    button HTML violation that this fix removed).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent, act } from '@testing-library/react';
+import { render, fireEvent, act, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock());
@@ -26,7 +27,8 @@ vi.mock('../../lib/I18nContext', () => ({
 vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 
 import { ProjectCard } from '../ProjectCard';
-import type { Project, AgentDetection } from '../../types/generated';
+import type { Project, AgentDetection, Discussion } from '../../types/generated';
+import { projects as projectsApi } from '../../lib/api';
 
 const noop = () => {};
 
@@ -60,13 +62,20 @@ const AGENT: AgentDetection = {
   rtk_hook_configured: false,
 };
 
-function renderCard(opts: { onToggleOpen?: () => void } = {}) {
+function renderCard(opts: {
+  onToggleOpen?: () => void;
+  project?: Partial<Project>;
+  isOpen?: boolean;
+  discussions?: Discussion[];
+  onOpenDiscussion?: (id: string) => void;
+  onNavigate?: (page: string) => void;
+} = {}) {
   return render(
     <ProjectCard
-      project={PROJECT}
-      isOpen={false}
+      project={{ ...PROJECT, ...opts.project }}
+      isOpen={opts.isOpen ?? false}
       onToggleOpen={opts.onToggleOpen ?? noop}
-      discussions={[]}
+      discussions={opts.discussions ?? []}
       driftStatus={undefined}
       agents={[AGENT]}
       allSkills={[]}
@@ -74,10 +83,10 @@ function renderCard(opts: { onToggleOpen?: () => void } = {}) {
       workflows={[]}
       configLanguage="fr"
       toast={vi.fn()}
-      onNavigate={noop}
+      onNavigate={opts.onNavigate ?? noop}
       onSetDiscPrefill={noop}
       onAutoRunDiscussion={noop}
-      onOpenDiscussion={noop}
+      onOpenDiscussion={opts.onOpenDiscussion ?? noop}
       onRefetch={noop}
       onRefetchDiscussions={noop}
       onRefetchSkills={noop}
@@ -133,5 +142,42 @@ describe('ProjectCard — header accessibility', () => {
     const header = document.querySelector('.dash-card-header') as HTMLElement;
     act(() => { fireEvent.keyDown(header, { key: 'Tab' }); });
     expect(onToggleOpen).not.toHaveBeenCalled();
+  });
+
+  describe('clickable badges (KT-1072)', () => {
+    it('the anti-hallu inject badge is a button activated by Enter, without toggling the card', async () => {
+      vi.mocked(projectsApi.antiHalluStatus).mockResolvedValue({ present: false, file_exists: true });
+      const onToggleOpen = vi.fn();
+      renderCard({ onToggleOpen, isOpen: true, project: { audit_status: 'Audited' } });
+      const badge = await screen.findByTestId('project-anti-hallu-inject');
+      expect(badge.tagName).toBe('BUTTON');
+      badge.focus();
+      await userEvent.keyboard('{Enter}');
+      await waitFor(() => expect(projectsApi.injectAntiHallu).toHaveBeenCalledWith('p-1'));
+      expect(onToggleOpen).not.toHaveBeenCalled();
+    });
+
+    it('the validation badge opens the validation discussion from the keyboard', async () => {
+      const onOpenDiscussion = vi.fn();
+      const onNavigate = vi.fn();
+      const validation = { id: 'd-val', project_id: 'p-1', title: 'Validation audit AI', archived: false } as unknown as Discussion;
+      renderCard({ isOpen: true, project: { audit_status: 'Audited' }, discussions: [validation], onOpenDiscussion, onNavigate });
+      const badge = await screen.findByTestId('project-validation-badge');
+      expect(badge.tagName).toBe('BUTTON');
+      badge.focus();
+      await userEvent.keyboard(' ');
+      expect(onOpenDiscussion).toHaveBeenCalledWith('d-val');
+      expect(onNavigate).toHaveBeenCalledWith('discussions');
+    });
+
+    it('the tech-debt badge is a keyboard-reachable button', async () => {
+      const onToggleOpen = vi.fn();
+      renderCard({ onToggleOpen, project: { audit_status: 'Audited', tech_debt_count: 3 } });
+      const badge = await screen.findByTestId('project-tech-debt-badge');
+      expect(badge.tagName).toBe('BUTTON');
+      badge.focus();
+      await userEvent.keyboard('{Enter}');
+      expect(onToggleOpen).toHaveBeenCalledTimes(1);
+    });
   });
 });

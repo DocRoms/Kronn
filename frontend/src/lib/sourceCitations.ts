@@ -8,6 +8,7 @@
 //
 // This only splits the text. It decides nothing about whether a citation is
 // good — the backend did that, and its verdict travels on the message.
+import type { SourceCheck } from '../types/generated';
 
 /** One `[src: …]` marker found in a run of text. */
 export interface SourceCitation {
@@ -94,4 +95,31 @@ export function splitSourceCitations(text: string): CitationPart[] {
 export function hasSourceCitation(text: string): boolean {
   MARKER.lastIndex = 0;
   return MARKER.test(text);
+}
+
+/**
+ * KT-1184 — the worktree that held a cited file the checkout does not have yet.
+ * `null` for a checkout file, and for rows stored before the origin existed.
+ */
+export function laneOf(source: SourceCheck): string | null {
+  return source.origin?.kind === 'worktree' ? (source.origin.name ?? '') : null;
+}
+
+/** Verified in an unmerged worktree: the file exists, just not merged yet. */
+export function isLaneVerified(source: SourceCheck): boolean {
+  return source.status === 'verified' && laneOf(source) !== null;
+}
+
+/** Verified in the checkout: the green case. */
+export function isCheckoutVerified(source: SourceCheck): boolean {
+  return source.status === 'verified' && laneOf(source) === null;
+}
+
+/** Chip states. `lane` is a file found only in an unmerged worktree. */
+export type SourceChipState = 'verified' | 'lane' | 'suspect' | 'unknown';
+
+export function chipStateFor(verdict: SourceCheck | undefined): SourceChipState {
+  if (!verdict || verdict.status === 'unchecked') return 'unknown';
+  if (verdict.status !== 'verified') return 'suspect';
+  return laneOf(verdict) !== null ? 'lane' : 'verified';
 }

@@ -120,6 +120,11 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
         id: "kronn-doc-author",
         content: include_str!("../skills/kronn-doc-author.md"),
     },
+    // KT-1168 — attached to the agent pass of « Revalider l'audit ».
+    BuiltinSkill {
+        id: "audit-revalidation",
+        content: include_str!("../skills/audit-revalidation.md"),
+    },
     // Business
     BuiltinSkill {
         id: "seo",

@@ -3792,63 +3792,6 @@ pub fn ensure_local_exclude(project_path: &str, pattern: &str) {
     }
 }
 
-/// Ensure a pattern is present in the project's .gitignore (public API).
-///
-/// Audit-only (`api/audit/full.rs`, KT-1165): every other caller uses
-/// [`ensure_local_exclude`]. Remove with the audit migration.
-pub fn ensure_gitignore_public(project_path: &str, pattern: &str) {
-    ensure_gitignore(project_path, pattern);
-}
-
-/// Ensure a pattern is present in the project's .gitignore.
-/// Creates the file if it doesn't exist. Appends the pattern if missing.
-fn ensure_gitignore(project_path: &str, pattern: &str) {
-    let resolved = resolve_host_path(project_path);
-    let gitignore = Path::new(&resolved).join(".gitignore");
-
-    // no-follow (Codex A2): a symlinked .gitignore — dangling included —
-    // would route the create+append OUTSIDE the project. Leave it intact.
-    if std::fs::symlink_metadata(&gitignore)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        tracing::warn!(
-            "{} is a symlink — skipping gitignore update",
-            gitignore.display()
-        );
-        return;
-    }
-
-    let content = std::fs::read_to_string(&gitignore).unwrap_or_default();
-
-    // Check if pattern is already present (exact line match)
-    if content.lines().any(|line| line.trim() == pattern) {
-        return;
-    }
-
-    // Append
-    let addition = if content.is_empty() || content.ends_with('\n') {
-        format!("{}\n", pattern)
-    } else {
-        format!("\n{}\n", pattern)
-    };
-
-    if let Err(e) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&gitignore)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, addition.as_bytes()))
-    {
-        tracing::warn!(
-            "Failed to update .gitignore at {}: {}",
-            gitignore.display(),
-            e
-        );
-    } else {
-        tracing::info!("Added '{}' to {}", pattern, gitignore.display());
-    }
-}
-
 // ─── MCP context files ──────────────────────────────────────────────────────
 
 /// Sub-path of the project's docs folder where per-MCP usage context lives.

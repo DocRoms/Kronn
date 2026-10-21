@@ -25,6 +25,8 @@ pub struct DriftResult {
     pub stale_sections: Vec<StaleSection>,
     pub fresh_sections: Vec<String>,
     pub total_sections: usize,
+    pub sources_state: crate::core::citation_drift::SourcesState,
+    pub broken_citations: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -546,11 +548,24 @@ fn compute_step_checksums_impl(
 
 /// Write a `checksums.json` to the project's docs folder (post-pivot
 /// `docs/`, legacy `ai/`). Path-agnostic via `detect_docs_dir`.
+/// `rewritten_docs`: the docs a step of the run proved it rewrote.
 pub fn write_checksums_file(
     project_path: &Path,
     mappings: &[ChecksumMapping],
+    rewritten_docs: &[String],
 ) -> Result<(), String> {
-    publish_checksums_file(project_path, mappings).map(|_| ())
+    publish_checksums_file(project_path, mappings)?;
+    record_citations_after_audit(project_path, rewritten_docs);
+    Ok(())
+}
+
+/// A new baseline also re-fingerprints the citations of the docs the run
+/// rewrote. Best effort: a stale `citations.json` reads as "to re-verify",
+/// never as clean.
+fn record_citations_after_audit(project_path: &Path, rewritten_docs: &[String]) {
+    if let Err(e) = crate::core::citation_drift::record_after_audit(project_path, rewritten_docs) {
+        tracing::warn!("Citation fingerprints not refreshed after the audit: {e}");
+    }
 }
 
 fn publish_checksums_file(
@@ -619,6 +634,7 @@ fn write_checksums_file_fail_closed_with_after<F>(
     project_path: &Path,
     mappings: &[ChecksumMapping],
     expected_source_tree: Option<&str>,
+    rewritten_docs: &[String],
     after_publish: F,
 ) -> Result<(), String>
 where
@@ -654,6 +670,7 @@ where
             )),
         };
     }
+    record_citations_after_audit(project_path, rewritten_docs);
     Ok(())
 }
 
@@ -663,11 +680,13 @@ pub fn write_checksums_file_fail_closed(
     project_path: &Path,
     mappings: &[ChecksumMapping],
     expected_source_tree: Option<&str>,
+    rewritten_docs: &[String],
 ) -> Result<(), String> {
     write_checksums_file_fail_closed_with_after(
         project_path,
         mappings,
         expected_source_tree,
+        rewritten_docs,
         || std::thread::sleep(SOURCE_TREE_QUIET_PERIOD),
     )
 }
@@ -686,6 +705,7 @@ where
         project_path,
         mappings,
         expected_source_tree,
+        &[],
         after_publish,
     )
 }
@@ -722,6 +742,7 @@ pub fn read_checksums_file_strict(project_path: &Path) -> Result<Option<Checksum
 
 /// Check whether any audited sources have drifted since the last checksums were recorded.
 pub fn check_drift(project_path: &Path) -> DriftResult {
+    let citations = crate::core::citation_drift::check(project_path);
     let checksums_file = match read_checksums_file(project_path) {
         Some(f) => f,
         None => {
@@ -730,6 +751,8 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
                 stale_sections: Vec::new(),
                 fresh_sections: Vec::new(),
                 total_sections: 0,
+                sources_state: citations.sources_state,
+                broken_citations: citations.broken_count,
             };
         }
     };
@@ -739,6 +762,7 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
     let source_tree_snapshot = checksums_file
         .mappings
         .iter()
+        .filter(|mapping| citations.section(&mapping.ai_file).is_none())
         .any(|mapping| {
             mapping
                 .sources
@@ -748,6 +772,20 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
         .then(|| git_source_tree_fingerprint(project_path));
 
     for mapping in &checksums_file.mappings {
+        // A section with recorded citations is judged by its cited lines only:
+        // a commit elsewhere in the tree no longer makes it stale.
+        if let Some(section) = citations.section(&mapping.ai_file) {
+            if section.stale {
+                stale_sections.push(StaleSection {
+                    ai_file: mapping.ai_file.clone(),
+                    audit_step: mapping.audit_step,
+                    changed_sources: crate::core::citation_drift::changed_sources(section),
+                });
+            } else {
+                fresh_sections.push(format!("{}#step{}", mapping.ai_file, mapping.audit_step));
+            }
+            continue;
+        }
         let patterns: Vec<&str> = mapping.sources.iter().map(|s| s.as_str()).collect();
         let current = match &source_tree_snapshot {
             Some(snapshot) => {
@@ -796,6 +834,8 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
         stale_sections,
         fresh_sections,
         total_sections: total,
+        sources_state: citations.sources_state,
+        broken_citations: citations.broken_count,
     }
 }
 
@@ -804,7 +844,7 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
 /// project, so recomputing it on each request cost seconds.
 const DRIFT_REUSE: Duration = Duration::from_secs(60);
 
-type DriftStamp = Option<std::time::SystemTime>;
+type DriftStamp = (Option<std::time::SystemTime>, Option<std::time::SystemTime>);
 
 struct CachedDrift {
     computed_at: std::time::Instant,
@@ -821,9 +861,14 @@ static DRIFT_GATES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<PathBuf, DriftGate>>,
 > = std::sync::LazyLock::new(Default::default);
 
+/// Both manifests: an acknowledgement rewrites `citations.json` only.
 fn manifest_stamp(project_path: &Path) -> DriftStamp {
+    let modified = |path: PathBuf| std::fs::metadata(path).and_then(|m| m.modified()).ok();
     let manifest = crate::core::scanner::detect_docs_dir(project_path).join("checksums.json");
-    std::fs::metadata(manifest).and_then(|m| m.modified()).ok()
+    (
+        modified(manifest),
+        modified(crate::core::citation_drift::citations_path(project_path)),
+    )
 }
 
 /// `check_drift`, reused for `DRIFT_REUSE` while the audit manifest is

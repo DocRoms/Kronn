@@ -22,6 +22,7 @@ pub mod resources;
 pub mod skill_migration;
 pub mod template;
 pub mod template_merge;
+pub mod template_reinstall;
 pub mod used_skills;
 
 pub use anti_hallu_inject::*;
@@ -55,17 +56,32 @@ pub use used_skills::{used_skill_file, used_skills};
 /// on-demand. Returns `None` when there are no companion repos so
 /// the caller can `unlink` the file (avoids stub clutter).
 pub(crate) fn format_linked_repos_for_docs(repos: &[LinkedRepo]) -> Option<String> {
-    if repos.is_empty() {
-        return None;
+    format_linked_repos_for_docs_with(repos, &crate::core::linked_repo_docs::status_of)
+}
+
+/// The entry point found in one linked repo, as stated to an agent (KT-999).
+fn entry_point_phrase(repo: &LinkedRepo, status: &LinkedRepoDocStatus) -> String {
+    let location = repo.location.trim().trim_end_matches('/');
+    let at = |path: &Option<String>| format!("`{location}/{}`", path.as_deref().unwrap_or(""));
+    match status.ai_doc {
+        LinkedRepoAiDoc::AgentsMd => format!("AI doc: {}", at(&status.doc_path)),
+        LinkedRepoAiDoc::LegacyAiIndex => {
+            format!("legacy AI doc: {}", at(&status.doc_path))
+        }
+        LinkedRepoAiDoc::ReadmeOnly => {
+            format!("no AI doc, README only: {}", at(&status.doc_path))
+        }
+        LinkedRepoAiDoc::NoAiDoc => "no AI doc and no README found".into(),
+        LinkedRepoAiDoc::Remote => "remote, its docs were not checked".into(),
+        LinkedRepoAiDoc::Missing => "path not found on this machine".into(),
     }
-    let mut out = String::from(
-        "# Linked repositories\n\n\
-         > Companion repos for cross-project context. Read this file ONLY when the current task references something not in this repo.\n\n\
-         ## How to read a linked repo\n\n\
-         Start with `<repo-path>/docs/AGENTS.md` (same Kronn entry point used by this repo).\n\
-         Only fall back to file scans / READMEs if AGENTS.md doesn't answer.\n\n\
-         ## Repositories\n\n"
-    );
+}
+
+fn linked_repo_lines(
+    repos: &[LinkedRepo],
+    status_of: &dyn Fn(&LinkedRepo) -> LinkedRepoDocStatus,
+) -> String {
+    let mut out = String::new();
     for r in repos {
         out.push_str(&format!(
             "- **{name}** ({kind}) → `{location}`",
@@ -76,8 +92,29 @@ pub(crate) fn format_linked_repos_for_docs(repos: &[LinkedRepo]) -> Option<Strin
         if !r.description.is_empty() {
             out.push_str(&format!(" — {}", r.description));
         }
+        out.push_str(&format!(" [{}]", entry_point_phrase(r, &status_of(r))));
         out.push('\n');
     }
+    out
+}
+
+const HOW_TO_READ: &str = "Each entry says which context entry point Kronn found in that repo: start there. `docs/AGENTS.md` is Kronn's entry point, but a repo may have only a legacy `ai/index.md`, a README, or nothing; only fall back to file scans when the entry point given doesn't answer.";
+
+pub(crate) fn format_linked_repos_for_docs_with(
+    repos: &[LinkedRepo],
+    status_of: &dyn Fn(&LinkedRepo) -> LinkedRepoDocStatus,
+) -> Option<String> {
+    if repos.is_empty() {
+        return None;
+    }
+    let mut out = format!(
+        "# Linked repositories\n\n\
+         > Companion repos for cross-project context. Read this file ONLY when the current task references something not in this repo.\n\n\
+         ## How to read a linked repo\n\n\
+         {HOW_TO_READ}\n\n\
+         ## Repositories\n\n"
+    );
+    out.push_str(&linked_repo_lines(repos, status_of));
     Some(out)
 }
 
@@ -125,27 +162,23 @@ pub(crate) fn sync_linked_repos_doc_in(
 /// model provider, so nothing else about the machine's other Kronn projects is
 /// ever rendered into an agent prompt: there is no pool of candidates.
 pub(crate) fn format_linked_repos_for_prompt(repos: &[LinkedRepo]) -> Option<String> {
+    format_linked_repos_for_prompt_with(repos, &crate::core::linked_repo_docs::status_of)
+}
+
+pub(crate) fn format_linked_repos_for_prompt_with(
+    repos: &[LinkedRepo],
+    status_of: &dyn Fn(&LinkedRepo) -> LinkedRepoDocStatus,
+) -> Option<String> {
     if repos.is_empty() {
         return None;
     }
-    let mut out = String::from(
+    let mut out = format!(
         "## Linked repositories (companion repos)\n\
          This project has companion repos that you may need to read for cross-project context (frontend ↔ API, app ↔ IaC, etc.). When a task references a concept that isn't in the current repo, check the relevant companion before asking the user — the path/URL is given below.\n\
          \n\
-         **How to read a linked repo** — start with `<repo-path>/docs/AGENTS.md` (Kronn's canonical project-context entry point — every Kronn-bootstrapped repo has one). Only fall back to random file scans / READMEs if AGENTS.md doesn't answer your question. This saves you parse cycles AND ensures you use the same context layer the repo's own agents use.\n\n"
+         **How to read a linked repo** — {HOW_TO_READ}\n\n"
     );
-    for r in repos {
-        out.push_str(&format!(
-            "- **{name}** ({kind}) → `{location}`",
-            name = r.name,
-            kind = r.kind,
-            location = r.location,
-        ));
-        if !r.description.is_empty() {
-            out.push_str(&format!(" — {}", r.description));
-        }
-        out.push('\n');
-    }
+    out.push_str(&linked_repo_lines(repos, status_of));
     Some(out)
 }
 
@@ -393,8 +426,69 @@ mod tests {
         assert!(block.contains("/home/priol/Repos/backend-api"));
         assert!(block.contains("GraphQL schema lives here"));
         // Entry without description has no trailing "— "
-        assert!(block.contains("**infra** (iac) → `https://github.com/org/infra`\n"));
+        assert!(block.contains(
+            "**infra** (iac) → `https://github.com/org/infra` [remote, its docs were not checked]\n"
+        ));
         assert!(!block.contains("**infra** (iac) → `https://github.com/org/infra` —"));
+    }
+
+    fn status(ai_doc: LinkedRepoAiDoc, doc_path: Option<&str>) -> LinkedRepoDocStatus {
+        LinkedRepoDocStatus {
+            id: String::new(),
+            ai_doc,
+            doc_path: doc_path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_prompt_states_the_entry_point_each_linked_repo_really_has() {
+        let repos = [
+            lr("api", "api", "/r/api/", ""),
+            lr("legacy", "other", "/r/legacy", ""),
+            lr("lib", "shared-lib", "/r/lib", ""),
+            lr("bare", "other", "/r/bare", ""),
+        ];
+        let block = format_linked_repos_for_prompt_with(&repos, &|r| match r.name.as_str() {
+            "api" => status(LinkedRepoAiDoc::AgentsMd, Some("docs/AGENTS.md")),
+            "legacy" => status(LinkedRepoAiDoc::LegacyAiIndex, Some("ai/index.md")),
+            "lib" => status(LinkedRepoAiDoc::ReadmeOnly, Some("README.md")),
+            _ => status(LinkedRepoAiDoc::NoAiDoc, None),
+        })
+        .unwrap();
+        assert!(
+            block.contains("[AI doc: `/r/api/docs/AGENTS.md`]"),
+            "{block}"
+        );
+        assert!(block.contains("[legacy AI doc: `/r/legacy/ai/index.md`]"));
+        assert!(block.contains("[no AI doc, README only: `/r/lib/README.md`]"));
+        assert!(block.contains("**bare** (other) → `/r/bare` [no AI doc and no README found]"));
+        // The false blanket claim is gone.
+        assert!(!block.contains("every Kronn-bootstrapped repo has one"));
+        assert!(!block.contains("/r/bare/docs/AGENTS.md"));
+    }
+
+    #[test]
+    fn the_linked_repos_doc_reads_the_real_repositories() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let with_doc = dir.path().join("with");
+        let readme_only = dir.path().join("readme");
+        std::fs::create_dir_all(with_doc.join("docs")).unwrap();
+        std::fs::write(with_doc.join("docs/AGENTS.md"), "x").unwrap();
+        std::fs::create_dir_all(&readme_only).unwrap();
+        std::fs::write(readme_only.join("README.md"), "x").unwrap();
+        let body = format_linked_repos_for_docs(&[
+            lr("with", "api", with_doc.to_str().unwrap(), ""),
+            lr("readme", "api", readme_only.to_str().unwrap(), ""),
+        ])
+        .unwrap();
+        assert!(body.contains(&format!(
+            "[AI doc: `{}/docs/AGENTS.md`]",
+            with_doc.display()
+        )));
+        assert!(body.contains(&format!(
+            "[no AI doc, README only: `{}/README.md`]",
+            readme_only.display()
+        )));
     }
 
     #[test]

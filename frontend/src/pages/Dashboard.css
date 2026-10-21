@@ -588,6 +588,14 @@ html[data-density="large"] .dash-main {
   background: rgba(var(--kr-warning-rgb), 0.2);
 }
 
+/* Clickable badges are buttons for keyboard users; keep the span look. */
+button.dash-badge-orange,
+button.dash-badge-tech-debt {
+  font-family: inherit;
+  line-height: inherit;
+  cursor: pointer;
+}
+
 /* Docs section state banners (0.8.1): shown inside the AiDocViewer
    when audit_status isn't yet Validated. Tone matches the message
    urgency — info for "you can audit", warn for "validate to finalize". */
@@ -1977,6 +1985,31 @@ html[data-density="large"] .dash-main {
   color: var(--kr-text-primary);
 }
 
+.briefing-form label.briefing-form-option {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+}
+
+.briefing-form-option > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.briefing-form-option-hint {
+  color: var(--kr-text-secondary);
+}
+
+.briefing-experimental {
+  padding: 0 6px;
+  border: 1px solid var(--kr-warning);
+  border-radius: 999px;
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}
+
 .briefing-form textarea {
   background: var(--kr-bg-elevated);
   border: 1px solid var(--kr-border-soft);
@@ -2019,6 +2052,203 @@ html[data-density="large"] .dash-main {
   color: var(--kr-accent-ink) !important;
   font-weight: 600;
 }
+
+/* KT-1173 — closed project cards (one choice per card, like a kronn-question). */
+.briefing-project {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  padding-top: var(--kr-sp-3);
+  border-top: 1px solid var(--kr-border-soft);
+}
+
+.briefing-project h4 {
+  margin: 0;
+}
+
+.briefing-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-width: 0;
+}
+
+.briefing-card legend {
+  padding: 0;
+  margin-bottom: var(--kr-sp-2);
+  font-size: var(--kr-fs-xs);
+}
+
+.briefing-card-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+}
+
+.briefing-card-option {
+  padding: 4px 10px;
+  font-size: var(--kr-fs-xs);
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 999px;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.briefing-card-option.is-selected {
+  background: var(--kr-accent-bg);
+  border-color: var(--kr-accent-ink);
+  color: var(--kr-accent-ink);
+  font-weight: 600;
+}
+
+.briefing-card-option:focus-visible,
+.briefing-card-input:focus {
+  outline: 1px solid var(--kr-accent-ink);
+}
+
+.briefing-card-input {
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+  min-width: 0;
+}
+
+/* KT-1196 — the saved briefing arrived after a change. */
+.briefing-form-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: 4px;
+  background: var(--kr-bg-elevated);
+  font-size: var(--kr-fs-sm);
+}
+
+/* KT-1196 — optional note under a project fact. */
+.briefing-card-note {
+  font-size: var(--kr-fs-xs);
+  border-style: dashed;
+}
+
+.briefing-card-person {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--kr-sp-2);
+}
+
+/* KT-999 — existing documentation locations in the briefing. */
+.briefing-doc {
+  padding: var(--kr-sp-2) 0;
+  border-top: 1px dashed var(--kr-border-soft);
+}
+
+.briefing-doc legend.briefing-doc-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.briefing-doc-include {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.briefing-doc-kind,
+.briefing-doc-date {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+}
+
+.briefing-doc-extra,
+.briefing-doc-manual {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.briefing-doc-extra .briefing-card-input,
+.briefing-doc-manual .briefing-card-input {
+  flex: 1 1 200px;
+}
+
+.briefing-doc-sot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--kr-fs-xs);
+}
+
+.briefing-doc-error {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-error);
+}
+
+/* KT-1193 — rules and bans editor */
+.briefing-rule {
+  padding: var(--kr-sp-2) 0;
+  border-top: 1px dashed var(--kr-border-soft);
+}
+
+.briefing-rule-head,
+.briefing-rule-pattern {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.briefing-rule-pattern {
+  margin-top: var(--kr-sp-2);
+}
+
+.briefing-rule-head .briefing-rule-text,
+.briefing-rule-pattern .briefing-card-input {
+  flex: 1 1 200px;
+}
+
+.briefing-rule-pattern select.briefing-card-input {
+  flex: 0 0 auto;
+}
+
+.briefing-rule-remove {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  color: var(--kr-text-muted);
+  cursor: pointer;
+}
+
+.briefing-rule-remove:hover {
+  color: var(--kr-error);
+}
+
+/* KT-999 — which AI doc a linked repo really has. */
+.linked-repo-ai-doc {
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: var(--kr-fs-xs);
+}
+
+.linked-repo-ai-doc-ok { color: var(--kr-success); }
+.linked-repo-ai-doc-partial { color: var(--kr-warning); }
+.linked-repo-ai-doc-none { color: var(--kr-text-muted); }
 
 /* ── Running-agents badge (2026-06-24) ───────────────────────────────────
    Persistent nav indicator: agents still running server-side (incl.

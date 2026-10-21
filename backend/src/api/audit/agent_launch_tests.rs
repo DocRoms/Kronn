@@ -18,6 +18,10 @@ mod coverage_repair_tests;
 #[path = "reaudit_unchanged_tests.rs"]
 mod reaudit_unchanged_tests;
 
+#[cfg(unix)]
+#[path = "cross_audit_e2e_tests.rs"]
+mod cross_audit_e2e_tests;
+
 fn sse(frames: &[String]) -> String {
     frames
         .iter()
@@ -410,6 +414,8 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
                 kind: None,
                 custom_prompt: None,
                 resume_run_id: Some("before-repair".into()),
+                retry_steps: None,
+                fresh: None,
             }),
         )
         .await
@@ -461,10 +467,23 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
         );
         let repaired =
             std::fs::read_to_string(project.path().join("docs/tech-debt/TD-repair.md")).unwrap();
+        // The rewrite that dropped the human section stays (KT-1079): the
+        // doc waits for its owner to reconfirm, with the human text as before.
         assert!(
-            repaired.contains(human.trim_end()),
-            "human section restored before validation: {repaired:?}"
+            !repaired.contains(human.trim_end()),
+            "never reverted: {repaired:?}"
         );
+        let provenance = crate::core::doc_provenance::report(project.path(), true).unwrap();
+        let marked = provenance
+            .docs
+            .iter()
+            .find(|d| d.doc == "docs/tech-debt/TD-repair.md")
+            .unwrap_or_else(|| panic!("{provenance:?}"));
+        assert!(marked.changes[0]
+            .before
+            .as_deref()
+            .unwrap()
+            .contains("Human decision remains."));
         assert_eq!(repaired.contains("invented.rs"), !correct);
         assert!(
             std::fs::read_dir(
@@ -614,6 +633,8 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
             kind: None,
             custom_prompt: None,
             resume_run_id: Some("before-unavailable".into()),
+            retry_steps: None,
+            fresh: None,
         }),
     )
     .await
@@ -1198,6 +1219,8 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
                 kind: None,
                 custom_prompt: None,
                 resume_run_id: None,
+                retry_steps: None,
+                fresh: None,
             }),
         )
         .await
@@ -1412,6 +1435,8 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
             kind: None,
             custom_prompt: None,
             resume_run_id: Some("run-prev".into()),
+            retry_steps: None,
+            fresh: None,
         }),
     )
     .await
@@ -1558,6 +1583,8 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
             kind: None,
             custom_prompt: None,
             resume_run_id: Some("run-prev".into()),
+            retry_steps: None,
+            fresh: None,
         }),
     )
     .await
@@ -1831,4 +1858,105 @@ fn an_http_run_feeds_the_recent_actions_and_its_label_by_category_only() {
         !all.contains("hunter2") && !all.contains("SENTINEL"),
         "{all}"
     );
+}
+
+/// KT-1000 — the version-source cascade reads only what the launch establishes.
+#[test]
+fn version_reach_follows_what_each_launch_mounts() {
+    let claude = AgentType::ClaudeCode;
+    assert_eq!(
+        version_reach(true, false, true, &AgentType::LiteLlm),
+        VersionReach {
+            mcp: None,
+            web: false
+        }
+    );
+    assert_eq!(
+        version_reach(false, true, true, &claude),
+        VersionReach {
+            mcp: Some(true),
+            web: false
+        }
+    );
+    assert_eq!(
+        version_reach(false, false, true, &claude),
+        VersionReach {
+            mcp: Some(false),
+            web: true
+        }
+    );
+    assert_eq!(
+        version_reach(false, false, false, &claude),
+        VersionReach {
+            mcp: Some(false),
+            web: false
+        }
+    );
+    assert_eq!(
+        version_reach(false, false, true, &AgentType::Codex),
+        VersionReach {
+            mcp: None,
+            web: false
+        }
+    );
+}
+
+#[tokio::test]
+async fn version_source_inputs_read_the_mcp_config_the_agent_is_handed() {
+    use crate::core::version_sources::{select_version_source, VersionSource};
+    let state = litellm_state("http://127.0.0.1:1").await;
+    let project = tempfile::tempdir().unwrap();
+    let path = project.path();
+    let path_str = path.to_string_lossy().to_string();
+    let stdio =
+        r#"{"mcpServers":{"context7":{"command":"npx","args":["-y","@upstash/context7-mcp"]}}}"#;
+    let remote =
+        r#"{"mcpServers":{"context7":{"type":"http","url":"https://mcp.context7.com/mcp"}}}"#;
+
+    let acp = AuditAgentLauncher::with_route(
+        &state,
+        &AgentType::ClaudeCode,
+        crate::acp::AcpProductionRoute::AdaptedAcp,
+    )
+    .await;
+    let direct = AuditAgentLauncher::with_route(
+        &state,
+        &AgentType::ClaudeCode,
+        crate::acp::AcpProductionRoute::DirectCliMigration,
+    )
+    .await;
+    let http = AuditAgentLauncher::new(&state, &AgentType::LiteLlm).await;
+    let pick = |l: &AuditAgentLauncher, watch| {
+        select_version_source(l.version_source_inputs(
+            &AgentType::ClaudeCode,
+            path,
+            &path_str,
+            watch,
+        ))
+    };
+
+    std::fs::write(path.join(".mcp.json"), stdio).unwrap();
+    assert_eq!(pick(&acp, true), VersionSource::Context7);
+    assert_eq!(pick(&direct, true), VersionSource::Context7);
+    assert_eq!(
+        select_version_source(http.version_source_inputs(
+            &AgentType::LiteLlm,
+            path,
+            &path_str,
+            true
+        )),
+        VersionSource::DependencyWatch
+    );
+
+    std::fs::write(path.join(".mcp.json"), remote).unwrap();
+    assert_eq!(
+        pick(&acp, true),
+        VersionSource::DependencyWatch,
+        "an ACP session drops url-only servers"
+    );
+    assert_eq!(pick(&direct, false), VersionSource::Context7);
+
+    std::fs::remove_file(path.join(".mcp.json")).unwrap();
+    assert_eq!(pick(&direct, false), VersionSource::Web);
+    assert_eq!(pick(&acp, false), VersionSource::None);
 }

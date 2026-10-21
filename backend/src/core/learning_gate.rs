@@ -5,6 +5,7 @@
 //! provides the verdicts/heuristics those decisions read.
 
 use crate::core::anti_halluc::{verify_source_marker_roots, SourceStatus};
+use crate::core::doc_provenance::SourceProvenance;
 use crate::models::learnings::Evidence;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -17,42 +18,66 @@ pub struct EvidenceCheck {
     pub reference: String,
     pub status: String, // SourceStatus debug name, or "Unchecked" for non-file kinds
     pub fabricated: bool,
+    /// A source inside the project docs: human-validated or AI-generated (KT-1079).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub doc_provenance: Option<SourceProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvidenceReport {
     pub checks: Vec<EvidenceCheck>,
     pub any_fabricated: bool,
+    /// Verified sources that count as proof: code, or docs a human validated.
     pub verified_count: usize,
+    pub human_validated_count: usize,
+    /// Verified, but in a doc only an AI wrote or changed since validation.
+    pub ai_doc_count: usize,
 }
 
 /// Gate-1 (existence) over a learning's evidence — spec §6 step 2. File / code
 /// refs are mechanically verified against the project roots; url / user / cmd /
 /// disc are `Unchecked` (can't be resolved here → NOT fabricated). A red
 /// (`fabricated`) evidence makes the candidate rejectable by the caller.
+/// A verified source in the docs is weighted by its provenance: one an AI
+/// wrote, or changed since a human validated it, is not proof of a fact.
 pub fn verify_evidence(evidence: &[Evidence], roots: &[&Path]) -> EvidenceReport {
     let mut checks = Vec::new();
     let mut any_fabricated = false;
     let mut verified_count = 0;
+    let mut human_validated_count = 0;
+    let mut ai_doc_count = 0;
     for e in evidence {
         match e.kind.to_ascii_lowercase().as_str() {
             "file" | "code" | "code-comment" => {
                 let c = verify_source_marker_roots(&e.reference, roots);
                 let fab = c.status.is_fabricated();
                 any_fabricated |= fab;
+                let doc_provenance = roots.iter().find_map(|root| {
+                    crate::core::doc_provenance::source_provenance(root, &e.reference)
+                });
                 if c.status == SourceStatus::Verified {
-                    verified_count += 1;
+                    match doc_provenance {
+                        Some(SourceProvenance::AiGenerated) => ai_doc_count += 1,
+                        Some(SourceProvenance::HumanValidated) => {
+                            human_validated_count += 1;
+                            verified_count += 1;
+                        }
+                        None => verified_count += 1,
+                    }
                 }
                 checks.push(EvidenceCheck {
                     reference: e.reference.clone(),
                     status: format!("{:?}", c.status),
                     fabricated: fab,
+                    doc_provenance,
                 });
             }
             _ => checks.push(EvidenceCheck {
                 reference: e.reference.clone(),
                 status: "Unchecked".into(),
                 fabricated: false,
+                doc_provenance: None,
             }),
         }
     }
@@ -60,6 +85,8 @@ pub fn verify_evidence(evidence: &[Evidence], roots: &[&Path]) -> EvidenceReport
         checks,
         any_fabricated,
         verified_count,
+        human_validated_count,
+        ai_doc_count,
     }
 }
 
@@ -180,6 +207,19 @@ mod tests {
     }
 
     #[test]
+    fn absolute_evidence_outside_the_roots_is_fabricated() {
+        let root = temp_project();
+        let inside = root.join("src/foo.rs").display().to_string();
+        let report = verify_evidence(
+            &[ev("file", &inside), ev("file", "/etc/passwd")],
+            &[root.as_path()],
+        );
+        assert_eq!(report.verified_count, 1, "{:?}", report.checks);
+        assert!(report.any_fabricated, "{:?}", report.checks);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn url_and_user_evidence_are_unchecked_not_fabricated() {
         let report = verify_evidence(
             &[ev("url", "https://x.test"), ev("user", "user:2026-05-31")],
@@ -188,6 +228,42 @@ mod tests {
         assert!(!report.any_fabricated);
         assert_eq!(report.verified_count, 0);
         assert!(report.checks.iter().all(|c| c.status == "Unchecked"));
+    }
+
+    #[test]
+    fn a_doc_source_counts_by_its_human_validation() {
+        let root = temp_project();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "# A\nUses pnpm.\n").unwrap();
+        let evidence = [ev("file", "docs/AGENTS.md:2")];
+        let ai = verify_evidence(&evidence, &[root.as_path()]);
+        assert_eq!(
+            (ai.verified_count, ai.ai_doc_count, ai.human_validated_count),
+            (0, 1, 0),
+            "an AI-written doc is not proof"
+        );
+        assert_eq!(
+            ai.checks[0].doc_provenance,
+            Some(SourceProvenance::AiGenerated)
+        );
+        crate::core::doc_provenance::record_all(
+            &root,
+            crate::core::doc_provenance::ValidationReason::AuditValidation,
+        )
+        .unwrap();
+        let human = verify_evidence(&evidence, &[root.as_path()]);
+        assert_eq!((human.verified_count, human.human_validated_count), (1, 1));
+        std::fs::write(root.join("docs/AGENTS.md"), "# A\nUses pnpm 9.\n").unwrap();
+        let modified = verify_evidence(&evidence, &[root.as_path()]);
+        assert_eq!(
+            (modified.verified_count, modified.ai_doc_count),
+            (0, 1),
+            "modified since validation counts as AI-generated"
+        );
+        let code = verify_evidence(&[ev("file", "src/foo.rs:2")], &[root.as_path()]);
+        assert_eq!(code.verified_count, 1, "code needs no validation");
+        assert_eq!(code.checks[0].doc_provenance, None);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

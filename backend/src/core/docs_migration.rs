@@ -686,13 +686,13 @@ fn rewrite_file_with_replacements(path: &Path, replacements: &[(&'static str, St
 /// Compact view of which package managers / build tools are present in
 /// the project. Drives `STACK_SUMMARY`, `TEST_CMD`, `LINT_CMD`.
 #[derive(Default)]
-struct StackSignals {
-    rust: bool,
-    typescript: bool,
-    javascript: bool,
-    python: bool,
-    go: bool,
-    php: bool,
+pub(crate) struct StackSignals {
+    pub(crate) rust: bool,
+    pub(crate) typescript: bool,
+    pub(crate) javascript: bool,
+    pub(crate) python: bool,
+    pub(crate) go: bool,
+    pub(crate) php: bool,
     /// Linters that ship with their toolchain — clippy, `go vet` — can be
     /// assumed from the language. These three cannot: they are optional
     /// packages, and naming one the project does not have puts a command in
@@ -798,7 +798,25 @@ impl StackSignals {
     }
 }
 
-fn detect_stack_signals(project_path: &Path) -> StackSignals {
+pub(crate) fn detect_stack_signals(project_path: &Path) -> StackSignals {
+    detect_stack(project_path, true)
+}
+
+/// Languages only, for the audit detectors: no file content is read and a
+/// symlinked manifest does not count, so nothing outside the project is touched.
+pub(crate) fn detect_stack_languages(project_path: &Path) -> StackSignals {
+    detect_stack(project_path, false)
+}
+
+fn detect_stack(project_path: &Path, read_tooling: bool) -> StackSignals {
+    let marker = |dir: &Path, name: &str| {
+        let path = dir.join(name);
+        if read_tooling {
+            path.is_file()
+        } else {
+            std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
+        }
+    };
     let mut s = StackSignals::default();
     // Recurse one level: many monorepos put `backend/Cargo.toml` and
     // `frontend/package.json`. Detecting at the root only would miss
@@ -830,12 +848,12 @@ fn detect_stack_signals(project_path: &Path) -> StackSignals {
         )
         .collect();
     for p in &candidates {
-        if p.join("Cargo.toml").is_file() {
+        if marker(p, "Cargo.toml") {
             s.rust = true;
         }
-        if p.join("package.json").is_file() {
-            s.js_lint_script = s.js_lint_script || js_lint_script_present(p);
-            if p.join("tsconfig.json").is_file() || p.join("tsconfig.app.json").is_file() {
+        if marker(p, "package.json") {
+            s.js_lint_script = s.js_lint_script || (read_tooling && js_lint_script_present(p));
+            if marker(p, "tsconfig.json") || marker(p, "tsconfig.app.json") {
                 s.typescript = true;
             } else {
                 s.javascript = true;
@@ -844,32 +862,29 @@ fn detect_stack_signals(project_path: &Path) -> StackSignals {
             // monorepos that mix pnpm + npm hit weirder problems than a
             // shaky test_cmd default.
             if s.js_pm.is_none() {
-                if p.join("pnpm-lock.yaml").is_file() {
+                if marker(p, "pnpm-lock.yaml") {
                     s.js_pm = Some("pnpm");
-                } else if p.join("yarn.lock").is_file() {
+                } else if marker(p, "yarn.lock") {
                     s.js_pm = Some("yarn");
-                } else if p.join("bun.lockb").is_file() {
+                } else if marker(p, "bun.lockb") {
                     s.js_pm = Some("bun");
-                } else if p.join("package-lock.json").is_file() {
+                } else if marker(p, "package-lock.json") {
                     s.js_pm = Some("npm");
                 } else {
                     s.js_pm = Some("npm"); // sensible default when no lockfile
                 }
             }
         }
-        if p.join("pyproject.toml").is_file()
-            || p.join("requirements.txt").is_file()
-            || p.join("setup.py").is_file()
-        {
+        if marker(p, "pyproject.toml") || marker(p, "requirements.txt") || marker(p, "setup.py") {
             s.python = true;
-            s.ruff = s.ruff || ruff_present(p);
+            s.ruff = s.ruff || (read_tooling && ruff_present(p));
         }
-        if p.join("go.mod").is_file() {
+        if marker(p, "go.mod") {
             s.go = true;
         }
-        if p.join("composer.json").is_file() {
+        if marker(p, "composer.json") {
             s.php = true;
-            s.phpcs = s.phpcs || php_codesniffer_present(p);
+            s.phpcs = s.phpcs || (read_tooling && php_codesniffer_present(p));
         }
     }
     s

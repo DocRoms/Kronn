@@ -9,8 +9,8 @@ of the total that billed cache reads as fresh input). With no counters or no
 confirmed rate the cost is NULL (unknown), and `message_usage.cost_unknown_reason`
 says why. Rows written before KT-894 keep their old figure, and nothing marks
 which ones those are.
-[src: file: backend/src/core/pricing.rs]
-[src: file: backend/src/api/discussions/streaming.rs]
+[src: file: backend/src/core/pricing.rs:324-347]
+[src: file: backend/src/api/discussions/streaming.rs:4824-4846]
 
 `stream_json_cost` is only ever populated from Claude Code's own `stream-json`
 `result` line, so only ClaudeCode messages can *possibly* carry a real

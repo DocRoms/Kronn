@@ -23,8 +23,8 @@ includes external Git metadata for linked worktrees. Missing/non-Git paths,
 permission-pattern characters, overlap with the working directory, unsupported
 agents and native Windows launches are rejected before dispatch. The list does
 not accept workflow template expressions.
-[src: file: backend/src/agents/read_only_repos.rs:12]
-[src: file: backend/src/api/workflow_step_schema.json:29]
+[src: file: backend/src/agents/read_only_repos.rs:23-60#resolve_with_dirs]
+[src: file: backend/src/api/workflow_step_schema.json:31#read_only_repos]
 
 Claude receives `--add-dir` together with `Edit` deny rules and sandbox
 `denyWrite` entries. Its read block remains enabled, the OS sandbox is
@@ -34,7 +34,7 @@ extending `:workspace`, with explicit `read` entries and approval policy `never`
 It keeps the standard broad filesystem read access; the declared directories
 are never added as writable roots, including when they live under a temporary
 directory. `--strict-config` rejects unsupported Codex settings.
-[src: file: backend/src/agents/read_only_repos.rs:96]
+[src: file: backend/src/agents/read_only_repos.rs:134-200#args]
 [Claude permission rules](https://code.claude.com/docs/en/permissions)
 [Claude sandbox](https://code.claude.com/docs/en/sandboxing)
 [Codex permissions](https://learn.chatgpt.com/docs/permissions)
@@ -47,17 +47,17 @@ host probe confirmed that Python, Write and shell redirection were all refused.
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
-[src: file: backend/src/agents/runner.rs:3747]
-[src: file: backend/src/agents/runner.rs:11065]
-[src: file: backend/src/acp/codex_adapter.rs:404]
+[src: file: backend/src/agents/runner.rs:4409-4413#read_only_repos]
+[src: file: backend/src/agents/runner.rs:13747-13757#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
 `-c projects={...}` inline table containing the working directory and, when
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:11007]
-[src: file: backend/src/agents/runner.rs:11076]
+[src: file: backend/src/agents/runner.rs:13500-13519#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:13500-13513#codex_project_trust_override]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -76,7 +76,7 @@ Workflow prompts state that repository paths are locations, not permission
 grants, and list the repositories declared by the current step. This corrects
 the runtime guidance even when companion context mentions other checkouts.
 It does not rewrite separately stored autoCode Quick Prompts or workflows.
-[src: file: backend/src/workflows/steps.rs:111]
+[src: file: backend/src/workflows/steps.rs:173-183#read_only_repos]
 
 I recommend replacing the stored autoCode assertion that the main checkout is
 readable with this wording when that template is available:
@@ -95,8 +95,8 @@ Claude Code or Codex Agent step whose rendered prompt contains that path gets
 it as a read-only directory under the policy above, without the Git checkout
 requirement: `--add-dir`, `Edit` deny rule and sandbox `denyWrite` for Claude,
 an explicit `read` entry for Codex. Other agents receive no grant.
-[src: file: backend/src/workflows/run_artifacts.rs:1]
-[src: file: backend/src/workflows/steps.rs:89]
+[src: file: backend/src/workflows/run_artifacts.rs:46-61#ensure]
+[src: file: backend/src/workflows/steps.rs:129-149#artifacts_read_only_dirs]
 
 ```json
 [
@@ -125,7 +125,7 @@ then records each file's SHA-256: the person saving approves that content.
 A save through an agent (a bridge token or a Kronn agent tool) checks the
 paths but leaves an empty hash empty, so the step refuses to run ("no
 approved hash") until a human saves the workflow from the UI.
-[src: file: backend/src/core/approved_scripts.rs:1]
+[src: file: backend/src/core/approved_scripts.rs:114-133#validate_and_pin]
 
 ```json
 {"name": "framing", "step_type": {"type": "Exec"}, "exec_command": "node",
@@ -145,7 +145,7 @@ runs with the copy as its working directory, so `node <declared path>` and a
 helper loaded through `process.cwd()` or the script's own directory come from
 the copy. The run's checkout is in `KRONN_WORKTREE`, the copy in
 `KRONN_APPROVED_SCRIPTS_DIR`. The setup command still runs in the checkout.
-[src: file: backend/src/workflows/exec_step.rs:102]
+[src: file: backend/src/workflows/exec_step.rs:83-104#approved_script_child]
 
 Limits: only the declared files are verified. Absolute imports, paths built
 from `KRONN_WORKTREE` and interpreter search paths outside the copy are not
@@ -160,8 +160,8 @@ path, since the cwd is the copy. The copy goes with the artifacts directory.
 The automated policy and dispatch regressions use temporary repositories and
 fake CLI processes. They verify declarations and arguments; they do not prove
 vendor sandbox enforcement.
-[src: file: backend/src/agents/read_only_repos.rs:208]
-[src: file: backend/tests/adapter_worker_policy.rs:1]
+[src: file: backend/src/agents/read_only_repos.rs:241-262#fixture]
+[src: file: backend/tests/adapter_worker_policy.rs:41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 The dispatch regression checks initial and resumed Codex adapter arguments:
 options occur once, repeated `-c` flags have distinct keys, the project MCP
@@ -170,9 +170,9 @@ without a conflicting `--sandbox` flag. Every Codex dispatch case also checks
 for exactly one inline `projects` override and rejects dotted trust keys,
 including ordinary non-strict and direct launches. Unit coverage checks host
 aliases, duplicate aliases and path escaping.
-[src: file: backend/tests/adapter_worker_policy.rs:188]
-[src: file: backend/src/agents/runner_test.rs:7933]
-[src: file: backend/src/acp/codex_adapter.rs:374]
+[src: file: backend/tests/adapter_worker_policy.rs:196-220#trust_level]
+[src: file: backend/src/agents/runner_test.rs:10710#codex_project_trust_override_preserves_paths_and_host_alias]
+[src: file: backend/src/acp/codex_adapter.rs:139-143#codex_project_mcp_override]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations
 and OS sandbox privileges:
@@ -186,7 +186,7 @@ checks externally read values from Read (or the Codex equivalent), Git history,
 head and grep, records the OS rejection of a subprocess write, checks a protected
 file is unchanged, and verifies a worktree write. Review the printed receipt
 for the built-in Edit/Write denial.
-[src: file: backend/tests/workflow_read_only_repos_probe.rs:1]
+[src: file: backend/tests/workflow_read_only_repos_probe.rs:9#workflow_read_only_repos_live_probe]
 
 The KT-806 worker could not run a nested macOS sandbox: invoking
 `codex sandbox macos --help` returned `sandbox-exec: sandbox_apply: Operation not

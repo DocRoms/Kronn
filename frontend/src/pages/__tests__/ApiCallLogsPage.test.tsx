@@ -11,7 +11,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { I18nProvider } from '../../lib/I18nContext';
+import { expectFocusKeptIn } from '../../test/dialogFocus';
 
 const mockState = vi.hoisted(() => {
   return {
@@ -211,5 +213,35 @@ describe('ApiCallLogsPage', () => {
     (apiCallLogs.list as ReturnType<typeof vi.fn>).mockClear();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(apiCallLogs.list).not.toHaveBeenCalled();
+  });
+
+  describe('keyboard access (KT-1072)', () => {
+    it('rows are focusable and Enter or Space opens the drawer', async () => {
+      wrap(<ApiCallLogsPage />);
+      const row = await screen.findByTestId('api-call-logs-row-log-2');
+      expect(row).toHaveAttribute('tabindex', '0');
+      row.focus();
+      await userEvent.keyboard('{Enter}');
+      expect(screen.getByTestId('api-call-logs-drawer')).toBeInTheDocument();
+      await userEvent.keyboard('{Escape}');
+      expect(screen.queryByTestId('api-call-logs-drawer')).toBeNull();
+      screen.getByTestId('api-call-logs-row-log-1').focus();
+      await userEvent.keyboard(' ');
+      expect(screen.getByTestId('api-call-logs-drawer')).toBeInTheDocument();
+    });
+
+    it('the drawer takes focus, keeps it, closes on Escape and returns focus to its row', async () => {
+      wrap(<ApiCallLogsPage />);
+      const row = await screen.findByTestId('api-call-logs-row-log-2');
+      row.focus();
+      await userEvent.keyboard('{Enter}');
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveAttribute('aria-modal', 'true');
+      expect(screen.getByTestId('api-call-logs-drawer-close')).toHaveFocus();
+      await expectFocusKeptIn(dialog, 3);
+      await userEvent.keyboard('{Escape}');
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(row).toHaveFocus();
+    });
   });
 });

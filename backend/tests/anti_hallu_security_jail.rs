@@ -4,8 +4,8 @@
 //! source path that escapes the project root (`../`, deeply-nested `../`, or a
 //! symlinked subdir pointing outside the root) must NEVER come back `Verified`.
 //! A traversal must be `OutsideProject` (or, at worst, `NotFound`) — never a
-//! green chip. Absolute paths are existence-only (no jail) and must NOT be
-//! re-rooted under the project.
+//! green chip. An absolute path is accepted only under the root; anywhere
+//! else it is `OutsideProject`, whether or not the file exists.
 //!
 //! These tests assert the CORRECT behaviour per the documented semantics. A
 //! red test here = a real security defect.
@@ -214,39 +214,23 @@ fn symlink_to_etc_is_outside_project() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// 7. Absolute /etc/passwd — existence-only, NOT treated as project-relative.
-//    The contract: absolute paths get NO jail. If /etc/passwd exists it may be
-//    Verified (existence-only). The invariant we PROVE here is that it is NOT
-//    re-rooted: it must NOT come back OutsideProject (that would mean it was
-//    wrongly jailed), and the verdict must be identical whether the root is the
-//    temp project or a totally unrelated root (because it's not project-relative).
+// 7. Absolute /etc/passwd — outside the root, so rejected although it exists.
 // ──────────────────────────────────────────────────────────────────────────
 #[test]
-fn absolute_etc_passwd_is_existence_only_not_jailed() {
+fn absolute_etc_passwd_is_outside_project() {
     let root = temp_project();
     let st = check_file("/etc/passwd", &root);
-    // Absolute → never jailed.
-    assert_ne!(
+    assert_eq!(
         st,
         SourceStatus::OutsideProject,
-        "an absolute path must NOT be jailed/treated as project-relative, got {st:?}"
+        "/etc/passwd must be refused, got {st:?}"
     );
-    // It's existence-only: Verified if it exists, NotFound otherwise.
-    let exists = Path::new("/etc/passwd").exists();
-    if exists {
-        assert_eq!(
-            st,
-            SourceStatus::Verified,
-            "/etc/passwd exists → existence-only Verified"
-        );
-    } else {
-        assert_eq!(st, SourceStatus::NotFound, "/etc/passwd absent → NotFound");
-    }
     cleanup(&root);
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// 8. Absolute path verdict is root-INDEPENDENT (proves it isn't re-rooted).
+// 8. The verdict on an absolute path outside the root does not depend on the
+//    root, and an absolute path under the root still verifies.
 // ──────────────────────────────────────────────────────────────────────────
 #[test]
 fn absolute_path_verdict_is_root_independent() {
@@ -255,27 +239,24 @@ fn absolute_path_verdict_is_root_independent() {
     let abs = "/etc/passwd";
     let st_a = check_file(abs, &root_a);
     let st_b = check_file(abs, &root_b);
-    assert_eq!(
-        st_a, st_b,
-        "an absolute path is existence-only → same verdict regardless of project root"
-    );
+    assert_eq!(st_a, st_b);
+    let inside = root_a.join("src/foo.rs").display().to_string();
+    assert_eq!(check_file(&inside, &root_a), SourceStatus::Verified);
+    assert_eq!(check_file(&inside, &root_b), SourceStatus::OutsideProject);
     cleanup(&root_a);
     cleanup(&root_b);
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// 9. Absolute path to a NON-existent file → NotFound (existence-only), never
-//    Verified and never OutsideProject.
+// 9. A missing absolute file outside the root reads exactly like an existing
+//    one: no existence oracle.
 // ──────────────────────────────────────────────────────────────────────────
 #[test]
-fn absolute_nonexistent_is_not_found_not_jailed() {
+fn absolute_nonexistent_outside_root_matches_existing_one() {
     let root = temp_project();
     let st = check_file("/this/surely/does/not/exist/anywhere_kronn_qa.rs", &root);
-    assert_eq!(
-        st,
-        SourceStatus::NotFound,
-        "absolute non-existent file → NotFound (existence-only), got {st:?}"
-    );
+    assert_eq!(st, SourceStatus::OutsideProject, "got {st:?}");
+    assert_eq!(st, check_file("/etc/passwd", &root));
     cleanup(&root);
 }
 

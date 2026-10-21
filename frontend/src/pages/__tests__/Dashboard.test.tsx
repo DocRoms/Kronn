@@ -26,6 +26,7 @@ vi.mock('../../lib/api', () => ({
     // the mocked module returns undefined and the cards crash silently.
     auditStatus: vi.fn().mockResolvedValue(null),
     auditResumable: vi.fn().mockResolvedValue(null),
+    docProvenance: vi.fn().mockResolvedValue({ docs: [], to_reconfirm: 0 }),
     agentFiles: vi.fn().mockResolvedValue({ policy: 'repo' }),
     githubConnection: vi.fn().mockResolvedValue({
       project_id: '', mode: 'not_connected', state: 'not_connected', machine_token_available: false,

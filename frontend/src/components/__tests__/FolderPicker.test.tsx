@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { act, render, screen, cleanup, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { I18nProvider } from '../../lib/I18nContext';
 
 vi.mock('../../lib/api', () => ({
@@ -162,5 +163,38 @@ describe('FolderPicker', () => {
     expect(onConfirm).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByText('agaches')).toBeTruthy();
+  });
+
+  describe('dialog focus (KT-1072)', () => {
+    function Opener({ onClose }: { onClose?: () => void }) {
+      const [open, setOpen] = useState(false);
+      return (
+        <I18nProvider>
+          <button type="button" onClick={() => setOpen(true)}>ouvrir</button>
+          {open && <FolderPicker selected={[]} onConfirm={vi.fn()} onClose={() => { onClose?.(); setOpen(false); }} />}
+        </I18nProvider>
+      );
+    }
+
+    it('takes focus on open, keeps it on Tab, closes on Escape and returns focus to its trigger', async () => {
+      vi.mocked(setupApi.browse).mockResolvedValue(listing());
+      const onClose = vi.fn();
+      render(<Opener onClose={onClose} />);
+      const trigger = screen.getByText('ouvrir');
+      await userEvent.click(trigger);
+      const dialog = await screen.findByRole('dialog');
+      await screen.findByText('agaches');
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      for (let i = 0; i < 12; i++) {
+        await userEvent.tab();
+        expect(dialog.contains(document.activeElement)).toBe(true);
+      }
+      await userEvent.tab({ shift: true });
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      await userEvent.keyboard('{Escape}');
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(trigger).toHaveFocus();
+    });
   });
 });

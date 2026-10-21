@@ -170,7 +170,8 @@ the exact discussion id for MCP clients, so an explicit `plan_get` or
 Planning state changes, agents also receive a compact change notification and
 then pull only the required details. This prevents unrelated agents from paying
 for unused task content while ensuring “create the discussion plan” works on a
-new room. `[src: file: backend/src/api/disc_prompts.rs]`
+new room. `[src: file: backend/src/api/disc_prompts.rs:471-492]`
+`[src: file: backend/src/api/discussions/streaming.rs:3268-3298]`
 
 The intended read surface is:
 
@@ -183,25 +184,26 @@ Writes are separate tools with narrow schemas. Lists are compact by default and
 full content is returned only for an explicitly requested task.
 `task_update_dod(task_id, dod_id, completed)` is the preferred narrow write for
 checkbox progress. Delta timestamps are compared numerically as RFC3339
-instants, independent of `Z`/offset spelling and fractional precision. Agents must be
-taught this contract in the same prompt/instruction layer that currently
-advertises discussion-history tools. Today that layer explicitly describes
-`disc_meta`, `disc_get_message`, and `disc_summarize`. `[src: file: backend/src/api/disc_prompts.rs:346-361]`
+instants, independent of `Z`/offset spelling and fractional precision. Agents are
+taught this contract in the same prompt/instruction layer that advertises the
+discussion-history tools `disc_meta`, `disc_get_message` and `disc_summarize`:
+the delayed history notice also lists the Planning reads and writes. `[src: file: backend/src/api/disc_prompts.rs:549-573#introspection_notice]`
 
 Runtime parity is capability-based:
 
-- Claude Code, Codex, Gemini CLI, Kiro and Copilot CLI call the
+- Claude Code, Codex, OpenCode, Gemini CLI, Kiro and Copilot CLI call the
   `kronn-internal` MCP tools. The injected explicit discussion id remains valid
   even when the bridge reports `no disc bound` or `rejoin_required`.
-- Ollama and LiteLLM call a compact native catalogue through the same Rust
+- Ollama, LiteLLM and NVIDIA call a compact native catalogue through the same Rust
   Planning handlers. Kronn enforces the current discussion scope server-side,
   records the concrete agent and source user message, hashes retry keys into a
   bounded discussion-scoped identity, and returns compact mutation receipts.
 - Vibe runs without MCP to avoid its stdio hang. It therefore emits a durable
   `kronn-plan-action` proposal for human validation instead of pretending that
   a direct task write succeeded.
-  `[src: file: backend/src/api/agent_tools.rs]`
-  `[src: file: backend/src/agents/runner.rs]`
+  `[src: file: backend/src/api/agent_tools.rs:2041-2121]`
+  `[src: file: backend/src/api/disc_prompts.rs:431-443]`
+  `[src: file: backend/src/api/disc_prompts.rs:282-287]`
 
 The first release is local-only. Actor/audit metadata must still distinguish
 the human from an agent and record which agent changed a task. Assignment fields

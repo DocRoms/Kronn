@@ -7927,6 +7927,24 @@ button.disc-contact-open {
 .disc-lint-item[data-status="unchecked"] code {
   color: var(--kr-text-secondary);
 }
+/* KT-1184 — found only in an unmerged worktree of the project: exists, not
+   merged yet. Neutral info blue, never the red of a missing file. */
+.disc-msg-lint-pill[data-severity="lane"] {
+  color: var(--kr-info);
+  border-color: rgba(var(--kr-info-rgb), 0.35);
+  background: rgba(var(--kr-info-rgb), 0.08);
+}
+.disc-msg-lint-detail[data-severity="lane"] {
+  background: rgba(var(--kr-info-rgb), 0.06);
+  border-color: rgba(var(--kr-info-rgb), 0.20);
+}
+.disc-lint-item[data-status="lane"] code {
+  color: var(--kr-text-primary);
+}
+.disc-lint-lane-tag {
+  color: var(--kr-info);
+  font-family: var(--kr-font-mono, monospace);
+}
 .disc-msg-lint-pill:hover { filter: brightness(1.1); }
 
 .disc-msg-lint-detail {

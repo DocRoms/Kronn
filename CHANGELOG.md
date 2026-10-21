@@ -75,6 +75,314 @@ Release notes for 0.9.3 and earlier are available in the
 - `rustls` 0.23.46 fixes RUSTSEC-2026-0346 to 0349.
 ### Added
 
+- The briefing records the team's rules and bans (KT-1193). « Règles et
+  interdits » holds up to 20 one-line entries of at most 200 characters,
+  each a rule (always) or a ban (never). A ban may carry a pattern Kronn
+  checks: a dependency declared in `package.json`, `Cargo.toml` (dotted keys
+  included), `composer.json`, `requirements*.txt` or `pyproject.toml` (PEP 621
+  and Poetry), a module read from each language's import syntax (comments
+  skipped; `lodash` matches `lodash/fp`, not `lodash.debounce`), or a file
+  glob matched in linear time (at most three `*`/`**`). The entries go to a
+  `## Project rules` section of `docs/briefing.md` with a machine copy, put
+  back after the AI review, before `## Kronn options`; a briefing without
+  rules keeps its earlier bytes. Kronn writes them into a generated section
+  of the coding-rules doc (in the detected docs folder), restored after
+  every audit step, so every agent of the project reads them; a section that
+  lost its end marker is repaired without touching human lines. The briefing
+  cannot be saved while an audit runs on the project (409). The steps
+  that judge the code (tech debt and every `inconsistencies-*` step) get a
+  short rules block: a violated ban or unmet rule is a TD with its
+  `file:line` proof, and no fix may break a ban. Each ban with a pattern is
+  checked by a read-only detector (`project-ban`, no symlink followed, size
+  and count caps) whose hits join the step 8 signals and need a disposition.
+- The briefing form reopens with the saved answers, and every project fact
+  takes an optional note (KT-1196). `GET /api/projects/{id}/briefing/answers`
+  reads `docs/briefing.md` (or the DB notes before the project has a docs
+  folder) back into the six questions, the project facts, the existing
+  documentation and the Kronn options; unknown or malformed parts are left
+  empty, and a section the form does not know stays inside the last answer
+  so a re-save keeps it. Saving again unchanged rewrites the same bytes.
+  Each fact (tracker, project key, forge, repository, default branch, commit
+  convention, sign-off, merge strategy, review, release cadence,
+  environments, people) gets « Note (facultatif) », up to 300 characters,
+  validated like the other briefing texts, stored in the machine copy (absent
+  when empty, so older briefings stay byte-identical), rendered next to its
+  fact in `## Project facts` and `docs/project.md`, given to the audit with
+  the fact and put back after an AI review.
+  An answer line that would read as structure (a heading, a machine copy, a
+  Kronn option line) is saved behind a `\` and given back as typed, and the
+  questions are read in order, so an answer can never split the briefing.
+  A click that only focuses a field no longer skips the prefill; when the
+  saved briefing arrives after a real change, the typed text is kept, only
+  the empty sections are filled from it, and « Charger le briefing
+  enregistré » loads the rest, so a save never wipes what was not changed.
+  The rules and bans (KT-1193) reload into their editor too, following the
+  same late-prefill rule, so re-saving a reopened briefing no longer drops
+  them; `## Project rules` ends the last answer instead of being read into
+  it, and the reopened form is refused (409) while an audit runs.
+- The briefing asks about existing documentation and linked projects
+  (KT-999). « Existing documentation? » lists the locations Kronn finds in
+  the repository (`README*`, `docs/`, `doc/`, `wiki/`, ADR folders,
+  `CONTRIBUTING*`, root `*.md`, OpenAPI/Swagger files, `apidoc/`; symlinks
+  skipped), pre-checked, each with the date of its last commit (`git log -1`,
+  literal pathspec, bounded and timed out). A path can be added by hand: it
+  must be relative, without `..`, existing, and stay inside the repository
+  once symlinks are resolved, otherwise the server answers 400. Each kept
+  location gets a closed state (recent, old, obsolete, partial, reference), a
+  one-line note and, at most one per kind, the source-of-truth mark (never on
+  an obsolete location). The answers go to a `## Existing documentation`
+  section of `docs/briefing.md` with a machine copy, put back as answered
+  after the AI review, before `## Kronn options`. The section stays out of
+  the audit and review prompts until a bench run shows a gain. The linked
+  repos drawer is available in the briefing with one-click suggestions whose
+  description is left to fill in.
+- Linked repos show which AI doc they really have (KT-999): « doc IA »
+  (`docs/AGENTS.md` or the legacy `ai/index.md`), « README seulement » or
+  « pas de doc IA ».
+
+- Docs record what a human validated and ask for a reconfirmation when Kronn
+  changes it, never blocking (KT-1079). A validation (`validate-audit`, a TD
+  decision on a validation card, « Vérifié, inchangé », a revalidation that
+  leaves the docs as validated) records the digest of each validated doc in
+  `docs/provenance.json`, next to `citations.json`; the validated text stays
+  local under `.kronn/audit/validated-originals/` for the diff. No marker is
+  added to the prose. Every automatic writer now applies its change to a
+  human-validated doc or an `owner="human"` section instead of refusing,
+  reverting or skipping it: full and partial audits (no more restore + dated
+  `human-section-diff` report), revalidation (re-anchoring and the agent pass
+  now cover human sections), template reinstall (human sections are no longer
+  put back), documentary repair (citation bundles in human sections are
+  normalized) and the tech-debt index resync. The doc is then marked « to
+  reconfirm » with the writer and a before/after diff. A « À reconfirmer (N) »
+  button next to the audit status on the project card opens the docs to
+  reconfirm with their diff; « Confirmer » (one doc or all,
+  `POST /api/projects/:id/doc-provenance/confirm`, human only) restores the
+  provenance. The template reinstall plan names the human-validated content
+  it will rewrite before writing. The learning gate weights its sources by
+  this provenance: a source in a doc a human validated and nothing changed
+  counts as proof; one only an AI wrote, or changed since its validation,
+  does not count as verified evidence for a `fact` until reconfirmed. The
+  audit prompts let an audit correct a human section where the code
+  contradicts it. No database change.
+- Settle the audit's tech debt from the project card (KT-982). A "Dette
+  technique" block shows the progress (confirmed, kept on purpose, deferred,
+  rejected, remaining), the remaining count per severity and the Validated
+  rule, and opens a review screen built for a hundred items and more: filters
+  (to settle, deferred included; settled; all), severity chips, a search over
+  id, title and cited files, a list grouped by severity with a checkbox on
+  every row, and a bulk bar that settles the whole selection in one atomic
+  request (one unknown id writes nothing). The detail shows the problem, the
+  clickable `file:line` pointers (opened in the code viewer), the verification
+  criterion and four decisions; keeping an item on purpose records the reason
+  in the project's decision log, trusted as a human decision like a validation
+  card. Each item links its Kronn task or creates one (the KT-1167 conversion
+  for one sheet); GitHub and Jira are disabled placeholders. "Discuter de cette
+  TD" shows the validation messages that name the item and the item's own
+  discussion, created with the agents picked in the comparative Quick Prompt
+  selector (now a shared component). New endpoints:
+  `GET /api/projects/{id}/audit/tds`, `POST …/audit/tds/decide`,
+  `POST …/audit/tds/{td_id}/task`, `GET|POST …/audit/tds/{td_id}/talk`.
+- A project can be validated without the validation discussion's terminal
+  marker once every Critical and High tech-debt sheet is confirmed, rejected
+  or kept on purpose (a deferral does not count) and the other gates pass
+  (KT-982). The discussion path still works.
+- CI checks the `[src: file:]` citations of Kronn's own docs (KT-1059). A
+  test (`cargo test docs_citations`, run by the backend suite) walks
+  `docs/**/*.md` (except the historical `docs/releases/`) and `backend/docs/`
+  with the citation verifier's own extraction, path jail and line counting,
+  and fails on a citation that has no line, names a missing file or a
+  directory, is absolute or leaves the repo root, or points past the end of
+  the file. Only a binary file may be cited without a line. Fenced code and
+  placeholder examples (`<path>:<line>`) are skipped; a citation in backticks
+  is checked. The report lists `doc:line`, the citation and the reason. The
+  corpus was repaired to zero failures: every line-less citation now points
+  at the symbol it means, paths of moved or split files were re-located, and
+  sentences about code that no longer exists were rewritten.
+- The audit's tech-debt baseline runs as code (KT-152). Fourteen new
+  deterministic detectors cover what the step 8 prompt used to ask the agent
+  to grep: Dockerfile (root user, no `HEALTHCHECK`, apt flags and list
+  cleanup, base image untagged or `latest`, `ADD` of a remote URL,
+  secret-named `ARG`), compose images untagged or `latest`, CI
+  (`StrictHostKeyChecking=no`, `pull_request_target`, actions on a moving
+  ref), tracked `.env` files (filenames only), templates (`<img>` without
+  `alt`, inline `<script>`/`<style>` over 50 lines) and OSS community files,
+  gated on OSS intent. Each finding carries `file:line` evidence, and step 8
+  is re-run when one is left unaddressed, like the existing detectors. PHP,
+  Node.js, Rust, Python and Go items (`display_errors`, `opcache`,
+  lockfile installs, `cargo deny`, `govulncheck`…) reach the prompt only
+  when that stack is detected. The step 8 prompt shrinks from 19,941 to
+  about 10,600 bytes (about 5,400 to 2,900 tokens); every former baseline
+  item is mapped to a detector, a stack item or a remaining prompt line by a
+  test.
+
+- Cross-agent audit, experimental and off by default (KT-1183). A briefing
+  option (« Audit croisé ») picks 2 or 3 agents and shows the estimated cost
+  first: ×N to ×2N the security step's last measured single-agent cost (from
+  the same step figures as `GET /api/audit-runs/{id}/cost`), or the measured
+  cost of an earlier cross-agent run with as many agents. On the security
+  step only, the agents detect in parallel without seeing each other's work
+  and return their findings as a machine-readable block; Kronn checks every
+  citation (file, lines, quoted text) and drops a false one with no model
+  call, groups findings about the same place (information only), then has
+  each finding challenged by another agent, who is not told who found it.
+  Never a vote: a refutation dismisses a finding only with a proof that passes
+  the same citation check, otherwise the finding stays, marked contested; the
+  author may answer a proven refutation once, and two proven positions become
+  a human `kronn-question` card with both arguments side by side. At most 30
+  findings are challenged per step, the rest listed as not cross-checked.
+  Kronn writes the index and the TD sheets (an existing sheet keeps its body,
+  only a Kronn provenance block changes); every finding's provenance —
+  found by, detection count, checked by, proof, reply, verdict — and the
+  dropped and dismissed findings are stored (migration 257). Without the
+  option the step is unchanged, byte for byte.
+- Citations can name what they point at (KT-1074):
+  `[src: file: path:120-140#symbol]`. The symbol must appear as a whole word
+  inside the cited lines; the check is textual, no code is parsed. The docs CI
+  check fails on an anchor that left its range and, when the symbol still
+  exists in the file, suggests the new range (`try path:436-465#symbol`). The
+  runtime verifier applies the same rule to agent and audit citations: a
+  missed anchor reads as `out_of_bounds` with a detail saying where the
+  symbol appears, so the existing red/amber badges are unchanged. Re-anchoring
+  a moved citation keeps its anchor. Documented in the citation spec and in
+  `docs/AGENTS.md`. Every one of the 1,345 file citations of
+  `docs/architecture/` and `docs/operations/` was re-read against the code
+  and now carries an anchor: about 60 % pointed beside what they described
+  (a random sample of 24 measured 10 beside before, 0 after); they were
+  re-pointed, and some 50 sentences describing code that has since changed
+  were rewritten (ADR-002 no longer claims an advisory integration lease,
+  the HTTP workspace catalogue lists its 13 tools including `git_commit`,
+  audits accept every agent but Vibe, among others).
+- The docs citation check is scoped per pull request (KT-1195). A pull
+  request that changes no file under `docs/` or `backend/docs/` gets the
+  check as a counted warning (job summary and one annotation per failure),
+  never a failure; one that changes docs fails only on citations of the docs
+  it changes, with the repair command in the message
+  (`make docs-reanchor DOCS="…"`). A pull request that changes `VERSION` (a
+  release), a release run without a pull-request proof, a manual run and a
+  local `cargo test` stay strict on every doc. CI lists the changed paths
+  from the pull request's merge commit (`scripts/ci/docs_citations_changed.sh`,
+  failing rather than guessing when it cannot) and passes them to the test.
+  `make docs-reanchor` re-points a citation whose `#symbol` left its range
+  only when the symbol occurs once in the cited file, keeping the span length
+  (clamped) and the anchor; with several occurrences it rewrites nothing and
+  lists the candidate lines, and the CI message no longer suggests a « try »
+  range for such an anchor (the nearest occurrence was often the wrong one). Missing files, missing lines and lines past the
+  end are never rewritten, and only the checked docs are written. It is the
+  first step of the release checklist (`docs/operations/releasing.md`). The
+  CI check, the `verified` badge and the runtime verifier keep one anchor
+  rule with no tolerance window, now stated in the citation spec. The 16
+  citations the integration had shifted were repaired: 1 by the command, 15
+  by hand, because their symbol occurs several times (for one of them the
+  nearest occurrence was the wrong one).
+- Audit versions and standards are judged from dated sources (KT-1000). The
+  tech-debt step and the security pass get a « Technologies and standards »
+  block: the project's stored dependency watch (version in place, latest,
+  gap, check date; never refreshed by the audit) and the runtime versions the
+  repository pins (`node-version`/`python-version`/… in `.github/workflows`
+  and `.gitlab-ci.yml`, `.nvmrc`, `.node-version`, `.python-version`,
+  `.ruby-version`, `rust-toolchain(.toml)`, `.tool-versions`), each with its
+  citation. Kronn picks the live source from configuration — context7 when the
+  agent mounts it from the project's MCP config, else a web tool when the
+  agent has one (a direct Claude CLI with full access), else the dependency
+  watch — and the prompt states it. New citation kind
+  `[src: deps: <manager>/<package>@<YYYY-MM-DD>]`: in an audit it is checked
+  against the injected watch (absent row or other date = fabricated);
+  elsewhere it stays unchecked. The `Dependencies` coverage row must state
+  `source used: …` or `not verified: no source`, otherwise step 8 is re-run.
+- « En faire des tâches Kronn » on the card of a project with tech debt
+  (KT-1167). `POST /api/projects/:id/audit/td-tasks` turns every
+  `docs/tech-debt/TD-*.md` sheet into a planning task linked to the project:
+  one parent task per theme (the sheet's `Category`, else its `Area`) with one
+  subtask per sheet. A subtask carries the sheet's title, its severity as
+  priority (Critical/High/Low as is, Medium and unknown as normal), theme,
+  area, status, problem excerpt, sheet path and a verification criterion as
+  its Definition of Done. Every task is keyed (`audit:<project>:<TD-id>`, and
+  `audit:<project>:theme:<theme>` for a parent) on the existing planning
+  idempotency key, so a second click creates nothing and reports the tasks
+  already linked; rejected sheets and sheets covered by an accepted decision
+  are skipped. The answer counts created, already linked and skipped. The
+  sheets stay in the repository as the source of truth. The briefing form
+  gains « Faire des TD trouvées des tâches Kronn »: saved in `docs/briefing.md`
+  (and the DB notes) as a `## Kronn options` line, it runs the same
+  conversion at the end of a successful Full audit (`td_tasks` SSE event, a
+  warning on failure).
+- The audit recap now shows what a run consumed per phase and in total
+  (KT-1084): the briefing, the audit steps and the validation discussion, each
+  with its tokens (uncached input, output, cache) and cost, plus a grand total.
+  `GET /api/audit-runs/:run_id/cost` adds them up from what each phase already
+  stored, nothing is re-measured. A step a resume carried over is counted once,
+  at the run that really ran it. A phase no agent reported shows « non mesuré »,
+  never 0; a sum over an unknown cost is marked `≥`, an estimated one `≈`. The
+  briefing is linked to the project, not to a run: it is the briefing discussion
+  opened since the previous Full audit.
+- « Revalider l'audit » on the card of an audited or validated project
+  (KT-1168). Kronn first checks every citation against the fingerprints
+  recorded at validation, without a model:
+  `GET /api/projects/:id/revalidation` lists, per doc, the moved citations,
+  the broken ones (changed, removed, file missing), the ones inside
+  `owner="human"` sections, and the audit step that owns each doc.
+  `POST /api/projects/:id/revalidate-audit` then rewrites the line number of
+  each moved citation whose content is unchanged, also without a model. If
+  any doc still has broken citations, it runs the step that owns that doc,
+  and only that step, through the partial-audit pipeline (same lease, run
+  row, Stop and gates). That step gets the re-verification prompt, Kronn's
+  findings for its doc and the new builtin skill `audit-revalidation`. A
+  citation that no longer resolves is named before the agent runs, and the
+  step cannot end `unchanged` while it is still there. Human sections are
+  listed for their owner and never edited. Docs the agent rewrote get fresh
+  fingerprints, so the « Sources » badge is clean again once nothing is left.
+  A run that rewrote nothing, because the agent ended `unchanged` or was
+  stopped first, restores the validation it revoked. Relaunching the action
+  resumes: it recomputes what is left. Each section of the panel has
+  « Vérifié, inchangé », wired to the existing acknowledgement, and every
+  error, stop or interruption offers « Reprendre ». The routes are not on the
+  bridge list.
+- The briefing now asks about the project itself, on closed cards, and the
+  audit writes `docs/project.md` from the answers (KT-1173). Next to the six
+  questions, the form shows one choice card per fact: tracker, project key,
+  forge, repository, default branch, commit convention, sign-off, merge
+  strategy, review, release cadence, environments (with optional URLs) and
+  roles (arbiter, tech lead, DevOps, PO, QA, with only the name and contact
+  the user types). The backend refuses any option outside a card. Answers go
+  to a `## Project facts` section of `docs/briefing.md`, kept as answered
+  even when the AI review rewrites the file. Each Full audit renders
+  `docs/project.md` deterministically (template v2 ships its skeleton and
+  routes it from `docs/AGENTS.md`). An open repository is taken from the git
+  remote. When the project has a Jira (`mcp-atlassian`) or GitHub
+  (`mcp-github`) API connection, the Jira project key, the repository and
+  its default branch are checked read-only with one GET each, and a
+  mismatch is flagged on the page. With no connection, the value is marked
+  "not verified". A `docs/project.md` without its generated marker is never
+  rewritten.
+
+- « Recréer les fichiers du template » (KT-1166): a damaged or missing AI-doc
+  template file can be reinstalled on purpose. The project card lists the files
+  that would be replaced and asks for confirmation; every replaced file is first
+  copied to `.kronn/audit/template-backups/<timestamp>/`, then the result names
+  what was replaced and where the originals are. Only the template's own files
+  are written and `owner="human"` sections are kept as they are. Files still
+  template-like or broken (empty, unfilled `{{placeholders}}`, unpaired section
+  markers) are repaired by default; files holding real audit content are listed
+  apart with a warning, unchecked, and replaced only when ticked (the POST takes
+  the explicit path list and refuses any path the plan does not offer). The action is
+  refused while an audit holds the project's lease. It is a human action: the
+  two routes (`GET .../template-reinstall/plan`, `POST .../template-reinstall`)
+  are off the bridge-token list and refuse a bridge caller. A failure keeps
+  « Reprendre ».
+- After an audit with failed steps, a single step can be retried alone, or a
+  human can accept it as it stands (KT-1131). On each failed line of the
+  timeline, « Relancer cette étape » resumes the interrupted run with
+  `retry_steps` (the other failed steps stay failed and unrun), and
+  « Accepter en l'état » calls
+  `POST /api/projects/:id/audit-runs/:run_id/steps/:step/accept`, which
+  records who, when and an optional reason (migration 246). The route is off
+  the bridge list and refuses any agent token. It is refused when the target
+  is missing, empty or still a template. Once no failed step is left,
+  « Finaliser l'audit » completes the run without an agent step, so the
+  project can be validated without a global audit. The recap and the
+  validation discussion list accepted steps apart from succeeded and
+  unchanged ones.
+
 - A repository that already has its own docs can now receive the AI-doc
   template v2 by merge (KT-1172). `GET /api/projects/:id/template-merge/plan`
   shows, without writing anything, a correspondence table that maps each
@@ -96,9 +404,216 @@ Release notes for 0.9.3 and earlier are available in the
   one diff per file that you accept one by one or all at once. You can also
   resume or abandon the merge. Every error says what to fix and offers
   "Reprendre".
+- The template merge plan now says where a merge stands (KT-1182). Its new
+  `merge` field reports whether the `kronn/template-v2-merge` worktree and
+  branch exist, how many files wait for review, and how many commits the
+  branch has that the checkout's branch (and the remote default branch)
+  does not. It reads git only: no fetch, no write. The panel opens on "Fusion
+  en cours" with Reprendre and Abandonner when a worktree exists, and on
+  "Fusion acceptée, à intégrer (N commits)" when accepted commits wait to be
+  merged. "Lancer l'audit" no longer offers the merge again in that case.
+- Audit drift is now measured per citation (KT-1175, KT-1078). Validation,
+  and every audit baseline, records a fingerprint of each `[src: path:line]`
+  the docs cite in `docs/citations.json`: path, line and a SHA-256 of the
+  cited line (whitespace-normalised, secrets redacted), never its content.
+  A section with fingerprints goes stale only when one of its cited lines
+  changes or disappears, and the drift report names the citation; a commit
+  elsewhere no longer marks it stale. A line that only moved, by up to 50
+  lines, is re-anchored. `GET /api/projects/:id/citation-drift` lists broken
+  and moved citations per section, and
+  `POST /api/projects/:id/citation-drift/acknowledge` (`{"doc": "docs/…"}`)
+  records a section as checked and unchanged without rewriting it. A new
+  "Sources clean" badge, kept apart from the dated "Validated" one, turns to
+  "To re-verify" as soon as a citation breaks, with no new audit. An
+  optional cron, `audit_reverify_cron` in `config.toml` (off by default),
+  re-verifies every project on that schedule.
+- A decision is no longer reported as tech debt (KT-1174). The v2 template's
+  `docs/decisions.md` is now a list of ADRs, with no cap on their number:
+  `## ADR-NNNN: title`, then status (`proposed`, `accepted`, `superseded by
+  ADR-NNNN`), date, optional `Supersedes`, `Covers`, `Source` and `Links`,
+  and Context, Decision and Consequences sections. After the audit steps,
+  Kronn settles every TD sheet an accepted ADR covers, either because the ADR
+  lists its slug in `Covers` (a re-discovery on another day still matches)
+  or because the sheet names the ADR in `Decision record`: its status becomes
+  `Accepted decision`, the sheet points at the ADR, and the TD leaves the
+  index and the validation. `proposed` and superseded ADRs cover nothing.
+  Only an ADR already accepted when the run started (in that version: a
+  `Covers` entry added during the run does not count), or accepted by a human
+  in a validation card, may settle a TD. An ADR the run itself wrote or
+  flipped to `accepted` goes back to `proposed`, and the finding stays in the
+  validation, where accepting it as a decision records a covering ADR. A
+  sheet's `Decision record` line counts only if that line, naming that ADR,
+  was on the sheet when the run started: one the run writes on a new sheet,
+  adds to an existing one or changes leaves the finding in the validation.
+  An ADR a human accepts during a run, or while it is paused before a
+  resume, counts from the next fresh run. A resumed run keeps the baseline
+  of the run it continues (migration 252, `audit_runs.adr_baseline` and
+  `audit_runs.adr_record_baseline`). The steps that write TDs receive only the ADRs
+  in force before the run. Existing tables keep working: a row that links a
+  TD sheet still covers it.
 
 ### Fixed
 
+- A native agent's reply to a joined CLI now reaches that CLI (KT-1201). When
+  the room's agent answered a CLI turn without naming it, the reply had no
+  target, and the bridge reported it as `withheld_by_routing` ("target another
+  identity"): the CLI thought the agent silent for hours. The reply is now
+  stored with that CLI as its target unless it names someone else, and the
+  delivery treats an untargeted agent reply to a session's own message as
+  addressed to it (`attention_required`). A native agent that writes
+  `@claude` while a Claude CLI is joined (the author of the turn it answers,
+  or the only one) now reaches that CLI instead of spawning a one-off Claude,
+  which used to answer as if it were the CLI. A one-off agent is told it is
+  not the joined CLI of its provider, whose turns it now sees labelled with
+  the CLI alias. Joined CLIs need an MCP reload to load the new bridge.
+- The MCP `audit_status` tool reports where a project's audits really stand
+  (KT-1210). Its `latest` was the newest Completed run, so after a Cancelled,
+  Failed or step-0 Interrupted run an agent read « Completed, nothing to
+  resume ». `latest` is now the newest run of any status, next to
+  `latest_completed`, `steps_to_redo` and `lease_orphaned` (launches refused
+  until the cleanup action), read even while the tracker has a live entry.
+  `GET /api/projects/{id}/audit-latest` returns these four fields.
+  `audit_launch` takes `fresh` and `retry_steps`, the parameters the backend
+  refusal already asked for, and refuses contradictory combinations before
+  any call. The bridge is a long-running process: reload it to get the fix.
+- A favourite stays in Favoris while an agent runs or waits in it. From 20
+  discussions on, a live pinned discussion moved to « À suivre » and left
+  Favoris until the run ended. Favoris now lists every pinned discussion,
+  live ones first with their indicator, and « À suivre » keeps the unpinned
+  live and unread work, so each discussion has one shortcut row.
+- Links inside project docs now open inside Kronn (KT-1200). A relative link
+  such as `testing-quality.md` or `../tech-debt/TD-….md` used to go to the
+  browser, which reloaded the app and opened nothing, since Kronn has no
+  router. The doc viewer now handles every link itself. A link to another doc
+  opens that doc in the viewer. The link is resolved from the current doc's
+  folder, falls back to the repository root, and never goes above it. A
+  `#section` link scrolls to the heading, since headings now carry slug ids.
+  A link to a source file, with or without `:line`, opens the source viewer
+  at that line. Web and `mailto:` links open in a new tab with
+  `rel="noopener noreferrer"`. A link to a missing doc, or to a path outside
+  the project, shows an inline message instead. A back button returns to the
+  previous doc.
+- Dialogs, drawers and click targets work from the keyboard (KT-1072). A
+  shared `useDialogFocus` hook gives focus on open, keeps Tab inside, closes
+  on Escape and returns focus to the trigger; it now covers the folder
+  picker, the audit history drawer (now `aria-modal`), the API call log
+  drawer, the tech-debt review and its source viewer, « À reconfirmer »,
+  « Revalider l'audit » and the template reinstall confirmation. API call
+  log rows and the doc viewer tree take focus and open with Enter or Space;
+  the project card's validation, anti-hallucination and tech-debt badges are
+  buttons, and the card header no longer swallows Enter or Space pressed on
+  a control inside it. The audit history's sortable columns expose
+  `aria-sort` and sort from a button, and the audit timeline announces each
+  new step, not every tick, through a polite live region.
+  The template reinstall confirmation is non-modal (Tab may leave it, only
+  an Escape pressed inside closes it) and focus follows each step: the
+  report's or the error's « Fermer » after confirming, then the open button.
+  Escape in one of two side-by-side inline panels closes that panel. The doc
+  viewer's source overlay is a modal dialog, the tech-debt review and its
+  source viewer leave Escape to an IME composition or a control that
+  consumed it, and one Escape in the commit detail closes it alone, not the
+  viewer around it.
+
+- One click on « Voir » in the pending-decisions banner now brings the
+  decision card into view. It fired a single smooth `scrollIntoView`, aimed
+  at the layout measured at the click; message rows use
+  `content-visibility: auto` and take their real height only as the scroll
+  reveals them, so on a long room it landed short and took up to ten clicks.
+  The banner now uses the room's pinned navigation, which keeps the card
+  centred until the rows above settle and stops on a wheel or touch. The
+  asset inventory's « go to message » and the in-room search's
+  previous/next had the same one-shot scroll and use the same pin.
+- The linked-repos block of audit prompts and `docs/linked-repos.md` no
+  longer claim that every Kronn-bootstrapped repo has a `docs/AGENTS.md`
+  (KT-999): each entry states the entry point Kronn found in that repo
+  (`docs/AGENTS.md`, legacy `ai/index.md`, README only, nothing, not checked
+  for a URL, or path not found).
+
+- Security: the citation verifier no longer marks a source outside the project
+  `verified` (KT-1077). An absolute citation such as `[src: file: /etc/passwd:1]`
+  used to pass on mere existence; it is now accepted only under a project root
+  (the discussion's worktree, the checkout, a declared linked repo) and then
+  jailed like a relative path, otherwise it is `outside_project`. Symlinks are
+  resolved one component at a time without following one out of the root, so
+  an existing and a missing file behind an escaping link get the same verdict:
+  nothing outside the root is stat'ed or opened. A `[src: …]` marker quoted in
+  inline backticks was skipped entirely; it is now verified too, green when it
+  resolves, and counted as unverified (amber, never fabricated) when it does
+  not, because docs quote the grammar itself that way (`[src: file: <path>:<line>]`).
+  `docs/AGENTS.md` and the citation spec say exactly this.
+
+- A stale-sections refresh launched after a Stop now runs (KT-1188). Like the
+  Full audit, the partial pipeline clears a cancellation flag left by a
+  previous run as soon as it holds the project lease, so a Stop nobody
+  acknowledged no longer stops the next refresh before its first step.
+- An audit no longer acknowledges the broken citations of a doc edited by hand
+  (KT-1187). After a Full audit or a partial refresh, only the docs a step of
+  that run proved it rewrote (its target, or a document its documentary
+  repair rewrote) get fresh citation fingerprints. A doc changed outside the
+  run keeps its record, so its broken citations stay « à re-vérifier » until
+  a validation, an acknowledgement or a rewrite checks them. A doc no step
+  wrote is no longer recorded by the run either.
+- An audit error never stays on screen without a way out, and « Lancer
+  l'audit » always starts from what exists (KT-1169). A launch that stops on
+  an error, whether refused, cut off or offline, leaves a « Reprendre »
+  banner in the timeline that replays that same launch. An unreadable
+  timeline, recap or resume state says so with « Réessayer ». A refused
+  acceptance keeps its form and reason. The server now refuses a launch
+  without `resume_run_id` while the latest run can still be resumed, unless
+  the request carries `fresh: true`, the confirmed « Relancer quand même
+  tout l'audit » choice. A stale-sections refresh is refused in that case
+  too. Bridge agents get the run id to resume. When the card cannot tell
+  whether a run is resumable, launching waits, and a step retried alone
+  never turns into a whole audit. On a documented repository no launch
+  installs the template again. The states and their actions are listed in
+  `docs/architecture/audit-run-states.md`.
+- `PUT /api/projects/:id/briefing` is no longer ignored once
+  `docs/briefing.md` exists (AUD-14): it writes the file, or removes it when
+  the notes are cleared, before the database column the audit falls back to.
+  The briefing injected into each audit step, full or partial, is capped at
+  6,000 characters and ends with an explicit truncation marker that points
+  to `docs/briefing.md`.
+
+- A task execution's progress no longer exposes the raw name of the running
+  tool (KT-1124). `task_exec_status` returned it in
+  `TaskExecutionProgress.reason`, and an MCP name such as `mcp__github__...`
+  reveals the server. The reason is now a tool category (`Read`, `Mcp`,
+  `Kronn`...), stored as such and mapped at read time for rows written before.
+  The tool transcript is unchanged.
+- The `db-backup.md` cron recipe now creates the backup folder as `0700` and
+  the copies as `0600` (`umask 077;`), with the `ls -la` result to expect
+  (KT-1075). A copy holds the conversation history in clear.
+- The audit UI no longer gets stuck (KT-1134). Every run state offers an
+  action (see `docs/architecture/audit-run-states.md`). A first audit that
+  stopped can be resumed from the validation phase, and an interrupted
+  re-audit points validation to its failed steps instead of an unlinked
+  discussion. Relaunching the whole audit over an interrupted run asks first.
+  « Validation avec vous » is never « En cours » while an audit runs. A cancel
+  the backend did not acknowledge stays « annulation en attente » instead of
+  going idle. A cancel deletes only its own run's validation discussion,
+  never an earlier run's. A lease whose run could not be settled is retried,
+  then signalled with a « Débloquer » action wired to
+  `/api/audit-runs/cleanup`, which now spares live audits. Validation agents
+  are stopped when an audit starts and held while it runs, so they never
+  write `docs/` at the same time as the audit.
+
+- A file cited by an agent that exists only in an unmerged worktree of the
+  project no longer shows as "not found" (KT-1184). Citation checks look in
+  the main checkout first, then in the project's own worktrees (the folders
+  under `.kronn/worktrees/` and the worktrees git registers for the repo,
+  most recently modified first, symlinked entries ignored), with the same
+  path jail and line checks. A path written with
+  `.kronn/worktrees/<lane>/` always resolves in that lane, however many
+  worktrees the project has. A path into another
+  project's worktree is refused. Each stored source check gains an optional
+  `origin` (`{kind: "checkout"}` or `{kind: "worktree", name}`); older rows
+  without it read as checkout. In the message, a lane file gets its own
+  neutral blue chip tagged with the worktree name, and its tooltip says it is
+  present in that worktree but not merged yet. The footer counts it apart
+  ("in a worktree"), and the detail panel lists it under its worktree. Red
+  stays reserved for a file found nowhere. Lane files no longer count as
+  fabricated in the lint report, so the `disc_append` receipt stops warning
+  about them.
 - The release body no longer mentions GitHub accounts by accident (KT-1179).
   Multi-agent syntax examples in the CHANGELOG (an `at` sign followed by an
   agent alias) were read by GitHub as mentions of real accounts, listed under
@@ -171,6 +686,28 @@ Release notes for 0.9.3 and earlier are available in the
   anti-hallucination spec its `docs/AGENTS.md` links to, so the documentary
   check no longer blocks step 1. The outdated "no template to restore" advice
   is gone from the step-failure toast.
+- A re-audit now re-checks the documentation it already wrote against the
+  current code, instead of looking only for template placeholders
+  (KT-1132). When the target of steps 1 to 7 is already filled, the step gets a
+  re-verification prompt: check each fact and each citation against the code,
+  correct what is false or stale, keep what is still true word for word,
+  never touch `owner="human"` sections, and leave a still-accurate file as it
+  is so that the step ends **Inchangé**. Before the agent runs, Kronn lists the
+  target's citations that no longer resolve (deleted file, line past the end
+  of the file) and hands them to the step. Such a document can no longer end
+  unchanged: the step corrects it in the same run, or fails after three
+  attempts, where it used to end unchanged and block the run at the final
+  documentary check. A dead link or citation inside an `owner="human"`
+  section is never handed to the agent and never blocks a step or the run,
+  since no step may rewrite that section: it is reported as a
+  `human_section_reference` warning naming the section, and the validation
+  discussion lists it for the section's owner to fix. On a project already
+  audited, the timeline's launch
+  button reads "Revérifier la doc" and explains what it does before you
+  start. A Full audit no longer writes `docs/var/` into the project
+  `.gitignore`: it goes into the local `info/exclude`, like Kronn's other
+  private paths (KT-1125), so an audit leaves your `.gitignore` byte-identical,
+  or absent.
 - `kronn dev` stops on Ctrl-C or TERM in every phase (KT-1145). Under bash
   5.2 the backend supervisor could drop a TERM that arrived while it expanded
   a command substitution, right after its Cargo build, and keep running. It

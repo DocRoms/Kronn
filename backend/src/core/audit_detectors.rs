@@ -88,24 +88,61 @@ static SOURCE_EXTS: &[&str] = &[
 ];
 
 /// Markup extensions scanned for `_blank` / CSP signals.
-static MARKUP_EXTS: &[&str] = &[
+pub(crate) static MARKUP_EXTS: &[&str] = &[
     "html", "htm", "twig", "vue", "svelte", "jsx", "tsx", "php", "erb", "blade",
 ];
 
 /// Per-detector cap on emitted signals so a pathological repo can't
 /// flood the Step 8 prompt. When a detector truncates, it appends a
 /// final summary signal so the omission is never silent.
-const MAX_PER_DETECTOR: usize = 15;
+pub(crate) const MAX_PER_DETECTOR: usize = 15;
 
 /// Run every Phase-1 detector against `project_path` and return the
 /// flattened, severity-sorted signal list.
 pub fn run_detectors(project_path: &Path) -> Vec<DetectedSignal> {
+    scan_project(project_path).signals
+}
+
+/// Step 8 inputs: the detector signals and the ecosystems whose
+/// stack-specific checklist applies.
+pub struct ProjectScan {
+    pub signals: Vec<DetectedSignal>,
+    pub ecosystems: Vec<crate::core::audit_ecosystems::Ecosystem>,
+}
+
+pub fn scan_project(project_path: &Path) -> ProjectScan {
+    scan_project_with_rules(project_path, &[])
+}
+
+/// [`scan_project`] plus the briefing's bans that carry a pattern (KT-1193).
+pub fn scan_project_with_rules(
+    project_path: &Path,
+    rules: &[crate::models::ProjectRule],
+) -> ProjectScan {
+    let inventory = crate::core::audit_baseline::Inventory::collect(project_path);
+    let listing = tracked_listing(project_path);
     let mut out = Vec::new();
     out.extend(detect_zero_tests(project_path));
     out.extend(detect_blank_without_noopener(project_path));
     out.extend(detect_csp_unsafe(project_path));
     out.extend(detect_missing_community_files(project_path));
-    out.extend(detect_tracked_repo_artifacts(project_path));
+    out.extend(match &listing {
+        Ok(listing) => {
+            tracked_artifacts_from_listing(listing, yarn_zero_install_is_documented(project_path))
+        }
+        Err(reason) => vec![tracked_artifact_scan_unavailable(reason.clone())],
+    });
+    if let Ok(listing) = &listing {
+        out.extend(crate::core::audit_baseline::detect_tracked_dotenv(listing));
+    }
+    out.extend(crate::core::audit_baseline::run_baseline(
+        project_path,
+        &inventory,
+    ));
+    out.extend(crate::core::project_rules::detect_ban_violations(
+        project_path,
+        rules,
+    ));
     // Stable order: severity first, then detector id, then evidence.
     out.sort_by(|a, b| {
         a.severity
@@ -113,7 +150,10 @@ pub fn run_detectors(project_path: &Path) -> Vec<DetectedSignal> {
             .then_with(|| a.detector_id.cmp(b.detector_id))
             .then_with(|| a.evidence.cmp(&b.evidence))
     });
-    out
+    ProjectScan {
+        signals: out,
+        ecosystems: crate::core::audit_ecosystems::detect_ecosystems(project_path, &inventory),
+    }
 }
 
 /// The list of detector ids that `run_detectors` runs, for the honest
@@ -124,6 +164,20 @@ pub const DETECTOR_IDS: &[&str] = &[
     "csp-unsafe",
     "missing-community-files",
     "tracked-repo-artifacts",
+    "tracked-dotenv",
+    "dockerfile-root-user",
+    "dockerfile-no-healthcheck",
+    "dockerfile-apt-hygiene",
+    "dockerfile-unpinned-base",
+    "dockerfile-add-remote",
+    "dockerfile-secret-arg",
+    "compose-unpinned-image",
+    "ci-ssh-hostkey-off",
+    "ci-pull-request-target",
+    "ci-action-moving-ref",
+    "img-missing-alt",
+    "inline-block-oversize",
+    "oss-community-standards",
 ];
 
 // ─── Detector 1: test gap ────────────────────────────────────────────────
@@ -167,7 +221,7 @@ fn detect_zero_tests(root: &Path) -> Vec<DetectedSignal> {
 
 /// Heuristic: is this path a test file? Covers the common per-language
 /// conventions without language-specific config.
-fn is_test_path(path: &Path) -> bool {
+pub(crate) fn is_test_path(path: &Path) -> bool {
     // Directory-based conventions: match any path COMPONENT (so a
     // top-level `tests/` with no leading slash is caught too).
     static TEST_DIRS: &[&str] = &["tests", "test", "__tests__", "spec", "specs", "testing"];
@@ -409,24 +463,29 @@ fn root_has_file(root: &Path, rel_lower: &str) -> bool {
 /// outputs are repository hygiene debt. Only `git ls-files` entries are
 /// considered: an untracked local screenshot or cache is a developer-state
 /// concern, not a finding against the project.
+#[cfg(test)]
 fn detect_tracked_repo_artifacts(root: &Path) -> Vec<DetectedSignal> {
-    let output = match crate::core::cmd::git_cmd()
+    match tracked_listing(root) {
+        Ok(listing) => {
+            tracked_artifacts_from_listing(&listing, yarn_zero_install_is_documented(root))
+        }
+        Err(reason) => vec![tracked_artifact_scan_unavailable(reason)],
+    }
+}
+
+/// `git ls-files -z --cached`, shared by the detectors that judge tracked
+/// paths. A failure is reported once, by the tracked-artifacts signal.
+fn tracked_listing(root: &Path) -> Result<Vec<u8>, String> {
+    let output = crate::core::cmd::git_cmd()
         .args(["-C"])
         .arg(root)
         .args(["ls-files", "-z", "--cached"])
         .output()
-    {
-        Ok(output) => output,
-        Err(error) => return vec![tracked_artifact_scan_unavailable(error.to_string())],
-    };
+        .map_err(|error| error.to_string())?;
     if !output.status.success() {
-        return vec![tracked_artifact_scan_unavailable(format!(
-            "git ls-files exited with {}",
-            output.status
-        ))];
+        return Err(format!("git ls-files exited with {}", output.status));
     }
-
-    tracked_artifacts_from_listing(&output.stdout, yarn_zero_install_is_documented(root))
+    Ok(output.stdout)
 }
 
 fn tracked_artifacts_from_listing(listing: &[u8], yarn_zero_install: bool) -> Vec<DetectedSignal> {
@@ -607,6 +666,11 @@ fn disposition_anchor(sig: &DetectedSignal) -> Option<String> {
     {
         return Some(sig.evidence.to_lowercase());
     }
+    if sig.detector_id == "tracked-dotenv"
+        || sig.detector_id == crate::core::project_rules::DETECTOR_ID
+    {
+        return Some(sig.evidence.to_lowercase());
+    }
     // Count / structural signals: fall back to a stable keyword.
     let kw = match sig.detector_id {
         "zero-tests" => "test",
@@ -616,6 +680,11 @@ fn disposition_anchor(sig: &DetectedSignal) -> Option<String> {
             } else {
                 "security"
             }
+        }
+        "oss-community-standards" => {
+            return crate::core::audit_baseline::oss_anchor(&sig.title)
+                .map(str::to_string)
+                .or_else(|| Some(sig.title.to_lowercase()));
         }
         _ => return Some(sig.title.to_lowercase()),
     };
@@ -725,7 +794,7 @@ fn escape_markdown_table_cell(value: &str) -> String {
 
 /// Shared bounded, skip-aware walk. Files only; depth-capped; heavy dirs
 /// pruned. Matches `scanner::scan_kronn_markers` conventions.
-fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+pub(crate) fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
     WalkDir::new(root)
         .max_depth(8)
         .into_iter()

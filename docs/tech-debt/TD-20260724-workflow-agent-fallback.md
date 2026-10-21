@@ -226,12 +226,14 @@ candidate must prove:
 - required filesystem, MCP, Kronn-tool, vision/file, and permission semantics;
 - compatibility with the run's data boundary and project access policy.
 
-This matters today because HTTP agents have a different execution path and
-workflow Agent steps do not yet receive the Kronn tool executor. A local Ollama
+This matters today because HTTP agents have a different execution path: since
+0.9.7 workflow Agent steps receive the Kronn tool executor, but only a bounded
+project/run-scoped catalogue without Planning mutations, and no per-model
+capability gate checks that the model can call tools. A local Ollama
 model therefore cannot safely replace every CLI step merely because the model
 is pulled. [src: file: backend/src/agents/runner.rs:510-536]
 [src: file: backend/src/workflows/steps.rs:759-779]
-[src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:67-76]
+[src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:52-54]
 
 No-capability declaration should mean “unknown/ineligible”, not “probably
 compatible”. This keeps `prefer_local_when_compatible` honest.

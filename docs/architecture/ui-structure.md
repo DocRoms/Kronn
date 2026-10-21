@@ -191,8 +191,8 @@ run tree, each with its agent's state and the head of its latest answer. A
 Quick API reads as its summary line and a table of its first rows, a Quick
 Exec's flat JSON output as key → value; the raw payload stays folded under
 the details.
-`[src: file: backend/src/db/kronn_action_engine.rs]`
-`[src: file: frontend/src/lib/runResultPreview.ts]`
+`[src: file: backend/src/db/kronn_action_engine.rs:219-256#reconcile_from_agent_turn]`
+`[src: file: frontend/src/lib/runResultPreview.ts:88-100#quickApiPreview]`
 
 Quick Exec cards also show the measured exit code and a folded, bounded stderr
 preview after reload. `SharedRun.exec_details` persists those diagnostics
@@ -210,9 +210,9 @@ spawn failures have no captured exit code. Signal deaths keep a null code.
 `KRONN:CHAIN_QP` remains a temporary variable-free Quick Prompt compatibility
 path; `kronn-action` is the canonical contract for new agent proposals.
 
-`[src: file: backend/src/db/discussion_actions.rs]`
-`[src: file: backend/src/api/discussion_actions.rs]`
-`[src: file: frontend/src/components/DiscussionActionCard.tsx]`
+`[src: file: backend/src/db/discussion_actions.rs:434-445#ingest_message_actions]`
+`[src: file: backend/src/api/discussion_actions.rs:69-102#claim_launch]`
+`[src: file: frontend/src/components/DiscussionActionCard.tsx:140-163#provenanceLabel]`
 
 **Right-pane header surface:** master/detail pages use
 `.collection-detail-header` for the shared subtle accent gradient and bottom
@@ -220,8 +220,8 @@ separator; each page keeps ownership of its header layout and spacing. The
 content pane sits inside the full-bleed page shell with the shared compact inset,
 border and radius; Discussions and Pages apply that frame directly to their
 long-lived right pane so their internal scroll areas remain stable.
-`[src: file: frontend/src/pages/DiscussionsPage.css:1900-1921]`
-`[src: file: frontend/src/pages/PagesPage.css:76-99]`
+`[src: file: frontend/src/pages/DiscussionsPage.css:1941-1954#disc-chat-area]`
+`[src: file: frontend/src/pages/PagesPage.css:76-89#live-pages-viewer]`
 Automation has no additional page-title band: the selected workflow, Quick
 Prompt, Quick API or Quick Exec header is the single visible content header.
 `[src: file: frontend/src/components/CollectionShell.css:2-5]`
@@ -270,8 +270,8 @@ the Docker CLI, Compose plugin or daemon cannot be reached. Lifecycle buttons
 are disabled while an operation is in flight and the returned status snapshot
 replaces the previous service list after every action. Its configuration action
 deep-links to the detected Compose file in the project's Code source explorer.
-`[src: file: frontend/src/components/ProjectDockerPanel.tsx]`
-`[src: file: frontend/src/components/SourceCodeViewer.tsx]`
+`[src: file: frontend/src/components/ProjectDockerPanel.tsx:167-208#runAction]`
+`[src: file: frontend/src/components/SourceCodeViewer.tsx:179-205#initialPath]`
 
 **Discussion-agent failure recovery (0.9.7):** native-agent startup/model
 failures are persisted as attributed System messages instead of leaving a
@@ -302,8 +302,9 @@ human user bubbles. Their card spans the full message column like a discussion
 note. The first meaningful line stays visible as a compact summary while the
 full operational payload is collapsed behind “Show details” by default; that
 toggle lives in the fixed card header so expanding it never moves the pointer
-target. `[src: file: backend/src/db/discussions.rs]`
-`[src: file: frontend/src/components/MessageBubble.tsx]`
+target. `[src: file: backend/src/db/discussions.rs:3198-3236#tombstone_message]`
+`[src: file: frontend/src/components/MessageBubble.tsx:456-468#orchestratorPreview]`
+`[src: file: frontend/src/components/MessageBubble.tsx:936-946#disc-msg-orchestrator-toggle]`
 
 **Attachment preview:** message attachments and the Assets panel share the
 same carousel for images, videos and disk-backed text files (including JSON
@@ -316,23 +317,24 @@ request. This is a client preview limit, not a server streaming guarantee:
 the existing content endpoint still reads the stored file before responding.
 Office documents represented only by extracted text (no original disk file)
 remain filename chips.
-`[src: file: frontend/src/components/TextAttachmentPreview.tsx:1]`
-`[src: file: frontend/src/lib/textAttachmentPreview.ts:1]`
-`[src: file: frontend/src/lib/mediaKind.ts:1]`
-`[src: file: backend/src/api/discussions/context.rs:448]`
+`[src: file: frontend/src/components/TextAttachmentPreview.tsx:19-25#AbortController]`
+`[src: file: frontend/src/lib/textAttachmentPreview.ts:2-30#TEXT_PREVIEW_MAX_BYTES]`
+`[src: file: frontend/src/lib/mediaKind.ts:33-39#isTextAttachment]`
+`[src: file: backend/src/api/discussions/context.rs:683-706#get_context_file_content]`
 
 **Compact routing receipt:** durable targets are shown inline in the human
 author header (`human → @agent · tier`) instead of consuming a separate message
 row. The full “Routing requested” label remains available to assistive
-technology and as a pointer tooltip. `[src: file: frontend/src/components/MessageBubble.tsx]`
+technology and as a pointer tooltip. `[src: file: frontend/src/components/MessageBubble.tsx:742-788#disc-msg-routing-receipt]`
 
 **Accessible agent identity colours:** provider brand colours remain available
 for dots, borders and tinted surfaces. Text labels use `agentTextColor`; NVIDIA
 therefore keeps its `#76B900` brand accent while using a WCAG-AA companion green
 adapted to light and dark themes in aliases, message attribution, comparisons,
 workflow summaries and the shared agent selector.
-`[src: file: frontend/src/lib/constants.ts]`
-`[src: file: frontend/src/styles/tokens.css]`
+`[src: file: frontend/src/lib/constants.ts:190-206#agentTextColor]`
+`[src: file: frontend/src/styles/tokens.css:82-84#kr-agent-nvidia-text]`
+`[src: file: frontend/src/styles/tokens.css:254-255#kr-agent-nvidia-text]`
 
 **Quick Prompt Compare details:** a completed or live Compare opens a dedicated
 multi-column workspace whose columns can be reordered without losing their
@@ -344,9 +346,11 @@ versioned blind rubric over anonymous answers. AI verdicts persist confidence,
 positive/negative points, contract violations and judge provenance (model,
 duration and tokens). Weighted quality exposes its human/AI weights and
 renormalizes only over present ratings instead of hiding missing evidence.
-`[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx]`
-`[src: file: backend/src/api/compare.rs]`
-`[src: file: backend/src/db/sql/130_batch_compare_evaluations.sql]`
+`[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:78-89#weightedQuality]`
+`[src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:183-201#ranked]`
+`[src: file: backend/src/api/compare.rs:118-138#build_judge_prompt]`
+`[src: file: backend/src/api/compare.rs:433-454#update_manual_score]`
+`[src: file: backend/src/db/sql/130_batch_compare_evaluations.sql:1-42#batch_compare_judge_runs]`
 
 Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → Planification → Plugins → Workflows → Pages (after activation) → Config. **"?" button** in nav replays the guided tour.
 
@@ -367,7 +371,7 @@ Frontend modal includes **drag & drop file upload** for documents. Files uploade
 
 ### Pre-audit briefing (optional)
 
-`POST /api/projects/:id/start-briefing` — creates a briefing discussion where the AI asks 5 quick questions (project purpose, stack, team, conventions, watch points). The agent writes `docs/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The briefing content is injected into each audit step via `PROMPT_PREAMBLE`. Vibe (API-only) is excluded from the briefing. The audit itself is open to the CLI agents (Claude Code, Codex, OpenCode, Gemini CLI, Kiro, GitHub Copilot) and, since 0.14.2, to Ollama and LiteLLM, whose native file tools Kronn runs scoped to the project — see [HTTP-agent capabilities](http-agent-capabilities.md#audits-kt-924). Vibe, NVIDIA and Custom are refused with a message naming who is accepted [src: file: backend/src/api/audit/mod.rs:1239].
+`POST /api/projects/:id/start-briefing` — creates a briefing discussion where the AI asks 5 quick questions (project purpose, stack, team, conventions, watch points). The agent writes `docs/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The briefing content is injected into each audit step via `PROMPT_PREAMBLE`. Vibe (API-only) is excluded from the briefing. The audit itself is open to the CLI agents (Claude Code, Codex, OpenCode, Gemini CLI, Kiro, GitHub Copilot) and to the HTTP agents (Ollama and LiteLLM since 0.14.2, NVIDIA, and Custom through a validated named connection), whose file tools Kronn runs scoped to the project — see [HTTP-agent capabilities](http-agent-capabilities.md#audits-kt-924). Only Vibe is refused, with a message naming who is accepted [src: file: backend/src/api/audit/mod.rs:1300-1315#agent_can_audit] [src: file: backend/src/api/audit/mod.rs:1319-1328#audit_refusal_message].
 
 ### CI pipeline
 
@@ -398,7 +402,7 @@ Projects display 3 badges next to the title: `[FileCode] Project docs`, `[Cpu] A
 - When the AI finishes all questions, it includes `KRONN:VALIDATION_COMPLETE` in its last message. This triggers a green banner in the discussion with a "Marquer l'audit comme valide" button. Similarly, `KRONN:BRIEFING_COMPLETE` signals the end of a pre-audit briefing discussion. `KRONN:WORKFLOW_READY` signals the AI Architect has produced a deployable workflow JSON (extracted from ```json block → one-click creation). **Bootstrap++ signals**: `KRONN:ARCHITECTURE_READY` → validate architecture, `KRONN:PLAN_READY` → validate plan, `KRONN:ISSUES_CREATED` → view project. Each gate sends a user message to continue the agent.
 - **Mark as validated**: injects `<!-- KRONN:VALIDATED:date -->` marker into `docs/AGENTS.md`.
 - AI config file badges (CLAUDE.md, .cursorrules, etc.) shown on a second line below the status badges.
-- **MCP-driven audits**: the `kronn-internal` bridge exposes `audit_prepare` (audit surface + current status + briefing state), `audit_launch` (full/partial; `steps` required for partial; `resume_run_id` full-only — resume an Interrupted run by id, the backend derives kind + checkpoint from the row and only accepts the project's most recent run), `audit_status` (bridge stream / live tracker / DB history, kept separate), `audit_install_template`, `bridge_info` (bridge staleness vs the script on disk) and `kronn_intro` (first-contact onboarding tour; per-client marker in `~/.config/kronn/mcp-onboarded.json`). An audit launched over MCP lives with the bridge session — if the stream is abandoned, the drop-guard reconciles state and the run stays resumable. The UI adopts externally-launched audits on the project card (fleet `GET /api/audit-status` poll) and a `WsMessage::AuditFinished` broadcast drives the end-of-audit toast + refetch.
+- **MCP-driven audits**: the `kronn-internal` bridge exposes `audit_prepare` (audit surface + current status + briefing state), `audit_launch` (full/partial; `steps` required for partial; `resume_run_id`, `retry_steps` and `fresh` full-only — resume an Interrupted run by id, optionally only some of its steps, the backend derives kind + checkpoint from the row and only accepts the project's most recent run; `fresh: true` starts over while a run is resumable), `audit_status` (bridge stream / live tracker / DB state kept separate: newest run of any status, newest Completed run, `steps_to_redo`, `lease_orphaned`), `audit_install_template`, `bridge_info` (bridge staleness vs the script on disk) and `kronn_intro` (first-contact onboarding tour; per-client marker in `~/.config/kronn/mcp-onboarded.json`). An audit launched over MCP lives with the bridge session — if the stream is abandoned, the drop-guard reconciles state and the run stays resumable. The UI adopts externally-launched audits on the project card (fleet `GET /api/audit-status` poll) and a `WsMessage::AuditFinished` broadcast drives the end-of-audit toast + refetch.
 
 ### Audit drift detection
 
@@ -479,7 +483,8 @@ run list and never encrypted, so it holds plain labels such as the ticket a run
 is about, never a secret. `GET /api/workflows/{id}/runs?state_key=ticketKey&state_value=EW-7791&limit=1`
 returns the newest run carrying that entry, whether it was seeded or written by
 a step, without reading any step output.
-`[src: file: backend/src/api/workflows.rs]`
+`[src: file: backend/src/api/workflows.rs:4756-4788#validate_initial_run_state]`
+`[src: file: backend/src/api/workflows.rs:5379-5434#list_runs_by_state_visible]`
 
 **6. Rollback / `on_failure`.** `Workflow.on_failure: Vec<WorkflowStep>` — a separate step list that fires **only** when the run terminates with `RunStatus::Failed`. Skipped on `Cancelled`, `StoppedByGuard`, and Gate `reject`. Templates `{{failed_step.name}}` and `{{failed_step.output}}` are exposed inside on_failure prompts. Migration `041_workflow_on_failure.sql`. The wizard rejects `Gate` inside the rollback list (Notify + Agent + ApiCall accepted).
 

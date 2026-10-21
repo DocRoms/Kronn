@@ -72,21 +72,55 @@ pub async fn audit_steps() -> Json<ApiResponse<Vec<AuditStepInfo>>> {
     Json(ApiResponse::ok(steps))
 }
 
-/// 0.8.4 (#298) — fetch the most-recent **completed** audit run for a
-/// project, or `None`. Sister of `audit_latest_resumable` (which only
-/// returns Interrupted rows); this one returns Completed rows so the
-/// ProjectCard recap panel knows which `audit_run_id` to feed to
-/// `audit_run_steps` below.
+/// What a client needs to tell where a project's audits stand.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct AuditLatest {
+    /// The newest run of any status: a Cancelled, Failed or Interrupted run
+    /// after a Completed one is the project's state, not history.
+    pub latest: Option<AuditRun>,
+    /// The newest Completed run, the health snapshot.
+    pub latest_completed: Option<AuditRun>,
+    /// 1-based steps a resume of `latest` runs; empty when it is not resumable.
+    pub steps_to_redo: Vec<u32>,
+    /// The lease is held by a run nobody can settle: every launch is refused
+    /// until the cleanup action releases it (KT-1134).
+    pub lease_orphaned: bool,
+}
+
+/// GET /api/projects/{id}/audit-latest
 pub async fn audit_latest(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<ApiResponse<Option<crate::models::AuditRun>>> {
+) -> Json<ApiResponse<AuditLatest>> {
+    let lease_orphaned = match state.audit_tracker.lock() {
+        Ok(t) => t.lease_orphaned(&id),
+        Err(_) => return Json(ApiResponse::err("audit tracker lock poisoned")),
+    };
     let result = state
         .db
-        .with_read_conn(move |conn| crate::db::audit_runs::latest_completed(conn, &id))
+        .with_read_conn(move |conn| {
+            let latest = crate::db::audit_runs::list_recent(conn, &id, 1)?
+                .into_iter()
+                .next();
+            let latest_completed = crate::db::audit_runs::latest_completed(conn, &id)?;
+            let steps_to_redo = match crate::db::audit_runs::latest_resumable(conn, &id)? {
+                Some(run) => {
+                    let steps = crate::db::audit_runs::list_audit_steps(conn, &run.id)?;
+                    ResumableAudit::new(run, &steps).steps_to_redo
+                }
+                None => Vec::new(),
+            };
+            Ok(AuditLatest {
+                latest,
+                latest_completed,
+                steps_to_redo,
+                lease_orphaned,
+            })
+        })
         .await;
     match result {
-        Ok(row) => Json(ApiResponse::ok(row)),
+        Ok(state) => Json(ApiResponse::ok(state)),
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
     }
 }
@@ -99,13 +133,41 @@ pub async fn audit_latest(
 ///
 /// Boot-time reconcile (30-min threshold) is automatic in
 /// `Database::open`. This endpoint is the manual escape hatch.
+///
+/// KT-1134 — the run of a live audit is spared, and a lease left held by a
+/// run that could not be settled (`AuditTracker::orphaned_leases`) is released
+/// once its rows are: the UI offers this action when a project is stuck.
 pub async fn audit_runs_cleanup(State(state): State<AppState>) -> Json<ApiResponse<u64>> {
+    let (live, orphaned): (Vec<String>, Vec<String>) = match state.audit_tracker.lock() {
+        Ok(t) => (
+            t.leased
+                .iter()
+                .filter(|id| !t.orphaned_leases.contains(*id))
+                .cloned()
+                .collect(),
+            t.orphaned_leases.iter().cloned().collect(),
+        ),
+        Err(_) => return Json(ApiResponse::err("audit tracker lock poisoned")),
+    };
     let result = state
         .db
-        .with_conn(crate::db::audit_runs::reconcile_all_running)
+        .with_conn(move |conn| crate::db::audit_runs::reconcile_running_except(conn, &live))
         .await;
     match result {
-        Ok(n) => Json(ApiResponse::ok(n)),
+        Ok(settled) => {
+            if let Ok(mut t) = state.audit_tracker.lock() {
+                for project_id in &orphaned {
+                    if t.orphaned_leases.contains(project_id) {
+                        t.release_lease(project_id);
+                        t.clear_progress(project_id);
+                        tracing::warn!(
+                            "Audit cleanup released the orphaned lease of project {project_id}"
+                        );
+                    }
+                }
+            }
+            Json(ApiResponse::ok(settled.len() as u64))
+        }
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
     }
 }
@@ -156,6 +218,23 @@ pub async fn audit_run_steps(
     }
 }
 
+/// KT-1084 — an audit run's tokens and cost per phase (briefing, audit,
+/// validation) and in total. Aggregation of what each phase stored.
+pub async fn audit_run_cost(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Json<ApiResponse<crate::models::AuditRunCost>> {
+    let result = state
+        .db
+        .with_read_conn(move |conn| crate::db::audit_run_cost::for_run(conn, &run_id))
+        .await;
+    match result {
+        Ok(Some(cost)) => Json(ApiResponse::ok(cost)),
+        Ok(None) => Json(ApiResponse::err("Audit run not found")),
+        Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
+    }
+}
+
 /// Runs whose steps the timeline merges (newest first): a resume or a partial
 /// run records only the steps it ran.
 const TIMELINE_STEP_RUNS: usize = 12;
@@ -177,6 +256,9 @@ pub struct AuditTimelineData {
     /// Completed, archived or not: the timeline offers to validate once it
     /// has finished.
     pub latest_validation: Option<AuditTimelineValidation>,
+    /// The project's audit lease is held by a run that could not be settled:
+    /// every launch is refused until the cleanup action releases it (KT-1134).
+    pub lease_orphaned: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
@@ -193,6 +275,11 @@ pub async fn audit_timeline(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<AuditTimelineData>> {
+    let lease_orphaned = state
+        .audit_tracker
+        .lock()
+        .map(|t| t.lease_orphaned(&id))
+        .unwrap_or(false);
     let result = state
         .db
         .with_read_conn(move |conn| {
@@ -245,6 +332,7 @@ pub async fn audit_timeline(
         recorded_audits,
         recorded_validated_at,
         latest_validation,
+        lease_orphaned,
     }))
 }
 
@@ -426,3 +514,7 @@ mod audit_status_tests {
         assert_eq!(agent.current_tool_call_count, Some(1), "the counts stay");
     }
 }
+
+#[cfg(test)]
+#[path = "run_states_tests.rs"]
+mod run_states_tests;

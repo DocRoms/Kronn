@@ -52,7 +52,7 @@ fn write_and_read_roundtrip() {
         checksums,
     }];
 
-    write_checksums_file(&dir, &mappings).unwrap();
+    write_checksums_file(&dir, &mappings, &[]).unwrap();
 
     let read_back = read_checksums_file(&dir).expect("should read back checksums file");
     assert_eq!(read_back.mappings.len(), 1);
@@ -99,7 +99,7 @@ fn check_drift_all_fresh() {
         checksums,
     }];
 
-    write_checksums_file(&dir, &mappings).unwrap();
+    write_checksums_file(&dir, &mappings, &[]).unwrap();
 
     // Check drift — file hasn't changed
     let result = check_drift(&dir);
@@ -128,7 +128,7 @@ fn check_drift_detects_change() {
         sources: vec!["src/main.rs".to_string()],
         checksums,
     }];
-    write_checksums_file(&dir, &mappings).unwrap();
+    write_checksums_file(&dir, &mappings, &[]).unwrap();
 
     // Modify the source file
     fs::write(
@@ -170,7 +170,7 @@ fn check_drift_detects_new_file() {
         sources: vec!["src/lib.rs".to_string()],
         checksums,
     }];
-    write_checksums_file(&dir, &mappings).unwrap();
+    write_checksums_file(&dir, &mappings, &[]).unwrap();
 
     // Now create the file
     fs::write(src_dir.join("lib.rs"), "pub fn lib() {}").unwrap();
@@ -207,7 +207,7 @@ fn check_drift_detects_deleted_file() {
         sources: vec!["src/to_delete.rs".to_string()],
         checksums,
     }];
-    write_checksums_file(&dir, &mappings).unwrap();
+    write_checksums_file(&dir, &mappings, &[]).unwrap();
 
     // Delete the file
     fs::remove_file(src_dir.join("to_delete.rs")).unwrap();
@@ -561,7 +561,7 @@ fn post_publish_mutation_restores_previous_baseline_byte_exact() {
         sources: vec!["src.rs".into()],
         checksums: BTreeMap::from([("src.rs".into(), "old".into())]),
     }];
-    write_checksums_file(&dir, &old).unwrap();
+    write_checksums_file(&dir, &old, &[]).unwrap();
     let path = dir.join("docs/checksums.json");
     let previous = fs::read(&path).unwrap();
     let replacement = vec![ChecksumMapping {
@@ -748,14 +748,14 @@ fn failed_checksums_write_preserves_the_previous_manifest() {
         sources: vec!["src/main.rs".into()],
         checksums: BTreeMap::new(),
     };
-    write_checksums_file(&dir, std::slice::from_ref(&mapping)).unwrap();
+    write_checksums_file(&dir, std::slice::from_ref(&mapping), &[]).unwrap();
     let before = fs::read(docs.join("checksums.json")).unwrap();
 
     // Make docs/ read-only: the sibling temp file cannot be created.
     let mut perms = fs::metadata(&docs).unwrap().permissions();
     perms.set_mode(0o555);
     fs::set_permissions(&docs, perms).unwrap();
-    let err = write_checksums_file(&dir, &[mapping]).unwrap_err();
+    let err = write_checksums_file(&dir, &[mapping], &[]).unwrap_err();
     assert!(
         err.contains("temp") || err.contains("denied") || err.contains("write"),
         "{err}"
@@ -807,6 +807,7 @@ fn audited_project(name: &str) -> PathBuf {
             sources: vec!["src/main.rs".to_string()],
             checksums,
         }],
+        &[],
     )
     .unwrap();
     dir

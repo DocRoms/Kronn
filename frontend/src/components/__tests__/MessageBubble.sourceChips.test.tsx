@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { MessageBubble } from '../MessageBubble';
 import type { DiscussionMessage, LintReport } from '../../types/generated';
@@ -137,5 +137,106 @@ describe('MessageBubble — inline source citations', () => {
     renderMessage('Un texte qui parle de src: file: sans crochets du tout.');
     expect(screen.queryByTestId('source-citation-chip')).toBeNull();
     expect(screen.getByText(/sans crochets du tout/)).toBeInTheDocument();
+  });
+});
+
+/// KT-1184 — a file that exists only in an unmerged lane worktree used to show
+/// the same red "not found" as a file that exists nowhere.
+describe('MessageBubble — citation origin (checkout, lane, not found)', () => {
+  const threeStates = {
+    unsourced_count: 0,
+    flagged_spans: [],
+    fabricated_count: 1,
+    unverified_count: 0,
+    sources: [
+      {
+        raw: 'file: src/main.rs:2', kind: 'file', status: 'verified',
+        detail: 'lines 2-2 within 5 lines', origin: { kind: 'checkout' },
+      },
+      {
+        raw: 'file: frontend/src/lib/templateMerge.ts:4', kind: 'file', status: 'verified',
+        detail: 'lines 4-4 within 10 lines — found in worktree 0151-kt1181 (not in the checkout)',
+        origin: { kind: 'worktree', name: '0151-kt1181' },
+      },
+      {
+        raw: 'file: src/ghost.rs:1', kind: 'file', status: 'not_found',
+        detail: "file not found: src/ghost.rs — not in the checkout nor in the project's 3 active worktree(s)",
+      },
+    ],
+  } as unknown as LintReport;
+
+  const text = 'Ici [src: file: src/main.rs:2], là [src: file: frontend/src/lib/templateMerge.ts:4] '
+    + 'et [src: file: src/ghost.rs:1].';
+
+  it('gives each of the three states its own chip and tooltip', () => {
+    renderMessage(text, threeStates);
+    const [checkout, lane, missing] = screen.getAllByTestId('source-citation-chip');
+
+    expect(checkout).toHaveAttribute('data-state', 'verified');
+    expect(checkout.getAttribute('title')).toBe(
+      '[src: file: src/main.rs:2]\nVérifié dans le checkout principal\nlines 2-2 within 5 lines',
+    );
+
+    expect(lane).toHaveAttribute('data-state', 'lane');
+    expect(lane.getAttribute('title')).toContain(
+      'Présent dans le worktree 0151-kt1181, pas encore intégré au checkout',
+    );
+    expect(lane).toHaveAttribute(
+      'aria-label',
+      'fichier templateMerge.ts:4 — Présent dans le worktree 0151-kt1181, pas encore intégré au checkout',
+    );
+    expect(screen.getByTestId('source-citation-lane')).toHaveTextContent('lane 0151-kt1181');
+
+    expect(missing).toHaveAttribute('data-state', 'suspect');
+    expect(missing.getAttribute('title')).toContain(
+      'Introuvable : ni dans le checkout, ni dans un worktree actif du projet',
+    );
+    // Only the lane chip carries a lane tag.
+    expect(screen.getAllByTestId('source-citation-lane')).toHaveLength(1);
+  });
+
+  it('reads a stored row without an origin as the checkout', () => {
+    renderMessage('Ancien [src: file: a.rs:1].', {
+      unsourced_count: 0,
+      flagged_spans: [],
+      fabricated_count: 0,
+      sources: [{ raw: 'file: a.rs:1', kind: 'file', status: 'verified', detail: 'ok' }],
+    } as unknown as LintReport);
+    const chip = screen.getByTestId('source-citation-chip');
+    expect(chip).toHaveAttribute('data-state', 'verified');
+    expect(chip.getAttribute('title')).toContain('Vérifié dans le checkout principal');
+    expect(screen.queryByTestId('source-citation-lane')).toBeNull();
+  });
+
+  it('counts lane files apart in the footer and lists them with their worktree', () => {
+    renderMessage(text, threeStates);
+    // Red headline (one file exists nowhere), then the good news split in two.
+    expect(screen.getByTestId('lint-pill')).toHaveAttribute('data-severity', 'fabricated');
+    expect(screen.getByTestId('lint-pill-verified')).toHaveTextContent('1');
+    const lanePill = screen.getByTestId('lint-pill-lane');
+    expect(lanePill).toHaveAttribute('data-severity', 'lane');
+    // The footer takes the bubble's `t` prop, an identity here: keys show.
+    expect(lanePill).toHaveTextContent('1 disc.lintLane');
+
+    fireEvent.click(lanePill);
+    const laneGroup = screen.getByTestId('lint-lane-group');
+    expect(laneGroup).toHaveTextContent('disc.lintLaneTitle');
+    expect(laneGroup).toHaveTextContent('disc.srcOrigin.laneTag');
+    expect(laneGroup).toHaveTextContent('found in worktree 0151-kt1181');
+    expect(laneGroup).toHaveTextContent('templateMerge.ts:4');
+    expect(screen.getByTestId('lint-verified-group')).not.toHaveTextContent('templateMerge');
+  });
+
+  it('shows a neutral lane headline when lane files are the only signal', () => {
+    renderMessage('Lot [src: file: frontend/src/lib/templateMerge.ts:4].', {
+      ...threeStates,
+      fabricated_count: 0,
+      sources: [threeStates.sources[1]],
+    } as unknown as LintReport);
+    const pill = screen.getByTestId('lint-pill');
+    expect(pill).toHaveAttribute('data-severity', 'lane');
+    expect(pill).toHaveAttribute('title', 'disc.lintPillHintLane');
+    expect(screen.queryByTestId('lint-pill-verified')).toBeNull();
+    expect(screen.queryByTestId('lint-pill-lane')).toBeNull();
   });
 });

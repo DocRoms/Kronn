@@ -2748,8 +2748,8 @@ TOOLS = [
     {
         "name": "audit_launch",
         "description": (
-            "Launch a detached audit; only a backend restart interrupts it, "
-            "then `audit_status` reports any `resume_run_id`."
+            "Launch a detached audit; only a backend restart interrupts it. "
+            "`audit_status` says what can be resumed."
         ),
         "inputSchema": {
             "type": "object",
@@ -2758,27 +2758,31 @@ TOOLS = [
                 "mode": {
                     "type": "string",
                     "enum": ["full", "partial"],
-                    "description": "full = whole pipeline + validation discussion; partial = selected steps only and REQUIRES `steps` (a fully-successful partial ALSO creates a validation discussion scoped to the refreshed sections and gets its own audit_runs row).",
+                    "description": "full = whole pipeline + validation discussion; partial = selected `steps` only (a fully-successful one also gets its run row and a scoped validation discussion).",
                 },
                 "steps": {
                     "type": "array",
                     "minItems": 1,
                     "items": {"type": "integer", "minimum": 1},
-                    "description": "REQUIRED for partial: 1-based step indices to re-run. Ignored for full.",
+                    "description": "REQUIRED for partial: 1-based steps to re-run.",
                 },
                 "resume_run_id": {
                     "type": "string",
-                    "description": (
-                        "full mode only: resume an Interrupted run by its id "
-                        "(see audit_status.resumable.id). The backend derives "
-                        "the kind AND the checkpoint from that run — you cannot "
-                        "oversize a step count or resume the wrong pipeline. "
-                        "Omit to start fresh."
-                    ),
+                    "description": "full: resume this Interrupted run (audit_status.resumable.id); kind and checkpoint come from the run.",
+                },
+                "retry_steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "integer", "minimum": 1},
+                    "description": "With resume_run_id: run only these of its steps_to_redo.",
+                },
+                "fresh": {
+                    "type": "boolean",
+                    "description": "full: true reruns everything; without it a launch is refused while a run is resumable.",
                 },
                 "agent": {
                     "type": "string",
-                    "description": "Agent that runs the audit steps (default: this bridge's agent type).",
+                    "description": "Agent running the steps (default: this bridge's).",
                 },
             },
             # "partial ⇒ steps required" was expressed here as a top-level
@@ -2797,13 +2801,11 @@ TOOLS = [
     {
         "name": "audit_status",
         "description": (
-            "Consolidated audit state for a project, three layers kept "
-            "SEPARATE and never merged: `bridge_stream` (what this bridge's "
-            "reader saw), `live` (the backend's in-memory tracker), and "
-            "`latest`/`resumable` (DB history, read when `live` is null).\n\n"
-            "⚠ `live: null` means 'no live state known', NOT 'finished': a "
-            "backend restart wipes the tracker while an agent may still be "
-            "working. Statuses are exposed verbatim."
+            "Audit state in separate layers: `bridge_stream` (this bridge's "
+            "reader), `live` (backend tracker; null is NOT 'finished', a "
+            "restart wipes it), then DB: `latest` (newest run, any status), "
+            "`latest_completed`, `resumable`, `steps_to_redo`. "
+            "`lease_orphaned`: launches refused until the UI cleanup."
         ),
         "inputSchema": {
             "type": "object",
@@ -7074,6 +7076,11 @@ def _wait_once(args):
                     if not (message_addressed_here and kind == "cli"):
                         other_targets.add(label)
                 continue
+            # KT-1201 — an untargeted reply to this session's own message is
+            # addressed here by the server; never fold it into room context.
+            if message.get("addressed_to_caller"):
+                addressed_here = True
+                continue
             targets = message.get("target_agents") or []
             if not targets and message.get("target_agent"):
                 targets = [message["target_agent"]]
@@ -10303,9 +10310,11 @@ TOOL_MANUALS = {
         "reloading this MCP does not interrupt it; only a backend restart does. Only one audit "
         "may run per project.\n\n"
         "Observe durable truth with `audit_status`. An interrupted full or specialized run may "
-        "resume by its reported `resume_run_id`; an interrupted partial is relaunched for its "
-        "stale scope. Successful full audits and fully successful partial audits create a "
-        "validation discussion. Missing briefing context lowers audit quality and should be "
+        "resume with `resume_run_id` = `resumable.id`, all its `steps_to_redo` or only "
+        "`retry_steps`; `fresh: true` starts over instead, and a launch without either is refused "
+        "while a run is resumable. An interrupted partial is relaunched for its stale scope. "
+        "Successful full audits and fully successful partial audits create a validation "
+        "discussion. Missing briefing context lowers audit quality and should be "
         "addressed in the UI when relevant."
     ),
     "qe_create_draft": (
@@ -10541,6 +10550,23 @@ def call_audit_launch(args):
         # The backend derives kind + checkpoint from the run id, so all the
         # bridge must guarantee is a non-empty string.
         raise RuntimeError("audit_launch: resume_run_id must be a non-empty string")
+    fresh = args.get("fresh")
+    if fresh is not None and not isinstance(fresh, bool):
+        raise RuntimeError("audit_launch: fresh must be a boolean")
+    retry_steps = args.get("retry_steps")
+    if retry_steps is not None and (
+        not isinstance(retry_steps, list) or not retry_steps or not all(
+            isinstance(s, int) and not isinstance(s, bool) and s >= 1 for s in retry_steps
+        )
+    ):
+        raise RuntimeError("audit_launch: retry_steps must be a non-empty list of 1-based integers")
+    # The partial endpoint has neither field: refuse rather than drop them silently.
+    if mode == "partial" and (resume_run_id or fresh is not None or retry_steps is not None):
+        raise RuntimeError("audit_launch: resume_run_id, fresh and retry_steps are full-mode only")
+    if retry_steps is not None and not resume_run_id:
+        raise RuntimeError("audit_launch: retry_steps needs resume_run_id")
+    if fresh and resume_run_id:
+        raise RuntimeError("audit_launch: fresh and resume_run_id are exclusive")
     # Blank/whitespace agent falls back like an absent one — never forward
     # an empty attribution to the backend.
     agent = (args.get("agent") or "").strip() or _agent_type_for_session()
@@ -10570,6 +10596,10 @@ def call_audit_launch(args):
         body = {"agent": agent}
         if resume_run_id:
             body["resume_run_id"] = resume_run_id.strip()
+        if retry_steps is not None:
+            body["retry_steps"] = retry_steps
+        if fresh is not None:
+            body["fresh"] = fresh
     else:
         path = f"/api/projects/{project_id}/partial-audit"
         body = {"agent": agent, "steps": steps}
@@ -10654,25 +10684,26 @@ def call_audit_status(args):
     if isinstance(live, dict):
         # The audit agent's recent actions are for the user's panel only.
         live.pop("recent_activity", None)
-    out = {
+    # The DB layer is read even while `live` is set: an orphaned lease or a
+    # newer terminal run is true state either way.
+    state = _unwrap(_http("GET", f"/api/projects/{project_id}/audit-latest"))
+    state = state if isinstance(state, dict) else {}
+    return {
         "bridge_stream": bridge_stream,
         "live": live,
-        "latest": None,
-        "resumable": None,
-        "note": None,
+        "latest": state.get("latest"),
+        "latest_completed": state.get("latest_completed"),
+        "resumable": _unwrap(_http("GET", f"/api/projects/{project_id}/audit-resumable")),
+        "steps_to_redo": state.get("steps_to_redo") or [],
+        "lease_orphaned": bool(state.get("lease_orphaned")),
+        "note": (
+            "live=null never means 'completed' (idle, or tracker wiped by a "
+            "restart). `latest` is the newest run of any status. With "
+            "`resumable`, launch with its id as resume_run_id (retry_steps "
+            "picks steps) or start over with fresh: true; without it a plain "
+            "full launch starts fresh."
+        ),
     }
-    if live is None:
-        # `live: null` = no LIVE state known — NOT "finished". Fall back to
-        # DB history so the caller can tell done/interrupted/never-ran apart.
-        out["latest"] = _unwrap(_http("GET", f"/api/projects/{project_id}/audit-latest"))
-        out["resumable"] = _unwrap(_http("GET", f"/api/projects/{project_id}/audit-resumable"))
-        out["note"] = (
-            "live=null means the backend tracker has no LIVE entry (idle OR "
-            "tracker wiped by a backend restart) — it never means 'completed'. "
-            "`latest` is the last terminal run from the DB, `resumable` the "
-            "last Interrupted-but-resumable one."
-        )
-    return out
 
 
 # ─── KT-374 — the room reaches the agent, instead of waiting to be asked ────

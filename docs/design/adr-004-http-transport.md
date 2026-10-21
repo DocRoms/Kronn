@@ -38,8 +38,8 @@ before any request reaches the provider. An entry with no recorded
 capabilities (every CLI-native discovery, or a model never covered by a
 connection test) is neither confirmed nor denied, consistent with the
 existing "unknown is not blocked" policy — only a positive mismatch refuses.
-[src: file: backend/src/core/model_catalog/mod.rs] (capability check inside
-`preflight_check`) [src: file: backend/src/http_transport.rs:43-51]
+[src: file: backend/src/core/model_catalog/mod.rs:1188-1214] (capability check in
+`decide_model`, which `preflight_check` reaches through `preflight_resolve`) [src: file: backend/src/http_transport.rs:43-51]
 (`entry_supports_capability`)
 
 ### Presets keep their identity, credential slot, color and concurrency
@@ -85,17 +85,18 @@ way:
   primary agent was a named Custom connection could dispatch its *first*
   message (an explicit `Agent`-kind target from New Discussion) but lost the
   connection on every ordinary follow-up reply. Both resolution points now
-  read the discussion's sticky `connection_id` instead. [src: file:
-  backend/src/api/discussions/messaging.rs] (`canonical_targets`'s
-  `DiscussionAgent` branch, `native_dispatch_agents_for_targets`'s
-  empty-target fallback) [src: file:
-  backend/src/db/sql/165_discussion_connection_id.sql]
+  read the discussion's sticky `connection_id` instead.
+  [src: file: backend/src/api/discussions/messaging.rs:258-267]
+  (`canonical_targets`'s `DiscussionAgent` branch)
+  [src: file: backend/src/api/discussions/messaging.rs:78-91]
+  (`native_dispatch_agents_for_targets`'s empty-target fallback)
+  [src: file: backend/src/db/sql/166_discussion_connection_id.sql:1-11]
 - `target_tier` in both `orchestration.rs` and the frontend
   `AgentSwitchPicker`/`MessageTarget` model matches on `(agent_type,
   connection_id)`, not `agent_type` alone — two different connections both
   project onto `AgentType::Custom`, so a match on the enum alone could pick
-  whichever target happened to be first. [src: file:
-  backend/src/api/discussions/orchestration.rs] (`target_tier`)
+  whichever target happened to be first.
+  [src: file: backend/src/api/discussions/orchestration.rs:32-51] (`target_tier`)
 
 ### Surfaces that now carry a `connection_id`
 
@@ -104,8 +105,8 @@ the new `OrchestrationParticipant` type (replacing the bare
 `Vec<AgentType>` on `OrchestrationRequest`) all carry an optional
 `connection_id`, validated the same way and dispatched through the same
 `enqueue_with_connection`/`external_http_runtime` construction discussion
-dispatch already used. [src: file: backend/src/models/compare.rs]
-[src: file: backend/src/models/discussions.rs] (`OrchestrationParticipant`)
+dispatch already used. [src: file: backend/src/models/compare.rs:128-156]
+[src: file: backend/src/models/discussions.rs:792-808] (`OrchestrationParticipant`)
 
 ## Consequences
 
@@ -132,7 +133,7 @@ integrated. [src: file: backend/src/api/discussions/orchestration.rs:60-130]
 
 - ADR-003 — ACP control-plane boundary: the "OpenAI-compatible HTTP remains a
   separate runtime-to-model-provider transport" statement this ADR
-  implements. [src: file: docs/design/adr-003-acp-control-plane.md]
+  implements. [src: file: docs/design/adr-003-acp-control-plane.md:15]
 - KT-531 (dynamic runtime catalog foundation, `b2971152`) — durable
   `runtime_target_id` scheme and `CatalogModelEntry.capabilities` this ADR
   builds the capability gate on top of.

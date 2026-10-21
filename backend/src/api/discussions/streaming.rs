@@ -1420,6 +1420,21 @@ mod dispatch_prompt_snapshot_tests {
     }
 
     #[test]
+    fn a_punctual_agent_is_told_it_is_not_the_joined_cli_of_its_provider() {
+        // KT-1201 — the punctual Claude spoke as @claude-cli-2, the lane lead.
+        let notice =
+            super::punctual_identity_notice("fr", "@claude", "@litellm", &["@claude-cli-2".into()]);
+        assert!(notice.contains("Tu es @claude, un agent ponctuel lancé pour ce seul tour"));
+        assert!(notice.contains("l'agent de la discussion est @litellm"));
+        assert!(notice.contains("Tu n'es PAS la session CLI jointe @claude-cli-2"));
+        assert!(notice.contains("ne présente pas comme décidé ce qui n'est que proposé"));
+
+        let alone = super::punctual_identity_notice("en", "@codex", "@litellm", &[]);
+        assert!(alone.contains("You are @codex, a one-off agent launched for this turn only"));
+        assert!(!alone.contains("joined CLI session"));
+    }
+
+    #[test]
     fn an_agent_alone_on_the_turn_gets_no_parallel_notice() {
         let room = joke_contest_room();
         let notice =
@@ -2057,6 +2072,56 @@ fn parallel_turn_notice(
             excerpt: excerpt.as_deref(),
         },
     )
+}
+
+/// KT-1201 — a punctual agent spawned in a room where a CLI of its provider is
+/// joined read that session's turns as its own and spoke as the lane lead.
+/// State that it is a one-off agent, distinct from those sessions.
+fn punctual_identity_notice(
+    language: &str,
+    own: &str,
+    principal: &str,
+    same_provider_cli: &[String],
+) -> String {
+    let aliases = same_provider_cli.join(", ");
+    match language {
+        "fr" => {
+            let cli = if aliases.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "Tu n'es PAS la session CLI jointe {aliases}, même si elle a le même fournisseur que toi : ses messages, étiquetés à son alias, ne sont pas les tiens. "
+                )
+            };
+            format!(
+                "--- Ton identité ---\nTu es {own}, un agent ponctuel lancé pour ce seul tour ; l'agent de la discussion est {principal}. {cli}Parle uniquement en ton nom : ne reprends ni le rôle, ni le plan, ni les engagements d'un autre participant, et ne présente pas comme décidé ce qui n'est que proposé.\n\n"
+            )
+        }
+        "es" => {
+            let cli = if aliases.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "NO eres la sesión CLI unida {aliases}, aunque tenga tu mismo proveedor: sus mensajes, etiquetados con su alias, no son tuyos. "
+                )
+            };
+            format!(
+                "--- Tu identidad ---\nEres {own}, un agente puntual lanzado solo para este turno; el agente de la conversación es {principal}. {cli}Habla solo en tu nombre: no asumas el rol, el plan ni los compromisos de otro participante, y no presentes como decidido lo que solo está propuesto.\n\n"
+            )
+        }
+        _ => {
+            let cli = if aliases.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "You are NOT the joined CLI session {aliases}, even though it shares your provider: its turns, labelled with its alias, are not yours. "
+                )
+            };
+            format!(
+                "--- Your identity ---\nYou are {own}, a one-off agent launched for this turn only; the discussion agent is {principal}. {cli}Speak only for yourself: do not take over another participant's role, plan or commitments, and do not present a proposal as a confirmed decision.\n\n"
+            )
+        }
+    }
 }
 
 /// The agent's handle in the room: its `@alias`, or its display name when it
@@ -3344,7 +3409,39 @@ pub(super) async fn make_agent_stream_inner(
         &agent_type,
         &root_turn_scheduled_agents,
     );
-    let context_files_prompt = format!("{context_files_prompt}{sibling_notice}");
+    let punctual_notice = if agent_type != disc.agent {
+        let did = discussion_id.clone();
+        let provider = format!("{agent_type:?}");
+        let provider_name = crate::api::disc_helpers::agent_display_name(&agent_type);
+        let same_provider_cli = state
+            .db
+            .with_read_conn(move |conn| {
+                Ok(
+                    crate::db::discussion_sessions::list_participant_views(conn, &did)?
+                        .into_iter()
+                        .filter(|view| view.workflow_step.is_none() && view.agent_type == provider)
+                        .map(|view| {
+                            crate::db::discussion_sessions::cli_session_alias(
+                                &view.agent_type,
+                                view.cli_ordinal,
+                            )
+                            .unwrap_or_else(|| format!("{provider_name} CLI"))
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .await
+            .unwrap_or_default();
+        punctual_identity_notice(
+            &disc.language,
+            &room_handle(&agent_type),
+            &room_handle(&disc.agent),
+            &same_provider_cli,
+        )
+    } else {
+        String::new()
+    };
+    let context_files_prompt = format!("{context_files_prompt}{sibling_notice}{punctual_notice}");
     let ollama_handoff_available = attached_handoff_agents.iter().any(|agent| {
         *agent == AgentType::Ollama
             && agent_handoff_target_is_allowed(agent, &handoff_blocked_agents)
@@ -4336,7 +4433,8 @@ pub(super) async fn make_agent_stream_inner(
                             runner::StreamJsonEvent::ToolStart(name) => {
                                 if let Some(job_id) = dispatch_job_id.as_ref() {
                                     let progress_id = job_id.clone();
-                                    let progress_tool = name.clone();
+                                    let progress_tool =
+                                        crate::agents::activity::category_of(&name).as_str();
                                     if let Err(error) = state
                                         .db
                                         .with_conn(move |conn| {
@@ -4344,7 +4442,7 @@ pub(super) async fn make_agent_stream_inner(
                                                 conn,
                                                 &progress_id,
                                                 "tool_activity",
-                                                Some(&progress_tool),
+                                                Some(progress_tool),
                                             )?;
                                             Ok(())
                                         })
@@ -5511,44 +5609,17 @@ pub(super) async fn make_agent_stream_inner(
                         let briefing_project_path = project_path.clone();
                         let briefing_state = state.clone();
                         tokio::spawn(async move {
-                            // Read briefing.md from the project's docs folder.
                             // Path-agnostic — works on docs/ post-pivot AND legacy ai/.
                             let resolved =
                                 crate::core::scanner::resolve_host_path(&briefing_project_path);
                             let briefing_file = crate::core::scanner::detect_docs_dir(&resolved)
                                 .join("briefing.md");
-                            let notes = tokio::task::spawn_blocking(move || {
-                                std::fs::read_to_string(&briefing_file).ok()
-                            })
-                            .await
-                            .unwrap_or(None);
-
-                            if let Some(content) = notes {
-                                let pid = briefing_project_id.clone();
-                                if let Err(e) = briefing_state
-                                    .db
-                                    .with_conn(move |conn| {
-                                        crate::db::projects::update_project_briefing_notes(
-                                            conn,
-                                            &pid,
-                                            Some(&content),
-                                        )
-                                    })
-                                    .await
-                                {
-                                    tracing::error!(
-                                        "Failed to save briefing notes for project {}: {e}",
-                                        briefing_project_id
-                                    );
-                                } else {
-                                    tracing::info!(
-                                        "Briefing notes saved for project {}",
-                                        briefing_project_id
-                                    );
-                                }
-                            } else {
-                                tracing::warn!("BRIEFING_COMPLETE detected but ai/briefing.md not found for project {}", briefing_project_id);
-                            }
+                            crate::api::audit::briefing::complete_reviewed_briefing(
+                                &briefing_state,
+                                briefing_project_id,
+                                briefing_file,
+                            )
+                            .await;
                         });
                     }
                 }

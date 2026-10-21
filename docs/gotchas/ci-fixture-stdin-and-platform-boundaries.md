@@ -24,7 +24,7 @@ The portability job compiles the complete Rust test library even when it
 executes only the worktree, maintenance and orchestration test groups. An
 unconditional Unix import/chmod in the ACP fixture helper and an unconditional
 Unix symlink in the source-explorer test therefore blocked that Windows job.
-[src: file: .github/workflows/ci-test.yml:705-740]
+[src: file: .github/workflows/ci-test.yml:722-757]
 [src: url: https://github.com/DocRoms/Kronn/actions/runs/34250607216/job/102143783376]
 
 Only the Unix permissions operation is platform-conditional; the helper still

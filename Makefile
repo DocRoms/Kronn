@@ -1,4 +1,4 @@
-.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff test-backend test-backend-cov test-backend-lib install-dev-tools require-nextest test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
+.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff docs-reanchor test-backend test-backend-cov test-backend-lib install-dev-tools require-nextest test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
 
 # Doc-skippers type `make` bare (or `make install`) before reading anything.
 # Bare `make` used to run the FIRST target — `_gen-override`, an internal Docker
@@ -532,6 +532,7 @@ help:
 	@echo "  make bump V=x.y.z  Bump version everywhere"
 	@echo "  make check-version  Verify release version consistency"
 	@echo "  make check-diff     Whitespace/conflict markers in the branch diff"
+	@echo "  make docs-reanchor  Re-anchor moved doc citations, then check them all"
 	@echo "  make desktop        Build desktop app (current platform)"
 	@echo "  make desktop-dev    Run desktop app (dev mode)"
 	@echo "  make desktop-target T=<triple>  Cross-compile desktop app"
@@ -591,3 +592,9 @@ check-version:
 ## (BASE defaults to the merge base with origin/main). CI runs the same script.
 check-diff:
 	@./scripts/check-diff.sh $(BASE)
+
+## Re-points a doc citation whose #symbol left its range, only when the symbol
+## occurs once in the cited file, then runs the strict citation check, which
+## lists what is left. DOCS="docs/a.md docs/b.md" limits both to those docs.
+docs-reanchor:
+	cd backend && KRONN_DOCS_REANCHOR="$(or $(DOCS),all)" cargo test --lib core::docs_citations::tests::docs_citations_resolve_in_the_repo -- --nocapture

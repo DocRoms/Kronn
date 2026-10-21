@@ -8,12 +8,19 @@ import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from 
 import { canRunAudit } from '../lib/agentCapabilities';
 import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from '../lib/discussionUiUtils';
+import { onActivationKey } from '../lib/keyboardActivation';
 import AuditRecapPanel from './AuditRecapPanel';
 import { AuditTimeline } from './AuditTimeline';
 import { TemplateMergeOfferSlot } from './TemplateMergePanel';
+import { TemplateReinstall } from './TemplateReinstall';
 import { useTemplateMergeOffer } from '../hooks/useTemplateMergeOffer';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
+import { SourcesBadge } from './SourcesBadge';
+import { RevalidateAudit } from './RevalidateAudit';
+import { DocReconfirm } from './DocReconfirm';
+import { TdTasksButton } from './TdTasksButton';
+import { TechDebtBlock } from './TechDebtBlock';
 import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
@@ -412,6 +419,15 @@ export function ProjectCard({
   const [auditRecent, setAuditRecent] = useState<AuditRecentActivity | null>(null);
   const [auditStepBreakdown, setAuditStepBreakdown] = useState<AuditTokenBreakdown | null>(null);
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
+  // KT-1134 — a cancel the backend has not acknowledged: the run may still go on.
+  const [cancelPending, setCancelPending] = useState(false);
+  // KT-1169 — the last launch that stopped on an error, and how to replay it.
+  const [auditLaunchError, setAuditLaunchError] = useState<{ message: string; retry: () => void } | null>(null);
+  // A "Reprendre" replays the launch with the state of the moment it is clicked.
+  const handleFullAuditRef = useRef<(options?: { retrySteps?: number[]; fresh?: boolean }) => Promise<void>>(async () => {});
+  const startPartialAuditRef = useRef<(drift: DriftCheckResponse) => Promise<void>>(async () => {});
+  // Re-arms the status poll: an external launch, or a cancel left pending.
+  const [externalAdoptTick, setExternalAdoptTick] = useState(0);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
   const [auditTierChoice, setAuditTierChoice] = useState<ModelTier>('reasoning');
   // KT-980 — the named external API connection picked for an HTTP agent.
@@ -462,14 +478,18 @@ export function ProjectCard({
   // flip to the dynamic resume CTA when an Interrupted run is on file
   // for this project. `null` = no resumable run; otherwise the row.
   const [resumableAudit, setResumableAudit] = useState<{ id: string; kind: AuditKind; last_completed_step: number; steps_to_redo?: number[]; started_at: string } | null>(null);
+  // Unknown is not "nothing to resume": launching waits until it is known (KT-1169).
+  const [resumableUnknown, setResumableUnknown] = useState(false);
+  const [resumableReload, setResumableReload] = useState(0);
   useEffect(() => {
     let cancelled = false;
     projectsApi.auditResumable(proj.id).then(row => {
       if (cancelled) return;
       setResumableAudit(row);
-    }).catch(() => { /* idle on error — button stays "Lancer" */ });
+      setResumableUnknown(false);
+    }).catch(() => { if (!cancelled) setResumableUnknown(true); });
     return () => { cancelled = true; };
-  }, [proj.id, proj.audit_status, auditActive]);
+  }, [proj.id, proj.audit_status, auditActive, auditCompletedTick, resumableReload]);
 
   // KT-1181 — a documented repo never merged gets the template v2 merge before its audit.
   const templateMerge = useTemplateMergeOffer(
@@ -517,7 +537,9 @@ export function ProjectCard({
   // ProjectCard read "Validation en cours" on an audit that hadn't
   // actually produced anything past step 5. The resumable check
   // catches that state and forces the "Reprendre" CTA instead.
-  const validationInProgress = !!validationDisc && proj.audit_status === 'Audited' && !resumableAudit;
+  // Never "in progress" while an audit runs: a resume has no resumable run, and
+  // the partial validation it continues is not being worked on (KT-1134).
+  const validationInProgress = !!validationDisc && proj.audit_status === 'Audited' && !resumableAudit && !auditActive;
   const bootstrapDisc = projDiscussions.find(d => isBootstrapDisc(d.title) && !d.archived);
   const bootstrapInProgress = !!bootstrapDisc && proj.audit_status === 'TemplateInstalled';
   // Use the locale-aware detector — the backend's `start_briefing` emits
@@ -683,8 +705,21 @@ export function ProjectCard({
       await projectsApi.cancelAudit(proj.id);
       toast(t('audit.cancelled'), 'success');
     } catch (e) {
+      // Not acknowledged: the run may still go on. Keep showing it, pending,
+      // and let the status poll say when it really stops.
       console.warn('Cancel audit failed:', e);
+      setCancelPending(true);
+      setAuditAbortController(null);
+      toast(t('audit.cancelPending'), 'warning');
+      resumeSettledRef.current = false;
+      if (auditPollRef.current) {
+        clearInterval(auditPollRef.current);
+        auditPollRef.current = null;
+      }
+      setExternalAdoptTick(n => n + 1);
+      return;
     }
+    setCancelPending(false);
     auditActiveRef.current = false;
     setAuditActive(false);
     setAuditAbortController(null);
@@ -695,7 +730,7 @@ export function ProjectCard({
     onRefetchDiscussions();
   }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions, stopAuditPolling]);
 
-  const handleFullAudit = useCallback(async () => {
+  const handleFullAudit = useCallback(async (options: { retrySteps?: number[]; fresh?: boolean } = {}) => {
     // Guard against double-click — `setAuditActive(true)` flips the UI to
     // the progress panel synchronously, but a fast double-click can call
     // this handler twice before React re-renders, spawning two concurrent
@@ -705,11 +740,19 @@ export function ProjectCard({
     // race-free guard — the second click reads the just-written ref and
     // bails out before the second SSE is dispatched.
     if (auditActiveRef.current) return;
-    auditActiveRef.current = true;
     // Resume support. When a resumable interrupted run exists we resume it
     // by id — the server derives the kind AND the checkpoint from that row,
     // so client state can never graft onto the wrong pipeline (Codex #3).
-    const resumeRunId = resumableAudit?.id ?? null;
+    // A fresh full audit ignores the resumable run on purpose (confirmed).
+    const resumeRunId = options.fresh ? null : resumableAudit?.id ?? null;
+    const retry = () => { void handleFullAuditRef.current(options); };
+    // A step retried alone needs its run: never fall back to a whole audit.
+    if (options.retrySteps && !resumeRunId) {
+      setAuditLaunchError({ message: t('audit.retryNeedsRun'), retry: () => setResumableReload(n => n + 1) });
+      return;
+    }
+    auditActiveRef.current = true;
+    setAuditLaunchError(null);
     // Progress-bar total: the UI now exposes the complete chained audit only;
     // a resumed legacy targeted run still keeps the kind stored by the server.
     const effectiveKind = resumeRunId ? resumableAudit?.kind : 'Full';
@@ -749,6 +792,10 @@ export function ProjectCard({
         // only the run id so the server remains authoritative for legacy runs.
         kind: resumeRunId ? null : 'Full',
         resume_run_id: resumeRunId,
+        // KT-1131 — retry only these failed steps of the resumed run.
+        retry_steps: resumeRunId && options.retrySteps ? options.retrySteps : undefined,
+        // KT-1169 — the confirmed choice to replay the whole audit.
+        fresh: options.fresh ? true : undefined,
         connection_id: auditConnectionId ?? undefined,
       }, {
         onTemplateInstalled: () => {},
@@ -876,6 +923,7 @@ export function ProjectCard({
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
           toast(t('audit.streamError', error || 'unknown error'), 'error');
+          setAuditLaunchError({ message: t('audit.streamError', error || 'unknown error'), retry });
           setAuditCompletedTick((t) => t + 1);
           onRefetch();
         },
@@ -886,6 +934,7 @@ export function ProjectCard({
       auditActiveRef.current = false;
       setAuditActive(false);
       clearAuditCheckpoint(proj.id);
+      setAuditLaunchError({ message: t('audit.streamError', userError(e)), retry });
       setAuditCompletedTick((t) => t + 1);
     } finally {
       setAuditAbortController(null);
@@ -895,6 +944,8 @@ export function ProjectCard({
   const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
     if (auditActiveRef.current) return;
     auditActiveRef.current = true;
+    setAuditLaunchError(null);
+    const retry = () => { void startPartialAuditRef.current(drift); };
     const steps = drift.stale_sections.map(s => s.audit_step);
     const controller = new AbortController();
     setAuditAbortController(controller);
@@ -971,6 +1022,7 @@ export function ProjectCard({
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
           toast(t('audit.partialStreamError', error || 'unknown error'), 'error');
+          setAuditLaunchError({ message: t('audit.partialStreamError', error || 'unknown error'), retry });
           setAuditCompletedTick((t) => t + 1);
           onRefetch();
         },
@@ -981,11 +1033,17 @@ export function ProjectCard({
       auditActiveRef.current = false;
       setAuditActive(false);
       clearAuditCheckpoint(proj.id);
+      setAuditLaunchError({ message: t('audit.partialStreamError', userError(e)), retry });
       setAuditCompletedTick((t) => t + 1);
     } finally {
       setAuditAbortController(null);
     }
   }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion]);
+
+  useEffect(() => {
+    handleFullAuditRef.current = handleFullAudit;
+    startPartialAuditRef.current = startPartialAudit;
+  }, [handleFullAudit, startPartialAudit]);
 
   // ─── Audit resume on mount ───────────────────────────────────────────────
   // When a local checkpoint indicates an audit was in-flight (tab switch, page
@@ -998,7 +1056,6 @@ export function ProjectCard({
   // AFTER mount was invisible — the card even offered to start an audit
   // while one was running. The Dashboard fleet poll tells us one is live:
   // re-arm the same adoption poll and every existing badge/chip/CTA works.
-  const [externalAdoptTick, setExternalAdoptTick] = useState(0);
   useEffect(() => {
     if (!externalAuditLive) return;
     if (auditActiveRef.current || auditPollRef.current) return; // already tracking
@@ -1086,6 +1143,7 @@ export function ProjectCard({
           const wasActive = auditActiveRef.current;
           auditActiveRef.current = false;
           setAuditActive(false);
+          setCancelPending(false);
           setAuditAuditor(null);
           setAuditStartedAt(null);
           // 0.8.3 (#274) — clear token chips when the audit wraps so
@@ -1278,7 +1336,11 @@ export function ProjectCard({
                   {auditOutcomeLabel}
                 </button>
               )}
-              {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
+              {!auditActive && <SourcesBadge drift={driftStatus} />}
+              <RevalidateAudit project={proj} auditActive={auditActive} agent={selectedAuditAgent} tier={auditTierChoice} connectionId={auditConnectionId} toast={toast} onRefetch={onRefetch} onRefetchDrift={onRefetchDrift} onOpenDiscussion={onOpenDiscussion} onNavigate={onNavigate} />
+              <DocReconfirm project={proj} auditActive={auditActive} toast={toast} />
+              <TdTasksButton project={proj} auditActive={auditActive} toast={toast} />
+              {!auditActive && !resumableAudit && driftStatus && driftStatus.stale_sections.length > 0 && (
                 <>
                   <span
                     className="dash-badge-drift"
@@ -1350,12 +1412,7 @@ export function ProjectCard({
         role="button"
         tabIndex={0}
         onClick={onToggleOpen}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            onToggleOpen();
-          }
-        }}
+        onKeyDown={onActivationKey(onToggleOpen)}
         aria-expanded={isOpen}
       >
         <ChevronRight size={14} style={{ color: 'var(--kr-accent-ink)', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
@@ -1417,10 +1474,14 @@ export function ProjectCard({
             ) : !auditActive && validationInProgress ? (
               <span className="dash-badge-orange cursor-pointer" {...newTabClickProps(validationDisc ? discussionPath(validationDisc.id) : PAGE_PATHS.discussions)} onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); else onNavigate('discussions'); }}>
                 <Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> Validation
-              </span>
+              </button>
             ) : !auditActive && (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
               <span className="dash-badge-gray"><ShieldCheck size={9} /> Validated</span>
             ) : null}
+            {!auditActive && <SourcesBadge drift={driftStatus} />}
+            <RevalidateAudit project={proj} auditActive={auditActive} agent={selectedAuditAgent} tier={auditTierChoice} connectionId={auditConnectionId} toast={toast} onRefetch={onRefetch} onRefetchDrift={onRefetchDrift} onOpenDiscussion={onOpenDiscussion} onNavigate={onNavigate} />
+            <DocReconfirm project={proj} auditActive={auditActive} toast={toast} />
+            <TdTasksButton project={proj} auditActive={auditActive} toast={toast} />
             {!auditActive && latestAuditOutcome && (
               <button
                 type="button"
@@ -1452,8 +1513,10 @@ export function ProjectCard({
                   <ShieldCheck size={9} /> {t('projects.antiHallu.present')}
                 </span>
               ) : antiHalluStatus.file_exists ? (
-                <span
+                <button
+                  type="button"
                   className="dash-badge-orange cursor-pointer"
+                  data-testid="project-anti-hallu-inject"
                   onClick={(e) => { e.stopPropagation(); handleInjectAntiHallu(); }}
                   title={t('projects.antiHallu.injectTooltip')}
                 >
@@ -1461,12 +1524,14 @@ export function ProjectCard({
                     ? <><Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.antiHallu.injecting')}</>
                     : <><AlertTriangle size={9} /> {t('projects.antiHallu.missing')}</>
                   }
-                </span>
+                </button>
               ) : null
             )}
             {!auditActive && (proj.tech_debt_count ?? 0) > 0 && (
-              <span
+              <button
+                type="button"
                 className="dash-badge-tech-debt"
+                data-testid="project-tech-debt-badge"
                 title={t('projects.techDebtBadge', proj.tech_debt_count ?? 0)}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -1485,10 +1550,10 @@ export function ProjectCard({
                 }}
               >
                 <AlertTriangle size={9} /> {proj.tech_debt_count} TD
-              </span>
+              </button>
             )}
             {/* Drift badge — hidden during active audit (#326 / F6) */}
-            {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
+            {!auditActive && !resumableAudit && driftStatus && driftStatus.stale_sections.length > 0 && (
               <>
                 <span
                   className="dash-badge-drift"
@@ -1961,6 +2026,16 @@ export function ProjectCard({
                   <span>{t('projects.master.overview.stale')}</span>
                 </button>
               </div>
+              <TechDebtBlock
+                project={proj}
+                auditActive={auditActive}
+                agents={agents}
+                modelTiers={modelTiers}
+                toast={toast}
+                onOpenDiscussion={onOpenDiscussion}
+                onNavigate={onNavigate}
+                onRefetch={onRefetch}
+              />
               <section
                 id={`project-linked-repos-${proj.id}`}
                 className="project-overview-linked-repos"
@@ -2363,6 +2438,9 @@ export function ProjectCard({
                 {!bootstrapInProgress && !auditActive && (
                   <TemplateMergeOfferSlot offer={templateMerge} projectId={proj.id} />
                 )}
+                {!bootstrapInProgress && !auditActive && proj.audit_status !== 'NoTemplate' && (
+                  <TemplateReinstall projectId={proj.id} />
+                )}
                 {!bootstrapInProgress && (
                   <AuditTimeline
                     projectId={proj.id}
@@ -2380,6 +2458,8 @@ export function ProjectCard({
                     }}
                     briefingDone={briefingDone}
                     onBriefingSaved={onRefetch}
+                    linkedRepos={proj.linked_repos ?? []}
+                    onLinkedReposChange={onRefetch}
                     auditActive={auditActive}
                     liveStep={auditStep}
                     liveTotal={auditTotalSteps}
@@ -2397,10 +2477,38 @@ export function ProjectCard({
                       ? () => onOpenDiscussion(briefingDisc.id)
                       : null}
                     onCancel={handleCancelAudit}
+                    cancelPending={cancelPending}
                     resumable={resumableAudit}
+                    resumableUnknown={resumableUnknown}
+                    onReloadResumable={() => setResumableReload(n => n + 1)}
+                    launchError={auditLaunchError}
+                    onDismissLaunchError={() => setAuditLaunchError(null)}
                     onLaunch={() => resumableAudit
                       ? void handleFullAudit()
                       : void templateMerge.gateLaunch(() => void handleFullAudit())}
+                    onRetryStep={(step) => void handleFullAudit({ retrySteps: [step] })}
+                    onRelaunchFull={() => void templateMerge.gateLaunch(() => void handleFullAudit({ fresh: true }))}
+                    onAcceptStep={async (step, reason) => {
+                      if (!resumableAudit) return;
+                      try {
+                        await projectsApi.acceptAuditStep(proj.id, resumableAudit.id, step, reason);
+                        toast(t('audit.stepAccepted', step), 'success');
+                        setAuditCompletedTick(n => n + 1);
+                      } catch (error) {
+                        toast(userError(error), 'error');
+                        // The form stays open on its error, with its reason.
+                        throw error;
+                      }
+                    }}
+                    onCleanupLease={async () => {
+                      try {
+                        await projectsApi.auditRunsCleanup();
+                        toast(t('auditTimeline.lease.released'), 'success');
+                        setAuditCompletedTick(n => n + 1);
+                      } catch (error) {
+                        toast(userError(error), 'error');
+                      }
+                    }}
                     validationInProgress={validationInProgress}
                     onValidate={() => {
                       if (validationInProgress && validationDisc) {

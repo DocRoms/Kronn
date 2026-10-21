@@ -5146,6 +5146,32 @@ pub(crate) mod test_acp_routes {
         ROUTES.lock().unwrap().get(work_dir).cloned()
     }
 
+    /// Routes per agent, for tests that run several agents at once in one
+    /// directory: one adapter serves one prompt at a time.
+    static AGENT_ROUTES: LazyLock<Mutex<HashMap<(PathBuf, String), Transport>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) struct AgentRouteGuard(PathBuf, String);
+
+    impl Drop for AgentRouteGuard {
+        fn drop(&mut self) {
+            AGENT_ROUTES
+                .lock()
+                .unwrap()
+                .remove(&(self.0.clone(), self.1.clone()));
+        }
+    }
+
+    pub(crate) fn route_agent(
+        work_dir: &Path,
+        agent: &crate::models::AgentType,
+        transport: Transport,
+    ) -> AgentRouteGuard {
+        let key = (work_dir.to_path_buf(), format!("{agent:?}"));
+        AGENT_ROUTES.lock().unwrap().insert(key.clone(), transport);
+        AgentRouteGuard(key.0, key.1)
+    }
+
     pub(super) fn transport_for(
         config: &AgentStartConfig<'_>,
         work_dir: &Path,
@@ -5153,6 +5179,13 @@ pub(crate) mod test_acp_routes {
         config
             .test_acp_transport
             .clone()
+            .or_else(|| {
+                AGENT_ROUTES
+                    .lock()
+                    .unwrap()
+                    .get(&(work_dir.to_path_buf(), format!("{:?}", config.agent_type)))
+                    .cloned()
+            })
             .or_else(|| ROUTES.lock().unwrap().get(work_dir).cloned())
     }
 }

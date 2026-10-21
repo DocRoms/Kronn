@@ -96,6 +96,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+          # Both parents of the pull request's merge commit, for the doc-citation scope.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
 
       # Cache the reusable instrumented directories in place. Never archive
       # profraw files, debug/incremental, tmp, or any other transient target

@@ -50,7 +50,8 @@ describe('BriefingForm (0.8.5)', () => {
         toast={() => {}}
       />
     );
-    const textareas = screen.getAllByRole('textbox');
+    // The single-line inputs (KT-999 documentation path) are not questions.
+    const textareas = Array.from(document.querySelectorAll('textarea'));
     expect(textareas).toHaveLength(6);
     expect(textareas[0]).toBeRequired();
     expect(textareas[1]).toBeRequired();
@@ -168,5 +169,69 @@ describe('BriefingForm (0.8.5)', () => {
     fireEvent.click(screen.getByRole('button', { name: /common\.close|Close|Fermer|Cerrar/i }));
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(projectsApi.saveBriefing).not.toHaveBeenCalled();
+  });
+
+  // KT-1167 — the option travels with the answers, unchecked by default.
+  it('sends the TD-to-tasks option with the answers', async () => {
+    (projectsApi.saveBriefing as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    const props = {
+      onClose: () => {}, onSaved: () => {}, agent: 'ClaudeCode' as const,
+      tier: 'reasoning' as const, review: false, toast: () => {},
+    };
+    const { unmount } = wrap(<BriefingForm projectId="p-off" {...props} />);
+    fillMandatory();
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledWith(
+      'p-off', expect.objectContaining({ td_to_tasks: false }),
+    ));
+    unmount();
+
+    wrap(<BriefingForm projectId="p-on" {...props} />);
+    fillMandatory();
+    fireEvent.click(screen.getByTestId('briefing-td-to-tasks'));
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledWith(
+      'p-on', expect.objectContaining({ td_to_tasks: true }),
+    ));
+  });
+  // KT-1183 — experimental, off by default; 2 or 3 agents; cost shown first.
+  it('sends the cross-agent audit option with its agents, never by default', async () => {
+    (projectsApi.saveBriefing as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (projectsApi.crossAuditEstimate as ReturnType<typeof vi.fn>).mockResolvedValue({
+      agents: 2, cross_checked_steps: ['docs/inconsistencies-security.md'], low_factor: 2, high_factor: 4,
+      max_cross_checked: 30, base_run_id: 'run-1', low_cost_usd_micros: 200_000, high_cost_usd_micros: 400_000,
+      estimated: true,
+    });
+    const toast = vi.fn();
+    const props = {
+      onClose: () => {}, onSaved: () => {}, agent: 'ClaudeCode' as const,
+      tier: 'reasoning' as const, review: false, toast,
+    };
+    const { unmount } = wrap(<BriefingForm projectId="p-off" {...props} />);
+    expect(screen.getByTestId('briefing-cross-audit')).not.toBeChecked();
+    fillMandatory();
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledWith(
+      'p-off', expect.objectContaining({ cross_audit_agents: [] }),
+    ));
+    expect(projectsApi.crossAuditEstimate).not.toHaveBeenCalled();
+    unmount();
+
+    wrap(<BriefingForm projectId="p-on" {...props} />);
+    fillMandatory();
+    fireEvent.click(screen.getByTestId('briefing-cross-audit'));
+    fireEvent.click(screen.getByTestId('briefing-cross-agent-ClaudeCode'));
+    // One agent is not a cross-check: refused before the round-trip.
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    expect(toast).toHaveBeenCalledWith(expect.any(String), 'error');
+    expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId('briefing-cross-agent-Codex'));
+    await waitFor(() => expect(projectsApi.crossAuditEstimate).toHaveBeenCalledWith('p-on', 2));
+    await waitFor(() => expect(screen.getByTestId('briefing-cross-estimate').textContent).toMatch(/×2.*×4/));
+    fireEvent.click(screen.getByRole('button', { name: /Save|Enregistrer|Guardar/i }));
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledWith(
+      'p-on', expect.objectContaining({ cross_audit_agents: ['ClaudeCode', 'Codex'] }),
+    ));
   });
 });

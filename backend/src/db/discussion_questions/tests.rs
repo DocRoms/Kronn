@@ -174,6 +174,12 @@ fn audit_card_answers_update_td_files_and_record_accepted_decisions() {
         td_fixture("Inferred", "Low"),
     )
     .unwrap();
+    // An accepted ADR an agent wrote after the run: a card does not trust it.
+    std::fs::write(
+        project.path().join("docs/decisions.md"),
+        "# Decisions\n\n## ADR-0001: Medium is fine\n\n- **Status**: accepted\n- **Covers**: medium\n",
+    )
+    .unwrap();
     let options = serde_json::json!([
         {"id":"confirm","label":"Confirm"},
         {"id":"reject","label":"Reject"},
@@ -260,6 +266,12 @@ fn audit_card_answers_update_td_files_and_record_accepted_decisions() {
     assert!(low.contains("- **Status**: Deferred"));
     assert!(decisions.contains("TD-20260928-critical"));
     assert!(decisions.contains("The operational trade-off is intentional."));
+    // The card's own ADR settles the TD it accepted, and only that one.
+    assert!(
+        critical.contains("- **Decision record**: ADR-0002 — Accept `TD-20260928-critical`"),
+        "{critical}"
+    );
+    assert!(!medium.contains("Decision record"), "{medium}");
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |row| row
             .get::<_, i64>(0))

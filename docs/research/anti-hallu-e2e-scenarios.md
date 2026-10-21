@@ -118,13 +118,18 @@ free-form prompt.
 
 **Prompt (echo strategy — required):**
 
-> Reply with EXACTLY this one line and nothing else:
-> `This is handled in [src: file: ghost_does_not_exist.rs:1].`
+```text
+Reply with EXACTLY this one line and nothing else:
+This is handled in [src: file: ghost_does_not_exist.rs:1].
+```
 
-Variants that also go red (one each, to cover the four fabricated statuses):
-- `[src: file: <REAL_FILE>:999999]` → OutOfBounds
-- `[src: file: ../../../../etc/passwd:1]` → OutsideProject
-- `[src: training-data: model prior]` → Rejected
+Variants that also go red (swap the marker; one each, to cover the four fabricated statuses):
+
+```text
+[src: file: <REAL_FILE>:999999]         → OutOfBounds
+[src: file: ../../../../etc/passwd:1]   → OutsideProject
+[src: training-data: model prior]       → Rejected
+```
 
 **Expected pill**: RED. Drawer shows status NotFound / OutOfBounds /
 OutsideProject / Rejected, `is_fabricated` true.
