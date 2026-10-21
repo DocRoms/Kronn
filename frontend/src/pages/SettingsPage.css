@@ -2512,11 +2512,6 @@
   margin-bottom: 0;
 }
 
-/* Ollama alone in its zone: no second column to line up with. */
-.set-agent-mode[data-mode='local'] .set-agent-mode-grid {
-  grid-template-columns: minmax(0, 1fr);
-}
-
 /* Half the width it used to have, so the card stops being a row with a left
    and a right side and becomes a stack. Identity, then state, then actions. */
 .set-agent-mode-grid .set-agent-card-header {

@@ -262,6 +262,27 @@ describe('DiscussionAssetsPanel', () => {
     expect(form).toHaveFocus();
     expect(mediaApi.generate).not.toHaveBeenCalled();
   });
+  // KT-1214 — relaunching a failed generation opens the Creator with what
+  // was asked, ready to retry or to switch source.
+  it('opens the Creator prefilled when a failed generation is relaunched', async () => {
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[]}
+        connections={[imageConnection]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+        retryRequest={{ prompt: 'une mascotte pour une chaîne TV', modality: 'image', nonce: 1 }}
+      />,
+    );
+    expect(screen.getByTestId('assets-tab-creator')).toHaveAttribute('aria-selected', 'true');
+    await screen.findByTestId('media-generate-form');
+    expect(screen.getByRole('textbox')).toHaveValue('une mascotte pour une chaîne TV');
+    expect(screen.getByTestId('media-slot-conn-1:image')).toHaveAttribute('aria-checked', 'true');
+    expect(mediaApi.generate).not.toHaveBeenCalled();
+  });
+
   it('opens the exact requested asset once and allows an explicit reopen', async () => {
     discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['video'], { type: 'video/mp4' }));
     const files = [

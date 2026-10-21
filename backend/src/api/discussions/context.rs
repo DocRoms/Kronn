@@ -522,6 +522,7 @@ fn anchor_extracted_frame(
         session_tokens_at_message: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
         model: None,
         lint_report: None,
         id: message_id.clone(),

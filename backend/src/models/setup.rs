@@ -14,6 +14,9 @@ pub struct AppConfig {
     pub tokens: TokensConfig,
     pub scan: ScanConfig,
     pub agents: AgentsConfig,
+    /// Local ComfyUI media target (KT-1381).
+    #[serde(default, skip_serializing_if = "crate::models::comfyui::is_unset")]
+    pub comfyui: crate::models::ComfyUiConfig,
     /// Output language used by agents when they write their replies.
     /// Separate from `ui_language` below which controls the Kronn UI locale.
     #[serde(default = "default_language")]

@@ -728,6 +728,25 @@ pub fn classify_lane_target(
     lane_target: &Path,
     judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
 ) -> LaneTargetState {
+    classify_lane_target_attributed(repo_path, lane_target, judge, &LaneAttributions::new())
+}
+
+/// Lane owners durable state names without a marker on disk, by lane name
+/// (KT-1397): a managed workspace row of a finished execution remembers the
+/// worktree it had, and the lane derives from that name. Built from the
+/// database, never from the directory being judged.
+pub type LaneAttributions = std::collections::HashMap<String, LaneOwner>;
+
+/// [`classify_lane_target`] that also recognises an unmarked lane by its
+/// durable lineage. The `target/wt-*` dirs of 20/10 predate the marker, or lost
+/// it; their execution is nonetheless in the database. Such a lane is only
+/// reclaimable once its worktree is gone: it never rides on a present checkout.
+pub fn classify_lane_target_attributed(
+    repo_path: &Path,
+    lane_target: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    attributions: &LaneAttributions,
+) -> LaneTargetState {
     if let Err(reason) = assert_lane_target_path(repo_path, lane_target) {
         return LaneTargetState::Kept(None, reason);
     }
@@ -740,8 +759,19 @@ pub fn classify_lane_target(
             return LaneTargetState::Kept(None, format!("cannot read it ({error})"));
         }
     }
-    let Some(owner) = read_lane_owner(lane_target) else {
-        return LaneTargetState::Unmarked;
+    let (owner, by_lineage) = match read_lane_owner(lane_target) {
+        Some(owner) => (owner, false),
+        None => {
+            let attributed = lane_target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix(LANE_TARGET_PREFIX))
+                .and_then(|lane| attributions.get(lane));
+            match attributed {
+                Some(owner) => (owner.clone(), true),
+                None => return LaneTargetState::Unmarked,
+            }
+        }
     };
     if let Err(reason) = judge(&owner) {
         return LaneTargetState::Claimed(owner, reason);
@@ -751,6 +781,12 @@ pub fn classify_lane_target(
     };
     let worktree = worktree_base_dir(repo_path).join(name);
     match classify_lane_worktree(repo_path, &owner.lane, &worktree) {
+        Ok(true) if by_lineage => LaneTargetState::Kept(
+            Some(owner),
+            "no ownership marker, attributed by its workspace lineage, and its worktree \
+             still exists — left alone"
+                .to_string(),
+        ),
         Ok(worktree_present) => LaneTargetState::Reclaimable {
             owner,
             worktree_present,
@@ -880,7 +916,27 @@ pub fn process_lane_target_idle(
     scope: LaneSweepScope,
     min_idle: std::time::Duration,
 ) -> LaneTargetOutcome {
-    match classify_lane_target(repo_path, lane_target, judge) {
+    process_lane_target_attributed(
+        repo_path,
+        lane_target,
+        judge,
+        scope,
+        min_idle,
+        &LaneAttributions::new(),
+    )
+}
+
+/// [`process_lane_target_idle`] that also takes an unmarked lane Kronn can
+/// attribute from durable lineage (KT-1397).
+pub fn process_lane_target_attributed(
+    repo_path: &Path,
+    lane_target: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    scope: LaneSweepScope,
+    min_idle: std::time::Duration,
+    attributions: &LaneAttributions,
+) -> LaneTargetOutcome {
+    match classify_lane_target_attributed(repo_path, lane_target, judge, attributions) {
         LaneTargetState::Unmarked => LaneTargetOutcome::Unmarked,
         LaneTargetState::Claimed(owner, reason) => LaneTargetOutcome::Claimed(owner, reason),
         LaneTargetState::Kept(owner, reason) => LaneTargetOutcome::Kept(owner, reason),
@@ -953,9 +1009,22 @@ pub fn sweep_lane_targets_idle(
     scope: LaneSweepScope,
     min_idle: std::time::Duration,
 ) -> LaneTargetSweep {
+    sweep_lane_targets_attributed(repo_path, judge, scope, min_idle, &LaneAttributions::new())
+}
+
+/// [`sweep_lane_targets_idle`] that also reclaims the unmarked lanes of
+/// `attributions` once their worktree is gone (KT-1397).
+pub fn sweep_lane_targets_attributed(
+    repo_path: &Path,
+    judge: &dyn Fn(&LaneOwner) -> Result<(), String>,
+    scope: LaneSweepScope,
+    min_idle: std::time::Duration,
+    attributions: &LaneAttributions,
+) -> LaneTargetSweep {
     let mut sweep = LaneTargetSweep::default();
     for path in lane_target_dirs(repo_path) {
-        match process_lane_target_idle(repo_path, &path, judge, scope, min_idle) {
+        match process_lane_target_attributed(repo_path, &path, judge, scope, min_idle, attributions)
+        {
             LaneTargetOutcome::Removed(owner, report) => sweep.removed.push((owner, report)),
             LaneTargetOutcome::WouldRemove(owner, report) => {
                 sweep.would_remove.push((owner, report))
@@ -2873,6 +2942,376 @@ pub fn remove_cancelled_task_worktree(
         ));
     }
     remove_discussion_worktree(repo_path, worktree_path, false)
+}
+
+/// What [`release_terminal_task_worktree`] did with the checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalWorktreeRelease {
+    /// The checkout was already gone; only the admin entry was pruned.
+    AlreadyGone,
+    /// The checkout was removed. `patch` is the saved uncommitted diff, when
+    /// there was one: the working-tree patch, or the staged one when that is
+    /// all there was (both sit in the evidence directory).
+    Removed { patch: Option<PathBuf> },
+}
+
+/// Name of the working-tree patch (index -> files on disk, untracked files
+/// included) kept as evidence of a released worktree. With nothing staged it is
+/// the whole uncommitted diff against `HEAD`.
+pub const RELEASED_WORKTREE_PATCH: &str = "uncommitted-changes.patch";
+
+/// Name of the staged patch (`HEAD` -> the worktree's own index), saved next to
+/// [`RELEASED_WORKTREE_PATCH`] only when the index differs from `HEAD`.
+pub const RELEASED_WORKTREE_STAGED_PATCH: &str = "staged-changes.patch";
+
+/// The most uncommitted state a release will turn into evidence. Untracked
+/// build output that `.gitignore` does not cover would otherwise become a
+/// multi-GB patch (and as many loose objects in the shared repository): above
+/// this the checkout is kept and the reason recorded (KT-1397).
+pub const RELEASED_WORKTREE_PATCH_CAP_BYTES: u64 = 256 * 1024 * 1024;
+
+fn run_git_in_index(wt: &Path, index: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = crate::core::cmd::git_cmd()
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .current_dir(wt)
+        .output()
+        .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
+}
+
+/// `Some(bytes)` once the content of the modified and untracked (not ignored)
+/// files of `wt` is known to exceed `cap`. Measured from file sizes before
+/// anything is staged, so an oversized tree is refused without copying a byte.
+fn uncommitted_content_over(wt: &Path, cap: u64) -> Result<Option<u64>, String> {
+    let output = crate::core::cmd::git_cmd()
+        .args([
+            "ls-files",
+            "-z",
+            "--modified",
+            "--others",
+            "--exclude-standard",
+        ])
+        .current_dir(wt)
+        .output()
+        .map_err(|e| format!("git ls-files failed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let mut total = 0u64;
+    for name in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+    {
+        let Ok(name) = std::str::from_utf8(name) else {
+            continue;
+        };
+        if let Ok(meta) = std::fs::symlink_metadata(wt.join(name)) {
+            if meta.is_file() {
+                total = total.saturating_add(meta.len());
+                if total > cap {
+                    return Ok(Some(total));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Stream `git <args>` (a tree-to-tree `diff`, so neither index is read) to `out`
+/// under `cap` bytes. `Ok(None)` is an empty diff and leaves no file; past the cap
+/// nothing is left behind and the result is an error. `Ok(Some(n))` is the size
+/// written.
+fn write_capped_git_patch(
+    wt: &Path,
+    args: &[&str],
+    out: &Path,
+    cap: u64,
+) -> Result<Option<u64>, String> {
+    use std::io::Read;
+    let mut child = crate::core::cmd::git_cmd()
+        .args(args)
+        .current_dir(wt)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
+    let mut stdout = child.stdout.take().ok_or("git diff has no output")?;
+    let staging = out.with_extension("patch.tmp");
+    let copied = std::fs::File::create(&staging)
+        .and_then(|mut file| std::io::copy(&mut stdout.by_ref().take(cap + 1), &mut file));
+    let abandon = |child: &mut std::process::Child| {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&staging);
+    };
+    let copied = match copied {
+        Ok(copied) => copied,
+        Err(e) => {
+            abandon(&mut child);
+            return Err(format!(
+                "cannot write the patch to {}: {e}",
+                staging.display()
+            ));
+        }
+    };
+    if copied > cap {
+        abandon(&mut child);
+        return Err(format!("the patch exceeds the {cap}-byte evidence cap"));
+    }
+    let status = child.wait().map_err(|e| format!("git diff failed: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!("git {} failed", args.join(" ")));
+    }
+    if copied == 0 {
+        let _ = std::fs::remove_file(&staging);
+        return Ok(None);
+    }
+    std::fs::rename(&staging, out).map_err(|e| {
+        let _ = std::fs::remove_file(&staging);
+        format!("cannot save the patch to {}: {e}", out.display())
+    })?;
+    Ok(Some(copied))
+}
+
+/// The real index of `wt`, as a path.
+fn worktree_index_path(wt: &Path) -> Result<PathBuf, String> {
+    let output = crate::core::cmd::git_cmd()
+        .args(["rev-parse", "--git-path", "index"])
+        .current_dir(wt)
+        .output()
+        .map_err(|e| format!("git rev-parse failed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git rev-parse --git-path index failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    Ok(if path.is_relative() {
+        wt.join(path)
+    } else {
+        path
+    })
+}
+
+/// Which patches a release saved. `staged` is `HEAD` -> the worktree's own index;
+/// `working` is that index -> the files on disk (tracked edits and untracked,
+/// not ignored, files). Reapplied in that order (`git apply --index` the first,
+/// `git apply` the second) on the kept branch they rebuild the index and the
+/// working tree exactly.
+#[derive(Debug)]
+struct SavedPatches {
+    staged: bool,
+    working: bool,
+}
+
+/// Save the whole uncommitted state of `wt` as the two patches described on
+/// [`SavedPatches`], within one `cap`. The worktree's own index is only copied
+/// (never opened for writing), so the checkout is exactly as it was when this
+/// returns. An index that cannot be written as a tree (unmerged paths) is an
+/// error: the checkout is kept rather than lose what one patch cannot hold.
+fn write_uncommitted_patches(
+    wt: &Path,
+    scratch_index: &Path,
+    evidence_dir: &Path,
+    cap: u64,
+) -> Result<SavedPatches, String> {
+    std::fs::copy(worktree_index_path(wt)?, scratch_index)
+        .map_err(|e| format!("cannot copy the index of {}: {e}", wt.display()))?;
+    let staged_tree =
+        String::from_utf8_lossy(&run_git_in_index(wt, scratch_index, &["write-tree"])?)
+            .trim()
+            .to_string();
+    run_git_in_index(wt, scratch_index, &["add", "-A"])?;
+    let working_tree =
+        String::from_utf8_lossy(&run_git_in_index(wt, scratch_index, &["write-tree"])?)
+            .trim()
+            .to_string();
+    let staged_out = evidence_dir.join(RELEASED_WORKTREE_STAGED_PATCH);
+    let working_out = evidence_dir.join(RELEASED_WORKTREE_PATCH);
+    let diff = |from: &str, to: &str| {
+        vec![
+            "diff".to_string(),
+            "--binary".to_string(),
+            "--no-ext-diff".to_string(),
+            from.to_string(),
+            to.to_string(),
+        ]
+    };
+    let saved = (|| {
+        let args = diff("HEAD", &staged_tree);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let staged = write_capped_git_patch(wt, &args, &staged_out, cap)?;
+        let args = diff(&staged_tree, &working_tree);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let working = write_capped_git_patch(
+            wt,
+            &args,
+            &working_out,
+            cap.saturating_sub(staged.unwrap_or(0)),
+        )?;
+        Ok(SavedPatches {
+            staged: staged.is_some(),
+            working: working.is_some(),
+        })
+    })();
+    if saved.is_err() {
+        // Half the evidence is worse than none: the checkout stays.
+        let _ = std::fs::remove_file(&staged_out);
+        let _ = std::fs::remove_file(&working_out);
+    }
+    saved
+}
+
+/// Whether anything in the checkout `wt` was written after `cutoff`: the newest
+/// mtime of any file or directory in it, except the Git admin entry and without
+/// following symlinks (the lane build dir lives outside the checkout). Stops at
+/// the first write newer than `cutoff`. Err when the tree cannot be read: an
+/// activity that cannot be established is never idle (KT-1397).
+pub fn checkout_written_since(
+    wt: &Path,
+    cutoff: std::time::SystemTime,
+) -> Result<Option<PathBuf>, String> {
+    let mut pending = vec![wt.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("cannot read {}: {e}", dir.display())),
+        };
+        let dir_meta = match std::fs::symlink_metadata(&dir) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("cannot stat {}: {e}", dir.display())),
+        };
+        let written = dir_meta
+            .modified()
+            .map_err(|e| format!("no mtime for {}: {e}", dir.display()))?;
+        if written > cutoff {
+            return Ok(Some(dir));
+        }
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("cannot list {}: {e}", dir.display()))?;
+            if dir == wt && entry.file_name() == ".git" {
+                continue;
+            }
+            let path = entry.path();
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("cannot stat {}: {e}", path.display())),
+            };
+            let written = meta
+                .modified()
+                .map_err(|e| format!("no mtime for {}: {e}", path.display()))?;
+            if written > cutoff {
+                return Ok(Some(path));
+            }
+            if meta.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Release the checkout of a task execution that has reached a terminal status
+/// (KT-1397): the branch is kept, the uncommitted changes are saved as a patch
+/// under `evidence_dir` first, and the checkout is then removed.
+///
+/// The caller proves the execution is terminal and the workspace is Kronn's
+/// (`managed`); this proves the rest against Git: the path is in the managed
+/// layout and the checkout is on exactly `expected_branch`. Unlike
+/// [`remove_cancelled_task_worktree`] a dirty tree is not a reason to keep the
+/// directory, but a patch that cannot be written, or that would exceed
+/// [`RELEASED_WORKTREE_PATCH_CAP_BYTES`], is: nothing is removed unless the
+/// evidence is on disk.
+pub fn release_terminal_task_worktree(
+    repo_path: &Path,
+    worktree_path: &str,
+    expected_branch: &str,
+    evidence_dir: &Path,
+) -> Result<TerminalWorktreeRelease, String> {
+    release_terminal_task_worktree_capped(
+        repo_path,
+        worktree_path,
+        expected_branch,
+        evidence_dir,
+        RELEASED_WORKTREE_PATCH_CAP_BYTES,
+    )
+}
+
+/// [`release_terminal_task_worktree`] with the evidence cap injected.
+pub fn release_terminal_task_worktree_capped(
+    repo_path: &Path,
+    worktree_path: &str,
+    expected_branch: &str,
+    evidence_dir: &Path,
+    patch_cap_bytes: u64,
+) -> Result<TerminalWorktreeRelease, String> {
+    reject_option_like_rev(expected_branch)?;
+    let wt = Path::new(worktree_path);
+    assert_managed_task_worktree_path(repo_path, wt)?;
+    if !wt.exists() {
+        let _ = crate::core::cmd::git_cmd()
+            .args(["worktree", "prune"])
+            .current_dir(repo_path)
+            .output();
+        return Ok(TerminalWorktreeRelease::AlreadyGone);
+    }
+    let actual_branch = find_branch_for_worktree(repo_path, worktree_path).ok_or_else(|| {
+        format!("cannot determine branch for terminal worktree {worktree_path} — preserving it")
+    })?;
+    if actual_branch != expected_branch {
+        return Err(format!(
+            "terminal worktree {worktree_path} is on branch {actual_branch}, expected {expected_branch} — preserving it"
+        ));
+    }
+    let mut patch = None;
+    if !worktree_dirty_files(wt)?.is_empty() {
+        if let Some(bytes) = uncommitted_content_over(wt, patch_cap_bytes)? {
+            return Err(format!(
+                "the uncommitted files of {worktree_path} hold {bytes}+ bytes, over the \
+                 {patch_cap_bytes}-byte evidence cap — preserving it"
+            ));
+        }
+        std::fs::create_dir_all(evidence_dir).map_err(|e| {
+            format!(
+                "cannot create {} for the uncommitted changes of {worktree_path}: {e} — preserving it",
+                evidence_dir.display()
+            )
+        })?;
+        // A previous attempt's leftovers must not pass for this release's evidence.
+        for stale in [RELEASED_WORKTREE_PATCH, RELEASED_WORKTREE_STAGED_PATCH] {
+            let _ = std::fs::remove_file(evidence_dir.join(stale));
+        }
+        let scratch_index = evidence_dir.join("patch-index.tmp");
+        let saved = write_uncommitted_patches(wt, &scratch_index, evidence_dir, patch_cap_bytes);
+        let _ = std::fs::remove_file(&scratch_index);
+        let saved = saved.map_err(|e| {
+            format!("cannot save the uncommitted changes of {worktree_path}: {e} — preserving it")
+        })?;
+        if saved.working {
+            patch = Some(evidence_dir.join(RELEASED_WORKTREE_PATCH));
+        } else if saved.staged {
+            patch = Some(evidence_dir.join(RELEASED_WORKTREE_STAGED_PATCH));
+        }
+    }
+    remove_discussion_worktree(repo_path, worktree_path, false)?;
+    Ok(TerminalWorktreeRelease::Removed { patch })
 }
 
 /// Remove a task worktree AFTER its candidate was integrated successfully.
@@ -5798,6 +6237,386 @@ mod tests {
 
         assert!(remove_cancelled_task_worktree(repo.path(), &info.path, &info.branch).is_err());
         assert!(Path::new(&info.path).exists());
+    }
+
+    /// KT-1397 — a terminal worktree is released even when dirty: the diff is
+    /// saved first, the branch (with its commits) stays.
+    #[test]
+    fn release_terminal_task_worktree_saves_the_diff_and_keeps_the_branch() {
+        let repo = make_test_repo("task-release-terminal");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-1397", "release", &base).unwrap();
+        let landed = commit_file(Path::new(&info.path), "done.txt", "done", "worker work");
+        fs::write(Path::new(&info.path).join("README.md"), "# edited").unwrap();
+        fs::write(Path::new(&info.path).join("scratch.txt"), "untracked").unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+
+        let released =
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path())
+                .unwrap();
+
+        let TerminalWorktreeRelease::Removed { patch: Some(patch) } = released else {
+            panic!("expected a removal with a saved patch, got {released:?}");
+        };
+        let saved = fs::read_to_string(patch).unwrap();
+        assert!(saved.contains("+# edited") && saved.contains("scratch.txt"));
+        assert!(
+            !saved.contains("done.txt"),
+            "committed work is the branch's"
+        );
+        assert!(!Path::new(&info.path).exists());
+        assert_eq!(
+            branch_commit(repo.path(), &info.branch).as_deref(),
+            Some(landed.as_str())
+        );
+        assert!(!evidence.path().join("patch-index.tmp").exists());
+        // Retry-safe once the checkout is gone.
+        assert_eq!(
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path())
+                .unwrap(),
+            TerminalWorktreeRelease::AlreadyGone
+        );
+    }
+
+    /// KT-1397 — ownership is proved before anything is removed: a checkout on
+    /// another branch, or outside the managed layout, is refused untouched.
+    #[test]
+    fn release_terminal_task_worktree_refuses_foreign_checkouts() {
+        let repo = make_test_repo("task-release-foreign");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-1397", "foreign", &base).unwrap();
+        fs::write(Path::new(&info.path).join("scratch.txt"), "keep").unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+
+        let wrong_branch =
+            release_terminal_task_worktree(repo.path(), &info.path, "main", evidence.path());
+        assert!(wrong_branch.is_err());
+        assert!(Path::new(&info.path).join("scratch.txt").exists());
+
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().to_string_lossy().to_string();
+        assert!(release_terminal_task_worktree(
+            repo.path(),
+            &outside_path,
+            &info.branch,
+            evidence.path()
+        )
+        .is_err());
+        assert!(outside.path().exists());
+    }
+
+    /// KT-1397 — the evidence is bounded: uncommitted files above the cap are
+    /// neither saved nor is the checkout removed, and nothing is left staged.
+    #[test]
+    fn release_terminal_task_worktree_keeps_a_checkout_whose_diff_exceeds_the_cap() {
+        let repo = make_test_repo("task-release-cap");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-1397", "cap", &base).unwrap();
+        fs::write(Path::new(&info.path).join("build.bin"), vec![7u8; 4096]).unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+
+        let error = release_terminal_task_worktree_capped(
+            repo.path(),
+            &info.path,
+            &info.branch,
+            evidence.path(),
+            1024,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("evidence cap"), "{error}");
+        assert!(Path::new(&info.path).join("build.bin").exists());
+        assert!(!evidence.path().join(RELEASED_WORKTREE_PATCH).exists());
+        // Under a cap that fits, the same checkout is released.
+        let released = release_terminal_task_worktree_capped(
+            repo.path(),
+            &info.path,
+            &info.branch,
+            evidence.path(),
+            1024 * 1024,
+        )
+        .unwrap();
+        assert!(matches!(
+            released,
+            TerminalWorktreeRelease::Removed { patch: Some(_) }
+        ));
+        assert!(!Path::new(&info.path).exists());
+    }
+
+    /// KT-1397 — the patch itself is streamed under the cap: a tracked edit
+    /// whose diff outgrows it (the size pre-check passed) leaves no partial file.
+    #[test]
+    fn write_uncommitted_patches_stop_at_the_cap_and_leave_nothing() {
+        let repo = make_test_repo("task-patch-cap");
+        fs::write(repo.path().join("big.txt"), "x".repeat(8192)).unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+        let index = evidence.path().join("scratch-index");
+
+        let error =
+            write_uncommitted_patches(repo.path(), &index, evidence.path(), 1024).unwrap_err();
+
+        assert!(error.contains("cap"), "{error}");
+        let left: Vec<_> = fs::read_dir(evidence.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "only the scratch index remains: {left:?}");
+    }
+
+    /// Git state of a checkout as a comparable value: the index (as a patch
+    /// against HEAD), the status, and the content of every file.
+    fn checkout_fingerprint(wt: &Path) -> (String, String, Vec<(String, Vec<u8>)>) {
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(wt)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}");
+            String::from_utf8_lossy(&output.stdout).to_string()
+        };
+        let mut files: Vec<(String, Vec<u8>)> = git(&["ls-files", "-z", "--cached", "--others"])
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .filter_map(|name| {
+                fs::read(wt.join(name))
+                    .ok()
+                    .map(|bytes| (name.to_string(), bytes))
+            })
+            .collect();
+        files.sort();
+        (
+            git(&["diff", "--cached", "--binary", "--no-ext-diff"]),
+            git(&["status", "--porcelain", "-uall"]),
+            files,
+        )
+    }
+
+    /// KT-1397 — staged state is evidence too: a modification kept only in the
+    /// index (the file on disk restored), another staged then edited again, a
+    /// staged deletion and an untracked file all survive the release, and the
+    /// two saved patches rebuild the exact index and working tree on the kept
+    /// branch.
+    #[test]
+    fn release_terminal_task_worktree_saves_the_staged_state_and_both_patches_reapply() {
+        let repo = make_test_repo("task-release-staged");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-1397", "staged", &base).unwrap();
+        let wt = Path::new(&info.path);
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(wt)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}");
+        };
+        commit_file(wt, "twice.txt", "v0\n", "tracked");
+        commit_file(wt, "gone.txt", "bye\n", "tracked");
+        let readme = fs::read(wt.join("README.md")).unwrap();
+        // Staged only: the file on disk is back at HEAD.
+        fs::write(wt.join("README.md"), "STAGED_WORK_TO_PRESERVE\n").unwrap();
+        git(&["add", "README.md"]);
+        fs::write(wt.join("README.md"), readme).unwrap();
+        // Staged, then edited again.
+        fs::write(wt.join("twice.txt"), "v1 staged\n").unwrap();
+        git(&["add", "twice.txt"]);
+        fs::write(wt.join("twice.txt"), "v2 on disk\n").unwrap();
+        // Staged deletion, staged binary add, untracked file.
+        git(&["rm", "-q", "gone.txt"]);
+        fs::write(
+            wt.join("blob.bin"),
+            (0..2048).map(|i| (i % 251) as u8).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        git(&["add", "blob.bin"]);
+        fs::write(wt.join("loose.txt"), "untracked\n").unwrap();
+        let before = checkout_fingerprint(wt);
+        let evidence = tempfile::tempdir().unwrap();
+
+        let released =
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path())
+                .unwrap();
+
+        assert!(matches!(
+            released,
+            TerminalWorktreeRelease::Removed { patch: Some(_) }
+        ));
+        assert!(!wt.exists());
+        let staged = evidence.path().join(RELEASED_WORKTREE_STAGED_PATCH);
+        let working = evidence.path().join(RELEASED_WORKTREE_PATCH);
+        assert!(fs::read_to_string(&staged)
+            .unwrap()
+            .contains("STAGED_WORK_TO_PRESERVE"));
+        assert!(!evidence.path().join("patch-index.tmp").exists());
+
+        // Rebuild on the kept branch.
+        let rebuilt = repo.path().join("rebuilt");
+        let output = std::process::Command::new("git")
+            .args(["worktree", "add"])
+            .arg(&rebuilt)
+            .arg(&info.branch)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        for (args, patch) in [
+            (["apply", "--index"], &staged),
+            (["apply", "--whitespace=nowarn"], &working),
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .arg(patch)
+                .current_dir(&rebuilt)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_eq!(checkout_fingerprint(&rebuilt), before);
+    }
+
+    /// KT-1397 — nothing staged: a staged patch is not written, the working
+    /// patch is the whole uncommitted diff (the pre-existing evidence shape).
+    #[test]
+    fn release_terminal_task_worktree_writes_no_staged_patch_when_nothing_is_staged() {
+        let repo = make_test_repo("task-release-unstaged");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-1397", "unstaged", &base).unwrap();
+        fs::write(Path::new(&info.path).join("loose.txt"), "x").unwrap();
+        let evidence = tempfile::tempdir().unwrap();
+
+        release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path())
+            .unwrap();
+
+        assert!(evidence.path().join(RELEASED_WORKTREE_PATCH).exists());
+        assert!(!evidence
+            .path()
+            .join(RELEASED_WORKTREE_STAGED_PATCH)
+            .exists());
+    }
+
+    /// KT-1397 — the cap covers both patches together, and a refusal leaves
+    /// neither behind (half the evidence is worse than none).
+    #[test]
+    fn release_terminal_task_worktree_keeps_a_checkout_whose_staged_state_exceeds_the_cap() {
+        let repo = make_test_repo("task-release-staged-cap");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-1397", "stagedcap", &base).unwrap();
+        let wt = Path::new(&info.path);
+        fs::write(wt.join("staged.bin"), vec![9u8; 8192]).unwrap();
+        let output = std::process::Command::new("git")
+            .args(["add", "staged.bin"])
+            .current_dir(wt)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        // The worktree matches the index: the size pre-check sees nothing.
+        let evidence = tempfile::tempdir().unwrap();
+
+        let error = release_terminal_task_worktree_capped(
+            repo.path(),
+            &info.path,
+            &info.branch,
+            evidence.path(),
+            1024,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("cap"), "{error}");
+        assert!(wt.join("staged.bin").exists());
+        assert!(!evidence.path().join(RELEASED_WORKTREE_PATCH).exists());
+        assert!(!evidence
+            .path()
+            .join(RELEASED_WORKTREE_STAGED_PATCH)
+            .exists());
+    }
+
+    /// KT-1397 — an index that cannot be written as a tree (a merge in
+    /// progress) is not representable by a patch: the checkout is kept.
+    #[test]
+    fn release_terminal_task_worktree_keeps_a_checkout_with_unmerged_paths() {
+        let repo = make_test_repo("task-release-unmerged");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-1397", "unmerged", &base).unwrap();
+        let wt = Path::new(&info.path);
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(wt)
+                .output()
+                .unwrap()
+        };
+        git(&["checkout", "-q", "-b", "side"]);
+        commit_file(wt, "README.md", "side\n", "side");
+        git(&["checkout", "-q", &info.branch]);
+        commit_file(wt, "README.md", "main\n", "main");
+        let merged = git(&["merge", "side"]);
+        assert!(!merged.status.success(), "the merge must conflict");
+        let evidence = tempfile::tempdir().unwrap();
+
+        let error =
+            release_terminal_task_worktree(repo.path(), &info.path, &info.branch, evidence.path())
+                .unwrap_err();
+
+        assert!(error.contains("preserving it"), "{error}");
+        assert!(wt.exists());
+        assert!(!evidence.path().join(RELEASED_WORKTREE_PATCH).exists());
+    }
+
+    /// KT-1397 — the activity probe: a fresh file, a fresh directory entry or an
+    /// unreadable tree is not idle; an old tree is; `.git` and a missing
+    /// checkout do not count.
+    #[test]
+    fn checkout_written_since_sees_recent_writes_and_ignores_the_git_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("src/deep")).unwrap();
+        fs::write(root.join("src/deep/lib.rs"), "fn main() {}").unwrap();
+        fs::write(root.join(".git"), "gitdir: elsewhere").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        let age = |path: &Path| {
+            let file = fs::File::open(path).unwrap();
+            file.set_modified(old).unwrap();
+        };
+        // Deepest first: a child write bumps its parent's mtime.
+        age(&root.join("src/deep/lib.rs"));
+        age(&root.join("src/deep"));
+        age(&root.join("src"));
+        age(&root.join(".git"));
+        age(root);
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+
+        assert_eq!(checkout_written_since(root, hour_ago).unwrap(), None);
+
+        // The Git admin entry is not the worker's activity.
+        fs::write(root.join(".git"), "gitdir: rewritten").unwrap();
+        age(root);
+        assert_eq!(checkout_written_since(root, hour_ago).unwrap(), None);
+
+        // A deep write is found.
+        fs::write(root.join("src/deep/lib.rs"), "fn main() { 1; }").unwrap();
+        let found = checkout_written_since(root, hour_ago).unwrap();
+        assert!(found.is_some(), "a fresh deep write must be seen");
+
+        // A directory entry added or removed moves the directory's mtime.
+        fs::write(root.join("src/deep/lib.rs"), "fn main() {}").unwrap();
+        age(&root.join("src/deep/lib.rs"));
+        age(&root.join("src/deep"));
+        age(&root.join("src"));
+        age(root);
+        assert_eq!(checkout_written_since(root, hour_ago).unwrap(), None);
+        fs::write(root.join("src/new.txt"), "x").unwrap();
+        fs::remove_file(root.join("src/new.txt")).unwrap();
+        assert!(checkout_written_since(root, hour_ago).unwrap().is_some());
+
+        assert!(checkout_written_since(&root.join("absent"), hour_ago)
+            .unwrap()
+            .is_none());
     }
 
     /// KT-514/KT-478 — the reclaim must succeed on a task worktree that carries a

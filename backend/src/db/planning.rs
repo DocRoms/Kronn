@@ -1868,6 +1868,19 @@ pub fn update_task(
     let mut removed_dod = Vec::new();
     if let Some(items) = request.definition_of_done.as_ref() {
         removed_dod = replace_dod(&transaction, task_id, items, &request.actor, None)?;
+        // KT-1402 — an execution that still owes a delivery adopts the edited
+        // DoD in this very transaction, so its worker is never refused for it.
+        crate::db::orchestration::adopt_task_dod_into_live_executions(
+            &transaction,
+            task_id,
+            &existing.definition_of_done,
+            &crate::models::PlanningActor {
+                kind: crate::models::PlanningActorKind::Backend,
+                id: Some("orchestrator".to_string()),
+                session_id: None,
+                source_message_id: None,
+            },
+        )?;
     }
     if let Some(links) = request.links.as_ref() {
         replace_links(&transaction, task_id, links)?;

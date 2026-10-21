@@ -11,6 +11,7 @@ pub mod assistant_conversations;
 pub mod audit;
 pub mod bundle;
 pub mod cli_telemetry;
+pub mod comfyui;
 pub mod compare;
 pub mod contacts;
 pub mod context_audit;

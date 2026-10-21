@@ -1857,6 +1857,12 @@ pub(crate) async fn list_with_visibility(
                 .iter()
                 .map(|wf| (wf.id.clone(), wf.clone()))
                 .collect();
+            // Saved Quick Execs a step runs by id count too (KT-1398).
+            let quick_execs: std::collections::HashMap<String, QuickExec> =
+                crate::db::quick_execs::list_quick_execs(conn)?
+                    .into_iter()
+                    .map(|exec| (exec.id.clone(), exec))
+                    .collect();
             // The run's gate renders and hashes an imported workflow: a child
             // several cards reach is checked once per list, not once per card.
             let mut approvals: std::collections::HashMap<String, Result<Option<String>, String>> =
@@ -1873,9 +1879,10 @@ pub(crate) async fn list_with_visibility(
                 .into_iter()
                 .map(|wf| {
                     let (blocker_count, human_approval_count) = crate::workflows::readiness::counts(
-                        &crate::workflows::readiness::assess_with_approvals(
+                        &crate::workflows::readiness::assess_full(
                             &wf,
                             &by_id,
+                            &quick_execs,
                             &mut approval,
                         ),
                     );

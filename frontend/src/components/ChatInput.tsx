@@ -62,7 +62,7 @@ import {
   StopCircle, RotateCcw, Loader2,
   Cpu, Mic, MicOff, Phone, PhoneOff,
   Volume2, VolumeX, Check, Zap, FileText, Paperclip, Image, Reply,
-  Eye, EyeOff, StickyNote, Terminal,
+  Eye, EyeOff, StickyNote, Terminal, Workflow,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { MarkdownEditor } from './MarkdownComposerTools';
@@ -134,6 +134,10 @@ export interface ChatInputProps {
   hasDiscussionNotes?: boolean;
   showDiscussionNotes?: boolean;
   onToggleDiscussionNotes?: () => void;
+  /** KT-1330 — the same control for the orchestrator's own room posts. */
+  hasOrchestrationMessages?: boolean;
+  showOrchestrationMessages?: boolean;
+  onToggleOrchestrationMessages?: () => void;
   onCancelReply?: () => void;
   modelTiers?: ModelTiersConfig | null;
   externalConnections?: ExternalApiConnectionView[];
@@ -181,6 +185,9 @@ export function ChatInput({
   hasDiscussionNotes = false,
   showDiscussionNotes = true,
   onToggleDiscussionNotes,
+  hasOrchestrationMessages = false,
+  showOrchestrationMessages = true,
+  onToggleOrchestrationMessages,
   onCancelReply,
   modelTiers,
   externalConnections = [],
@@ -2150,6 +2157,22 @@ export function ChatInput({
                   </button>
                 )}
               </span>
+            )}
+
+            {hasOrchestrationMessages && onToggleOrchestrationMessages && (
+              <button
+                type="button"
+                className="disc-tool-btn disc-orchestration-visibility-btn"
+                data-color="warning"
+                data-active={showOrchestrationMessages}
+                data-testid="orchestration-visibility-toggle"
+                onClick={onToggleOrchestrationMessages}
+                title={showOrchestrationMessages ? t('disc.orchestration.hide') : t('disc.orchestration.show')}
+                aria-label={showOrchestrationMessages ? t('disc.orchestration.hide') : t('disc.orchestration.show')}
+                aria-pressed={showOrchestrationMessages}
+              >
+                <Workflow size={15} />
+              </button>
             )}
 
             {/* Debate / multi-agent */}

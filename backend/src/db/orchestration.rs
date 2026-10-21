@@ -708,6 +708,129 @@ pub fn lane_target_claims(
     Ok(claims)
 }
 
+/// The lanes durable lineage attributes to an execution, whatever is (or is not)
+/// written inside them (KT-1397): every managed workspace row of the project
+/// that still names its worktree (`workspace_path` survives the retirement that
+/// clears `canonical_path`) and belongs to an execution. The lane derives from
+/// that worktree name exactly as provisioning derived it.
+///
+/// Attribution only names an owner; whether that owner is finished and the
+/// worktree gone is still the claims' and the sweep's to prove. A row without
+/// an execution, an external workspace or a path no lane derives from is not
+/// attributed.
+pub fn lane_attributions(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<std::collections::HashMap<String, crate::core::worktree::LaneOwner>> {
+    let mut statement = conn.prepare(
+        "SELECT task_execution_id, workspace_path FROM discussion_workspaces
+          WHERE project_id = ?1 AND ownership = 'managed'
+            AND task_execution_id IS NOT NULL AND workspace_path IS NOT NULL
+          ORDER BY created_at, id",
+    )?;
+    let rows = statement
+        .query_map(params![project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut attributed = std::collections::HashMap::new();
+    for (execution_id, worktree) in rows {
+        let Ok(lane) =
+            crate::core::task_worker_env::WorkerLane::for_worktree(std::path::Path::new(&worktree))
+        else {
+            continue;
+        };
+        let owner = crate::core::worktree::LaneOwner {
+            version: 1,
+            lane: lane.name.clone(),
+            execution_id,
+            worktree,
+        };
+        // Two executions that derive the same lane name cannot both own it: the
+        // lane is then attributed to neither, and stays.
+        match attributed.entry(lane.name) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Some(owner));
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if slot
+                    .get()
+                    .as_ref()
+                    .is_some_and(|known| known.execution_id != owner.execution_id)
+                {
+                    slot.insert(None);
+                }
+            }
+        }
+    }
+    Ok(attributed
+        .into_iter()
+        .filter_map(|(lane, owner)| owner.map(|owner| (lane, owner)))
+        .collect())
+}
+
+/// Record, once per distinct reason, that a finished execution's checkout was
+/// kept by the release (KT-1397): a sweep that runs every half hour must not
+/// bury the event log under the same refusal. `true` when it was recorded now.
+pub fn record_release_kept_once(
+    conn: &Connection,
+    exec_id: &str,
+    reason: &str,
+    actor: &OrchestrationActor,
+) -> Result<bool> {
+    let changes = serde_json::json!({ "reason": reason });
+    let already: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_execution_events
+              WHERE task_execution_id = ?1 AND action = 'worktree_release_kept'
+                AND changes_json = ?2)",
+        params![exec_id, serde_json::to_string(&changes)?],
+        |row| row.get(0),
+    )?;
+    if already {
+        return Ok(false);
+    }
+    record_execution_event(
+        conn,
+        exec_id,
+        "worktree_release_kept",
+        None,
+        None,
+        actor,
+        changes,
+    )?;
+    Ok(true)
+}
+
+/// Managed checkouts that outlive a finished execution (KT-1397): one row per
+/// terminal (`Done`, `Failed`, `Cancelled`) execution whose managed workspace
+/// still names a path on disk. `finished_at` lets the caller leave a recent
+/// finish alone; a legacy row without one is old enough by definition.
+pub fn terminal_executions_with_checkout(
+    conn: &Connection,
+) -> Result<Vec<(String, Option<chrono::DateTime<chrono::Utc>>)>> {
+    let mut statement = conn.prepare(
+        "SELECT te.id, te.finished_at FROM task_executions te
+           JOIN discussion_workspaces dw ON dw.task_execution_id = te.id
+          WHERE dw.ownership = 'managed' AND dw.canonical_path IS NOT NULL
+            AND te.status IN ('Done', 'Failed', 'Cancelled')
+          ORDER BY te.finished_at, te.id",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, finished)| {
+            let finished = finished
+                .and_then(|text| chrono::DateTime::parse_from_rfc3339(&text).ok())
+                .map(|at| at.with_timezone(&chrono::Utc));
+            (id, finished)
+        })
+        .collect())
+}
+
 /// Audit one lane target reclaim against the execution that owned `canonical_path`.
 /// The same shape as [`record_artifact_reclaim`], under its own actions so a
 /// worktree's `target/` and its lane target are told apart. KT-1256.
@@ -2197,6 +2320,9 @@ pub struct UndeliveredDispatchInterruption {
     pub execution_id: String,
     pub parent_discussion_id: String,
     pub task_id: String,
+    /// KT-1402 — why the worker's last `task_exec_deliver` was refused, when it
+    /// was: the real cause behind a worker that "ended without delivery".
+    pub delivery_refusal: Option<String>,
 }
 
 /// A native worker process may finish or fail without calling `task_exec_deliver`
@@ -2219,6 +2345,14 @@ pub fn interrupt_undelivered_execution_for_dispatch(
         if execution.status != TaskExecutionStatus::Working {
             return Ok(None);
         }
+        let delivery_refusal = latest_delivery_refusal(conn, &execution.id)?;
+        // The reason keeps its leading code (readers match on the prefix) and
+        // carries the refusal the worker could not get past.
+        let reason = match delivery_refusal.as_deref() {
+            Some(refusal) => format!("{reason}: last task_exec_deliver was refused: {refusal}"),
+            None => reason.to_string(),
+        };
+        let reason = reason.as_str();
         if !transition_execution(
             conn,
             &execution.id,
@@ -2227,6 +2361,7 @@ pub fn interrupt_undelivered_execution_for_dispatch(
             serde_json::json!({
                 "reason": reason,
                 "dispatch_job_id": dispatch_job_id,
+                "delivery_refusal": delivery_refusal,
             }),
         )? {
             return Ok(None);
@@ -2248,6 +2383,7 @@ pub fn interrupt_undelivered_execution_for_dispatch(
             execution_id: execution.id,
             parent_discussion_id: execution.parent_discussion_id,
             task_id: execution.task_id,
+            delivery_refusal,
         }))
     })
 }
@@ -2731,6 +2867,7 @@ fn announce_integration_refusal(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -4882,6 +5019,7 @@ fn publish_campaign_gate_card(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -5034,6 +5172,7 @@ fn notify_principal_of_terminal(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -5155,6 +5294,7 @@ fn return_cli_worker_to_origin(
         recovered_partial: false,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let child_message = message(
         format!("orch-return-child:{exec_id}:{terminal}"),
@@ -5461,6 +5601,218 @@ pub fn list_execution_events(conn: &Connection, exec_id: &str) -> Result<Vec<Tas
         .query_map(params![exec_id], row_to_event)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(events)
+}
+
+const DELIVERY_REFUSED_ACTION: &str = "delivery_refused";
+const DOD_READOPTED_ACTION: &str = "dod_readopted";
+
+/// KT-1402 — journal why a `task_exec_deliver` was refused. The worker sees the
+/// refusal as a tool error; without this row the principal only learns that the
+/// worker ended without delivering.
+pub fn record_delivery_refusal(
+    conn: &Connection,
+    exec_id: &str,
+    attempt_no: u32,
+    detail: &str,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        DELIVERY_REFUSED_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::json!({ "detail": detail, "attempt": attempt_no }),
+    )
+}
+
+/// The latest delivery refusal still in force: a later transition into
+/// `Working`, a reassignment or a DoD re-adoption starts a fresh turn against
+/// fresh facts, and an accepted delivery (the move to `AwaitingReview`)
+/// supersedes a refusal from the same turn. The refusal event itself stays in
+/// the journal as history.
+pub fn latest_delivery_refusal(conn: &Connection, exec_id: &str) -> Result<Option<String>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+               AND rowid > COALESCE((SELECT MAX(rowid) FROM task_execution_events \
+                                      WHERE task_execution_id = ?1 \
+                                        AND (to_status IN ('Working', 'AwaitingReview') \
+                                             OR action IN (?3, 'worker_reassigned'))), 0) \
+             ORDER BY rowid DESC LIMIT 1",
+            params![exec_id, DELIVERY_REFUSED_ACTION, DOD_READOPTED_ACTION],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| {
+            let changes: serde_json::Value = serde_json::from_str(&changes)?;
+            Ok(changes["detail"].as_str().map(str::to_string))
+        })
+        .transpose()
+        .map(Option::flatten)
+}
+
+/// Does this execution still owe the worker a delivery judged against the
+/// task's DoD? Once a delivery awaits review the launch-time snapshot is the
+/// reference instead (KT-1291), so those states keep theirs.
+fn awaits_a_delivery(execution: &TaskExecution) -> bool {
+    use TaskExecutionStatus::*;
+    let owes = |status: Option<TaskExecutionStatus>| {
+        matches!(
+            status,
+            Some(Pending | Provisioning | Working | ChangesRequested)
+        )
+    };
+    match execution.status {
+        Blocked => owes(execution.blocked_from_status),
+        status => owes(Some(status)),
+    }
+}
+
+/// Do two DoD versions ask the worker for something different? Ticks and
+/// evidence are progress, not requirements, so they are ignored; a reworded
+/// sentence or another verification kind is a change even under the same id.
+pub fn dod_requirements_differ(
+    before: &[crate::models::PlanningDodItem],
+    after: &[crate::models::PlanningDodItem],
+) -> bool {
+    let key = |items: &[crate::models::PlanningDodItem]| {
+        items
+            .iter()
+            .map(|item| (item.id.clone(), item.sentence.clone(), item.verification))
+            .collect::<Vec<_>>()
+    };
+    key(before) != key(after)
+}
+
+/// KT-1402 — point an execution's DoD snapshot at the task's current DoD.
+/// `requirements_changed` covers an edit that keeps every id (a reworded
+/// sentence): the snapshot is then unchanged but the worker must still be told.
+/// Returns whether anything changed.
+pub fn readopt_dod_snapshot(
+    conn: &Connection,
+    exec_id: &str,
+    dod_ids: &[String],
+    requirements_changed: bool,
+    cause: &str,
+    actor: &OrchestrationActor,
+) -> Result<bool> {
+    in_savepoint(conn, |conn| {
+        let Some(execution) = get_task_execution(conn, exec_id)? else {
+            return Ok(false);
+        };
+        // No snapshot = a pre-snapshot execution: delivery already tells it to
+        // relaunch, and there is no earlier DoD to announce a change from.
+        match execution.worker_dod_ids.as_deref() {
+            Some(snapshot) if requirements_changed || snapshot != dod_ids => {}
+            _ => return Ok(false),
+        }
+        conn.execute(
+            "UPDATE task_executions SET worker_dod_ids_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![
+                exec_id,
+                serde_json::to_string(dod_ids)?,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        record_execution_event(
+            conn,
+            exec_id,
+            DOD_READOPTED_ACTION,
+            None,
+            None,
+            actor,
+            serde_json::json!({
+                "cause": cause,
+                "previous": execution.worker_dod_ids,
+                "current": dod_ids,
+            }),
+        )?;
+        Ok(true)
+    })
+}
+
+/// KT-1402 — the task's DoD was edited: every execution of the task that still
+/// owes a delivery adopts the new one and its worker is told in its own
+/// discussion. Without that, the worker's delivery is refused for a drift it
+/// cannot see and the whole turn is lost. `before` is the DoD as it stood
+/// before the edit, so a reworded sentence under an unchanged id is noticed too.
+/// Returns the adopting execution ids.
+pub fn adopt_task_dod_into_live_executions(
+    conn: &Connection,
+    task_id: &str,
+    before: &[crate::models::PlanningDodItem],
+    actor: &OrchestrationActor,
+) -> Result<Vec<String>> {
+    let Some(task) = crate::db::planning::get_task(conn, task_id)? else {
+        return Ok(Vec::new());
+    };
+    let requirements_changed = dod_requirements_differ(before, &task.definition_of_done);
+    let dod_ids = task
+        .definition_of_done
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    let candidates = conn
+        .prepare("SELECT id FROM task_executions WHERE task_id = ?1")?
+        .query_map(params![task_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut adopted = Vec::new();
+    for exec_id in candidates {
+        let Some(execution) = get_task_execution(conn, &exec_id)? else {
+            continue;
+        };
+        if !awaits_a_delivery(&execution) {
+            continue;
+        }
+        if !readopt_dod_snapshot(
+            conn,
+            &exec_id,
+            &dod_ids,
+            requirements_changed,
+            "task_dod_edited",
+            actor,
+        )? {
+            continue;
+        }
+        if let Some(child) = execution.sub_discussion_id.as_deref() {
+            let lang = crate::db::discussions::room_lang(conn, &execution.parent_discussion_id);
+            let message = crate::api::orchestration::orchestrator_message(
+                format!("orch-dod-readopted:{exec_id}:{}", Uuid::new_v4()),
+                dod_readopted_notice(lang, &task.definition_of_done),
+            );
+            crate::db::discussions::insert_message(conn, child, &message)?;
+        }
+        adopted.push(exec_id);
+    }
+    Ok(adopted)
+}
+
+/// What the worker must know once the DoD it was launched with is replaced.
+pub fn dod_readopted_notice(lang: RoomLang, dod: &[crate::models::PlanningDodItem]) -> String {
+    let items = dod
+        .iter()
+        .enumerate()
+        .map(|(position, item)| format!("{}. {}", position + 1, item.sentence))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let count = dod.len();
+    match lang {
+        RoomLang::Fr => format!(
+            "**Definition of Done modifiée**\n\nLe principal a modifié la DoD de la tâche après \
+             le lancement. Cette exécution a adopté la nouvelle DoD : `task_exec_deliver` attend \
+             exactement {count} assertion(s) `dod_status`, dans cet ordre (le brief initial est \
+             périmé) :\n\n{items}"
+        ),
+        RoomLang::En => format!(
+            "**Definition of Done changed**\n\nThe principal edited the task's DoD after launch. \
+             This execution adopted the new DoD: `task_exec_deliver` expects exactly {count} \
+             `dod_status` assertion(s), in this order (the original brief is out of date):\n\n{items}"
+        ),
+    }
 }
 
 /// Journal what the launch-time toolchain smoke check found (KT-1246). The
@@ -6484,6 +6836,7 @@ fn notify_principal_of_timeout(
         reply_to_message_id: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
     };
     let targets = [principal_notice_target(conn, exec_id, principal.agent)?];
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -6852,6 +7205,20 @@ pub fn reassign_execution_worker(
                 exec_id,
                 execution.status.as_str()
             );
+        }
+        // KT-1402 — the replacement worker is briefed on the task's current DoD,
+        // and its deliveries are judged against the snapshot: re-adopt it here,
+        // or an execution whose DoD was edited after launch refuses every
+        // delivery of the new worker as well.
+        if let Some(task) = crate::db::planning::get_task(conn, &execution.task_id)? {
+            let dod_ids = task
+                .definition_of_done
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>();
+            if readopt_dod_snapshot(conn, exec_id, &dod_ids, false, "worker_reassigned", actor)? {
+                execution.worker_dod_ids = Some(dod_ids);
+            }
         }
         // KT-640: clear the awaiting-acceptance hold back to its Provisioning
         // origin (ADR §3 checkpoint guard — `Blocked` resumes ONLY to

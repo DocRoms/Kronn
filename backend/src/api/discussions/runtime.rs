@@ -164,8 +164,16 @@ pub(crate) fn persist_dispatch_settlement(
                 let message = crate::api::orchestration::orchestrator_message(
                     message_id,
                     format!(
-                        "**{title}**\n\nLe dispatch `{job_id}` de la tâche `{}` s'est terminé sans appel valide à `task_exec_deliver`. L'exécution `{}` est maintenant `Interrupted` au lieu de rester faussement `Working`. {instruction}",
-                        interrupted.task_id, interrupted.execution_id,
+                        "**{title}**\n\nLe dispatch `{job_id}` de la tâche `{}` s'est terminé sans appel valide à `task_exec_deliver`. L'exécution `{}` est maintenant `Interrupted` au lieu de rester faussement `Working`.{refusal} {instruction}",
+                        interrupted.task_id,
+                        interrupted.execution_id,
+                        refusal = interrupted
+                            .delivery_refusal
+                            .as_deref()
+                            .map(|detail| format!(
+                                " Cause : la livraison du worker a été refusée — {detail}"
+                            ))
+                            .unwrap_or_default(),
                     ),
                 );
                 crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
@@ -913,6 +921,7 @@ async fn finish_dispatch_turn(
             session_tokens_at_message: None,
             author_cli_ordinal: None,
             session_continuity: None,
+            kind: Default::default(),
             model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),

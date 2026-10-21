@@ -95,6 +95,25 @@ pub trait MediaCodec: Send + Sync {
         true
     }
 
+    /// Whether an image is a submit → poll job like a video. ComfyUI queues
+    /// every workflow; the HTTP providers answer images in one call.
+    fn image_is_async(&self) -> bool {
+        false
+    }
+
+    /// Whether submitting twice costs nothing. A lost handle on a billed
+    /// provider must not be resubmitted; a local server can simply be asked
+    /// again.
+    fn resubmit_is_free(&self) -> bool {
+        false
+    }
+
+    /// Wait before the next poll. A billed provider is polled on a growing
+    /// ladder; a local one is free to ask often.
+    fn poll_delay(&self, attempts: u32) -> std::time::Duration {
+        crate::agents::media_worker::backoff_delay(attempts)
+    }
+
     fn image_url(&self, base: &str) -> String;
     fn video_submit_url(&self, base: &str) -> String;
     fn video_poll_url(&self, base: &str, provider_job_id: &str) -> String;
@@ -138,8 +157,11 @@ pub trait MediaCodec: Send + Sync {
 /// a BYOK call bills zero here while the real spend sits with the upstream
 /// account, and averaging that zero into an estimate would understate it.
 fn usage_cost(value: &Value) -> Option<MediaCost> {
-    value.get("usage").map(|usage| MediaCost {
-        cost_usd: usage.get("cost").and_then(Value::as_f64).unwrap_or(0.0),
+    // A `usage` without a `cost` (LiteLLM reports tokens only) says nothing
+    // about price: a fabricated 0.0 would drag every estimate down.
+    let usage = value.get("usage")?;
+    Some(MediaCost {
+        cost_usd: usage.get("cost").and_then(Value::as_f64)?,
         is_byok: usage
             .get("is_byok")
             .and_then(Value::as_bool)
@@ -568,12 +590,267 @@ impl MediaCodec for NvidiaMediaCodec {
     }
 }
 
+/// LiteLLM proxy (KT-1214): images go through the OpenAI route
+/// `/v1/images/generations` (`/v1/images`, OpenRouter's, answers 404 there)
+/// with the OpenAI body only. Measured on 2026-10-20 with
+/// `vertex_ai/gemini-3-pro-image`: `data[0].b64_json`, `usage` in tokens and
+/// no cost. Videos keep the shared route: not measured on LiteLLM yet.
+pub struct LiteLlmMediaCodec;
+
+impl MediaCodec for LiteLlmMediaCodec {
+    fn supports(&self, modality: MediaModality) -> bool {
+        OpenRouterMediaCodec.supports(modality)
+    }
+    fn accepts_reference_images(&self) -> bool {
+        // An image edit is a multipart `/v1/images/edits` call nobody measured
+        // here; refusing beats a billed request built on a guess.
+        false
+    }
+    fn image_url(&self, base: &str) -> String {
+        format!("{}/v1/images/generations", base_without_v1(base))
+    }
+    fn video_submit_url(&self, base: &str) -> String {
+        OpenRouterMediaCodec.video_submit_url(base)
+    }
+    fn video_poll_url(&self, base: &str, provider_job_id: &str) -> String {
+        OpenRouterMediaCodec.video_poll_url(base, provider_job_id)
+    }
+    fn video_content_url(&self, base: &str, provider_job_id: &str, index: u32) -> String {
+        OpenRouterMediaCodec.video_content_url(base, provider_job_id, index)
+    }
+    fn image_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        _params: &MediaParams,
+        references: &[MediaReferenceImage],
+    ) -> Result<Value> {
+        if !references.is_empty() {
+            bail!("this LiteLLM image route takes no source image");
+        }
+        Ok(json!({ "model": model, "prompt": prompt, "n": 1 }))
+    }
+    fn video_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        reference: Option<&MediaReferenceImage>,
+    ) -> Result<Value> {
+        OpenRouterMediaCodec.video_body(model, prompt, params, reference)
+    }
+    fn parse_image_response(&self, body: &str) -> Result<MediaImageResponse> {
+        let value: Value = serde_json::from_str(body)?;
+        if let Some(message) = provider_error(&value) {
+            bail!("{}", bounded(&message));
+        }
+        // OpenAI shape: `b64_json`, or a `url` that may be a `data:` URI.
+        let images: Vec<String> = value["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                item["b64_json"].as_str().map(str::to_string).or_else(|| {
+                    item["url"]
+                        .as_str()
+                        .and_then(|url| url.split_once(";base64,"))
+                        .filter(|(scheme, _)| scheme.starts_with("data:image/"))
+                        .map(|(_, payload)| payload.to_string())
+                })
+            })
+            .collect();
+        if images.is_empty() {
+            let remote = value["data"][0]["url"].as_str().is_some();
+            bail!(if remote {
+                "the image came back as a remote URL, which this route does not fetch"
+            } else {
+                "image response carries no image"
+            });
+        }
+        Ok(MediaImageResponse {
+            images,
+            cost: usage_cost(&value),
+            generation_id: value.get("id").and_then(Value::as_str).map(str::to_string),
+        })
+    }
+    fn parse_submit_response(&self, body: &str) -> Result<MediaSubmitAck> {
+        OpenRouterMediaCodec.parse_submit_response(body)
+    }
+    fn parse_poll_response(&self, body: &str) -> Result<MediaPollState> {
+        OpenRouterMediaCodec.parse_poll_response(body)
+    }
+    fn asset_host_policy(&self) -> AssetHostPolicy {
+        OpenRouterMediaCodec.asset_host_policy()
+    }
+}
+
+/// Local ComfyUI (KT-1381): every generation is a queued workflow, submitted
+/// to `/prompt`, polled on `/history/<id>` and fetched from `/view` on the
+/// same origin. Nothing is billed.
+pub struct ComfyUiMediaCodec {
+    pub base: String,
+    /// Stable per job, so a resubmitted job renders the same picture.
+    pub seed: u64,
+    /// The workflow an image runs with: known, declared or chosen by the user.
+    pub image_family: Option<crate::core::comfyui::ComfyFamily>,
+    /// The job's settings: the family defaults with the user's overrides.
+    pub settings: crate::core::comfyui::ResolvedGenSettings,
+    /// Resolved from ComfyUI before a video is submitted.
+    pub video_companions: Option<crate::core::comfyui::WanCompanions>,
+}
+
+impl ComfyUiMediaCodec {
+    fn submission(workflow: Value) -> Value {
+        json!({ "prompt": workflow, "client_id": "kronn" })
+    }
+
+    fn refuse_references(references: usize) -> Result<()> {
+        if references > 0 {
+            bail!("the local ComfyUI workflows do not take source images yet");
+        }
+        Ok(())
+    }
+}
+
+impl MediaCodec for ComfyUiMediaCodec {
+    fn supports(&self, _modality: MediaModality) -> bool {
+        true
+    }
+    fn accepts_reference_images(&self) -> bool {
+        false
+    }
+    fn image_is_async(&self) -> bool {
+        true
+    }
+    fn resubmit_is_free(&self) -> bool {
+        true
+    }
+    fn poll_delay(&self, _attempts: u32) -> std::time::Duration {
+        // The worker ticks every 5 s; a local job is checked at each tick
+        // (measured: the ladder turned a 2 min image into 5 min, 2026-10-20).
+        std::time::Duration::from_secs(5)
+    }
+    fn image_url(&self, base: &str) -> String {
+        format!("{}/prompt", trimmed_base(base))
+    }
+    fn video_submit_url(&self, base: &str) -> String {
+        format!("{}/prompt", trimmed_base(base))
+    }
+    fn video_poll_url(&self, base: &str, provider_job_id: &str) -> String {
+        format!("{}/history/{provider_job_id}", trimmed_base(base))
+    }
+    fn video_content_url(&self, base: &str, _provider_job_id: &str, _index: u32) -> String {
+        // The file name only exists in the history entry; poll returns it.
+        format!("{}/view", trimmed_base(base))
+    }
+    fn image_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        references: &[MediaReferenceImage],
+    ) -> Result<Value> {
+        Self::refuse_references(references.len())?;
+        let family = self.image_family.ok_or_else(|| {
+            anyhow!(
+                "{model} has no image workflow yet: choose which one runs it in the ComfyUI card"
+            )
+        })?;
+        let workflow = crate::core::comfyui::image_workflow(
+            family,
+            model,
+            prompt,
+            params,
+            self.seed,
+            &self.settings,
+        )?;
+        Ok(Self::submission(workflow))
+    }
+    fn video_body(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        reference: Option<&MediaReferenceImage>,
+    ) -> Result<Value> {
+        Self::refuse_references(usize::from(reference.is_some()))?;
+        let companions = self
+            .video_companions
+            .as_ref()
+            .ok_or_else(|| anyhow!("the Wan text encoder and VAE were not resolved"))?;
+        let workflow = crate::core::comfyui::video_workflow(
+            model,
+            companions,
+            prompt,
+            params,
+            self.seed,
+            &self.settings,
+        )?;
+        Ok(Self::submission(workflow))
+    }
+    fn parse_image_response(&self, _body: &str) -> Result<MediaImageResponse> {
+        bail!("local ComfyUI images are queued, never answered inline")
+    }
+    fn parse_submit_response(&self, body: &str) -> Result<MediaSubmitAck> {
+        let value: Value = serde_json::from_str(body)?;
+        if let Some(id) = value["prompt_id"].as_str().filter(|id| !id.is_empty()) {
+            return Ok(MediaSubmitAck {
+                provider_job_id: id.to_string(),
+            });
+        }
+        // A refused workflow answers 400 with `error` and per-node details.
+        let node_detail = value["node_errors"]
+            .as_object()
+            .and_then(|nodes| nodes.values().next())
+            .and_then(|node| node["errors"][0]["details"].as_str());
+        let message = value["error"]["message"]
+            .as_str()
+            .map(|message| match node_detail {
+                Some(detail) => format!("{message}: {detail}"),
+                None => message.to_string(),
+            })
+            .unwrap_or_else(|| "ComfyUI did not queue the workflow".to_string());
+        bail!(bounded(&message))
+    }
+    fn parse_poll_response(&self, body: &str) -> Result<MediaPollState> {
+        use crate::core::comfyui::{parse_history, view_url, HistoryState};
+        let value: Value = serde_json::from_str(body)?;
+        let Some(prompt_id) = value.as_object().and_then(|entries| entries.keys().next()) else {
+            return Ok(MediaPollState::Pending);
+        };
+        match parse_history(prompt_id, body)? {
+            HistoryState::Pending => Ok(MediaPollState::Pending),
+            HistoryState::Failed(message) => Ok(MediaPollState::Failed {
+                message: bounded(&format!("ComfyUI: {message}")),
+            }),
+            HistoryState::Completed(files) => {
+                // A video job also saves a preview; the clip is the asset.
+                let file = files
+                    .iter()
+                    .find(|file| file.kind == "video")
+                    .or_else(|| files.first())
+                    .ok_or_else(|| anyhow!("ComfyUI reported no output file"))?;
+                Ok(MediaPollState::Completed {
+                    urls: vec![view_url(&self.base, file)?],
+                    cost: None,
+                    generation_id: Some(prompt_id.clone()),
+                })
+            }
+        }
+    }
+    fn asset_host_policy(&self) -> AssetHostPolicy {
+        // Assets come from the configured origin only.
+        AssetHostPolicy::credentialed_only(&[])
+    }
+}
+
 /// The codec a connection's provider needs. Both the submission path and the
 /// worker resolve it here: a preflight that guessed differently from the
 /// worker would refuse the wrong requests, or let the wrong ones through.
 pub fn codec_for(preset: crate::models::ExternalApiConnectionPreset) -> Box<dyn MediaCodec> {
     match preset {
         crate::models::ExternalApiConnectionPreset::Nvidia => Box::new(NvidiaMediaCodec),
+        crate::models::ExternalApiConnectionPreset::LiteLlm => Box::new(LiteLlmMediaCodec),
         _ => Box::new(OpenRouterMediaCodec),
     }
 }
@@ -610,6 +887,202 @@ mod tests {
                 "https://openrouter.ai/api/v1/videos"
             );
         }
+    }
+
+    /// KT-1214 — captured from LiteLLM (stg proxy) on 2026-10-20 with
+    /// `vertex_ai/gemini-3-pro-image`, payload shortened to a 1x1 PNG.
+    const LITELLM_IMAGE: &str = r#"{"created":1792448665,"background":null,"data":[{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/wD/2v0AAAAASUVORK5CYII=","revised_prompt":null,"url":null}],"output_format":null,"quality":null,"size":null,"usage":{"total_tokens":1378,"input_tokens":9,"input_tokens_details":{"image_tokens":0,"text_tokens":9},"output_tokens":1120}}"#;
+
+    #[test]
+    fn litellm_images_use_the_openai_route_and_body() {
+        let codec = codec_for(crate::models::ExternalApiConnectionPreset::LiteLlm);
+        // `/v1/images` answers 404 on a LiteLLM proxy: that was the bug.
+        assert_eq!(
+            codec.image_url("http://litellm.stg.euronews.internal"),
+            "http://litellm.stg.euronews.internal/v1/images/generations"
+        );
+        let params = MediaParams {
+            aspect_ratio: Some("16:9".into()),
+            resolution: Some("720p".into()),
+            ..Default::default()
+        };
+        let body = codec
+            .image_body("vertex_ai/gemini-3-pro-image", "a fox", &params, &[])
+            .unwrap();
+        assert_eq!(
+            body,
+            json!({"model": "vertex_ai/gemini-3-pro-image", "prompt": "a fox", "n": 1})
+        );
+        assert!(!codec.accepts_reference_images());
+    }
+
+    #[test]
+    fn litellm_gemini_images_are_read_and_a_token_usage_is_not_a_price() {
+        let codec = LiteLlmMediaCodec;
+        let response = codec.parse_image_response(LITELLM_IMAGE).unwrap();
+        assert_eq!(response.images.len(), 1);
+        assert!(response.images[0].starts_with("iVBOR"));
+        // Tokens only: no price was declared, so none is recorded.
+        assert_eq!(response.cost, None);
+        let data_uri = codec
+            .parse_image_response(r#"{"data":[{"url":"data:image/png;base64,iVBORw0KGgo="}]}"#)
+            .unwrap();
+        assert_eq!(data_uri.images, vec!["iVBORw0KGgo=".to_string()]);
+        let remote = codec
+            .parse_image_response(r#"{"data":[{"url":"https://cdn.example/x.png"}]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(remote.contains("remote URL"), "{remote}");
+        let not_found = codec
+            .parse_image_response(r#"{"detail":"Not Found"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            not_found.contains("no image") || not_found.contains("Not Found"),
+            "{not_found}"
+        );
+    }
+
+    fn comfy(companions: bool) -> ComfyUiMediaCodec {
+        ComfyUiMediaCodec {
+            base: "http://127.0.0.1:8188".into(),
+            seed: 11,
+            image_family: Some(crate::core::comfyui::ComfyFamily::FluxSchnell),
+            settings: crate::core::comfyui::ComfyFamily::FluxSchnell.defaults(),
+            video_companions: companions.then(|| crate::core::comfyui::WanCompanions {
+                text_encoder: "umt5_xxl_fp8_e4m3fn_scaled.safetensors".into(),
+                vae: "wan_2.1_vae.safetensors".into(),
+            }),
+        }
+    }
+
+    /// KT-1381 — ComfyUI queues images too, and its own routes are used.
+    #[test]
+    fn comfyui_queues_images_on_its_own_routes() {
+        let codec = comfy(false);
+        assert!(codec.image_is_async());
+        assert!(!OpenRouterMediaCodec.image_is_async());
+        assert!(!codec.accepts_reference_images());
+        assert_eq!(
+            codec.image_url("http://127.0.0.1:8188/"),
+            "http://127.0.0.1:8188/prompt"
+        );
+        assert_eq!(
+            codec.video_poll_url("http://127.0.0.1:8188", "p-1"),
+            "http://127.0.0.1:8188/history/p-1"
+        );
+        let body = codec
+            .image_body(
+                "flux1-schnell-fp8.safetensors",
+                "a fox",
+                &MediaParams::default(),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(body["prompt"]["5"]["inputs"]["seed"], 11);
+        assert_eq!(body["client_id"], "kronn");
+        assert_eq!(
+            codec
+                .parse_submit_response(r#"{"prompt_id":"p-1","number":3,"node_errors":{}}"#)
+                .unwrap(),
+            MediaSubmitAck {
+                provider_job_id: "p-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn comfyui_is_polled_at_every_worker_tick_and_billed_providers_on_the_ladder() {
+        assert_eq!(
+            comfy(false).poll_delay(6),
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(
+            OpenRouterMediaCodec.poll_delay(6),
+            crate::agents::media_worker::backoff_delay(6)
+        );
+        assert!(OpenRouterMediaCodec.poll_delay(6) > std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn comfyui_says_why_it_refused_a_workflow() {
+        let refused = comfy(false)
+            .parse_submit_response(r#"{"error":{"type":"prompt_outputs_failed_validation","message":"Prompt outputs failed validation"},"node_errors":{"1":{"errors":[{"details":"ckpt_name: 'gone.safetensors' not in []"}]}}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("failed validation") && refused.contains("gone.safetensors"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn comfyui_hands_back_the_clip_not_its_preview_on_the_configured_origin() {
+        let done = r#"{"p-2":{"outputs":{"10":{"images":[{"filename":"preview_00001_.webp","subfolder":"","type":"output"}]},"12":{"images":[{"filename":"clip_00001_.mp4","subfolder":"video","type":"output","metadata":{"kind":"video"}}]}},"status":{"status_str":"success","completed":true,"messages":[]}}}"#;
+        let MediaPollState::Completed {
+            urls,
+            cost,
+            generation_id,
+        } = comfy(true).parse_poll_response(done).unwrap()
+        else {
+            panic!("a finished job");
+        };
+        assert_eq!(
+            urls,
+            vec![
+                "http://127.0.0.1:8188/view?filename=clip_00001_.mp4&subfolder=video&type=output"
+                    .to_string()
+            ]
+        );
+        assert_eq!(cost, None);
+        assert_eq!(generation_id.as_deref(), Some("p-2"));
+        assert_eq!(
+            comfy(true).parse_poll_response("{}").unwrap(),
+            MediaPollState::Pending
+        );
+    }
+
+    #[test]
+    fn comfyui_refuses_source_images_and_needs_its_video_companions() {
+        let reference = MediaReferenceImage {
+            mode: MediaReferenceMode::FirstFrame,
+            mime_type: "image/png".into(),
+            bytes: vec![1],
+        };
+        assert!(comfy(true)
+            .image_body(
+                "flux1-schnell-fp8.safetensors",
+                "x",
+                &MediaParams::default(),
+                std::slice::from_ref(&reference)
+            )
+            .is_err());
+        assert!(comfy(true)
+            .video_body(
+                "wan2.1_t2v_1.3B_fp16.safetensors",
+                "x",
+                &MediaParams::default(),
+                Some(&reference)
+            )
+            .is_err());
+        let missing = comfy(false)
+            .video_body(
+                "wan2.1_t2v_1.3B_fp16.safetensors",
+                "x",
+                &MediaParams::default(),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("text encoder"), "{missing}");
+        assert!(comfy(true)
+            .video_body(
+                "wan2.1_t2v_1.3B_fp16.safetensors",
+                "x",
+                &MediaParams::default(),
+                None
+            )
+            .is_ok());
     }
 
     #[test]
@@ -1054,5 +1527,6 @@ mod tests {
         assert!(!codec_for(ExternalApiConnectionPreset::Nvidia).accepts_reference_images());
         assert!(codec_for(ExternalApiConnectionPreset::OpenRouter).accepts_reference_images());
         assert!(codec_for(ExternalApiConnectionPreset::Other).accepts_reference_images());
+        assert!(!codec_for(ExternalApiConnectionPreset::LiteLlm).accepts_reference_images());
     }
 }

@@ -79,6 +79,14 @@ vi.mock('../../lib/api', () => ({
   // KT-337 — AgentsSection loads the NVIDIA catalogue on mount (header status +
   // model datalist). This file mocks the api module by hand, so the namespace has
   // to be here too or the mount reaches the network and the page never settles.
+  comfyui: {
+    status: vi.fn().mockResolvedValue({ state: 'not_found', endpoint: 'http://127.0.0.1:8188', version: null, models: [], image_model: null, video_model: null, video_blocker: null, install_command: null, download_url: 'https://www.comfy.org/download', suggestions: [], install_dir: '/home/user/ComfyUI-Installs', configured_endpoint: null, configured_install_dir: null, image_settings: {}, video_settings: {}, family_defaults: [], samplers: [], schedulers: [] }),
+    setSlots: vi.fn(),
+    setSettings: vi.fn(),
+    setModelFamily: vi.fn(),
+    source: vi.fn().mockResolvedValue(null),
+    pull: vi.fn(),
+  },
   nvidia: {
     models: vi.fn().mockResolvedValue({ models: [], endpoint: 'https://integrate.api.nvidia.com', has_key: false }),
     probe: vi.fn().mockResolvedValue({ model: '', verdict: 'Usable', detail: '' }),

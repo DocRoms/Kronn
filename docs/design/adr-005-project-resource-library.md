@@ -331,7 +331,7 @@ the step by name. A discussion still reads the checkout as it is.
   `workflow:triage`, `skill:block-migration`, `plugin:github`.
 - Instance-bound references (API config, MCP config, connection, agent or
   model) are requirements resolved locally on import, as `rebind_api_configs`
-  already does for API configs [src: file: backend/src/api/workflows.rs:3892-3925#rebind_api_configs].
+  already does for API configs [src: file: backend/src/api/workflows.rs:3907-3940#rebind_api_configs].
 - Ids embedded in artifact HTML are rewritten on import, as `remap_html`
   already does [src: file: backend/src/api/artifact_portability/import.rs:325-364#remap_html].
 - Workflows (KT-917). One resolver serves every kind (`workflow`, `qe`, `qa`,

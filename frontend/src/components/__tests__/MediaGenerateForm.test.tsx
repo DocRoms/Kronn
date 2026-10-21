@@ -87,6 +87,35 @@ describe('MediaGenerateForm', () => {
     });
   });
 
+  // KT-1381 — the local ComfyUI is offered like a connection, prices nothing
+  // and is reached by its reserved id.
+  it('offers the local ComfyUI as a source that costs nothing', async () => {
+    const local = connection({
+      id: 'local:comfyui',
+      display_name: 'ComfyUI (local)',
+      mention_alias: 'comfyui',
+      endpoint: 'http://127.0.0.1:8188',
+      origin_preset: 'other',
+      has_credential: false,
+      image_model: 'RealVisXL_V5.0_fp16.safetensors',
+      video_model: null,
+    });
+    render(<MediaGenerateForm discussionId="d-1" connections={[local]} t={t} />);
+
+    fireEvent.click(screen.getByTestId('media-slot-local:comfyui:image'));
+    expect(await screen.findByText('disc.media.localNoCost')).toBeInTheDocument();
+    expect(mediaApi.estimate).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'un lapin samouraï' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    expect(mediaApi.generate.mock.calls[0][0]).toMatchObject({
+      connection_id: 'local:comfyui',
+      modality: 'image',
+      prompt: 'un lapin samouraï',
+    });
+  });
+
   it('sends the prompt and the shape, never a model', async () => {
     const onLaunched = vi.fn();
     render(
