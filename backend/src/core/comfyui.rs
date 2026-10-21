@@ -36,13 +36,14 @@ pub enum ComfyFamily {
     Sdxl,
     /// Wan 2.1 text-to-video: diffusion model + umt5 text encoder + VAE.
     Wan21T2v,
+    Wan21Vace,
 }
 
 impl ComfyFamily {
     pub fn modality(self) -> MediaModality {
         match self {
             Self::FluxSchnell | Self::Sdxl => MediaModality::Image,
-            Self::Wan21T2v => MediaModality::Video,
+            Self::Wan21T2v | Self::Wan21Vace => MediaModality::Video,
         }
     }
 }
@@ -50,6 +51,16 @@ impl ComfyFamily {
 /// Files whose workflow was measured on 2026-10-19 (KT-1381). Exact names:
 /// a checkpoint is matched by what it is, not by what its name suggests.
 pub const KNOWN_MODELS: &[(&str, &str, ComfyFamily)] = &[
+    (
+        VIDEO_FOLDER,
+        "wan2.1_vace_1.3B_fp16.safetensors",
+        ComfyFamily::Wan21Vace,
+    ),
+    (
+        VIDEO_FOLDER,
+        "wan2.1_vace_14B_fp16.safetensors",
+        ComfyFamily::Wan21Vace,
+    ),
     (
         IMAGE_FOLDER,
         "flux1-schnell-fp8.safetensors",
@@ -217,6 +228,9 @@ pub struct ComfyGenSettings {
     pub sampler: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub denoise: Option<f32>,
 }
 
 impl ComfyGenSettings {
@@ -241,7 +255,7 @@ impl ComfyFamily {
         let (steps, cfg, sampler, scheduler) = match self {
             Self::FluxSchnell => (4, 1.0, "euler", "simple"),
             Self::Sdxl => (30, 5.0, "dpmpp_sde", "karras"),
-            Self::Wan21T2v => (30, 6.0, "uni_pc", "simple"),
+            Self::Wan21T2v | Self::Wan21Vace => (30, 6.0, "uni_pc", "simple"),
         };
         ResolvedGenSettings {
             steps,
@@ -380,7 +394,9 @@ pub fn image_workflow(
     let (latent, negative) = match family {
         ComfyFamily::FluxSchnell => ("EmptySD3LatentImage", ""),
         ComfyFamily::Sdxl => ("EmptyLatentImage", SDXL_NEGATIVE),
-        ComfyFamily::Wan21T2v => bail!("{checkpoint} is a video model, not an image one"),
+        ComfyFamily::Wan21T2v | ComfyFamily::Wan21Vace => {
+            bail!("{checkpoint} is a video model, not an image one")
+        }
     };
     Ok(json!({
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": checkpoint}},
@@ -630,6 +646,7 @@ mod tests {
             cfg: Some(4.5),
             sampler: Some(" euler ".into()),
             scheduler: Some("".into()),
+            ..Default::default()
         });
         assert_eq!((tuned.steps, tuned.cfg), (20, 4.5));
         assert_eq!(tuned.sampler, "euler");

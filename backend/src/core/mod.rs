@@ -25,6 +25,7 @@ pub mod cli_access_probe;
 pub mod cli_args;
 pub mod cmd;
 pub mod comfyui;
+pub mod comfyui_references;
 pub mod commit_facts;
 pub mod config;
 pub mod content_memo;

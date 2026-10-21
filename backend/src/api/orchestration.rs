@@ -16407,6 +16407,7 @@ pub(crate) mod tests {
                     crate::agents::media_capabilities::MediaFramePosition::FirstFrame,
                 ],
                 max_input_references: Some(1),
+                reference_support: None,
                 generate_audio: None,
             },
         }

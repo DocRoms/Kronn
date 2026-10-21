@@ -2393,6 +2393,10 @@ TOOLS = [
                     "type": "string",
                     "description": "Optional, from `agent_list`; omitted, the only one.",
                 },
+                "expected_model": {
+                    "type": "string",
+                    "description": "Optional model id read from agent_list: refuse a changed slot, never override it.",
+                },
                 "modality": {
                     "type": "string",
                     "enum": ["image", "video"],
@@ -2442,8 +2446,9 @@ TOOLS = [
                     "enum": ["first_frame", "last_frame", "reference"],
                     "description": (
                         "Use of those images. A first/last frame is video-only "
-                        "and takes ONE picture; `reference` is what an image "
-                        "uses."
+                        "and takes ONE picture; `reference` accepts multiple "
+                        "pictures for images or videos up to the effective "
+                        "`max_input_references` in agent_list."
                     ),
                 },
                 "wait": {
@@ -8998,7 +9003,7 @@ def call_media_generate(args):
     # Ambiguous providers are returned to the caller instead of selected here.
     if args.get("connection_id"):
         body["connection_id"] = args["connection_id"]
-    for key in ("duration_secs", "resolution", "aspect_ratio"):
+    for key in ("duration_secs", "resolution", "aspect_ratio", "expected_model"):
         if args.get(key) is not None:
             body[key] = args[key]
     # Ids inside the bound discussion, checked server-side. Sending one without
@@ -10730,8 +10735,10 @@ TOOL_MANUALS["media_generate"] = (
     "answer says which connection was billed.\n\n"
     "Local ComfyUI. When the operator set a ComfyUI model, `agent_list` also "
     "lists `local:comfyui` (alias `comfyui`): images and videos generated on "
-    "this machine, billed nothing, with no source image (`reference_asset_ids` "
-    "is refused there). It is slow: about a minute for an image, around ten "
+    "this machine, billed nothing. Source support depends on the configured "
+    "workflow and installed dependencies: read max_input_references and "
+    "reference_support.blocker. A missing Kronn adapter is not a model's "
+    "incapability. It is slow: about a minute for an image, around ten "
     "for two seconds of video, so prefer `wake_when_ready` over `wait`.\n\n"
     "Parameters come from the model, not from habit. `agent_list` returns one "
     "entry per configured media slot, each carrying the `capabilities` the "
@@ -10742,8 +10749,9 @@ TOOL_MANUALS["media_generate"] = (
     "a null `capabilities` means the catalogue could not be read, so keep your "
     "defaults rather than inventing one.\n\n"
     "References. Order matters: providers weigh reference images by position. "
-    "A video takes one picture; an image takes as many as "
-    "`max_input_references` advertises. `reference_mode` says what the picture "
+    "Images and videos accept multiple visual references when their effective "
+    "`max_input_references` permits it; unknown is not zero. Explicitly pass "
+    "`reference_mode: reference` for these. `reference_mode` says what the picture "
     "IS to the generation: `first_frame` and `last_frame` pin the clip's exact "
     "opening or closing image (video only, one picture), `reference` is a "
     "visual the model draws from. A video model can start from (or end on) a "

@@ -2198,7 +2198,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/media/jobs/{id}/cancel", post(api::media::cancel_job))
         .route("/api/media/costs", get(api::media::spend))
         .route("/api/media/estimate", get(api::media::estimate))
-        .route("/api/media/models", get(api::media::model_capabilities))
+        .route(
+            "/api/media/models",
+            get(api::media::model_capabilities).put(api::media_reference_settings::set_limit),
+        )
         // ── Secret themes (hidden palette unlock via code) ──
         .route("/api/themes/unlock", post(api::themes::unlock))
         // ── Document generation (5 formats through the Python sidecar) ──

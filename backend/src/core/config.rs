@@ -746,6 +746,7 @@ pub fn default_config() -> AppConfig {
             default_docs_dir: None,
         },
         comfyui: crate::models::ComfyUiConfig::default(),
+        media_reference_limits: Vec::new(),
         agents: AgentsConfig {
             claude_code: AgentConfig {
                 concurrency: None,

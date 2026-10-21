@@ -202,7 +202,7 @@ room to the existing generation endpoint. A successfully created room is kept
 across a generation error, and the same idempotency key is retained for an
 explicit identical retry; the UI never automatically repeats an ambiguous
 billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:400-419#createMediaDiscussion]`
-`[src: file: frontend/src/components/MediaGenerateForm.tsx:489-544#submit]`
+`[src: file: frontend/src/components/MediaGenerateForm.tsx:479-536#submit]`
 `[src: file: frontend/src/pages/DiscussionsPage.tsx:2693-2712#handleCreateMediaDiscussion]`
 
 ## What a model accepts, read rather than assumed
@@ -286,9 +286,9 @@ recorded before several pictures were possible; it is never written again.
 Everything is checked before anything durable is written and long before the
 provider is paid: the asset exists, belongs to THIS discussion, is an image
 with stored bytes, is under the size ceiling, and its mode is one the model
-advertises. A refused request leaves no anchor message and no job. A catalogue
-that cannot be reached does not become a refusal — the provider stays the
-authority — but a mode it explicitly does not list is refused here.
+advertises. A refused request leaves no anchor message and no job. An unknown visual-reference limit requires an explicit model-scoped declaration
+in Config before source images can be queued; an explicit zero refuses them.
+[src: file: backend/src/api/media.rs:1876]
 
 Only the id is persisted, in `media_jobs.params_json`. The worker re-reads the
 file on each attempt, so a job resumed after a restart uses the same picture
@@ -305,8 +305,10 @@ position.
 
 How many references an image model takes is its own: the catalogue states it
 as a range and it runs from 1 to 16 across the models, so the form offers what
-each one advertises and the request is refused above a stated maximum. A
-catalogue that advertises nothing stays silent and lets the submission tell.
+each one advertises and the request is refused above a stated maximum. An unknown count is shown as unknown. A configured count can supply that
+missing declaration, but cannot exceed a known provider/workflow ceiling or
+enable a transport the adapter does not implement.
+[src: file: backend/src/api/media_reference_settings.rs:21]
 
 The finished result states what it was built on: the run projection echoes the
 source ids and the mode, and the bubble shows a line — "starts on an image of
@@ -331,10 +333,13 @@ ends on a fade to black is refused too: a visible refusal costs a retry, while
 a black rectangle passed off as the last frame is paid for as the starting
 picture of the next generation.
 
-Four deliberate refusals. A visual reference on a video is refused rather than
-submitted as a frame: no video model advertises `reference` under
-`supported_frame_images`, and passing it as a frame would have the model
-reproduce a picture that was only an inspiration — and bill for it. A frame on
+The HTTP video adapters currently refuse visual references: their implemented
+contract carries input frames. ComfyUI Wan VACE has a separate workflow that
+accepts multiple visual references. A count declaration alone does not add
+that transport to an HTTP adapter.
+[src: file: backend/src/api/media_reference_settings.rs:21]
+
+A frame on
 the image route is refused symmetrically: an illustration has no first or last
 one, and demoting the request to a plain reference would bill a generation
 nobody asked for. Several images for one frame are refused whether or not a
@@ -416,12 +421,12 @@ connection with the reserved id `local:comfyui` (alias `comfyui`, no
 credential, no text tier), and every media path resolves it: generation and
 its preflights, `/api/media/models`, the estimate, the worker, the bridge
 guard and the `agent_list` catalogue.
-[src: file: backend/src/api/comfyui.rs:1118-1142#local_connection]
-[src: file: backend/src/api/orchestration.rs:13356-13362#with_local_media_source]
+[src: file: backend/src/api/comfyui.rs:1242]
+[src: file: backend/src/api/orchestration.rs:13358]
 
 ComfyUI runs a node graph, so a model is usable only when Kronn has a
-measured workflow for its family (FLUX.1 schnell, SDXL such as RealVisXL,
-Wan 2.1 text-to-video). The family comes from the architecture a checkpoint's
+compatible integrated workflow for its family (FLUX.1 schnell, SDXL such as
+RealVisXL, Wan 2.1 text-to-video, or Wan VACE). The family comes from the architecture a checkpoint's
 header declares (FLUX.1 schnell, any SDXL base), else from its exact file
 name in the measured list — never from what a name suggests. Anything else is
 listed on the card, disabled, until the user picks the workflow it runs with:
@@ -430,7 +435,7 @@ The family validated when the image slot is chosen is saved with it
 (`image_family`), so a job never depends on reading the header again.
 A Wan job also needs its text encoder and VAE; one missing is refused before
 submission.
-[src: file: backend/src/core/comfyui.rs:172-197#family_of]
+[src: file: backend/src/core/comfyui.rs:191]
 
 Nothing on the card assumes one machine. The server address (default
 `http://127.0.0.1:8188`, `host.docker.internal` from Docker) and the install
@@ -438,15 +443,15 @@ folder checked when the server is down (default `~/ComfyUI-Installs`, Comfy
 Desktop's) are settings. Each slot keeps optional steps, guidance, sampler and
 scheduler overrides; an empty field uses the family's measured default, and
 the sampler lists come from the running ComfyUI's `/object_info/KSampler`.
-[src: file: backend/src/api/comfyui.rs:328-342#install_dir]
-[src: file: backend/src/api/comfyui.rs:1026-1059#set_settings]
-[src: file: backend/src/core/comfyui.rs:254-273#settings]
+[src: file: backend/src/api/comfyui.rs:443]
+[src: file: backend/src/api/comfyui.rs:1144]
+[src: file: backend/src/core/comfyui.rs:269]
 
 Images are queued like videos: `POST /prompt` records ComfyUI's prompt id as
 the provider handle, `/history/<id>` is polled, and the file is fetched from
 `/view` on the configured origin. A local job stores no cost, so it never
 enters an estimate or the spend; the Creator form says it costs nothing.
-Source images are not taken yet.
+Source images use the integrated workflows described below.
 
 A local job fails with a sentence instead of waiting for its deadline:
 ComfyUI not answering before a submission, a prompt it no longer holds in its
@@ -476,5 +481,76 @@ size, and is installed only once its size and SHA-256 match; one pull holds a
 file at a time, and disk space is checked first. From Docker those folders
 are the host's, and Windows has no such handle here, so there the card only
 links to Hugging Face.
-[src: file: backend/src/agents/media_codec.rs:683-693#ComfyUiMediaCodec]
-[src: file: backend/src/agents/media_runner.rs:776-887#advance_local_comfyui]
+[src: file: backend/src/agents/media_codec.rs:703]
+[src: file: backend/src/agents/media_runner.rs:778]
+
+
+## Configurable source-image limits (KT-1403)
+
+Config exposes a reference limit beside each saved image/video model, including
+ComfyUI. Empty restores automatic detection; zero disables visual references;
+a positive number declares an unknown limit or lowers an advertised maximum.
+The declaration is persisted for the connection, normalized media endpoint,
+model, modality and integrated workflow. Changing any of those identities does
+not transfer the declaration. The effective capability includes its provenance,
+advertised/configured maxima and a dependency or transport blocker when needed.
+The Creator, `agent_list` and generation preflight use that same envelope.
+[src: file: backend/src/api/media_reference_settings.rs:21]
+[src: file: backend/src/api/media_reference_settings.rs:96]
+
+`PUT /api/media/models` takes `connection_id`, the current `model`, `modality`
+and `max_input_references` (null for automatic, integer 0–64 otherwise). It
+rejects a stale model and a limit above the provider/workflow ceiling. The
+Creator retains references when switching to a narrower model and requires
+explicit removal of excess sources; it supports ordering and removal for both
+output modalities. First/last-frame modes retain their single-image meaning.
+[src: file: backend/src/api/media_reference_settings.rs:96]
+[src: file: frontend/src/components/MediaGenerateForm.tsx:660]
+
+ComfyUI reference paths:
+
+| Workflow | Integrated limit | Additional files / nodes |
+| --- | --- | --- |
+| SDXL img2img | 1 | `LoadImage` → `VAEEncode` → sampler latent; configurable denoise below 1 (default 0.55) |
+| FLUX schnell + Redux | 3 | `style_models/flux1-redux-dev.safetensors`, `clip_vision/sigclip_vision_patch14_384.safetensors`; one vision encode and style conditioning application per source |
+| Wan 2.1 VACE | 3 | VACE diffusion weights, Wan text encoder and VAE; one `WanVaceToVideo` per source, chained conditioning, then `TrimVideoLatent` |
+
+These are limits of Kronn's integrated graphs, not universal limits of the model
+families. The preflight probes the required nodes and model files. A missing
+dependency makes the effective count zero with an actionable reason; increasing
+the configured count cannot remove that blocker.
+[src: file: backend/src/api/comfyui.rs:322]
+
+Kronn uploads every source via `/upload/image` under stable job-specific names,
+then builds the graph itself. Adding a node to a different workflow open in the
+ComfyUI browser does not alter Kronn's submitted graph. New reference jobs keep
+the accepted endpoint, family and generation settings across queueing and
+retries. The original source ids and mode remain the result provenance.
+[src: file: backend/src/models/media.rs:54]
+[src: file: backend/src/agents/media_runner.rs:778]
+[src: file: backend/src/agents/media_runner.rs:940]
+
+The official [Redux examples](https://comfyanonymous.github.io/ComfyUI_examples/flux/#redux)
+show the model files and conditioning nodes; the [Wan VACE examples](https://comfyanonymous.github.io/ComfyUI_examples/wan/#vace-reference-image-to-video)
+show reference video conditioning. Redux's official weight repository requires
+its own Hugging Face access; Kronn does not accept license conditions or bypass
+that access requirement.
+[src: url: https://comfyanonymous.github.io/ComfyUI_examples/flux/#redux]
+[src: url: https://comfyanonymous.github.io/ComfyUI_examples/wan/#vace-reference-image-to-video]
+
+An opt-in integration recipe exercises Kronn's generation API and real worker,
+saves the result, job receipt and ComfyUI history, and checks that three source
+nodes survive into the executed graph. It is ignored during normal CI because
+it needs the corresponding installed weights and real GPU time. Set
+`KRONN_REFERENCE_RECIPE_DIR` to a folder containing `a.png`, `b.png`, `c.png`,
+`KRONN_REFERENCE_RECIPE_MODALITY` to `image` or `video`, and optionally
+`KRONN_REFERENCE_RECIPE_ENDPOINT` (default `http://127.0.0.1:8188`). Then run:
+
+```sh
+cargo test --manifest-path backend/Cargo.toml --test it live_comfyui_three_reference_recipe -- --ignored --nocapture
+```
+
+The recipe uses a separate test database and does not change the live Kronn
+configuration. Its image and video results must be assessed separately; passing
+a graph/transport unit test is not evidence of a successful model generation.
+[src: file: backend/tests/support/api_media_references.rs:10]
