@@ -245,6 +245,8 @@ import type {
   ProposalDecisionResponse,
   ProposalListResponse,
   RemovePlanningBlockerRequest,
+  AssignPlanningTaskRequest,
+  UnassignPlanningTaskRequest,
   UpdatePlanningDodItemRequest,
   UpdatePlanningTaskRequest,
   TelemetryCoverage,
@@ -1131,8 +1133,11 @@ export const projects = {
   markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
   cancelAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/cancel-audit`),
   /** KT-1131 — a human accepts a failed step of the latest interrupted run. */
-  acceptAuditStep: (id: string, runId: string, step: number, reason: string | null) =>
-    api<AcceptAuditStepResponse>('POST', `/projects/${id}/audit-runs/${runId}/steps/${step}/accept`, { reason }),
+  acceptAuditStep: (id: string, runId: string, step: number, reason: string | null, overrideUnsound?: boolean) =>
+    api<AcceptAuditStepResponse>('POST', `/projects/${id}/audit-runs/${runId}/steps/${step}/accept`, {
+      reason,
+      ...(overrideUnsound ? { override_unsound: true } : {}),
+    }),
   /** KT-1134 — settle runs no worker runs any more and release an orphaned lease. */
   auditRunsCleanup: () => api<number>('POST', '/audit-runs/cleanup'),
   /**
@@ -1167,6 +1172,9 @@ export const projects = {
        *  Absent from a backend that predates it. */
       steps_to_redo?: number[];
       started_at: string;
+      /** KT-1199 — the run is the one a colleague committed in the
+       *  repository, not a row of this instance: the launch adopts it. */
+      from_repository?: boolean;
     } | null>(
       'GET', `/projects/${id}/audit-resumable`,
     ),
@@ -2634,6 +2642,19 @@ export const planning = {
     `/planning/tasks/${encodeURIComponent(taskId)}/blockers/${encodeURIComponent(blockerTaskId)}`,
     request,
   ),
+  /** KT-154 — put an agent on a task (idempotent on its typed identity). */
+  assign: (taskId: string, request: AssignPlanningTaskRequest) =>
+    api<PlanningTaskDetail>(
+      'POST',
+      `/planning/tasks/${encodeURIComponent(taskId)}/assignees`,
+      request,
+    ),
+  unassign: (taskId: string, request: UnassignPlanningTaskRequest) =>
+    api<PlanningTaskDetail>(
+      'DELETE',
+      `/planning/tasks/${encodeURIComponent(taskId)}/assignees`,
+      request,
+    ),
   discussionPlan: (discussionId: string) =>
     api<DiscussionPlan>('GET', `/discussions/${encodeURIComponent(discussionId)}/plan`),
   proposals: (discussionId: string, pendingOnly = true) => {

@@ -6,6 +6,7 @@
  */
 import type {
   BriefingEnvironmentKind,
+  BriefingExternalDocKind,
   BriefingFact,
   BriefingPersonRole,
   BriefingProjectAnswers,
@@ -143,6 +144,13 @@ export const BRIEFING_ENVIRONMENTS: { id: BriefingEnvironmentKind; labelKey: str
   { id: 'preview', labelKey: 'briefing.project.envPreview' },
 ];
 
+export const BRIEFING_EXTERNAL_DOCS: { id: BriefingExternalDocKind; labelKey: string }[] = [
+  { id: 'confluence', labelKey: 'briefing.project.docsConfluence' },
+  { id: 'notion', labelKey: 'briefing.project.docsNotion' },
+  { id: 'wiki', labelKey: 'briefing.project.docsWiki' },
+  { id: 'other', labelKey: 'briefing.project.docsOther' },
+];
+
 export const BRIEFING_ROLES: { id: BriefingPersonRole; labelKey: string }[] = [
   { id: 'arbiter', labelKey: 'briefing.project.roleArbiter' },
   { id: 'tech_lead', labelKey: 'briefing.project.roleTechLead' },
@@ -194,5 +202,6 @@ export function projectUnanswered(project: BriefingProjectAnswers): boolean {
   const empty = emptyProjectAnswers();
   return (Object.keys(empty) as (keyof BriefingProjectAnswers)[])
     .every(key => JSON.stringify(project[key]) === JSON.stringify(empty[key]))
+    && (project.external_docs ?? []).length === 0
     && cleanFactNotes(project) === undefined;
 }

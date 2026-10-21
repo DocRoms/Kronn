@@ -24,7 +24,7 @@ room: `@claude` is the discussion agent in a ClaudeCode-configured room
 and a punctual spawn everywhere else. This is intentional and the
 autocomplete must always show which one is being picked (KT-211).
 [src: file: frontend/src/lib/messageTargets.ts:54-68#isPrincipal]
-[src: file: backend/scripts/disc-introspection-mcp.py:5090-5098#principal]
+[src: file: backend/scripts/disc-introspection-mcp.py:5157-5165#principal]
 
 ## 2. Alias resolution, exactly
 
@@ -41,7 +41,7 @@ autocomplete must always show which one is being picked (KT-211).
   identify a joined CLI — an agent cannot invent a session. A short
   alias resolves to `discussion_agent` when principal, else `agent`.
   Multiple mentions fan out once per identity, in textual order.
-  [src: file: backend/scripts/disc-introspection-mcp.py:5011-5097#_structured_message_targets]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5070-5156#_structured_message_targets]
 - **No presence-based substitution.** A short alias never silently
   reroutes to a joined CLI (and never refuses to spawn) just because a
   same-provider CLI is present: the punctual agent and the CLI are
@@ -110,7 +110,7 @@ joined CLI of its provider, whose turns its transcript labels with
 the CLI alias.
 [src: file: backend/src/db/discussions.rs:2071-2074#reply_author]
 [src: file: backend/src/api/disc_invite.rs:1972-1992#addressed_to_session]
-[src: file: backend/src/api/discussions/streaming.rs:2077-2125#punctual_identity_notice]
+[src: file: backend/src/api/discussions/streaming.rs:2382-2430#punctual_identity_notice]
 [src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
 [src: file: backend/src/api/disc_invite.rs:1615-1623#reply_target]
 
@@ -129,7 +129,7 @@ the author or alias cannot be verified, with a refusal that never
 fabricates an ordinal. A deliberate fan-out that lists the exact replied
 CLI alongside its native identity passes untouched, and outside a reply
 context the short alias stays free (both identities may be wanted).
-[src: file: backend/scripts/disc-introspection-mcp.py:5187-5270#_reject_short_alias_reply_to_cli_author]
+[src: file: backend/scripts/disc-introspection-mcp.py:5246-5329#_reject_short_alias_reply_to_cli_author]
 
 ## 6. Presence, fallback, reload
 
@@ -149,7 +149,7 @@ context the short alias stays free (both identities may be wanted).
   native identity rotated (fresh session id) needs one `disc_join` with
   a token, which mints its credential — one-shot, by design. Unacked
   awareness survives reloads (server cursors, migrations 105/106).
-  [src: file: backend/scripts/disc-introspection-mcp.py:3530-3539#_BINDING_DIR]
+  [src: file: backend/scripts/disc-introspection-mcp.py:3558-3567#_BINDING_DIR]
   [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
 
 ## 7. Autocomplete presentation (KT-211 contract)

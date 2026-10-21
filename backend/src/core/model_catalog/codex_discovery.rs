@@ -77,8 +77,12 @@ const MAX_MODEL_LIST_PAGES: u64 = 20;
 
 /// `codex app-server`, run outside any repository (design note §9).
 fn discovery_command() -> tokio::process::Command {
+    discovery_command_for("codex")
+}
+
+fn discovery_command_for(program: &str) -> tokio::process::Command {
     let mut command =
-        crate::core::cmd::discovery_cmd("codex", crate::core::child_env::AgentFamily::Codex);
+        crate::core::cmd::discovery_cmd(program, crate::core::child_env::AgentFamily::Codex);
     command
         .arg("app-server")
         .current_dir(std::env::temp_dir())
@@ -274,7 +278,16 @@ mod tests {
 
     #[test]
     fn discovery_runs_outside_any_repository() {
-        let command = discovery_command();
+        // A stub the test controls: the machine's codex is never started (KT-1189).
+        let stubs = tempfile::tempdir().unwrap();
+        let codex = stubs.path().join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let command = discovery_command_for(&codex.to_string_lossy());
         assert_eq!(
             command.as_std().get_current_dir(),
             Some(std::env::temp_dir().as_path())

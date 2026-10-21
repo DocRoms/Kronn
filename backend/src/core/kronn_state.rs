@@ -246,9 +246,9 @@ pub fn mark_validated_by(
         state.validated_at = Some(today_iso());
     }
     state.validated_by = Some(by.to_string());
-    if let Some(started_by) = started_by {
-        state.validation_started_by = Some(started_by.to_string());
-    }
+    // Replaced, never merged: a validation whose opener is unknown must not
+    // keep crediting the previous run's opener.
+    state.validation_started_by = started_by.map(str::to_string);
     write(project_path, &mut state)
 }
 

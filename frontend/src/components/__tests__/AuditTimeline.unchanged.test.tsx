@@ -37,7 +37,7 @@ function props(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
     briefingDone: true, onBriefingSaved: vi.fn(), auditActive: false, liveStep: 0, liveTotal: 0,
     liveFile: '', liveElapsed: null, liveTool: null, liveStartedAt: null, liveToolCalls: null, liveStepTokens: null,
     liveTotalTokens: null, onResumeBriefingDiscussion: null, onCancel: vi.fn(), resumable: null,
-    onLaunch: vi.fn(), validationInProgress: false, onValidate: vi.fn(),
+    onLaunch: vi.fn(), validationInProgress: false,
     onMarkValid: vi.fn().mockResolvedValue(undefined), onOpenValidation: vi.fn(), onViewTechDebts: vi.fn(),
     refreshTrigger: 0, toast: vi.fn(), ...over,
   };

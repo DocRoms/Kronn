@@ -288,7 +288,14 @@ fn assert_git_shows_only_docs(root: &Path) {
     let status = String::from_utf8_lossy(&out.stdout);
     for line in status.lines() {
         let path = &line[3..];
-        assert!(!path.contains(".kronn-"), "{status}");
+        // The run state is versioned on purpose (KT-1199): a colleague who
+        // fetches resumes or validates from it. Any other `.kronn-` file is
+        // leaked working state.
+        let versioned = path.ends_with(&format!(
+            "docs/{}",
+            crate::core::audit_run_state::RUN_STATE_FILENAME
+        ));
+        assert!(versioned || !path.contains(".kronn-"), "{status}");
         if line.starts_with("!! ") {
             // Template installation also excludes the documented scratch area.
             assert!(
@@ -419,6 +426,7 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
                 custom_prompt: None,
                 resume_run_id: Some("before-repair".into()),
                 retry_steps: None,
+                redo_steps: None,
                 fresh: None,
             }),
         )
@@ -638,6 +646,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
             custom_prompt: None,
             resume_run_id: Some("before-unavailable".into()),
             retry_steps: None,
+            redo_steps: None,
             fresh: None,
         }),
     )
@@ -1234,6 +1243,7 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
                 custom_prompt: None,
                 resume_run_id: None,
                 retry_steps: None,
+                redo_steps: None,
                 fresh: None,
             }),
         )
@@ -1450,6 +1460,7 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
             custom_prompt: None,
             resume_run_id: Some("run-prev".into()),
             retry_steps: None,
+            redo_steps: None,
             fresh: None,
         }),
     )
@@ -1598,6 +1609,7 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
             custom_prompt: None,
             resume_run_id: Some("run-prev".into()),
             retry_steps: None,
+            redo_steps: None,
             fresh: None,
         }),
     )

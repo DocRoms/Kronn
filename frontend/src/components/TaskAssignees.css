@@ -1,0 +1,147 @@
+/* KT-154 — assignee pastilles + quick menu. Tokens only. */
+.task-assignees {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.task-assignee {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  max-width: 160px;
+  padding: 1px var(--kr-sp-3);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-full);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.task-assignee-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-assignee[data-role="owner"] {
+  border-color: rgba(var(--kr-success-rgb), 0.3);
+}
+
+.task-assignee[data-role="reviewer"] {
+  border-color: rgba(var(--kr-warning-rgb), 0.3);
+}
+
+/* The worker of a running execution: derived, not assigned by hand. */
+.task-assignee[data-source="execution"] {
+  border-style: dashed;
+  color: var(--kr-text-primary);
+}
+
+.task-assignee-role {
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+  text-transform: uppercase;
+}
+
+.task-assignee-more {
+  color: var(--kr-text-muted);
+}
+
+.task-assignee-picker {
+  position: relative;
+  display: inline-flex;
+}
+
+.task-assignee-trigger {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-ghost);
+  cursor: pointer;
+}
+
+.task-assignee-trigger:hover,
+.task-assignee-trigger[aria-expanded="true"] {
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
+}
+
+.task-assignee-trigger:focus-visible,
+.task-assignee-role-btn:focus-visible {
+  outline: 2px solid var(--kr-accent);
+}
+
+.task-assignee-popover {
+  position: absolute;
+  top: calc(100% + var(--kr-sp-2));
+  left: 0;
+  z-index: var(--kr-z-sticky);
+  min-width: 220px;
+  padding: var(--kr-sp-3);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-md);
+}
+
+.task-assignee-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.task-assignee-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+}
+
+.task-assignee-row[data-assigned="true"] {
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-primary);
+}
+
+.task-assignee-roles {
+  display: inline-flex;
+  gap: var(--kr-sp-2);
+}
+
+.task-assignee-role-btn {
+  padding: 1px var(--kr-sp-3);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.task-assignee-role-btn[aria-pressed="true"] {
+  border-color: var(--kr-accent);
+  background: var(--kr-accent);
+  color: var(--kr-accent-ink);
+}
+
+.task-assignee-role-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.task-assignee-empty {
+  padding: var(--kr-sp-3);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-sm);
+}

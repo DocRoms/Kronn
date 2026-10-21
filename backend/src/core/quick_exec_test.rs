@@ -710,7 +710,7 @@ fn a_quick_exec_child_carries_a_built_environment() {
             ("OPENAI_API_KEY", "sk"),
             ("GH_TOKEN", "ghp"),
         ],
-        || build_command(&validated),
+        || build_command(&validated, None),
     );
     let env: Vec<String> = command
         .as_std()

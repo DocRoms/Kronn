@@ -230,7 +230,7 @@ import { clearImportantMessages } from '../../lib/importantMessages';
 import { resetDiscussionQuestions } from '../../lib/discussionQuestions';
 import { discardImportantDraft } from '../../lib/importantMessageDraft';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
-import type { ActiveAgentDispatch, AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun, WsMessage } from '../../types/generated';
+import type { ActiveAgentDispatch, ActiveWorkflowStep, AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun, WsMessage } from '../../types/generated';
 import type { ExternalApiConnectionView } from '../../lib/api';
 import type { ToastFn } from '../../hooks/useToast';
 
@@ -5332,6 +5332,132 @@ describe('KT-1108 — live progress in the reply bubble', () => {
     });
     expect(screen.getByTestId('run-phase')).toHaveTextContent('Prompt envoyé, en attente du modèle');
     expect(screen.getByTestId('run-stopped')).toHaveTextContent('Kronn a arrêté Codex après 5 min 00 s sans activité.');
+  });
+});
+
+describe('KT-1252 — a workflow step working for the room', () => {
+  type ProgressFrame = Extract<WsMessage, { type: 'agent_run_progress' }>;
+  const stepFrame = (overrides: Partial<ProgressFrame['progress']> = {}, seq = 1): ProgressFrame => ({
+    type: 'agent_run_progress',
+    discussion_id: 'd-room',
+    dispatch_id: null,
+    trigger_message_id: null,
+    agent_type: 'ClaudeCode',
+    run_id: 'prog-1',
+    started_at: '2026-10-15T08:50:52Z',
+    seq,
+    progress: {
+      phase: 'starting_cli',
+      phase_ms: 1_000,
+      elapsed_ms: 2_000,
+      timeline: [{ phase: 'preparing', at_ms: 0 }, { phase: 'starting_cli', at_ms: 300 }],
+      mcp_servers: null,
+      activity: [],
+      tool_calls: 0,
+      silent_ms: 0,
+      idle_limit_ms: null,
+      stopped: null,
+      ...overrides,
+    },
+  });
+  const roomWith = (steps: ActiveWorkflowStep[]): Discussion => ({
+    ...makeListDiscussion('d-room', 1),
+    messages: [{
+      id: 'm1', role: 'User', channel: 'main', content: 'Cadrage EW-7853',
+      agent_type: null, timestamp: '2026-10-15T08:50:50Z', tokens_used: 0, auth_mode: null,
+    }],
+    active_workflow_steps: steps,
+  } as Discussion);
+  const step = (extra: Partial<ActiveWorkflowStep> = {}): ActiveWorkflowStep => ({
+    run_id: 'run-b4e247d5',
+    workflow_id: 'wf-framing',
+    workflow_name: 'Framing',
+    step_key: 'analyse',
+    step_name: 'analyse',
+    agent_type: 'ClaudeCode',
+    started_at: '2026-10-15T08:50:52Z',
+    ...extra,
+  });
+
+  let send: ((msg: WsMessage) => void) | undefined;
+  beforeEach(async () => {
+    const { resetLiveRuns } = await import('../../lib/agentRunProgress');
+    resetLiveRuns();
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    vi.mocked(useWebSocket).mockImplementation(onMessage => {
+      send = msg => onMessage(msg);
+      return { connected: true, connectionState: 'connected' };
+    });
+    vi.mocked(discussionsApi.runProgress).mockReset();
+    vi.mocked(discussionsApi.runProgress).mockResolvedValue([]);
+  });
+  afterEach(async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }));
+  });
+
+  const renderRoom = async (disc: Discussion) => {
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[disc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-room"
+        {...liftedProps()}
+      />,
+    );
+  };
+
+  it('shows the placeholder and the live activity at the push, not at the 5 s poll, and drops it at the end', async () => {
+    await renderRoom(roomWith([]));
+    expect(await screen.findByText('Cadrage EW-7853')).toBeInTheDocument();
+    expect(screen.queryByTestId('workflow-step-running-run-b4e247d5-analyse')).toBeNull();
+
+    // The step enters: the room is told, nothing else is awaited.
+    vi.mocked(discussionsApi.get).mockResolvedValue(roomWith([step({ progress_run_id: 'prog-1' })]));
+    vi.mocked(discussionsApi.runProgress).mockResolvedValue([stepFrame()]);
+    await act(async () => { send?.({ type: 'workflow_step_room_changed', discussion_id: 'd-room' }); });
+    const bubble = await screen.findByTestId('workflow-step-running-run-b4e247d5-analyse');
+    expect(bubble).toHaveTextContent('Framing');
+    await waitFor(() => expect(bubble.querySelector('[data-testid="agent-run-progress"]')).not.toBeNull());
+    expect(bubble.querySelector('[data-testid="agent-run-progress"]')).toHaveAttribute('data-phase', 'starting_cli');
+
+    // Its tool calls arrive as frames of the same run.
+    await act(async () => {
+      send?.(stepFrame({
+        phase: 'tool',
+        tool_calls: 3,
+        activity: [{ category: 'Read', at: new Date().toISOString() }],
+      }, 2));
+    });
+    expect(bubble.querySelector('[data-testid="agent-run-progress"]')).toHaveAttribute('data-phase', 'tool');
+    expect(screen.getByTestId('run-activity-toggle')).toHaveTextContent('Activité (3)');
+
+    // Another room's change leaves this one alone.
+    const pollsBefore = vi.mocked(discussionsApi.poll).mock.calls.length;
+    await act(async () => { send?.({ type: 'workflow_step_room_changed', discussion_id: 'd-other' }); });
+    expect(vi.mocked(discussionsApi.poll).mock.calls.length).toBe(pollsBefore);
+
+    // The step ends: the bubble goes without a manual reload.
+    vi.mocked(discussionsApi.get).mockResolvedValue(roomWith([]));
+    await act(async () => { send?.({ type: 'workflow_step_room_changed', discussion_id: 'd-room' }); });
+    await waitFor(() => expect(screen.queryByTestId('workflow-step-running-run-b4e247d5-analyse')).toBeNull());
+  });
+
+  it('shows the workflow and its step while the run prepares, before its agent enters', async () => {
+    await renderRoom(roomWith([step({ step_key: 'copie', step_name: 'copie des dépôts', preparing: true })]));
+    const bubble = await screen.findByTestId('workflow-step-running-run-b4e247d5-copie');
+    expect(bubble).toHaveAttribute('data-preparing', 'true');
+    expect(bubble).toHaveTextContent('Framing');
+    expect(bubble).toHaveTextContent('copie des dépôts');
+    expect(bubble).toHaveTextContent("n'est pas encore entré dans la salle");
   });
 });
 

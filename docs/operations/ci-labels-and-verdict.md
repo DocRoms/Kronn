@@ -17,9 +17,55 @@ re-run once and its new verdict is repeated.
 
 - Runs of CI Verdict for one pull-request state share a concurrency group:
   a burst of label events keeps only the newest run.
-- GitHub keeps every check run it ever received for a SHA. An older red
-  aggregate can stay listed next to a newer green one; the required check reads
-  the newest.
+- GitHub keeps every check run it ever received for a SHA and cannot delete
+  one. So the run that finishes **supersedes** the earlier verdicts
+  (`scripts/ci/supersede_verdicts.sh`, last step of each gate job).
+
+## Superseded verdicts
+
+When a CI Verdict run has reported `ci-quality-gates` or `ci-build-gates`, it
+updates the earlier check runs of the **same head SHA and the same gate name**
+to conclusion `neutral`, titled `Superseded by run <id>`, with a summary that
+links the latest run. The history stays visible; the latest verdict is the only
+success or failure of that gate on the head.
+
+A check run is superseded only if all of these hold:
+
+- it has the gate's name and is completed and not yet `neutral` (so a second
+  pass is a no-op);
+- its `details_url` points at a **CI Verdict** run of this head SHA with a lower
+  run id. CI Tests and CI Build publish checks with the same names on the same
+  SHA: those are never touched;
+- the current run is not cancelled (the step runs on success or failure only):
+  a run replaced by a newer label event supersedes nothing, its successor does.
+
+Superseding is cosmetic and never turns a verdict red: a read-only token (a
+fork) or an API error prints a warning and exits 0, and the old check stays
+listed. The job needs `checks: write`.
+
+`backend/scripts/test_ci_supersede_verdicts.py` covers which runs are selected
+and the fields sent, against a stub `gh`:
+
+```bash
+python3 -m unittest backend/scripts/test_ci_supersede_verdicts.py
+```
+
+## Which checks must be required
+
+Branch protection must require the aggregates `ci-quality-gates` and
+`ci-build-gates`, not the `require-ci-label` / `require-ci-build-label` guards:
+a guard succeeds on the label alone, whatever the tests did. Read the live
+ruleset (needs repository admin read access):
+
+```bash
+gh api repos/DocRoms/Kronn/rulesets/13870406 \
+  --jq '.rules[] | select(.type == "required_status_checks")
+        | .parameters.required_status_checks[] | .context'
+```
+
+The list must contain both aggregates and neither guard. If an aggregate is
+missing, append it as described in `CONTRIBUTING.md`. A `neutral` superseded
+check never blocks a merge, so the ruleset needs no change for it.
 
 ## Cancelled jobs
 

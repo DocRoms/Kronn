@@ -1102,6 +1102,19 @@ pub struct AuditRun {
     /// (KT-920); never written into the checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_profile_draft: Option<String>,
+    /// KT-1211 — the user cancelled this run while this step was in flight
+    /// (0 = before step 1). `None` on a run nobody cancelled. A run cancelled
+    /// after a completed step is `Interrupted` (resumable) and carries this
+    /// flag; one cancelled before any step is `Cancelled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cancelled_at_step: Option<u32>,
+    /// KT-1211 — what moved in the sources between the run this one resumes
+    /// and the resume itself; saved so the timeline and the validation prompt
+    /// can say so after the one-off toast is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resume_drift: Option<String>,
 }
 
 /// 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
@@ -1165,6 +1178,13 @@ pub struct AuditRunStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub accepted_reason: Option<String>,
+    /// KT-1211 — what became of the step's target when the step did not
+    /// succeed: `restored` (put back as it was before the step) or `partial`
+    /// (kept, with a visible partial marker). `None` when the step wrote
+    /// nothing wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target_state: Option<String>,
     /// The step's cost in millionths of a dollar, when its agent reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<u64>,
@@ -1603,6 +1623,11 @@ pub struct LaunchAuditRequest {
     #[serde(default)]
     #[ts(optional)]
     pub retry_steps: Option<Vec<u32>>,
+    /// KT-1211 (M6) — with `resume_run_id`: also redo these 1-based steps the
+    /// run inherited as done, because the sources moved since they ran.
+    #[serde(default)]
+    #[ts(optional)]
+    pub redo_steps: Option<Vec<u32>>,
     /// KT-1169 — a launch without `resume_run_id` is refused while the
     /// project's latest run can be resumed, unless this explicit choice says
     /// to run the whole audit again.
@@ -2288,6 +2313,26 @@ pub struct BriefingEnvironment {
     pub url: String,
 }
 
+/// Where a project's documentation lives outside the repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingExternalDocKind {
+    Confluence,
+    Notion,
+    Wiki,
+    Other,
+}
+
+/// An external documentation space: its kind and its address, nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BriefingExternalDoc {
+    pub kind: BriefingExternalDocKind,
+    #[serde(default)]
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
@@ -2329,6 +2374,10 @@ pub struct BriefingProjectAnswers {
     pub release_cadence: BriefingReleaseCadence,
     pub environments: Vec<BriefingEnvironment>,
     pub people: Vec<BriefingPerson>,
+    /// External documentation (Confluence, Notion, a wiki). Omitted when empty
+    /// so machine copies written before it stay identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_docs: Vec<BriefingExternalDoc>,
     /// KT-1196 — optional free-text note per fact: the "how" a closed option
     /// cannot say. Omitted when empty so older machine copies stay identical.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -2352,6 +2401,7 @@ pub enum BriefingFact {
     ReleaseCadence,
     Environments,
     People,
+    ExternalDocs,
 }
 
 /// The saved briefing as the form's answers (KT-1196), read back from

@@ -248,15 +248,7 @@ fn snapshot_tree(work_dir: &Path, sparse: Option<&[String]>) -> Result<(String, 
         real_index.with_file_name(format!("kronn-safety-index-{}-{nanos}", std::process::id()));
     // A copy only reuses the file stat cache; `add -A` rewrites every entry.
     if real_index.exists() {
-        std::fs::copy(&real_index, &private)?;
-        // Git re-reads an entry as recent as its index file. On Linux the copy
-        // gets a fresh mtime, so git would trust a same-size rewrite from that
-        // instant (macOS clones keep it, which hides this locally).
-        let modified = std::fs::metadata(&real_index)?.modified()?;
-        std::fs::File::options()
-            .write(true)
-            .open(&private)?
-            .set_modified(modified)?;
+        copy_index(&real_index, &private)?;
     }
     let written = clear_hidden_entries(work_dir, &private, sparse).and_then(|absent| {
         git_with_index(work_dir, &private, &["add", "-A"])?;
@@ -265,6 +257,23 @@ fn snapshot_tree(work_dir: &Path, sparse: Option<&[String]>) -> Result<(String, 
     });
     let _ = std::fs::remove_file(&private);
     written
+}
+
+/// Git trusts an entry whose stat matches the file only while the entry is older
+/// than the index file; an entry as recent as the index is "racily clean" and
+/// its content is compared. A fresh copy would be newer than every entry, so a
+/// same-size rewrite made in the same clock tick as the index was written would
+/// be taken for clean: the copy keeps the real index's modification time.
+/// The bytes are written explicitly because `fs::copy` keeps the timestamp on
+/// some platforms (macOS) and not on others (Linux): the result must not depend on it.
+fn copy_index(real_index: &Path, private: &Path) -> Result<()> {
+    let modified = std::fs::metadata(real_index)?.modified()?;
+    std::fs::write(private, std::fs::read(real_index)?)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(private)?
+        .set_modified(modified)?;
+    Ok(())
 }
 
 /// Copied entries flagged assume-unchanged or skip-worktree are never re-read
@@ -566,6 +575,75 @@ mod tests {
         assert_eq!(
             measure(dir.path(), &baseline).unwrap(),
             ChangeStats { files: 2, lines: 4 }
+        );
+    }
+
+    /// A file rewritten with the same size right after the index entry was
+    /// written, in the same clock tick: stat-clean for git, racily clean only
+    /// through the index timestamp. The ctime is not trusted so the rewrite
+    /// leaves nothing but the content to tell it apart.
+    fn racy_rewrite(dir: &Path, content: &str) {
+        git_in(dir, &["config", "core.trustctime", "false"]);
+        let file = dir.join("a.txt");
+        let entry_mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+        std::fs::write(&file, content).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(entry_mtime)
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join(".git/index"))
+            .unwrap()
+            .set_modified(entry_mtime)
+            .unwrap();
+        // The copy is made in a later clock tick than the entry.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+
+    #[test]
+    fn a_same_size_rewrite_in_the_clock_tick_of_the_index_is_measured_by_content() {
+        let dir = repo();
+        let worktree_blob = |content: &str| {
+            let file = dir.path().join("hash.tmp");
+            std::fs::write(&file, content).unwrap();
+            let out = git(dir.path(), &["hash-object", "hash.tmp"]).unwrap();
+            std::fs::remove_file(&file).unwrap();
+            out.trim().to_string()
+        };
+        // Whether `commit` left the entry smudged depends on the clock: make
+        // it a plain stat-clean entry, which is the state this guards.
+        git_in(dir.path(), &["update-index", "--really-refresh"]);
+        racy_rewrite(dir.path(), "uno\ndos\n");
+        let index = std::fs::read(dir.path().join(".git/index")).unwrap();
+        let baseline = capture_baseline(dir.path()).unwrap();
+        assert_eq!(
+            git(
+                dir.path(),
+                &["rev-parse", &format!("{}:a.txt", baseline.tree)]
+            )
+            .unwrap()
+            .trim(),
+            worktree_blob("uno\ndos\n"),
+            "the baseline holds what is on disk, not the stale index content"
+        );
+        assert_eq!(
+            measure(dir.path(), &baseline).unwrap(),
+            ChangeStats { files: 0, lines: 0 }
+        );
+        // The run puts the committed content back, again with the same size and mtime.
+        racy_rewrite(dir.path(), "one\ntwo\n");
+        assert_eq!(
+            measure(dir.path(), &baseline).unwrap(),
+            ChangeStats { files: 1, lines: 4 },
+            "the run's own same-size rewrite is a change"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(".git/index")).unwrap(),
+            index,
+            "the user's index is never written"
         );
     }
 

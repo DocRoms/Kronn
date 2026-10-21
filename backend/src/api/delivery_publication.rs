@@ -224,6 +224,8 @@ pub fn summary_from_manifest(
                 .map(|verification| DeliveryPrincipalVerification {
                     dod_id: verification.dod_id.clone(),
                     met: verification.met,
+                    live_check: verification.verification
+                        == Some(crate::models::PlanningDodVerification::PostIntegration),
                     evidence: verification.evidence.clone(),
                 })
                 .collect(),
@@ -615,6 +617,7 @@ mod tests {
             dod_id: dod_id.to_owned(),
             met,
             evidence: evidence.to_owned(),
+            verification: None,
         }
     }
 
@@ -735,6 +738,29 @@ mod tests {
         assert!(!summary.principal_verifications[0].met);
         let report = summary.render_markdown();
         assert!(report.contains("`dod-3` → not met"), "{report}");
+    }
+
+    /// KT-1254 — a declared live check reads as pending, not as a failure.
+    #[test]
+    fn a_declared_live_check_is_reported_as_pending_after_integration() {
+        let mut pending = verification("dod-4", false, "replay after restart");
+        pending.verification = Some(crate::models::PlanningDodVerification::PostIntegration);
+        let summary = summary_from_manifest(
+            "KT-1254",
+            "exec-1",
+            &manifest(),
+            &facts(),
+            &[pending],
+            at("2026-09-01T10:00:00Z"),
+        )
+        .expect("a complete manifest must produce a summary");
+
+        let report = summary.render_markdown();
+        assert!(
+            report.contains("`dod-4` → live check pending after integration"),
+            "{report}"
+        );
+        assert!(!report.contains("not met"), "{report}");
     }
 
     /// The publication path reads the decision persisted for the current

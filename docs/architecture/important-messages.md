@@ -115,7 +115,7 @@ The bar re-fetches when the transcript's newest durable message id changes
 fetch per arrival, not one per render or per bubble, and never stuck on the
 first GET while a new card lands.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:182-192#messageRevision]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4682-4686#ImportantMessagesBar]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4693-4697#ImportantMessagesBar]
 
 ## Human form (0.13.0, KT-643)
 
@@ -155,7 +155,7 @@ category without rewriting migrations 172/174, preserving the previous rows,
 identities, foreign keys, category checks and indexes.
 [src: file: frontend/src/lib/importantMessageDraft.ts:54-60#takeScalars]
 [src: file: backend/src/db/sql/175_important_message_information_category.sql:1-3#discussion_important_messages_next]
-[src: file: backend/src/db/migrations.rs:1742-1746#migration_175_preserves_populated_cards_and_closes_information_category]
+[src: file: backend/src/db/migrations.rs:1758-1762#migration_175_preserves_populated_cards_and_closes_information_category]
 
 ## Tests
 

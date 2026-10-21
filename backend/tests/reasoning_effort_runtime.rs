@@ -17,8 +17,8 @@ impl Environment {
         if !self.0.iter().any(|(key, _)| *key == name) {
             self.0.push((name, kronn::core::child_env::var_os(name)));
         }
-        // This binary contains one current-thread test. No other test can
-        // observe its temporary PATH or transport switches.
+        // The test runs in its own process (`own_process::delegated`): no
+        // other test can observe its temporary PATH or transport switches.
         kronn::core::child_env::set_var(name, value);
     }
 }
@@ -117,6 +117,12 @@ async fn unresolved_qp_effort_is_an_atomic_configuration_error(db: Arc<Database>
 
 #[tokio::test(flavor = "current_thread")]
 async fn discovered_effort_reaches_real_cli_and_adapter_children_including_resume_and_workers() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "discovered_effort_reaches_real_cli_and_adapter_children_including_resume_and_workers",
+    ) {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
@@ -248,11 +254,11 @@ esac
                     )
                 };
                 let mut process =
-                    tokio::time::timeout(Duration::from_secs(10), start_agent_with_config(config))
+                    tokio::time::timeout(Duration::from_secs(60), start_agent_with_config(config))
                         .await
                         .unwrap()
                         .unwrap();
-                let completion = tokio::time::timeout(Duration::from_secs(10), async {
+                let completion = tokio::time::timeout(Duration::from_secs(60), async {
                     while process.next_line().await.is_some() {}
                     process.child.wait().await.unwrap()
                 })

@@ -571,10 +571,10 @@ TOOLS = [
     {
         "name": "task_update_dod",
         "description": (
-            "Check or uncheck one Definition of Done item atomically. Use the "
-            "DoD item id returned by task_get. Prefer this over replacing the "
-            "whole definition_of_done array when only completion changed: two "
-            "agents can update different items without overwriting each other."
+            "Check or uncheck one DoD item atomically, by the id task_get "
+            "returns; prefer it to replacing the whole array. A "
+            "post_integration item is the principal's live check: ticking it "
+            "needs `evidence`."
         ),
         "inputSchema": {
             "type": "object",
@@ -582,6 +582,7 @@ TOOLS = [
                 "task_id": {"type": "string"},
                 "dod_id": {"type": "string"},
                 "completed": {"type": "boolean"},
+                "evidence": {"type": "string"},
                 "source_message_id": {"type": "string"},
             },
             "required": ["task_id", "dod_id", "completed"],
@@ -618,6 +619,33 @@ TOOLS = [
                 "source_message_id": {"type": "string"},
             },
             "required": ["task_id", "blocker_task_id"],
+        },
+    },
+    {
+        "name": "task_assign",
+        "description": (
+            "Put yourself, or `assignee`, on a task; `unassign:true` takes "
+            "it off. Contract: tool_manual."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "role": {"type": "string", "enum": ["owner", "reviewer"]},
+                "unassign": {"type": "boolean"},
+                "assignee": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["discussion_agent", "agent", "cli"]},
+                        "agent_type": {"type": "string"},
+                        "cli_session_id": {"type": "integer"},
+                        "connection_id": {"type": "string"},
+                    },
+                    "required": ["kind", "agent_type"],
+                },
+                "source_message_id": {"type": "string"},
+            },
+            "required": ["task_id"],
         },
     },
     # ─── 0.8.4 (#294) cross-agent memory tools ─────────────────────────
@@ -739,12 +767,10 @@ TOOLS = [
             "finds the room again via `disc_find_by_session` without a fresh "
             "invite token. ⚠ EVERY ARGUMENT IS OPTIONAL: called bare, "
             "`disc_link({})` binds THIS CLI session to the currently-bound "
-            "disc — you cannot know your own durable session id, the bridge "
-            "derives it. `disc_join` already does this for you; call this only "
-            "to bind a disc you reached another way. Safe by default: if that "
-            "session already owns another discussion the call fails instead of "
-            "silently stealing it. Set force_reassign=true only when the user "
-            "explicitly asks to transfer ownership."
+            "disc. `disc_join` already does this; call this only for a disc "
+            "you reached another way. A session that already owns another "
+            "discussion fails instead of being stolen: set force_reassign=true "
+            "only when the user explicitly asks to transfer ownership."
         ),
         "inputSchema": {
             "type": "object",
@@ -767,16 +793,12 @@ TOOLS = [
     {
         "name": "disc_transfer_session",
         "description": (
-            "Explicitly hand THIS durable CLI session from its previous room "
-            "to the room currently joined by this bridge. Use only after the "
-            "human clearly asks to change rooms. `from_disc_id` pins the room "
-            "the caller expects to release and `confirm_transfer=true` is "
-            "mandatory; ownership changes or missing confirmation fail closed. "
-            "The backend atomically closes the previous append-only binding "
-            "history row, opens the new one and returns `session_bound: true`. "
-            "Afterward, a bare `disc_find_by_session({})` resumes this new room "
-            "after an MCP reload. This transfers durable resume ownership only; "
-            "it does not impersonate `disc_leave` or alter unrelated peers."
+            "Hand THIS durable CLI session from its previous room to the room "
+            "this bridge has joined, only after the human clearly asks to "
+            "change rooms. `from_disc_id` pins the room you expect to release "
+            "and `confirm_transfer=true` is mandatory; a missing confirmation "
+            "or an ownership change fails closed. The binding moves "
+            "atomically (`session_bound: true`)."
         ),
         "inputSchema": {
             "type": "object",
@@ -864,15 +886,12 @@ TOOLS = [
         "description": (
             "Declare or refresh THIS joined CLI session's Git worktree in the "
             "current discussion. `workspace_path` defaults to the bridge's "
-            "current directory; Kronn canonicalizes it and reads the real "
-            "branch + HEAD from Git, so never guess or send those fields. "
-            "Optionally link the workspace to a planning task with `task_ref` "
-            "(for example `KT-140`). The path must be a registered worktree of "
-            "the discussion project's primary or linked repositories, and one "
-            "physical worktree cannot belong to two discussions. The result "
-            "always exposes a `blockers` array: dirty/branch-concurrency guards "
-            "on success, or a structured missing/repository/ownership blocker "
-            "when the declaration is refused."
+            "current directory; Kronn reads the real branch + HEAD from Git, "
+            "so never send those fields. Optionally link a planning task with "
+            "`task_ref`. The path must be a registered worktree of the "
+            "discussion project's repositories, and one physical worktree "
+            "cannot belong to two discussions. The result always has a "
+            "`blockers` array: guards on success, or the refusal's blocker."
         ),
         "inputSchema": {
             "type": "object",
@@ -1001,10 +1020,10 @@ TOOLS = [
     {
         "name": "task_exec_cancel",
         "description": (
-            "Cancel a non-terminal TaskExecution as its principal. Kronn cancels due/live "
-            "dispatches; completed commits and audit history are preserved. The worktree is "
-            "kept by default; `remove_if_clean` removes only a proven-clean owned worktree "
-            "and refuses dirty or unproven paths."
+            "Cancel a non-terminal TaskExecution as its principal. Dispatches stop, commits "
+            "stay, the task status is NOT changed (to relaunch: task_update status=todo). "
+            "Worktree kept by default; `remove_if_clean` removes only a proven-clean owned "
+            "one, refusing dirty/unproven paths."
         ),
         "inputSchema": {
             "type": "object",
@@ -1082,11 +1101,10 @@ TOOLS = [
     {
         "name": "task_exec_deliver",
         "description": (
-            "Submit your DeliveryManifest v1 when the task's DoD is met. Identity is derived "
-            "from this bridge's durable session, and only the execution's EXACT worker is "
-            "accepted. On success the execution flips to AwaitingReview and the principal is "
-            "woken: call this BEFORE announcing 'ready for review'. A malformed manifest is "
-            "refused."
+            "Submit your DeliveryManifest v1 when the task's DoD is met; only the execution's "
+            "EXACT worker is accepted (identity comes from this bridge's session). On success "
+            "the execution flips to AwaitingReview and the principal is woken: call this "
+            "BEFORE announcing 'ready for review'. A malformed manifest is refused."
         ),
         "inputSchema": {
             "type": "object",
@@ -1098,10 +1116,28 @@ TOOLS = [
                 "manifest": {
                     "type": "object",
                     "description": (
-                        "The DeliveryManifest v1 object: version, task_ref, head_sha, "
+                        "DeliveryManifest v1: version \"1\" (string), task_ref, head_sha, "
                         "files_touched, tests, dod_status, docs, migrations, risks, "
-                        "limitations, summary (see the brief's delivery format)."
+                        "limitations, summary, tests_executed (required)."
                     ),
+                    # Declared here, inside the literal the budget gate measures:
+                    # the spawned-worker projection in `_visible_tools` reuses it.
+                    "properties": {
+                        "tests_executed": {
+                            "type": "object",
+                            "description": (
+                                "Whether a test really ran, and which commands: "
+                                "`executed: false` needs `which: []`; `true` needs the "
+                                "commands, matching a pass/fail `tests` entry."
+                            ),
+                            "additionalProperties": False,
+                            "required": ["executed", "which"],
+                            "properties": {
+                                "executed": {"type": "boolean"},
+                                "which": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                    },
                 },
             },
             "required": ["task_execution_id", "manifest"],
@@ -1110,16 +1146,11 @@ TOOLS = [
     {
         "name": "task_exec_review",
         "description": (
-            "Decide a delivered task attempt as the principal (KT-319). Pass the "
-            "`task_execution_id` and a ReviewDecision v1 `decision` object "
-            "(`decision`: 'approve' | 'request_changes'; `comment` is required for "
-            "request_changes; optional structured `findings`). The backend derives "
-            "your identity from this bridge's durable session and authorizes you as a "
-            "party to the execution — the parent-room principal, or the worker only if "
-            "the run explicitly enables self-review. approve is REFUSED if the manifest "
-            "is missing, the worktree HEAD drifted since delivery, or a DoD is unmet; "
-            "request_changes hands your findings to the worker in its sub-discussion "
-            "and keeps the worktree. A caller who is not a party gets one opaque refusal."
+            "Decide a delivered task attempt as the principal (identity comes from this "
+            "bridge's session; the worker only if the run enables self-review). approve "
+            "is REFUSED if the manifest is missing, the worktree HEAD drifted since "
+            "delivery, or a DoD is unmet; request_changes hands your findings to the "
+            "worker and keeps the worktree. A non-party gets one opaque refusal."
         ),
         "inputSchema": {
             "type": "object",
@@ -1131,9 +1162,13 @@ TOOLS = [
                 "decision": {
                     "type": "object",
                     "description": (
-                        "The ReviewDecision v1 object: version, task_ref, decision "
-                        "('approve' | 'request_changes'), comment (required for "
-                        "request_changes), optional findings [{path?, line?, issue}]."
+                        "ReviewDecision v1: version \"1\" (string), task_ref, decision "
+                        "('approve' | 'request_changes'), reviewed_head_sha (required for "
+                        "approve), dod_verifications [{dod_id, met, evidence, "
+                        "verification?}] (required for approve: one per DoD item except a "
+                        "live check, which is `post_integration` + met false, never a "
+                        "blocker), comment (required for request_changes), findings "
+                        "[{path?, line?, issue}]."
                     ),
                 },
             },
@@ -1168,15 +1203,12 @@ TOOLS = [
         "description": (
             "Look up the Kronn disc_id bound to a CLI session, or `null` if "
             "none. ⚠ BOTH ARGUMENTS ARE OPTIONAL: called bare, "
-            "`disc_find_by_session({})` answers « which room is MY session "
-            "bound to? » and actively restores THIS bridge's runtime binding "
-            "and durable read cursor after an MCP reload. A legacy/pre-fix "
-            "session can still have a server link but no local resume "
-            "credential; that exceptional response carries "
-            "`rejoin_required: true` instead of falsely claiming the bridge is "
-            "ready, and needs one fresh kr-join bootstrap. "
-            "Also the way to decide between `disc_create` (no prior thread) "
-            "and `disc_append` (resume an existing one)."
+            "`disc_find_by_session({})` answers which room MY session is "
+            "bound to and restores THIS bridge's runtime binding and durable "
+            "read cursor after an MCP reload. A legacy session with no local "
+            "resume credential returns `rejoin_required: true` and needs one "
+            "fresh kr-join bootstrap. Decides between `disc_create` (no prior "
+            "thread) and `disc_append` (resume)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1487,16 +1519,13 @@ TOOLS = [
     {
         "name": "qa_list",
         "description": (
-            "List every Quick API in the user's library — compact view "
-            "(id, name, api_plugin_slug, api_endpoint_path, api_method, "
-            "description, project_id, variables[]). The `variables[]` "
-            "entries include `{name, label, required, description, source, "
-            "source_ref, allow_manual_override, control}`. Pass only user-input "
-            "values to `qa_run`; project/context values resolve at dispatch. Use this to (a) "
-            "discover the right QA for an action via `qa_run`, (b) "
-            "reuse a matching QA via `quick_api_id` in a workflow "
-            "`ApiCall` / `BatchApiCall` step, or as a source in "
-            "`CollectApiData`, instead of re-specifying the endpoint inline."
+            "List every Quick API in the user's library — compact view with "
+            "`variables[]` (name, label, required, source, control…). Pass "
+            "only user-input values to `qa_run`; project/context values "
+            "resolve at dispatch. Use it to find the QA for `qa_run`, or to "
+            "reuse one via `quick_api_id` in a workflow `ApiCall` / "
+            "`BatchApiCall` step or a `CollectApiData` source instead of "
+            "re-specifying the endpoint inline."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -4755,7 +4784,7 @@ def call_task_changes(args):
 # already knows the task; it needs proof the write landed and nothing else.
 _TASK_ACK_FIELDS = (
     "id", "reference", "title", "status", "priority",
-    "parent_reference", "blocker_count",
+    "parent_reference", "blocker_count", "assignees",
 )
 
 
@@ -4887,6 +4916,7 @@ def call_task_update_dod(args):
             f"/api/planning/tasks/{encoded_task}/dod/{encoded_dod}",
             {
                 "completed": args["completed"],
+                "evidence": args.get("evidence"),
                 "actor": _planning_actor(args),
             },
         )),
@@ -4925,6 +4955,45 @@ def call_task_remove_blocker(args):
         "DELETE",
         f"/api/planning/tasks/{encoded_task}/blockers/{encoded_blocker}",
         {"actor": _planning_actor(args)},
+    )))
+
+
+def _assignee_arg(args):
+    """The typed identity an agent names, or `None` for "myself".
+
+    The server resolves "myself" from the caller's durable CLI session, so
+    this side never guesses a session pk or a provider.
+    """
+    assignee = args.get("assignee")
+    if assignee is None:
+        return None
+    if not isinstance(assignee, dict):
+        raise RuntimeError("task_assign: assignee must be an object")
+    if not assignee.get("kind") or not assignee.get("agent_type"):
+        raise RuntimeError("task_assign: assignee needs kind and agent_type")
+    return {
+        key: assignee[key]
+        for key in ("kind", "agent_type", "cli_session_id", "connection_id")
+        if assignee.get(key) is not None
+    }
+
+
+def call_task_assign(args):
+    task_id = (args.get("task_id") or "").strip()
+    if not task_id:
+        raise RuntimeError("task_assign: task_id is required")
+    body = {"actor": _planning_actor(args)}
+    assignee = _assignee_arg(args)
+    if assignee is not None:
+        body["assignee"] = assignee
+    unassign = args.get("unassign") is True
+    if args.get("role") is not None and not unassign:
+        body["role"] = args["role"]
+    encoded = urllib.parse.quote(task_id, safe="")
+    return _task_ack(_unwrap(_http(
+        "DELETE" if unassign else "POST",
+        f"/api/planning/tasks/{encoded}/assignees",
+        body,
     )))
 
 
@@ -5831,7 +5900,7 @@ def _visible_tools():
         "additionalProperties": False,
         "required": [
             "tests", "dod_status", "docs", "migrations", "risks",
-            "limitations", "summary",
+            "limitations", "summary", "tests_executed",
         ],
         "properties": {
             "tests": {
@@ -5871,6 +5940,10 @@ def _visible_tools():
             "risks": {"type": "array", "items": {"type": "string"}},
             "limitations": {"type": "array", "items": {"type": "string"}},
             "summary": {"type": "string", "minLength": 1},
+            # Declared in the TOOLS literal (the budget gate counts it there).
+            "tests_executed": delivery["inputSchema"]["properties"]["manifest"][
+                "properties"
+            ]["tests_executed"],
         },
     }
     status = next(item for item in TOOLS if item["name"] == "task_exec_status")
@@ -9951,6 +10024,18 @@ TOOL_MANUALS = {
         "Launch may persist principal-owned `validations: [{command, quick_exec_id?, "
         "timeout_secs?}]`; never copy gates from the worker manifest. Reuse one idempotency key "
         "if the launch response is lost.\n\n"
+        "**Live checks.** A DoD item that can only be proven once the code is integrated and "
+        "running (a replay on a real input) is a principal live check. Only the principal of the "
+        "task's execution, or a human, may declare or remove it: a worker, an HTTP agent or an "
+        "anonymous agent is refused. Declare it either with `task_update` while the execution is "
+        "live (`definition_of_done` item `{id, sentence, verification: \"post_integration\"}`) or "
+        "at review, with a `dod_verifications` entry `{dod_id, met: false, evidence, "
+        "verification: \"post_integration\"}`; `task_create` cannot, a new task has no execution. "
+        "The worker reports it `met: false` honestly; approve integrates with it pending, the task "
+        "stays open and the plan lists it as a live check. Run it yourself after integration, then "
+        "tick it with `task_update_dod({completed: true, evidence})`: evidence is mandatory, and "
+        "the task closes on the last tick. Downgrading it to a worker check and ticking it in "
+        "one write is refused.\n\n"
         "**Validations contract.** Kronn runs each `command` on the candidate at integration, "
         "after review — NOT through a shell. The command is split on whitespace into ONE binary "
         "and its literal arguments, then run like a Quick Exec:\n"
@@ -10406,6 +10491,20 @@ TOOL_MANUALS["workflow_trigger"] = (
     "Discovery first: `workflow_list` gives the `workflow_id`. The workflow must be enabled — a disabled draft is refused with a clear error.\n\n`next_check` has the form `{wait_seconds, reason, confidence}`. The first wait is always at least 30s, a sanity check that the run actually started. `confidence: baseline` means the average duration is reliable; `confidence: no_baseline` means this workflow has never run, so check every 60s.\n\nWhen the workflow declares manual launch variables, pass them as `variables: {name: value, …}`. Required ones must be non-empty — the same validation the UI form applies.\n\n`step_agents` changes the agent of some Agent steps for this run only: `{\"<step id or name>\": {\"agent\": \"Codex\", \"model\": \"…\", \"reasoning_effort\": \"…\"}}`. Omitted model or effort means the agent's default. The workflow is never modified; the step keeps its budget and tools. An unknown step, a non-Agent step, an agent not installed or enabled, or tools/budget the agent cannot apply is refused before the run starts."
 )
 TOOL_MANUALS["task_exec_launch"] = TOOL_MANUALS["task_exec_prepare"]
+TOOL_MANUALS["task_assign"] = (
+    "Without `assignee` it assigns YOU: your exact joined CLI session, resolved "
+    "by Kronn from your durable session id. `role` is optional: `owner` = doing "
+    "it, `reviewer` = reviewing it. To assign another agent, pass `assignee` "
+    "with its typed identity: `kind` `cli` (needs its `cli_session_id`), `agent` "
+    "(a punctual agent) or `discussion_agent` (the room's configured agent, "
+    "with its `connection_id` when it is a custom one) and `agent_type`. Never "
+    "name a provider alone for a CLI: two Codex CLIs are two identities.\n\n"
+    "`unassign: true` removes YOU, or `assignee`. Only manual assignments can be "
+    "removed: the worker of a running task execution is shown from the "
+    "execution itself.\n\n"
+    "Moving a task to `in_progress` via `task_update` already makes you its "
+    "owner, unless someone other than a reviewer is on it. Safe to retry."
+)
 TOOL_MANUALS["media_generate"] = (
     "Which connection. `connection_id` is OPTIONAL: leave it out and Kronn uses "
     "the only connection configured for the modality you asked for. Never ask a "
@@ -10937,6 +11036,7 @@ DISPATCH = {
     "task_unlink_discussion": call_task_unlink_discussion,
     "task_add_blocker": call_task_add_blocker,
     "task_remove_blocker": call_task_remove_blocker,
+    "task_assign": call_task_assign,
     # 0.8.4 (#294) cross-agent memory
     "disc_create": call_disc_create,
     "disc_append": call_disc_append,
@@ -11756,7 +11856,7 @@ def _handle(req):
                     "• **Working in a room:** " + ROOM_WORK_PROTOCOL + "\n"
                     '• Blocking human decisions MUST use a closed `kronn-question` JSON fence, never prose alone. `version` MUST be the JSON number 1, never the string "1". Read `disc_question_list` first; its tool_manual has a complete valid example. After publication, read back the exact key to verify recording; if absent, correct the payload and republish with the same key. Wait for a durable human answer before advancing the affected lot; independent work can continue. Agents cannot answer for humans.\n'
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
-                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
+                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`/`task_assign` (yourself, when taking a task). Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Human-gated Automation proposals: after resolving a real QP/QA/QE/Workflow id and its declared variables through the catalogue/get tools, an agent may emit one `kronn-action` fence with `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<real id>\",\"project_id\":\"<optional id>\",\"values\":[{\"name\":\"<declared variable>\",\"value\":\"<editable suggestion>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<your alias>\"}]}`. This proposes only: Kronn validates and persists the card, and the human click launches it. Never invent ids/variables or include secret/resolved values.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"

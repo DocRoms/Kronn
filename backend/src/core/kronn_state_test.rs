@@ -179,6 +179,22 @@ fn revoke_validated_neutralizes_a_legacy_marker_project() {
 }
 
 #[test]
+fn a_validation_with_an_unknown_opener_does_not_keep_the_previous_opener() {
+    let tmp = fresh_tmp("opener-replaced");
+    mark_validated_by(&tmp, "Validator-1", Some("Opener-1")).unwrap();
+    let first = read(&tmp).unwrap();
+    assert_eq!(first.validation_started_by.as_deref(), Some("Opener-1"));
+    assert_eq!(first.validated_by.as_deref(), Some("Validator-1"));
+    // The next audit revokes the sign-off; its validation has no recorded opener.
+    revoke_validated(&tmp).unwrap();
+    mark_validated_by(&tmp, "Validator-2", None).unwrap();
+    let second = read(&tmp).unwrap();
+    assert_eq!(second.validated_by.as_deref(), Some("Validator-2"));
+    assert_eq!(second.validation_started_by, None);
+    cleanup(&tmp);
+}
+
+#[test]
 fn mark_validated_preserves_original_date() {
     let tmp = fresh_tmp("validated-preserve");
     let mut state = KronnState {

@@ -5,3 +5,5 @@
 # Generated files — exclude from language stats
 frontend/src/types/generated.ts linguist-generated=true
 backend/bindings/*.ts linguist-generated=true
+# Parallel lanes all add CHANGELOG entries: keep both sides instead of a conflict.
+CHANGELOG.md merge=union

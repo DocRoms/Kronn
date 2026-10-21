@@ -90,7 +90,7 @@ or relax worker isolation. Workers run through WSL instead; the boundary
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
 runtimes report that a restart is required instead of attempting the Unix
 file-descriptor script reload used during source development.
-[src: file: backend/scripts/disc-introspection-mcp.py:11086-11096#_schedule_bridge_reload]
+[src: file: backend/scripts/disc-introspection-mcp.py:11186-11196#_schedule_bridge_reload]
 
 The desktop sidecar build runs an MCP smoke test from a relocated directory
 with spaces and non-ASCII characters, an empty PATH and an ephemeral HTTP
@@ -138,7 +138,7 @@ A native agent's `disc_append` can carry its runtime session id without having
 joined the room as a CLI peer. Such a post does not implicitly queue another
 answer from the discussion's principal. An actual joined CLI may still hand
 the turn back, and explicit recipients keep their existing routing.
-[src: file: backend/src/api/disc_source.rs:773-785#route_joined_peer_turn]
+[src: file: backend/src/api/disc_source.rs:788-800#route_joined_peer_turn]
 
 Claude's SDK model catalogue is discovered independently of these execution
 toggles. It uses an initialization-only, no-prompt CLI process, not the ACP
@@ -294,7 +294,7 @@ workflow Agent step is launched with. Undeclared, the argv is unchanged.
   server. [src: file: backend/src/agents/runner.rs:5857-5878#declared_mcp_servers]
 - The bridge, given `--step-tools=`, lists and dispatches only those tools
   and sends no catalogue instructions on `initialize`.
-  [src: file: backend/scripts/disc-introspection-mcp.py:5781-5797#_declared_step_tools]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5840-5856#_declared_step_tools]
 - The direct CLI fallback (`KRONN_ACP_ADAPTER_*=0`) refuses a declared step
   rather than launch it with every tool.
 

@@ -9,6 +9,7 @@ instead of one long "how we work" document nobody fully reads.
 - [tickets.md](tickets.md) — ticket/tracker conventions, including whether a
   code comment may cite a ticket/issue ID.
 - [ci-cd.md](ci-cd.md) — CI/CD pipeline: what runs, where, and what blocks a merge.
+- [templates](../templates/README.md) — the ticket and PR templates, verbatim.
 
 Each file states the actual project convention as a checkable fact, not
 generic advice. If a process isn't formalized yet, say so explicitly

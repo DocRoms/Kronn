@@ -531,6 +531,191 @@ pub fn worktree_cleanup_liveness(
     Ok(ExecutionLiveness::Terminal)
 }
 
+/// Which lane targets (`target/wt-<lane>`) of a project a live execution still
+/// claims, by lane name, with the reason.
+///
+/// A lane is claimed by every workspace row of the project that still carries a
+/// checkout path and whose durable state is not [`ExecutionLiveness::Terminal`]
+/// (an unfinished execution, a live session, a held lease, an unmanaged row, or
+/// state that cannot answer: all fail closed). A lane no row names — rows of
+/// finished executions are retired with their path cleared — is an orphan.
+/// KT-1256.
+pub fn live_lane_claims(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    use crate::core::worktree::ExecutionLiveness;
+
+    let mut statement = conn.prepare(
+        "SELECT canonical_path FROM discussion_workspaces
+          WHERE project_id = ?1 AND canonical_path IS NOT NULL",
+    )?;
+    let paths = statement
+        .query_map(params![project_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut claims = std::collections::HashMap::new();
+    for path in paths {
+        let Ok(lane) =
+            crate::core::task_worker_env::WorkerLane::for_worktree(std::path::Path::new(&path))
+        else {
+            continue;
+        };
+        match worktree_cleanup_liveness(conn, &path)? {
+            ExecutionLiveness::Terminal => {}
+            ExecutionLiveness::Active(reason) | ExecutionLiveness::Unknown(reason) => {
+                claims.insert(lane.name, reason);
+            }
+        }
+    }
+    Ok(claims)
+}
+
+/// Which marked lane targets of a project must stay, by lane name, with why.
+///
+/// A lane is *not* in the result only when durable state proves it finished:
+/// its marker's execution exists and is terminal, no workspace row of that
+/// execution is still live (attached session, held lease, unmanaged), and no
+/// workspace row of the project claims the lane by path. A missing execution,
+/// an unreadable status or any state that cannot answer keeps the lane.
+/// KT-1256.
+pub fn lane_target_claims(
+    conn: &Connection,
+    project_id: &str,
+    owners: &[crate::core::worktree::LaneOwner],
+) -> Result<std::collections::HashMap<String, String>> {
+    use crate::core::worktree::ExecutionLiveness;
+
+    let mut claims = live_lane_claims(conn, project_id)?;
+    for owner in owners {
+        if claims.contains_key(&owner.lane) {
+            continue;
+        }
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM task_executions WHERE id = ?1",
+                params![&owner.execution_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(status) = status else {
+            claims.insert(
+                owner.lane.clone(),
+                format!(
+                    "execution {} is not in the database, so nothing durable says it finished",
+                    owner.execution_id
+                ),
+            );
+            continue;
+        };
+        match TaskExecutionStatus::from_str(&status) {
+            Ok(parsed) if parsed.is_terminal() => {}
+            Ok(_) => {
+                claims.insert(
+                    owner.lane.clone(),
+                    format!(
+                        "execution {} is {status}, which is not a finished state",
+                        owner.execution_id
+                    ),
+                );
+                continue;
+            }
+            Err(error) => {
+                claims.insert(
+                    owner.lane.clone(),
+                    format!(
+                        "execution {} has an unreadable status: {error}",
+                        owner.execution_id
+                    ),
+                );
+                continue;
+            }
+        }
+        // A finished execution can still have a workspace row with a live
+        // session or an unreleased lease: the same verdict as for its worktree.
+        let mut statement = conn.prepare(
+            "SELECT canonical_path FROM discussion_workspaces
+              WHERE task_execution_id = ?1 AND canonical_path IS NOT NULL",
+        )?;
+        let paths = statement
+            .query_map(params![&owner.execution_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for path in paths {
+            match worktree_cleanup_liveness(conn, &path)? {
+                ExecutionLiveness::Terminal => {}
+                ExecutionLiveness::Active(reason) | ExecutionLiveness::Unknown(reason) => {
+                    claims.insert(owner.lane.clone(), reason);
+                    break;
+                }
+            }
+        }
+    }
+    Ok(claims)
+}
+
+/// Audit one lane target reclaim against the execution that owned `canonical_path`.
+/// The same shape as [`record_artifact_reclaim`], under its own actions so a
+/// worktree's `target/` and its lane target are told apart. KT-1256.
+pub fn record_lane_target_reclaim(
+    conn: &Connection,
+    canonical_path: &str,
+    lane_target: &str,
+    outcome: Result<(u64, bool), String>,
+) -> Result<()> {
+    let execution_id: Option<String> = conn
+        .query_row(
+            "SELECT task_execution_id FROM discussion_workspaces
+              WHERE canonical_path = ?1 AND task_execution_id IS NOT NULL
+              ORDER BY updated_at DESC
+              LIMIT 1",
+            params![canonical_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(execution_id) = execution_id else {
+        return Ok(());
+    };
+    record_lane_target_reclaim_for_execution(conn, &execution_id, lane_target, outcome)
+}
+
+/// [`record_lane_target_reclaim`] for a lane whose execution is already known:
+/// the sweep reads it from the lane's ownership marker.
+pub fn record_lane_target_reclaim_for_execution(
+    conn: &Connection,
+    execution_id: &str,
+    lane_target: &str,
+    outcome: Result<(u64, bool), String>,
+) -> Result<()> {
+    let (action, changes) = match outcome {
+        Ok((bytes, partial)) => (
+            "lane_target_reclaimed",
+            serde_json::json!({
+                "target": lane_target,
+                "bytes_reclaimed": bytes,
+                "bytes_are_partial": partial,
+            }),
+        ),
+        Err(reason) => (
+            "lane_target_refused",
+            serde_json::json!({ "target": lane_target, "reason": reason }),
+        ),
+    };
+    record_execution_event(
+        conn,
+        execution_id,
+        action,
+        None,
+        None,
+        &OrchestrationActor {
+            kind: PlanningActorKind::Backend,
+            id: Some("disk-maintenance".to_string()),
+            session_id: None,
+            source_message_id: None,
+        },
+        changes,
+    )
+}
+
 /// Is this discussion a worker's execution room?
 ///
 /// KT-398 — a worker gets the full native catalogue, planning-management tools
@@ -4745,6 +4930,80 @@ pub enum IntegrationCheckpointOutcome {
     ExecutionRaced,
 }
 
+/// The DoD items the approved attempt verified as met, with the evidence each
+/// one carries. A principal's `dod_verifications` entry wins; an item it does not
+/// name falls back to the delivery manifest's own `met` claim (a human approve
+/// supplies no principal evidence). Unreadable stored JSON yields nothing: the
+/// unticked-item guard then refuses the completion instead of guessing.
+fn approved_dod_evidence(conn: &Connection, exec_id: &str) -> Result<Vec<(String, String)>> {
+    let Some(attempt_no) = conn
+        .query_row(
+            "SELECT attempt_no FROM task_executions WHERE id = ?1",
+            params![exec_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    let attempt_no = attempt_no as u32;
+    let mut evidence: Vec<(String, String)> = Vec::new();
+    if let Some(delivery) = crate::db::worker_deliveries::get_delivery(conn, exec_id, attempt_no)? {
+        if let Ok(manifest) =
+            serde_json::from_str::<crate::models::DeliveryManifestV1>(&delivery.manifest_json)
+        {
+            for status in manifest.dod_status.into_iter().filter(|status| status.met) {
+                let text = status.evidence.unwrap_or_default();
+                if !text.trim().is_empty() {
+                    evidence.push((status.dod_id, text));
+                }
+            }
+        }
+    }
+    if let Some(review) = crate::db::worker_reviews::get_review(conn, exec_id, attempt_no)? {
+        if let Ok(decision) =
+            serde_json::from_str::<crate::models::ReviewDecisionV1>(&review.decision_json)
+        {
+            if decision.decision == crate::models::ReviewVerdict::Approve {
+                for verification in decision.dod_verifications.into_iter().filter(|v| v.met) {
+                    evidence.retain(|(id, _)| *id != verification.dod_id);
+                    evidence.push((verification.dod_id, verification.evidence));
+                }
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+/// KT-1262 — the worker DoD items the Integrated checkpoint would leave
+/// unticked: unticked now and not verified by the approved attempt. A
+/// post-integration live check is not one. Read BEFORE the git apply, so an item
+/// added between approve and integration holds the approval while the target is
+/// untouched, instead of parking an execution whose code already landed.
+pub fn unverified_worker_dod(conn: &Connection, exec_id: &str) -> Result<Vec<(String, String)>> {
+    let Some(task_id) = conn
+        .query_row(
+            "SELECT task_id FROM task_executions WHERE id = ?1",
+            params![exec_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    let verified = approved_dod_evidence(conn, exec_id)?
+        .into_iter()
+        .filter(|(_, evidence)| !evidence.trim().is_empty())
+        .map(|(dod_id, _)| dod_id)
+        .collect::<std::collections::HashSet<_>>();
+    Ok(
+        crate::db::planning::unticked_worker_dod_within_tx(conn, &task_id)?
+            .into_iter()
+            .filter(|(dod_id, _)| !verified.contains(dod_id))
+            .collect(),
+    )
+}
+
 /// Commit one integration-saga step: pin its checkpoint columns and its transition
 /// in a single transaction (ADR §4bis, KT-320 DoD-7). The four columns declared by
 /// migration 127 come alive here — until this, the boot-time reconciliation reasoned
@@ -4809,6 +5068,11 @@ pub fn commit_integration_checkpoint(
                 [exec_id],
                 |row| row.get(0),
             )?;
+            // KT-1262 — the approve's evidence reaches the DoD before the task
+            // completes; `mark_task_done_within_tx` then refuses a task that
+            // still has an unticked worker item (the transaction rolls back).
+            let verified = approved_dod_evidence(&tx, exec_id)?;
+            crate::db::planning::tick_verified_dod_within_tx(&tx, &task_id, &verified, actor)?;
             if !crate::db::planning::mark_task_done_within_tx(&tx, &task_id, actor)? {
                 return Ok(IntegrationCheckpointOutcome::TaskNotCompletable);
             }
@@ -4930,6 +5194,93 @@ pub fn latest_toolchain_capabilities(
     latest
         .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
         .transpose()
+}
+
+/// Journal how a lane started (KT-1250): where its target was seeded from and
+/// how long its first build took, so the gain of a warm start is measurable.
+/// A sibling of the capability record; readers take the latest.
+pub fn record_lane_warm_start(
+    conn: &Connection,
+    exec_id: &str,
+    record: &crate::core::task_worker_lane_warm::WarmStartRecord,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::to_value(record)?,
+    )
+}
+
+/// The most recent warm-start record of an execution, if any.
+pub fn latest_lane_warm_start(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::core::task_worker_lane_warm::WarmStartRecord>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
+/// Action of the event that says a lane is warming (KT-1250): its first build
+/// is queued or running and the worker is not dispatched yet.
+const LANE_WARMING_ACTION: &str = "lane_warming";
+
+/// Journal that the execution's lane started warming, with the longest the
+/// warm-up may take before the worker starts regardless.
+pub fn record_lane_warming(
+    conn: &Connection,
+    exec_id: &str,
+    bound_secs: u64,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        LANE_WARMING_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::json!({ "bound_secs": bound_secs }),
+    )
+}
+
+/// Since when the execution's lane has been warming: the latest `lane_warming`
+/// event not yet followed by a `lane_warm_start` record. `None` once the
+/// warm-up has finished (or never started).
+pub fn lane_warming_since(conn: &Connection, exec_id: &str) -> Result<Option<DateTime<Utc>>> {
+    let since: Option<String> = conn
+        .query_row(
+            "SELECT created_at FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+               AND rowid > COALESCE((SELECT MAX(rowid) FROM task_execution_events \
+                                      WHERE task_execution_id = ?1 AND action = ?3), 0) \
+             ORDER BY rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                LANE_WARMING_ACTION,
+                crate::core::task_worker_lane_warm::WARM_START_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(since.map(parse_dt))
 }
 
 const WORKER_SCOPE_REANCHORED: &str = "worker_scope_reanchored";
@@ -5293,6 +5644,27 @@ pub const DEFAULT_ACTIVITY_TIMEOUT_SECS: u32 = 20 * 60;
 /// How long a delivery may sit unreviewed before the principal is alerted.
 pub const DEFAULT_REVIEW_TIMEOUT_SECS: u32 = 4 * 60 * 60;
 const ACTIVITY_TIMEOUT_ENV: &str = "KRONN_TASK_ACTIVITY_TIMEOUT_SECS";
+/// How long a single tool call (a cold `cargo build`, a full test suite) may
+/// run before the worker counts as silent again.
+const TOOL_IN_FLIGHT_CAP_ENV: &str = "KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS";
+const DEFAULT_TOOL_IN_FLIGHT_CAP_SECS: u32 = 2 * 60 * 60;
+
+pub fn tool_in_flight_cap_secs() -> u32 {
+    crate::core::child_env::var(TOOL_IN_FLIGHT_CAP_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_TOOL_IN_FLIGHT_CAP_SECS)
+}
+
+/// A tool that started and has not finished is activity: a worker compiling
+/// for 25 minutes is busy, not silent. Past the cap it is treated as hung.
+fn tool_in_flight(phase: Option<&str>, started: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    phase == Some("tool_activity")
+        && started.is_some_and(|started| {
+            started + chrono::Duration::seconds(i64::from(tool_in_flight_cap_secs())) > now
+        })
+}
 const REVIEW_TIMEOUT_ENV: &str = "KRONN_TASK_REVIEW_TIMEOUT_SECS";
 
 fn timeout_secs_from_env(name: &str, fallback: u32) -> u32 {
@@ -5614,11 +5986,13 @@ pub fn expired_execution_timeouts(
     let mut stmt = conn.prepare(
         "SELECT r.task_execution_id, e.status, r.total_deadline_at, \
                 r.activity_deadline_at, r.review_deadline_at, r.human_wait_started_at, \
-                p.human_wait_timeout_secs \
+                p.human_wait_timeout_secs, d.progress_phase, d.last_progress_at \
          FROM task_execution_recovery r \
          JOIN task_executions e ON e.id = r.task_execution_id \
          LEFT JOIN orchestration_run_resilience_policy p \
            ON p.orchestration_run_id = e.orchestration_run_id \
+         LEFT JOIN agent_dispatch_jobs d \
+           ON d.id = e.dispatch_job_id AND d.status = 'Running' \
          WHERE e.status NOT IN ('Done', 'Failed', 'Cancelled')",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -5630,11 +6004,13 @@ pub fn expired_execution_timeouts(
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })?;
     let mut expired = Vec::new();
     for row in rows {
-        let (id, status, total, activity, review, human_since, human_secs) = row?;
+        let (id, status, total, activity, review, human_since, human_secs, phase, phase_at) = row?;
         let parse = |value: Option<String>| value.map(parse_dt);
         if parse(total).is_some_and(|deadline| deadline <= now) {
             expired.push((id, ExecutionTimeoutKind::TotalDuration));
@@ -5648,6 +6024,7 @@ pub fn expired_execution_timeouts(
             }
         } else if status == TaskExecutionStatus::Working.as_str()
             && parse(activity).is_some_and(|deadline| deadline <= now)
+            && !tool_in_flight(phase.as_deref(), phase_at.map(parse_dt), now)
         {
             // Only a worker that owes work can be silent. A delivered attempt
             // (`AwaitingReview`) or a parked one is never an activity timeout.
@@ -6329,7 +6706,8 @@ pub fn cancel_execution_tree(
             "UPDATE task_executions SET outcome_reason = ?2 WHERE id = ?1",
             params![exec_id, reason],
         )?;
-        crate::db::planning::restore_task_todo_after_cancellation(conn, &execution.task_id, actor)?;
+        // KT-1267 — the task status is deliberately left alone: the work may
+        // already be integrated by hand, so the principal decides (done / todo).
         record_reconciliation_event(
             conn,
             "execution",

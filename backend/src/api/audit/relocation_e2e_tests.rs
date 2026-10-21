@@ -713,6 +713,7 @@ async fn launch_route_fresh(h: &Harness, bridge: bool, fresh: Option<bool>) -> S
             custom_prompt: None,
             resume_run_id: None,
             retry_steps: None,
+            redo_steps: None,
             fresh,
         }),
     )
@@ -1138,6 +1139,10 @@ fn an_applied_template_merge_on_a_dot_ai_project_writes_and_commits_under_its_ro
 fn default_root_snapshot(project: &Path, prompts: &[String]) -> String {
     let date =
         regex_lite::Regex::new(r"\d{4}-\d{2}-\d{2}([T ][0-9:.]+(Z|[+-]\d{2}:?\d{2})?)?").unwrap();
+    // Every step prompt opens with "(YYYYMMDD: <today>)": the compact form of
+    // the same date, which the golden must not depend on either.
+    let compact =
+        regex_lite::Regex::new(r"\b20\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\b").unwrap();
     let location = project.display().to_string();
     let canonical = project
         .canonicalize()
@@ -1152,7 +1157,8 @@ fn default_root_snapshot(project: &Path, prompts: &[String]) -> String {
             .replace(&canonical, "<PROJECT>")
             .replace(&location, "<PROJECT>")
             .replace(&name, "<NAME>");
-        date.replace_all(&text, "<DATE>").into_owned()
+        let text = date.replace_all(&text, "<DATE>").into_owned();
+        compact.replace_all(&text, "<DATE>").into_owned()
     };
     let mut lines: Vec<String> = Vec::new();
     for entry in walkdir::WalkDir::new(project)
@@ -1174,6 +1180,8 @@ fn default_root_snapshot(project: &Path, prompts: &[String]) -> String {
         let volatile = matches!(
             rel.as_str(),
             "docs/.kronn.json"
+                // Carries the operator label and the run id (KT-1199).
+                | "docs/.kronn-audit-run.json"
                 | "docs/checksums.json"
                 | "docs/citations.json"
                 | "docs/provenance.json"

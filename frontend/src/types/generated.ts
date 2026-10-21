@@ -9,7 +9,14 @@ export type AcceptAuditStepRequest = {
 /**
  * Why the step is accepted; optional.
  */
-reason?: string, };
+reason?: string,
+/**
+ * KT-1211 — accept a step whose failure is known to leave an unsound
+ * document (truncated, citations that do not resolve, an undisposed
+ * detector signal, a stopped step) anyway. Without it the acceptance is
+ * refused and the answer carries the diff to look at.
+ */
+override_unsound?: boolean, };
 
 export type AcceptAuditStepResponse = { step: number, accepted_by: string, accepted_at: string,
 /**
@@ -56,7 +63,19 @@ connection_id?: string,
  */
 progress_phase?: string, };
 
-export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
+export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string,
+/**
+ * KT-1252 — the `run_id` of the room's live `AgentRunProgress` frames for
+ * this step: the bubble reads the run's phase and tool activity from the
+ * run-progress store under it. Absent while the step has none.
+ */
+progress_run_id?: string,
+/**
+ * KT-1252 — the run targets this room but its agent has not entered it
+ * yet. `step_*` then name the step the run executes now (the preparation),
+ * and `agent_type` the agent about to enter.
+ */
+preparing?: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 /**
  * What kind of action an agent's tool call is, from a fixed table
@@ -800,6 +819,13 @@ path: string,
 format?: string | null, };
 
 /**
+ * KT-154 — `assignee: None` means "the acting agent itself": the server
+ * resolves the actor's exact joined CLI session and refuses when it cannot.
+ * `role` applies to that self-assignment (default `owner`).
+ */
+export type AssignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, role?: PlanningAssigneeRole | null, actor?: PlanningActor, };
+
+/**
  * What a discussion is created for when it is an assistant conversation:
  * the link is written in the discussion's own transaction, and `secrets`
  * are masked out of its title and first message before anything is stored.
@@ -918,7 +944,13 @@ steps_to_redo: Array<number>,
  * The lease is held by a run nobody can settle: every launch is refused
  * until the cleanup action releases it (KT-1134).
  */
-lease_orphaned: boolean, };
+lease_orphaned: boolean,
+/**
+ * The audit run the repository describes (KT-1199): a colleague's run
+ * after a fetch or a rebase. Shown as the project's state when
+ * `newer_than_local`; `None` when the repository carries no run state.
+ */
+repo: RepoAuditRun | null, };
 
 /**
  * What one phase of an audit (briefing, audit steps, validation discussion)
@@ -1144,7 +1176,20 @@ model?: string | null,
  * Starter `kronn/project.toml` drafted for a repository without one
  * (KT-920); never written into the checkout.
  */
-project_profile_draft?: string | null, };
+project_profile_draft?: string | null,
+/**
+ * KT-1211 — the user cancelled this run while this step was in flight
+ * (0 = before step 1). `None` on a run nobody cancelled. A run cancelled
+ * after a completed step is `Interrupted` (resumable) and carries this
+ * flag; one cancelled before any step is `Cancelled`.
+ */
+cancelled_at_step?: number,
+/**
+ * KT-1211 — what moved in the sources between the run this one resumes
+ * and the resume itself; saved so the timeline and the validation prompt
+ * can say so after the one-off toast is gone.
+ */
+resume_drift?: string, };
 
 /**
  * An audit run's tokens and cost per phase and in total (KT-1084).
@@ -1203,6 +1248,13 @@ unchanged: boolean,
  * why. It counts as done; `cli_success` and `step_warning` keep the failure.
  */
 accepted_at?: string, accepted_by?: string, accepted_reason?: string,
+/**
+ * KT-1211 — what became of the step's target when the step did not
+ * succeed: `restored` (put back as it was before the step) or `partial`
+ * (kept, with a visible partial marker). `None` when the step wrote
+ * nothing wrong.
+ */
+target_state?: string,
 /**
  * The step's cost in millionths of a dollar, when its agent reported one.
  */
@@ -1270,7 +1322,17 @@ lease_orphaned: boolean,
  * Why the server would refuse a validation now (`None` = it accepts):
  * the UI shows the reason instead of offering the action.
  */
-validation_block: ValidationBlock | null, };
+validation_block: ValidationBlock | null,
+/**
+ * The audit run the repository describes (KT-1199): a colleague's run
+ * after a fetch or a rebase, read off the working tree at every call.
+ */
+repo: RepoAuditRun | null,
+/**
+ * The repository's run is the project's state here and the server would
+ * accept a validation from it: the timeline offers to validate.
+ */
+repo_can_validate: boolean, };
 
 export type AuditTimelineValidation = { discussion_id: string,
 /**
@@ -1497,9 +1559,19 @@ export type BriefingEnvironment = { kind: BriefingEnvironmentKind, url: string, 
 export type BriefingEnvironmentKind = "local" | "dev" | "staging" | "preprod" | "production" | "preview";
 
 /**
+ * An external documentation space: its kind and its address, nothing else.
+ */
+export type BriefingExternalDoc = { kind: BriefingExternalDocKind, url: string, };
+
+/**
+ * Where a project's documentation lives outside the repository.
+ */
+export type BriefingExternalDocKind = "confluence" | "notion" | "wiki" | "other";
+
+/**
  * A project fact a briefing note can be attached to (KT-1196).
  */
-export type BriefingFact = "tracker" | "tracker_key" | "forge" | "forge_repo" | "default_branch" | "commit_convention" | "signoff" | "merge_strategy" | "review" | "release_cadence" | "environments" | "people";
+export type BriefingFact = "tracker" | "tracker_key" | "forge" | "forge_repo" | "default_branch" | "commit_convention" | "signoff" | "merge_strategy" | "review" | "release_cadence" | "environments" | "people" | "external_docs";
 
 export type BriefingForge = "unknown" | "github" | "gitlab" | "bitbucket" | "azure_devops" | "other";
 
@@ -1524,6 +1596,11 @@ tracker_key: string, forge: BriefingForge,
  * `owner/name`; inferred from the project's git remote when empty.
  */
 forge_repo: string, default_branch: BriefingDefaultBranch, commit_convention: BriefingCommitConvention, signoff_required: BriefingYesNo, merge_strategy: BriefingMergeStrategy, review_policy: BriefingReviewPolicy, release_cadence: BriefingReleaseCadence, environments: Array<BriefingEnvironment>, people: Array<BriefingPerson>,
+/**
+ * External documentation (Confluence, Notion, a wiki). Omitted when empty
+ * so machine copies written before it stay identical.
+ */
+external_docs?: Array<BriefingExternalDoc>,
 /**
  * KT-1196 — optional free-text note per fact: the "how" a closed option
  * cannot say. Omitted when empty so older machine copies stay identical.
@@ -2285,7 +2362,11 @@ host_sync?: HostSyncMode,
  */
 custom_spec?: CustomApiPayload | null, };
 
-export type CreatePlanningDodItem = { id: string | null, sentence: string, completed: boolean, };
+export type CreatePlanningDodItem = { id: string | null, sentence: string, completed: boolean,
+/**
+ * KT-1254 — `None` keeps an existing item's mode (`Worker` for a new one).
+ */
+verification?: PlanningDodVerification, };
 
 export type CreatePlanningTaskLink = { label: string, url: string, };
 
@@ -4621,6 +4702,11 @@ resume_run_id?: string | null,
  */
 retry_steps?: Array<number>,
 /**
+ * KT-1211 (M6) — with `resume_run_id`: also redo these 1-based steps the
+ * run inherited as done, because the sources moved since they ran.
+ */
+redo_steps?: Array<number>,
+/**
  * KT-1169 — a launch without `resume_run_id` is refused while the
  * project's latest run can be resumed, unless this explicit choice says
  * to run the whole audit again.
@@ -6229,6 +6315,43 @@ session_id: string | null, source_message_id: string | null, };
 export type PlanningActorKind = "human" | "agent" | "backend" | "system";
 
 /**
+ * KT-154 — one agent on a task, identified with the typed KT-116 regime
+ * (`kind` + `agent_type` + exact `cli_session_id`), never by provider alone.
+ */
+export type PlanningAssignee = { kind: MessageTargetKind, agent_type: AgentType, connection_id?: string | null,
+/**
+ * Exact joined CLI session (`discussion_sessions.id`) for a `cli` assignee.
+ */
+cli_session_id?: number | null,
+/**
+ * Stable room ordinal of that session (`@codex-cli-2` → 2), so two CLIs of
+ * one provider read differently in the plan.
+ */
+cli_ordinal?: number | null, role?: PlanningAssigneeRole | null, source: PlanningAssigneeSource,
+/**
+ * Model tier of an execution worker. Always `None` for a manual assignee.
+ */
+tier?: ModelTier | null, execution_id?: string | null, execution_status?: TaskExecutionStatus | null, };
+
+/**
+ * KT-154 — the identity a caller assigns or removes. Same shape as the
+ * persisted assignee minus the derived fields.
+ */
+export type PlanningAssigneeInput = { kind: MessageTargetKind, agent_type: AgentType, connection_id: string | null, cli_session_id: number | null, role: PlanningAssigneeRole | null, };
+
+/**
+ * KT-154 — what an assignee does on the task. Optional on a manual assignment.
+ */
+export type PlanningAssigneeRole = "owner" | "reviewer";
+
+/**
+ * KT-154 — where an assignee row comes from. `Manual` rows are stored and can
+ * be removed; `Execution` rows are the worker of a live TaskExecution, derived
+ * at read time and never stored (so they cannot outlive the execution).
+ */
+export type PlanningAssigneeSource = "manual" | "execution";
+
+/**
  * KT-30 — minimal, read-only dependency reference for the plan projection.
  * Just enough to render a blocked task's active blockers (and, later, the
  * dependency neighbourhood) WITHOUT loading each blocker's full detail. Never
@@ -6250,7 +6373,29 @@ active_blockers: Array<PlanningDependencySummary>,
  */
 actionable: boolean, };
 
-export type PlanningDodItem = { id: string, sentence: string, completed: boolean, position: number, };
+export type PlanningDodItem = { id: string, sentence: string, completed: boolean, position: number,
+/**
+ * KT-1254 — who proves the item and when. `Worker` (default) is covered by
+ * the delivery; `PostIntegration` is the principal's live check, made
+ * after integration, and never blocks approve.
+ */
+verification: PlanningDodVerification,
+/**
+ * KT-1254 / KT-1262 — the proof the item was ticked on: the principal's
+ * live evidence for a post-integration item, or what an integrating
+ * approve verified for a worker item. Cleared when the item is unticked.
+ */
+evidence?: string | null, };
+
+/**
+ * KT-1254 — how a DoD item is verified.
+ */
+export type PlanningDodVerification = "worker" | "post_integration";
+
+/**
+ * KT-1254 — a pending principal live check, as the plan shows it.
+ */
+export type PlanningLiveCheck = { dod_id: string, sentence: string, };
 
 export type PlanningPlacement = "active" | "later";
 
@@ -6289,7 +6434,17 @@ result_task_id?: string, decided_at?: string, };
 
 export type PlanningTaskChange = { task_id: string, task_reference: string, task_title: string, id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
-export type PlanningTaskDetail = { subtasks: Array<PlanningTaskSummary>, description: string, blocked_reason: string | null, definition_of_done: Array<PlanningDodItem>, links: Array<PlanningTaskLink>, blockers: Array<PlanningTaskSummary>, blocking: Array<PlanningTaskSummary>, workspaces?: Array<PlanningWorkspaceSummary>, events: Array<PlanningTaskEvent>, id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
+export type PlanningTaskDetail = { subtasks: Array<PlanningTaskSummary>, description: string, blocked_reason: string | null, definition_of_done: Array<PlanningDodItem>, links: Array<PlanningTaskLink>, blockers: Array<PlanningTaskSummary>, blocking: Array<PlanningTaskSummary>, workspaces?: Array<PlanningWorkspaceSummary>, events: Array<PlanningTaskEvent>, id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number,
+/**
+ * KT-154 — manual assignees first (assignment order), then the worker of a
+ * live TaskExecution when it is not already assigned by hand.
+ */
+assignees: Array<PlanningAssignee>,
+/**
+ * KT-1254 — unticked post-integration DoD items: the principal's live
+ * checks still owed on this task.
+ */
+live_checks?: Array<PlanningLiveCheck>, created_at: string, updated_at: string, };
 
 export type PlanningTaskEvent = { id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
@@ -6301,7 +6456,17 @@ export type PlanningTaskPriority = "critical" | "high" | "normal" | "low";
 
 export type PlanningTaskStatus = "idea" | "todo" | "in_progress" | "blocked" | "done" | "archived";
 
-export type PlanningTaskSummary = { id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
+export type PlanningTaskSummary = { id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number,
+/**
+ * KT-154 — manual assignees first (assignment order), then the worker of a
+ * live TaskExecution when it is not already assigned by hand.
+ */
+assignees: Array<PlanningAssignee>,
+/**
+ * KT-1254 — unticked post-integration DoD items: the principal's live
+ * checks still owed on this task.
+ */
+live_checks?: Array<PlanningLiveCheck>, created_at: string, updated_at: string, };
 
 export type PlanningWorkspaceSummary = { id: string, disc_id: string, branch: string, state: string, ownership: string, session_agent_type: string | null, };
 
@@ -7322,6 +7487,40 @@ export type ReplacedFile = { path: string,
  */
 backup: string, };
 
+/**
+ * What the UI shows of an audit run that the repository describes.
+ */
+export type RepoAuditRun = { run_id: string, kind: string,
+/**
+ * The run's own status in the file: `Running` means an interruption or
+ * a run still going on another machine.
+ */
+status: string, started_by: string, started_at: string, ended_at: string | null, updated_at: string, total_steps: number,
+/**
+ * Finished steps whose produced file still matches.
+ */
+done_steps: Array<number>,
+/**
+ * Failed and pending steps: what a resume runs.
+ */
+resume_steps: Array<number>,
+/**
+ * Finished steps whose file changed since: « à revérifier », replayed.
+ */
+recheck_steps: Array<number>,
+/**
+ * The file is the committed one: a resume or a validation may rely on it.
+ */
+committed: boolean,
+/**
+ * This is the project's state: no local run, or the repository is newer.
+ */
+newer_than_local: boolean,
+/**
+ * A committed, unfinished run with steps left to run: can be resumed here.
+ */
+resumable: boolean, briefing_changed: boolean, td_total: number, td_settled: number, validated_at: string | null, validated_by: string | null, };
+
 export type ReportTelemetryRequest = {
 /**
  * The CLI's own durable session id, as sent at join. Resolved to the Kronn
@@ -7634,7 +7833,13 @@ dod_verifications: Array<ReviewDodVerification>, comment: string | null, finding
  * persisted inside the attempt-scoped ReviewDecision, never inferred from a
  * mutable Planning checkbox.
  */
-export type ReviewDodVerification = { dod_id: string, met: boolean, evidence: string, };
+export type ReviewDodVerification = { dod_id: string, met: boolean, evidence: string,
+/**
+ * KT-1254 — `post_integration` (with `met: false`) declares the item a
+ * principal live check made after integration: approve integrates with it
+ * pending and the task closes once it is ticked with evidence.
+ */
+verification?: PlanningDodVerification | null, };
 
 /**
  * A structured review finding (ADR §5). `issue` is required; `path` / `line`
@@ -9211,7 +9416,7 @@ warnings?: Array<CampaignTaskReason>, active_execution: TaskExecution | null, };
 
 export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode, };
 
-export type TaskExecutionProgressPhase = "queued" | "launching" | "upstream_wait" | "tool_activity" | "delivering" | "completed" | "failed" | "unknown";
+export type TaskExecutionProgressPhase = "warming" | "queued" | "launching" | "upstream_wait" | "tool_activity" | "delivering" | "completed" | "failed" | "unknown";
 
 /**
  * Recovery projection kept separately from the business state machine.
@@ -9817,6 +10022,8 @@ project_id?: string,
  */
 step_agents?: { [key in string]: StepAgentOverride }, };
 
+export type UnassignPlanningTaskRequest = { assignee?: PlanningAssigneeInput | null, actor?: PlanningActor, };
+
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
 /**
@@ -9972,7 +10179,11 @@ export type UpdateMcpConfigRequest = { label?: string | null, env?: Record<strin
 
 export type UpdateMcpContextRequest = { content: string, };
 
-export type UpdatePlanningDodItemRequest = { completed: boolean, actor?: PlanningActor, };
+export type UpdatePlanningDodItemRequest = { completed: boolean,
+/**
+ * Required to tick a post-integration item: the principal's live proof.
+ */
+evidence?: string | null, actor?: PlanningActor, };
 
 export type UpdatePlanningTaskRequest = { title?: string | null, description?: string | null, status?: PlanningTaskStatus | null, priority?: PlanningTaskPriority | null, parent_id?: string | null | null, blocked_reason?: string | null | null, rank?: number | null, project_ids?: Array<string> | null, tags?: Array<string> | null, definition_of_done?: Array<CreatePlanningDodItem> | null, links?: Array<CreatePlanningTaskLink> | null, actor?: PlanningActor, };
 
@@ -10100,9 +10311,16 @@ export type UsageTotals = { input_tokens: number, output_tokens: number, cache_c
  * timeline and the discussion banners show this reason instead of offering
  * an action the server would refuse.
  */
-export type ValidationBlock = "no_local_run" | "audit_running" | "run_not_completed" | "no_linked_discussion" | "discussion_missing" | "foreign_discussion" | "not_finished";
+export type ValidationBlock = "no_local_run" | "audit_running" | "run_not_completed" | "no_linked_discussion" | "discussion_missing" | "foreign_discussion" | "not_finished" | "repo_run_not_committed" | "repo_steps_to_recheck" | "repo_td_open";
 
 export type ValidationReason = "audit_validation" | "validation_card" | "acknowledged" | "revalidation" | "confirmed" | "human_owned";
+
+/**
+ * Where a validation state comes from (KT-1199): the run this instance
+ * recorded, or the committed run state of the repository (a colleague's run
+ * after a fetch or a rebase).
+ */
+export type ValidationSource = "local" | "repo";
 
 /**
  * One validation to run on the candidate before the parent is advanced (§6).
@@ -10124,7 +10342,7 @@ finished: boolean, completed_at: string | null, completed_message_id: string | n
 /**
  * Pseudo of the operator whose audit opened the validation.
  */
-started_by: string | null, validated_by: string | null, validated_at: string | null,
+started_by: string | null, validated_by: string | null, validated_at: string | null, source: ValidationSource,
 /**
  * The server accepts a validation now (the tech-debt sheet path, which
  * reads the filesystem, is decided by the POST itself).
@@ -11329,4 +11547,4 @@ started_at: string,
 /**
  * Increases with every frame of one run.
  */
-seq: number, progress: AgentRunProgress, } | { "type": "embed_origins_changed" } | { "type": "live_page_data_changed", page_id: string, data_revision: number, };
+seq: number, progress: AgentRunProgress, } | { "type": "workflow_step_room_changed", discussion_id: string, } | { "type": "embed_origins_changed" } | { "type": "live_page_data_changed", page_id: string, data_revision: number, };

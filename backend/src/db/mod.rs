@@ -282,6 +282,24 @@ impl Database {
         // row is a zombie — and the flip is resume-safe because
         // last_completed_step survives (see
         // `reconcile_stale_runs_preserves_last_completed_step`).
+        // KT-1211 (M5) — an agent the previous backend left running would
+        // keep writing the docs the freed lease lets a resume rewrite: kill
+        // it first (only a process whose start stamp still matches).
+        match crate::core::agent_orphans::reap_recorded_agents(&conn) {
+            Ok(0) => {}
+            Ok(n) => {
+                tracing::warn!("Killed {n} audit agent(s) left running by the previous backend")
+            }
+            Err(e) => tracing::warn!("Failed to reap orphaned audit agents: {e}"),
+        }
+        // KT-1211 — the step that agent was writing never ended: put its doc
+        // back from the pre-step snapshot (or mark it partial) now, so it is
+        // never left half-written and unmarked until the next launch.
+        match crate::api::audit::step_guard::settle_unfinished_at_boot(&conn) {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!("Settled {n} audit step(s) cut off with the previous backend"),
+            Err(e) => tracing::warn!("Failed to settle audit steps cut off at boot: {e}"),
+        }
         match audit_runs::reconcile_stale_runs(&conn, 0) {
             Ok(0) => {}
             Ok(n) => tracing::info!("Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted", n),
@@ -400,6 +418,23 @@ impl Database {
     /// Get the database file path.
     pub fn path(&self) -> &PathBuf {
         &self.path
+    }
+
+    /// A second handle on the SAME connections, for work that must outlive the
+    /// request that started it (a detached task cannot borrow the caller's
+    /// `&Database`). Reads, writes, the change signal and the assistant guard
+    /// are shared; the boot-interrupted list and the catalogue refresh locks
+    /// are NOT — drain and lock them on the original only.
+    pub(crate) fn share_handle(&self) -> Database {
+        Database {
+            conn: Arc::clone(&self.conn),
+            read_conn: self.read_conn.clone(),
+            path: self.path.clone(),
+            boot_interrupted: Mutex::new(Vec::new()),
+            catalog_refresh_locks: Mutex::new(std::collections::HashMap::new()),
+            resource_changes: Arc::clone(&self.resource_changes),
+            assistant_guard: Arc::clone(&self.assistant_guard),
+        }
     }
 
     pub(crate) async fn lock_catalog_refresh(

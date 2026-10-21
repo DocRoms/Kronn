@@ -8,7 +8,7 @@ const state = (over: Partial<ValidationState> = {}): ValidationState => ({
   project_id: 'p1', run_id: 'r1', run_status: 'Completed', discussion_id: 'd-latest',
   archived: false, finished: true, completed_at: '2026-08-28T21:37:00+00:00',
   completed_message_id: 'm1', started_by: 'Romu', validated_by: null, validated_at: null,
-  can_validate: true, blocked: null, ...over,
+  source: 'local', can_validate: true, blocked: null, ...over,
 });
 
 describe('validationBanner', () => {

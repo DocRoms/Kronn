@@ -27,6 +27,10 @@ static ARM_THE_REAL_AGENT_GUARD: extern "C" fn() = {
 #[path = "support/publication_fixture.rs"]
 mod fixture_env;
 
+/// A test that owns process-global state runs in its own process (KT-1186).
+#[path = "support/own_process.rs"]
+mod own_process;
+
 #[path = "adapter_worker_policy.rs"]
 mod adapter_worker_policy;
 #[path = "anti_hallu_citation_forms.rs"]

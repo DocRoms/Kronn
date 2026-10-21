@@ -23,6 +23,16 @@ pub async fn bootstrap(
     State(state): State<AppState>,
     Json(req): Json<BootstrapProjectRequest>,
 ) -> Json<ApiResponse<BootstrapProjectResponse>> {
+    bootstrap_as(state, req, Uuid::new_v4().to_string()).await
+}
+
+/// `bootstrap` under a caller-chosen project id, so a test can hold that
+/// project's audit lease and watch the writer refuse before touching the disk.
+pub(crate) async fn bootstrap_as(
+    state: AppState,
+    req: BootstrapProjectRequest,
+    project_id: String,
+) -> Json<ApiResponse<BootstrapProjectResponse>> {
     // 1. Determine parent directory: use the common parent of existing projects,
     // or fall back to KRONN_REPOS_DIR env var, or first scan path.
     // We need a writable directory — KRONN_HOST_HOME is mounted read-only.
@@ -53,7 +63,6 @@ pub async fn bootstrap(
     let agent_type = req.agent;
     let configured_adapter = crate::core::root_agent_files::adapter_for_agent_type(&agent_type);
 
-    let project_id = Uuid::new_v4().to_string();
     let lease =
         match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
             Ok(lease) => lease,

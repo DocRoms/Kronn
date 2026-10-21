@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::deserialize_optional_field;
+use super::{AgentType, MessageTargetKind, ModelTier, TaskExecutionStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "snake_case")]
@@ -167,6 +168,113 @@ pub struct PlanningActor {
     pub source_message_id: Option<String>,
 }
 
+/// KT-154 — what an assignee does on the task. Optional on a manual assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PlanningAssigneeRole {
+    Owner,
+    Reviewer,
+}
+
+impl PlanningAssigneeRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Reviewer => "reviewer",
+        }
+    }
+}
+
+impl std::str::FromStr for PlanningAssigneeRole {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "owner" => Ok(Self::Owner),
+            "reviewer" => Ok(Self::Reviewer),
+            _ => anyhow::bail!("Unknown planning assignee role: {value}"),
+        }
+    }
+}
+
+/// KT-154 — where an assignee row comes from. `Manual` rows are stored and can
+/// be removed; `Execution` rows are the worker of a live TaskExecution, derived
+/// at read time and never stored (so they cannot outlive the execution).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PlanningAssigneeSource {
+    Manual,
+    Execution,
+}
+
+/// KT-154 — one agent on a task, identified with the typed KT-116 regime
+/// (`kind` + `agent_type` + exact `cli_session_id`), never by provider alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PlanningAssignee {
+    pub kind: MessageTargetKind,
+    pub agent_type: AgentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    /// Exact joined CLI session (`discussion_sessions.id`) for a `cli` assignee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_session_id: Option<i64>,
+    /// Stable room ordinal of that session (`@codex-cli-2` → 2), so two CLIs of
+    /// one provider read differently in the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_ordinal: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<PlanningAssigneeRole>,
+    pub source: PlanningAssigneeSource,
+    /// Model tier of an execution worker. Always `None` for a manual assignee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ModelTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_status: Option<TaskExecutionStatus>,
+}
+
+/// KT-154 — the identity a caller assigns or removes. Same shape as the
+/// persisted assignee minus the derived fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PlanningAssigneeInput {
+    pub kind: MessageTargetKind,
+    pub agent_type: AgentType,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub cli_session_id: Option<i64>,
+    #[serde(default)]
+    pub role: Option<PlanningAssigneeRole>,
+}
+
+/// KT-154 — `assignee: None` means "the acting agent itself": the server
+/// resolves the actor's exact joined CLI session and refuses when it cannot.
+/// `role` applies to that self-assignment (default `owner`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AssignPlanningTaskRequest {
+    #[serde(default)]
+    pub assignee: Option<PlanningAssigneeInput>,
+    #[serde(default)]
+    pub role: Option<PlanningAssigneeRole>,
+    #[serde(default)]
+    pub actor: PlanningActor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UnassignPlanningTaskRequest {
+    #[serde(default)]
+    pub assignee: Option<PlanningAssigneeInput>,
+    #[serde(default)]
+    pub actor: PlanningActor,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PlanningTaskSummary {
@@ -185,6 +293,14 @@ pub struct PlanningTaskSummary {
     pub discussion_ids: Vec<String>,
     pub tags: Vec<String>,
     pub blocker_count: u32,
+    /// KT-154 — manual assignees first (assignment order), then the worker of a
+    /// live TaskExecution when it is not already assigned by hand.
+    #[serde(default)]
+    pub assignees: Vec<PlanningAssignee>,
+    /// KT-1254 — unticked post-integration DoD items: the principal's live
+    /// checks still owed on this task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_checks: Vec<PlanningLiveCheck>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -196,6 +312,54 @@ pub struct PlanningDodItem {
     pub sentence: String,
     pub completed: bool,
     pub position: i64,
+    /// KT-1254 — who proves the item and when. `Worker` (default) is covered by
+    /// the delivery; `PostIntegration` is the principal's live check, made
+    /// after integration, and never blocks approve.
+    #[serde(default)]
+    pub verification: PlanningDodVerification,
+    /// KT-1254 / KT-1262 — the proof the item was ticked on: the principal's
+    /// live evidence for a post-integration item, or what an integrating
+    /// approve verified for a worker item. Cleared when the item is unticked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+/// KT-1254 — how a DoD item is verified.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanningDodVerification {
+    /// Proved by the worker's delivery, before integration.
+    #[default]
+    Worker,
+    /// A principal live check after integration; approve integrates with it
+    /// pending and the task closes once it is ticked with evidence.
+    PostIntegration,
+}
+
+impl PlanningDodVerification {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::PostIntegration => "post_integration",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        if value == "post_integration" {
+            Self::PostIntegration
+        } else {
+            Self::Worker
+        }
+    }
+}
+
+/// KT-1254 — a pending principal live check, as the plan shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PlanningLiveCheck {
+    pub dod_id: String,
+    pub sentence: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -334,6 +498,10 @@ pub struct CreatePlanningDodItem {
     pub sentence: String,
     #[serde(default)]
     pub completed: bool,
+    /// KT-1254 — `None` keeps an existing item's mode (`Worker` for a new one).
+    #[serde(default)]
+    #[ts(optional)]
+    pub verification: Option<PlanningDodVerification>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -444,6 +612,9 @@ pub struct RemovePlanningBlockerRequest {
 #[ts(export)]
 pub struct UpdatePlanningDodItemRequest {
     pub completed: bool,
+    /// Required to tick a post-integration item: the principal's live proof.
+    #[serde(default)]
+    pub evidence: Option<String>,
     #[serde(default)]
     pub actor: PlanningActor,
 }
