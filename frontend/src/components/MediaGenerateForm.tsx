@@ -6,14 +6,13 @@
 // question the configuration already answers — and offering a modality nobody
 // had configured.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Clapperboard, Image as ImageIcon, Loader2, Paperclip, Sparkles, X } from 'lucide-react';
+import { ArrowUp, ArrowDown, Clapperboard, Image as ImageIcon, Loader2, Paperclip, Sparkles, X } from 'lucide-react';
 import { media, discussions as discussionsApi } from '../lib/api';
 import { Dropdown, type DropdownOption } from './Dropdown';
 import { SearchableSelect, type SearchableSelectOption } from './SearchableSelect';
 import type {
   ExternalApiConnectionView,
   MediaModality,
-  MediaFramePosition,
   MediaModelCapabilities,
   MediaReferenceMode,
 } from '../lib/api';
@@ -232,11 +231,8 @@ export function MediaGenerateForm({
     return () => { cancelled = true; };
   }, [selected]);
 
-  // KT-587 — derived rather than cleared inside the effect. Deliberately NOT
-  // keyed to the current slot: the previous model's limits stand until the new
-  // ones arrive, because treating the gap as "no limits known" makes the trim
-  // below drop every attached picture for one render, and that is not
-  // recoverable.
+  // Capabilities belong to this exact slot and model. Keep selected images
+  // while the next envelope loads, but do not submit them with stale limits.
   const capabilitiesResolvedForSelected = capabilityResult.key === capabilityKey
     && capabilityResult.status === 'resolved';
   const capabilities = capabilitiesResolvedForSelected ? capabilityResult.capabilities : null;
@@ -265,34 +261,28 @@ export function MediaGenerateForm({
     () => (isVideo ? (capabilities?.frame_positions ?? []) : []),
     [isVideo, capabilities],
   );
-  // How many pictures an IMAGE model takes as references. The catalogue states
-  // it per model and it ranges from 1 to 16, so a fixed number would be wrong
-  // for nearly every provider. Absent means the model advertises none.
-  const maxReferences = isVideo ? 0 : (capabilities?.max_input_references ?? 0);
-  const referenceLimit = isVideo ? 1 : maxReferences;
+  // The effective visual-reference count applies to either output modality.
+  // Unknown counts do not authorize a source-image submission.
+  const maxReferences = capabilities?.max_input_references ?? 0;
+  const referenceModes = useMemo<MediaReferenceMode[]>(
+    () => [...framePositions, ...(maxReferences > 0 ? ['reference' as const] : [])],
+    [framePositions, maxReferences],
+  );
+  const referenceLimit = storedReference?.mode !== 'reference' && storedReference ? 1 : maxReferences || 1;
   // An empty room still shows the picker when a picture can be attached from
   // here: hiding it made attaching the FIRST one impossible, which is exactly
   // the case a fresh discussion is in.
   const canReference =
-    (isVideo ? framePositions.length > 0 : maxReferences > 0)
+    referenceModes.length > 0
     && (images.length > 0 || !!onImageAttached);
   // KT-587 — normalised at render, where an effect used to rewrite the state
   // one render late. That render is the one a fast click submits, and it would
   // have carried a picture the model refuses — after billing started.
   const reference = useMemo(() => {
     if (!storedReference || !canReference) return null;
-    if (isVideo) {
-      return framePositions.includes(storedReference.mode as MediaFramePosition)
-        ? storedReference
-        : null;
-    }
-    if (storedReference.mode !== 'reference') return null;
-    // Trimmed rather than dropped: the pictures already chosen stay, and only
-    // what the new model cannot take goes.
-    return storedReference.assetIds.length > referenceLimit
-      ? { ...storedReference, assetIds: storedReference.assetIds.slice(0, referenceLimit) }
-      : storedReference;
-  }, [storedReference, canReference, isVideo, framePositions, referenceLimit]);
+    return referenceModes.includes(storedReference.mode) ? storedReference : null;
+  }, [storedReference, canReference, referenceModes]);
+  const referenceOverLimit = !!reference && reference.assetIds.length > referenceLimit;
   // Do not silently downgrade a viewer handoff to text-to-media.  The stored
   // source remains available for an explicit removal, but a click cannot
   // reach the paid endpoint until this selected model has accepted it.
@@ -394,13 +384,13 @@ export function MediaGenerateForm({
 
   const pickImage = useCallback((assetId: string) => {
     setReference(current => {
-      const mode: MediaReferenceMode = isVideo ? framePositions[0] : 'reference';
+      const mode: MediaReferenceMode = maxReferences > 0 ? 'reference' : framePositions[0];
       if (!current) return { assetIds: [assetId], mode };
       if (current.assetIds.includes(assetId)) return current;
       if (current.assetIds.length >= referenceLimit) return current;
       return { ...current, assetIds: [...current.assetIds, assetId] };
     });
-  }, [framePositions, isVideo, referenceLimit]);
+  }, [framePositions, maxReferences, referenceLimit]);
 
   const attachImage = useCallback(async (file: File) => {
     setAttaching(true);
@@ -487,7 +477,7 @@ export function MediaGenerateForm({
   }, [initialReferenceKey]);
 
   const submit = useCallback(async () => {
-    if (!selected || !prompt.trim() || busy || referenceTooNarrow || referenceIntentUnresolved || submissionInFlightRef.current) return;
+    if (!selected || !prompt.trim() || busy || referenceTooNarrow || referenceIntentUnresolved || referenceOverLimit || submissionInFlightRef.current) return;
     submissionInFlightRef.current = true;
     setBusy(true);
     setError(null);
@@ -501,6 +491,7 @@ export function MediaGenerateForm({
       }
     const signature = JSON.stringify({
       connectionId: selected.connectionId,
+      model: selected.model,
       modality: selected.modality,
       prompt: prompt.trim(),
       discussionId: targetDiscussionId,
@@ -516,6 +507,7 @@ export function MediaGenerateForm({
       const job = await media.generate({
         idempotency_key: pendingLaunchRef.current.key,
         connection_id: selected.connectionId,
+        expected_model: selected.model,
         modality: selected.modality,
         prompt: prompt.trim(),
         discussion_id: targetDiscussionId,
@@ -541,7 +533,7 @@ export function MediaGenerateForm({
       submissionInFlightRef.current = false;
       setBusy(false);
     }
-  }, [aspectRatio, busy, discussionId, durationSecs, generateAudio, onCreateDiscussion, onDiscussionCreated, onLaunched, prompt, reference, referenceIntentUnresolved, referenceTooNarrow, resolution, selected]);
+  }, [aspectRatio, busy, discussionId, durationSecs, generateAudio, onCreateDiscussion, onDiscussionCreated, onLaunched, prompt, reference, referenceIntentUnresolved, referenceOverLimit, referenceTooNarrow, resolution, selected]);
 
   if (slots.length === 0) {
     return (
@@ -637,7 +629,7 @@ export function MediaGenerateForm({
         <fieldset className="media-generate-reference" data-testid="media-reference-pending">
           <legend>{isVideo ? t('disc.media.sourceImage') : t('disc.media.referenceImages')}</legend>
           <p className="media-generate-reference-warning" role="alert">
-            {t('disc.media.referenceCompatibilityPending')}
+            {capabilities?.reference_support?.blocker ?? t('disc.media.referenceCompatibilityPending')}
           </p>
           <p>{storedReference?.assetIds.map(assetId => images.find(image => image.id === assetId)?.filename ?? assetId).join(', ')}</p>
           <button
@@ -660,7 +652,7 @@ export function MediaGenerateForm({
               {referenceUrl && <img src={referenceUrl} alt="" />}
               {isVideo && (
                 <div className="media-generate-reference-modes" role="radiogroup">
-                  {framePositions.map(position => (
+                  {referenceModes.map(position => (
                     <button
                       key={position}
                       type="button"
@@ -671,18 +663,31 @@ export function MediaGenerateForm({
                       onClick={() => setReference({ ...reference, mode: position })}
                       data-testid={`media-reference-mode-${position}`}
                     >
-                      {t(`disc.media.frame.${position}`)}
+                      {position === 'reference' ? t('disc.media.referenceImages') : t(`disc.media.frame.${position}`)}
                     </button>
                   ))}
                 </div>
               )}
-              {!isVideo && (
+              {(
                 // Named one by one: which pictures were chosen, and in which
                 // order — providers weigh references by position.
                 <ul className="media-generate-reference-list">
                   {reference.assetIds.map((assetId, index) => (
                     <li key={assetId}>
                       <span>{index + 1}. {images.find(image => image.id === assetId)?.filename ?? assetId}</span>
+                      {([-1, 1] as const).map(direction => (
+                        <button key={direction} type="button" className="btn btn-sm btn-ghost"
+                          disabled={index + direction < 0 || index + direction >= reference.assetIds.length}
+                          aria-label={t(direction < 0 ? 'disc.media.moveReferenceUp' : 'disc.media.moveReferenceDown')}
+                          onClick={() => setReference(current => {
+                            if (!current || index + direction < 0 || index + direction >= current.assetIds.length) return current;
+                            const ids = [...current.assetIds];
+                            [ids[index], ids[index + direction]] = [ids[index + direction], ids[index]];
+                            return { ...current, assetIds: ids };
+                          })}>
+                          {direction < 0 ? <ArrowUp size={12} aria-hidden="true" /> : <ArrowDown size={12} aria-hidden="true" />}
+                        </button>
+                      ))}
                       <button
                         type="button"
                         className="btn btn-sm btn-ghost"
@@ -710,6 +715,9 @@ export function MediaGenerateForm({
                   {t('disc.media.referenceTooNarrow', referenceWidth ?? 0, MIN_REFERENCE_WIDTH_PX)}
                 </p>
               )}
+              {referenceOverLimit && <p role="alert" className="media-generate-reference-warning">
+                {t('disc.media.referenceLimitExceeded', referenceLimit)}
+              </p>}
             </div>
           )}
           {canPickMore ? (
@@ -757,7 +765,7 @@ export function MediaGenerateForm({
           ) : (
             // The ceiling is the model's own, said out loud: a picker that
             // simply stopped responding would read as broken.
-            !isVideo && (
+            reference?.mode === 'reference' && (
               <p className="set-hint" data-testid="media-reference-limit">
                 {t('disc.media.referenceLimitReached', referenceLimit)}
               </p>
@@ -797,7 +805,7 @@ export function MediaGenerateForm({
         </p>
       )}
 
-      <button type="submit" className="btn btn-sm" disabled={busy || !prompt.trim() || referenceTooNarrow || referenceIntentUnresolved}>
+      <button type="submit" className="btn btn-sm" disabled={busy || !prompt.trim() || referenceTooNarrow || referenceIntentUnresolved || referenceOverLimit}>
         {busy
           ? <Loader2 size={13} aria-hidden="true" className="spin" />
           : <Sparkles size={13} aria-hidden="true" />}

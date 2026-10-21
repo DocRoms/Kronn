@@ -300,6 +300,121 @@ pub async fn video_companions(base: &str) -> anyhow::Result<WanCompanions> {
     wan_companions(&text_encoders, &vaes)
 }
 
+pub(crate) fn reference_family(
+    config: &ComfyUiConfig,
+    model: &str,
+    modality: MediaModality,
+) -> Option<ComfyFamily> {
+    let folder = match modality {
+        MediaModality::Image => IMAGE_FOLDER,
+        MediaModality::Video => VIDEO_FOLDER,
+    };
+    config
+        .chosen_family(folder, model)
+        .or_else(|| {
+            config.image_family.filter(|_| {
+                modality == MediaModality::Image && config.image_model.as_deref() == Some(model)
+            })
+        })
+        .or_else(|| family_of(folder, model, None, None))
+}
+
+pub async fn reference_capabilities(
+    config: &ComfyUiConfig,
+    model: &str,
+    modality: MediaModality,
+) -> crate::agents::media_capabilities::MediaModelCapabilities {
+    use crate::core::comfyui_references::{MULTI_REFERENCE_LIMIT, REDUX_MODEL, REDUX_VISION};
+    use crate::models::{MediaReferenceLimitSource, MediaReferenceSupport};
+    let mut result = capabilities(model, modality);
+    let folder = match modality {
+        MediaModality::Image => IMAGE_FOLDER,
+        MediaModality::Video => VIDEO_FOLDER,
+    };
+    let family = reference_family(config, model, modality);
+    let (maximum, required, mut blocker): (u32, &[&str], Option<String>) = match family {
+        Some(ComfyFamily::Sdxl) => (1, &["LoadImage", "VAEEncode"], None),
+        Some(ComfyFamily::FluxSchnell) => (MULTI_REFERENCE_LIMIT, &["LoadImage", "StyleModelLoader", "CLIPVisionLoader", "CLIPVisionEncode", "StyleModelApply"], None),
+        Some(ComfyFamily::Wan21Vace) => (MULTI_REFERENCE_LIMIT, &["LoadImage", "WanVaceToVideo", "TrimVideoLatent"], None),
+        _ => (0, &[], Some("Kronn's selected ComfyUI workflow does not take source images. Select SDXL img2img, FLUX Redux, or a Wan VACE video model; this is a workflow limitation, not a statement about every local model.".into())),
+    };
+    let base = base_url(config);
+    if maximum > 0 {
+        let checks = futures::future::join_all(required.iter().map(|node| {
+            let url = format!("{base}/object_info/{node}");
+            let node = node.to_string();
+            async move {
+                let response = client(PROBE_TIMEOUT)
+                    .get(url)
+                    .send()
+                    .await
+                    .ok()?
+                    .error_for_status()
+                    .ok()?
+                    .json::<Value>()
+                    .await
+                    .ok()?;
+                response.get(&node).map(|_| ())
+            }
+        }))
+        .await;
+        let missing: Vec<_> = required
+            .iter()
+            .zip(checks)
+            .filter_map(|(node, found)| found.is_none().then_some(*node))
+            .collect();
+        if !missing.is_empty() {
+            blocker = Some(format!("ComfyUI is unavailable or required nodes are missing: {}. Start or update ComfyUI, then check again.",missing.join(", ")));
+        } else if !list_folder(&base, folder)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|file| file == model)
+        {
+            blocker = Some(format!("The selected model {folder}/{model} is missing or ComfyUI is unavailable. Add the model or select an installed one, then check again."));
+        } else if family == Some(ComfyFamily::FluxSchnell) {
+            let (styles, visions) = tokio::join!(
+                list_folder(&base, "style_models"),
+                list_folder(&base, "clip_vision")
+            );
+            let mut missing = Vec::new();
+            if !styles
+                .unwrap_or_default()
+                .iter()
+                .any(|name| name == REDUX_MODEL)
+            {
+                missing.push(format!("style_models/{REDUX_MODEL}"));
+            }
+            if !visions
+                .unwrap_or_default()
+                .iter()
+                .any(|name| name == REDUX_VISION)
+            {
+                missing.push(format!("clip_vision/{REDUX_VISION}"));
+            }
+            if !missing.is_empty() {
+                blocker = Some(format!(
+                    "FLUX Redux requires {}. Add these model files to ComfyUI, then check again.",
+                    missing.join(", ")
+                ));
+            }
+        } else if family == Some(ComfyFamily::Wan21Vace) {
+            if let Err(error) = video_companions(&base).await {
+                blocker = Some(format!("Wan VACE dependencies: {error}"));
+            }
+        }
+    }
+    result.max_input_references = Some(if blocker.is_none() { maximum } else { 0 });
+    result.reference_support = Some(MediaReferenceSupport {
+        workflow: crate::core::comfyui_references::workflow_id(family).map(str::to_string),
+        source: MediaReferenceLimitSource::Workflow,
+        advertised_max: Some(maximum),
+        configured_max: None,
+        blocker,
+    });
+    result
+}
+
 fn home_dir() -> Option<PathBuf> {
     crate::core::child_env::var("KRONN_HOST_HOME")
         .or_else(|_| crate::core::child_env::var("HOME"))
@@ -376,6 +491,7 @@ fn family_defaults() -> Vec<ComfyUiFamilyDefaults> {
         ComfyFamily::FluxSchnell,
         ComfyFamily::Sdxl,
         ComfyFamily::Wan21T2v,
+        ComfyFamily::Wan21Vace,
     ]
     .into_iter()
     .map(|family| ComfyUiFamilyDefaults {
@@ -1046,6 +1162,14 @@ pub async fn set_settings(
         ("video", &request.video_settings),
     ] {
         if settings
+            .denoise
+            .is_some_and(|value| !value.is_finite() || !(0.0..1.0).contains(&value))
+        {
+            return Json(ApiResponse::err(format!(
+                "{label} img2img denoise must be at least 0 and less than 1"
+            )));
+        }
+        if settings
             .steps
             .is_some_and(|steps| !(1..=200).contains(&steps))
         {
@@ -1172,6 +1296,7 @@ pub fn capabilities(
         },
         frame_positions: Vec::new(),
         max_input_references: Some(0),
+        reference_support: None,
         generate_audio: Some(false),
     }
 }
@@ -1195,6 +1320,88 @@ pub fn names_local(reference: &str) -> bool {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reference_limits_require_installed_models_and_nodes_and_recover_after_installation() {
+        use wiremock::{matchers::path, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let config = ComfyUiConfig {
+            endpoint: Some(server.uri()),
+            ..Default::default()
+        };
+        let model = "flux1-schnell-fp8.safetensors";
+        let caps = reference_capabilities(&config, model, MediaModality::Image).await;
+        assert_eq!(caps.max_input_references, Some(0));
+        assert!(caps
+            .reference_support
+            .unwrap()
+            .blocker
+            .unwrap()
+            .contains("required nodes"));
+        for node in [
+            "LoadImage",
+            "StyleModelLoader",
+            "CLIPVisionLoader",
+            "CLIPVisionEncode",
+            "StyleModelApply",
+            "WanVaceToVideo",
+            "TrimVideoLatent",
+        ] {
+            Mock::given(path(format!("/object_info/{node}")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({node:{}})),
+                )
+                .mount(&server)
+                .await;
+        }
+        Mock::given(path("/models/checkpoints"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([model])))
+            .mount(&server)
+            .await;
+        let caps = reference_capabilities(&config, model, MediaModality::Image).await;
+        assert_eq!(caps.max_input_references, Some(0));
+        assert!(caps
+            .reference_support
+            .unwrap()
+            .blocker
+            .unwrap()
+            .contains("style_models/flux1-redux-dev"));
+        for (folder, files) in [
+            ("style_models", vec!["flux1-redux-dev.safetensors"]),
+            (
+                "clip_vision",
+                vec!["sigclip_vision_patch14_384.safetensors"],
+            ),
+            (
+                "diffusion_models",
+                vec!["wan2.1_vace_1.3B_fp16.safetensors"],
+            ),
+            (
+                "text_encoders",
+                vec!["umt5_xxl_fp8_e4m3fn_scaled.safetensors"],
+            ),
+            ("vae", vec!["wan_2.1_vae.safetensors"]),
+        ] {
+            Mock::given(path(format!("/models/{folder}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(files))
+                .mount(&server)
+                .await;
+        }
+        for (model, modality, workflow) in [
+            (model, MediaModality::Image, "flux-redux-v1"),
+            (
+                "wan2.1_vace_1.3B_fp16.safetensors",
+                MediaModality::Video,
+                "wan21-vace-references-v1",
+            ),
+        ] {
+            let caps = reference_capabilities(&config, model, modality).await;
+            assert_eq!(caps.max_input_references, Some(3), "{caps:?}");
+            let support = caps.reference_support.unwrap();
+            assert_eq!(support.workflow.as_deref(), Some(workflow));
+            assert!(support.blocker.is_none());
+        }
+    }
 
     #[test]
     fn the_install_folder_is_shown_under_a_tilde_never_with_the_home_path() {

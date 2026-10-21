@@ -198,8 +198,8 @@ describe('ComfyUiCard (KT-1381)', () => {
     expect(setSettings).toHaveBeenCalledWith(expect.objectContaining({
       endpoint: null,
       install_dir: null,
-      image_settings: { steps: 12, cfg: null, sampler: 'euler', scheduler: null },
-      video_settings: { steps: 20, cfg: null, sampler: null, scheduler: null },
+      image_settings: { steps: 12, cfg: null, sampler: 'euler', scheduler: null, denoise: undefined },
+      video_settings: { steps: 20, cfg: null, sampler: null, scheduler: null, denoise: undefined },
     }));
   });
 

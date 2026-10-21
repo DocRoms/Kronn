@@ -13142,6 +13142,12 @@ class MediaGenerateReferenceTests(unittest.TestCase):
         body = self.fake_http.call_args.args[2]
         self.assertEqual(body["reference_asset_ids"], ["asset-a", "asset-b"])
 
+    def test_video_keeps_all_three_visual_references_in_order(self):
+        body = self._call(reference_asset_ids=["asset-c", "asset-a", "asset-b"], reference_mode="reference", expected_model="chosen-video")
+        self.assertEqual(body["expected_model"], "chosen-video")
+        self.assertEqual(body["reference_asset_ids"], ["asset-c", "asset-a", "asset-b"])
+        self.assertEqual(body["reference_mode"], "reference")
+
     def test_a_frame_takes_one_picture_and_says_so(self):
         # Keeping one of them silently would bill the generation for something
         # else, and only the result would show it.

@@ -313,6 +313,7 @@ import type {
   MediaFramePosition,
   MediaReferenceMode,
   MediaModelCapabilities,
+  SetMediaReferenceLimitRequest,
   ModelCatalogSnapshot,
   ModelCatalogView,
   RefreshModelCatalogRequest,
@@ -3654,6 +3655,7 @@ export type MediaModality = 'image' | 'video';
 
 export interface GenerateMediaBody {
   idempotency_key: string;
+  expected_model?: string;
   connection_id: string;
   modality: MediaModality;
   prompt: string;
@@ -3730,6 +3732,8 @@ export interface MediaSpend {
 }
 
 export const media = {
+  setReferenceLimit: (body: SetMediaReferenceLimitRequest) =>
+    api<MediaModelCapabilitiesResponse>('PUT', '/media/models', body),
   generate: (body: GenerateMediaBody) =>
     api<GeneratedMediaJob>('POST', '/media/generate', body),
   job: (id: string) => api<MediaJobView>('GET', `/media/jobs/${id}`),

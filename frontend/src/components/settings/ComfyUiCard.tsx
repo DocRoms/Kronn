@@ -4,6 +4,7 @@ import { comfyui, type ComfyUiPullProgress } from '../../lib/api';
 import type { ComfyFamily, ComfyGenSettings, ComfyUiModel, ComfyUiStatus, ComfyUiSuggestion, MediaModality } from '../../types/generated';
 import { SearchableSelect } from '../SearchableSelect';
 import { comfyUiSlotOptions } from '../../lib/comfyUi';
+import { MediaReferenceSettings } from './MediaReferenceSettings';
 
 interface ComfyUiCardProps {
   t: (key: string, ...args: (string | number)[]) => string;
@@ -16,14 +17,15 @@ const SLOTS: { modality: MediaModality; icon: string; field: 'image_model' | 'vi
 
 const FAMILIES_BY_FOLDER: Record<string, ComfyFamily[]> = {
   checkpoints: ['flux_schnell', 'sdxl'],
-  diffusion_models: ['wan21_t2v'],
+  diffusion_models: ['wan21_t2v', 'wan21_vace'],
 };
 
-interface SlotDraft { steps: string; cfg: string; sampler: string; scheduler: string }
+interface SlotDraft { denoise: string; steps: string; cfg: string; sampler: string; scheduler: string }
 interface SettingsDraft { endpoint: string; installDir: string; image: SlotDraft; video: SlotDraft }
 
 function slotDraft(settings: ComfyGenSettings): SlotDraft {
   return {
+    denoise: settings.denoise != null ? String(settings.denoise) : '',
     steps: settings.steps != null ? String(settings.steps) : '',
     cfg: settings.cfg != null ? String(settings.cfg) : '',
     sampler: settings.sampler ?? '',
@@ -43,6 +45,7 @@ function settingsDraft(status: ComfyUiStatus): SettingsDraft {
 /** Empty fields fall back to the family defaults on the server. */
 function slotSettings(draft: SlotDraft): ComfyGenSettings {
   return {
+    denoise: draft.denoise.trim() ? Number(draft.denoise) : undefined,
     steps: draft.steps.trim() ? Number(draft.steps) : null,
     cfg: draft.cfg.trim() ? Number(draft.cfg) : null,
     sampler: draft.sampler || null,
@@ -52,7 +55,7 @@ function slotSettings(draft: SlotDraft): ComfyGenSettings {
 
 /** The family the slot's model runs with, for the placeholders. */
 function slotFamily(status: ComfyUiStatus, modality: MediaModality): ComfyFamily | null {
-  if (modality === 'video') return 'wan21_t2v';
+  if (modality === 'video') return status.models.find(model => model.folder === 'diffusion_models' && model.file === status.video_model)?.family ?? null;
   return status.models.find(model => model.folder === 'checkpoints' && model.file === status.image_model)?.family ?? null;
 }
 
@@ -306,6 +309,8 @@ export function ComfyUiCard({ t }: ComfyUiCardProps) {
             {status.video_model && status.video_blocker && (
               <p className="set-ollama-context-error" role="alert">{status.video_blocker}</p>
             )}
+            {SLOTS.map(({ modality, field }) => status[field] && <MediaReferenceSettings
+              key={`${modality}:${status[field]}`} connectionId="local:comfyui" model={status[field] ?? ''} modality={modality} t={t} />)}
             <div className="set-ollama-tier-guidance">💡 {t('comfyui.guidance')}</div>
             {status.models.some(model => !model.family || model.chosen) && (
               <div className="set-ollama-context-list" data-testid="comfyui-families">
@@ -454,6 +459,13 @@ export function ComfyUiCard({ t }: ComfyUiCardProps) {
                           onChange={event => editSlot(modality, 'cfg', event.target.value)}
                         />
                       </div>
+                      {modality === 'image' && family === 'sdxl' && <div className="set-ollama-context-editor">
+                        <label htmlFor="comfyui-denoise">{t('comfyui.settings.denoise')}</label>
+                        <input id="comfyui-denoise" type="number" min={0} max={0.99} step={0.05}
+                          value={slot.denoise} placeholder="0.55" disabled={savingSettings}
+                          onChange={event => editSlot(modality, 'denoise', event.target.value)} />
+                        <p className="set-hint">{t('comfyui.settings.denoiseHint')}</p>
+                      </div>}
                       <div className="set-ollama-tier-row">
                         <span className="set-ollama-tier-label">{t('comfyui.settings.sampler')}</span>
                         <SearchableSelect
