@@ -38,7 +38,12 @@ pub(super) fn recovery_plan(
         let owner = steps
             .iter()
             .position(|s| s.target_file == diagnostic.path)
-            .or_else(|| steps.iter().position(|s| s.target_file == "docs/AGENTS.md"))
+            .or_else(|| {
+                // The entry point of whatever root the chain was relocated to.
+                steps
+                    .iter()
+                    .position(|s| s.target_file.rsplit('/').next() == Some("AGENTS.md"))
+            })
             .unwrap_or(0) as u32
             + 1;
         plan.entry(owner).or_default().push(diagnostic.clone());

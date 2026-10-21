@@ -23,7 +23,7 @@ const noop = () => {};
 const PROJECT: Project = {
   id: 'p-states', name: 'states-target', path: '/repos/states-target',
   repo_url: null, token_override: null, ai_config: { detected: false, configs: [] },
-  audit_status: 'Audited', ai_todo_count: 0, tech_debt_count: 0,
+  audit_status: 'Audited', briefing_notes: '# Project Briefing', ai_todo_count: 0, tech_debt_count: 0,
   needs_docs_migration: false, path_exists: true,
   created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
 };

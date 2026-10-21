@@ -152,6 +152,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // deliberately never mints one — then load the encrypted credentials. Runs
     // before the auth-token handling below, which reads the stored token.
     kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
+    // Before any request resolves a project's AI doc folder (KT-263).
+    kronn::arm_docs_locations(&database).await?;
 
     let max_agents = if app_config.server.max_concurrent_agents > 0 {
         app_config.server.max_concurrent_agents

@@ -17,6 +17,7 @@ mod agent_launch;
 pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
 pub mod briefing;
+pub mod briefing_cards;
 pub(crate) mod briefing_docs;
 pub(crate) mod briefing_load;
 pub(crate) mod briefing_rules;
@@ -1129,12 +1130,15 @@ pub(crate) fn dated_step_prompt(
     gate: &str,
     step_prompt: &str,
     now: chrono::DateTime<chrono::Utc>,
+    docs_root: &crate::core::docs_location::DocsRoot,
 ) -> String {
     let today = now.format("%Y-%m-%d").to_string();
     let today_compact = now.format("%Y%m%d").to_string();
     format!(
         "Today's date is {today} (YYYYMMDD: {today_compact}).\n\n{}\n\n{}{}",
-        PROMPT_PREAMBLE, gate, step_prompt
+        docs_root.relocate(PROMPT_PREAMBLE),
+        gate,
+        step_prompt
     )
     .replace("YYYYMMDD=today", &format!("YYYYMMDD={today_compact}"))
     .replace("today's date (YYYY-MM-DD)", &today)
@@ -1200,6 +1204,54 @@ pub(crate) fn gate_for_step(step_1_based: usize, first_chained_step: usize) -> &
     }
 }
 
+/// The chain for `kind` with every target, source and prompt rewritten under
+/// the project's docs root (KT-1192). Identity for `docs/`.
+pub(crate) fn steps_for(
+    kind: crate::models::AuditKind,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> Vec<AnalysisStep> {
+    relocate_steps(assemble_chained_steps(kind), docs_root)
+}
+
+pub(crate) fn relocate_steps(
+    steps: Vec<AnalysisStep>,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> Vec<AnalysisStep> {
+    if docs_root.is_default() {
+        return steps;
+    }
+    steps
+        .into_iter()
+        .map(|step| AnalysisStep {
+            target_file: docs_root.relocate_static(step.target_file),
+            prompt: docs_root.relocate_static(step.prompt),
+            sources: relocate_sources(step.sources, docs_root),
+        })
+        .collect()
+}
+
+fn relocate_sources(
+    sources: &'static [&'static str],
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> &'static [&'static str] {
+    if !sources.iter().any(|s| docs_root.relocate(s) != *s) {
+        return sources;
+    }
+    // Interned like the strings: one slice per (root, source list).
+    type Interned = std::collections::HashMap<(String, usize), &'static [&'static str]>;
+    static SLICES: std::sync::LazyLock<std::sync::Mutex<Interned>> =
+        std::sync::LazyLock::new(Default::default);
+    let key = (docs_root.rel().to_string(), sources.as_ptr() as usize);
+    let mut cache = SLICES.lock().unwrap_or_else(|e| e.into_inner());
+    cache.entry(key).or_insert_with(|| {
+        let relocated: Vec<&'static str> = sources
+            .iter()
+            .map(|s| docs_root.relocate_static(s))
+            .collect();
+        Box::leak(relocated.into_boxed_slice())
+    })
+}
+
 pub(crate) fn assemble_chained_steps(kind: crate::models::AuditKind) -> Vec<AnalysisStep> {
     use crate::models::AuditKind;
     if !matches!(kind, AuditKind::Full) {
@@ -1228,6 +1280,7 @@ pub(crate) fn step8_context_block(
     signals: &[crate::core::audit_detectors::DetectedSignal],
     ecosystems: &[crate::core::audit_ecosystems::Ecosystem],
     prior_td_digests: &[reconciliation::PriorDigest],
+    docs_root: &crate::core::docs_location::DocsRoot,
 ) -> String {
     let mut out = format!(
         "\n\n{}\n\n{}",
@@ -1237,7 +1290,7 @@ pub(crate) fn step8_context_block(
     if !prior_td_digests.is_empty() {
         out.push_str(&format!(
             "\n\n{}\n",
-            reconciliation::render_known_debt_block(prior_td_digests),
+            reconciliation::render_known_debt_block(prior_td_digests, docs_root),
         ));
     }
     out
@@ -1250,14 +1303,24 @@ pub(crate) fn decisions_context_block(
     project: &std::path::Path,
     step: &AnalysisStep,
     baseline: &str,
+    docs_root: &crate::core::docs_location::DocsRoot,
 ) -> String {
-    if !step.target_file.starts_with("docs/inconsistencies-") {
+    if !docs_root
+        .strip(step.target_file)
+        .is_some_and(|rest| rest.starts_with("inconsistencies-"))
+    {
         return String::new();
     }
-    let block = crate::core::adr::in_force_prompt_block(&project.join("docs"), baseline);
+    let block = crate::core::adr::in_force_prompt_block(&docs_root.dir(project), baseline);
     if block.is_empty() {
         block
     } else {
+        // Only Kronn's header names the root; the ADR text stays as written.
+        let block = block.replacen(
+            "(docs/decisions.md)",
+            &format!("({})", docs_root.path("decisions.md")),
+            1,
+        );
         format!("\n\n{block}")
     }
 }
@@ -1265,10 +1328,13 @@ pub(crate) fn decisions_context_block(
 /// Whether a chained step can be refreshed via partial-audit: only steps
 /// with a REAL docs/ target are verifiable post-run — the synthetic REVIEW
 /// pseudo-step (no file) would pass the validator on exit code 0 alone.
-pub(crate) fn partial_selectable(step: &AnalysisStep) -> bool {
+pub(crate) fn partial_selectable(
+    step: &AnalysisStep,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> bool {
     step.target_file != "REVIEW"
         && !step.target_file.is_empty()
-        && step.target_file.starts_with("docs/")
+        && docs_root.contains(step.target_file)
 }
 
 /// Agents eligible to RUN an audit: the pipeline's only deliverable is
@@ -1329,7 +1395,7 @@ pub(crate) fn audit_refusal_message(agent: &crate::models::AgentType) -> String 
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "{agent:?} cannot run audits: Kronn has no file tools it can scope to the project for it, so the docs/ deliverables would silently never be written. Pick one of: {accepted}."
+        "{agent:?} cannot run audits: Kronn has no file tools it can scope to the project for it, so the documentation deliverables would silently never be written. Pick one of: {accepted}."
     )
 }
 
@@ -2160,20 +2226,44 @@ mod prompt_tests {
         )
         .unwrap();
         let baseline = "## ADR-0001: CI is label-triggered\n\n- **Status**: accepted\n";
-        let block = decisions_context_block(dir.path(), td_step, baseline);
+        let block = decisions_context_block(
+            dir.path(),
+            td_step,
+            baseline,
+            &crate::core::docs_location::DocsRoot::default(),
+        );
         assert!(
             block.contains("ADR-0001 — CI is label-triggered"),
             "{block}"
         );
         // Every sub-audit writes TD sheets too.
-        assert!(!decisions_context_block(dir.path(), &SECURITY_STEPS[0], baseline).is_empty());
+        assert!(!decisions_context_block(
+            dir.path(),
+            &SECURITY_STEPS[0],
+            baseline,
+            &crate::core::docs_location::DocsRoot::default()
+        )
+        .is_empty());
         // A documentation step gets nothing.
         assert_eq!(
-            decisions_context_block(dir.path(), &ANALYSIS_STEPS[0], baseline),
+            decisions_context_block(
+                dir.path(),
+                &ANALYSIS_STEPS[0],
+                baseline,
+                &crate::core::docs_location::DocsRoot::default()
+            ),
             ""
         );
         // An ADR accepted during the run is not offered to later steps.
-        assert_eq!(decisions_context_block(dir.path(), td_step, ""), "");
+        assert_eq!(
+            decisions_context_block(
+                dir.path(),
+                td_step,
+                "",
+                &crate::core::docs_location::DocsRoot::default()
+            ),
+            ""
+        );
     }
 
     #[test]
@@ -2641,7 +2731,12 @@ mod prompt_tests {
             .iter()
             .enumerate()
         {
-            let prompt = dated_step_prompt("", step.prompt, now);
+            let prompt = dated_step_prompt(
+                "",
+                step.prompt,
+                now,
+                &crate::core::docs_location::DocsRoot::default(),
+            );
             assert!(
                 prompt.starts_with("Today's date is 2026-10-03 (YYYYMMDD: 20261003)."),
                 "step {}",
@@ -2659,7 +2754,12 @@ mod prompt_tests {
         let prompt_of = |index: usize| {
             let step = &ANALYSIS_STEPS[index - 1];
             let reverify = reverifies_target(project.path(), index, step);
-            dated_step_prompt("", &step_prompt_body(step, reverify), now)
+            dated_step_prompt(
+                "",
+                &step_prompt_body(step, reverify),
+                now,
+                &crate::core::docs_location::DocsRoot::default(),
+            )
         };
         for (index, step) in ANALYSIS_STEPS.iter().enumerate().take(REVERIFIED_STEPS) {
             let index = index + 1;
@@ -3110,7 +3210,12 @@ mod prompt_tests {
     #[test]
     fn step8_context_carries_signals_then_the_stack_checklist() {
         use crate::core::audit_ecosystems::Ecosystem;
-        let block = step8_context_block(&[], &[Ecosystem::Rust], &[]);
+        let block = step8_context_block(
+            &[],
+            &[Ecosystem::Rust],
+            &[],
+            &crate::core::docs_location::DocsRoot::default_root(),
+        );
         let signals = block.find("Deterministic detector signals").unwrap();
         let stack = block.find("Stack-specific checklist").unwrap();
         assert!(signals < stack, "{block}");

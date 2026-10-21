@@ -342,9 +342,12 @@ pub(crate) async fn run_cross_step(
     Ok(report)
 }
 
-pub(crate) fn heading_for(target_file: &str) -> &'static str {
-    match target_file {
-        "docs/inconsistencies-security.md" => "Security findings (cross-agent audit)",
+pub(crate) fn heading_for(
+    target_file: &str,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> &'static str {
+    match docs_root.strip(target_file) {
+        Some("inconsistencies-security.md") => "Security findings (cross-agent audit)",
         _ => "Findings (cross-agent audit)",
     }
 }
@@ -358,8 +361,8 @@ pub(crate) fn write_outputs(
     run_id: &str,
     report: &mut CrossStepReport,
 ) -> Result<(), String> {
-    let docs = root.join("docs");
-    let td_dir = docs.join("tech-debt");
+    let docs_root = crate::core::docs_location::DocsRoot::of(root);
+    let td_dir = docs_root.file(root, "tech-debt");
     std::fs::create_dir_all(&td_dir).map_err(|e| format!("create {}: {e}", td_dir.display()))?;
     let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
     engine::assign_td_ids(&mut report.records, &td_dir, &yyyymmdd);
@@ -384,7 +387,7 @@ pub(crate) fn write_outputs(
         std::fs::write(&path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
     }
     let index = engine::render_index(&IndexInput {
-        heading: heading_for(target_file),
+        heading: heading_for(target_file, &docs_root),
         agents,
         records: &report.records,
         dropped: &report.dropped,
@@ -426,6 +429,7 @@ pub(crate) fn dispute_discussion(
         recovered_partial: false,
         session_tokens_at_message: None,
         author_cli_ordinal: None,
+        session_continuity: None,
         model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),
@@ -558,6 +562,7 @@ pub(crate) fn estimate(
     agents: u32,
     base: Option<(String, Option<u64>, Option<u64>)>,
     measured: Option<crate::db::audit_cross::MeasuredStep>,
+    docs_root: &crate::core::docs_location::DocsRoot,
 ) -> CrossAuditEstimate {
     let low = agents.max(engine::MIN_AGENTS as u32);
     let high = low * 2;
@@ -568,9 +573,8 @@ pub(crate) fn estimate(
     let measured_same = measured.as_ref().filter(|m| m.agents == Some(low as usize));
     CrossAuditEstimate {
         agents: low,
-        cross_checked_steps: engine::CROSS_CHECKED_TARGETS
-            .iter()
-            .map(|s| s.to_string())
+        cross_checked_steps: engine::cross_checked_targets(docs_root)
+            .map(str::to_string)
             .collect(),
         low_factor: low,
         high_factor: high,
@@ -605,10 +609,20 @@ pub async fn cross_audit_estimate(
         .agents
         .unwrap_or(engine::MIN_AGENTS as u32)
         .clamp(engine::MIN_AGENTS as u32, engine::MAX_AGENTS as u32);
-    let label = engine::CROSS_CHECKED_TARGETS[0].to_string();
     let result = state
         .db
         .with_read_conn(move |conn| {
+            // Step labels are the project's relocated targets (KT-1192).
+            let docs_root = match crate::db::projects::get_project(conn, &id)? {
+                Some(project) => crate::core::docs_location::DocsRoot::of(
+                    &crate::core::scanner::resolve_host_path(&project.path),
+                ),
+                None => crate::core::docs_location::DocsRoot::default_root(),
+            };
+            let label = engine::cross_checked_targets(&docs_root)
+                .next()
+                .unwrap_or_default()
+                .to_string();
             let base = match crate::db::audit_cross::latest_single_agent_step(conn, &id, &label)? {
                 Some(step) => {
                     // The step's figures as KT-1084's run cost reads them:
@@ -624,7 +638,7 @@ pub async fn cross_audit_estimate(
                 None => None,
             };
             let measured = crate::db::audit_cross::latest_cross_step(conn, &id, &label)?;
-            Ok(estimate(agents, base, measured))
+            Ok(estimate(agents, base, measured, &docs_root))
         })
         .await;
     match result {

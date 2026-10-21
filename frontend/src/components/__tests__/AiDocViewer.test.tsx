@@ -131,4 +131,19 @@ describe('AiDocViewer — docs/ root folder + project README', () => {
     await waitFor(() => expect(projects.readAiFile).toHaveBeenCalledWith('p1', 'docs/architecture/overview.md'));
     expect(file).toHaveAttribute('aria-current', 'true');
   });
+
+  it('opens a configured folder and selects its entry (KT-263)', async () => {
+    vi.mocked(projects.listAiFiles).mockResolvedValueOnce([
+      {
+        path: 'packages/x/docs', name: 'packages/x/docs', is_dir: true, children: [
+          { path: 'packages/x/docs/AGENTS.md', name: 'AGENTS.md', is_dir: false, children: [] },
+        ],
+      },
+    ]);
+    vi.mocked(projects.readAiFile).mockClear();
+    render(<AiDocViewer projectId="p2" />);
+    expect(await screen.findByText('AGENTS.md')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(projects.readAiFile).toHaveBeenCalledWith('p2', 'packages/x/docs/AGENTS.md'));
+  });
 });

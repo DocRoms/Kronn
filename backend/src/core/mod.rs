@@ -31,6 +31,8 @@ pub mod desktop_port;
 pub mod directives;
 pub mod doc_provenance;
 pub mod docs_citations;
+pub mod docs_folder;
+pub mod docs_location;
 pub mod docs_merge;
 pub mod docs_migration;
 pub mod docs_sidecar;

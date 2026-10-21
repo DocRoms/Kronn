@@ -136,7 +136,12 @@ pub async fn accept_audit_step(
     let Some(kind) = crate::models::AuditKind::from_label(&run.kind) else {
         return Json(ApiResponse::err(format!("Unknown audit kind {}", run.kind)));
     };
-    let chain = super::assemble_chained_steps(kind);
+    let chain = super::steps_for(
+        kind,
+        &crate::core::docs_location::DocsRoot::of(&crate::core::scanner::resolve_host_path(
+            &project.path,
+        )),
+    );
     let total = chain.len() as u32;
     if !(1..=total).contains(&step) {
         return Json(ApiResponse::err(format!(

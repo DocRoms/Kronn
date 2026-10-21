@@ -1769,6 +1769,9 @@ pub struct AgentProcess {
     activity_watched: bool,
     /// The launch's scoped bridge token; dropping the process revokes it.
     bridge_token: Option<crate::core::bridge_token::BridgeTokenGuard>,
+    /// Set when the runtime refused the requested resume and the turn went out
+    /// with the full history in a new session instead.
+    resume_fallback: Option<crate::models::SessionContinuityReason>,
 }
 
 /// Reads an HTTP agent's tool activity from outside its run.
@@ -1903,6 +1906,12 @@ impl AgentProcess {
     ) -> Self {
         self.bridge_token = guard;
         self
+    }
+
+    /// Why the requested resume was refused, when the turn fell back to the
+    /// full history in a new session.
+    pub fn resume_fallback(&self) -> Option<crate::models::SessionContinuityReason> {
+        self.resume_fallback
     }
 
     /// True when `next_line()` yields RAW token fragments to concatenate as-is,
@@ -2767,6 +2776,32 @@ impl AcpSessionStore {
             })
             .await
             .map_err(|error| format!("load completed conversation checkpoint: {error}"))
+    }
+
+    /// Why `load_completed_checkpoint` returned nothing for this scope.
+    pub async fn explain_missing_checkpoint(
+        &self,
+        agent_type: &AgentType,
+        project_scope: &Path,
+        cli_print: bool,
+    ) -> crate::models::SessionContinuityReason {
+        use crate::db::acp_runtime_sessions::CheckpointAbsence;
+        use crate::models::SessionContinuityReason as Reason;
+        let Some(key) = self.session_key(agent_type, project_scope, cli_print) else {
+            return Reason::ResumeUnsupported;
+        };
+        match self
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::acp_runtime_sessions::checkpoint_absence(conn, &key)
+            })
+            .await
+        {
+            Ok(CheckpointAbsence::NoSession) => Reason::NoStoredId,
+            Ok(CheckpointAbsence::ScopeChanged) => Reason::ScopeChanged,
+            Ok(CheckpointAbsence::TurnUnfinished) => Reason::PreviousTurnUnfinished,
+            Err(_) => Reason::StoreUnavailable,
+        }
     }
 
     /// The response writer commits this proof in its existing transaction.
@@ -3882,9 +3917,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // never attached the skill. Idempotent (skipped when already in skill_ids)
     // and inert outside enforce. The content is injected inline (the skill isn't
     // in skill_ids, so the native-files path wouldn't write it to disk).
+    // The project's AI doc entry, under its docs root (KT-1192).
+    let docs_root =
+        crate::core::docs_location::DocsRoot::of(std::path::Path::new(config.project_path));
+    let entry_rel = docs_root.path("AGENTS.md");
     let project_has_agents_md = !config.project_path.is_empty()
         && std::path::Path::new(config.project_path)
-            .join("docs/AGENTS.md")
+            .join(&entry_rel)
             .exists();
     let doc_author_prompt = if crate::core::anti_halluc::should_auto_attach_doc_author(
         crate::core::anti_halluc::current_mode(),
@@ -3977,7 +4016,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // when they discover stable facts, names the writable subfolders,
     // forbids `docs/AGENTS.md` direct edits, references the anti-secret
     // filter. Universal text, no per-agent customisation.
-    let memory_prelude = crate::core::user_context::build_memory_prelude_prompt();
+    let memory_prelude = docs_root
+        .relocate(&crate::core::user_context::build_memory_prelude_prompt())
+        .into_owned();
 
     // Combine all context parts with explicit section markers
     // (helps non-Claude agents distinguish instructions from task)
@@ -3988,7 +4029,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // chokepoint covers every agent surface (disc, audit, architect, QP
     // improver, batch, summarization, orchestration) — see core::anti_halluc.
     if let Some(preamble) = crate::core::anti_halluc::preamble_if_active() {
-        parts.push(preamble.to_string());
+        parts.push(docs_root.relocate(preamble).into_owned());
     }
     if !prelocalized_http_worker && !user_context.is_empty() {
         parts.push(format!(
@@ -4024,21 +4065,21 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 // Inline section headings to guide discovery; file-capable agents read the full
                 // entry document on demand.
                 let index = std::fs::read_to_string(
-                    std::path::Path::new(config.project_path).join("docs/AGENTS.md"),
+                    std::path::Path::new(config.project_path).join(&entry_rel),
                 )
                 .map(|doc| doc_section_index(&doc))
                 .unwrap_or_default();
                 parts.push(format!(
                     "=== PROJECT DOCUMENTATION ===\n\nThis project documents itself for agents \
-                     in `docs/AGENTS.md`. Call `read_file` on exactly that path, in ONE call, \
+                     in `{entry_rel}`. Call `read_file` on exactly that path, in ONE call, \
                      before working on the project. The file is there: do not go looking for it \
                      with `list_files`, `find_files` or `git_log`. It covers:\n\n{index}\n\n\
                      Open the files it points to the same way. Never describe this project from \
                      memory when the doc can be read."
                 ));
-            } else if let Ok(mut doc) = std::fs::read_to_string(
-                std::path::Path::new(config.project_path).join("docs/AGENTS.md"),
-            ) {
+            } else if let Ok(mut doc) =
+                std::fs::read_to_string(std::path::Path::new(config.project_path).join(&entry_rel))
+            {
                 // No workspace tools: inlining the entry doc is the only project
                 // grounding this agent can get.
                 const MAX_INLINE_DOC: usize = 24_000;
@@ -4057,10 +4098,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 // accessible" and cites files it never saw (observed 2026-07-01).
                 parts.push(format!(
                     "=== PROJECT DOCUMENTATION ===\n\nThe following is the ONLY project file \
-                     you have. Other files it mentions (docs/*, source code) are NOT available: \
+                     you have. Other files it mentions ({}/*, source code) are NOT available: \
                      you can NOT read or open them, and if asked you must say so. You may cite \
                      their paths as pointers for the USER to open, but never present their \
                      content as known to you.\n\n{}",
+                    docs_root.rel(),
                     doc
                 ));
             }
@@ -4705,6 +4747,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         token_fragments: false,
         activity_watched: false,
         bridge_token: bridge,
+        resume_fallback: None,
     })
 }
 
@@ -5312,7 +5355,7 @@ async fn run_acp_session(
         AgentRunPhase::OpeningSession,
         Some(startup_bounds.session_setup),
     );
-    let (resumed, resume_failed) = match resume_id {
+    let (resumed, resume_refused) = match resume_id {
         Some(conversation_id) => {
             let agent = match acp_agent(agent_type) {
                 Some(agent) => agent,
@@ -5340,15 +5383,21 @@ async fn run_acp_session(
                 return Err(acp_start_failure(&host, cancelled()).await);
             };
             match resumed {
-                Ok(()) => (Some(target), false),
+                Ok(()) => (Some(target), None),
                 // Capability absence and a positively identified missing
                 // session are safe before a prompt has any external effect.
                 // Authentication, timeout and transport errors are ambiguous:
                 // returning them avoids a potentially duplicate prompt.
                 Err(crate::acp::AcpError::CapabilityUnavailable {
                     capability: AcpCapability::Resume,
-                }) => (None, true),
-                Err(crate::acp::AcpError::SessionNotFound) => (None, true),
+                }) => (
+                    None,
+                    Some(crate::models::SessionContinuityReason::ResumeUnsupported),
+                ),
+                Err(crate::acp::AcpError::SessionNotFound) => (
+                    None,
+                    Some(crate::models::SessionContinuityReason::SessionExpired),
+                ),
                 Err(error) => {
                     let failure = timed_out(&error, AcpStartPhase::Session, started)
                         .unwrap_or_else(|| {
@@ -5361,7 +5410,7 @@ async fn run_acp_session(
                 }
             }
         }
-        None => (None, false),
+        None => (None, None),
     };
     let session = match resumed {
         Some(target) => target,
@@ -5449,7 +5498,7 @@ async fn run_acp_session(
         }
     }
 
-    let prompt_for_session = if resume_failed {
+    let prompt_for_session = if resume_refused.is_some() {
         fallback_prompt.unwrap_or(prompt)
     } else {
         prompt
@@ -5748,6 +5797,7 @@ async fn run_acp_session(
         token_fragments: true,
         activity_watched: true,
         bridge_token: None,
+        resume_fallback: resume_refused,
     })
 }
 
@@ -12011,6 +12061,7 @@ async fn start_ollama_http_with_idle(
         token_fragments: false,
         activity_watched: streamed,
         bridge_token: None,
+        resume_fallback: None,
     })
 }
 
@@ -14798,6 +14849,7 @@ mod acp_resume_tests {
             .success());
         assert_eq!(resumed.resumed.load(Ordering::SeqCst), 1);
         assert_eq!(resumed.created.load(Ordering::SeqCst), 0);
+        assert_eq!(resumed_process.resume_fallback(), None);
 
         let fallback = transport(ResumeOutcome::Missing, PromptOutcome::Complete);
         let mut fallback_process = run_fixture(
@@ -14823,6 +14875,11 @@ mod acp_resume_tests {
             ["complete history"],
             "a disappeared native session must receive the full prompt, never the delta"
         );
+        // KT-1202 — the message records that this turn fell back, and why.
+        assert_eq!(
+            fallback_process.resume_fallback(),
+            Some(crate::models::SessionContinuityReason::SessionExpired)
+        );
 
         let absent = transport(
             ResumeOutcome::CapabilityUnavailable,
@@ -14842,6 +14899,10 @@ mod acp_resume_tests {
         assert_eq!(
             absent.prompts.lock().unwrap().as_slice(),
             ["complete history"]
+        );
+        assert_eq!(
+            absent_process.resume_fallback(),
+            Some(crate::models::SessionContinuityReason::ResumeUnsupported)
         );
     }
 

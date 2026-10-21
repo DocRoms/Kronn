@@ -205,7 +205,13 @@ impl KronnToolExecutor {
     /// document and stays free.
     fn foreign_step_target_refusal(&self, call: &ToolCall) -> Option<String> {
         let own = self.audit_step_target.as_deref()?;
-        if own == "docs/decisions.md" || own == "REVIEW" {
+        // Targets are under the run's docs root (KT-1192).
+        let docs_root = self
+            .audit_workspace
+            .as_deref()
+            .map(crate::core::docs_location::DocsRoot::of)
+            .unwrap_or_default();
+        if docs_root.strip(own) == Some("decisions.md") || own == "REVIEW" {
             return None;
         }
         if !matches!(
@@ -219,7 +225,7 @@ impl KronnToolExecutor {
         if normalized == own {
             return None;
         }
-        let owner = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
+        let owner = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root)
             .iter()
             .position(|step| step.target_file == normalized)?;
         Some(format!(

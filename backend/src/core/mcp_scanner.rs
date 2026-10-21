@@ -3905,11 +3905,13 @@ pub fn build_mcp_server_listing(project_path: &str) -> String {
              `kronn-internal` tool, when you are about to use one.\n",
         );
     }
+    // Relative path, not the folder name: a configured `packages/x/docs` must
+    // not read as `docs` (KT-263).
+    let root = resolve_host_path(project_path);
     let doc_dir = format!(
         "{}/{}",
-        crate::core::scanner::detect_docs_dir(Path::new(&resolve_host_path(project_path)))
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
+        crate::core::docs_location::resolution(Path::new(&root))
+            .relative(Path::new(&root))
             .unwrap_or_else(|| "docs".to_string()),
         MCP_CONTEXT_SUBPATH
     );

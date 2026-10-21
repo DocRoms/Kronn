@@ -620,6 +620,12 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
         &[("id", P)],
     ),
     r(
+        "GET",
+        "/api/projects/{id}/briefing-status",
+        Read,
+        &[("id", P)],
+    ),
+    r(
         "POST",
         "/api/projects/{id}/full-audit",
         Effect,

@@ -596,6 +596,28 @@ button.dash-badge-tech-debt {
   cursor: pointer;
 }
 
+/* KT-1192 — briefing written with default answers, to be completed */
+.dash-badge-briefing-defaults {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: var(--kr-r-sm);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  background: rgba(var(--kr-warning-rgb), 0.12);
+  color: var(--kr-warning-soft);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
+}
+
+.briefing-form-defaults {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin-bottom: var(--kr-sp-3);
+}
+
 /* Docs section state banners (0.8.1): shown inside the AiDocViewer
    when audit_status isn't yet Validated. Tone matches the message
    urgency — info for "you can audit", warn for "validate to finalize". */
@@ -1041,6 +1063,50 @@ button.dash-badge-tech-debt {
 }
 
 .project-agent-files-error {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: rgb(var(--kr-error-rgb));
+}
+
+/* KT-263 — project AI doc folder */
+.project-docs-location {
+  margin-top: var(--kr-sp-6);
+  padding-top: var(--kr-sp-6);
+  border-top: 1px solid var(--kr-border-ghost);
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.project-docs-location h4 {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+
+.project-docs-location-help,
+.project-docs-location-effective {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-faint);
+}
+
+.project-docs-location-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.project-docs-location-row input {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.project-docs-location-error {
   margin: 0;
   font-size: var(--kr-fs-xs);
   color: rgb(var(--kr-error-rgb));

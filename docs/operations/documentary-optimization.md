@@ -21,10 +21,10 @@ large-inventory threshold.
 [src: file: backend/src/core/document_optimization.rs:247-284#validate_budgets]
 
 The report includes bytes, words, estimated tokens, routed documents and the
-five largest contributors for each detected adapter. [src: file: backend/src/core/document_optimization.rs:160-176#top_contributors]
+five largest contributors for each detected adapter. [src: file: backend/src/core/document_optimization.rs:171-187#top_contributors]
 Diagnostics cover
 budget overruns, unresolved placeholders, broken local links and file
 citations, duplicate or obsolete guides, orphan documents, large inventories
 that are not search-first, and mutable citation line ranges; only broken links
 and broken citations are blocking, the others are warnings.
-[src: file: backend/src/core/document_optimization.rs:943-960#is_blocking_code]
+[src: file: backend/src/core/document_optimization.rs:957-974#is_blocking_code]

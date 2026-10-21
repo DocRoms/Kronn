@@ -39,12 +39,19 @@ pub async fn check_drift(
     let project_path = scanner::resolve_host_path(&project.path);
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::core::checksums::check_drift_cached(&project_path)
+        let placeholders = crate::api::projects::template_reinstall::placeholder_docs(
+            &project_path,
+            &crate::api::projects::template::resolve_templates_dir().join("docs"),
+        );
+        (
+            crate::core::checksums::check_drift_cached(&project_path),
+            placeholders,
+        )
     })
     .await;
 
     match result {
-        Ok(drift) => {
+        Ok((drift, placeholder_docs)) => {
             let response = DriftCheckResponse {
                 audit_date: drift.audit_date,
                 stale_sections: drift
@@ -60,6 +67,7 @@ pub async fn check_drift(
                 total_sections: drift.total_sections,
                 sources_state: drift.sources_state,
                 broken_citations: drift.broken_citations,
+                placeholder_docs,
             };
             Json(ApiResponse::ok(response))
         }
@@ -184,13 +192,24 @@ pub async fn partial_audit(
     // Safety: early return above guarantees project is Some
     let project = project.expect("project is Some after early return");
     let project_path = scanner::resolve_host_path(&project.path);
+    // One root for every artefact (KT-1192); a broken override refuses.
+    let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
+        Ok(docs_root) => docs_root,
+        Err(reason) => {
+            let msg = serde_json::json!({ "error": reason });
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(Event::default().event("error").data(msg.to_string()))
+            }));
+            return Sse::new(stream);
+        }
+    };
 
     // Validate requested step numbers against the FULL chained pipeline
     // (foundation 1..9 + chained sub-audits 10..16), not just the 9
     // foundation steps — otherwise a drift-flagged sub-audit section (Codex
     // #8) could never be refreshed, the "Mettre à jour" button would send a
     // step the endpoint rejects.
-    let chain = super::assemble_chained_steps(crate::models::AuditKind::Full);
+    let chain = super::steps_for(crate::models::AuditKind::Full, &docs_root);
     let total_steps_available = chain.len();
     // An empty selection would run nothing and still end `done complete` — a
     // no-op masquerading as a refresh. Refuse it like the bridge does.
@@ -207,7 +226,7 @@ pub async fn partial_audit(
         // alone and a "refresh" could end Completed having verified
         // nothing. Refused before any lease/row exists.
         if (1..=total_steps_available).contains(&step)
-            && !super::partial_selectable(&chain[step - 1])
+            && !super::partial_selectable(&chain[step - 1], &docs_root)
         {
             let msg = serde_json::json!({
                 "error": format!("Step {step} ({}) is a synthetic step — it cannot be refreshed via partial-audit", chain[step - 1].target_file)
@@ -335,7 +354,17 @@ pub(crate) async fn run_partial_pipeline(
     // would be copied into a versioned `docs/AGENTS.md`.
     let linked_repos_block =
         crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
-    let chain = super::assemble_chained_steps(crate::models::AuditKind::Full);
+    let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
+        Ok(docs_root) => docs_root,
+        Err(reason) => {
+            let msg = serde_json::json!({ "error": reason });
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(Event::default().event("error").data(msg.to_string()))
+            }));
+            return Sse::new(stream);
+        }
+    };
+    let chain = super::steps_for(crate::models::AuditKind::Full, &docs_root);
     let redact_targets: Vec<String> = chain.iter().map(|s| s.target_file.to_string()).collect();
     let first_chained_step = ANALYSIS_STEPS.len() + 1;
 
@@ -586,7 +615,7 @@ pub(crate) async fn run_partial_pipeline(
             .any(|&n| chain[n - 1].target_file.ends_with("inconsistencies-tech-debt.md"));
         // KT-1174 — only the ADRs in force and the TD record lines present
         // before this refresh settle a TD.
-        let adr_baseline = crate::core::adr::StartOfRun::capture(&project_path.join("docs"));
+        let adr_baseline = crate::core::adr::StartOfRun::capture(&docs_root.dir(&project_path));
         let (detector_signals, ecosystems, prior_td_digests) = if step8_selected {
             let p = project_path.clone();
             let rules = project_rules.clone().unwrap_or_default().rules;
@@ -594,7 +623,7 @@ pub(crate) async fn run_partial_pipeline(
                 let scan = crate::core::audit_detectors::scan_project_with_rules(&p, &rules);
                 (scan.signals, scan.ecosystems)
             }).await.unwrap_or_default();
-            let digests = super::reconciliation::digest_prior_tech_debt(&project_path.join("docs"));
+            let digests = super::reconciliation::digest_prior_tech_debt(&docs_root.dir(&project_path));
             (signals, ecosystems, digests)
         } else {
             (Vec::new(), Vec::new(), Vec::new())
@@ -669,16 +698,16 @@ pub(crate) async fn run_partial_pipeline(
             // longer applies must still write its one-line "Not applicable".
             let gate = super::gate_for_step(step, first_chained_step);
             let reverify = super::reverifies_target(&project_path, step, analysis_step);
-            let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now());
+            let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now(), &docs_root);
 
             if let Some(ref notes) = briefing_notes {
-                full_prompt.push_str(&super::briefing::briefing_prompt_section(notes));
+                full_prompt.push_str(&super::briefing::briefing_prompt_section(notes, &docs_root));
             }
             if let Some(ref block) = linked_repos_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));
             }
             if analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
-                full_prompt.push_str(&super::step8_context_block(&detector_signals, &ecosystems, &prior_td_digests));
+                full_prompt.push_str(&super::step8_context_block(&detector_signals, &ecosystems, &prior_td_digests, &docs_root));
             }
             if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
                 full_prompt.push_str(&block);
@@ -686,7 +715,7 @@ pub(crate) async fn run_partial_pipeline(
             if let Some(block) = revalidation.as_ref().and_then(|r| r.blocks.get(&step)) {
                 full_prompt.push_str(block);
             }
-            full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline.decisions));
+            full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline.decisions, &docs_root));
             full_prompt.push_str(&super::briefing_rules::prompt_block(analysis_step.target_file, project_rules.as_ref()));
 
             // Rewrite-proof snapshot BEFORE the agent runs — compared as the
@@ -1398,7 +1427,8 @@ pub(crate) async fn run_partial_pipeline(
             tokio::task::spawn_blocking(move || {
                 // A trusted ADR settles its sheets before the scope is read.
                 let trust = baseline.trust();
-                if let Err(e) = crate::core::adr::settle_covered_sheets(&pp.join("docs"), trust) {
+                let docs = crate::core::docs_location::DocsRoot::of(&pp).dir(&pp);
+                if let Err(e) = crate::core::adr::settle_covered_sheets(&docs, trust) {
                     tracing::warn!("ADR check after the refresh failed: {e}");
                 }
                 super::reconciliation::td_validation_scope(&pp, &idx).undecided
@@ -1416,15 +1446,16 @@ pub(crate) async fn run_partial_pipeline(
 
         let pending_validation: Option<(Discussion, DiscussionMessage)> = if partial_success {
             let language = { state.config.read().await.language.clone() };
-            let prompt = super::helpers::build_partial_validation_prompt(
+            let prompt = docs_root.relocate(&super::helpers::build_partial_validation_prompt(
                 &refreshed_files, &run_td_ids, &language,
-            );
+            )).into_owned();
             let now = Utc::now();
             let disc_id = uuid::Uuid::new_v4().to_string();
             let msg = DiscussionMessage {
                 recovered_partial: false,
                 session_tokens_at_message: None,
                 author_cli_ordinal: None,
+                session_continuity: None,
                 model: None, lint_report: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 role: MessageRole::User,
@@ -1692,7 +1723,8 @@ pub(crate) async fn finalize_partial_run(
                 let (disc, msg) = pending.as_ref();
                 crate::db::discussions::insert_discussion(&tx, disc)?;
                 crate::db::discussions::insert_message(&tx, &disc.id, msg)?;
-                let td_dir = project_path.join("docs/tech-debt");
+                let td_dir = crate::core::docs_location::DocsRoot::of(&project_path)
+                    .file(&project_path, "tech-debt");
                 let counts = super::full::count_td_severities(&td_dir);
                 let score = crate::models::compute_health_score(
                     counts.critical, counts.high, counts.medium, counts.low,
@@ -1759,6 +1791,7 @@ mod partial_finalize_tests {
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             lint_report: None,
             id: format!("{id}-m"),
@@ -2208,12 +2241,18 @@ mod partial_finalize_tests {
             prompt: "",
             sources: &[],
         };
-        assert!(!super::super::partial_selectable(&review));
+        assert!(!super::super::partial_selectable(
+            &review,
+            &crate::core::docs_location::DocsRoot::default()
+        ));
         let real = super::super::AnalysisStep {
             target_file: "docs/repo-map.md",
             prompt: "",
             sources: &[],
         };
-        assert!(super::super::partial_selectable(&real));
+        assert!(super::super::partial_selectable(
+            &real,
+            &crate::core::docs_location::DocsRoot::default()
+        ));
     }
 }

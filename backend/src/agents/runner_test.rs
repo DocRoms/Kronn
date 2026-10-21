@@ -13388,6 +13388,7 @@ Suite de la réponse.";
                 token_fragments: false,
                 activity_watched: false,
                 bridge_token: None,
+                resume_fallback: None,
             };
             let exit = process.wait().await.expect("leader exits");
             assert!(exit.success);
@@ -13516,6 +13517,7 @@ sleep 3600
             token_fragments: false,
             activity_watched: false,
             bridge_token: None,
+            resume_fallback: None,
         };
 
         // Call the production kill() method
@@ -13597,6 +13599,7 @@ sleep 3600
             token_fragments: false,
             activity_watched: false,
             bridge_token: None,
+            resume_fallback: None,
         };
 
         assert_eq!(process.reported_token_usage(), Some(8));

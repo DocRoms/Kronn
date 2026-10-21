@@ -26,6 +26,7 @@ import { setAuthToken } from '../lib/api';
 import { useTheme, type ThemeMode } from '../lib/ThemeContext';
 import { useLayoutDensity } from '../lib/layoutDensity';
 import { AgentsSection } from '../components/settings/AgentsSection';
+import { DefaultDocsDirSetting } from '../components/DefaultDocsDirSetting';
 import { CapabilityOriginBadge, type CapabilityOrigin } from '../components/settings/CapabilityOriginBadge';
 import { HostDiscoverySection } from '../components/settings/HostDiscoverySection';
 import { TourProgressCta } from '../components/tour/TourProgressCta';
@@ -1694,6 +1695,9 @@ export function SettingsPage({
               </button>
             </div>
           </div>
+
+          {/* Default AI doc folder (KT-263) */}
+          <DefaultDocsDirSetting t={t} />
 
           {/* Scan Ignore */}
           <div className="set-inner-divider">

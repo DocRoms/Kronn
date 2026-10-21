@@ -182,7 +182,10 @@ pub async fn validate_audit(
         let index_file = scanner::detect_docs_entry(&project_path);
 
         if !index_file.exists() {
-            return Err("docs/AGENTS.md not found — run the audit first".into());
+            return Err(format!(
+                "{} not found — run the audit first",
+                crate::core::docs_location::DocsRoot::of(&project_path).path("AGENTS.md")
+            ));
         }
 
         if optimize_documents {
@@ -239,7 +242,13 @@ fn unresolved_unknowns(
         .diagnostics
         .iter()
         .filter(|d| d.code == "placeholder")
-        .filter(|d| !d.path.starts_with("docs/tech-debt/") && !d.path.starts_with("docs/reports/"))
+        .filter(|d| {
+            let within = crate::core::docs_location::DocsRoot::of(project_path)
+                .strip(&d.path)
+                .unwrap_or_default()
+                .to_string();
+            !within.starts_with("tech-debt/") && !within.starts_with("reports/")
+        })
         .filter(|d| crate::core::document_optimization::kronn_owns(project_path, &d.path))
         .map(|d| d.path.clone())
         .collect();
@@ -270,7 +279,10 @@ pub async fn mark_bootstrapped(
         let index_file = scanner::detect_docs_entry(&project_path);
 
         if !index_file.exists() {
-            return Err("docs/AGENTS.md not found".into());
+            return Err(format!(
+                "{} not found",
+                crate::core::docs_location::DocsRoot::of(&project_path).path("AGENTS.md")
+            ));
         }
 
         kronn_state::mark_bootstrapped(&project_path)

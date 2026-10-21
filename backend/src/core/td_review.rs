@@ -47,14 +47,20 @@ pub fn is_settled(state: TdReviewState) -> bool {
 /// Every `TD-*.md` directly under `<docs>/tech-debt/`, sorted by id, without
 /// the task and talk links (the caller adds them from the DB).
 pub fn read_items(docs_dir: &Path) -> Vec<TdReviewItem> {
-    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
-        return Vec::new();
-    };
     let docs_name = docs_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("docs")
         .to_string();
+    read_items_rel(docs_dir, &docs_name)
+}
+
+/// `read_items` with the sheets' paths under `docs_rel`, the docs root as the
+/// repository names it (`packages/x/docs`, KT-1192).
+pub fn read_items_rel(docs_dir: &Path, docs_name: &str) -> Vec<TdReviewItem> {
+    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
+        return Vec::new();
+    };
     let mut items: Vec<TdReviewItem> = entries
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
@@ -219,10 +225,13 @@ pub fn gate(items: &[TdReviewItem]) -> TdValidationGate {
     }
 }
 
+/// Reads the sheets where the audit writes them: the project's docs root.
 pub fn validation_gate(project_path: &Path) -> TdValidationGate {
-    gate(&read_items(&crate::core::scanner::detect_docs_dir(
-        project_path,
-    )))
+    let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
+    gate(&read_items_rel(
+        &docs_root.dir(project_path),
+        docs_root.rel(),
+    ))
 }
 
 /// TD ids a text names, as whole tokens.

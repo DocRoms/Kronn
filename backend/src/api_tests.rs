@@ -2656,6 +2656,7 @@ mod tests {
                         recovered_partial: false,
                         session_tokens_at_message: None,
                         author_cli_ordinal: None,
+                        session_continuity: None,
                         id: "portable-http-message".into(),
                         role: crate::models::MessageRole::User,
                         channel: crate::models::MessageChannel::Main,
@@ -3526,6 +3527,7 @@ mod tests {
                         recovered_partial: false,
                         session_tokens_at_message: None,
                         author_cli_ordinal: None,
+                        session_continuity: None,
                         model: None,
                         lint_report: None,
                         id: uuid::Uuid::new_v4().to_string(),
@@ -4214,7 +4216,7 @@ mod tests {
                     mcp_sync_report: None,
                     default_skill_ids: vec![],
                     default_profile_id: None,
-                    briefing_notes: None,
+                    briefing_notes: Some("# Project Briefing".into()),
                     linked_repos: vec![],
                     workspace: None,
                     created_at: now,
@@ -4256,6 +4258,80 @@ mod tests {
             body_str.contains("Invalid step"),
             "Should contain error about invalid step: {body_str}"
         );
+    }
+
+    /// KT-1192 — no audit starts from the UI without a briefing: Full,
+    /// partial and revalidation answer a typed `briefing_required`, and the
+    /// gate opens once the briefing is saved.
+    #[tokio::test]
+    async fn every_audit_launch_without_a_briefing_is_refused_with_a_typed_code() {
+        let state = test_state();
+        let repo = tempfile::tempdir().unwrap();
+        let path = repo.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) \
+                     VALUES ('gate-proj', 'Gate', ?1, 'now', 'now')",
+                    [&path],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let sse = |uri: &'static str, body: serde_json::Value| {
+            let state = state.clone();
+            async move {
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap();
+                let resp = build_router_with_auth(state, false)
+                    .oneshot(req)
+                    .await
+                    .unwrap();
+                let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+        };
+        let launches = [
+            (
+                "/api/projects/gate-proj/full-audit",
+                serde_json::json!({ "agent": "ClaudeCode" }),
+            ),
+            (
+                "/api/projects/gate-proj/partial-audit",
+                serde_json::json!({ "agent": "ClaudeCode", "steps": [99] }),
+            ),
+            (
+                "/api/projects/gate-proj/revalidate-audit",
+                serde_json::json!({ "agent": "ClaudeCode" }),
+            ),
+        ];
+        for (uri, body) in launches.clone() {
+            let text = sse(uri, body).await;
+            assert!(text.contains("briefing_required"), "{uri}: {text}");
+            assert!(text.contains("briefing form"), "{uri}: {text}");
+        }
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::projects::update_project_briefing_notes(
+                    conn,
+                    "gate-proj",
+                    Some("# Project Briefing"),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        // Past the gate, the partial refresh reaches its own validation.
+        let text = sse(launches[1].0, launches[1].1.clone()).await;
+        assert!(!text.contains("briefing_required"), "{text}");
+        assert!(text.contains("Invalid step"), "{text}");
     }
 
     #[tokio::test]
@@ -6447,6 +6523,7 @@ mod tests {
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             lint_report: None,
             id: "user-message-1".into(),
@@ -7632,6 +7709,7 @@ mod tests {
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: None,
                     model: None,
                     lint_report: None,
                     id: uuid::Uuid::new_v4().to_string(),

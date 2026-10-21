@@ -499,10 +499,8 @@ pub(crate) fn apply_td_resolutions_at(
     if resolutions.is_empty() {
         return Err(anyhow!("At least one TD must be resolved"));
     }
-    let docs_dir = canonical_child(
-        project_path,
-        &crate::core::scanner::detect_docs_dir(project_path),
-    )?;
+    let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
+    let docs_dir = canonical_child(project_path, &docs_root.dir(project_path))?;
     let td_dir = canonical_child(&docs_dir, &docs_dir.join("tech-debt"))?;
 
     let mut seen = std::collections::HashSet::new();
@@ -517,7 +515,15 @@ pub(crate) fn apply_td_resolutions_at(
             .with_context(|| format!("cannot read {}", path.display()))?;
         let title = crate::core::td_index::parse_sheet(&resolution.td_id, &content).title;
         titles.insert(resolution.td_id.as_str(), title);
-        let updated = update_td(&content, resolution.action, origin)?;
+        let mut updated = update_td(&content, resolution.action, origin)?;
+        // The note quotes the project's docs root (KT-1192).
+        if !docs_root.is_default() {
+            updated = updated.replacen(
+                "recorded in docs/decisions.md.",
+                &format!("recorded in {}.", docs_root.path("decisions.md")),
+                1,
+            );
+        }
         updates.push((path, content, updated));
     }
 

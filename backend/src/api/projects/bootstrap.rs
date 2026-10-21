@@ -14,7 +14,7 @@ use crate::AppState;
 
 use super::{
     determine_parent_dir, enrich_audit_status,
-    template::{copy_dir_nondestructive, ensure_agent_writable_subfolders, resolve_templates_dir},
+    template::{ensure_agent_writable_subfolders, resolve_templates_dir},
 };
 
 /// POST /api/projects/bootstrap
@@ -95,9 +95,15 @@ pub async fn bootstrap(
             let template_dir = resolve_templates_dir();
             if template_dir.exists() {
                 let docs_template = template_dir.join("docs");
-                let docs_target = project_path.join("docs");
+                // The project's docs root (KT-1192): `docs/` unless configured.
+                let docs_root = crate::core::docs_location::DocsRoot::for_project(&project_path)?;
+                let docs_target = docs_root.dir(&project_path);
                 if docs_template.is_dir() {
-                    copy_dir_nondestructive(&docs_template, &docs_target)?;
+                    super::template::copy_dir_nondestructive_in(
+                        &docs_template,
+                        &docs_target,
+                        &docs_root,
+                    )?;
                 }
                 // 0.8.7 — copy the anti-hallu spec embedded in the binary
                 // into the project's `docs/conventions/` so any agent
@@ -240,6 +246,7 @@ pub async fn bootstrap(
         recovered_partial: false,
         session_tokens_at_message: None,
         author_cli_ordinal: None,
+        session_continuity: None,
         model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),

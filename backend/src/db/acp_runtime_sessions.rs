@@ -55,6 +55,39 @@ pub fn get_completed_checkpoint(
     .map_err(Into::into)
 }
 
+/// Why `get_completed_checkpoint` found nothing for this key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointAbsence {
+    /// No conversation recorded for this discussion, agent and runtime.
+    NoSession,
+    /// Conversations exist, but only for other directories.
+    ScopeChanged,
+    /// This scope has a conversation whose last turn never completed.
+    TurnUnfinished,
+}
+
+pub fn checkpoint_absence(conn: &Connection, key: &SessionKey) -> Result<CheckpointAbsence> {
+    let (same_scope, any_scope): (i64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(project_scope = ?4), 0), COUNT(*)
+         FROM acp_runtime_sessions
+         WHERE discussion_id = ?1 AND agent_type = ?2 AND runtime = ?3",
+        params![
+            key.discussion_id,
+            key.agent_type,
+            key.runtime,
+            key.project_scope
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(if same_scope > 0 {
+        CheckpointAbsence::TurnUnfinished
+    } else if any_scope > 0 {
+        CheckpointAbsence::ScopeChanged
+    } else {
+        CheckpointAbsence::NoSession
+    })
+}
+
 /// Retire old progress before a direct CLI can start processing another turn.
 /// Its init event will supply the session identity; absent init is not proof.
 pub fn invalidate_checkpoint(conn: &Connection, key: &SessionKey) -> Result<()> {
@@ -340,6 +373,30 @@ mod tests {
             input_message_id: input.into(),
             output_message_id: output.into(),
         }
+    }
+
+    /// KT-1202 — a missing checkpoint says why, so a fresh turn can be explained.
+    #[test]
+    fn checkpoint_absence_tells_a_new_session_from_a_moved_or_unfinished_one() {
+        let conn = connection();
+        let key = native_key();
+        assert_eq!(
+            checkpoint_absence(&conn, &key).unwrap(),
+            CheckpointAbsence::NoSession
+        );
+        begin_turn(&conn, &key, "session-1", "turn-1").unwrap();
+        assert_eq!(
+            checkpoint_absence(&conn, &key).unwrap(),
+            CheckpointAbsence::TurnUnfinished
+        );
+        let moved = SessionKey {
+            project_scope: "/project/b".into(),
+            ..key.clone()
+        };
+        assert_eq!(
+            checkpoint_absence(&conn, &moved).unwrap(),
+            CheckpointAbsence::ScopeChanged
+        );
     }
 
     #[test]

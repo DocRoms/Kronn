@@ -16,6 +16,7 @@ use rusqlite::Connection;
 use crate::core::audit_validation::{
     apply_td_resolutions_at, TdDecisionOrigin, TdResolution, TdResolutionAction,
 };
+use crate::core::docs_location::DocsRoot;
 use crate::core::td_index::is_td_id;
 use crate::core::{scanner, td_review, td_tasks};
 use crate::models::*;
@@ -61,11 +62,15 @@ fn err<T: serde::Serialize>((code, message): ApiErrorBody) -> Json<ApiResponse<T
     Json(ApiResponse::err_coded(code, message))
 }
 
+/// The TD sheets under the project's docs root, where the audit and
+/// `apply_td_resolutions_at` write them (KT-1192).
+fn read_root_items(project_path: &std::path::Path) -> Vec<TdReviewItem> {
+    let docs_root = DocsRoot::of(project_path);
+    td_review::read_items_rel(&docs_root.dir(project_path), docs_root.rel())
+}
+
 async fn read_items_blocking(project_path: PathBuf) -> anyhow::Result<Vec<TdReviewItem>> {
-    Ok(tokio::task::spawn_blocking(move || {
-        td_review::read_items(&scanner::detect_docs_dir(&project_path))
-    })
-    .await?)
+    Ok(tokio::task::spawn_blocking(move || read_root_items(&project_path)).await?)
 }
 
 fn parse_timestamp(raw: &str) -> DateTime<Utc> {
@@ -179,7 +184,7 @@ pub async fn list_tds(
     };
     let raw_path = project.path.clone();
     let files = tokio::task::spawn_blocking(move || {
-        let items = td_review::read_items(&scanner::detect_docs_dir(&project_path));
+        let items = read_root_items(&project_path);
         let validated = scanner::detect_audit_status(&raw_path) == AiAuditStatus::Validated;
         (items, validated)
     })
@@ -247,8 +252,7 @@ pub(crate) fn decide_at(
     project_path: &std::path::Path,
     items: &[TdDecisionItem],
 ) -> Result<TdDecideOutcome, String> {
-    let docs_dir = scanner::detect_docs_dir(project_path);
-    check_batch(items, &td_review::read_items(&docs_dir))?;
+    check_batch(items, &read_root_items(project_path))?;
     let resolutions: Vec<TdResolution> = items
         .iter()
         .map(|item| TdResolution {
@@ -271,7 +275,7 @@ pub(crate) fn decide_at(
         .collect();
     apply_td_resolutions_at(project_path, &with_reasons, TdDecisionOrigin::Review)
         .map_err(|e| e.to_string())?;
-    let after = td_review::read_items(&docs_dir);
+    let after = read_root_items(project_path);
     let states: BTreeMap<&str, TdReviewState> =
         after.iter().map(|i| (i.id.as_str(), i.state)).collect();
     let results = items
@@ -339,7 +343,8 @@ pub async fn create_td_task(
     };
     let wanted = td_id.clone();
     let sources = tokio::task::spawn_blocking(move || {
-        td_tasks::load_sources(&scanner::detect_docs_dir(&project_path))
+        let docs_root = DocsRoot::of(&project_path);
+        td_tasks::load_sources_rel(&docs_root.dir(&project_path), docs_root.rel())
             .into_iter()
             .filter(|s| s.sheet.id == wanted)
             .collect::<Vec<_>>()

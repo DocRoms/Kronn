@@ -67,7 +67,7 @@ alone does not establish a user-visible duration.
    injected context and sends the content to `ReactMarkdown` with
    `remark-gfm` and `remark-emoji`.
    [src: file: frontend/src/components/MessageBubble.tsx:2230-2275#MessageBody]
-   [src: file: frontend/src/components/MessageBubble.tsx:2179-2192#ReactMarkdown]
+   [src: file: frontend/src/components/MessageBubble.tsx:2203-2216#ReactMarkdown]
    Each message first renders as plain text and upgrades to Markdown once it is
    near the viewport or the browser is idle, so every message is still parsed.
    [src: file: frontend/src/components/MessageBubble.tsx:2128-2160#canDefer]

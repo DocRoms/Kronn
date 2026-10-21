@@ -32,7 +32,7 @@ import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
-import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction, WorkflowStepIdentity } from '../types/generated';
+import type { DiscussionMessage, SessionContinuity, AgentType, QuickPrompt, ContextFile, SourceCheck, MessageTarget, DiscussionAction, WorkflowStepIdentity } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, USER_MENTION_TRIGGER, agentColor, agentTextColor } from '../lib/constants';
 import { externalAgentColor } from '../lib/externalAgentIdentity';
@@ -57,6 +57,18 @@ import {
 } from 'lucide-react';
 
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
+/** Tooltip for the session-continuity marker: what happened, and why when known. */
+function sessionContinuityHint(
+  continuity: SessionContinuity,
+  t: (key: string, ...args: (string | number)[]) => string,
+): string {
+  if (continuity.status === 'resumed') return t('disc.session.resumedHint');
+  const reason = continuity.reason ? t(`disc.session.reason.${continuity.reason}`) : '?';
+  return continuity.status === 'fallback_full_history'
+    ? t('disc.session.fallbackHint', reason)
+    : t('disc.session.newHint', reason);
+}
+
 const RE_AUTH_ERROR = /api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i;
 const RE_PARTIAL_RESPONSE = /Réponse partielle.*interrompu|Timeout d'inactivité/i;
 const EDIT_TEXTAREA_MAX_HEIGHT = 160;
@@ -842,6 +854,18 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                       title={msg.model ? `Modèle : ${msg.model}` : `Palier : ${msg.model_tier}`}
                     >
                       · {msg.model ?? msg.model_tier}
+                    </span>
+                  )}
+                  {/* KT-1202 — whether this turn continued the agent's conversation. */}
+                  {msg.session_continuity && (
+                    <span
+                      className="disc-msg-session-continuity"
+                      data-testid="disc-msg-session-continuity"
+                      data-status={msg.session_continuity.status}
+                      style={{ opacity: 0.6, fontWeight: 400 }}
+                      title={sessionContinuityHint(msg.session_continuity, t)}
+                    >
+                      {' '}· {t(`disc.session.${msg.session_continuity.status}`)}
                     </span>
                   )}
                   {msg.author_pseudo && (

@@ -795,14 +795,19 @@ fn escape_markdown_table_cell(value: &str) -> String {
 /// Shared bounded, skip-aware walk. Files only; depth-capped; heavy dirs
 /// pruned. Matches `scanner::scan_kronn_markers` conventions.
 pub(crate) fn walk(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+    // The project's own AI doc folder is Kronn output wherever it lives (KT-1192).
+    let own_docs = crate::core::docs_location::DocsRoot::for_project(root)
+        .ok()
+        .map(|docs_root| docs_root.dir(root));
     WalkDir::new(root)
         .max_depth(8)
         .into_iter()
-        .filter_entry(|e| {
-            e.file_name()
-                .to_str()
-                .map(|name| !SKIP_DIRS.contains(&name))
-                .unwrap_or(true)
+        .filter_entry(move |e| {
+            own_docs.as_deref() != Some(e.path())
+                && e.file_name()
+                    .to_str()
+                    .map(|name| !SKIP_DIRS.contains(&name))
+                    .unwrap_or(true)
         })
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())

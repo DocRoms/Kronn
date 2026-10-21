@@ -21,6 +21,7 @@ use crate::models::AgentType;
 /// Briefing line that turns the option on, followed by the chosen agents.
 pub const BRIEFING_OPTION_PREFIX: &str = "- Cross-agent audit (experimental):";
 /// The finding steps run cross-agent. The documentation steps never are.
+/// Written for `docs/`; a project's own root relocates them.
 pub const CROSS_CHECKED_TARGETS: &[&str] = &["docs/inconsistencies-security.md"];
 pub const MIN_AGENTS: usize = 2;
 pub const MAX_AGENTS: usize = 3;
@@ -82,8 +83,21 @@ pub fn parse_agent_list(list: &str) -> Option<Vec<AgentType>> {
         .then_some(agents)
 }
 
-pub fn is_cross_checked_target(target_file: &str) -> bool {
-    CROSS_CHECKED_TARGETS.contains(&target_file)
+/// `target_file` is a step target of a chain relocated under `docs_root`.
+pub fn is_cross_checked_target(
+    target_file: &str,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> bool {
+    cross_checked_targets(docs_root).any(|t| t == target_file)
+}
+
+/// The cross-checked step targets under `docs_root`.
+pub fn cross_checked_targets(
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> impl Iterator<Item = &'static str> + '_ {
+    CROSS_CHECKED_TARGETS
+        .iter()
+        .map(|t| docs_root.relocate_static(t))
 }
 
 pub fn agent_label(agent: &AgentType) -> String {

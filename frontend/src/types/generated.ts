@@ -1415,6 +1415,23 @@ export type BriefingCommitConvention = "unknown" | "conventional" | "ticket_pref
 export type BriefingDefaultBranch = "unknown" | "main" | "master" | "develop" | "trunk";
 
 /**
+ * The folder the briefing proposes, and where the proposal comes from.
+ */
+export type BriefingDefaults = {
+/**
+ * Relative to the project root, without a trailing slash.
+ */
+docs_dir: string, docs_dir_source: BriefingDocsDirSource,
+/**
+ * The folder already exists in the project.
+ */
+folder_exists: boolean,
+/**
+ * What the proposed folder already holds.
+ */
+folder: DocsFolderState, };
+
+/**
  * A location found in the repository, offered as a pre-filled answer.
  */
 export type BriefingDetectedDoc = { path: string, kind: BriefingDocKind, is_dir: boolean, last_commit: string | null, };
@@ -1446,6 +1463,8 @@ source_of_truth: boolean,
 last_commit: string | null, };
 
 export type BriefingDocsAnswers = { locations: Array<BriefingDocLocation>, };
+
+export type BriefingDocsDirSource = "project_override" | "existing" | "global_default" | "default";
 
 /**
  * The state the user gives a location. `Unknown` is an unanswered state.
@@ -3408,7 +3427,12 @@ reply_to_message_id?: string | null,
  * `None` for User/System/native-agent messages and legacy rows with no
  * recorded CLI author.
  */
-author_cli_ordinal?: number | null, };
+author_cli_ordinal?: number | null,
+/**
+ * KT-1202 — whether this agent turn continued its CLI/ACP conversation or
+ * started a new one, and why. `None` for runtimes that never resume.
+ */
+session_continuity?: SessionContinuity | null, };
 
 /**
  * Lean surrounding-message shape for a `disc_get_message` window.
@@ -3711,6 +3735,25 @@ kronn_writes: Array<KronnWrite>,
  */
 changes: Array<ProvenanceChange>, };
 
+/**
+ * Which rule picked the folder.
+ */
+export type DocsDirSource = "project_override" | "detected";
+
+export type DocsFolderState = { "kind": "missing" } | { "kind": "kronn_managed" } | { "kind": "human_docs",
+/**
+ * Files a move to `legacy/` would carry.
+ */
+files: number,
+/**
+ * A static-site generator config that references the folder.
+ */
+site_generator: string | null,
+/**
+ * `<folder>/legacy/` already exists: Kronn never merges into it.
+ */
+legacy_exists: boolean, };
+
 export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
 
 /**
@@ -3741,7 +3784,11 @@ export type DriftCheckResponse = { audit_date: string | null, stale_sections: Ar
 /**
  * "Sources clean" badge, recomputed from the cited lines.
  */
-sources_state: SourcesState, broken_citations: number, };
+sources_state: SourcesState, broken_citations: number,
+/**
+ * Template docs that still hold raw `{{PLACEHOLDERS}}` (KT-1203).
+ */
+placeholder_docs: Array<PlaceholderDoc>, };
 
 export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>, };
 
@@ -6132,6 +6179,20 @@ resume_token: string,
  */
 self_alias: string | null, cli_ordinal: number | null, };
 
+/**
+ * A template doc still holding raw `{{PLACEHOLDERS}}`, with the Full-chain
+ * step that fills it.
+ */
+export type PlaceholderDoc = {
+/**
+ * Project-relative path.
+ */
+path: string,
+/**
+ * 1-based step for `partial-audit`; `None` when no audit step targets the file.
+ */
+step: number | null, };
+
 export type PlanningActor = { kind: PlanningActorKind, id: string | null,
 /**
  * Durable joined-CLI source session. Two sessions of the same provider
@@ -6437,6 +6498,25 @@ export type ProjectDockerService = { service: string, container_name: string | n
  * Snapshot returned by the project-scoped Docker Compose status endpoint.
  */
 export type ProjectDockerStatus = { compose_present: boolean, compose_file: string | null, docker_available: boolean, daemon_available: boolean, services: Array<ProjectDockerService>, checked_at: string, error: string | null, };
+
+export type ProjectDocsLocation = {
+/**
+ * The project's own override, as saved.
+ */
+override_dir: string | null,
+/**
+ * The global default from the settings: it pre-fills the briefing and
+ * never applies by itself (KT-1192).
+ */
+default_dir: string | null,
+/**
+ * The folder in use, relative to the project root; `None` when refused.
+ */
+effective_dir: string | null, source: DocsDirSource,
+/**
+ * Why a configured folder is not used.
+ */
+refused: string | null, };
 
 export type ProjectGithubConnection = { project_id: string, mode: GithubConnectionMode, state: GithubConnectionState, machine_token_available: boolean, machine_token_source: GithubMachineTokenSource | null,
 /**
@@ -7844,7 +7924,12 @@ export type ScanConfig = { paths: Array<string>, ignore: Array<string>,
 /**
  * Max depth when scanning for git repos (2–10, default 4)
  */
-scan_depth: number, };
+scan_depth: number,
+/**
+ * Default AI doc folder, relative to each project root (KT-263). `None`
+ * keeps the historical detection (`docs/` → `doc/` → `ai/`).
+ */
+default_docs_dir?: string, };
 
 export type ScheduleAgentWakeRequest = { delay_seconds: number, reason: string, dedupe_key: string, task_execution_id?: string | null, };
 
@@ -8231,6 +8316,18 @@ max_turns: number,
  */
 soft_ratio: number, };
 
+export type SessionContinuity = { status: SessionContinuityStatus, reason?: SessionContinuityReason | null, };
+
+/**
+ * Why a turn did not resume.
+ */
+export type SessionContinuityReason = "no_stored_id" | "scope_changed" | "previous_turn_unfinished" | "session_expired" | "history_changed" | "nothing_new" | "delta_not_smaller" | "resume_unsupported" | "store_unavailable";
+
+/**
+ * How an agent turn related to the CLI/ACP conversation of the previous one.
+ */
+export type SessionContinuityStatus = "resumed" | "new" | "fallback_full_history";
+
 /**
  * A bridge-held secret, carried without ever being printed.
  *
@@ -8285,6 +8382,12 @@ num_ctx: number | null,
 warnings: Array<string>, };
 
 export type SetProjectAgentFiles = { policy: AgentFilesPolicy, };
+
+export type SetProjectDocsLocation = {
+/**
+ * `None` or blank clears the override.
+ */
+dir?: string | null, };
 
 /**
  * `PUT /api/projects/{id}/github`. `token` is read only for `stored_token`.
@@ -9408,7 +9511,15 @@ skipped: Array<string>,
 /**
  * Human-validated docs this reinstall rewrote, now to reconfirm.
  */
-to_reconfirm: Array<string>, };
+to_reconfirm: Array<string>,
+/**
+ * Template docs still holding placeholders afterwards, with their step.
+ */
+placeholder_docs: Array<PlaceholderDoc>,
+/**
+ * `TemplateInstalled` when the docs entry itself is a raw template again.
+ */
+audit_status: AiAuditStatus, };
 
 export type TemplateReinstallRequest = {
 /**

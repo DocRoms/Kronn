@@ -89,7 +89,7 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
-`[src: file: backend/src/lib.rs:2726-2740#decline]`
+`[src: file: backend/src/lib.rs:2752-2766#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:511#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:168-189#pending_question_count]`
 `[src: file: backend/src/db/sql/168_discussion_questions.sql:1#discussion_questions]`
@@ -365,7 +365,7 @@ Planning catalogue natively and executes it through the same HTTP handlers,
 with the discussion scope and actor provenance supplied server-side. Vibe's
 programmatic runner deliberately disables MCP; its supported Planning write
 path is the human-gated `kronn-plan-action` fence.
-`[src: file: backend/src/api/agent_tools.rs:492-499#tool_catalogue]`
+`[src: file: backend/src/api/agent_tools.rs:498-505#tool_catalogue]`
 `[src: file: backend/scripts/vibe-runner.py:2-6#run_programmatic]`
 
 ## Task execution lifecycle
@@ -588,14 +588,14 @@ A running audit does not defer the reload: it runs detached on the
 backend and the bridge only subscribes to its SSE. Retry the refused mutation once with the same idempotency
 key. If preflight, handoff or reexec fails, the bridge stops automatic attempts and
 reports one precise manual reconnect/recovery action instead.
-`[src: file: backend/scripts/disc-introspection-mcp.py:10447-10456#_require_fresh_bridge]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11258-11278#_bridge_stale_result]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11042-11066#_schedule_bridge_reload]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10468-10477#_require_fresh_bridge]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11291-11311#_bridge_stale_result]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11075-11099#_schedule_bridge_reload]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:11110-11171#_perform_scheduled_bridge_reload]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:2843-2872#_restore_reload_handoff]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11232-11240#_close_inherited_reload_artifact]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11876-11889#list_changed]`
-`[src: file: backend/scripts/test_disc_introspection_mcp.py:8301-8317#test_reload_is_not_deferred_by_a_detached_full_audit]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11265-11273#_close_inherited_reload_artifact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11921-11934#list_changed]`
+`[src: file: backend/scripts/test_disc_introspection_mcp.py:8343-8359#test_reload_is_not_deferred_by_a_detached_full_audit]`
 
 The replacement process restores the room and durable read cursor through the
 existing binding files; no invitation token is needed. A changed mtime with
@@ -603,8 +603,8 @@ identical contents is not stale. `task_exec_status` remains available for
 recovery; every orchestration mutation stays fail-closed until the fresh bridge
 is ready.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4024-4042#_attempt_resume]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10433-10444#_bridge_freshness]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10458-10473#_GUARDED_ORCHESTRATION_TOOLS]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10454-10465#_bridge_freshness]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10479-10494#_GUARDED_ORCHESTRATION_TOOLS]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
 process that loaded the preceding schema. After upgrading to 0.11.0, reconnect
@@ -676,7 +676,7 @@ agent-type/alias matching or any other permissive resolution if either is missin
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration.rs:23676-23680#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration.rs:23678-23682#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:78-165#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,
@@ -743,9 +743,9 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:12592-12641#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2631-2659#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:12636-12685#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2631-2659#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:5740-5774#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:11730-11743#_spawned_task_worker_mode]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:5740-5774#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:11763-11776#_spawned_task_worker_mode]`
 
 Native HTTP workers can finish the Git side of that contract without receiving
 a shell. Their catalogue includes `git_commit`, but execution is refused unless
@@ -1080,8 +1080,8 @@ The Python catalogue distinguishes bounded work from idle listening, and one
 shared orientation supplies the join manual, wait manual and initialize text.
 This is a source instruction contract, not a guarantee that a running host has
 loaded or follows it. See [the diagnosis and qualification](../../gotchas/joined-cli-work-loop.md).
-[src: file: backend/scripts/disc-introspection-mcp.py:9789-9793#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10355-10359#TOOL_MANUALS]
+[src: file: backend/scripts/disc-introspection-mcp.py:9810-9814#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10376-10380#TOOL_MANUALS]
 
 The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, OpenCode → OpenCode, …), then from the parent command line, so no env-var prep is needed. An unidentified CLI joins as `Unknown`: it can read and post, but no implicit turn is routed to it. Set `KRONN_AGENT_TYPE` to name it explicitly.
 
@@ -1111,7 +1111,7 @@ an explicit target still takes precedence. Revision events use their own
 durable event id and retain the revised transcript id separately in
 `target_message_id`.
 [src: file: backend/scripts/disc-introspection-mcp.py:3944-3964#_ack_pending_read_cursors] [src: file: backend/scripts/disc-introspection-mcp.py:7001-7018#delivered_message_ids]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:9904-9952#test_wait_without_explicit_cursor_uses_and_advances_durable_read_cursor]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:9976-10024#test_wait_without_explicit_cursor_uses_and_advances_durable_read_cursor]
 [src: file: backend/src/api/disc_invite.rs:1087-1127#WaitForPeerMessage] [src: file: backend/src/api/disc_invite.rs:1201-1209#withheld_by_routing]
 
 Human turns use typed identities. `discussion_agent` means the configured
@@ -1152,7 +1152,7 @@ the other manuals. Native tools read the same registry that the MCP bridge
 fetches through `GET /api/signals/catalog`; the bridge fails explicitly if that
 read fails, rather than substituting a stale local schema.
 [src: file: backend/src/api/signal_catalog.rs:10-18#catalogue]
-[src: file: backend/scripts/disc-introspection-mcp.py:10409-10417#TOOL_MANUALS]
+[src: file: backend/scripts/disc-introspection-mcp.py:10430-10438#TOOL_MANUALS]
 
 Version 1 describes the `kronn-action` Markdown fence for existing Quick Prompts,
 Quick APIs, Quick Execs and workflows. It includes target-discovery tools, a

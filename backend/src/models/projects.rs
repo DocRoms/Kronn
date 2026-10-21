@@ -1769,6 +1769,20 @@ pub struct DriftCheckResponse {
     pub sources_state: crate::core::citation_drift::SourcesState,
     #[serde(default)]
     pub broken_citations: usize,
+    /// Template docs that still hold raw `{{PLACEHOLDERS}}` (KT-1203).
+    #[serde(default)]
+    pub placeholder_docs: Vec<PlaceholderDoc>,
+}
+
+/// A template doc still holding raw `{{PLACEHOLDERS}}`, with the Full-chain
+/// step that fills it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PlaceholderDoc {
+    /// Project-relative path.
+    pub path: String,
+    /// 1-based step for `partial-audit`; `None` when no audit step targets the file.
+    pub step: Option<usize>,
 }
 
 /// `POST /api/projects/:id/citation-drift/acknowledge` body: the doc whose

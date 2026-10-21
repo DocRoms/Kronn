@@ -493,6 +493,11 @@ pub struct ScanConfig {
     /// Max depth when scanning for git repos (2–10, default 4)
     #[serde(default = "default_scan_depth")]
     pub scan_depth: usize,
+    /// Default AI doc folder, relative to each project root (KT-263). `None`
+    /// keeps the historical detection (`docs/` → `doc/` → `ai/`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_docs_dir: Option<String>,
 }
 
 fn default_scan_depth() -> usize {

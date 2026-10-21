@@ -274,6 +274,54 @@ Release notes for 0.9.3 and earlier are available in the
   citations the integration had shifted were repaired: 1 by the command, 15
   by hand, because their symbol occurs several times (for one of them the
   nearest occurrence was the wrong one).
+- The AI doc folder is configurable (KT-263). Settings › Project scanning sets
+  a default folder relative to every project root, and each project can
+  override it from its page; without an override, detection stays `docs/` →
+  `doc/` → `ai/`. Detection, the audit badge, the evidence file, the context audit, the
+  redirectors and the doc viewer all read the same resolver. A folder that is
+  absolute, uses `..`, points into `.git` or reaches outside the project
+  through a symlink is refused with a 400 when saved and fails closed when
+  used. New column `projects.docs_dir` (migration 258).
+- The audit pipeline writes under the project's AI doc folder (KT-1192). One
+  root, resolved per run: step targets, TD sheets, `decisions.md`,
+  `briefing.md`, `project.md`, the `inconsistencies-*.md` indexes, checksums,
+  the installed templates, the root redirectors and every path the step,
+  validation and briefing prompts quote follow it, for Full and partial
+  audits, sub-audits, revalidation, template reinstall and merge. A project
+  without an override keeps `docs/` with byte-identical prompts. The legacy
+  `ai/` → `docs/` migration still applies only to unconfigured projects.
+- The briefing asks for the « Dossier de la documentation IA » (KT-1192),
+  pre-filled with the project's override, else the folder it already
+  documents itself in, else the default from Settings, else `docs/`. Saving
+  it sets the project's folder through the same containment check (400 on
+  refusal); the default from Settings now only pre-fills this field and
+  never applies to a project by itself.
+- No audit starts without a briefing (KT-1192): Full, partial, sub-audit and
+  revalidation launches answer `error_code: briefing_required`. In the UI
+  the briefing step is required and its form gets a one-click « Utiliser
+  les valeurs par défaut ». An MCP launch (`audit_launch`, `audit_prepare`)
+  receives the briefing as ready-to-post `kronn-question` cards in the
+  discussion's language, as a set of its own (`briefing-<field>.<set>`
+  keys); once every card of the latest set is answered in that discussion,
+  Kronn saves the briefing through the form's validation, and answers to a
+  superseded set are saved nowhere. A launch with no
+  discussion (a workflow run) gets default answers, flagged « valeurs par
+  défaut — à compléter » on the project card.
+- An existing AI doc folder is handled explicitly (KT-1192). Kronn's own docs
+  are updated in place without a question; they need both a `.kronn.json`
+  recording an audit or a bootstrap and a structural marker (a line-leading
+  `kronn:doc-version` / `kronn:generated` header, paired `kronn:section` or
+  managed-block markers outside code, or the AGENTS.md signature). A mention
+  of Kronn, or markers without that record, is a human's docs.
+  A folder of human docs shows « Le dossier … utilisé par Kronn existe déjà »
+  and asks: put Kronn's docs in another folder, or move them to
+  `<folder>/legacy/` (file count, broken links and a detected mkdocs,
+  Docusaurus or VitePress config are stated first); the audit then reads
+  them as its primary source. The silent pre-audit move is gone: nothing
+  moves without that choice, never into an existing `legacy/`, and only once
+  the briefing is committed (a failed save leaves the folder as it was). An
+  audit or unattended launch on such a folder without a choice stops with
+  `docs_folder_choice_required`.
 - Audit versions and standards are judged from dated sources (KT-1000). The
   tech-debt step and the security pass get a « Technologies and standards »
   block: the project's stored dependency watch (version in place, latest,
@@ -451,6 +499,16 @@ Release notes for 0.9.3 and earlier are available in the
   `audit_runs.adr_record_baseline`). The steps that write TDs receive only the ADRs
   in force before the run. Existing tables keep working: a row that links a
   TD sheet still covers it.
+- Each agent reply says whether it continued the agent's conversation
+  (KT-1202). Every turn relaunches the CLI or ACP process; memory survives
+  through `--resume` (Claude Code) or ACP `session/resume`, with the full
+  history sent when that is not possible. The reply now records which
+  happened: « reprise », « nouvelle session » or « historique complet »
+  (resume refused by the runtime), shown discreetly after the model, with the
+  reason in the tooltip (no stored conversation, working directory changed,
+  previous turn unfinished, conversation expired, history changed, nothing
+  new, resume not supported…). Agents that never resume record nothing.
+  Migration 259 adds `messages.session_continuity`.
 
 ### Fixed
 
@@ -476,6 +534,29 @@ Release notes for 0.9.3 and earlier are available in the
   `audit_launch` takes `fresh` and `retry_steps`, the parameters the backend
   refusal already asked for, and refuses contradictory combinations before
   any call. The bridge is a long-running process: reload it to get the fix.
+- An agent can open the images and videos it generated (KT-1202). They were
+  stored in Kronn's data dir, outside the project the CLI agent is allowed to
+  read, so its `Read` of its own picture failed. Generated media are now
+  stored like uploads: the copy the UI serves stays in the project's main
+  checkout under `.kronn/context-files/` (Kronn's data dir without a
+  project), so removing a worktree never deletes it. When the agent runs
+  elsewhere (a worktree, a project-less discussion's folder), it gets a
+  git-excluded copy under its own `.kronn/context-files/` and that path in its
+  prompt; a failed copy is logged and the original path given instead. Media
+  already stored keep working: files are served from their recorded path.
+- « Recréer les fichiers du template » now ends with a next step (KT-1203).
+  The recreated files are raw templates, so they hold `{{PLACEHOLDERS}}`
+  until an audit fills them. The result lists each doc that still holds
+  placeholders, maps it to the audit step whose target it is, and offers one
+  button that runs the partial audit for exactly those steps (same lease and
+  saved briefing as « Mettre à jour »). Docs that no audit step targets are
+  listed as such, with no button. If the docs entry itself was recreated, the
+  project is back to `TemplateInstalled` and the result points to the full
+  audit instead. The confirmation says that recreated files stay empty until
+  those steps run. The project card shows the docs still holding placeholders,
+  with the same action. The count comes from `GET /api/projects/{id}/drift`
+  (`placeholder_docs`), so it survives a reload. It reads only the template's
+  own files, and `TEMPLATE.md` templates are not counted.
 - A favourite stays in Favoris while an agent runs or waits in it. From 20
   discussions on, a live pinned discussion moved to « À suivre » and left
   Favoris until the run ended. Favoris now lists every pinned discussion,
