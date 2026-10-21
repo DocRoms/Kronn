@@ -477,6 +477,18 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     ),
     r(
         "POST",
+        "/api/planning/tasks/{id}/assignees",
+        Write,
+        &[("id", T)],
+    ),
+    r(
+        "DELETE",
+        "/api/planning/tasks/{id}/assignees",
+        Write,
+        &[("id", T)],
+    ),
+    r(
+        "POST",
         "/api/planning/tasks/{id}/blockers",
         Write,
         &[("id", T)],

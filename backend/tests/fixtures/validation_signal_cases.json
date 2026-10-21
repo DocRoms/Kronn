@@ -1,0 +1,23 @@
+{
+  "signal": "KRONN:VALIDATION_COMPLETE",
+  "note": "KT-1122 — the one table of the validation terminal-signal rule. Read by the backend (`ends_with_terminal_signal`, `is_validation_signal`) and by the frontend (`endsWithValidationSignal`): a case added here is enforced on both sides, so the two parsers cannot drift.",
+  "cases": [
+    { "content": "KRONN:VALIDATION_COMPLETE", "ends_with_signal": true },
+    { "content": "Done.\nKRONN:VALIDATION_COMPLETE", "ends_with_signal": true },
+    { "content": "Done.\n\nKRONN:VALIDATION_COMPLETE\n", "ends_with_signal": true },
+    { "content": "all done.\nKRONN:VALIDATION_COMPLETE", "ends_with_signal": true },
+    { "content": "done\n  kronn:validation_complete  \n\n", "ends_with_signal": true },
+    { "content": "Done.\n**KRONN:VALIDATION_COMPLETE**", "ends_with_signal": true },
+    { "content": "Done.\n**KRONN:VALIDATION_COMPLETE", "ends_with_signal": true },
+    { "content": "Done.\n`KRONN:VALIDATION_COMPLETE`\n", "ends_with_signal": true },
+    { "content": "Done.\n_KRONN:VALIDATION_COMPLETE_", "ends_with_signal": true },
+    { "content": "I will emit KRONN:VALIDATION_COMPLETE later.", "ends_with_signal": false },
+    { "content": "quote KRONN:VALIDATION_COMPLETE then continue", "ends_with_signal": false },
+    { "content": "KRONN:VALIDATION_COMPLETE\nmore work", "ends_with_signal": false },
+    { "content": "KRONN:VALIDATION_COMPLETE puis la suite", "ends_with_signal": false },
+    { "content": "Emit \"KRONN:VALIDATION_COMPLETE\" when done", "ends_with_signal": false },
+    { "content": "when finished, emit KRONN:VALIDATION_COMPLETE on its own line.\nStill working…", "ends_with_signal": false },
+    { "content": "KRONN:BRIEFING_COMPLETE", "ends_with_signal": false },
+    { "content": "", "ends_with_signal": false }
+  ]
+}

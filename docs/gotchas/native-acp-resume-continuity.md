@@ -82,7 +82,7 @@ Each agent reply records which path its turn took in
 (resume refused by the runtime), with a reason when it did not resume. The
 discussion layer decides `new` and its reason; the runner reports a refused
 resume once the runtime answered it. Runtimes that never resume record nothing.
-[src: file: backend/src/api/discussions/streaming.rs:2289-2305#resume_with_delta_if_possible]
+[src: file: backend/src/api/discussions/streaming.rs:2594-2610#resume_with_delta_if_possible]
 [src: file: backend/src/agents/runner.rs:5351-5372#resume_refused]
 
 ## Deterministic qualification boundaries

@@ -1056,11 +1056,7 @@ pub fn evaluate_enforce_gate(
             fabricated: verdict.count(),
         },
         GateDecision::Fail => EnforceGateOutcome::Fail {
-            reason: format!(
-                "{} fabricated `[src:]` citation(s) still present after {} attempts (enforce mode)",
-                verdict.count(),
-                max_attempts
-            ),
+            reason: enforce_failure_reason(verdict.count(), max_attempts),
         },
         GateDecision::Pass => EnforceGateOutcome::Pass { written },
     }

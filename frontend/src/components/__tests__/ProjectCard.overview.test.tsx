@@ -738,6 +738,7 @@ describe('ProjectCard — repository overview', () => {
         discussion_ids: [],
         tags: [],
         blocker_count: 0,
+        assignees: [],
         created_at: '2026-07-25T00:00:00Z',
         updated_at: '2026-07-25T00:00:00Z',
       }],

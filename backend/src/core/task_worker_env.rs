@@ -18,6 +18,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 /// Where the worker's tests keep their Kronn state, so they never touch the
 /// operator's real data directory.
@@ -26,8 +27,36 @@ pub const KRONN_DATA_DIR_ENV: &str = "KRONN_DATA_DIR";
 pub const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 /// Cargo never reaches a registry from a worker (supply chain).
 pub const CARGO_NET_OFFLINE_ENV: &str = "CARGO_NET_OFFLINE";
-/// The lane's private Cargo home: lock files land there, the registry is linked.
+/// The lane's Cargo home. By default the host's own, which the sandbox only
+/// reads: Cargo fingerprints a registry crate by the absolute path of its
+/// sources, so a lane under another `CARGO_HOME` can never reuse a warm target
+/// and recompiles every dependency (KT-1250, measured). With
+/// [`PRIVATE_CARGO_HOME_ENV`] set it is the lane's private home instead: lock
+/// files land there, the registry is linked, credentials never are.
 pub const CARGO_HOME_ENV: &str = "CARGO_HOME";
+/// Set to `1`/`true` to give every lane the private `CARGO_HOME` of KT-1246
+/// instead of the host's. A warm target is then reusable by no other lane (nor
+/// by the main checkout's), so seeding is skipped.
+pub const PRIVATE_CARGO_HOME_ENV: &str = "KRONN_WORKER_PRIVATE_CARGO_HOME";
+/// Caps one worker's compilation (KT-1250); the host-wide cap on concurrently
+/// compiling workers is `core::task_worker_lane_warm`.
+pub const CARGO_BUILD_JOBS_ENV: &str = "CARGO_BUILD_JOBS";
+/// The port a Kronn backend started by the worker listens on (never the host's).
+pub const KRONN_PORT_ENV: &str = "KRONN_PORT";
+/// Where the worker's Vite proxies `/api`: its own backend. Never
+/// `KRONN_BACKEND_URL`, which is the address the worker's MCP bridge uses to
+/// reach the host Kronn.
+pub const VITE_BACKEND_URL_ENV: &str = "KRONN_VITE_BACKEND_URL";
+/// The worker's Vite (and Playwright) port.
+pub const VITE_DEV_PORT_ENV: &str = "VITE_DEV_PORT";
+/// Vite's cache: the linked node_modules is read-only to the worker.
+pub const VITE_CACHE_DIR_ENV: &str = "VITE_CACHE_DIR";
+/// Playwright's Chromium runs single-process: the sandbox denies its rendezvous.
+pub const E2E_CHROMIUM_SINGLE_PROCESS_ENV: &str = "KRONN_E2E_CHROMIUM_SINGLE_PROCESS";
+/// Lane ports live in `[LANE_PORT_BASE, LANE_PORT_BASE + 2 * LANE_PORT_SLOTS)`,
+/// away from the host's Kronn (3140) and Vite (5173).
+const LANE_PORT_BASE: u16 = 20_000;
+const LANE_PORT_SLOTS: u16 = 15_000;
 
 /// `task_execution_events.action` under which the capability record is journalled.
 pub const TOOLCHAIN_EVENT_ACTION: &str = "toolchain_capabilities";
@@ -36,15 +65,29 @@ pub const TOOLCHAIN_EVENT_ACTION: &str = "toolchain_capabilities";
 /// (`<repo>/target/wt-<lane>`) are never untracked files of the checkout.
 const LANE_TARGET_EXCLUDE: &str = "/target/wt-*/";
 
+/// Prefix of a lane's directory under `<repo>/target`: the name the cleanup
+/// (KT-1256) recognises a lane target by, so it must stay in step with
+/// [`LANE_TARGET_EXCLUDE`].
+pub const LANE_TARGET_PREFIX: &str = "wt-";
+
 const FRONTEND_DEPS_EXCLUDE: &str = "/frontend/node_modules";
 
 /// Sub-directory of the worktree holding the frontend's `package.json`.
 const FRONTEND_DIR: &str = "frontend";
 const NODE_MODULES: &str = "node_modules";
+/// Written into a lane's layered `node_modules`, so a later launch knows the
+/// directory is Kronn's to keep in step rather than the worker's own.
+const LAYER_MARKER: &str = ".kronn-lane-layer";
+/// What a tool writes inside `node_modules` while it runs (Vite's config
+/// bundle and cache): never linked, so it lands in the lane.
+const NODE_MODULES_LANE_OWNED: [&str; 3] = [".vite-temp", ".vite", ".cache"];
 
 const NEXTEST_TIMEOUT: Duration = Duration::from_secs(20);
 const OFFLINE_FETCH_TIMEOUT: Duration = Duration::from_secs(90);
 const VITEST_TIMEOUT: Duration = Duration::from_secs(20);
+const VITEST_CONFIG_TIMEOUT: Duration = Duration::from_secs(60);
+/// A file filter no test file matches: the run loads the config, finds nothing.
+const VITEST_CONFIG_PROBE_FILTER: &str = "kronn-lane-config-probe-no-such-test";
 /// What a failed probe's reason keeps of the command's output.
 const PROBE_DETAIL_BYTES: usize = 300;
 
@@ -108,7 +151,9 @@ impl WorkerLane {
             .and_then(Path::parent)
             .map(Path::to_path_buf);
         let cargo_target_dir = match &main_checkout {
-            Some(root) => root.join("target").join(format!("wt-{name}")),
+            Some(root) => root
+                .join("target")
+                .join(format!("{LANE_TARGET_PREFIX}{name}")),
             None => worktree.join(".kronn").join("target"),
         };
         Ok(Self {
@@ -122,13 +167,21 @@ impl WorkerLane {
     }
 
     /// Directories the worker may write: its worktree and, when it lives
-    /// outside it, the lane's Cargo target (the private `CARGO_HOME` is inside).
+    /// outside it, the lane's Cargo target (the private `CARGO_HOME`, when one
+    /// is used, is inside). The host's own `CARGO_HOME` is never writable.
     pub fn write_roots(&self) -> Vec<PathBuf> {
         let mut roots = vec![self.worktree.clone()];
         if !self.cargo_target_dir.starts_with(&self.worktree) {
             roots.push(self.cargo_target_dir.clone());
         }
         roots
+    }
+
+    /// The lane's own scratch directory (KT-1255): inside the Cargo target, so
+    /// inside a write root, and the `TMPDIR` of a sandboxed lane build, which
+    /// is thereby granted no global `/tmp`.
+    pub fn tmp_dir(&self) -> PathBuf {
+        self.cargo_target_dir.join(".kronn-tmp")
     }
 
     /// Directories the worker reads but never writes: the host's dependency
@@ -155,11 +208,57 @@ impl WorkerLane {
                 self.cargo_target_dir.clone().into_os_string(),
             ),
             (CARGO_NET_OFFLINE_ENV, OsString::from("true")),
+            (
+                CARGO_BUILD_JOBS_ENV,
+                OsString::from(crate::core::task_worker_lane_warm::worker_build_jobs().to_string()),
+            ),
         ];
-        if provisioned.cargo_home_ready {
-            env.push((CARGO_HOME_ENV, self.cargo_home.clone().into_os_string()));
+        let (backend, vite) = self.ports();
+        env.push((KRONN_PORT_ENV, OsString::from(backend.to_string())));
+        env.push((
+            VITE_BACKEND_URL_ENV,
+            OsString::from(format!("http://127.0.0.1:{backend}")),
+        ));
+        env.push((VITE_DEV_PORT_ENV, OsString::from(vite.to_string())));
+        env.push((
+            VITE_CACHE_DIR_ENV,
+            self.data_dir.join("vite-cache").into_os_string(),
+        ));
+        env.push((E2E_CHROMIUM_SINGLE_PROCESS_ENV, OsString::from("1")));
+        if let Some(home) = self.effective_cargo_home(provisioned) {
+            env.push((CARGO_HOME_ENV, home.into_os_string()));
         }
         env
+    }
+
+    /// The `CARGO_HOME` this lane's Cargo runs with, when one is set at all: the
+    /// host's own (same absolute registry paths as the main checkout's builds,
+    /// so a warm target is reusable) unless the private home was asked for.
+    pub fn effective_cargo_home(&self, provisioned: &Provisioned) -> Option<PathBuf> {
+        if !provisioned.cargo_home_ready {
+            return None;
+        }
+        Some(
+            provisioned
+                .shared_cargo_home
+                .clone()
+                .unwrap_or_else(|| self.cargo_home.clone()),
+        )
+    }
+
+    /// The lane's own backend and Vite ports, stable for its name, so whatever
+    /// the worker serves never takes the host Kronn's port.
+    pub fn ports(&self) -> (u16, u16) {
+        // FNV-1a: stable across processes, unlike the std hasher.
+        let hash = self
+            .name
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        let slot = (hash % u64::from(LANE_PORT_SLOTS)) as u16;
+        let backend = LANE_PORT_BASE + 2 * slot;
+        (backend, backend + 1)
     }
 
     fn frontend_dir(&self) -> PathBuf {
@@ -177,6 +276,12 @@ impl WorkerLane {
     /// result (and ends up in the capability record), never raised, so a missing
     /// cache degrades to "cannot run those tests" instead of "cannot start".
     pub fn provision(&self, caches: &SharedCaches) -> Provisioned {
+        self.provision_with(caches, private_cargo_home_requested())
+    }
+
+    /// [`WorkerLane::provision`] with the `CARGO_HOME` choice made explicit:
+    /// `private_cargo_home` keeps KT-1246's lane-private home.
+    pub fn provision_with(&self, caches: &SharedCaches, private_cargo_home: bool) -> Provisioned {
         let mut warnings = Vec::new();
         // A lane target beside the repo must never make the main checkout look
         // dirty: the integration preflight refuses a dirty target. A project
@@ -200,6 +305,10 @@ impl WorkerLane {
             }
         }
         let cargo_home_ready = self.link_cargo_home(caches, &mut warnings);
+        let shared_cargo_home = caches
+            .cargo_home
+            .clone()
+            .filter(|_| cargo_home_ready && !private_cargo_home);
         let frontend_deps = self.link_frontend_deps();
         // A `node_modules/` rule matches directories only, so the link would
         // show as an untracked file and the delivery would find the worktree
@@ -215,6 +324,7 @@ impl WorkerLane {
         Provisioned {
             frontend_deps,
             cargo_home_ready,
+            shared_cargo_home,
             warnings,
         }
     }
@@ -252,21 +362,96 @@ impl WorkerLane {
             return FrontendDeps::NotApplicable;
         }
         let destination = frontend.join(NODE_MODULES);
+        let source = self.frontend_deps_source().filter(|path| path.is_dir());
         match std::fs::symlink_metadata(&destination) {
-            // A real directory (or a link that still resolves) is left alone.
-            Ok(_) if destination.is_dir() => return FrontendDeps::AlreadyPresent,
-            Ok(_) => {} // dangling link: replaced below
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return FrontendDeps::Failed(error.to_string()),
-        }
-        let Some(source) = self.frontend_deps_source().filter(|path| path.is_dir()) else {
-            return FrontendDeps::SourceMissing;
-        };
-        match ensure_symlink(&source, &destination) {
-            Ok(_) => FrontendDeps::Linked(source),
-            Err(error) => FrontendDeps::Failed(error),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                // KT-1246 linked the whole directory, so Vite's config loader
+                // (`node_modules/.vite-temp`) could not write (KT-1266). A link
+                // to the main checkout's directory is replaced by the layer
+                // below; any other link that resolves is the worker's own.
+                let ours = source.as_ref().is_some_and(|source| {
+                    std::fs::read_link(&destination).is_ok_and(|target| &target == source)
+                });
+                if destination.is_dir() && !ours {
+                    return FrontendDeps::AlreadyPresent;
+                }
+                self.layer_frontend_deps(&destination, source, true)
+            }
+            // A real directory is left alone; a layer of ours is kept in step
+            // with the main checkout's (a package installed since).
+            Ok(_) if destination.is_dir() => {
+                if let Some(source) = source.filter(|_| destination.join(LAYER_MARKER).is_file()) {
+                    let _ = link_entries(&source, &destination);
+                }
+                FrontendDeps::AlreadyPresent
+            }
+            Ok(_) => FrontendDeps::Failed(format!(
+                "{} exists and is not a directory",
+                destination.display()
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.layer_frontend_deps(&destination, source, false)
+            }
+            Err(error) => FrontendDeps::Failed(error.to_string()),
         }
     }
+
+    /// `frontend/node_modules` as a real, writable directory whose entries link
+    /// to the main checkout's: Vite bundles its config under
+    /// `node_modules/.vite-temp` and fails with EPERM when that is a read-only
+    /// link, whatever flag the worker passes or forgets (KT-1266). What the
+    /// entries resolve to is still outside every write root.
+    fn layer_frontend_deps(
+        &self,
+        destination: &Path,
+        source: Option<PathBuf>,
+        replace_link: bool,
+    ) -> FrontendDeps {
+        let Some(source) = source else {
+            return FrontendDeps::SourceMissing;
+        };
+        if replace_link {
+            if let Err(error) = std::fs::remove_file(destination) {
+                return FrontendDeps::Failed(format!(
+                    "cannot replace the link {}: {error}",
+                    destination.display()
+                ));
+            }
+        }
+        if let Err(error) = std::fs::create_dir_all(destination) {
+            return FrontendDeps::Failed(format!(
+                "cannot create {}: {error}",
+                destination.display()
+            ));
+        }
+        if let Err(error) = link_entries(&source, destination) {
+            return FrontendDeps::Failed(error);
+        }
+        if let Err(error) = std::fs::write(destination.join(LAYER_MARKER), b"") {
+            return FrontendDeps::Failed(format!("cannot mark {}: {error}", destination.display()));
+        }
+        FrontendDeps::Linked(source)
+    }
+}
+
+/// Link every entry of `source` into `destination`, except what a tool writes
+/// at run time (those stay the lane's own, in the real directory).
+fn link_entries(source: &Path, destination: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+    // One entry that cannot be linked (a real directory the lane already has)
+    // must not leave the entries after it unlinked: go on, report the first.
+    let mut first_error = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if NODE_MODULES_LANE_OWNED.iter().any(|owned| name == *owned) {
+            continue;
+        }
+        if let Err(error) = ensure_symlink(&entry.path(), &destination.join(&name)) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// How the worktree's frontend dependencies were made available.
@@ -283,11 +468,20 @@ pub enum FrontendDeps {
     Failed(String),
 }
 
+fn private_cargo_home_requested() -> bool {
+    crate::core::child_env::var_os(PRIVATE_CARGO_HOME_ENV)
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
+}
+
 /// What [`WorkerLane::provision`] managed to prepare.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provisioned {
     pub frontend_deps: FrontendDeps,
     pub cargo_home_ready: bool,
+    /// The host's own `CARGO_HOME`, when the lane runs with it rather than with
+    /// its private one (see [`CARGO_HOME_ENV`]).
+    pub shared_cargo_home: Option<PathBuf>,
     pub warnings: Vec<String>,
 }
 
@@ -529,6 +723,21 @@ pub struct ProbeOutcome {
 /// How the smoke check runs a command; injectable so both outcomes are testable.
 pub trait ProbeRunner: Send + Sync {
     fn run(&self, probe: &ProbeCommand) -> ProbeOutcome;
+
+    /// [`ProbeRunner::run`] that stops the command when `cancel` fires,
+    /// reporting a failure. A runner that cannot interrupt a probe keeps this
+    /// default and simply runs it to its end.
+    fn run_cancellable(&self, probe: &ProbeCommand, cancel: &CancellationToken) -> ProbeOutcome {
+        let _ = cancel;
+        self.run(probe)
+    }
+
+    /// Whether every command this runner starts runs under the worker's sandbox
+    /// profile (KT-1255, `core::task_worker_sandbox`). The plain process runner
+    /// does not: it is for Kronn's own commands, never for a lane's build.
+    fn confined(&self) -> bool {
+        false
+    }
 }
 
 /// Runs probes as real child processes with the sealed Kronn environment plus
@@ -537,6 +746,10 @@ pub struct ProcessProbeRunner;
 
 impl ProbeRunner for ProcessProbeRunner {
     fn run(&self, probe: &ProbeCommand) -> ProbeOutcome {
+        self.run_cancellable(probe, &CancellationToken::new())
+    }
+
+    fn run_cancellable(&self, probe: &ProbeCommand, cancel: &CancellationToken) -> ProbeOutcome {
         let failure = |detail: String| ProbeOutcome {
             success: false,
             detail,
@@ -551,6 +764,8 @@ impl ProbeRunner for ProcessProbeRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(unix)]
+        detach_from_terminal(&mut command);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => return failure(format!("cannot start `{}`: {error}", probe.program)),
@@ -558,12 +773,17 @@ impl ProbeRunner for ProcessProbeRunner {
         let stdout = child.stdout.take().map(drain_tail);
         let stderr = child.stderr.take().map(drain_tail);
         let deadline = Instant::now() + probe.timeout;
+        let mut cancelled = false;
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status),
+                Ok(None) if cancel.is_cancelled() => {
+                    kill_process_tree(&mut child);
+                    cancelled = true;
+                    break None;
+                }
                 Ok(None) if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_process_tree(&mut child);
                     break None;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(25)),
@@ -585,9 +805,49 @@ impl ProbeRunner for ProcessProbeRunner {
                 detail,
             },
             Some(status) => failure(format!("exited with {status}: {detail}")),
+            None if cancelled => failure("cancelled".to_string()),
             None => failure(format!("timed out after {}s", probe.timeout.as_secs())),
         }
     }
+}
+
+/// Start `command` in a session of its own (KT-1255).
+///
+/// The session leader is also the leader of a fresh process group, so a
+/// timeout or a cancel takes `cargo`'s `rustc` children with it instead of
+/// leaving them compiling (`kill_process_tree`). And, unlike a bare
+/// `process_group(0)` — which stays in the backend's session — the command has
+/// no controlling terminal: a worker-written `build.rs` cannot open `/dev/tty`
+/// and push keystrokes into the operator's shell (`TIOCSTI`) when the backend
+/// runs in a terminal. `setsid` must not follow `setpgid` (a group leader
+/// cannot create a session), so this replaces `process_group`, never adds to it.
+#[cfg(unix)]
+pub(crate) fn detach_from_terminal(command: &mut std::process::Command) {
+    // SAFETY: the hook only calls `setsid`, which is async-signal-safe, and
+    // touches no memory of the parent.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(command, || {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Kill the probe and everything it started (it leads its own session and
+/// process group), then reap it.
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: `killpg` takes a plain process-group id; the child is the
+        // leader of the group it was spawned into.
+        unsafe {
+            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Read a pipe to its end, keeping only the last [`PROBE_DETAIL_BYTES`].
@@ -722,7 +982,7 @@ fn check_rust(
     ))
 }
 
-fn check_frontend(
+pub(crate) fn check_frontend(
     lane: &WorkerLane,
     provisioned: &Provisioned,
     env: &[(String, OsString)],
@@ -752,13 +1012,33 @@ fn check_frontend(
                 env: env.to_vec(),
                 timeout: VITEST_TIMEOUT,
             });
-            if outcome.success {
+            if !outcome.success {
+                return Capability::no(format!("`vitest --version` failed: {}", outcome.detail));
+            }
+            let version = outcome.detail;
+            // `--version` never loads the config, which is where Vite writes
+            // (`node_modules/.vite-temp`) and where a lane failed with EPERM
+            // (KT-1266): a run that selects no test file loads it and exits.
+            let config = runner.run(&ProbeCommand {
+                program: vitest.to_string_lossy().into_owned(),
+                args: vec![
+                    "run".into(),
+                    "--passWithNoTests".into(),
+                    VITEST_CONFIG_PROBE_FILTER.into(),
+                ],
+                cwd: lane.frontend_dir(),
+                env: env.to_vec(),
+                timeout: VITEST_CONFIG_TIMEOUT,
+            });
+            if config.success {
                 Capability::yes(format!(
-                    "vitest {} runs from frontend/node_modules",
-                    outcome.detail
+                    "vitest {version} runs from frontend/node_modules and loads its config in the lane"
                 ))
             } else {
-                Capability::no(format!("`vitest --version` failed: {}", outcome.detail))
+                Capability::no(format!(
+                    "vitest cannot load its config in the lane (`vitest run --passWithNoTests`): {}",
+                    config.detail
+                ))
             }
         }
     }

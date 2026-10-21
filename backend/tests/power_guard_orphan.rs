@@ -222,6 +222,16 @@ fn end_helper(
 }
 
 fn caffeinate_dies_with_its_lease_holder(end: End) {
+    // The helper inherits this process's environment. A sibling `it` test that
+    // swaps `PATH`, `TMPDIR` or `KRONN_*` would hand it a foreign one, so the
+    // test runs in its own process, as it does under nextest.
+    let name = match end {
+        End::SigKill => "caffeinate_dies_with_a_sigkilled_lease_holder",
+        End::NormalExit => "caffeinate_dies_with_a_lease_holder_that_exits_normally",
+    };
+    if crate::own_process::delegated(module_path!(), name) {
+        return;
+    }
     let scratch = tempfile::tempdir().unwrap();
     let mut owned = spawn_helper("1", scratch.path());
     let helper_pid = owned.helper.as_ref().unwrap().id();
@@ -230,7 +240,9 @@ fn caffeinate_dies_with_its_lease_holder(end: End) {
     // caffeinate's exec, so READY is the synchronisation point.
     wait_ready(&mut owned);
 
-    let caf_pid = poll(Duration::from_secs(5), || {
+    // A bound, not a pace: the probe returns on its first hit, and a loaded
+    // host (builds, `pgrep` itself) can take seconds to answer once.
+    let caf_pid = poll(Duration::from_secs(30), || {
         caffeinate_children(helper_pid).first().copied()
     })
     .expect("the lease holder never started caffeinate");
@@ -256,12 +268,12 @@ fn caffeinate_dies_with_its_lease_holder(end: End) {
         "caffeinate inherited the helper's non-CLOEXEC descriptor:\n{open}"
     );
 
-    let status = end_helper(&mut owned, end, Duration::from_secs(10)).unwrap();
+    let status = end_helper(&mut owned, end, Duration::from_secs(30)).unwrap();
     if let End::NormalExit = end {
         assert!(status.success(), "helper did not exit normally: {status}");
     }
 
-    let gone = poll(Duration::from_secs(10), || {
+    let gone = poll(Duration::from_secs(30), || {
         (!args_of(caf_pid).is_some_and(|a| is_caffeinate(&a))).then_some(())
     });
     assert!(

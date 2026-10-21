@@ -260,3 +260,31 @@ fn a_large_watch_is_capped_with_a_remainder_count() {
     assert!(!block.contains("pkg-60 "));
     assert!(block.contains("…and 10 more row(s) not shown."));
 }
+
+#[test]
+fn the_stack_table_block_feeds_the_currency_cells_and_asks_for_no_td() {
+    // KT-819 DoD 8 — the project index reads the same dated rows, with its own
+    // instructions: no `Dependencies` coverage row and no TD exists in step 1.
+    let snap = DependencySnapshot::from_summary(&summary());
+    let block = render_version_block_for(
+        VersionPurpose::StackTable,
+        VersionSource::DependencyWatch,
+        Some(&snap),
+        &[],
+        "2026-10-11",
+    );
+    assert!(block.contains("`Latest stable` and `Support end` cells"));
+    assert!(block.contains("[src: deps: npm/react@2026-10-04]"));
+    assert!(block.contains("never filled from memory"));
+    assert!(!block.contains("coverage row"), "{block}");
+    assert!(!block.contains("becomes a TD"), "{block}");
+    // The judging steps keep their wording.
+    let judged = render_version_block(
+        VersionSource::DependencyWatch,
+        Some(&snap),
+        &[],
+        "2026-10-11",
+    );
+    assert!(judged.contains("`Dependencies` coverage row"));
+    assert!(judged.contains("becomes a TD"));
+}

@@ -720,6 +720,24 @@ pub(crate) async fn run_partial_pipeline(
                 "message": "This refresh runs single-agent: the cross-agent audit option applies to Full audits only.",
             }).to_string());
         }
+        // KT-1199 — the refresh is a run too: its state travels with the repository.
+        let run_state_writer = std::sync::Arc::new(super::run_state::RunStateWriter::new(
+            project_path.clone(),
+            audit_run_id.clone(),
+            super::run_state::RunStateMeta::capture(
+                &project_path,
+                super::validate::operator_pseudo(&state).await,
+                None,
+            ),
+            requested_steps
+                .iter()
+                .map(|&n| (n as u32, super::full::step_file_label(&chain[n - 1]).to_string()))
+                .collect(),
+        ));
+        {
+            let writer = run_state_writer.clone();
+            let _ = state.db.with_conn(move |conn| { writer.sync(conn, false); Ok(()) }).await;
+        }
         let td_decisions_before = crate::core::td_decisions::snapshot(&docs_root.dir(&project_path));
 
         // Same-inputs parity with the Full pipeline (Codex lot-3 #4/#3):
@@ -855,6 +873,32 @@ pub(crate) async fn run_partial_pipeline(
                     continue;
                 }
             };
+            // KT-1211 — the target's content before the agent runs: a stop puts
+            // it back, a failure marks what the agent left as partial.
+            // Kept durably too (same table as the Full pipeline): a backend
+            // that dies mid-step leaves the doc half-written, and boot puts it
+            // back from here — memory alone would be gone.
+            let pre_content: Option<String> = if analysis_step.target_file == "REVIEW" {
+                None
+            } else {
+                let content = super::step_guard::read_target(&project_path, analysis_step.target_file)
+                    .ok()
+                    .flatten();
+                let (run_id, target, saved) = (
+                    audit_run_id.clone(), analysis_step.target_file.to_string(), content.clone(),
+                );
+                if let Err(e) = state.db.with_conn(move |conn| {
+                    crate::db::audit_runs::save_step_snapshot(conn, &run_id, step as u32, &target, saved.as_deref())
+                }).await {
+                    tracing::warn!("Could not keep the pre-step snapshot of partial step {step}: {e}");
+                }
+                content
+            };
+            // What the agent is seen writing is kept durably: a crash settles
+            // the target only from content it can vouch for.
+            let mut target_watch = super::step_guard::TargetWatch::new(
+                &project_path, analysis_step.target_file, pre_content.as_deref(),
+            );
             let validated_docs_snapshot =
                 match super::helpers::capture_validated_docs(&project_path) {
                     Ok(snapshot) => snapshot,
@@ -947,6 +991,18 @@ pub(crate) async fn run_partial_pipeline(
                             if let Ok(mut tracker) = audit_tracker.lock() {
                                 tracker.running_pids.insert(project_id_for_progress.clone(), pid);
                             }
+                            // KT-1211 (M5) — the group and the leader's start
+                            // stamp, so a boot after a crash kills an agent the
+                            // dead backend left rewriting the docs.
+                            let stamp = tokio::task::spawn_blocking(move || {
+                                crate::core::agent_orphans::start_stamp(pid)
+                            }).await.ok().flatten();
+                            let run_id = audit_run_id.clone();
+                            if let Err(e) = state.db.with_conn(move |conn| {
+                                crate::db::audit_runs::set_agent_process(conn, &run_id, pid as i64, stamp.as_deref())
+                            }).await {
+                                tracing::warn!("Could not record the partial audit agent's process group: {e}");
+                            }
                         }
                     }
                     let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
@@ -983,6 +1039,14 @@ pub(crate) async fn run_partial_pipeline(
                                         t.set_recent_activity(&project_id_for_progress, snapshot);
                                     }
                                     yield Event::default().event("activity").data(payload.to_string());
+                                }
+                                if let Some(seen) = target_watch.as_mut().and_then(|w| w.moved()) {
+                                    let (run_id, step_n) = (audit_run_id.clone(), step as u32);
+                                    if let Err(e) = state.db.with_conn(move |conn| {
+                                        crate::db::audit_runs::record_observed_output(conn, &run_id, step_n, &seen)
+                                    }).await {
+                                        tracing::warn!("Could not record what partial step {step} wrote: {e}");
+                                    }
                                 }
                                 let Some(watch) = activity.as_mut() else { continue };
                                 if let Some((tool, calls)) = watch.tool_moved() {
@@ -1075,6 +1139,15 @@ pub(crate) async fn run_partial_pipeline(
                         tracker.running_pids.remove(&project_id_for_progress);
                         tracker.agent_cancels.remove(&project_id_for_progress);
                     }
+                    {
+                        // KT-1211 (M5) — the agent is reaped: nothing to kill at boot.
+                        let run_id = audit_run_id.clone();
+                        if let Err(e) = state.db.with_conn(move |conn| {
+                            crate::db::audit_runs::clear_agent_process(conn, &run_id)
+                        }).await {
+                            tracing::warn!("Could not clear the partial audit agent's process group: {e}");
+                        }
+                    }
                     run_tokens.add(step_usage.total());
                     tracing::debug!("Partial audit step {}: fix_ownership applied for {}", step, file_label);
 
@@ -1138,9 +1211,44 @@ pub(crate) async fn run_partial_pipeline(
                     // marked; BEFORE any gate or retry, so a stopped step
                     // neither counts as a failure nor spawns another agent.
                     if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id_for_progress)).unwrap_or(false) {
+                        // KT-1211 — the agent was killed mid-write: the target
+                        // goes back as it was before the step, never left
+                        // half-written (marked partial when it cannot be put back).
+                        let step_n = step as u32;
+                        let outcome = super::step_guard::settle_killed(
+                            &project_path,
+                            analysis_step.target_file,
+                            pre_content.as_deref(),
+                            target_watch.as_ref().map(|w| w.last_seen()),
+                            super::step_guard::StopKind::Cancelled,
+                            step_n,
+                        );
+                        {
+                            let run_id = audit_run_id.clone();
+                            let reason = super::step_guard::killed_reason(step_n, &outcome);
+                            let duration_ms = step_started_at.elapsed().as_millis() as u64;
+                            let recorded_total = run_tokens.total();
+                            let usage = step_usage;
+                            let killed_state = outcome.target_state();
+                            let keep_snapshot = outcome.keeps_snapshot();
+                            if let Err(e) = state.db.with_conn(move |conn| {
+                                crate::db::audit_runs::finalize_audit_step(
+                                    conn, &run_id, step_n, Utc::now(), duration_ms, &usage,
+                                    recorded_total, false, Some(&reason), false,
+                                )?;
+                                crate::db::audit_runs::set_step_target_state(conn, &run_id, step_n, killed_state)?;
+                                if !keep_snapshot {
+                                    crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step_n)?;
+                                }
+                                Ok(())
+                            }).await {
+                                tracing::error!("Failed to record the cancelled partial step {step} for run {audit_run_id}: {e}");
+                            }
+                        }
                         let run_id = audit_run_id.clone();
                         let persisted = state.db.with_conn(move |conn| {
-                            crate::db::audit_runs::mark_cancelled(conn, &run_id)
+                            crate::db::audit_runs::mark_cancelled_at_step(conn, &run_id, step_n)
+                                .map(|_| ())
                         }).await;
                         match persisted {
                             Ok(()) => drop_guard.disarm(),
@@ -1341,6 +1449,23 @@ pub(crate) async fn run_partial_pipeline(
                     };
 
                     let step_succeeded = success && outcome == "succeeded";
+                    // KT-1211 — a step that failed never leaves an unmarked
+                    // half-written doc: what the agent wrote stays under a
+                    // visible partial marker; a success drops an earlier one.
+                    let mut target_state: Option<&'static str> = None;
+                    if step_succeeded {
+                        if let Err(e) = super::step_guard::clear_partial_marker(&project_path, analysis_step.target_file) {
+                            tracing::warn!("Partial audit step {step} ({file_label}): {e}");
+                        }
+                    } else if outcome == "failed" {
+                        match super::step_guard::settle_failed_target(
+                            &project_path, analysis_step.target_file, &pre_snapshot, step as u32,
+                            "the step did not pass its checks",
+                        ) {
+                            Ok(state) => target_state = state,
+                            Err(e) => tracing::warn!("Partial audit step {step} ({file_label}): {e}"),
+                        }
+                    }
                     let duration_ms = step_started_at.elapsed().as_millis() as u64;
                     if let (Some(step_tokens), Ok(mut t)) = (step_usage.total(), audit_tracker.lock()) {
                         t.update_chips(&project_id_for_progress, Some(step_tokens), run_tokens.total(), None);
@@ -1363,8 +1488,9 @@ pub(crate) async fn run_partial_pipeline(
                         let recorded_usage = step_usage;
                         let recorded_total = run_tokens.total();
                         let step_unchanged = outcome == "unchanged";
+                        let writer = run_state_writer.clone();
                         if let Err(e) = state.db.with_conn(move |conn| {
-                            crate::db::audit_runs::finalize_audit_step_with_outcome(
+                            let finalized = crate::db::audit_runs::finalize_audit_step_with_outcome(
                                 conn,
                                 &run_id,
                                 step as u32,
@@ -1376,7 +1502,15 @@ pub(crate) async fn run_partial_pipeline(
                                 None,
                                 false,
                                 step_unchanged,
-                            )
+                            );
+                            writer.sync(conn, false);
+                            finalized?;
+                            // A done step has nothing left to restore; a failed
+                            // one keeps its snapshot (acceptance diff).
+                            if step_succeeded {
+                                crate::db::audit_runs::delete_step_snapshot(conn, &run_id, step as u32)?;
+                            }
+                            crate::db::audit_runs::set_step_target_state(conn, &run_id, step as u32, target_state)
                         }).await {
                             tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");
                         }
@@ -1404,8 +1538,9 @@ pub(crate) async fn run_partial_pipeline(
                         let run_id = audit_run_id.clone();
                         let duration_ms = step_started_at.elapsed().as_millis() as u64;
                         let recorded_total = run_tokens.total();
+                        let writer = run_state_writer.clone();
                         if let Err(e) = state.db.with_conn(move |conn| {
-                            crate::db::audit_runs::finalize_audit_step(
+                            let finalized = crate::db::audit_runs::finalize_audit_step(
                                 conn,
                                 &run_id,
                                 step as u32,
@@ -1416,7 +1551,9 @@ pub(crate) async fn run_partial_pipeline(
                                 false,
                                 None,
                                 false,
-                            )
+                            );
+                            writer.sync(conn, false);
+                            finalized
                         }).await {
                             tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");
                         }
@@ -1665,6 +1802,12 @@ pub(crate) async fn run_partial_pipeline(
                 }).to_string(),
             );
             return;
+        }
+
+        // KT-1199 — the terminal state, with the documents as they now stand.
+        {
+            let writer = run_state_writer.clone();
+            let _ = state.db.with_conn(move |conn| { writer.sync(conn, true); Ok(()) }).await;
         }
 
         // KT-1122 — who opened this partial run's validation. Best-effort:

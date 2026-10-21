@@ -197,7 +197,7 @@ across a generation error, and the same idempotency key is retained for an
 explicit identical retry; the UI never automatically repeats an ambiguous
 billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:397-415#createMediaDiscussion]`
 `[src: file: frontend/src/components/MediaGenerateForm.tsx:476-532#submit]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:2615-2634#handleCreateMediaDiscussion]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:2626-2645#handleCreateMediaDiscussion]`
 
 ## What a model accepts, read rather than assumed
 
@@ -226,7 +226,7 @@ trimmed and case-insensitively, so a caller is never refused over `720P`.
 
 The same read serves both surfaces. `agent_list` sweeps every configured media
 slot concurrently, each under its own 8 s window, and attaches what came back
-[src: file: backend/src/api/orchestration.rs:10754-10799#bounded_media_capabilities]; the catalogue builder
+[src: file: backend/src/api/orchestration.rs:11555-11600#bounded_media_capabilities]; the catalogue builder
 itself stays pure and is handed the result, like the reachability and quota
 preflights beside it. An envelope is attached only when the model it was read
 for is still the configured one — a connection whose model changed between the

@@ -315,6 +315,30 @@ pub(crate) fn prior_partial_validation_block(discussion_id: &str, language: &str
     format!("{title}\n{}\n\n", body.replace("{id}", discussion_id))
 }
 
+/// KT-1211 (M6) — the sources moved between the run this one resumed and the
+/// resume: the steps it inherited describe the earlier sources. Said in the
+/// validation prompt so the reviewer does not take them for current.
+pub(crate) fn resume_drift_block(drift: &str, language: &str) -> String {
+    let (title, lead) = match language {
+        "en" => (
+            "## SOURCE DRIFT DURING THE RESUME",
+            "The documents of the steps this run inherited were written against earlier sources. Check them against the current tree before trusting them, and report any that no longer match:",
+        ),
+        "es" => (
+            "## CAMBIO EN LAS FUENTES DURANTE LA REANUDACION",
+            "Los documentos de los pasos heredados por este run se escribieron sobre fuentes anteriores. Compruebalos con el arbol actual antes de fiarte y senala los que ya no coinciden:",
+        ),
+        _ => (
+            "## DÉRIVE DES SOURCES PENDANT LA REPRISE",
+            "Les documents des étapes héritées par ce run ont été écrits sur des sources antérieures. Vérifie-les contre l'arbre actuel avant de t'y fier et signale ceux qui ne correspondent plus :",
+        ),
+    };
+    format!(
+        "{title}\n{lead}\n> {}\n\n",
+        drift.split_whitespace().collect::<Vec<_>>().join(" ")
+    )
+}
+
 pub(crate) fn partial_run_block(
     steps_to_redo: &[(u32, String)],
     total_steps: u32,
@@ -1000,38 +1024,21 @@ pub(crate) fn restore_step_briefing(
     )
 }
 
-/// Remove the KRONN:BOOTSTRAP block from docs/AGENTS.md
+/// Remove the legacy KRONN:BOOTSTRAP block from the docs entry file (the run
+/// start; `core::scanner::retire_legacy_bootstrap_block` does the same at boot).
 pub(super) fn remove_bootstrap_block(index_file: &std::path::Path) {
-    let content = match std::fs::read_to_string(index_file) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    if !content.contains("KRONN:BOOTSTRAP:START") {
+    let Ok(observed) = std::fs::read(index_file) else {
         return;
-    }
-
-    // Remove everything between START and END markers (inclusive)
-    let mut result = String::new();
-    let mut in_block = false;
-    for line in content.lines() {
-        if line.contains("KRONN:BOOTSTRAP:START") {
-            in_block = true;
-            continue;
-        }
-        if line.contains("KRONN:BOOTSTRAP:END") {
-            in_block = false;
-            continue;
-        }
-        if !in_block {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-
-    // Trim leading whitespace from the cleaned content
-    let trimmed = result.trim_start().to_string();
-    if let Err(e) = std::fs::write(index_file, trimmed) {
+    };
+    let Ok(content) = std::str::from_utf8(&observed) else {
+        return;
+    };
+    let Some(cleaned) = crate::core::scanner::without_legacy_bootstrap_block(content) else {
+        return;
+    };
+    if let Err(e) = crate::core::mcp_scanner::atomic_write_if_unchanged_preserving_permissions(
+        index_file, &cleaned, &observed,
+    ) {
         tracing::warn!("Failed to remove bootstrap block: {}", e);
     }
 }

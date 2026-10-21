@@ -43,8 +43,8 @@ keep their own sandbox and receive no lane variables.
 | Reads | `filesystem.allowRead`: `~/.cargo/registry`, `~/.cargo/git`, existing pnpm stores, the main checkout's `frontend/node_modules`. Never a write root. |
 | Network | `network.allowLocalBinding: true` (loopback). No `allowedDomains`: no external host. |
 | Fail-closed | `enabled`, `failIfUnavailable`, `allowUnsandboxedCommands: false` unchanged; an unresolvable worktree still yields an empty write list and no network key. |
-| Environment | `KRONN_DATA_DIR=<worktree>/.kronn/data`, `CARGO_TARGET_DIR=<lane target>`, `CARGO_NET_OFFLINE=true`, and `CARGO_HOME=<lane target>/.kronn-cargo-home` when the registry link is in place. No `VAR=x cmd` prefix is needed. |
-| Cargo home | lane-private, so Cargo's package-cache lock is written inside the lane; `registry`, `git` and `config.toml` are symlinks to the host's (credentials are not linked). |
+| Environment | `KRONN_DATA_DIR=<worktree>/.kronn/data`, `CARGO_TARGET_DIR=<lane target>`, `CARGO_NET_OFFLINE=true`, `CARGO_BUILD_JOBS` (KT-1250), and `CARGO_HOME` when the registry is in place. No `VAR=x cmd` prefix is needed. |
+| Cargo home | the host's own `CARGO_HOME`, read-only to the sandbox (KT-1250: Cargo fingerprints a registry crate by the absolute path of its sources, so a lane under another home can never reuse a warm target — see [worker lane warm start](worker-lane-warm-start.md)). `KRONN_WORKER_PRIVATE_CARGO_HOME=1` restores the KT-1246 lane-private home (`<lane target>/.kronn-cargo-home`: `registry`, `git`, `config.toml` symlinked, credentials never linked) at the price of no seeding. |
 | Frontend | `frontend/node_modules` is a symlink to the main checkout's, created without any network install. Missing there: frontend tests are reported unavailable. |
 
 Two side effects are deliberately neutralised, because both made a clean
@@ -80,7 +80,9 @@ test; `executed: false` needs `which: []` and no `pass`/`fail` test.
 
 ### Known limits
 
-- Lane targets under `<repo>/target/wt-*` are not removed with the worktree.
+- Lane targets under `<repo>/target/wt-*` are removed with a clean worktree and
+  swept at boot when stamped with `.kronn-lane.json` (see [worker lane warm
+  start](worker-lane-warm-start.md)); a dirty preserved worktree keeps its lane.
 - A worker needing a crate absent from the host cache cannot fetch it.
 - Vite's dev server may refuse files outside its root through the
   `node_modules` link; `vitest` runs are unaffected.

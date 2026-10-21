@@ -7,9 +7,10 @@ use std::future::Future;
 use std::path::Path;
 
 use crate::models::{
-    BriefingCommitConvention, BriefingDefaultBranch, BriefingEnvironmentKind, BriefingFact,
-    BriefingForge, BriefingMergeStrategy, BriefingPersonRole, BriefingProjectAnswers,
-    BriefingReleaseCadence, BriefingReviewPolicy, BriefingTracker, BriefingYesNo,
+    BriefingCommitConvention, BriefingDefaultBranch, BriefingEnvironmentKind, BriefingExternalDoc,
+    BriefingExternalDocKind, BriefingFact, BriefingForge, BriefingMergeStrategy,
+    BriefingPersonRole, BriefingProjectAnswers, BriefingReleaseCadence, BriefingReviewPolicy,
+    BriefingTracker, BriefingYesNo,
 };
 
 /// Heading of the answers section inside `docs/briefing.md`.
@@ -21,7 +22,9 @@ const ANSWERS_SUFFIX: &str = " -->";
 /// the file over to humans: the audit then never rewrites it.
 pub(crate) const GENERATED_MARKER: &str = "<!-- kronn:generated=\"briefing\"";
 
-const NOT_PROVIDED: &str = "Not provided — ask before assuming.";
+pub(crate) const NOT_PROVIDED: &str = "Not provided — ask before assuming.";
+/// External documentation spaces one project can list.
+pub(crate) const MAX_EXTERNAL_DOCS: usize = 6;
 /// Longest note attached to one project fact (KT-1196).
 pub(crate) const FACT_NOTE_MAX_CHARS: usize = 300;
 const JIRA_PLUGIN: &str = "mcp-atlassian";
@@ -124,6 +127,36 @@ pub(crate) fn normalize_answers(
         }
     }
 
+    let mut seen_doc: Vec<(BriefingExternalDocKind, String)> = Vec::new();
+    for doc in &mut out.external_docs {
+        doc.url = doc.url.trim().trim_end_matches('/').to_string();
+        if doc.url.is_empty() {
+            continue;
+        }
+        if !doc.url.starts_with("https://") || !is_http_url(&doc.url) {
+            return Err(format!(
+                "external_docs.url: `{}` must be an https URL",
+                doc.url
+            ));
+        }
+        let authority = doc.url["https://".len()..].split('/').next().unwrap_or("");
+        if authority.is_empty() || authority.contains('@') {
+            return Err(
+                "external_docs.url: a host is required, and no credentials in the address".into(),
+            );
+        }
+    }
+    out.external_docs.retain(|d| {
+        let fresh = !d.url.is_empty() && !seen_doc.contains(&(d.kind, d.url.clone()));
+        seen_doc.push((d.kind, d.url.clone()));
+        fresh
+    });
+    if out.external_docs.len() > MAX_EXTERNAL_DOCS {
+        return Err(format!(
+            "external_docs: at most {MAX_EXTERNAL_DOCS} documentation spaces"
+        ));
+    }
+
     let mut seen_role = Vec::new();
     out.people.retain(|p| {
         let fresh = !seen_role.contains(&p.role);
@@ -172,6 +205,7 @@ fn fact_key(v: BriefingFact) -> &'static str {
         BriefingFact::ReleaseCadence => "release_cadence",
         BriefingFact::Environments => "environments",
         BriefingFact::People => "people",
+        BriefingFact::ExternalDocs => "external_docs",
     }
 }
 
@@ -189,6 +223,7 @@ fn fact_label(v: BriefingFact) -> &'static str {
         BriefingFact::ReleaseCadence => "Release cadence",
         BriefingFact::Environments => "Environments",
         BriefingFact::People => "People",
+        BriefingFact::ExternalDocs => "External documentation",
     }
 }
 
@@ -223,7 +258,7 @@ fn forge_label(v: BriefingForge) -> &'static str {
     }
 }
 
-fn branch_label(v: BriefingDefaultBranch) -> Option<&'static str> {
+pub(crate) fn branch_label(v: BriefingDefaultBranch) -> Option<&'static str> {
     match v {
         BriefingDefaultBranch::Unknown => None,
         BriefingDefaultBranch::Main => Some("main"),
@@ -233,7 +268,7 @@ fn branch_label(v: BriefingDefaultBranch) -> Option<&'static str> {
     }
 }
 
-fn commit_label(v: BriefingCommitConvention) -> &'static str {
+pub(crate) fn commit_label(v: BriefingCommitConvention) -> &'static str {
     match v {
         BriefingCommitConvention::Unknown => NOT_PROVIDED,
         BriefingCommitConvention::Conventional => "Conventional Commits",
@@ -242,7 +277,7 @@ fn commit_label(v: BriefingCommitConvention) -> &'static str {
     }
 }
 
-fn yes_no_label(v: BriefingYesNo) -> &'static str {
+pub(crate) fn yes_no_label(v: BriefingYesNo) -> &'static str {
     match v {
         BriefingYesNo::Unknown => NOT_PROVIDED,
         BriefingYesNo::Yes => "Required",
@@ -250,7 +285,7 @@ fn yes_no_label(v: BriefingYesNo) -> &'static str {
     }
 }
 
-fn merge_label(v: BriefingMergeStrategy) -> &'static str {
+pub(crate) fn merge_label(v: BriefingMergeStrategy) -> &'static str {
     match v {
         BriefingMergeStrategy::Unknown => NOT_PROVIDED,
         BriefingMergeStrategy::Squash => "Squash",
@@ -259,7 +294,7 @@ fn merge_label(v: BriefingMergeStrategy) -> &'static str {
     }
 }
 
-fn review_label(v: BriefingReviewPolicy) -> &'static str {
+pub(crate) fn review_label(v: BriefingReviewPolicy) -> &'static str {
     match v {
         BriefingReviewPolicy::Unknown => NOT_PROVIDED,
         BriefingReviewPolicy::NoReview => "No required review",
@@ -268,7 +303,7 @@ fn review_label(v: BriefingReviewPolicy) -> &'static str {
     }
 }
 
-fn cadence_label(v: BriefingReleaseCadence) -> &'static str {
+pub(crate) fn cadence_label(v: BriefingReleaseCadence) -> &'static str {
     match v {
         BriefingReleaseCadence::Unknown => NOT_PROVIDED,
         BriefingReleaseCadence::Continuous => "Continuous (every merge)",
@@ -288,7 +323,16 @@ fn env_label(v: BriefingEnvironmentKind) -> &'static str {
     }
 }
 
-fn role_label(v: BriefingPersonRole) -> &'static str {
+fn external_doc_label(v: BriefingExternalDocKind) -> &'static str {
+    match v {
+        BriefingExternalDocKind::Confluence => "Confluence",
+        BriefingExternalDocKind::Notion => "Notion",
+        BriefingExternalDocKind::Wiki => "Wiki",
+        BriefingExternalDocKind::Other => "Other (ask the team)",
+    }
+}
+
+pub(crate) fn role_label(v: BriefingPersonRole) -> &'static str {
     match v {
         BriefingPersonRole::Arbiter => "Arbiter (final call)",
         BriefingPersonRole::TechLead => "Tech lead",
@@ -417,6 +461,19 @@ pub(crate) fn render_facts_section(answers: &BriefingProjectAnswers) -> Option<S
         out.push_str(&format!("- Environments: {}\n", envs.join(", ")));
     }
     out.push_str(&env_note);
+    let docs_note = notes_of(&[BriefingFact::ExternalDocs]);
+    if answers.external_docs.is_empty() && !docs_note.is_empty() {
+        out.push_str("- External documentation: not provided\n");
+    }
+    if !answers.external_docs.is_empty() {
+        let docs: Vec<String> = answers
+            .external_docs
+            .iter()
+            .map(|d| format!("{} ({})", external_doc_label(d.kind), d.url))
+            .collect();
+        out.push_str(&format!("- External documentation: {}\n", docs.join(", ")));
+    }
+    out.push_str(&docs_note);
     let people_note = notes_of(&[BriefingFact::People]);
     if answers.people.is_empty() && !people_note.is_empty() {
         out.push_str("- People: not provided\n");
@@ -659,6 +716,8 @@ pub(crate) struct ProjectChecks {
     pub default_branch: CheckStatus,
     /// The default branch the forge reports, used when the briefing left it open.
     pub observed_default_branch: Option<String>,
+    /// One status per `answers.external_docs` entry, in order.
+    pub external_docs: Vec<CheckStatus>,
 }
 
 impl ProjectChecks {
@@ -669,6 +728,11 @@ impl ProjectChecks {
             ("default branch", &self.default_branch),
         ]
         .into_iter()
+        .chain(
+            self.external_docs
+                .iter()
+                .map(|s| ("external documentation", s)),
+        )
         .filter_map(|(field, status)| match status {
             CheckStatus::Mismatch { detail, .. } => Some(format!("{field}: {detail}")),
             _ => None,
@@ -736,6 +800,7 @@ where
         forge_repo: CheckStatus::NotApplicable,
         default_branch: CheckStatus::NotApplicable,
         observed_default_branch: None,
+        external_docs: Vec::new(),
     };
 
     if answers.tracker == BriefingTracker::Jira && !answers.tracker_key.is_empty() {
@@ -852,7 +917,81 @@ where
             }
         }
     }
+    for doc in &answers.external_docs {
+        checks
+            .external_docs
+            .push(check_external_doc(doc, connections, &probe).await);
+    }
     checks
+}
+
+/// The Confluence space key an address names (`…/wiki/spaces/<KEY>/…`).
+pub(crate) fn confluence_space_key(url: &str) -> Option<String> {
+    let rest = url.split("/spaces/").nth(1)?;
+    let key: String = rest
+        .chars()
+        .take_while(|c| !matches!(c, '/' | '?' | '#'))
+        .collect();
+    let valid = !key.is_empty()
+        && key.len() <= 128
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '~' | '_' | '-' | '.'));
+    valid.then_some(key)
+}
+
+/// One external documentation space. Only a Confluence space reachable through
+/// the project's Atlassian connection can be read back; anything else says so.
+/// A space the connection cannot see proves nothing (Confluence may sit on
+/// another host than Jira), so it is never reported as a mismatch.
+async fn check_external_doc<F, Fut>(
+    doc: &BriefingExternalDoc,
+    connections: &[(String, String)],
+    probe: &F,
+) -> CheckStatus
+where
+    F: Fn(ProbeRequest) -> Fut,
+    Fut: Future<Output = ProbeResponse>,
+{
+    let unverified = |reason: &str| CheckStatus::NotVerified {
+        reason: reason.to_string(),
+    };
+    if doc.kind != BriefingExternalDocKind::Confluence {
+        return unverified("no read-only check exists for this documentation tool");
+    }
+    let Some(key) = confluence_space_key(&doc.url) else {
+        return unverified("the address names no Confluence space (`/spaces/<KEY>`)");
+    };
+    let via = "Atlassian connection".to_string();
+    let params = HashMap::from([("key".to_string(), key.clone())]);
+    match probe_all(
+        connections,
+        JIRA_PLUGIN,
+        "/wiki/rest/api/space/{key}",
+        &params,
+        probe,
+    )
+    .await
+    {
+        None => unverified("no Atlassian connection configured for this project"),
+        Some(ProbeResponse::Found(body)) => {
+            let seen = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            if seen.eq_ignore_ascii_case(&key) {
+                CheckStatus::Verified { via }
+            } else {
+                CheckStatus::Mismatch {
+                    via,
+                    detail: format!("Confluence answers with space `{seen}`, not `{key}`"),
+                }
+            }
+        }
+        Some(ProbeResponse::NotFound) => unverified(
+            "the space is not visible to the configured connection (it may live on another host)",
+        ),
+        Some(ProbeResponse::Failed(e)) => CheckStatus::NotVerified {
+            reason: failure_reason(&e),
+        },
+    }
 }
 
 // ─── docs/project.md ────────────────────────────────────────────────────────
@@ -877,7 +1016,30 @@ pub(crate) fn render_project_doc(
     );
     out.push_str(&format!("Last generated: {today}.\n\n"));
 
-    out.push_str("## Tracker\n\n| Field | Value | Check |\n|-------|-------|-------|\n");
+    out.push_str("## External documentation\n\n");
+    if answers.external_docs.is_empty() {
+        out.push_str(NOT_PROVIDED);
+        out.push('\n');
+    } else {
+        out.push_str("| Tool | Address | Check |\n|------|---------|-------|\n");
+        for (index, doc) in answers.external_docs.iter().enumerate() {
+            let check = checks
+                .external_docs
+                .get(index)
+                .map(CheckStatus::render)
+                .unwrap_or_else(|| "—".into());
+            out.push_str(&format!(
+                "| {} | {} | {} |\n",
+                external_doc_label(doc.kind),
+                cell(&doc.url),
+                check
+            ));
+        }
+    }
+    if let Some(n) = answers.notes.get(&BriefingFact::ExternalDocs) {
+        out.push_str(&format!("\nNote: {}\n", cell(n)));
+    }
+    out.push_str("\n## Tracker\n\n| Field | Value | Check |\n|-------|-------|-------|\n");
     let note = |value: String, fact: BriefingFact| with_note(value, answers, fact);
     out.push_str(&format!(
         "| Tool | {} | — |\n",
@@ -1043,6 +1205,8 @@ pub(crate) struct ProjectDocReport {
     pub kept_without_answers: bool,
     pub mismatches: Vec<String>,
     pub error: Option<String>,
+    /// What seeding `conventions/`, `gotchas/` and `people/` did (KT-819).
+    pub operating_docs: Option<operating_seed::SeedReport>,
 }
 
 /// The production probe: the ApiCall executor's readiness path, GET only,
@@ -1097,8 +1261,29 @@ async fn api_probe(
 }
 
 /// Audit hook: render `docs/project.md` from the briefing and the read-only
-/// checks. Never fails the audit; the report says what happened.
+/// checks, then seed `conventions/`, `gotchas/` and `people/` from the same
+/// briefing (KT-819). Never fails the audit; the report says what happened.
 pub(crate) async fn fill_project_doc_for_audit(
+    state: &crate::AppState,
+    project_id: &str,
+    project_path: &Path,
+    repo_url: Option<&str>,
+    briefing_notes: Option<&str>,
+) -> ProjectDocReport {
+    let mut report =
+        write_project_page(state, project_id, project_path, repo_url, briefing_notes).await;
+    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
+    if docs_dir.is_dir() {
+        report.operating_docs = Some(operating_seed::seed(
+            project_path,
+            &docs_dir,
+            briefing_notes,
+        ));
+    }
+    report
+}
+
+async fn write_project_page(
     state: &crate::AppState,
     project_id: &str,
     project_path: &Path,
@@ -1177,6 +1362,9 @@ pub(crate) async fn fill_project_doc_for_audit(
     }
     report
 }
+
+#[path = "operating_seed.rs"]
+pub(crate) mod operating_seed;
 
 #[cfg(test)]
 #[path = "project_doc_tests.rs"]

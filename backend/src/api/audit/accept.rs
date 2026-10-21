@@ -22,7 +22,21 @@ pub struct AcceptAuditStepRequest {
     #[serde(default)]
     #[ts(optional)]
     pub reason: Option<String>,
+    /// KT-1211 — accept a step whose failure is known to leave an unsound
+    /// document (truncated, citations that do not resolve, an undisposed
+    /// detector signal, a stopped step) anyway. Without it the acceptance is
+    /// refused and the answer carries the diff to look at.
+    #[serde(default)]
+    #[ts(optional)]
+    pub override_unsound: Option<bool>,
 }
+
+/// Prefix of the refusal that asks for an explicit override, so a client can
+/// tell it from any other refusal and offer the override with the diff.
+pub const OVERRIDE_REQUIRED_PREFIX: &str = "override_required:";
+
+/// Lines of diff a refusal carries.
+const MAX_DIFF_LINES: usize = 60;
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export)]
@@ -53,13 +67,48 @@ pub(crate) fn check_target(
         return Ok(());
     }
     let content = match std::fs::read_to_string(project_path.join(target_file)) {
-        Ok(content) if !content.trim().is_empty() => content,
+        // A partial marker is Kronn's, not the document's.
+        Ok(content) => super::step_guard::strip_partial_marker(&content).unwrap_or(content),
         _ => return Err(TargetRefusal::Missing),
     };
+    if content.trim().is_empty() {
+        return Err(TargetRefusal::Missing);
+    }
     if super::validation::count_raw_placeholders(&content) > 0 {
         return Err(TargetRefusal::Template);
     }
     Ok(())
+}
+
+/// The change a step made, as a bounded unified diff.
+pub(crate) fn diff_excerpt(before: &str, after: &str) -> String {
+    let diff = crate::core::repository_resources::unified_diff(before.as_bytes(), after.as_bytes());
+    let mut lines = diff.lines();
+    let mut excerpt: Vec<&str> = lines.by_ref().take(MAX_DIFF_LINES).collect();
+    if lines.next().is_some() {
+        excerpt.push("… (diff truncated)");
+    }
+    excerpt.join("\n")
+}
+
+/// What makes accepting `row` as it stands need an explicit override.
+pub(crate) fn accept_blocker_of(
+    row: &crate::models::AuditRunStep,
+) -> Option<super::step_guard::AcceptBlocker> {
+    use super::step_guard::{AcceptBlocker, STATE_RESTORED};
+    // A step that never ended has no verdict and, when its agent was cut off,
+    // no failure reason either: its target is unvetted, whatever it holds.
+    if row.ended_at.is_none() && row.accepted_at.is_none() {
+        return Some(AcceptBlocker::NeverEnded);
+    }
+    row.step_warning
+        .as_deref()
+        .and_then(AcceptBlocker::of_reason)
+        // A stopped step whose document was put back leaves it whole.
+        .filter(|blocker| {
+            !(*blocker == AcceptBlocker::Killed
+                && row.target_state.as_deref() == Some(STATE_RESTORED))
+        })
 }
 
 /// A reason as stored: one line, trimmed, bounded; `None` when empty.
@@ -177,11 +226,73 @@ pub async fn accept_audit_step(
         Err(e) => return Json(ApiResponse::err(format!("target check failed: {e}"))),
     }
 
+    // KT-1211 (M4) — a step that failed for a reason that leaves its document
+    // unsound is accepted only on an explicit override, with the diff shown.
+    let step_row = steps.iter().find(|row| row.step_index == step);
+    let blocker = step_row.and_then(accept_blocker_of);
+    let overridden = req.override_unsound.unwrap_or(false);
+    if let Some(blocker) = blocker.filter(|_| !overridden) {
+        let snapshot = {
+            let rid = run.id.clone();
+            state
+                .db
+                .with_conn(move |conn| crate::db::audit_runs::step_snapshot(conn, &rid, step))
+                .await
+                .ok()
+                .flatten()
+        };
+        let diff = {
+            let root = project_root.clone();
+            let target = target.clone();
+            tokio::task::spawn_blocking(move || {
+                let now = super::step_guard::read_target(&root, &target)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let now = super::step_guard::strip_partial_marker(&now).unwrap_or(now);
+                match snapshot {
+                    Some(before) => diff_excerpt(before.content.as_deref().unwrap_or(""), &now),
+                    None => String::new(),
+                }
+            })
+            .await
+            .unwrap_or_default()
+        };
+        let mut message = format!(
+            "{OVERRIDE_REQUIRED_PREFIX} step {step} cannot be accepted as it stands: {}. \
+             Retry the step, or confirm the override to accept it anyway.",
+            blocker.label()
+        );
+        if !diff.is_empty() {
+            message.push_str(&format!("\n\nWhat the step changed in `{target}`:\n{diff}"));
+        }
+        return Json(ApiResponse::err(message));
+    }
+    let reason = match (blocker, reason) {
+        (Some(blocker), Some(reason)) => Some(format!("override ({}): {reason}", blocker.label())),
+        (Some(blocker), None) => Some(format!("override ({})", blocker.label())),
+        (None, reason) => reason,
+    };
+
     let lease =
         match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
             Ok(lease) => lease,
             Err(error) => return Json(ApiResponse::err(error)),
         };
+    // The step now counts as done: its document is the human's call, no
+    // longer marked partial.
+    {
+        let root = project_root.clone();
+        let target = target.clone();
+        match lease
+            .blocking(move || super::step_guard::clear_partial_marker(&root, &target))
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!("Accepted step {step}: {e}"),
+            Err(e) => tracing::warn!("Accepted step {step}: marker cleanup failed: {e}"),
+        }
+    }
     let at = Utc::now();
     let label = super::full::step_file_label(analysis_step).to_string();
     let written = {
@@ -210,6 +321,9 @@ pub async fn accept_audit_step(
                     reason.as_deref(),
                     at,
                 )?;
+                if accepted {
+                    crate::db::audit_runs::delete_step_snapshot(conn, &rid, step)?;
+                }
                 let steps = crate::db::audit_runs::list_audit_steps(conn, &rid)?;
                 Ok(Some((accepted, steps)))
             })

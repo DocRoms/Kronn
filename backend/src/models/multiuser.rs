@@ -291,6 +291,12 @@ pub enum WsMessage {
         seq: u32,
         progress: super::AgentRunProgress,
     },
+    /// A workflow step started, ended or retargeted what it shows in this
+    /// discussion's room (KT-1252): the open room re-reads its detail at once
+    /// instead of waiting for its poll. Local only: never relayed to a peer.
+    WorkflowStepRoomChanged {
+        discussion_id: String,
+    },
     /// The allowed embed sites changed: open tabs re-read the list. Carries
     /// no origin. Local only: never relayed to a peer.
     EmbedOriginsChanged,
@@ -421,6 +427,15 @@ mod tests {
             progress: crate::agents::run_progress::RunProgress::new().snapshot(),
         }
         .is_peer_relayable());
+        // KT-1252 — a room's workflow steps changing is a local signal too.
+        let changed = WsMessage::WorkflowStepRoomChanged {
+            discussion_id: "d".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&changed).unwrap(),
+            serde_json::json!({ "type": "workflow_step_room_changed", "discussion_id": "d" })
+        );
+        assert!(!changed.is_peer_relayable());
         // Shared-discussion traffic is the only thing relayed.
         assert!(chat("m1").is_peer_relayable());
         assert!(WsMessage::DiscussionInvite {

@@ -245,8 +245,8 @@ the runtime-resolution guide.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:10933-10939#task_worker_catalogue]
-  [src: file: backend/scripts/disc-introspection-mcp.py:5988-5993#call_agent_list]
+  [src: file: backend/src/api/orchestration.rs:11771-11777#task_worker_catalogue]
+  [src: file: backend/scripts/disc-introspection-mcp.py:6059-6064#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:144-162#resolve]
   [src: file: backend/src/api/media.rs:150-189#ConnectionReference]
   [src: file: backend/src/api/media.rs:385-414#usable_connections]

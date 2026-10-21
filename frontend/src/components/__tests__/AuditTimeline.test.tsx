@@ -48,7 +48,7 @@ function props(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
     briefingDone: true, onBriefingSaved: vi.fn(), auditActive: false, liveStep: 0, liveTotal: 0,
     liveFile: '', liveElapsed: null, liveTool: null, liveStartedAt: null, liveToolCalls: null, liveStepTokens: null,
     liveTotalTokens: null, onResumeBriefingDiscussion: null, onCancel: vi.fn(), resumable: null,
-    onLaunch: vi.fn(), validationInProgress: false, onValidate: vi.fn(),
+    onLaunch: vi.fn(), validationInProgress: false,
     onMarkValid: vi.fn().mockResolvedValue(undefined), onOpenValidation: vi.fn(), onViewTechDebts: vi.fn(),
     refreshTrigger: 0, toast: vi.fn(), ...over,
   };
@@ -559,7 +559,6 @@ describe('AuditTimeline', () => {
     const block = await screen.findByTestId('audit-timeline-validation-finished');
     fireEvent.click(within(block).getByRole('button', { name: /Valider l'audit/ }));
     await waitFor(() => expect(p.onMarkValid).toHaveBeenCalledTimes(1));
-    expect(p.onValidate).not.toHaveBeenCalled();
     fireEvent.click(within(block).getByRole('button', { name: /Voir la discussion de validation/ }));
     expect(p.onOpenValidation).toHaveBeenCalledWith('d-val');
   });
@@ -571,7 +570,6 @@ describe('AuditTimeline', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Reprendre la validation/ }));
     expect(p.onOpenValidation).toHaveBeenCalledWith('d-val');
-    expect(p.onValidate).not.toHaveBeenCalled();
     expect(p.onMarkValid).not.toHaveBeenCalled();
     expect(screen.queryByTestId('audit-timeline-validation-finished')).toBeNull();
     expect(screen.queryByRole('button', { name: /Voir la discussion de validation/ })).toBeNull();
@@ -589,7 +587,7 @@ describe('AuditTimeline', () => {
 
     expect(await screen.findByTestId('audit-timeline-validation-unavailable')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Valider l'audit/ })).toBeNull();
-    expect(p.onValidate).not.toHaveBeenCalled();
+    expect(p.onMarkValid).not.toHaveBeenCalled();
   });
 
   it.each(['Interrupted', 'Cancelled'])('a latest Security %s run blocks validation after an older completed Full run', async (status) => {
@@ -630,7 +628,6 @@ describe('AuditTimeline', () => {
 
     expect(await screen.findByTestId('audit-timeline-validation-unlinked')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Valider l'audit/ })).toBeNull();
-    expect(p.onValidate).not.toHaveBeenCalled();
   });
 
   it('announces step changes, not ticks, through a polite live region (KT-1072)', async () => {

@@ -42,7 +42,7 @@ This is the supported escape hatch when a human or agent needs to discuss the
 syntax itself (write `` `@codex` `` rather than a live mention). The UI composer
 and MCP bridge apply the same exemption before resolving targets.
 [src: file: frontend/src/lib/messageTargets.ts:131-147#proseOnly]
-[src: file: backend/scripts/disc-introspection-mcp.py:5011-5022#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5070-5081#_structured_message_targets]
 
 | Room mode | Target state | Result |
 |---|---|---|
@@ -83,7 +83,7 @@ time, so any other Kronn call ends that wait; the call's result carries
 `wait_preempted` and the agent must re-arm. True zero-turn silence on such a
 host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1674-1742#addressed_to_caller]
-[src: file: backend/scripts/disc-introspection-mcp.py:7222-7239#_WAIT_PREEMPTED_NOTICE]
+[src: file: backend/scripts/disc-introspection-mcp.py:7281-7298#_WAIT_PREEMPTED_NOTICE]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server
@@ -97,7 +97,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/db/sql/105_user_turn_catchup.sql:12-23#user_catchup_cursor]
 [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
 [src: file: backend/src/api/disc_invite.rs:1362-1390#ack_awareness_upto]
-[src: file: backend/scripts/disc-introspection-mcp.py:3469-3476#_PENDING_AWARENESS_ACK_BY_DISC]
+[src: file: backend/scripts/disc-introspection-mcp.py:3497-3504#_PENDING_AWARENESS_ACK_BY_DISC]
 
 ## Queue, restart, and edit/resend
 
@@ -152,8 +152,8 @@ on the root turn, or no marker), computed from `message_targets`.
 [src: file: backend/src/db/discussions.rs:1746-1789#native_agents_scheduled_for_root_turn]
 [src: file: backend/src/api/discussions/crud.rs:538-548#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/api/discussions/crud.rs:886-890#attach_discussion_participants]
-[src: file: backend/src/api/discussions/streaming.rs:1930-1940#independent_sibling_notice]
+[src: file: backend/src/api/discussions/crud.rs:898-902#attach_discussion_participants]
+[src: file: backend/src/api/discussions/streaming.rs:2235-2245#independent_sibling_notice]
 [src: file: backend/src/db/discussions.rs:2016-2030#already_scheduled]
 
 ## Joined agent turn (MCP)
@@ -164,7 +164,7 @@ from exact joined aliases (`@codex-cli`, `@codex-cli-2`, …) using the
 discussion's participant order. Several mentions fan out once per durable
 identity. The legacy single `target_agent` field remains accepted during
 rolling upgrades, with its historical provider-level semantics.
-[src: file: backend/scripts/disc-introspection-mcp.py:5011-5097#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5070-5156#_structured_message_targets]
 [src: file: backend/src/api/disc_source.rs:434-454#legacy_requested_target]
 
 For each native identity, the message and its dispatch obligation commit in one
@@ -200,7 +200,16 @@ An untargeted live peer append in a native discussion deliberately addresses
 the native principal: this is how an invited CLI hands work back to the
 discussion's normal agent. Peer-to-peer exchanges that must exclude that
 principal use a structured target; autonomous rooms use no-agent mode.
-[src: file: backend/src/api/discussions/routing.rs:42-63#route_joined_peer_turn]
+[src: file: backend/src/api/discussions/routing.rs:42-69#route_joined_peer_turn]
+
+A workflow Agent step joined by `room_id` is the exception (KT-1253): it
+reports to the room rather than handing it the turn, so its untargeted append
+reaches the joined peers and never wakes the native principal. Without this,
+every progress report of an orchestrator woke the room's agent for a reply
+nobody asked for. An explicit target (typed, legacy `target_agent`, connection
+mention, or the CLI author of a `reply_to`) keeps its route, and a failed
+lookup fails closed like the rest of the presence snapshot.
+[src: file: backend/src/api/disc_source.rs:773-779#session_identity]
 
 ## When a start is refused
 
@@ -224,7 +233,7 @@ Two distinctions the reason must not blur, and does not:
   the untracked path alone changes nothing a room user sees — which is exactly how the
   second producer of the generic string survived the first fix. `strings` on the built
   binary, not a source grep, is what proved a second one existed.
-[src: file: backend/src/api/discussions/streaming.rs:964-1009#agent_start_failure_outcome] [src: file: backend/src/api/discussions/streaming.rs:1175-1189#finish_tracked_preflight]
+[src: file: backend/src/api/discussions/streaming.rs:1269-1314#agent_start_failure_outcome] [src: file: backend/src/api/discussions/streaming.rs:1480-1494#finish_tracked_preflight]
 
 ## Persistence and interruption
 
@@ -233,7 +242,7 @@ Two distinctions the reason must not blur, and does not:
   New-discussion `@alias` routing is persisted on the initial user message
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
-  [src: file: backend/src/api/discussions/crud.rs:599-640#replace_message_targets]
+  [src: file: backend/src/api/discussions/crud.rs:611-652#replace_message_targets]
   [src: file: backend/src/api/discussions/runtime.rs:615-634#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.

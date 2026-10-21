@@ -187,6 +187,7 @@ pub fn analyze(project: &Path) -> Result<DocumentaryOptimizationReport, String> 
     }
 
     inspect_docs(project, &docs, &adapters, &budgets, &mut diagnostics);
+    inspect_stack_currency(project, &mut diagnostics);
     for diagnostic in diagnostics.iter_mut().filter(|d| d.blocking) {
         if !kronn_owns(project, &diagnostic.path) {
             diagnostic.blocking = false;
@@ -954,6 +955,114 @@ fn contained_file(root: &Path, path: &Path) -> bool {
         metadata.is_file() && !metadata.file_type().is_symlink() && contained_path(root, path)
     })
 }
+/// Diagnostic code of a Stack row without its currency facts.
+pub const STACK_CURRENCY: &str = "stack_currency";
+
+/// KT-819 DoD 8 — every row of the entry file's Stack table says what is in
+/// place, the latest stable version and when support ends, each with its source
+/// and date. A warning, never a blocker: a run with no live source honestly
+/// writes `not verified: no source` and that passes.
+fn inspect_stack_currency(project: &Path, diagnostics: &mut Vec<Diagnostic>) {
+    let rel = under_root(project, "docs/AGENTS.md");
+    let Ok(content) = read(&project.join(rel)) else {
+        return;
+    };
+    for problem in stack_currency_problems(&content) {
+        diagnostics.push(diag(STACK_CURRENCY, rel, problem));
+    }
+}
+
+fn table_cells(line: &str) -> Vec<String> {
+    line.trim()
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect()
+}
+
+fn has_iso_date(text: &str) -> bool {
+    text.as_bytes().windows(10).any(|w| {
+        w.iter().enumerate().all(|(i, b)| match i {
+            4 | 7 => *b == b'-',
+            _ => b.is_ascii_digit(),
+        })
+    })
+}
+
+/// What the first table under the first "Stack" heading lacks. Empty when
+/// there is no such table yet (the placeholder diagnostic covers an unfilled
+/// one) or when every row is complete.
+fn stack_currency_problems(content: &str) -> Vec<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let is_heading = |line: &str| line.trim_start().starts_with('#');
+    let Some(heading) = lines.iter().position(|line| {
+        is_heading(line)
+            && line
+                .trim_start()
+                .trim_start_matches('#')
+                .to_ascii_lowercase()
+                .contains("stack")
+    }) else {
+        return Vec::new();
+    };
+    let mut table: Vec<&str> = Vec::new();
+    for line in &lines[heading + 1..] {
+        if is_heading(line) {
+            break;
+        }
+        if line.trim_start().starts_with('|') {
+            table.push(line);
+        } else if !table.is_empty() {
+            break;
+        }
+    }
+    if table.len() < 2 || table[0].contains("{{") {
+        return Vec::new();
+    }
+    let header: Vec<String> = table_cells(table[0])
+        .into_iter()
+        .map(|cell| cell.to_ascii_lowercase())
+        .collect();
+    let column = |names: &[&str]| {
+        header
+            .iter()
+            .position(|cell| names.iter().any(|name| cell.contains(name)))
+    };
+    let (Some(latest), Some(support)) = (
+        column(&["latest"]),
+        column(&["support", "eol", "end of life"]),
+    ) else {
+        return vec![
+            "the Stack table has no `Latest stable` / `Support end` column: each row needs both, \
+             with source and date, or `not verified: no source`"
+                .into(),
+        ];
+    };
+    let mut problems = Vec::new();
+    for row in &table[1..] {
+        let cells = table_cells(row);
+        if cells
+            .iter()
+            .all(|c| c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')))
+        {
+            continue;
+        }
+        let name = cells.first().map(String::as_str).unwrap_or("");
+        for (index, label) in [(latest, "Latest stable"), (support, "Support end")] {
+            let cell = cells.get(index).map(String::as_str).unwrap_or("");
+            let lowered = cell.to_ascii_lowercase();
+            let honest = lowered.contains("not verified");
+            let sourced = lowered.contains("[src:") && has_iso_date(cell);
+            if !(honest || sourced) {
+                problems.push(format!(
+                    "Stack row `{name}`: `{label}` lacks its source and date (or `not verified: no source`)"
+                ));
+            }
+        }
+    }
+    problems
+}
+
 fn diag(code: &str, path: &str, message: String) -> Diagnostic {
     Diagnostic {
         code: code.into(),
@@ -1380,6 +1489,64 @@ mod tests {
             "{:#?}",
             report.diagnostics
         );
+    }
+
+    fn stack_diagnostics(body: &str) -> Vec<Diagnostic> {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("docs/AGENTS.md"), body);
+        analyze(tmp.path())
+            .unwrap()
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.code == STACK_CURRENCY)
+            .collect()
+    }
+
+    const STACK_HEAD: &str = "# Project\n\n## 6. Stack\n\n\
+        | Technology | In place | Latest stable | Support end | Role |\n\
+        |---|---|---|---|---|\n";
+
+    #[test]
+    fn a_stack_row_carries_in_place_latest_and_support_end_with_source_and_date() {
+        // KT-819 DoD 8.
+        let complete = format!(
+            "{STACK_HEAD}\
+             | PHP | 8.3.1 [src: file: composer.lock:3] | 8.4.1 [src: url: https://www.php.net/releases/] (read 2026-10-15) | 2026-12-31 [src: url: https://www.php.net/supported-versions.php] (read 2026-10-15) | API |\n\
+             | Symfony | 7.3.6 [src: file: composer.lock:9] | 7.4.0 [src: deps: composer/symfony/symfony@2026-10-04] | not verified: no source | Framework |\n"
+        );
+        assert!(stack_diagnostics(&complete).is_empty());
+
+        // A row whose cell has neither a dated source nor an honest "not verified".
+        let missing = format!(
+            "{STACK_HEAD}\
+             | PHP | 8.3.1 [src: file: composer.lock:3] | 8.4 | 2026-12-31 | API |\n\
+             | Redis | 7.2 [src: file: docker-compose.yml:4] | not verified: no source | not verified: no source | Cache |\n"
+        );
+        let found = stack_diagnostics(&missing);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found.iter().all(|d| d.message.contains("`PHP`")),
+            "{found:?}"
+        );
+        assert!(found.iter().any(|d| d.message.contains("`Latest stable`")));
+        assert!(found.iter().any(|d| d.message.contains("`Support end`")));
+        // A date without a source is a claim, not a fact.
+        assert!(found.iter().all(|d| !d.blocking));
+
+        // A table with no currency column at all is one finding.
+        let old_shape = "# Project\n\n## 6. Stack\n\n| Technology | Version | Role |\n|---|---|---|\n| PHP | 8.3 | API |\n";
+        let found = stack_diagnostics(old_shape);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("no `Latest stable`"));
+    }
+
+    #[test]
+    fn an_unfilled_stack_block_raises_no_currency_finding() {
+        // The placeholder diagnostic owns an unfilled block.
+        assert!(stack_diagnostics("# Project\n\n## 6. Stack\n\n{{STACK}}\n").is_empty());
+        let skeleton = skeleton_project();
+        let report = analyze(skeleton.path()).unwrap();
+        assert!(report.diagnostics.iter().all(|d| d.code != STACK_CURRENCY));
     }
 
     #[test]

@@ -7410,3 +7410,136 @@ async fn a_dedicated_read_holds_neither_shared_connection() {
         "it reads the committed write"
     );
 }
+
+// ─── KT-1122 — the validation repair runs when the backend boots ─────────
+
+/// front-africanews' shape, written into a database FILE, then reopened the
+/// way the backend boots (`open_path_for_backend_boot`): the repair must have
+/// run by itself — no caller invokes `audit_validation::repair`.
+#[tokio::test]
+async fn booting_the_backend_repairs_stale_validations_idempotently() {
+    const PROMPT: &str =
+        "Valide.\n\n## Sortie\némets la phrase exacte : \"KRONN:VALIDATION_COMPLETE\".";
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("kronn.db");
+
+    let before_boot = crate::db::Database::open_path(&path).unwrap();
+    before_boot
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('p1', 'P', '/tmp/p1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            for (id, created, archived) in [
+                ("linked", "2026-08-28T20:00:00+00:00", 1),
+                ("april", "2026-04-02T10:00:00+00:00", 0),
+            ] {
+                conn.execute(
+                    "INSERT INTO discussions
+                     (id, project_id, title, agent, language, created_at, updated_at, archived)
+                     VALUES (?1, 'p1', 'Validation audit AI', 'ClaudeCode', 'fr', ?2, ?2, ?3)",
+                    rusqlite::params![id, created, archived],
+                )?;
+            }
+            let messages = [
+                ("l0", "linked", 0, "User", PROMPT),
+                (
+                    "l1",
+                    "linked",
+                    1,
+                    "Agent",
+                    "Fin.\nKRONN:VALIDATION_COMPLETE",
+                ),
+                ("l2", "linked", 2, "Agent", "Commit pushed for PR #34"),
+                ("a0", "april", 0, "User", PROMPT),
+            ];
+            for (id, disc, order, role, content) in messages {
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, tokens_used)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                    rusqlite::params![
+                        id,
+                        disc,
+                        role,
+                        content,
+                        format!("2026-08-28T21:{order:02}:00+00:00"),
+                        order
+                    ],
+                )?;
+            }
+            let started = Utc
+                .with_ymd_and_hms(2026, 8, 28, 19, 0, 0)
+                .single()
+                .ok_or_else(|| anyhow::anyhow!("date"))?;
+            crate::db::audit_runs::insert_running(conn, "r1", "p1", "Full", "ClaudeCode", started)?;
+            crate::db::audit_runs::complete(
+                conn,
+                "r1",
+                started,
+                "Completed",
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                100,
+                None,
+                None,
+            )?;
+            crate::db::audit_runs::set_validation_discussion(conn, "r1", "linked")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // Seeded as a past backend left it: nothing recognised, nothing archived.
+    let untouched = before_boot
+        .with_read_conn(|conn| {
+            let record = crate::db::audit_validation::record(conn, "r1")?;
+            let april: bool = conn.query_row(
+                "SELECT archived FROM discussions WHERE id='april'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok((record.completed_at, april))
+        })
+        .await
+        .unwrap();
+    assert_eq!(untouched, (None, false));
+    drop(before_boot);
+
+    for boot in 0..2 {
+        let booted = crate::db::Database::open_path_for_backend_boot(&path).unwrap();
+        let (completed_message, april_archived, linked_archived) = booted
+            .with_read_conn(|conn| {
+                let record = crate::db::audit_validation::record(conn, "r1")?;
+                let archived = |id: &str| -> rusqlite::Result<bool> {
+                    conn.query_row(
+                        "SELECT archived FROM discussions WHERE id = ?1",
+                        [id],
+                        |r| r.get(0),
+                    )
+                };
+                Ok((
+                    record.completed_message_id,
+                    archived("april")?,
+                    archived("linked")?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            completed_message.as_deref(),
+            Some("l1"),
+            "boot {boot}: the earliest clean signal is the completion"
+        );
+        assert!(
+            april_archived,
+            "boot {boot}: the stale validation is archived"
+        );
+        assert!(linked_archived, "boot {boot}: the linked one is untouched");
+    }
+}

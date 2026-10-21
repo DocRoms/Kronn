@@ -2089,6 +2089,23 @@ class TaskExecDeliverTests(unittest.TestCase):
         self.assertNotIn("cli_session_id", props)
         self.assertNotIn("source_agent", props)
 
+    def test_manifest_description_names_every_field_the_backend_requires(self):
+        """KT-1262 — `tests_executed` is required of a spawned worker since
+        KT-1246 and was missing from the field list. The fields below mirror
+        `delivery_manifest_v1_schema` (a Rust test pins that schema to the same
+        list), so a field the backend learns to require is named here too."""
+        tool = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_deliver"
+        )
+        text = tool["inputSchema"]["properties"]["manifest"]["description"]
+        for field in (
+            "version", "task_ref", "head_sha", "files_touched", "tests",
+            "dod_status", "docs", "migrations", "risks", "limitations",
+            "summary", "tests_executed",
+        ):
+            self.assertIn(field, text)
+        self.assertIn('"1" (string)', text)
+
     def test_deliver_derives_identity_and_posts_the_manifest(self):
         self.mod._set_current_disc_id("disc-parent")
         http = mock.MagicMock(return_value={
@@ -2161,9 +2178,19 @@ class TaskExecDeliverTests(unittest.TestCase):
             projected["required"],
             [
                 "tests", "dod_status", "docs", "migrations", "risks",
-                "limitations", "summary",
+                "limitations", "summary", "tests_executed",
             ],
         )
+        self.assertEqual(
+            projected["properties"]["tests_executed"]["required"],
+            ["executed", "which"],
+        )
+        # KT-1262 — the property is declared in the TOOLS literal, which the MCP
+        # surface budget measures; the projection only reuses it.
+        declared = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_deliver"
+        )["inputSchema"]["properties"]["manifest"]["properties"]["tests_executed"]
+        self.assertEqual(projected["properties"]["tests_executed"], declared)
         self.assertNotIn("head_sha", projected["properties"])
         self.assertNotIn("task_ref", projected["properties"])
         self.assertNotIn(
@@ -2419,6 +2446,28 @@ class TaskExecReviewTests(unittest.TestCase):
         self.assertNotIn("source_session_id", props)
         self.assertNotIn("cli_session_id", props)
         self.assertNotIn("source_agent", props)
+
+    def test_decision_description_names_every_field_the_backend_requires(self):
+        """KT-1262 — an approve is refused without `reviewed_head_sha` and one
+        `dod_verifications` entry per DoD item, and `version` is the STRING "1".
+        The fields below mirror `review_decision_v1_schema` (a Rust test pins that
+        schema to the same list), so a field the backend learns to require is
+        named here before an agent has to find it by a refusal."""
+        tool = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_review"
+        )
+        text = tool["inputSchema"]["properties"]["decision"]["description"]
+        for field in (
+            "version", "task_ref", "decision", "reviewed_head_sha",
+            "dod_verifications", "comment", "findings",
+        ):
+            self.assertIn(field, text)
+        self.assertIn('"1" (string)', text)
+        self.assertIn("dod_verifications [{dod_id, met, evidence", text)
+        # KT-1254 — the live check is excluded from "one per DoD item".
+        self.assertIn("verification?", text)
+        self.assertIn("post_integration", text)
+        self.assertIn("one per DoD item except a live check", text)
 
     def test_review_derives_identity_and_posts_the_decision(self):
         self.mod._set_current_disc_id("disc-parent")
@@ -10243,10 +10292,16 @@ class PlanningToolTests(unittest.TestCase):
             "proposal_list", "proposal_get",
             "task_create", "task_update", "task_update_dod", "task_link_discussion",
             "task_add_blocker", "task_remove_blocker",
+            "task_assign",
         }
         names = {tool["name"] for tool in self.mod.TOOLS}
         self.assertTrue(expected.issubset(names))
         self.assertTrue(expected.issubset(self.mod.DISPATCH))
+        # KT-154 — one tool, declared in the TOOLS literal the byte gate parses;
+        # removing an assignment is `unassign: true`, not a second declaration.
+        self.assertNotIn("task_unassign", names)
+        self.assertNotIn("task_unassign", self.mod.DISPATCH)
+        self.assertIn("task_assign", self.mod.TOOL_MANUALS)
         self.assertFalse(
             {"proposal_accept", "proposal_reject", "proposal_decide"} & names,
             "proposal decisions must remain human-only",
@@ -10462,6 +10517,73 @@ class PlanningToolTests(unittest.TestCase):
         )
         self.assertEqual(body["completed"], True)
         self.assertEqual(body["actor"]["id"], "Codex")
+
+    def test_task_update_dod_forwards_the_live_check_evidence(self):
+        # KT-1254 — a post_integration item is ticked with the principal's proof.
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_update_dod({
+                "task_id": "KT-42",
+                "dod_id": "dod-a",
+                "completed": True,
+                "evidence": "replayed on a real framing: ok",
+            })
+        _method, _path, body = self.fake_http.call_args.args
+        self.assertEqual(body["evidence"], "replayed on a real framing: ok")
+
+    def test_task_assign_without_assignee_names_the_caller_session(self):
+        # KT-154 — "myself" is resolved server-side from the durable session, so
+        # the bridge never invents a provider-only identity.
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="cli-session-a"):
+            self.mod.call_task_assign({"task_id": "KT/154", "role": "reviewer"})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual((method, path), ("POST", "/api/planning/tasks/KT%2F154/assignees"))
+        self.assertNotIn("assignee", body)
+        self.assertEqual(body["role"], "reviewer")
+        self.assertEqual(body["actor"]["id"], "Codex")
+        self.assertEqual(body["actor"]["session_id"], "cli-session-a")
+
+    def test_task_assign_forwards_only_the_typed_identity_fields(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_assign({
+                "task_id": "KT-154",
+                "assignee": {
+                    "kind": "cli",
+                    "agent_type": "Codex",
+                    "cli_session_id": 12,
+                    "ignored": "x",
+                },
+            })
+        body = self.fake_http.call_args.args[2]
+        self.assertEqual(
+            body["assignee"],
+            {"kind": "cli", "agent_type": "Codex", "cli_session_id": 12},
+        )
+
+    def test_task_assign_rejects_a_provider_only_assignee(self):
+        with self.assertRaisesRegex(RuntimeError, "kind and agent_type"):
+            self.mod.call_task_assign({"task_id": "KT-154", "assignee": {"agent_type": "Codex"}})
+        with self.assertRaisesRegex(RuntimeError, "task_id is required"):
+            self.mod.call_task_assign({"unassign": True})
+
+    def test_task_assign_unassign_is_a_delete_on_the_assignees_collection(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_assign({"task_id": "KT-154", "unassign": True, "role": "owner"})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual((method, path), ("DELETE", "/api/planning/tasks/KT-154/assignees"))
+        self.assertNotIn("assignee", body)
+        self.assertNotIn("role", body, "a removal carries no role")
+
+    def test_assignees_reach_the_write_receipt(self):
+        ack = self.mod._task_ack({
+            "id": "t", "reference": "KT-154", "title": "x", "status": "in_progress",
+            "assignees": [{"kind": "cli", "agent_type": "Codex", "cli_session_id": 12}],
+        })
+        self.assertEqual(ack["assignees"][0]["cli_session_id"], 12)
 
     def test_task_add_blocker_requires_both_references(self):
         with self.assertRaisesRegex(RuntimeError, "task_id and blocker_task_id"):
@@ -12736,7 +12858,7 @@ class TaskAckTests(unittest.TestCase):
         for name in (
             "call_task_create", "call_task_update", "call_task_update_dod",
             "call_task_add_blocker", "call_task_remove_blocker",
-            "call_task_link_discussion",
+            "call_task_link_discussion", "call_task_assign",
         ):
             source = inspect.getsource(getattr(self.mod, name))
             self.assertIn("_task_ack", source, f"{name} still returns the whole task")

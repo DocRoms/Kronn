@@ -8,7 +8,7 @@ use crate::models::{
     BriefingTracker, ProjectRule, ProjectRuleKind, ProjectRulePattern, ProjectRulePatternKind,
 };
 
-const ALL_FACTS: [BriefingFact; 12] = [
+const ALL_FACTS: [BriefingFact; 13] = [
     BriefingFact::Tracker,
     BriefingFact::TrackerKey,
     BriefingFact::Forge,
@@ -21,6 +21,7 @@ const ALL_FACTS: [BriefingFact; 12] = [
     BriefingFact::ReleaseCadence,
     BriefingFact::Environments,
     BriefingFact::People,
+    BriefingFact::ExternalDocs,
 ];
 
 fn project_answers() -> BriefingProjectAnswers {
@@ -161,7 +162,7 @@ fn every_section_of_a_saved_briefing_is_read_back() {
     assert_eq!(saved.additional, "Ask Sam first.");
     let project = saved.project.expect("project facts");
     assert_eq!(project, project_answers());
-    assert_eq!(project.notes.len(), 12);
+    assert_eq!(project.notes.len(), 13);
     assert_eq!(saved.existing_docs, Some(docs_answers()));
     assert_eq!(saved.project_rules, Some(rules_answers()));
     assert!(saved.td_to_tasks);

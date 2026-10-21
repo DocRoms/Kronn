@@ -223,45 +223,14 @@ pub(crate) fn ensure_agent_writable_subfolders(
         // bootstrap is in a degraded state.
         return;
     }
-    // The README copy below makes one point explicit: these folders
-    // are EMPTY by default after the audit. The audit pipeline does
-    // NOT seed them — they're discovery-time scratchpads filled by
-    // agents (and humans) as they encounter conventions / gotchas /
-    // contributors during real work. Without this notice, users
-    // open the empty folders after their first audit and assume
-    // something went wrong. 0.8.3 (F5).
-    static SUBFOLDERS: &[(&str, &str)] = &[
-        (
-            "conventions",
-            "# Conventions\n\n\
-             > **Empty by design after the initial audit.** This folder fills up over time, one file at a time, as agents and humans encounter project-specific conventions while doing real work. The audit pipeline does NOT seed it — only `coding-rules.md` (one level up) is filled at audit time.\n\n\
-             ## What goes here\n\
-             Project-specific conventions discovered at runtime — naming patterns, idioms agents must follow, micro-rules that don't fit `coding-rules.md`.\n\n\
-             One file per topic, e.g. `pnpm-vs-npm.md`, `git-signoff.md`, `commit-style.md`.\n\n\
-             Curated by humans + agents. Cross-ref with `[[wikilinks]]` for Obsidian graph.\n",
-        ),
-        (
-            "gotchas",
-            "# Gotchas\n\n\
-             > **Empty by design after the initial audit.** This folder fills up over time as agents (and humans) hit footguns during real work. The audit pipeline does NOT seed it — only generic `inconsistencies-tech-debt.md` (one level up) is filled at audit time.\n\n\
-             ## What goes here\n\
-             Sharp edges to know before touching code — runtime quirks, footguns, version-specific issues, MCP integration weirdness, framework bugs.\n\n\
-             One file per topic, e.g. `jira-mcp-escapes-panels.md`, `migration-locks-table.md`.\n",
-        ),
-        (
-            "people",
-            "# People\n\n\
-             > **Empty by design after the initial audit.** Optional folder. Skip if your project is solo or if collaborators don't need agent-tailored context.\n\n\
-             ## What goes here\n\
-             Team context — preferences, ownership areas, review style. Helps agents adapt to the human they're collaborating with.\n\n\
-             One file per person if useful: `alice.md`, `bob.md`.\n",
-        ),
-    ];
+    // KT-819 DoD 11 — the audit seeds these folders from what the team stated
+    // in the briefing (`api::audit::operating_seed`); they stay empty only when
+    // the briefing gave nothing to seed, and agents and humans add to them.
     // The trust root is the EXPLICIT project root, never inferred (same
     // class as ensure_docs_index): the lstat walk never checks the root
     // itself, so rooting at docs_dir would let a symlinked docs/ route
     // these writes outside the project.
-    for (name, readme) in SUBFOLDERS {
+    for (name, readme) in SUBFOLDER_READMES {
         let folder = docs_dir.join(name);
         // no-follow: a symlinked subfolder (conventions/gotchas/people →
         // external dir) or dangling README link is skipped, never traversed.
@@ -284,6 +253,36 @@ pub(crate) fn ensure_agent_writable_subfolders(
         }
     }
 }
+
+/// The README each agent-writable subfolder starts with. Shipped as
+/// `templates/docs/<folder>/README.md` too: a test keeps both copies equal.
+pub(crate) const SUBFOLDER_READMES: &[(&str, &str)] = &[
+    (
+        "conventions",
+        "# Conventions\n\n\
+         > **Seeded by the audit** from the Git workflow the team stated in the briefing (`git-workflow.md`), when it did; empty otherwise. It then fills up one file at a time, as agents and humans meet project-specific conventions while doing real work.\n\n\
+         ## What goes here\n\
+         Project-specific conventions — naming patterns, idioms agents must follow, micro-rules that don't fit `coding-rules.md` (one level up).\n\n\
+         One file per topic, e.g. `pnpm-vs-npm.md`, `git-signoff.md`, `commit-style.md`.\n\n\
+         Curated by humans + agents. Cross-ref with `[[wikilinks]]` for Obsidian graph.\n",
+    ),
+    (
+        "gotchas",
+        "# Gotchas\n\n\
+         > **Seeded by the audit** from the traps the team listed in the briefing (`known-traps.md`), when it did; empty otherwise. It then fills up as agents (and humans) hit footguns during real work.\n\n\
+         ## What goes here\n\
+         Sharp edges to know before touching code — runtime quirks, footguns, version-specific issues, MCP integration weirdness, framework bugs.\n\n\
+         One file per topic, e.g. `jira-mcp-escapes-panels.md`, `migration-locks-table.md`.\n",
+    ),
+    (
+        "people",
+        "# People\n\n\
+         > **Seeded by the audit** from the roles, names and contacts the team entered in the briefing (`team.md`), when it did; empty otherwise. Skip the folder if your project is solo.\n\n\
+         ## What goes here\n\
+         Team context — preferences, ownership areas, review style. Helps agents adapt to the human they're collaborating with.\n\n\
+         One file per person if useful: `alice.md`, `bob.md`.\n",
+    ),
+];
 
 /// Recursively copy a directory, creating ONLY files that do not exist
 /// at the destination, and returning the exact list of paths created by
@@ -406,22 +405,24 @@ mod tests {
     }
 
     #[test]
-    fn ensure_subfolders_readme_explicitly_says_empty_by_design() {
-        // 0.8.3 F5 — users opened conventions/gotchas/people after
-        // the first audit, saw only a tiny README, and assumed
-        // something failed. The README now states upfront that these
-        // folders are MEANT to be empty post-audit (they're filled
-        // at runtime by agents and humans, not by the audit pipeline).
+    fn subfolder_readmes_say_what_seeds_them_and_match_the_shipped_template() {
+        // KT-819 DoD 11 — the audit seeds these folders, so the README says
+        // what from and that an empty folder means the briefing was silent.
         let tmp = tempfile::TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
         std::fs::create_dir(&docs).unwrap();
         ensure_agent_writable_subfolders(tmp.path(), &docs);
-        for sub in &["conventions", "gotchas", "people"] {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+        for (sub, _) in SUBFOLDER_READMES {
             let body = std::fs::read_to_string(docs.join(sub).join("README.md")).unwrap();
             assert!(
-                body.contains("Empty by design"),
-                "{sub}/README.md must explicitly call out the empty-by-design status (got: {body:?})"
+                body.contains("Seeded by the audit") && body.contains("empty otherwise"),
+                "{sub}/README.md must say what seeds the folder (got: {body:?})"
             );
+            assert!(!body.contains("Empty by design"), "{sub}: {body:?}");
+            let shipped = std::fs::read_to_string(root.join(sub).join("README.md"))
+                .unwrap_or_else(|e| panic!("templates/docs/{sub}/README.md: {e}"));
+            assert_eq!(shipped, body, "{sub}: template and installer copies differ");
         }
     }
 
