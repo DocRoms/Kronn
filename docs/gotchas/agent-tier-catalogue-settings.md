@@ -128,7 +128,7 @@ caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
 [src: file: frontend/src/components/ChatHeader.tsx:430-431#currentModel]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1612-1643#changeQuickPromptAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3227-3228#currentModel]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3230-3231#currentModel]
 
 KT-627 separately removed the HTTP runner's embedded fallback and qualified
 production-library resolution/preflight. The final migration and cross-surface

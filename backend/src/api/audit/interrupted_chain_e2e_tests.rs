@@ -133,14 +133,14 @@ async fn a_resume_never_reruns_an_accepted_step_unless_the_human_asks() {
             .collect();
     let writer = chain.iter().position(|t| *t == RULES).unwrap() as u64 + 1;
 
-    // The writer step leaves a document no step targets, citing a file that
+    // The writer step leaves a document no step targets, linking a page that
     // does not exist: its gate fails, and so does the final documentary gate.
     arm(tools, "fill", &ghost_chain(RULES, &chain));
     let root = project.display();
     after_each_step(
         tools,
         &format!(
-            "{RULES}) printf '# Extra\\nGhost [src: file: ghost-a.rs:1]\\n' > '{root}/docs/extra-a.md' ;;"
+            "{RULES}) printf '# Extra\\nGhost [page](nowhere/ghost-a.md)\\n' > '{root}/docs/extra-a.md' ;;"
         ),
     );
     let run = run_full(state, None).await;
@@ -229,7 +229,7 @@ async fn a_resume_of_an_accepted_step_finalizes_once_its_document_is_fixed_by_ha
     after_each_step(
         tools,
         &format!(
-            "{RULES}) printf '# Extra\\nGhost [src: file: ghost-a.rs:1]\\n' > '{root}/docs/extra-a.md' ;;"
+            "{RULES}) printf '# Extra\\nGhost [page](nowhere/ghost-a.md)\\n' > '{root}/docs/extra-a.md' ;;"
         ),
     );
     let run = run_full(state, None).await;

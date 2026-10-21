@@ -55,7 +55,7 @@ does not resolve the question and does not start it. The declaration accepts at
 most 16 variables. Workflow ids are non-empty and at most 128 characters;
 variable names are 1–64 ASCII letters, digits, `_`, `-`, or `.`, and each value
 is a control-free string of at most 8,000 characters.
-`[src: file: backend/src/db/discussion_questions.rs:239-246#valid_resume_variable] [src: file: backend/src/db/discussion_questions.rs:300-307#nonempty_bounded]`
+`[src: file: backend/src/db/discussion_questions.rs:239-246#valid_resume_variable] [src: file: backend/src/db/discussion_questions.rs:354-361#nonempty_bounded]`
 `[src: file: backend/src/api/discussion_questions.rs:64-135#launch_question_resume] [src: file: backend/src/api/discussion_questions.rs:137-164#resume_and_reload]`
 
 Pause execution, delegation and completion of the affected lot until the human
@@ -101,7 +101,7 @@ as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
 `[src: file: backend/src/lib.rs:2652-2700#decline]`
-`[src: file: backend/src/db/discussion_questions.rs:514-619#publish_human_resolution]`
+`[src: file: backend/src/db/discussion_questions.rs:655-770#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
 
@@ -649,7 +649,7 @@ identical contents is not stale. `task_exec_status` remains available for
 recovery; every orchestration mutation stays fail-closed until the fresh bridge
 is ready.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4049-4135#_attempt_resume]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10711-10722#_bridge_freshness]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10717-10728#_bridge_freshness]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:10744-10755#_GUARDED_ORCHESTRATION_TOOLS]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
@@ -917,14 +917,14 @@ A recorded arbitration answer does not by itself restart its originating
 workflow: without a declared `resume`, no follow-up run is launched. When
 debugging a failed run, compare its output with the answer timestamps; the
 current decision history does not prove the earlier result incorporated it.
-[src: file: backend/src/db/discussion_questions.rs:690-749#claim_resume]
+[src: file: backend/src/db/discussion_questions.rs:886-945#claim_resume]
 
 Question `resume` starts a new run of the declared workflow, once per card;
 it does not resume a failed run in place or wait for every other question to
 be resolved. The target workflow must check its remaining decisions and
 domain prerequisites before proceeding. Workflow concurrency limits already
 support atomic admission per launch-variable key, within that workflow.
-[src: file: backend/src/db/discussion_questions.rs:690-749#claim_resume]
+[src: file: backend/src/db/discussion_questions.rs:886-945#claim_resume]
 [src: file: backend/src/api/discussion_questions.rs:64-135#launch_question_resume]
 [src: file: backend/src/workflows/concurrency.rs:106-140#insert_run_within_limit]
 
@@ -966,7 +966,7 @@ provenance or marks a line human-written. `ready:true` means no
 known refusal, not a guaranteed run: report the real outcome from
 `workflow_run_get`. The bridge forwards the backend's verdict and never
 re-derives it.
-[src: file: backend/src/workflows/readiness.rs:18-31#assess] [src: file: backend/src/workflows/readiness.rs:33-48#collection_failure] [src: file: backend/src/workflows/readiness.rs:121-208#visit]
+[src: file: backend/src/workflows/readiness.rs:18-31#assess] [src: file: backend/src/workflows/readiness.rs:47-63#collection_failure] [src: file: backend/src/workflows/readiness.rs:185-274#visit]
 [src: file: backend/scripts/disc-introspection-mcp.py:4391-4409#kronn_readiness] [src: file: backend/scripts/disc-introspection-mcp.py:7692-7699#call_workflow_validate]
 
 ## Workflow trigger agents
@@ -1126,7 +1126,7 @@ other visible timeline message.
 
 [src: file: backend/src/api/disc_introspection.rs:584-657#disc_note_list]
 [src: file: backend/src/api/disc_invite.rs:121-123#note_count] [src: file: backend/src/api/disc_invite.rs:394-399#note_count]
-[src: file: backend/src/api/disc_source.rs:1763-1850#disc_load_other]
+[src: file: backend/src/api/disc_source.rs:1785-1872#disc_load_other]
 [src: file: backend/src/api/discussions/messaging.rs:441-518#MessageChannel]
 [src: file: backend/src/db/discussions.rs:1425-1465#insert_note_message]
 
@@ -1189,7 +1189,7 @@ shared orientation supplies the join manual, wait manual and initialize text.
 This is a source instruction contract, not a guarantee that a running host has
 loaded or follows it. See [the diagnosis and qualification](../../gotchas/joined-cli-work-loop.md).
 [src: file: backend/scripts/disc-introspection-mcp.py:9960-9983#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10558-10564#TOOL_MANUALS]
+[src: file: backend/scripts/disc-introspection-mcp.py:10559-10565#TOOL_MANUALS]
 
 The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, OpenCode → OpenCode, …), then from the parent command line, so no env-var prep is needed. An unidentified CLI joins as `Unknown`: it can read and post, but no implicit turn is routed to it. Set `KRONN_AGENT_TYPE` to name it explicitly.
 

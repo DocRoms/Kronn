@@ -90,6 +90,14 @@ case "$prompt" in
         printf '\nChecked by the audit: scanned — nothing substantiable.\n' >> "$f.next"
       fi
       mv "$f.next" "$f"
+      if [ "$(basename "$target")" = coding-rules.md ]; then
+        c="$(dirname "$f")/workflow/commits.md"
+        if [ -f "$c" ]; then
+          sed -e '/TEMPLATE FILE/d' -e 's/<!-- Fill:[^>]*-->//g' \
+              -e 's/{{{{[A-Z0-9_]*}}}}/Not formalized - ask before assuming./g' "$c" > "$c.next"
+          mv "$c.next" "$c"
+        fi
+      fi
       if [ "$target" = docs/AGENTS.md ] && [ -f '{state}/stack-table' ]; then
         cat '{state}/stack-table' >> "$f"
       fi
@@ -1696,6 +1704,115 @@ fn after_each_step(tools: &Path, hook: &str) {
     .unwrap();
 }
 
+/// KT-1388 round 2 — the partial refresh gives the same advice as Full: a stack
+/// conflict and an unproven closure in what a step wrote are handed back while
+/// it has attempts left, then left as a step warning, a documentary note and a
+/// line of the validation prompt; the step stays done and the run completes.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_partial_refresh_hands_back_and_records_the_advice_like_full() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("baseline done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    std::fs::write(
+        project.join("composer.json"),
+        "{\"require\":{\"symfony/framework-bundle\":\"^8.1\"}}",
+    )
+    .unwrap();
+    let target = "docs/inconsistencies-security.md";
+    let step = targets.iter().position(|t| *t == target).unwrap() + 1;
+    let attempts = crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS;
+    arm(tools, "noop", &vec![target; attempts]);
+    after_each_step(
+        tools,
+        &format!(
+            "{target}) printf '\\nSymfony 7.3\\nTD-20261020-review-proof — Resolved.\\n' >> '{}' ;;",
+            project.join(target).display()
+        ),
+    );
+    let response = crate::api::audit::drift::partial_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::PartialAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            steps: vec![step],
+            accept_unverified_agents: None,
+        }),
+    )
+    .await
+    .into_response();
+    let body = sse_body(response).await;
+    let done = sse_events(&body, "done").pop().expect("partial done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{body}");
+
+    // Handed back while attempts remain, never past the budget.
+    let retries: Vec<Value> = sse_events(&body, "step_retry")
+        .into_iter()
+        .filter(|e| e["reason"] == "documentary_advisories")
+        .collect();
+    assert_eq!(retries.len(), attempts - 1, "{body}");
+    let codes = |event: &Value| -> Vec<String> {
+        event["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["code"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for retry in &retries {
+        assert_eq!(retry["step"], step, "{retry}");
+        assert!(codes(retry).contains(&"stack_conflict".into()), "{retry}");
+        assert!(
+            codes(retry).contains(&"unproven_resolution".into()),
+            "{retry}"
+        );
+    }
+    // The last attempt leaves them: an event, and the step stays done.
+    let left = sse_events(&body, "documentary_advisory");
+    assert_eq!(left.len(), 1, "{body}");
+    assert!(codes(&left[0]).contains(&"stack_conflict".into()), "{body}");
+    let step_done = sse_events(&body, "step_done")
+        .into_iter()
+        .find(|e| e["step"] == step)
+        .unwrap();
+    assert_eq!(step_done["success"], true, "{step_done}");
+
+    // Recorded: the step warning, the run's notes and the validation prompt.
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, steps, prompt) = persisted(state, &run_id).await;
+    assert_eq!(run.status, "Completed");
+    let row = steps.iter().find(|s| s.step_index == step as u32).unwrap();
+    let warning = row.step_warning.as_deref().expect("step warning");
+    assert!(warning.contains("Symfony 7.3"), "{warning}");
+    assert!(warning.contains("TD-20261020-review-proof"), "{warning}");
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    for code in ["stack_conflict", "unproven_resolution"] {
+        assert!(
+            saved["advisories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["code"] == code),
+            "{saved}"
+        );
+    }
+    let prompt = prompt.expect("validation prompt");
+    assert!(prompt.contains("Symfony 7.3"), "{prompt}");
+    assert!(prompt.contains("TD-20261020-review-proof"), "{prompt}");
+}
+
 /// KT-1306 — the final documentary gate charges a blocker to the step that wrote
 /// the document, even one no step targets, and a resume redoes that step, never
 /// the founding one by default.
@@ -1712,7 +1829,7 @@ async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
     let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
     assert!(![writer_a, writer_b].contains(&founding));
 
-    // Two steps each leave a document no step targets, citing a file that does
+    // Two steps each leave a document no step targets, linking a page that does
     // not exist. A step that fails its gate retries: one scripted line per attempt.
     let mut targets: Vec<&str> = Vec::new();
     for (index, step) in chain.iter().enumerate() {
@@ -1728,8 +1845,8 @@ async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
     after_each_step(
         tools,
         &format!(
-            "docs/coding-rules.md) printf '# A\\nGhost [src: file: ghost-a.rs:1]\\n' > '{root}/docs/extra-a.md' ;;\n\
-             docs/glossary.md) mkdir -p '{root}/docs/workflow'; printf '# B\\nGhost [src: file: ghost-b.rs:1]\\n' > '{root}/docs/workflow/extra-b.md' ;;"
+            "docs/coding-rules.md) printf '# A\\nGhost [page](nowhere/ghost-a.md)\\n' > '{root}/docs/extra-a.md' ;;\n\
+             docs/glossary.md) mkdir -p '{root}/docs/workflow'; printf '# B\\nGhost [page](nowhere/ghost-b.md)\\n' > '{root}/docs/workflow/extra-b.md' ;;"
         ),
     );
     let run = run_full(state, None).await;
@@ -1854,6 +1971,381 @@ async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
     let prompt = prompt.expect("validation prompt");
     assert!(prompt.contains("docs/notes.md"), "{prompt}");
     assert!(prompt.contains("ghost.rs"), "{prompt}");
+}
+
+/// KT-1387 — a command a document cites and the repository does not define is
+/// feedback, never a blocker: the step is told on each retry, and when the
+/// attempts are spent it stays done, with a warning and a line in the run's
+/// notes and in the validation prompt. The end-of-run gate does not count it.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_unknown_command_is_told_to_the_step_then_kept_as_a_warning() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    let touching = chain
+        .iter()
+        .position(|s| s.target_file == "docs/glossary.md")
+        .unwrap() as u32
+        + 1;
+
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    // The glossary step cites a make target nothing defines, on every attempt.
+    let notes = project.join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\nPlain prose.\n").unwrap();
+    let attempts = crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS;
+    let mut scripted: Vec<&str> = Vec::new();
+    for step in &chain {
+        let times = if step.target_file == "docs/glossary.md" {
+            attempts
+        } else {
+            1
+        };
+        scripted.extend(std::iter::repeat_n(step.target_file, times));
+    }
+    arm(tools, "noop", &scripted);
+    after_each_step(
+        tools,
+        &format!(
+            "docs/glossary.md) printf 'Run `make ghost`.\\n' >> '{}' ;;",
+            notes.display()
+        ),
+    );
+    let second = run_full(state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    let retries: Vec<Value> = sse_events(&second, "step_retry")
+        .into_iter()
+        .filter(|e| e["reason"] == "documentary_unverified_commands")
+        .collect();
+    assert_eq!(retries.len(), attempts - 1, "{second}");
+    assert!(retries.iter().all(|e| e["step"] == touching), "{second}");
+    assert!(
+        retries[0]["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("make ghost"),
+        "{second}"
+    );
+    // Nothing fails: the step is done, the run completes, no blocker is counted.
+    assert!(sse_events(&second, "step_warning").is_empty(), "{second}");
+    let step_done = sse_events(&second, "step_done")
+        .into_iter()
+        .find(|e| e["step"] == touching)
+        .unwrap();
+    assert_eq!(step_done["success"], true, "{step_done}");
+    assert_eq!(done["status"], "complete", "{second}");
+    let optimization = sse_events(&second, "documentary_optimization")
+        .pop()
+        .unwrap();
+    assert_eq!(optimization["blocking_count"], 0, "{optimization}");
+
+    // Said as a warning, in the run's notes and in the validation prompt.
+    let warned = sse_events(&second, "warning")
+        .into_iter()
+        .find(|e| e["step"] == touching)
+        .unwrap_or_else(|| panic!("{second}"));
+    assert!(
+        warned["message"]
+            .as_str()
+            .unwrap()
+            .contains("cited command"),
+        "{warned}"
+    );
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, _, prompt) = persisted(state, &run_id).await;
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    assert_eq!(saved["unverified_commands"][0]["step"], touching, "{saved}");
+    assert_eq!(
+        saved["unverified_commands"][0]["path"], "docs/notes.md",
+        "{saved}"
+    );
+    assert!(prompt.expect("validation prompt").contains("make ghost"));
+}
+
+/// A partial refresh of `steps` (1-based), through the real handler.
+async fn partial_refresh(state: &AppState, steps: Vec<usize>) -> String {
+    let response = crate::api::audit::drift::partial_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::PartialAuditRequest {
+            agent: AgentType::ClaudeCode,
+            connection_id: None,
+            tier: None,
+            steps,
+            accept_unverified_agents: None,
+        }),
+    )
+    .await
+    .into_response();
+    sse_body(response).await
+}
+
+/// The step's document and `docs/notes.md` both get a command nothing defines.
+fn cite_a_ghost_command(tools: &Path, project: &Path, target: &str) {
+    after_each_step(
+        tools,
+        &format!(
+            "{target}) printf 'Run `make ghost`.\\n' >> '{notes}'; printf '\\nChecked again.\\n' >> '{doc}' ;;",
+            notes = project.join("docs/notes.md").display(),
+            doc = project.join(target).display(),
+        ),
+    );
+}
+
+/// A finished baseline audit, and `docs/notes.md` for the commands to land in.
+async fn audited_with_notes(h: &Harness) -> Vec<&'static str> {
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&'static str> = chain.iter().map(|s| s.target_file).collect();
+    arm(h.tools.path(), "fill", &targets);
+    let first = run_full(&h.state, None).await;
+    let done = sse_events(&first, "done").pop().expect("baseline done");
+    validation_settled(&h.state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+    std::fs::write(
+        h.project.path().join("docs/notes.md"),
+        "# Notes\nPlain prose.\n",
+    )
+    .unwrap();
+    targets
+}
+
+fn commands_of(run: &crate::models::AuditRun) -> Vec<(u64, String, String)> {
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap_or("null"))
+        .unwrap_or_else(|_| panic!("{:?}", run.documentary_notes));
+    saved["unverified_commands"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|c| {
+            (
+                c["step"].as_u64().unwrap(),
+                c["path"].as_str().unwrap().to_string(),
+                c["message"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// KT-1389 — the partial refresh treats a command nothing defines as Full does:
+/// told to the step on each retry, never a failure; when the attempts are spent
+/// the step stays done, with a warning, a line in the run's notes and one in the
+/// validation prompt.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_partial_refresh_tells_an_unknown_command_to_the_step_then_keeps_it_as_a_warning() {
+    let h = harness().await;
+    let targets = audited_with_notes(&h).await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let target = "docs/glossary.md";
+    let step = targets.iter().position(|t| *t == target).unwrap() + 1;
+    let attempts = crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS;
+    // A moved source, so the refresh has something to re-verify.
+    std::fs::write(
+        project.join("composer.json"),
+        "{\"require\":{\"symfony/framework-bundle\":\"^8.1\"}}",
+    )
+    .unwrap();
+    arm(tools, "noop", &vec![target; attempts]);
+    cite_a_ghost_command(tools, project, target);
+
+    let body = partial_refresh(state, vec![step]).await;
+    let done = sse_events(&body, "done").pop().expect("partial done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{body}");
+
+    let retries: Vec<Value> = sse_events(&body, "step_retry")
+        .into_iter()
+        .filter(|e| e["reason"] == "documentary_unverified_commands")
+        .collect();
+    assert_eq!(retries.len(), attempts - 1, "{body}");
+    assert!(retries.iter().all(|e| e["step"] == step), "{body}");
+    assert!(
+        retries[0]["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("make ghost"),
+        "{body}"
+    );
+    // The feedback the agent receives on the next attempt names the command.
+    let handed_back = std::fs::read_to_string(tools.join("prompt.2")).unwrap();
+    assert!(handed_back.contains("make ghost"), "{handed_back}");
+    assert!(
+        handed_back.contains("must exist in this repository"),
+        "{handed_back}"
+    );
+
+    // Never a failure: the step is done and is not counted as a blocker.
+    assert!(sse_events(&body, "step_warning").is_empty(), "{body}");
+    let step_done = sse_events(&body, "step_done")
+        .into_iter()
+        .find(|e| e["step"] == step)
+        .unwrap();
+    assert_eq!(step_done["success"], true, "{step_done}");
+    let warned = sse_events(&body, "warning")
+        .into_iter()
+        .find(|e| e["step"] == step)
+        .unwrap_or_else(|| panic!("{body}"));
+    assert!(
+        warned["message"]
+            .as_str()
+            .unwrap()
+            .contains("cited command"),
+        "{warned}"
+    );
+
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, _, prompt) = persisted(state, &run_id).await;
+    assert_eq!(run.status, "Completed");
+    let commands = commands_of(&run);
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert_eq!(commands[0].0, step as u64);
+    assert_eq!(commands[0].1, "docs/notes.md");
+    assert!(prompt.expect("validation prompt").contains("make ghost"));
+}
+
+/// KT-1389 — a refresh interrupted after a step that left a command and an
+/// advisory keeps both on the run: they are recorded as the step ends, not only
+/// when the run does. A partial run has no resume (its label is not an audit
+/// kind); the row is what the timeline and the validation read.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_interrupted_partial_refresh_keeps_the_notes_of_its_done_steps() {
+    let h = harness().await;
+    let targets = audited_with_notes(&h).await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let (first, second) = ("docs/glossary.md", "docs/inconsistencies-security.md");
+    let step_of = |file: &str| targets.iter().position(|t| *t == file).unwrap() + 1;
+    let attempts = crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS;
+    std::fs::write(
+        project.join("composer.json"),
+        "{\"require\":{\"symfony/framework-bundle\":\"^8.1\"}}",
+    )
+    .unwrap();
+    let mut scripted = vec![first; attempts];
+    scripted.extend(vec![second; attempts]);
+    arm(tools, "noop", &scripted);
+    let failing = attempts as u32 + 1;
+    fail_steps(tools, &[failing, failing + 1, failing + 2]);
+    after_each_step(
+        tools,
+        &format!(
+            "{first}) printf 'Run `make ghost`.\\n' >> '{notes}'; printf '\\nSymfony 7.3\\n' >> '{doc}' ;;",
+            notes = project.join("docs/notes.md").display(),
+            doc = project.join(first).display(),
+        ),
+    );
+
+    let body = partial_refresh(state, vec![step_of(first), step_of(second)]).await;
+    let done = sse_events(&body, "done").pop().expect("partial done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "interrupted", "{body}");
+    assert_eq!(done["succeeded_steps"], json!([step_of(first)]), "{body}");
+
+    let run_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, _, prompt) = persisted(state, &run_id).await;
+    assert_eq!(run.status, "Interrupted");
+    let commands = commands_of(&run);
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert_eq!(commands[0].0, step_of(first) as u64);
+    let saved: Value = serde_json::from_str(run.documentary_notes.as_deref().unwrap()).unwrap();
+    assert!(
+        saved["advisories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "stack_conflict"),
+        "{saved}"
+    );
+    let prompt = prompt.expect("validation prompt");
+    assert!(prompt.contains("make ghost"), "{prompt}");
+    assert!(prompt.contains("Symfony 7.3"), "{prompt}");
+}
+
+/// KT-1389 — an interrupted Full run keeps the notes of its done steps, and the
+/// run that resumes it inherits them (the step numbers stay the original ones):
+/// the commands and demoted references a carried step left are still listed,
+/// with the run's own, when it completes.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn the_documentary_notes_of_an_interrupted_full_run_survive_its_resume() {
+    let h = harness().await;
+    let targets = audited_with_notes(&h).await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let touching = targets
+        .iter()
+        .position(|t| *t == "docs/glossary.md")
+        .unwrap() as u32
+        + 1;
+    let attempts = crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS;
+    let mut scripted: Vec<&str> = Vec::new();
+    for step in &chain {
+        let times = if step.target_file == "docs/glossary.md" {
+            attempts
+        } else {
+            1
+        };
+        scripted.extend(std::iter::repeat_n(step.target_file, times));
+    }
+    arm(tools, "noop", &scripted);
+    // The last step fails, so the run ends Interrupted with the glossary step done.
+    let last = scripted.len() as u32;
+    fail_steps(tools, &[last, last + 1, last + 2]);
+    after_each_step(
+        tools,
+        &format!(
+            "docs/glossary.md) printf 'Run `make ghost`.\\n' >> '{}' ;;",
+            project.join("docs/notes.md").display()
+        ),
+    );
+    let interrupted = run_full(state, None).await;
+    let done = sse_events(&interrupted, "done")
+        .pop()
+        .expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "interrupted", "{interrupted}");
+    let interrupted_id = done["audit_run_id"].as_str().unwrap().to_string();
+    let (row, _, _) = persisted(state, &interrupted_id).await;
+    assert_eq!(row.status, "Interrupted");
+    let kept = commands_of(&row);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].0, touching as u64);
+
+    // The resume replays only the failed step: nothing cites a command again.
+    std::fs::remove_file(tools.join("after")).unwrap();
+    arm(tools, "noop", &[chain.last().unwrap().target_file]);
+    let resumed = run_full(state, Some(interrupted_id.clone())).await;
+    let done = sse_events(&resumed, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{resumed}");
+    assert_eq!(
+        started_steps(&resumed),
+        vec![chain.len() as u64],
+        "{resumed}"
+    );
+    let resumed_id = done["audit_run_id"].as_str().unwrap().to_string();
+    assert_ne!(resumed_id, interrupted_id);
+    let (run, _, prompt) = persisted(state, &resumed_id).await;
+    let inherited = commands_of(&run);
+    assert_eq!(
+        inherited, kept,
+        "the resume lists what its predecessor kept"
+    );
+    assert!(prompt.expect("validation prompt").contains("make ghost"));
 }
 
 /// KT-1353 — a blocker the committed documents held before the run, in a

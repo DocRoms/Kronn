@@ -489,6 +489,8 @@ pub async fn full_audit(
             std::collections::HashSet::new();
         // KT-1131 — carried steps a human accepted, with who and why.
         let mut accepted_rows: Vec<AcceptedStep> = Vec::new();
+        // KT-1389 — the documentary notes the run being resumed had recorded.
+        let mut resumed_notes: Option<String> = None;
         if retry_steps_req.is_some() && resume_run_id_req.is_none() {
             yield Event::default().event("error").data(
                 serde_json::json!({ "error": "retry_steps needs resume_run_id: only a step of an interrupted run can be retried alone" }).to_string(),
@@ -540,6 +542,7 @@ pub async fn full_audit(
                              a newer attempt supersedes it; launch a fresh audit instead"
                         ))
                     } else {
+                        resumed_notes = row.as_ref().and_then(|run| run.documentary_notes.clone());
                         resolve_resume_row(&run_id, row.as_ref(), &project_id).map(|plan| (plan, steps))
                     }
                 }
@@ -1404,6 +1407,30 @@ pub async fn full_audit(
         // and the problems it let through, kept to be said to the human.
         let mut documentary_autofixes: Vec<(u32, crate::core::document_optimization::AppliedFix)> = Vec::new();
         let mut documentary_preexisting: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
+        // KT-1389 — a resume inherits what the steps it carries over as done had
+        // left in the notes (the references and commands below), recorded on its
+        // own row right away so the next interruption does not lose them either.
+        let carried = super::document_repair::carried_notes(
+            resumed_notes.as_deref(),
+            |step| already_succeeded_steps.contains(&step),
+        );
+        // KT-1387 — the commands the documents still cite once a step's
+        // attempts are spent: told to the step, never a blocker.
+        let mut documentary_unverified_commands: Vec<(u32, crate::core::document_optimization::Diagnostic)> = carried.unverified_commands;
+        // KT-1388 — stack conflicts and unproven closures the documents still
+        // hold at the end: advice recorded for the human, never a blocker.
+        let mut documentary_advisories: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
+        // KT-1370 — the markers Kronn demoted to flagged backticked paths once a
+        // step's attempts were spent, with the step that left each one.
+        let mut unverified_references: Vec<(u32, crate::core::document_optimization::DemotedReference)> = carried.unverified;
+        if let Some(notes) = super::document_repair::notes_json(&documentary_preexisting, &documentary_advisories, &documentary_autofixes, &unverified_references, &documentary_unverified_commands) {
+            let run_id = audit_run_id.clone();
+            if let Err(error) = db.with_conn(move |conn|
+                crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes)
+            ).await {
+                tracing::warn!("Documentary notes of {audit_run_id} not carried over: {error}");
+            }
+        }
 
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // KT-1199 — what the previous step left, before anything else runs.
@@ -1550,6 +1577,9 @@ pub async fn full_audit(
             if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
                 full_prompt.push_str(&block);
             }
+            if let Some(block) = super::commit_context::block_for(&project_path, analysis_step.target_file, &docs_root) {
+                full_prompt.push_str(&block);
+            }
             full_prompt.push_str(&super::decisions_context_block(&project_path, analysis_step, &adr_baseline.decisions, &docs_root));
             full_prompt.push_str(&super::briefing_rules::prompt_block(analysis_step.target_file, project_rules.as_ref()));
             // 0.8.3 (#272) — pre-existing user docs are migrated to
@@ -1670,6 +1700,8 @@ pub async fn full_audit(
             // before the agent runs; settled after every attempt.
             let step_remit = super::step_remit::StepRemit::capture(&project_path, &docs_root).await;
             let mut remit_notes: Vec<String> = Vec::new();
+            // KT-1370 — what this step's documentary gate demoted after its last attempt.
+            let mut step_demotions: Vec<crate::core::document_optimization::DemotedReference> = Vec::new();
 
             // Correct blockers before final validation, at most twice per
             // step. Full's documentary gate also applies in off/warn mode;
@@ -1685,6 +1717,18 @@ pub async fn full_audit(
                     "Audit step {} ({}) re-verifies a filled target: {} stale reference(s) before the agent",
                     step, file_label, recovery_targets.iter().filter(|d| d.path == analysis_step.target_file).count()
                 );
+            }
+            // KT-1388 — the final review reads the documents side by side: a
+            // stack version the manifests or another document contradict is
+            // handed to it, whichever step wrote it, with both places named.
+            if should_optimize_documents(kind)
+                && super::ANALYSIS_STEPS.last().is_some_and(|last| last.prompt == analysis_step.prompt)
+            {
+                match super::document_repair::with_stack_conflicts(&project_path, recovery_targets.clone()) {
+                    Ok(targets) => recovery_targets = targets,
+                    // The end-of-run documentary gate still checks the stack versions.
+                    Err(e) => tracing::warn!("Audit step {} ({}): cross-document stack check skipped: {}", step, file_label, e),
+                }
             }
             // Taken before ANY write of the step, the cross-agent path's
             // included: what that path writes is the step's own doing.
@@ -2417,10 +2461,14 @@ pub async fn full_audit(
                     if cli_success && !success
                         && documentary_snapshot.is_some() && attempt < max_attempts
                     {
-                        if let Some(feedback) = super::validation::coverage_repair_feedback(&project_path, analysis_step.target_file) {
+                        let repair = super::validation::coverage_repair_feedback(&project_path, analysis_step.target_file)
+                            .map(|feedback| ("dimension_coverage", feedback))
+                            .or_else(|| super::validation::companion_repair_feedback(&project_path, analysis_step.target_file)
+                                .map(|feedback| ("unfilled_companion", feedback)));
+                        if let Some((reason, feedback)) = repair {
                             yield Event::default().event("step_retry").data(serde_json::json!({
                                 "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
-                                "reason":"dimension_coverage","diagnostic":warning.as_ref().map(|w| &w.reason),
+                                "reason":reason,"diagnostic":warning.as_ref().map(|w| &w.reason),
                             }).to_string());
                             citation_feedback = Some(feedback);
                             continue 'attempts;
@@ -2544,15 +2592,78 @@ pub async fn full_audit(
                                     }).to_string());
                                 }
                             }
+                            // KT-1388 — advice, not a blocker: handed back while the
+                            // step can still correct, recorded when it cannot.
+                            let advisory = gate.as_ref().map(|check| check.advisory.clone()).unwrap_or_default();
+                            // KT-1387 — commands the repository does not define: the
+                            // same treatment, kept in their own list of the run's notes.
+                            let unverified_commands = gate
+                                .as_ref()
+                                .map(|check| check.unverified_commands.clone())
+                                .unwrap_or_default();
                             let reason = match gate.map(|check| check.blocking) {
+                                Ok(blocking) if blocking.is_empty() && (!advisory.is_empty() || !unverified_commands.is_empty()) && attempt < max_attempts => {
+                                    let (retry_reason, flagged) = if advisory.is_empty() {
+                                        citation_feedback = Some(super::document_repair::feedback(&unverified_commands));
+                                        ("documentary_unverified_commands", unverified_commands.clone())
+                                    } else {
+                                        let mut flagged = advisory.clone();
+                                        flagged.extend(unverified_commands.iter().cloned());
+                                        citation_feedback = Some(super::document_repair::advice(&flagged));
+                                        ("documentary_advisories", flagged)
+                                    };
+                                    yield Event::default().event("step_retry").data(serde_json::json!({
+                                        "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
+                                        "reason":retry_reason,"advisory_count":advisory.len(),
+                                        "fabricated_count":unverified_commands.len(),
+                                        "diagnostics":flagged,
+                                    }).to_string());
+                                    continue 'attempts;
+                                }
                                 Ok(blocking) if blocking.is_empty() => {
                                     documentary_repair_proven = super::document_repair::recovery_changed(
                                         &project_path, before, &recovery_targets,
                                     );
+                                    if !advisory.is_empty() {
+                                        // The last attempt leaves them: a step warning, the step stays done.
+                                        let notes: Vec<String> = advisory
+                                            .iter()
+                                            .map(|d| format!("Unverified: `{}` — {}", d.path, d.message))
+                                            .collect();
+                                        yield Event::default().event("documentary_advisory").data(serde_json::json!({
+                                            "step":step,"file":file_label,"diagnostics":advisory,
+                                        }).to_string());
+                                        remit_notes.extend(notes);
+                                    }
+                                    // The attempts are spent: the step stays done, the
+                                    // doubt is recorded and said to the human.
+                                    if !unverified_commands.is_empty() {
+                                        tracing::warn!(
+                                            "Audit step {} ({}): {} cited command(s) not defined by the repository, kept as a warning",
+                                            step, file_label, unverified_commands.len()
+                                        );
+                                        for diagnostic in &unverified_commands {
+                                            let entry = (step as u32, diagnostic.clone());
+                                            if !documentary_unverified_commands.contains(&entry) {
+                                                documentary_unverified_commands.push(entry);
+                                            }
+                                        }
+                                        yield Event::default().event("warning").data(serde_json::json!({
+                                            "message": format!(
+                                                "Step {step} ({file_label}): {} cited command(s) are not defined by the repository's Makefile or manifests; kept as a warning, listed in the run's documentary notes",
+                                                unverified_commands.len()
+                                            ),
+                                            "step":step,"file":file_label,
+                                            "diagnostics":unverified_commands,
+                                        }).to_string());
+                                    }
                                     None
                                 }
                                 Ok(blocking) if attempt < max_attempts => {
-                                    citation_feedback = Some(super::document_repair::feedback(&blocking));
+                                    // What is flagged beyond the blockers rides along.
+                                    let mut flagged = blocking.clone();
+                                    flagged.extend(unverified_commands.iter().cloned());
+                                    citation_feedback = Some(super::document_repair::feedback(&flagged));
                                     yield Event::default().event("step_retry").data(serde_json::json!({
                                         "step":step,"file":file_label,"attempt":attempt,"max_attempts":max_attempts,
                                         "reason":"documentary_blockers","fabricated_count":blocking.len(),
@@ -2560,7 +2671,45 @@ pub async fn full_audit(
                                     }).to_string());
                                     continue 'attempts;
                                 }
-                                Ok(blocking) => Some(super::document_repair::feedback(&blocking)),
+                                // KT-1370 — the last attempt is spent: what is left is
+                                // only citation markers neither the agent nor the exact
+                                // fixes could repair. They stop being citations (a flagged
+                                // backticked path) and the run goes on, instead of
+                                // ending Interrupted with every later step refused.
+                                Ok(blocking) => {
+                                    let target_holds = || matches!(
+                                        super::anti_hallu_enforce::evaluate_enforce_gate(
+                                            enforce_mode, true, analysis_step.target_file,
+                                            &project_path, attempt, max_attempts, version_ctx.snapshot.as_ref(),
+                                        ),
+                                        super::anti_hallu_enforce::EnforceGateOutcome::NotApplicable
+                                            | super::anti_hallu_enforce::EnforceGateOutcome::Pass { .. }
+                                    );
+                                    match super::document_repair::demote_last_attempt(
+                                        &project_path, &blocking, Some(&run_provenance), &target_holds,
+                                    ) {
+                                        Ok(demoted) if !demoted.is_empty() => {
+                                            tracing::warn!(
+                                                "Audit step {} ({}): {} citation marker(s) demoted to unverified references after the last attempt",
+                                                step, file_label, demoted.len()
+                                            );
+                                            documentary_repair_proven = super::document_repair::recovery_changed(
+                                                &project_path, before, &recovery_targets,
+                                            );
+                                            yield Event::default().event("documentary_demoted").data(serde_json::json!({
+                                                "step":step,"file":file_label,"attempt":attempt,"references":demoted,
+                                            }).to_string());
+                                            unverified_references.extend(demoted.iter().cloned().map(|r| (step as u32, r)));
+                                            step_demotions = demoted;
+                                            None
+                                        }
+                                        Ok(_) => Some(super::document_repair::feedback(&blocking)),
+                                        Err(error) => {
+                                            tracing::warn!("Audit step {step} ({file_label}): demotion failed: {error}");
+                                            Some(super::document_repair::feedback(&blocking))
+                                        }
+                                    }
+                                }
                                 Err(error) => Some(format!("Documentary correction failed: {error}")),
                             };
                             if let Some(reason) = reason {
@@ -2751,8 +2900,21 @@ pub async fn full_audit(
                         // `null` — not 0 — when an attempt's agent reported no cost.
                         "cost_usd_micros": step_cost.usd_micros(),
                         "remit": remit_notes,
+                        "unverified_references": step_demotions.len(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
+
+                    // KT-1389 — the notes are recorded as each step ends, not only
+                    // at the final gate: an interrupted run keeps what its done
+                    // steps left, and a resume inherits it.
+                    if let Some(notes) = super::document_repair::notes_json(&documentary_preexisting, &documentary_advisories, &documentary_autofixes, &unverified_references, &documentary_unverified_commands) {
+                        let run_id = audit_run_id.clone();
+                        if let Err(error) = db.with_conn(move |conn|
+                            crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes)
+                        ).await {
+                            tracing::warn!("Documentary notes of {audit_run_id} not recorded: {error}");
+                        }
+                    }
 
                     // 0.8.4 (#298) — finalize the per-step row. `success`
                     // captures both CLI exit code AND the validation
@@ -2765,6 +2927,7 @@ pub async fn full_audit(
                         let warn_reason = {
                             let mut reasons: Vec<String> = warning.as_ref().map(|w| w.reason.clone()).into_iter().collect();
                             reasons.extend(remit_notes.iter().cloned());
+                            reasons.extend(super::document_repair::demotion_notes(&step_demotions));
                             (!reasons.is_empty()).then(|| reasons.join("\n"))
                         };
                         let repaired = warning.as_ref().map(|w| w.repaired).unwrap_or(false);
@@ -3226,7 +3389,9 @@ pub async fn full_audit(
                             "step":0,"file":"","phase":"final_gate","diagnostics":preexisting,
                         }).to_string());
                     }
-                    if let Some(notes) = super::document_repair::notes_json(&preexisting, &documentary_autofixes) {
+                    // KT-1388 - what the documents still hold as advice: noted, never counted.
+                    documentary_advisories = report.advisory_diagnostics().cloned().collect();
+                    if let Some(notes) = super::document_repair::notes_json(&preexisting, &documentary_advisories, &documentary_autofixes, &unverified_references, &documentary_unverified_commands) {
                         let run_id = audit_run_id.clone();
                         if let Err(error) = db.with_conn(move |conn|
                             crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes)
@@ -3532,7 +3697,7 @@ pub async fn full_audit(
         );
         let validation_prompt = format!(
             "{}{validation_prompt}",
-            super::helpers::documentary_notes_block(&documentary_preexisting, &documentary_autofixes, &language)
+            super::helpers::documentary_notes_block(&documentary_preexisting, &documentary_advisories, &documentary_autofixes, &unverified_references, &documentary_unverified_commands, &language)
         );
         let accepted_listed: Vec<super::helpers::AcceptedStepLine> = accepted_rows
             .iter()
@@ -3821,6 +3986,7 @@ pub async fn full_audit(
             "discussion_id": disc_id,
             "template_was_installed": template_installed,
             "audit_run_id": audit_run_id,
+            "unverified_references": unverified_references.len(),
         });
         yield Event::default().event("done").data(done.to_string());
     });

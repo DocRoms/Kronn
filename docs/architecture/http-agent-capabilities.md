@@ -358,7 +358,7 @@ why the gates exist. An HTTP run that answers in prose instead of calling a tool
 ends cleanly, so its exit code says "success"; the output validator and the
 rewrite proof are what record the step as failed when its target is missing,
 still the template, or byte-identical to before the agent ran
-[src: file: backend/src/api/audit/validation.rs:168-300#validate_step_output]
+[src: file: backend/src/api/audit/validation.rs:225-357#validate_step_output]
 [src: file: backend/src/api/audit/validation.rs:61-71#target_snapshot]. The final review step has no
 target file and is judged on the exit code alone, for an HTTP agent as for a CLI
 one.
@@ -366,8 +366,8 @@ one.
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs:1881-1886#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:4640-4643#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:1925-1930#agent_cancels]
+[src: file: backend/src/api/audit/full.rs:4806-4809#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 

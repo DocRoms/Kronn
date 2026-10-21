@@ -1206,8 +1206,10 @@ resume_drift?: string,
 /**
  * KT-1353 — JSON of what the documentary gate let through (blockers the
  * committed docs held before the run, in docs no step owns) and repaired
- * by itself (exact gate replacements) during this run:
- * `{"preexisting":[{path,message}],"autofixes":[{step,path,kind,from,to}]}`.
+ * by itself (exact gate replacements) during this run, and (KT-1388) the
+ * stack conflicts / unproven closures the documents still hold, which
+ * never fail the run:
+ * `{"preexisting":[{path,message}],"advisories":[{code,path,message}],"autofixes":[{step,path,kind,from,to}]}`.
  * Absent when there was nothing to report.
  */
 documentary_notes?: string,
@@ -1508,6 +1510,19 @@ parent_workflow_id: string | null, parent_workflow_name: string | null,
  * workflow (ordered by started_at). None for manual batches.
  */
 parent_run_sequence: number | null, };
+
+/**
+ * The saved Quick Exec behind a blocker, and the program it hands run values to.
+ */
+export type BlockedQuickExec = { id: string, name: string,
+/**
+ * The CollectApiData source alias that runs it.
+ */
+source_alias: string,
+/**
+ * The program that receives run values, e.g. `aws`.
+ */
+program: string, };
 
 /**
  * Structured discriminant for a non-terminal `Blocked` TaskExecution (KT-328). A
@@ -2913,6 +2928,11 @@ lint?: AppendLintSummary,
  * that cannot publish must learn it did not, instead of assuming it did.
  */
 important?: ImportantIngest,
+/**
+ * KT-1401 — `kronn-question` fences of the appended message that no card
+ * could be recorded from, each with its reason: the author reposts them.
+ */
+invalid_cards?: Array<InvalidCard>,
 /**
  * `sort_order` of the LAST appended message (stab-1). This is a write
  * receipt, not a read cursor: another message may have landed between
@@ -4754,6 +4774,15 @@ redirects_to: Array<string>, };
 export type IntegrationStrategy = "two_phase_ff_only";
 
 /**
+ * A `kronn-question` fence that no card could be recorded from.
+ */
+export type InvalidCard = {
+/**
+ * The fence's `key`, when it could still be read.
+ */
+key?: string, reason: string, };
+
+/**
  * Wire shape returned by the invite endpoint. The frontend displays
  * `instruction_text` directly in the copy-paste modal — the wording
  * lives server-side so we can tweak it (i18n, channel, etc.) without
@@ -5014,7 +5043,14 @@ export type LintReport = { unsourced_count: number, flagged_spans: Array<Flagged
  * honestly "couldn't verify" (typo? cross-repo? wrong line?), surfaced as
  * a soft amber pill, NOT a red "fabricated" one.
  */
-unverified_count: number, };
+unverified_count: number,
+/**
+ * KT-1401 — `kronn-question` fences of the message that Kronn could not
+ * turn into an arbitration card, each with the reason. Set when the
+ * message is stored, so the author is told instead of leaving a card the
+ * human sees but cannot answer.
+ */
+invalid_cards?: Array<InvalidCard>, };
 
 export type ListRequest = { authority: string, };
 
@@ -7357,6 +7393,15 @@ export type QuickExecExportEnvelope = { kind: string, version: number, exported_
  * Fields whose literal secret was replaced before export (never the value).
  */
 redacted_fields?: Array<RedactedField>, };
+
+/**
+ * One saved Quick Exec whose line waits for a human's approval (KT-1398).
+ */
+export type QuickExecPendingApproval = { id: string,
+/**
+ * The program that receives run values, e.g. `aws`.
+ */
+program: string, message: string, };
 
 export type QuickExecResult = { status: QuickExecStatus,
 /**
@@ -11133,7 +11178,12 @@ reason?: string, message: string, action: string,
 /**
  * Only a human can lift it: an agent must report it, never work around it.
  */
-human_only: boolean, };
+human_only: boolean,
+/**
+ * A saved Quick Exec a CollectApiData source runs (KT-1398): the human
+ * approves it there, so the page can approve it or open it directly.
+ */
+quick_exec?: BlockedQuickExec, };
 
 /**
  * What keeps a run from starting (KT-1138).

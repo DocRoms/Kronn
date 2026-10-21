@@ -2928,11 +2928,17 @@ fn insert_message_inner(
             &msg.id,
             &msg.content,
         )?;
-        super::discussion_questions::ingest_message_questions(
+        let invalid_cards = super::discussion_questions::ingest_message_questions(
             conn,
             discussion_id,
             &msg.id,
             &msg.content,
+        )?;
+        super::discussion_questions::report_invalid_cards(
+            conn,
+            &msg.id,
+            msg.lint_report.as_ref(),
+            invalid_cards,
         )?;
         super::audit_validation::on_agent_message(
             conn,

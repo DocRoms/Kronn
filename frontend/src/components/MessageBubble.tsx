@@ -1514,6 +1514,19 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             )}
           </div>
         </div>
+        {/* KT-1401 — a `kronn-question` fence Kronn could not record: said
+            plainly, always visible, so it is never read as a card to answer. */}
+        {msg.role === 'Agent' && lint?.invalid_cards?.map((card, i) => (
+          <div
+            key={`invalid-card-${i}`}
+            className="disc-msg-invalid-card"
+            role="alert"
+            data-testid="invalid-card-notice"
+          >
+            <AlertTriangle size={12} />{' '}
+            {t('disc.invalidCard', card.key ? `${card.key} — ${card.reason}` : card.reason)}
+          </div>
+        ))}
         {showLint && lint && (
           <div className="disc-msg-lint-detail" data-severity={lintSeverity} id={`lint-detail-${msg.id}`} data-testid="lint-detail">
             {lint.sources.some(s => s.status !== 'verified' && s.status !== 'unchecked') && (
