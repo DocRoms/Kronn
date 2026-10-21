@@ -28,7 +28,8 @@ prose. Quick Prompt and media dispatch workers remain stopped: those two cells
 prove the queued job, not child inference or image generation. Provider
 credentials are read through the existing runner configuration and are absent
 from the retained reports.
-[src: file: backend/src/api/agent_quick_prompt_bench.rs:269-378]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:139-164#campaign_state]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:269-378#bench_quick_prompt_native_catalogue]
 
 Reproduce from the measured commit, using an existing configured provider:
 
@@ -110,6 +111,9 @@ Before the VPN restart, DNS failed in both sandboxed and host-side probes.
 After Romuald restarted the VPN, the same configured endpoint answered HTTP 200
 and the real campaign above passed. No application setting was rewritten. A
 separate observation, named-connection `reachable: true` without a live probe,
-is recorded as follow-up KT-697 and was not changed in this lot.
+was recorded as follow-up KT-697 and was not changed in this lot. KT-697 has
+since landed: a named connection is probed over the network, and an address
+that does not resolve is reported unreachable.
 [src: user: 2026-09-22: litellm-live-access-20260922]
-[src: file: backend/src/api/orchestration.rs:8420]
+[src: file: backend/src/core/endpoint_reachability.rs:1-7]
+[src: file: backend/src/api/orchestration.rs:15294-15325#a_named_connection_failing_dns_is_unreachable_like_the_legacy_family]

@@ -65,6 +65,27 @@ pub struct DocFingerprints {
     pub recorded_at: String,
     pub reason: RecordReason,
     pub citations: Vec<CitationFingerprint>,
+    /// Digest of each Markdown section when recorded (KT-1168): tells a
+    /// section nobody revised from one a person already touched.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sections: BTreeMap<String, String>,
+    /// Per section key, the gone paths its prose names that a human saw and
+    /// accepted with « Vérifié, inchangé »: a deliberate mention, not a stale
+    /// claim. Only an acknowledgement writes it; a validation or a
+    /// revalidation carries it over and never adds to it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub known_missing: BTreeMap<String, Vec<String>>,
+}
+
+/// A doc no citation or path anchors was re-read by an agent pass (KT-1292):
+/// the doc as it stood, and the sources of the step that owns it. Either
+/// changing sends the doc back to its step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocReview {
+    pub doc_sha256: String,
+    /// Digest of the owning step's sources when the doc was re-read.
+    pub sources_fingerprint: String,
+    pub reviewed_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -74,6 +95,10 @@ pub struct CitationsFile {
     /// Doc path relative to the project root (`docs/AGENTS.md`) → its citations.
     #[serde(default)]
     pub docs: BTreeMap<String, DocFingerprints>,
+    /// Doc path → when an agent pass last re-read it though nothing anchors
+    /// it. Only the docs sent for that reason have a stamp.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reviews: BTreeMap<String, DocReview>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -300,7 +325,49 @@ fn fingerprint(project_path: &Path, citation: &DocCitation) -> Option<CitationFi
     Some(fp)
 }
 
-fn fingerprint_doc(project_path: &Path, content: &str, reason: RecordReason) -> DocFingerprints {
+/// The accepted gone paths a new record keeps. An acknowledgement accepts what
+/// the human was just shown; every other reason carries over what was accepted
+/// before, as long as that section still names the path.
+fn accepted_missing(
+    project_path: &Path,
+    doc: &str,
+    content: &str,
+    reason: RecordReason,
+    previous: Option<&DocFingerprints>,
+) -> BTreeMap<String, Vec<String>> {
+    let current = crate::core::doc_relevance::missing_by_section(project_path, doc, content);
+    if reason == RecordReason::Acknowledged {
+        return current;
+    }
+    let Some(previous) = previous else {
+        return BTreeMap::new();
+    };
+    current
+        .into_iter()
+        .filter_map(|(key, paths)| {
+            let kept: Vec<String> = previous
+                .known_missing
+                .get(&key)
+                .map(|accepted| {
+                    paths
+                        .iter()
+                        .filter(|p| accepted.contains(p))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            (!kept.is_empty()).then_some((key, kept))
+        })
+        .collect()
+}
+
+fn fingerprint_doc(
+    project_path: &Path,
+    doc: &str,
+    content: &str,
+    reason: RecordReason,
+    previous: Option<&DocFingerprints>,
+) -> DocFingerprints {
     DocFingerprints {
         doc_sha256: sha256_hex(content.as_bytes()),
         recorded_at: chrono::Utc::now().to_rfc3339(),
@@ -309,6 +376,8 @@ fn fingerprint_doc(project_path: &Path, content: &str, reason: RecordReason) -> 
             .iter()
             .filter_map(|c| fingerprint(project_path, c))
             .collect(),
+        sections: crate::core::doc_relevance::section_digests(content),
+        known_missing: accepted_missing(project_path, doc, content, reason, previous),
     }
 }
 
@@ -371,6 +440,11 @@ pub(crate) fn doc_files(project_path: &Path) -> Vec<String> {
     out
 }
 
+/// Whether a project-relative file (or folder) a doc names still exists.
+pub(crate) fn cited_file_exists(project_path: &Path, file: &str) -> bool {
+    resolve_cited(project_path, file).is_some_and(|path| path.exists())
+}
+
 fn read_doc(project_path: &Path, doc: &str) -> Option<String> {
     std::fs::read_to_string(project_path.join(doc)).ok()
 }
@@ -378,13 +452,25 @@ fn read_doc(project_path: &Path, doc: &str) -> Option<String> {
 /// Validation: every doc's citations are re-fingerprinted from the code as it
 /// is now. The human has just checked the whole set.
 pub fn record_all(project_path: &Path) -> Result<(), String> {
-    let mut file = CitationsFile::default();
+    // A previous record is read for what a human accepted, never rebuilt:
+    // a validation does not accept a vanished path nobody was shown.
+    let previous = read_strict(project_path).ok().flatten().unwrap_or_default();
+    // A review stamp is no fingerprint of the code: a validation keeps it, and
+    // the doc hash and the sources digest decide later whether it still holds.
+    let mut file = CitationsFile {
+        reviews: previous.reviews.clone(),
+        ..Default::default()
+    };
     for doc in doc_files(project_path) {
         if let Some(content) = read_doc(project_path, &doc) {
-            file.docs.insert(
-                doc,
-                fingerprint_doc(project_path, &content, RecordReason::Validation),
+            let entry = fingerprint_doc(
+                project_path,
+                &doc,
+                &content,
+                RecordReason::Validation,
+                previous.docs.get(&doc),
             );
+            file.docs.insert(doc, entry);
         }
     }
     write(project_path, &mut file)
@@ -399,10 +485,14 @@ pub fn record_after_audit(project_path: &Path, rewritten: &[String]) -> Result<(
     let mut file = previous.clone().unwrap_or_default();
     for doc in rewritten.iter().filter(|d| docs.contains(*d)) {
         if let Some(content) = read_doc(project_path, doc) {
-            file.docs.insert(
-                doc.clone(),
-                fingerprint_doc(project_path, &content, RecordReason::Audit),
+            let entry = fingerprint_doc(
+                project_path,
+                doc,
+                &content,
+                RecordReason::Audit,
+                previous.as_ref().and_then(|p| p.docs.get(doc)),
             );
+            file.docs.insert(doc.clone(), entry);
         }
     }
     let unchanged = match &previous {
@@ -415,9 +505,24 @@ pub fn record_after_audit(project_path: &Path, rewritten: &[String]) -> Result<(
     write(project_path, &mut file)
 }
 
+/// The gone prose paths a human was shown, per doc then per section key: what
+/// an acknowledgement from the card may accept.
+pub type ShownPaths = BTreeMap<String, BTreeMap<String, Vec<String>>>;
+
 /// "Verified, unchanged": refresh one section's fingerprints from the current
-/// code. Only `citations.json` is written, never the doc.
+/// code. Only `citations.json` is written, never the doc. Every gone prose
+/// path of the doc is accepted: the caller is a panel that lists them all.
 pub fn acknowledge(project_path: &Path, doc: &str) -> Result<SectionCitations, String> {
+    acknowledge_accepting(project_path, doc, None)
+}
+
+/// As `acknowledge`, accepting only the gone prose paths in `shown` (what the
+/// human was shown, not what is gone at the click). `None` accepts them all.
+pub fn acknowledge_accepting(
+    project_path: &Path,
+    doc: &str,
+    shown: Option<&BTreeMap<String, Vec<String>>>,
+) -> Result<SectionCitations, String> {
     let rel = Path::new(doc);
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
     let inside_docs = project_path
@@ -429,10 +534,55 @@ pub fn acknowledge(project_path: &Path, doc: &str) -> Result<SectionCitations, S
     }
     let content = read_doc(project_path, doc).ok_or_else(|| format!("`{doc}` not found"))?;
     let mut file = read_strict(project_path)?.unwrap_or_default();
-    let entry = fingerprint_doc(project_path, &content, RecordReason::Acknowledged);
+    let previous = file.docs.get(doc).cloned();
+    let mut entry = fingerprint_doc(
+        project_path,
+        doc,
+        &content,
+        RecordReason::Acknowledged,
+        previous.as_ref(),
+    );
+    if let Some(shown) = shown {
+        // What was accepted before stays accepted; of the rest, only what the
+        // human saw. The record never grows past the gone paths named now.
+        let before = previous.as_ref().map(|p| &p.known_missing);
+        entry.known_missing = std::mem::take(&mut entry.known_missing)
+            .into_iter()
+            .filter_map(|(key, paths)| {
+                let kept: Vec<String> = paths
+                    .into_iter()
+                    .filter(|p| {
+                        shown.get(&key).is_some_and(|s| s.contains(p))
+                            || before
+                                .and_then(|b| b.get(&key))
+                                .is_some_and(|b| b.contains(p))
+                    })
+                    .collect();
+                (!kept.is_empty()).then_some((key, kept))
+            })
+            .collect();
+    }
     file.docs.insert(doc.to_string(), entry.clone());
     write(project_path, &mut file)?;
     Ok(evaluate_section(project_path, doc, &entry))
+}
+
+/// « Vérifié, inchangé » on several sections at once, from the card. Every one
+/// that is a doc of the project is acknowledged, recorded or not: the checks
+/// judge every doc, so one added since the validation must be clearable too.
+/// A section that is not a doc (an audit step's own name) is left to its other
+/// route. Only the gone paths in `shown` are accepted.
+pub fn acknowledge_docs(
+    project_path: &Path,
+    sections: &[String],
+    shown: &ShownPaths,
+) -> Result<(), String> {
+    let docs: BTreeSet<String> = doc_files(project_path).into_iter().collect();
+    let none = BTreeMap::new();
+    for doc in sections.iter().filter(|s| docs.contains(*s)) {
+        acknowledge_accepting(project_path, doc, Some(shown.get(doc).unwrap_or(&none)))?;
+    }
+    Ok(())
 }
 
 /// The distinct citation labels a text carries, as the store names them.
@@ -614,6 +764,9 @@ pub fn record_reanchored(
     // An edit made by hand since the record stays visible as such.
     if entry.doc_sha256 == sha256_hex(before.as_bytes()) {
         entry.doc_sha256 = sha256_hex(after.as_bytes());
+        if !entry.sections.is_empty() {
+            entry.sections = crate::core::doc_relevance::section_digests(after);
+        }
     }
     write(project_path, &mut file)
 }
@@ -631,11 +784,50 @@ pub fn record_docs(
     let mut file = read_strict(project_path)?.unwrap_or_default();
     for doc in docs {
         if let Some(content) = read_doc(project_path, doc) {
-            file.docs
-                .insert(doc.clone(), fingerprint_doc(project_path, &content, reason));
+            let entry = fingerprint_doc(project_path, doc, &content, reason, file.docs.get(doc));
+            file.docs.insert(doc.clone(), entry);
         }
     }
     write(project_path, &mut file)
+}
+
+/// Stamp each doc an agent pass re-read although nothing anchors it, whether
+/// or not the pass added anchors: `(doc, owning step's sources digest)`. The
+/// doc is hashed as it stands now, after the pass.
+pub fn record_reviews(project_path: &Path, reviewed: &[(String, String)]) -> Result<(), String> {
+    if reviewed.is_empty() {
+        return Ok(());
+    }
+    let mut file = read_strict(project_path)?.unwrap_or_default();
+    let now = chrono::Utc::now().to_rfc3339();
+    for (doc, sources_fingerprint) in reviewed {
+        if let Some(content) = read_doc(project_path, doc) {
+            file.reviews.insert(
+                doc.clone(),
+                DocReview {
+                    doc_sha256: sha256_hex(content.as_bytes()),
+                    sources_fingerprint: sources_fingerprint.clone(),
+                    reviewed_at: now.clone(),
+                },
+            );
+        }
+    }
+    write(project_path, &mut file)
+}
+
+/// The stamp of `doc` when it still holds for this content and these sources;
+/// `None` when never re-read, or edited / sources changed since. The sources
+/// digest is only computed once the doc itself matches.
+pub fn current_review<'a>(
+    file: Option<&'a CitationsFile>,
+    doc: &str,
+    content: &str,
+    sources_fingerprint: impl FnOnce() -> String,
+) -> Option<&'a DocReview> {
+    let stamp = file?.reviews.get(doc)?;
+    (stamp.doc_sha256 == sha256_hex(content.as_bytes())
+        && stamp.sources_fingerprint == sources_fingerprint())
+    .then_some(stamp)
 }
 
 // ─── Evaluation ───────────────────────────────────────────────────────────

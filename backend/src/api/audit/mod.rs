@@ -37,6 +37,8 @@ pub mod redact_artifacts;
 pub mod revalidate;
 pub mod run;
 pub(crate) mod run_state;
+#[cfg(test)]
+mod step_closing_tests;
 pub(crate) mod step_guard;
 pub mod td_review;
 pub mod td_tasks;
@@ -459,6 +461,40 @@ pub(crate) fn legacy_layout_refusal(project: &std::path::Path) -> Option<serde_j
     })
 }
 
+/// A human's docs are never moved or written over without the briefing's
+/// explicit choice: every run that writes the folder (Full, partial,
+/// revalidation) refuses it the same way. `recorded_run`: a Full run this
+/// instance recorded stands for the record (see `DocsFolderState`).
+pub(crate) fn docs_folder_choice_refusal(
+    project: &std::path::Path,
+    docs_root: &crate::core::docs_location::DocsRoot,
+    recorded_run: bool,
+) -> Option<serde_json::Value> {
+    let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } =
+        crate::core::docs_folder::folder_state_with_runs(project, docs_root.rel(), recorded_run)
+    else {
+        return None;
+    };
+    Some(serde_json::json!({
+        "error": format!(
+            "The folder {}/ used by Kronn already exists and holds {files} file(s) Kronn did not write. \
+             Open the briefing and choose: another folder, or move them to {}/legacy/.",
+            docs_root.rel(), docs_root.rel()
+        ),
+        "error_code": "docs_folder_choice_required",
+    }))
+}
+
+/// Whether this instance recorded a Full run for the project.
+pub(crate) async fn has_recorded_full_run(state: &crate::AppState, project_id: &str) -> bool {
+    let id = project_id.to_string();
+    state
+        .db
+        .with_read_conn(move |conn| crate::db::audit_runs::has_any_full(conn, &id))
+        .await
+        .unwrap_or(false)
+}
+
 /// Template steps reverify a filled target; finding and review steps always
 /// preserve existing text, including documents outside their nominal target.
 pub(crate) fn reverifies_target(
@@ -507,6 +543,59 @@ pub(crate) fn gate_for_step(step_1_based: usize, first_chained_step: usize) -> &
         CHAINED_STEP_GATE
     } else {
         ""
+    }
+}
+
+/// The last words of a step prompt (KT-1278). An ACP session has no system
+/// channel: the context and the step travel as ONE user message, and a prompt
+/// that ends on a reference block (versions table, briefing, rules, signals) is
+/// read by a small model as loaded context to answer, not as work to run. The
+/// directive names the step and its target, and says no human answers.
+pub(crate) fn step_closing_directive(
+    step_1_based: usize,
+    step: &AnalysisStep,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
+    let target = step.target_file;
+    let work = if target == "REVIEW" || target.is_empty() {
+        format!("Run step {step_1_based} now and answer with its result.")
+    } else {
+        let details = if docs_root
+            .strip(target)
+            .is_some_and(|rest| rest.starts_with("inconsistencies-"))
+        {
+            format!(
+                " and the detail files it lists under `{}`",
+                docs_root.path("tech-debt/")
+            )
+        } else {
+            String::new()
+        };
+        format!("Run step {step_1_based} now: write `{target}`{details}.")
+    };
+    format!(
+        "=== RUN THIS STEP NOW ===\n\
+         Everything above is the instructions of step {step_1_based} plus reference material to \
+         consult (versions, briefing, rules, signals). None of it is a question for you.\n\
+         {work} There is no human in this turn to answer: never ask what to do or what the \
+         priority is. Stop once the work is written."
+    )
+}
+
+/// The prompt one attempt sends: the step's reference blocks and instructions,
+/// then the retry feedback when there is one, then ALWAYS the closing directive
+/// — nothing may follow it (KT-1278).
+pub(crate) fn finish_step_prompt(
+    prompt: &str,
+    feedback: Option<&str>,
+    step_1_based: usize,
+    step: &AnalysisStep,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
+    let directive = step_closing_directive(step_1_based, step, docs_root);
+    match feedback {
+        Some(feedback) => format!("{prompt}\n\n{feedback}\n\n{directive}"),
+        None => format!("{prompt}\n\n{directive}"),
     }
 }
 

@@ -2207,21 +2207,74 @@ fn an_unreviewed_delivery_alerts_the_principal_without_deciding() {
         )
         .unwrap();
     assert_eq!(reviews, 0);
+    // KT-1293 — the alert names `task_exec_review`, which only accepts an
+    // `AwaitingReview` row: the timeout must not move the execution.
     let after = get_task_execution(&conn, &execution.id).unwrap().unwrap();
-    assert!(
-        !matches!(
-            after.status,
-            TaskExecutionStatus::Approved
-                | TaskExecutionStatus::Done
-                | TaskExecutionStatus::Cancelled
-                | TaskExecutionStatus::ChangesRequested
-        ),
-        "{:?}",
-        after.status
-    );
+    assert_eq!(after.status, TaskExecutionStatus::AwaitingReview);
+    let recovery = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovery.recovery_reason, "review_wait_timeout");
+    assert!(!recovery.pending);
+    assert!(recovery.review_deadline_at.is_none());
     let alerts = parent_room_alerts(&conn);
     assert_eq!(alerts.len(), 1, "{alerts:?}");
     assert!(alerts[0].contains("task_exec_review"), "{}", alerts[0]);
+    assert!(alerts[0].contains("AwaitingReview"), "{}", alerts[0]);
+
+    // Notified once: the disarmed clock is never reported again.
+    assert!(expired_execution_timeouts(&conn, Utc::now())
+        .unwrap()
+        .is_empty());
+    assert_eq!(parent_room_alerts(&conn).len(), 1);
+}
+
+/// KT-1316 — the alert is posted in the parent room's own language, French
+/// being the default of a discussion and English what a configured `en` reads.
+#[test]
+#[serial_test::serial(task_timeout_env)]
+fn the_review_wait_alert_follows_the_parent_rooms_language() {
+    for (code, expected, absent) in [
+        ("en", "Orchestration event", "Événement"),
+        ("fr", "Événement d'orchestration", "Orchestration event"),
+    ] {
+        let conn = setup();
+        conn.execute(
+            "UPDATE discussions SET language = ?2 WHERE id = ?1",
+            rusqlite::params![DISC, code],
+        )
+        .unwrap();
+        let execution = working_execution(&conn, "t-review-lang", 1316);
+        transition_execution(
+            &conn,
+            &execution.id,
+            TaskExecutionStatus::AwaitingReview,
+            &backend_actor(),
+            serde_json::json!({}),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE task_execution_recovery SET review_deadline_at = '2020-01-01T00:00:00Z' \
+             WHERE task_execution_id = ?1",
+            [&execution.id],
+        )
+        .unwrap();
+        assert!(
+            apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::ReviewWait)
+                .unwrap()
+        );
+        let alerts = parent_room_alerts(&conn);
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert!(alerts[0].contains(expected), "{code}: {}", alerts[0]);
+        assert!(!alerts[0].contains(absent), "{code}: {}", alerts[0]);
+        if code == "en" {
+            assert!(
+                alerts[0].contains("waiting for your review"),
+                "{}",
+                alerts[0]
+            );
+        }
+    }
 }
 
 #[test]
@@ -5929,6 +5982,7 @@ fn requested_changes_publish_a_steering_card_beside_the_findings() {
             escalation: None,
             reactivation: None,
             native_dispatch: None,
+            carried_dod: &[],
             actor: &backend_actor(),
         },
     )
@@ -5993,6 +6047,7 @@ fn requested_changes_publish_a_steering_card_beside_the_findings() {
             escalation: None,
             reactivation: None,
             native_dispatch: None,
+            carried_dod: &[],
             actor: &backend_actor(),
         },
     );

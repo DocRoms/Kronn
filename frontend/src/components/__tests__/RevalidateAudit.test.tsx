@@ -36,7 +36,14 @@ const PROJECT: Project = {
   updated_at: '2026-01-01T00:00:00Z',
 };
 
+const NO_RELEVANCE = {
+  sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0,
+  untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null,
+};
+
 const PLAN: RevalidationPlan = {
+  relevance: NO_RELEVANCE,
+  unanchored: [], unanchored_docs: [],
   sources_state: 'needs_reverification',
   agent_steps: [4],
   reanchor_count: 1,
@@ -46,7 +53,7 @@ const PLAN: RevalidationPlan = {
       doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
       reanchor: [{ cite: 'src/a.rs:2', file: 'src/a.rs', line: 2, end_line: 2, state: 'moved', current_line: 5 }],
       broken: [{ cite: 'src/a.rs:9', file: 'src/a.rs', line: 9, end_line: 9, state: 'changed', current_line: null }],
-      human: [],
+      human: [], relevance: [],
     },
     {
       doc: 'docs/glossary.md', step: 2, action: 'human', doc_missing: false,
@@ -55,12 +62,15 @@ const PLAN: RevalidationPlan = {
         section: 'owner-notes',
         citation: { cite: 'src/old.rs:3', file: 'src/old.rs', line: 3, end_line: 3, state: 'file_missing', current_line: null },
       }],
+      relevance: [],
     },
   ],
 };
 
 const CLEAN: RevalidationPlan = {
   sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0,
+  relevance: NO_RELEVANCE,
+  unanchored: [], unanchored_docs: [],
 };
 
 type Handlers = Parameters<typeof projectsApi.revalidateAuditStream>[2];
@@ -183,6 +193,7 @@ describe('RevalidateAudit', () => {
           ai_file: 'docs/coding-rules.md',
           audit_step: 4,
           changed_sources: ['frontend/src/App.tsx', 'backend/src/main.rs'],
+          missing_paths: [{ section: 'Routing', paths: ['frontend/src/lib/gone.ts'] }],
         }],
         fresh_sections: [], total_sections: 1, sources_state: 'needs_reverification',
         broken_citations: 2, placeholder_docs: [],
@@ -202,6 +213,9 @@ describe('RevalidateAudit', () => {
     expect(stale).toHaveTextContent('docState.stale.step 4 docs/coding-rules.md');
     expect(stale).toHaveTextContent('frontend/src/App.tsx');
     expect(stale).toHaveTextContent('backend/src/main.rs');
+    // The gone prose paths are shown with their section before they can be accepted.
+    expect(within(stale).getByTestId('revalidate-stale-missing-paths')).toHaveTextContent('frontend/src/lib/gone.ts');
+    expect(within(stale).getByTestId('revalidate-stale-missing-paths')).toHaveTextContent('Routing');
     expect(stale).toHaveTextContent('docState.stale.updateEffect');
     expect(stale).toHaveTextContent('docState.stale.unchangedEffect');
 
@@ -449,15 +463,85 @@ describe('RevalidateAudit', () => {
     expect(within(panel).queryByTestId('revalidate-launch')).toBeNull();
   });
 
+  it('judges each section: verdict counts, evidence and the proposed correction', async () => {
+    vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
+      sources_state: 'needs_reverification',
+      agent_steps: [4],
+      reanchor_count: 0,
+      human_count: 0,
+      relevance: {
+        sections: 6, anchors_intact: 3, outdated: 1, no_longer_relevant: 1, unanchored: 1,
+        untouched_stale: 2, missing_references: 2, prose_missing: 1, anchored_intact_pct: 60,
+      },
+      unanchored: [{
+        doc: 'docs/glossary.md', heading: 'Intro', verdict: 'unanchored', evidence: [],
+        corrections: [{ kind: 'check_or_anchor', reference: '', proposal: 'Check it, then anchor it.' }],
+        untouched_since_code_changed: false,
+      }],
+      unanchored_docs: [
+        { doc: 'docs/glossary.md', reviewed_at: '2026-10-16T09:30:00+00:00', owned: true },
+        { doc: 'docs/notes.md', reviewed_at: null, owned: true },
+        { doc: 'docs/architecture/design.md', reviewed_at: null, owned: false },
+      ],
+      sections: [{
+        doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
+        reanchor: [], broken: [], human: [],
+        relevance: [{
+          doc: 'docs/coding-rules.md', heading: 'Engine', verdict: 'no_longer_relevant',
+          evidence: [{ kind: 'path_reference', reference: 'src/engine.rs', state: 'file_missing' }],
+          corrections: [{
+            kind: 'remove_section', reference: '', proposal: 'Everything this section points at is gone.',
+          }],
+          untouched_since_code_changed: true,
+        }],
+      }],
+    });
+    setup();
+    const panel = await openPanel();
+
+    const counts = await within(panel).findByTestId('revalidate-relevance-counts');
+    expect(counts).toHaveTextContent('audit.revalidate.relevance 3 5 1 1 1 2');
+    const section = within(panel).getByTestId('revalidate-relevance-section');
+    expect(section).toHaveAttribute('data-verdict', 'no_longer_relevant');
+    expect(section).toHaveTextContent('Engine');
+    expect(section).toHaveTextContent('src/engine.rs');
+    expect(section).toHaveTextContent('Everything this section points at is gone.');
+    expect(within(section).getByTestId('revalidate-untouched')).toBeInTheDocument();
+    expect(within(panel).queryByTestId('revalidate-prose-changed')).toBeNull();
+    expect(within(panel).getByTestId('revalidate-launch')).toBeEnabled();
+
+    // The sections no anchor measures are listed, never called true.
+    const unanchored = within(panel).getByTestId('revalidate-unanchored');
+    expect(unanchored).toHaveTextContent('audit.revalidate.relevance.unanchored.title 1');
+    const row = within(unanchored).getByTestId('revalidate-unanchored-section');
+    expect(row).toHaveTextContent('docs/glossary.md');
+    expect(row).toHaveTextContent('Intro');
+
+    // KT-1292 — each doc made only of such sections says when it was last re-read.
+    const [reread, pending, unowned] = within(unanchored).getAllByTestId('revalidate-unanchored-doc');
+    expect(reread).toHaveTextContent('docs/glossary.md');
+    expect(reread).toHaveTextContent(
+      `audit.revalidate.relevance.unanchored.reread ${new Date('2026-10-16T09:30:00+00:00').toLocaleDateString()}`,
+    );
+    expect(pending).toHaveTextContent('docs/notes.md');
+    expect(pending).toHaveTextContent('audit.revalidate.relevance.unanchored.pending');
+    // A doc no audit step owns is never queued: it is not called "pending".
+    expect(unowned).toHaveTextContent('docs/architecture/design.md');
+    expect(unowned).toHaveTextContent('audit.revalidate.relevance.unanchored.unowned');
+    expect(unowned).not.toHaveTextContent('unanchored.pending');
+  });
+
   it('allows a targeted prose check while citation fingerprints are unknown', async () => {
     vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
       sources_state: 'unknown',
       agent_steps: [4],
       reanchor_count: 0,
       human_count: 0,
+      relevance: NO_RELEVANCE,
+      unanchored: [], unanchored_docs: [],
       sections: [{
         doc: 'docs/coding-rules.md', step: 4, action: 'agent', doc_missing: false,
-        reanchor: [], broken: [], human: [],
+        reanchor: [], broken: [], human: [], relevance: [],
       }],
     });
     setup();

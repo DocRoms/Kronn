@@ -21,6 +21,10 @@ name = "it"
 path = "tests/it.rs"
 
 [features]
+# Reads `KRONN_TEST_NO_REAL_AGENTS` (KT-1189). Off in every build a user runs:
+# only the dev-dependency on this package below turns it on, for the
+# integration test binary, so a release or debug `kronn` ignores the variable.
+test-support = []
 # `full-tests` (default) compiles every unit-test module. The macOS portability
 # job turns it off (`--no-default-features`) and compiles only the four suites
 # it runs: the full lib-test binary (9 200 tests) needs more memory than the

@@ -32,7 +32,11 @@ fn scripted_agent(tools: &Path, project: &Path) -> PathBuf {
     let project = project.display();
     let script = format!(
         r#"prompt=$(cat)
+agent=$(printf '%s' "$prompt" | grep -o 'You are agent `[A-Za-z]*`' | head -n 1 | sed 's/.*`\(.*\)`/\1/')
 case "$prompt" in
+  *"DETECTION MODE"*) cat '{state}/reply.det.'"$agent"; exit 0 ;;
+  *"RIGHT OF REPLY"*) cat '{state}/reply.rep.'"$agent"; exit 0 ;;
+  *"CROSS-CHECK. You are agent"*) cat '{state}/reply.chk.'"$agent"; exit 0 ;;
   *{BRIEFING_MARKER}*)
     n=$(( $(cat '{state}/counter' 2>/dev/null || echo 0) + 1 ))
     echo "$n" > '{state}/counter'
@@ -51,7 +55,7 @@ case "$prompt" in
     fi
     if [ "$(cat '{state}/mode')" = reverify ]; then
       printf '%s\n' "$prompt" | sed -n 's/^- `\([^`]*\)`: citation path does not exist `\([^`]*\)`$/\1 [src: file: \2:/p' > '{state}/drop'
-      printf '%s\n' "$prompt" | sed -n 's/^- `\([^`]*\)`: citation line `\([^`]*\)` is outside `\([^`]*\)`$/\1 [src: file: \3:\2]/p' >> '{state}/drop'
+      printf '%s\n' "$prompt" | sed -n 's/^- `\([^`]*\)`: citation line `\([^`]*\)` is outside `\([^`]*\)`.*$/\1 [src: file: \3:\2]/p' >> '{state}/drop'
       while read -r doc needle; do
         d='{project}'/"$doc"
         grep -vF "$needle" "$d" > "$d.next"
@@ -86,7 +90,12 @@ case "$prompt" in
         printf '\nChecked by the audit: scanned — nothing substantiable.\n' >> "$f.next"
       fi
       mv "$f.next" "$f"
+      if [ "$target" = docs/AGENTS.md ] && [ -f '{state}/stack-table' ]; then
+        cat '{state}/stack-table' >> "$f"
+      fi
     fi
+    if [ -f '{state}/after' ]; then sh '{state}/after' "$target"; fi
+    if [ -f '{state}/stream-extra' ]; then cat '{state}/stream-extra'; fi
     ;;
   *)
     while [ -f '{state}/validation-hold' ]; do sleep 0.1; done
@@ -239,6 +248,7 @@ struct Harness {
     tools: tempfile::TempDir,
     state: AppState,
     project: tempfile::TempDir,
+    fixture: PathBuf,
     _route: crate::agents::runner::test_acp_routes::RouteGuard,
     _restore: TemplatesEnv,
 }
@@ -266,6 +276,7 @@ async fn harness() -> Harness {
         tools,
         state,
         project,
+        fixture,
         _route: route,
         _restore: restore,
     }
@@ -661,6 +672,7 @@ impl Audited {
             tools,
             state,
             project,
+            fixture: _,
             _route: route,
             _restore: restore,
         } = harness().await;
@@ -1493,6 +1505,9 @@ mod revalidate_e2e_tests;
 #[path = "relocation_e2e_tests.rs"]
 mod relocation_e2e_tests;
 
+#[path = "briefing_docs_e2e_tests.rs"]
+mod briefing_docs_e2e_tests;
+
 /// KT-1208 — a re-audit cannot undo a human TD decision, a sheet that leaves
 /// the active list closes its task, and a partial refresh says it is
 /// single-agent when the briefing asks for the cross-agent audit.
@@ -1629,3 +1644,261 @@ async fn a_reaudit_keeps_human_td_decisions_and_a_refresh_says_it_is_single_agen
         .unwrap_or_else(|| panic!("{partial}"));
     assert_eq!(done["cross_agent_skipped"], true, "{partial}");
 }
+
+/// Run `hook` (shell `case` arms over `$1`, the step's target) after each step
+/// prompt of the scripted agent.
+fn after_each_step(tools: &Path, hook: &str) {
+    std::fs::write(
+        tools.join("after"),
+        format!("case \"$1\" in\n{hook}\nesac\n"),
+    )
+    .unwrap();
+}
+
+/// KT-1306 — the final documentary gate charges a blocker to the step that wrote
+/// the document, even one no step targets, and a resume redoes that step, never
+/// the founding one by default.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let step_of = |file: &str| chain.iter().position(|s| s.target_file == file).unwrap() as u32 + 1;
+    let (writer_a, writer_b) = (step_of("docs/coding-rules.md"), step_of("docs/glossary.md"));
+    let (first_writer, second_writer) = (writer_a.min(writer_b), writer_a.max(writer_b));
+    let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
+    assert!(![writer_a, writer_b].contains(&founding));
+
+    // Two steps each leave a document no step targets, citing a file that does
+    // not exist. A step that fails its gate retries: one scripted line per attempt.
+    let mut targets: Vec<&str> = Vec::new();
+    for (index, step) in chain.iter().enumerate() {
+        let attempts = if [writer_a, writer_b].contains(&(index as u32 + 1)) {
+            crate::api::audit::anti_hallu_enforce::MAX_ATTEMPTS
+        } else {
+            1
+        };
+        targets.extend(std::iter::repeat_n(step.target_file, attempts));
+    }
+    arm(tools, "fill", &targets);
+    let root = project.display();
+    after_each_step(
+        tools,
+        &format!(
+            "docs/coding-rules.md) printf '# A\\nGhost [src: file: ghost-a.rs:1]\\n' > '{root}/docs/extra-a.md' ;;\n\
+             docs/glossary.md) mkdir -p '{root}/docs/workflow'; printf '# B\\nGhost [src: file: ghost-b.rs:1]\\n' > '{root}/docs/workflow/extra-b.md' ;;"
+        ),
+    );
+    let run = run_full(state, None).await;
+    let done = sse_events(&run, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "interrupted", "{run}");
+    assert_eq!(
+        done["steps_to_redo"],
+        json!([first_writer, second_writer]),
+        "{run}"
+    );
+    let mut warned: Vec<u64> = sse_events(&run, "step_warning")
+        .iter()
+        .map(|e| e["step"].as_u64().unwrap())
+        .collect();
+    warned.sort_unstable();
+    warned.dedup();
+    assert_eq!(
+        warned,
+        vec![first_writer as u64, second_writer as u64],
+        "{run}"
+    );
+    let optimization = sse_events(&run, "documentary_optimization").pop().unwrap();
+    assert_eq!(optimization["blocking_count"], 2, "{optimization}");
+    let interrupted = done["audit_run_id"].as_str().unwrap().to_string();
+    let (row, _, _) = persisted(state, &interrupted).await;
+    assert_eq!(outcomes(&row)["failed"], done["steps_to_redo"], "{row:?}");
+
+    // The resume replays exactly those two steps; the founding one is not rerun.
+    std::fs::remove_file(tools.join("steps.log")).unwrap();
+    std::fs::remove_file(tools.join("after")).unwrap();
+    std::fs::remove_file(project.join("docs/extra-a.md")).unwrap();
+    std::fs::remove_file(project.join("docs/workflow/extra-b.md")).unwrap();
+    arm(tools, "noop", &["docs/coding-rules.md", "docs/glossary.md"]);
+    let resumed = run_full(state, Some(interrupted)).await;
+    let started: Vec<u64> = sse_events(&resumed, "step_start")
+        .iter()
+        .map(|e| e["step"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        started,
+        vec![first_writer as u64, second_writer as u64],
+        "{resumed}"
+    );
+}
+
+/// KT-1306 — a blocker that was in a document before a step ran is reported,
+/// not charged to that step when it touches the document.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_step_is_not_blocked_by_a_blocker_that_pre_dates_it() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let targets: Vec<&str> = chain.iter().map(|s| s.target_file).collect();
+    let touching = chain
+        .iter()
+        .position(|s| s.target_file == "docs/glossary.md")
+        .unwrap() as u32
+        + 1;
+    let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
+
+    arm(tools, "fill", &targets);
+    let first = run_full(state, None).await;
+    let done = sse_events(&first, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+    assert_eq!(done["status"], "complete", "{first}");
+
+    // A document already carries a dead citation when the next audit starts;
+    // one step then touches that document without being asked to fix it.
+    let notes = project.join("docs/notes.md");
+    std::fs::write(&notes, "# Notes\nGhost [src: file: ghost.rs:1]\n").unwrap();
+    arm(tools, "noop", &targets);
+    after_each_step(
+        tools,
+        &format!(
+            "docs/glossary.md) printf 'Another note.\\n' >> '{}' ;;",
+            notes.display()
+        ),
+    );
+    let second = run_full(state, None).await;
+    let done = sse_events(&second, "done").pop().expect("terminal done");
+    validation_settled(state, &done).await;
+
+    let reported = sse_events(&second, "documentary_preexisting");
+    assert_eq!(reported.len(), 1, "{second}");
+    assert_eq!(reported[0]["step"], touching, "{second}");
+    assert_eq!(
+        reported[0]["diagnostics"][0]["path"], "docs/notes.md",
+        "{second}"
+    );
+    assert!(sse_events(&second, "step_retry").is_empty(), "{second}");
+    let step_done = sse_events(&second, "step_done")
+        .into_iter()
+        .find(|e| e["step"] == touching)
+        .unwrap();
+    assert_eq!(step_done["success"], true, "{step_done}");
+    // Nobody introduced it during this run: the run is still blocked on it
+    // (the entry point's step owns what no step wrote), but the toucher is not.
+    assert_eq!(done["status"], "interrupted", "{second}");
+    assert_eq!(done["steps_to_redo"], json!([founding]), "{second}");
+}
+
+/// KT-1306 — the cross-agent path writes a step's documents itself, before any
+/// agent prompt: what it writes is that step's, so a blocker in a sheet it
+/// wrote is charged to it, not to the founding step.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_blocker_written_by_the_cross_agent_path_is_charged_to_its_step() {
+    let h = harness().await;
+    let (tools, state, project) = (h.tools.path(), &h.state, h.project.path());
+    let notes = format!(
+        "{BRIEFING_MARKER}\n\n## Kronn options\n{}\n",
+        crate::core::cross_audit::briefing_option_line(&[AgentType::ClaudeCode, AgentType::Codex])
+    );
+    state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::update_project_briefing_notes(conn, PROJECT_ID, Some(&notes))
+        })
+        .await
+        .unwrap();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("src/db.rs"),
+        "fn a() {}\nfn b() {}\nlet q = format!(\"SELECT * FROM t WHERE id = {}\", id);\nconn.execute(&q);\n",
+    )
+    .unwrap();
+    let project_path = project.to_string_lossy().into_owned();
+    let work_dir =
+        crate::agents::runner::resolve_agent_work_dir(Some(&project_path), &project_path).unwrap();
+    let _routes: Vec<_> = [AgentType::ClaudeCode, AgentType::Codex]
+        .iter()
+        .map(|agent| {
+            crate::agents::runner::test_acp_routes::route_agent(
+                &work_dir,
+                agent,
+                std::sync::Arc::new(crate::acp::ClaudeAcpAdapter::new_with_program(
+                    h.fixture.to_string_lossy(),
+                    None,
+                    false,
+                )),
+            )
+        })
+        .collect();
+
+    // Both agents find the same issue; its impact carries a link to nothing.
+    let stream = |text: &str| {
+        format!(
+            "{}\n{}\n",
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}}),
+            json!({"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":10,"output_tokens":5}})
+        )
+    };
+    let fenced = |fence: &str, body: Value| format!("Done.\n```{fence}\n{body}\n```\n");
+    let finding = json!({"title": "SQL query built with format", "category": "security",
+        "severity": "High", "file": "src/db.rs", "line": 3, "quote": "format!(\"SELECT * FROM t",
+        "impact": "Reads any row. See [missing guide](absent.md)", "remediation": "bind the parameter"});
+    for agent in ["ClaudeCode", "Codex"] {
+        let detection = fenced("kronn-findings", json!({"findings": [finding.clone()]}));
+        std::fs::write(tools.join(format!("reply.det.{agent}")), stream(&detection)).unwrap();
+        let verdicts = fenced("kronn-verdicts", json!({"verdicts": []}));
+        std::fs::write(tools.join(format!("reply.chk.{agent}")), stream(&verdicts)).unwrap();
+        let replies = fenced("kronn-replies", json!({"replies": []}));
+        std::fs::write(tools.join(format!("reply.rep.{agent}")), stream(&replies)).unwrap();
+    }
+
+    let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
+    let cross_step = chain
+        .iter()
+        .position(|s| s.target_file == "docs/inconsistencies-security.md")
+        .unwrap() as u32
+        + 1;
+    let founding = crate::api::audit::full::founding_step_index(&chain).unwrap();
+    assert_ne!(cross_step, founding);
+    // The cross step takes no step prompt: the agent's script skips its line.
+    let targets: Vec<&str> = chain
+        .iter()
+        .map(|s| s.target_file)
+        .filter(|t| *t != "docs/inconsistencies-security.md")
+        .collect();
+    arm(tools, "fill", &targets);
+    let run = run_full(state, None).await;
+    let done = sse_events(&run, "done")
+        .pop()
+        .unwrap_or_else(|| panic!("{run}"));
+    validation_settled(state, &done).await;
+
+    let sheets: Vec<_> = std::fs::read_dir(project.join("docs/tech-debt"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("TD-"))
+        .collect();
+    assert_eq!(sheets.len(), 1, "{run}");
+    assert!(
+        std::fs::read_to_string(sheets[0].path())
+            .unwrap()
+            .contains("[missing guide](absent.md)"),
+        "the cross path wrote the broken link"
+    );
+    assert_eq!(done["status"], "interrupted", "{run}");
+    assert_eq!(done["steps_to_redo"], json!([cross_step]), "{run}");
+    let ledger = std::fs::read_to_string(project.join(".kronn/audit/document-blame.json")).unwrap();
+    assert!(
+        ledger.contains(&format!("\"step\":{cross_step}")),
+        "{ledger}"
+    );
+}
+
+#[path = "stack_provenance_tests.rs"]
+mod stack_provenance;

@@ -4,7 +4,8 @@
 //! regular file by its path from the repo root (no basename or suffix walk, no
 //! absolute path) and carry a line or range that exists. Only a binary file
 //! may be cited without a line. Fenced code and placeholder examples are skipped.
-//! A `#symbol` anchor (KT-1074) must appear as a word inside the cited lines.
+//! A `#symbol` anchor (KT-1074) must appear as a word inside the cited lines,
+//! and open them when they contain its definition.
 //!
 //! KT-1195: CI scopes the gate per pull request ([`Scope`]) and
 //! `make docs-reanchor` repairs moved anchors ([`reanchor_corpus`]).
@@ -48,11 +49,14 @@ pub struct DocCitationFailure {
     pub moved: Option<MovedAnchor>,
 }
 
-/// A `#symbol` that left its cited range but still occurs in the cited file.
+/// A `#symbol` that left its cited range, or whose definition inside it no
+/// longer opens it, but still occurs in the cited file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MovedAnchor {
     pub span: (usize, usize),
-    /// Every line of the file holding the symbol; none is inside `span`.
+    /// Where a range for the symbol would start: the top of the doc comment
+    /// and attributes of each definition, else every line holding it. None
+    /// opens `span`.
     pub occurrences: Vec<usize>,
     /// Line count of the cited file.
     pub total: usize,
@@ -91,12 +95,13 @@ fn check_reference(
         Some(span) => match line_bounds_status(&found, Some(span)) {
             (SourceStatus::Verified, _) => {
                 let symbol = anchor?;
-                let elsewhere = anchor_miss(&found, span, symbol)?;
-                let detail = anchor_miss_detail(span, symbol, &elsewhere);
+                let miss = anchor_miss(&found, span, symbol)?;
+                let detail = anchor_miss_detail(span, symbol, &miss);
+                let (elsewhere, starts) = (miss.lines, miss.starts);
                 let total = std::fs::read_to_string(&found).map_or(0, |t| t.lines().count());
                 let reason = match elsewhere.as_slice() {
                     [] => format!("{detail} — rewrite the claim or cite where it lives"),
-                    [_] => match suggested_span(span, &elsewhere, total) {
+                    [_] => match suggested_span(span, &starts, total) {
                         Some((start, end)) => {
                             format!(
                                 "{detail} — try `{path}:{}#{symbol}`",
@@ -116,7 +121,7 @@ fn check_reference(
                 };
                 let moved = (!elsewhere.is_empty()).then_some(MovedAnchor {
                     span,
-                    occurrences: elsewhere,
+                    occurrences: starts,
                     total,
                 });
                 Some((reason, moved))
@@ -927,6 +932,45 @@ mod tests {
     }
 
     #[test]
+    fn a_definition_anchor_must_open_its_range_and_reanchor_proposes_that_range() {
+        let tmp = repo();
+        let root = tmp.path();
+        let mut file = "x\n".repeat(12);
+        file.push_str("/// Docs.\n#[inline]\nfn run() {\n    step();\n}\nfn step() {}\nz\n");
+        std::fs::write(root.join("src/d.rs"), file).unwrap();
+        // The doc comment and the attribute open the range; so do up to 5
+        // sibling lines above them.
+        for ok in ["13-17", "14-17", "15", "15-17", "8-17"] {
+            let doc = format!("[src: file: src/d.rs:{ok}#run]");
+            assert_eq!(check_doc(&doc, root), vec![], "{ok}");
+        }
+        // A call site stays citable although the file defines `step`.
+        assert_eq!(check_doc("[src: file: src/d.rs:15-17#step]", root), vec![]);
+        // The definition sits well inside the range.
+        assert_eq!(
+            reasons("[src: file: src/d.rs:1-17#run]", root),
+            ["symbol `run` is defined at line 15, not at the start of lines 1-17: a definition anchor must start the range — try `src/d.rs:13-19#run`"]
+        );
+        assert_eq!(reasons("[src: file: src/d.rs:7-17#run]", root).len(), 1);
+        // The range holds neither the definition nor a call.
+        assert_eq!(
+            reasons("[src: file: src/d.rs:1#run]", root),
+            ["symbol `run` not in line 1; it appears at line 15 — try `src/d.rs:13#run`"]
+        );
+        let (new, outcome) = reanchor(
+            root,
+            "docs/a.md",
+            "[src: file: src/d.rs:1-3#run] `[src: file: src/d.rs:1-17#run]`\n",
+        );
+        assert_eq!(
+            new,
+            "[src: file: src/d.rs:13-15#run] `[src: file: src/d.rs:13-19#run]`\n"
+        );
+        assert_eq!(outcome.rewritten.len(), 2);
+        assert!(check_corpus(root).is_empty());
+    }
+
+    #[test]
     fn a_vanished_anchor_fails_without_a_suggestion() {
         let tmp = repo();
         assert_eq!(
@@ -942,14 +986,20 @@ mod tests {
         use crate::core::anti_halluc::verify_source_marker;
         let tmp = repo();
         let root = tmp.path();
-        std::fs::write(root.join("src/w.rs"), "a\nb\nfn edge() {}\nd\ne\n").unwrap();
+        let mut file = "a\n".repeat(8);
+        file.push_str("fn edge() {}\nd\ne\n");
+        std::fs::write(root.join("src/w.rs"), file).unwrap();
         for (citation, holds) in [
-            ("file: src/w.rs:3#edge", true),
-            ("file: src/w.rs:1-3#edge", true),
-            ("file: src/w.rs:3-5#edge", true),
-            ("file: src/w.rs:2#edge", false),
-            ("file: src/w.rs:4-5#edge", false),
-            ("file: src/w.rs:1-2#edge", false),
+            ("file: src/w.rs:9#edge", true),
+            ("file: src/w.rs:9-11#edge", true),
+            // The sibling allowance: 5 lines above the definition.
+            ("file: src/w.rs:4-11#edge", true),
+            // Past it the definition is merely inside the range.
+            ("file: src/w.rs:3-11#edge", false),
+            ("file: src/w.rs:1-9#edge", false),
+            ("file: src/w.rs:8#edge", false),
+            ("file: src/w.rs:10-11#edge", false),
+            ("file: src/w.rs:1-8#edge", false),
         ] {
             let ci = check_doc(&format!("[src: {citation}]"), root).is_empty();
             let runtime =
@@ -1192,7 +1242,7 @@ mod tests {
 
         let mut moved = String::from("fn target() {}\n\nfn helper() {}\n");
         for index in 0..60 {
-            moved.push_str(&format!("// inserted {index}\n"));
+            moved.push_str(&format!("let inserted_{index} = {index};\n"));
         }
         moved.push_str(if change_endpoint {
             "pub fn target() {\n"

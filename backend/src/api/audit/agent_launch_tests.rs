@@ -1333,6 +1333,67 @@ async fn an_audit_prompt_no_longer_reads_another_repos_docs_or_lists_the_machine
     }
 }
 
+/// KT-1278 — over ACP the context and the step are one user message; a step
+/// that ends on a reference block (versions, briefing, rules, linked repos) is
+/// answered as a question. Read on what the agent was ACTUALLY handed by the two
+/// real pipelines (retries included: the scripted agent writes nothing, so every
+/// step runs its gates' attempts): each turn ends on one step's own directive,
+/// and the step numbers it names are those of the chain.
+#[cfg(unix)]
+#[tokio::test]
+async fn every_step_prompt_the_full_and_partial_pipelines_hand_the_agent_ends_on_its_directive() {
+    let docs_root = crate::core::docs_location::DocsRoot::default_root();
+    let steps = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root);
+    let directives: Vec<String> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, step)| crate::api::audit::step_closing_directive(i + 1, step, &docs_root))
+        .collect();
+    for pipeline in ["full", "partial"] {
+        for linked in [false, true] {
+            let prompts = step_prompts_of(pipeline, linked).await;
+            assert!(prompts.len() >= expected_step_count(pipeline), "{pipeline}");
+            let mut covered = std::collections::BTreeSet::new();
+            for turn in &prompts {
+                // The recorder logs the prompt, then the CLI arguments on ONE
+                // line: the prompt ends where that line starts, and nothing but
+                // the arguments may follow the directive.
+                let prompt = match turn.rfind("--print --output-format") {
+                    Some(at) => {
+                        assert!(!turn[at..].contains('\n'), "{pipeline}: one argument line");
+                        &turn[..at]
+                    }
+                    None => turn.as_str(),
+                };
+                let step = directives
+                    .iter()
+                    .position(|d| prompt.ends_with(d.as_str()))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{pipeline} (linked={linked}): a step prompt does not end on its directive:\n…{}",
+                            &prompt[prompt.len().saturating_sub(500)..]
+                        )
+                    });
+                covered.insert(step);
+                assert_eq!(
+                    prompt.matches("=== RUN THIS STEP NOW ===").count(),
+                    1,
+                    "{pipeline}: exactly one directive"
+                );
+            }
+            let wanted: std::collections::BTreeSet<usize> = if pipeline == "full" {
+                (0..steps.len()).collect()
+            } else {
+                refreshable_steps().into_iter().map(|n| n - 1).collect()
+            };
+            assert_eq!(
+                covered, wanted,
+                "{pipeline}: every step was handed to the agent"
+            );
+        }
+    }
+}
+
 #[test]
 fn no_static_audit_prompt_carries_the_retired_companion_pool() {
     let mut prompts: Vec<String> = Vec::new();
@@ -1694,6 +1755,61 @@ fn a_step_cost_sums_its_attempts_and_one_silent_attempt_makes_it_unknown() {
         StepCost::Known(u64::MAX).with_attempt(Some(1)).usd_micros(),
         Some(u64::MAX)
     );
+}
+
+/// KT-1313 — a Claude step stopped between turns holds every turn it consumed,
+/// the final line replaces the sum, and no reading ever lowers the counter.
+#[test]
+fn a_stream_step_sums_its_turns_and_its_final_line_replaces_the_sum() {
+    use crate::db::audit_runs::StepTokens;
+    let agent = AgentType::ClaudeCode;
+    let turn = |input: u64, output: u64| {
+        StepTokens {
+            input: Some(input),
+            output: Some(output),
+            cache_read: None,
+            cache_write: None,
+            accounting: Default::default(),
+        }
+        .inclusive_for(&agent)
+    };
+    let mut turns = StreamTurns::default();
+    let mut usage = StepTokens::UNKNOWN;
+    let mut seen = Vec::new();
+    for reading in [turn(300, 30), turn(500, 47), turn(200, 16)] {
+        usage = turns.fold(usage, reading, false);
+        seen.push(usage.total().unwrap());
+    }
+    assert_eq!(seen, [330, 877, 1093], "a smaller turn still adds");
+    assert_eq!((usage.input, usage.output), (Some(1000), Some(93)));
+
+    // The final line states the whole run: it replaces the sum.
+    let done = turns.fold(usage, turn(1000, 100), true);
+    assert_eq!(done.total(), Some(1100));
+    // …unless it counts less than what was already seen.
+    assert_eq!(turns.fold(done, turn(10, 1), true), done);
+
+    assert!(runner::is_claude_result_line(
+        r#"{"type":"result","usage":{"input_tokens":1}}"#
+    ));
+    assert!(!runner::is_claude_result_line(
+        r#"{"type":"stream_event","event":{"type":"message_delta"}}"#
+    ));
+    assert!(!runner::is_claude_result_line("not json"));
+}
+
+#[test]
+fn the_runs_live_token_counter_never_goes_down() {
+    let mut run = RunTokens::default();
+    assert_eq!(run.total(), None);
+    assert_eq!(run.with(630), 630);
+    assert_eq!(run.with(877), 877);
+    // A stopped step whose tokens were never added, then a smaller reading.
+    assert_eq!(run.with(346), 877, "the shown total holds");
+    run.add(Some(877));
+    assert_eq!(run.total(), Some(877));
+    assert_eq!(run.with(0), 877);
+    assert_eq!(run.with(100), 977);
 }
 
 #[test]

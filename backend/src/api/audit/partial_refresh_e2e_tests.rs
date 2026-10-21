@@ -248,6 +248,7 @@ async fn acknowledge(
         bridge,
         axum::Json(crate::models::AcknowledgeDriftRequest {
             sections: sections.iter().map(|s| s.to_string()).collect(),
+            shown_paths: Vec::new(),
         }),
     )
     .await
@@ -294,7 +295,13 @@ async fn verified_unchanged_freshens_a_checksum_section_for_a_human_only() {
     let drift = acknowledged.data.unwrap();
     assert!(drift.stale_sections.iter().all(|s| s.ai_file != AGENTS));
     assert!(!stale(fx.project()).contains(&AGENTS.to_string()));
-    assert_eq!(docs_snapshot(fx.project()).len(), docs_before.len());
+    // No doc is created or removed. The `.json` sidecars may appear: the
+    // acknowledgement records the doc's fingerprints (KT-1168), the docs
+    // themselves are compared byte for byte below.
+    let docs_of = |snapshot: &std::collections::BTreeMap<String, Vec<u8>>| {
+        snapshot.keys().filter(|p| !p.ends_with(".json")).count()
+    };
+    assert_eq!(docs_of(&docs_snapshot(fx.project())), docs_of(&docs_before));
     for (path, bytes) in &docs_before {
         if path != "docs/checksums.json" && !path.ends_with(".json") {
             assert_eq!(docs_snapshot(fx.project()).get(path), Some(bytes), "{path}");

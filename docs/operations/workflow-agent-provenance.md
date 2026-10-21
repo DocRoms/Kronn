@@ -93,7 +93,7 @@ step with no recorded provenance (older runs, non-Agent steps) exposes nothing:
 current configuration.
 
 [src: file: backend/src/models/workflows.rs:1933-2027#WorkflowAgentProvenance]
-[src: file: backend/src/workflows/steps.rs:1389-1435#WorkflowAgentAttempt]
+[src: file: backend/src/workflows/steps.rs:1389-1437#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/runner.rs:4812-4828#record_step_completion]
 [src: file: backend/src/agents/provenance.rs:36-101#observe_model]
 [src: file: backend/src/agents/runner.rs:4651-4657#claude_observed_model]

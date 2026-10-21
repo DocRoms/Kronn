@@ -59,6 +59,9 @@ impl HttpSettings {
 pub(super) struct RunTokens {
     total: u64,
     known: bool,
+    /// The highest running total shown so far: the live counter never goes down
+    /// (KT-1313).
+    shown: u64,
 }
 
 impl RunTokens {
@@ -75,9 +78,43 @@ impl RunTokens {
         self.known.then_some(self.total)
     }
 
-    /// The running total with the step in progress at its latest reading.
-    pub(super) fn with(&self, step: u64) -> u64 {
-        self.total.saturating_add(step)
+    /// The running total with the step in progress at its latest reading,
+    /// never below one already shown.
+    pub(super) fn with(&mut self, step: u64) -> u64 {
+        self.shown = self.total.saturating_add(step).max(self.shown);
+        self.shown
+    }
+}
+
+/// The usage of one attempt of a Claude stream-json step. Each model call
+/// (turn) reports its own usage; only the final `result` line states the
+/// whole run's. A step stopped mid-way never reaches that line, so the turns
+/// are summed as they come, and the final line replaces the sum when it
+/// arrives. The reading never goes down (KT-1313).
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct StreamTurns {
+    summed: Option<crate::db::audit_runs::StepTokens>,
+}
+
+impl StreamTurns {
+    /// The attempt's usage once `reading` is folded into `current`.
+    pub(super) fn fold(
+        &mut self,
+        current: crate::db::audit_runs::StepTokens,
+        reading: crate::db::audit_runs::StepTokens,
+        is_final: bool,
+    ) -> crate::db::audit_runs::StepTokens {
+        let next = if is_final {
+            reading
+        } else {
+            let sum = self.summed.map_or(reading, |sum| sum.across_turns(reading));
+            self.summed = Some(sum);
+            sum
+        };
+        match (current.total(), next.total()) {
+            (Some(seen), Some(now)) if now < seen => current,
+            _ => next,
+        }
     }
 }
 
@@ -214,6 +251,12 @@ impl AuditAgentLauncher {
     /// the step was over while the agent kept working (KT-927, about 8 minutes).
     pub(super) fn stops_with_token(&self) -> bool {
         self.http.is_some() || self.acp
+    }
+
+    /// Whether the run's tool calls, inputs included, reach Kronn as traces:
+    /// any agent in the ACP host. An HTTP agent's loop reports none.
+    pub(super) fn reports_tool_inputs(&self) -> bool {
+        self.acp
     }
 
     /// Which live version sources this run's agent reaches (KT-1000). Read

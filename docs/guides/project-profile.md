@@ -10,7 +10,7 @@ transitions, delivery workflows.
 - File: `kronn/project.toml`, versioned in the repository.
 - Kronn reads the file **at the commit of the selected ref of the main
   checkout**, with git, never from a working tree
-  [src: file: backend/src/core/project_profile.rs:1]. The ref is selected in
+  [src: file: backend/src/core/project_profile.rs:392-460#default_branch_ref]. The ref is selected in
   this order:
   1. the branch name `origin/HEAD` points to;
   2. else `main`, else `master`.

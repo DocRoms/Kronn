@@ -1800,6 +1800,11 @@ pub struct DriftCheckResponse {
     pub sources_state: crate::core::citation_drift::SourcesState,
     #[serde(default)]
     pub broken_citations: usize,
+    /// Paths the docs' prose names that are gone, which no citation covers
+    /// (KT-1168). Counted apart from `broken_citations`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub missing_paths: Option<usize>,
     /// Template docs that still hold raw `{{PLACEHOLDERS}}` (KT-1203).
     #[serde(default)]
     pub placeholder_docs: Vec<PlaceholderDoc>,
@@ -1830,6 +1835,20 @@ pub struct AcknowledgeCitationsRequest {
 #[ts(export)]
 pub struct AcknowledgeDriftRequest {
     pub sections: Vec<String>,
+    /// The gone prose paths the human was shown with those sections: only
+    /// these are accepted. Absent, none is (an older client accepts nothing
+    /// it never displayed).
+    #[serde(default)]
+    pub shown_paths: Vec<ShownPath>,
+}
+
+/// One gone path the stale block listed, in its doc's section.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export)]
+pub struct ShownPath {
+    pub doc: String,
+    pub section: String,
+    pub path: String,
 }
 
 /// `GET /api/projects/:id/citation-drift`: broken and moved citations per
@@ -1848,6 +1867,9 @@ pub struct DriftSection {
     pub ai_file: String,
     pub audit_step: usize,
     pub changed_sources: Vec<String>,
+    /// Gone paths the doc's prose names, none accepted yet (KT-1168).
+    #[serde(default)]
+    pub missing_paths: Vec<crate::core::doc_relevance::VanishedPaths>,
 }
 
 /// What "Revalider l'audit" does with one section (KT-1168).
@@ -1889,6 +1911,28 @@ pub struct RevalidationSection {
     /// Broken citations outside human sections.
     pub broken: Vec<crate::core::citation_drift::CitationStatus>,
     pub human: Vec<HumanCitationTodo>,
+    /// The doc's sections that are outdated or no longer relevant to the
+    /// code, with the evidence and the corrections Kronn proposes.
+    #[serde(default)]
+    pub relevance: Vec<crate::core::doc_relevance::SectionRelevance>,
+    /// Sent to the agent only to re-read prose no citation or path anchors
+    /// (KT-1292): never re-read, or edited / its step's sources changed since.
+    #[serde(default)]
+    #[ts(skip)]
+    pub reread: bool,
+}
+
+/// A doc whose every section is unanchored, and when an agent pass last
+/// re-read it (KT-1292).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UnanchoredDoc {
+    pub doc: String,
+    /// RFC 3339; `None` when no pass has re-read it since it last changed.
+    pub reviewed_at: Option<String>,
+    /// An audit step owns the doc, so a pass can re-read it; `false` when none
+    /// does (it is listed, never queued).
+    pub owned: bool,
 }
 
 /// `GET /api/projects/:id/revalidation`: the deterministic part of
@@ -1906,6 +1950,17 @@ pub struct RevalidationPlan {
     pub reanchor_count: usize,
     #[ts(type = "number")]
     pub human_count: usize,
+    /// Sections per verdict over every doc, and how many of the stale ones
+    /// nobody revised since validation (KT-1168).
+    #[serde(default)]
+    pub relevance: crate::core::doc_relevance::RelevanceCounts,
+    /// The sections Kronn cannot measure (no citation, no path), listed so
+    /// each is confronted with the code: by a person or by the agent pass.
+    #[serde(default)]
+    pub unanchored: Vec<crate::core::doc_relevance::SectionRelevance>,
+    /// The docs made only of such sections, with their last re-read date.
+    #[serde(default)]
+    pub unanchored_docs: Vec<UnanchoredDoc>,
 }
 
 /// What the conversion did with one tech-debt sheet (KT-1167).

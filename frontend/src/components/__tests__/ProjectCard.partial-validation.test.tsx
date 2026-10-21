@@ -55,7 +55,7 @@ const CODEX_AGENT: AgentDetection = {
 const DRIFT: DriftCheckResponse = {
   audit_date: '2026-07-20',
   stale_sections: [
-    { ai_file: 'docs/repo-map.md', audit_step: 3, changed_sources: ['src/x.rs'] },
+    { ai_file: 'docs/repo-map.md', audit_step: 3, changed_sources: ['src/x.rs'], missing_paths: [] },
   ],
   fresh_sections: [],
   total_sections: 1,
@@ -186,8 +186,8 @@ describe('ProjectCard — partial refresh validation UX', () => {
         ...DRIFT,
         stale_sections: [
           ...DRIFT.stale_sections,
-          { ai_file: 'docs/repo-map.md', audit_step: 9, changed_sources: [] },
-          { ai_file: 'docs/glossary.md', audit_step: 2, changed_sources: [] },
+          { ai_file: 'docs/repo-map.md', audit_step: 9, changed_sources: [], missing_paths: [] },
+          { ai_file: 'docs/glossary.md', audit_step: 2, changed_sources: [], missing_paths: [] },
         ],
       },
     });
@@ -195,10 +195,33 @@ describe('ProjectCard — partial refresh validation UX', () => {
     const btn = await screen.findByTestId('revalidate-stale-ack');
     await act(async () => { fireEvent.click(btn); fireEvent.click(btn); await Promise.resolve(); });
     expect(projectsApi.acknowledgeDrift).toHaveBeenCalledTimes(1);
-    expect(projectsApi.acknowledgeDrift).toHaveBeenCalledWith(PROJECT.id, ['docs/repo-map.md', 'docs/glossary.md']);
+    expect(projectsApi.acknowledgeDrift).toHaveBeenCalledWith(PROJECT.id, ['docs/repo-map.md', 'docs/glossary.md'], []);
     await act(async () => { release?.(); await Promise.resolve(); await Promise.resolve(); });
     expect(props.toast).toHaveBeenCalledWith('audit.driftAckDone 2', 'success');
     expect(props.onRefetchDrift).toHaveBeenCalledWith(PROJECT.id);
+  });
+
+  it('« Vérifié, inchangé » sends the gone paths the stale block listed, and only those', async () => {
+    vi.mocked(projectsApi.acknowledgeDrift).mockResolvedValue(DRIFT);
+    renderCard({
+      driftStatus: {
+        ...DRIFT,
+        stale_sections: [{
+          ai_file: 'docs/repo-map.md',
+          audit_step: 3,
+          changed_sources: ['src/x.rs'],
+          missing_paths: [{ section: 'Layout', paths: ['src/gone.rs'] }],
+        }],
+      },
+    });
+    await openVerification();
+    expect(await screen.findByTestId('revalidate-stale-missing-paths')).toHaveTextContent('src/gone.rs');
+    await act(async () => { fireEvent.click(await screen.findByTestId('revalidate-stale-ack')); await Promise.resolve(); });
+    expect(projectsApi.acknowledgeDrift).toHaveBeenCalledWith(
+      PROJECT.id,
+      ['docs/repo-map.md'],
+      [{ doc: 'docs/repo-map.md', section: 'Layout', path: 'src/gone.rs' }],
+    );
   });
 
   it('a refused acknowledgement says why and keeps the button', async () => {
@@ -214,7 +237,7 @@ describe('ProjectCard — partial refresh validation UX', () => {
 
   it('opens and loads reconfirmation details through ProjectCard → Verify docs → Reconfirm', async () => {
     vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
-      sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0,
+      sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0, unanchored: [], unanchored_docs: [], relevance: { sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0, untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null },
     });
     vi.mocked(projectsApi.docProvenance).mockImplementation(async (_id, detail = false) => ({
       to_reconfirm: 1,

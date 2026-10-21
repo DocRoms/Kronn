@@ -4454,10 +4454,14 @@ pub(super) async fn make_agent_stream_inner(
                 worker.agent_type.clone(),
             )
         });
+        // Every launch keeps its capture: the reply is priced at the model the
+        // runtime reported serving, not at the tier alias the discussion stores.
+        let provenance_capture = served_model
+            .as_ref()
+            .map(crate::api::delivery_publication::ServedModelRecorder::capture)
+            .unwrap_or_default();
         match runner::start_agent_with_config(runner::AgentStartConfig {
-            provenance: served_model
-                .as_ref()
-                .map(crate::api::delivery_publication::ServedModelRecorder::capture),
+            provenance: Some(provenance_capture.clone()),
             project_id: disc_project_id.as_deref(),
             work_dir: workspace_path.as_deref(),
             full_access,
@@ -5373,9 +5377,16 @@ pub(super) async fn make_agent_stream_inner(
                         usage.prompt_cache.cache_write_prompt_tokens,
                     )
                 });
+                let observed_models = provenance_capture
+                    .lock()
+                    .map(|state| state.observed_models.clone())
+                    .unwrap_or_default();
                 let priced = crate::core::pricing::price_reply(
                     &at_str,
-                    attempted_model.as_deref(),
+                    crate::core::pricing::serving_model_for_pricing(
+                        attempted_model.as_deref(),
+                        &observed_models,
+                    ),
                     tokens_used,
                     stream_json_cost,
                     message_counters,

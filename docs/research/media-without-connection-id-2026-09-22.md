@@ -85,4 +85,4 @@ a success-rate estimate. [Raw follow-up evidence](media-without-connection-id-35
 retains both attempts, the successful response, exact arguments, timestamps,
 exit statuses and log hashes.
 
-[src: file: backend/src/api/agent_quick_prompt_bench.rs:1]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:269-315#bench_quick_prompt_native_catalogue]

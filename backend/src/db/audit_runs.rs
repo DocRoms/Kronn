@@ -1295,6 +1295,24 @@ impl StepTokens {
             },
         }
     }
+    /// Sum the usage of two turns of the same attempt. A turn that did not
+    /// report a component adds nothing to it (a sum over a turn is a floor that
+    /// is still consumed, unlike across attempts where a silent one makes it
+    /// unknown).
+    pub(crate) fn across_turns(self, other: Self) -> Self {
+        let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+        };
+        Self {
+            input: sum(self.input, other.input),
+            output: sum(self.output, other.output),
+            cache_read: sum(self.cache_read, other.cache_read),
+            cache_write: sum(self.cache_write, other.cache_write),
+            accounting: other.accounting,
+        }
+    }
+
     /// The usage of a step's attempts so far, `previous` being `None` before
     /// the first one: no attempt yet is not an attempt that reported nothing.
     pub(crate) fn after_attempt(previous: Option<Self>, attempt: Self) -> Self {

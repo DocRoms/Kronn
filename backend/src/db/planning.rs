@@ -569,13 +569,17 @@ fn reopen_for_unticked_live_check(
 /// `import_evidence` is `Some` only for a trusted discussion import: the live
 /// checks are then restored as they were exported (declared, and ticked with
 /// their evidence at the same position), without a principal session.
+///
+/// Returns the `(id, sentence)` of every item the replace removed, so the
+/// caller can record them in its event (KT-1291): a removed item is otherwise
+/// gone with its sentence.
 fn replace_dod(
     conn: &Connection,
     task_id: &str,
     items: &[CreatePlanningDodItem],
     actor: &PlanningActor,
     import_evidence: Option<&[Option<String>]>,
-) -> Result<()> {
+) -> Result<Vec<(String, String)>> {
     let existing_ids = load_string_list(
         conn,
         "SELECT id FROM planning_task_dod_items
@@ -710,14 +714,15 @@ fn replace_dod(
             )?;
         }
     }
+    let mut removed = Vec::new();
     for obsolete_id in existing_ids
         .iter()
         .filter(|id| !retained_ids.contains(id.as_str()))
     {
-        let removed_mode: String = conn.query_row(
-            "SELECT verification FROM planning_task_dod_items WHERE id = ?1",
+        let (removed_mode, removed_sentence): (String, String) = conn.query_row(
+            "SELECT verification, sentence FROM planning_task_dod_items WHERE id = ?1",
             [obsolete_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         if PlanningDodVerification::from_db(&removed_mode)
             == PlanningDodVerification::PostIntegration
@@ -728,8 +733,9 @@ fn replace_dod(
             "DELETE FROM planning_task_dod_items WHERE id = ?1 AND task_id = ?2",
             params![obsolete_id, task_id],
         )?;
+        removed.push((obsolete_id.clone(), removed_sentence));
     }
-    Ok(())
+    Ok(removed)
 }
 
 fn replace_links(conn: &Connection, task_id: &str, links: &[CreatePlanningTaskLink]) -> Result<()> {
@@ -1471,7 +1477,8 @@ fn create_task_inner(
     )?;
     replace_projects(&transaction, &id, &request.project_ids)?;
     replace_tags(&transaction, &id, &tags)?;
-    replace_dod(
+    // A new task has nothing to remove.
+    let _ = replace_dod(
         &transaction,
         &id,
         &request.definition_of_done,
@@ -1858,8 +1865,9 @@ pub fn update_task(
     if let Some(tags) = tags.as_ref() {
         replace_tags(&transaction, task_id, tags)?;
     }
+    let mut removed_dod = Vec::new();
     if let Some(items) = request.definition_of_done.as_ref() {
-        replace_dod(&transaction, task_id, items, &request.actor, None)?;
+        removed_dod = replace_dod(&transaction, task_id, items, &request.actor, None)?;
     }
     if let Some(links) = request.links.as_ref() {
         replace_links(&transaction, task_id, links)?;
@@ -1867,13 +1875,16 @@ pub fn update_task(
     if should_rebalance {
         rebalance_priority_band(&transaction, priority, task_id)?;
     }
-    insert_event(
-        &transaction,
-        task_id,
-        "updated",
-        &request.actor,
-        compact_update_changes(request)?,
-    )?;
+    let mut changes = compact_update_changes(request)?;
+    if !removed_dod.is_empty() {
+        // KT-1291 — what the replace removed, with its sentence: the request
+        // only lists what stays.
+        changes["removed_dod"] = removed_dod
+            .iter()
+            .map(|(id, sentence)| serde_json::json!({ "id": id, "sentence": sentence }))
+            .collect();
+    }
+    insert_event(&transaction, task_id, "updated", &request.actor, changes)?;
     // KT-154 — an agent that takes a task (→ in_progress) is its owner unless
     // the task already has someone on it or the agent is already assigned.
     if status == PlanningTaskStatus::InProgress
@@ -2132,6 +2143,240 @@ pub fn mark_dod_post_integration(
         )?;
     }
     Ok(())
+}
+
+/// KT-1291 — outcome of checking the task a review carries a DoD item to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DodCarrierCheck {
+    /// The carrier exists, is open and holds the requirement; `reference` is
+    /// its canonical `KT-n`.
+    Accepted { reference: String },
+    /// The carry is refused; the sentence names the precise cause.
+    Refused(String),
+}
+
+fn normalized_sentence(sentence: &str) -> String {
+    sentence
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// KT-1291 — the sentence of DoD item `dod_id` of `task_id`, as it stood when the
+/// worker was briefed: the execution's launch-time snapshot first; then, for an
+/// execution that predates it, the live row, or the item an `updated` event
+/// recorded as removed (or an earlier `dod_carried` event of this same carry).
+/// `None` when no record names it — nothing is guessed.
+fn dod_sentence_for_carry(
+    conn: &Connection,
+    task_id: &str,
+    execution_id: &str,
+    dod_id: &str,
+) -> Result<Option<String>> {
+    if let Some(sentence) =
+        crate::db::orchestration::execution_dod_sentence(conn, execution_id, dod_id)?
+    {
+        return Ok(Some(sentence));
+    }
+    let live: Option<String> = conn
+        .query_row(
+            "SELECT sentence FROM planning_task_dod_items WHERE id = ?1 AND task_id = ?2",
+            params![dod_id, task_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if live.is_some() {
+        return Ok(live);
+    }
+    let mut statement = conn.prepare(
+        "SELECT changes_json FROM planning_task_events
+          WHERE task_id = ?1 ORDER BY created_at DESC, rowid DESC",
+    )?;
+    let payloads = statement
+        .query_map([task_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for payload in payloads {
+        let Ok(changes) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            continue;
+        };
+        if changes.get("dod_id").and_then(serde_json::Value::as_str) == Some(dod_id) {
+            if let Some(sentence) = changes.get("sentence").and_then(serde_json::Value::as_str) {
+                return Ok(Some(sentence.to_string()));
+            }
+        }
+        let removed = changes
+            .get("removed_dod")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(dod_id))
+            .and_then(|item| item.get("sentence").and_then(serde_json::Value::as_str));
+        if let Some(sentence) = removed {
+            return Ok(Some(sentence.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// KT-1291 — may DoD item `dod_id` of `task_id` (judged in `execution_id`) be
+/// carried to `carried_to`? The carrier must be another task that exists, shares
+/// a project with `task_id`, is not closed (`done` / `archived`) and holds the
+/// requirement: an unticked item with the same sentence. When that sentence
+/// cannot be recovered the carry is refused rather than matched against
+/// anything.
+pub fn check_dod_carrier(
+    conn: &Connection,
+    task_id: &str,
+    execution_id: &str,
+    dod_id: &str,
+    carried_to: &str,
+) -> Result<DodCarrierCheck> {
+    let carried_to = carried_to.trim();
+    let Some(carrier_id) = lookup_task_id(conn, carried_to)? else {
+        return Ok(DodCarrierCheck::Refused(format!(
+            "carrier task `{carried_to}` does not exist"
+        )));
+    };
+    if carrier_id == task_id {
+        return Ok(DodCarrierCheck::Refused(format!(
+            "DoD `{dod_id}` cannot be carried to its own task"
+        )));
+    }
+    let carrier = get_task(conn, &carrier_id)?.context("Carrier task disappeared")?;
+    let reference = carrier.summary.reference.clone();
+    if matches!(
+        carrier.summary.status,
+        PlanningTaskStatus::Done | PlanningTaskStatus::Archived
+    ) {
+        return Ok(DodCarrierCheck::Refused(format!(
+            "carrier task `{reference}` is closed ({}); it cannot hold a requirement still owed",
+            carrier.summary.status.as_str()
+        )));
+    }
+    let task_projects = load_string_list(
+        conn,
+        "SELECT project_id FROM planning_task_projects WHERE task_id = ?1",
+        task_id,
+    )?;
+    if !carrier
+        .summary
+        .project_ids
+        .iter()
+        .any(|project| task_projects.contains(project))
+    {
+        return Ok(DodCarrierCheck::Refused(format!(
+            "carrier task `{reference}` shares no project with this task"
+        )));
+    }
+    let Some(sentence) = dod_sentence_for_carry(conn, task_id, execution_id, dod_id)? else {
+        return Ok(DodCarrierCheck::Refused(format!(
+            "the sentence of DoD `{dod_id}` cannot be recovered from the execution or the task \
+             history, so carrier `{reference}` cannot be checked against it; declare the \
+             sentence on the carrier and restore the item on this task before carrying it"
+        )));
+    };
+    let wanted = normalized_sentence(&sentence);
+    if !carrier
+        .definition_of_done
+        .iter()
+        .any(|item| !item.completed && normalized_sentence(&item.sentence) == wanted)
+    {
+        return Ok(DodCarrierCheck::Refused(format!(
+            "carrier task `{reference}` holds no unticked Definition of Done item stating the \
+             requirement of `{dod_id}`; add it there first"
+        )));
+    }
+    Ok(DodCarrierCheck::Accepted { reference })
+}
+
+/// KT-1291 — detach a carried DoD item from its task and record an event naming
+/// the carrier. The event is written even when the item already left the task
+/// (the principal removed it before approving); a second carry of an item that
+/// already has its event leaves no duplicate.
+pub fn detach_carried_dod(
+    conn: &Connection,
+    task_id: &str,
+    execution_id: &str,
+    dod_id: &str,
+    carried_to: &str,
+    evidence: &str,
+    actor: &PlanningActor,
+) -> Result<bool> {
+    validate_actor(actor)?;
+    let Some(sentence) = dod_sentence_for_carry(conn, task_id, execution_id, dod_id)? else {
+        bail!("the sentence of DoD `{dod_id}` cannot be recovered; it was not carried");
+    };
+    let removed = conn.execute(
+        "DELETE FROM planning_task_dod_items WHERE id = ?1 AND task_id = ?2",
+        params![dod_id, task_id],
+    )?;
+    if removed == 0 {
+        let mut statement = conn.prepare(
+            "SELECT changes_json FROM planning_task_events
+              WHERE task_id = ?1 AND action = 'dod_carried'",
+        )?;
+        let already = statement
+            .query_map([task_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .filter_map(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+            .any(|changes| {
+                changes.get("dod_id").and_then(serde_json::Value::as_str) == Some(dod_id)
+            });
+        if already {
+            return Ok(false);
+        }
+    }
+    insert_event(
+        conn,
+        task_id,
+        "dod_carried",
+        actor,
+        serde_json::json!({
+            "dod_id": dod_id,
+            "sentence": sentence,
+            "carried_to": carried_to,
+            "evidence": evidence,
+            "via": "review",
+        }),
+    )?;
+    Ok(true)
+}
+
+/// KT-1291 — carry the `(dod_id, carried_to, evidence)` items of an approving
+/// review: every carrier is re-checked, then every item is detached, all in one
+/// transaction (a savepoint when the caller is already in one, as the review
+/// checkpoint is), so a carrier that closed since the guard refuses the whole
+/// set and a failure part-way detaches nothing. `Some(detail)` is that refusal.
+pub fn carry_dod_items(
+    conn: &Connection,
+    task_id: &str,
+    execution_id: &str,
+    carried: &[(String, String, String)],
+    actor: &PlanningActor,
+) -> Result<Option<String>> {
+    let transaction = NestableTx::begin(conn)?;
+    let mut references = Vec::with_capacity(carried.len());
+    for (dod_id, carried_to, _) in carried {
+        match check_dod_carrier(&transaction, task_id, execution_id, dod_id, carried_to)? {
+            DodCarrierCheck::Accepted { reference } => references.push(reference),
+            DodCarrierCheck::Refused(detail) => return Ok(Some(detail)),
+        }
+    }
+    for ((dod_id, _, evidence), reference) in carried.iter().zip(&references) {
+        detach_carried_dod(
+            &transaction,
+            task_id,
+            execution_id,
+            dod_id,
+            reference,
+            evidence,
+            actor,
+        )?;
+    }
+    transaction.commit()?;
+    Ok(None)
 }
 
 pub fn update_dod_item(
@@ -2871,6 +3116,10 @@ fn load_grouped_by_task<'a>(
     }
     Ok(grouped)
 }
+
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "planning_assignees_tests.rs"]
+mod assignees_tests;
 
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {

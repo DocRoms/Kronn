@@ -2,10 +2,12 @@
 
 - **ID**: TD-20260717-run-power-assertion-sleep
 - **Area**: Backend / Runs (runtime, ops) — macOS d'abord, pattern portable
-- **Status**: PARTIAL — audit runs protected; workflow and detached agent runs
-  remain open.
-- **Problem (fact)**: Ordinary workflow runs and detached discussion-agent runs
-  pose **no shared power assertion**. Sur macOS avec les réglages par défaut (`pmset: sleep 1`,
+- **Status**: PARTIAL — macOS is covered for audit runs, workflow runs and
+  detached discussion-agent runs (see *Shipped scope*); Linux and Windows hold
+  no assertion yet.
+- **Problem (fact)**: Before the shared assertion shipped (see *Shipped scope*),
+  ordinary workflow runs and detached discussion-agent runs
+  posed **no shared power assertion**. Sur macOS avec les réglages par défaut (`pmset: sleep 1`,
   `displaysleep 2`), verrouiller l'écran endort le système ~3 min plus tard et
   **gèle le run en plein vol**. Mesuré sur le WF PR-review (forensic 2026-07-16
   → incident 2026-07-17) :
@@ -23,17 +25,29 @@
   un serveur, faux sur un laptop/desktop de dev). Le harnais Claude Code, lui,
   pose un `caffeinate` pendant ses commandes — c'est ce qui masquait le problème
   tant qu'une session interactive tournait en parallèle.
-- **Shipped scope**: full and partial audits own a macOS `caffeinate -i` child
-  through `AuditDropGuard` and release it on normal completion or drop.
-  [src: file: backend/src/api/audit/full.rs:38-105]
-- **Residual fix**: poser une power assertion pendant tout autre run actif, la
+- **Shipped scope**: `core::power_guard` keeps one refcounted `PowerLease`:
+  the first live lease starts a macOS `caffeinate -i -w <backend pid>` child, the
+  last drop kills it, and other OSes are a no-op. Full and partial audits take a
+  lease through `AuditDropGuard` and release it on normal completion or drop;
+  a workflow run takes one once it is claimed Running, and a detached
+  discussion-agent dispatch holds one for the whole run.
+  [src: file: backend/src/core/power_guard.rs:1-15]
+  [src: file: backend/src/core/power_guard.rs:69-74#caffeinate_args]
+  [src: file: backend/src/core/power_guard.rs:127-141#Caffeinate]
+  [src: file: backend/src/core/power_guard.rs:148-181#PowerLease]
+  [src: file: backend/src/api/audit/full.rs:35-96#AuditDropGuard]
+  [src: file: backend/src/workflows/runner.rs:1197-1204#_power_lease]
+  [src: file: backend/src/api/discussions/runtime.rs:498-498#power_lease]
+  [src: file: backend/src/api/discussions/runtime.rs:541-542#power_lease]
+- **Residual fix** (macOS : livré, voir *Shipped scope* ; reste Linux/Windows) :
+  poser une power assertion pendant tout run actif, la
   relâcher à la fin (et à l'abort) :
   - macOS : `IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep)`
     via `IOKit` (crate `core-foundation`/binding direct), ou fallback simple :
     spawn `caffeinate -i -w <pid_backend>` scope au run (kill à la fin).
-  - Périmètre restant : workflow runs (parent + children) **et** agent runs détachés
-    (spawn_agent_run_background) — un seul refcount global « ≥1 run actif ⇒
-    assertion tenue » suffit.
+  - Périmètre initial : workflow runs (parent + children) **et** agent runs détachés
+    — un seul refcount global « ≥1 run actif ⇒ assertion tenue » suffit ; c'est
+    ce que tient `power_guard::acquire` (macOS, via le fallback `caffeinate`).
   - Linux/Windows plus tard : `systemd-inhibit` / `SetThreadExecutionState`
     (même abstraction, impl par OS).
 - **Workaround actuel** (posé le 2026-07-17) : `sudo pmset -c sleep 0` sur la

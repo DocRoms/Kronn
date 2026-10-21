@@ -59,7 +59,7 @@ already affected run retains its original snapshot.
 
 [src: file: backend/src/core/execution_variables.rs:54-188#resolve]
 [src: file: backend/src/api/execution_variables.rs:23-101#preview]
-[src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx:80-136#toggleReveal]
+[src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx:75-136#revealTimers]
 
 ## Snapshot and discussion trace
 
@@ -100,5 +100,5 @@ value-free errors.
 
 [src: file: backend/src/core/execution_variables.rs:326-1013#tests]
 [src: file: backend/src/db/execution_variable_snapshots.rs:319-597#tests]
-[src: file: backend/tests/api_tests.rs:11160-11370#execution_variable_preview_is_short_lived_masked_and_audited]
+[src: file: backend/tests/api_tests.rs:11201-11411#execution_context_http_routes_keep_values_masked_reveal_on_demand_and_audit_extension]
 [src: file: frontend/src/components/workflows/__tests__/ProvidedVariablesPreview.test.tsx:71-120#ProvidedVariablesPreview]

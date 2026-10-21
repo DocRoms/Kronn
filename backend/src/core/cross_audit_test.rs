@@ -118,6 +118,23 @@ fn only_finding_steps_are_cross_checked() {
 // ── blocks ──
 
 #[test]
+fn a_detection_prompt_ends_on_its_own_no_write_closing() {
+    let step = "## Step 4\n### Runtime versions pinned in the repository\n| node | 22 |\n";
+    for agent in [AgentType::ClaudeCode, AgentType::Codex] {
+        let prompt = format!("{step}{}", detection_appendix(&agent));
+        assert!(
+            prompt.ends_with(DETECTION_CLOSING),
+            "…{}",
+            &prompt[prompt.len() - 300..]
+        );
+        assert!(DETECTION_CLOSING.contains("write NO file"));
+        assert!(DETECTION_CLOSING.contains("no human"));
+        // The step's "write the file" directive is the opposite instruction.
+        assert!(!prompt.contains("=== RUN THIS STEP NOW ==="));
+    }
+}
+
+#[test]
 fn the_last_fenced_block_is_parsed() {
     let text = "Format:\n```kronn-findings\n{\"findings\":[{\"title\":\"x\"}]}\n```\nAnswer:\n```kronn-findings\n{\"findings\":[]}\n```\n";
     let out: DetectionOutput = parse_fenced(text, FINDINGS_FENCE).unwrap();

@@ -25,7 +25,8 @@ Export uses one read transaction. Missing dependencies, unsupported bundles and
 bundles exceeding 16 MiB or 512 resources fail explicitly; nothing is silently
 truncated. Historical HTML revisions, run/publication history and discussion
 links are not included.
-[src: file: backend/src/models/artifact_portability.rs:56-62#ArtifactBundle]
+[src: file: backend/src/models/artifact_portability.rs:9-52#ArtifactBundlePoint]
+[src: file: backend/src/models/artifact_portability.rs:54-74#ArtifactBundle]
 [src: file: backend/src/api/artifact_portability.rs:20-23#MAX_BUNDLE_ITEMS]
 [src: file: backend/src/api/artifact_portability.rs:287-296#export_bundle]
 
@@ -83,7 +84,7 @@ definitions and import identities, and refuses stale decisions. All resources,
 datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
-[src: file: backend/src/lib.rs:1413-1434#artifact_portability]
+[src: file: backend/src/lib.rs:1420-1441#artifact_portability]
 [src: file: backend/src/api/artifact_portability/import.rs:1029-1047#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
@@ -168,7 +169,8 @@ the message clears only its source anchor and preserves the Artifact and its
 discussion link. Streamed previews without a persisted message id do not offer
 this action.
 [src: file: backend/src/api/live_pages.rs:408-420#source_message_id]
-[src: file: frontend/src/components/DocPreviewArtifact.tsx:10#DocPreviewArtifact]
+[src: file: frontend/src/components/DocPreviewArtifact.tsx:22-33#create]
+[src: file: frontend/src/components/DocPreview.tsx:153#DocPreviewArtifact]
 
 ## Domain model
 
@@ -247,10 +249,10 @@ become rows, a single array inside an object envelope is expanded while scalar
 metadata is repeated, parallel nested arrays are zipped by index, and matrix
 arrays receive stable `column_N` headers. Time-series exports apply the same
 normalization per observation and retain `observed_at` plus
-`workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#recordsToRows]` The
+`workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:475-487#delimiter]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:567-579#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 
@@ -358,7 +360,8 @@ tokens pass: keys `^[a-z][a-z0-9_]{0,31}$`, values `^[A-Za-z0-9_.-]{0,64}$`,
 at most 8, first occurrence wins; anything else is dropped. The embedded viewer
 and mosaic tiles have no URL of their own and send no `params` key. Parameters
 are hints for the Page's own rendering, never an authorization input.
-`[src: file: frontend/src/lib/live-page-navigation.ts:40-70#livePageViewParams]`
+`[src: file: frontend/src/lib/live-page-navigation.ts:30-38#LIVE_PAGE_PARAM_KEY]`
+`[src: file: frontend/src/lib/live-page-navigation.ts:40-47#livePageViewParams]`
 `[src: file: frontend/src/lib/live-page-sandbox.ts:314-325#runtimeData]`
 
 The embedded viewer, standalone Page and mosaic skip automatic data
@@ -401,6 +404,8 @@ keeps its previous data. A stdout that starts with `{` or `[` is parsed and
 stored as the JSON value; if it does not parse, the step fails the same way.
 Other text is published as a string. The Exec output is scrubbed of the
 project's GitHub token before it reaches the run record or a Page.
+`[src: file: backend/src/workflows/exec_step.rs:59-61#MAX_PUBLISH_OUTPUT_BYTES]`
+`[src: file: backend/src/workflows/exec_step.rs:386-391#secrets]`
 `[src: file: backend/src/workflows/publish_page_step.rs:152-165#from_exec]`
 `[src: file: backend/src/workflows/publish_page_step.rs:180-226#exec_value]`
 
@@ -428,7 +433,7 @@ Images load only from `data:` and `blob:` URIs. An image behind authentication,
 such as a Jira attachment thumbnail, is fetched by an `ApiCall` with
 `api_response: Binary` and published as a data URI; see
 [binary responses](../operations/deagent-apicall.md#binary-responses-images-and-other-files).
-[src: file: frontend/src/lib/live-page-sandbox.ts:5-7#LIVE_PAGE_CSP]
+[src: file: frontend/src/lib/live-page-sandbox.ts:7-18#LIVE_PAGE_CSP]
 
 PDF and DOCX export starts from the materialized iframe DOM, not from the stored
 HTML template. A request/response `postMessage` bridge keeps the opaque-origin
@@ -495,7 +500,7 @@ values it ran against, so it stays true history and becomes explicitly stale
 when the Page moves on. The API keeps speaking one `LivePageAction`: the
 declaration before a click, the declaration joined to its launch afterwards,
 with `id` naming the launch so a card follows its own run.
-`[src: file: backend/src/db/live_page_actions.rs:23-31#live_page_action_launches]`
+`[src: file: backend/src/db/live_page_actions.rs:23-31#live_page_action_launches] [src: file: backend/src/db/live_page_actions.rs:1089-1165#launch_id]`
 
 Action launch history retains at most 1,000 terminal rows per
 `(page_id, action_ref)`, shared across bindings and revisions. The launch involved
@@ -506,7 +511,7 @@ prunes terminal overflow in the same write transaction. Existing excess history
 is therefore cleaned on the next such write, not during a read or at startup.
 Reconciliation reads lifecycle metadata rather than result/step-output/stderr
 payloads. A cleanup failure rolls back the associated mutation.
-[src: file: backend/src/db/live_page_actions.rs:653-719#retain_launch_history]
+[src: file: backend/src/db/live_page_actions.rs:653-719#MAX_RETAINED_TERMINAL_LAUNCHES]
 [src: file: backend/src/db/live_page_action_retention_tests.rs:192-234#retention_and_completion_roll_back_together_and_compose_with_an_outer_transaction]
 
 Pruning removes the Page launch snapshot only: shared results, result discussions,
@@ -540,7 +545,7 @@ fence carries one intention.
 [src: file: frontend/src/hooks/useLivePageActions.ts:174-218#handleIntent]
 [src: file: frontend/src/hooks/useLivePageActions.ts:276-288#anyInFlight]
 [src: file: frontend/src/components/LivePageActionOverlay.tsx:40#Escape]
-[src: file: frontend/src/components/DiscussionActionCard.tsx:478-485#discussionActionOperations]
+[src: file: frontend/src/components/DiscussionActionCard.tsx:32-34#relaunch]
 
 When authoring a local row move after an action succeeds, preserve the row's
 detail fields and update any separate detail dataset and in-memory index before
@@ -568,9 +573,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:10263-10306]
-[src: file: backend/src/api/orchestration.rs:11494-11536#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:11775-11804#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:11319-11508#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:12450-12492#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:12724-12766#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:12768-12821#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -632,10 +638,10 @@ even when two tiles share the same `action_ref` string for different Pages.
 `[src: file: frontend/src/hooks/useLivePageActions.ts:220-227#handleChanged]`
 `[src: file: frontend/src/components/LivePageActionOverlay.tsx:105-116#LivePageActionCard]`
 The standalone tab and mosaic tiles have no Dashboard shell to navigate
-within, so a terminal action's "open discussion" jump seeds the same
-session-storage reload checkpoint Dashboard already reads on mount
-(`dashboard-navigation.ts`) and opens it in a fresh same-origin tab instead of
-switching in place. `[src: file: frontend/src/lib/live-page-navigation.ts:114-120#openStandaloneDiscussion]`
+within, so a terminal action's "open discussion" jump opens the
+discussion's own address in a fresh same-origin tab (`noopener,noreferrer`)
+instead of switching in place; the address carries the discussion, so nothing is
+cloned across windows. `[src: file: frontend/src/lib/live-page-navigation.ts:114-120#openStandaloneDiscussion]`
 
 Workflow export bundle v2 includes each statically referenced Page's current
 HTML template and dataset contract, then remaps every `PublishPageData.page_id`
@@ -678,6 +684,7 @@ bridge-token list and the handlers refuse a bridge caller.
   CollectApiData Quick Exec source (a run does not pin it); no `user_input`,
   `project_env` or overridable value; target, block and Page in one project;
   workflow enabled.
+  [src: file: backend/src/db/live_page_action_trusts.rs:152-165#AGENTLESS_STEP_TYPES]
 - **Invalidation.** Any fingerprint difference or lost eligibility marks the
   approval invalidated with a reason, for good. SQLite triggers on `workflows`
   and `quick_apis` invalidate at write time through
@@ -696,7 +703,8 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/db/live_page_action_trusts.rs:152-165#AGENTLESS_STEP_TYPES]
+[src: file: backend/src/api/workflows.rs:4483-4493#create_manual_run_admitted]
+[src: file: backend/src/workflows/run_pins.rs:93-103#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
 Embed permission (third-party embeds) is a separate mechanism and is not
@@ -725,7 +733,7 @@ on its origin (scheme, host and port, compared exactly, so
 `https://player.example.com` does not cover `https://cdn.player.example.com`
 nor `:8443`). URLs with credentials or another scheme are ignored. Adding a new
 service is a configuration change plus HTML, never an engine change.
-[src: file: frontend/src/lib/live-page-embeds.ts:35-37#embedUrlOrigin]
+[src: file: frontend/src/lib/live-page-embeds.ts:20-37#parseWebUrl]
 A third-party site can still refuse to be framed (`X-Frame-Options` or a CSP
 `frame-ancestors`); allowing it in Kronn does not override that, and the
 player then shows the site's own error.
@@ -859,7 +867,7 @@ never added. Inside the app the current tab navigates to
 or a Back never types it in again (the legacy `#settings/artifacts?origin=…`
 redirects there); a standalone Page or mosaic keeps running and opens the
 settings in a new tab.
-[src: file: frontend/src/lib/live-page-embeds.ts:71]
+[src: file: frontend/src/lib/live-page-embeds.ts:70-116#planLivePageEmbeds]
 [src: file: frontend/src/lib/live-page-navigation.ts:139-157]
 [src: file: frontend/src/routes/SettingsRoute.tsx:16-35]
 [src: file: frontend/src/lib/legacyRoutes.ts:31-38]
@@ -877,8 +885,9 @@ reordering only changes its style, and playback continues. Each player is
 referrerpolicy="strict-origin-when-cross-origin"
 sandbox="allow-scripts allow-same-origin allow-popups allow-presentation">`;
 `allow-same-origin` keeps the site's own origin, cross-origin to Kronn.
-[src: file: frontend/src/components/LivePageEmbedOverlay.tsx:50#LivePageEmbedOverlay]
-[src: file: frontend/src/components/LivePageEmbedOverlay.tsx:105-113#live-page-embed-overlay__player]
+[src: file: frontend/src/components/LivePageEmbedOverlay.css:1-9]
+[src: file: frontend/src/components/LivePageEmbedOverlay.tsx:81-92#nextOrder]
+[src: file: frontend/src/components/LivePageEmbedOverlay.tsx:105-118#sandbox]
 
 Export and import. An exported Artifact carries `embed_origins` (omitted when
 empty, so other Artifacts keep their exact bytes): the origins of the
@@ -890,7 +899,7 @@ it was itself imported with. That last part is stored with the Page
 (`live_pages.declared_embed_origins`), so content built by script keeps its
 declaration through a chain of imports. It is information for the importer,
 never an authorization, and the creator's allowed sites are not exported.
-[src: file: backend/src/core/embed_origins.rs:154#declared_origins]
+[src: file: backend/src/core/embed_origins.rs:149-172#declared_origins]
 [src: file: backend/src/api/artifact_portability.rs:126#export_embed_origins]
 The import preview lists one row per distinct origin (from the HTML and the
 declaration): already allowed ("in the Artifact and already in your
@@ -906,7 +915,9 @@ changed meanwhile, the configuration cannot be saved), the result lists those
 sites in `not_allowed_embed_origins` with `embed_origins_error`, and the dialog
 says so before opening the Artifact.
 [src: file: frontend/src/components/ArtifactImportDialog.tsx:164#embed_origins]
-[src: file: backend/src/api/artifact_portability/import.rs:88-90#origins_to_allow]
+[src: file: backend/src/api/artifact_portability/import.rs:88-101#origins_to_allow]
+[src: file: backend/src/api/artifact_portability/import.rs:1038-1043#apply_changes]
+[src: file: backend/src/core/embed_origins.rs:217-218#MAX_EMBED_ORIGINS]
 [src: file: backend/src/api/artifact_portability/import.rs:1076-1080#not_allowed_embed_origins]
 
 Security reasoning, in short: the destination Kronn alone decides which sites
