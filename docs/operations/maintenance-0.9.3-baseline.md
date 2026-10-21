@@ -18,7 +18,7 @@ disabling the authoritative ESLint rules. Details and the remaining inventory
 live in the dedicated React debt entry, whose last recorded count (2026-08-11)
 is 72 warnings; the CI warning budget has since been ratcheted to 63.
 [src: file: docs/tech-debt/TD-20260509-react19-effect-rules.md:21-34#Current]
-[src: file: .github/workflows/ci-test.yml:670-671#max-warnings]
+[src: file: .github/workflows/ci-test.yml:685-686#max-warnings]
 
 ## Dependency and security outcome
 
@@ -66,7 +66,7 @@ typecheck/lint/test/build gate.
 `pnpm audit --audit-level=moderate` now passes and is mandatory in both the
 regular CI and aggregate dependency-review workflow. The review deliberately
 runs all three audits before failing, so one graph cannot hide findings in
-another. [src: file: .github/workflows/ci-test.yml:964-966#audit-level]
+another. [src: file: .github/workflows/ci-test.yml:980-982#audit-level]
 [src: file: .github/workflows/dependency-review.yml:35-113#continue-on-error]
 
 After the final direct-dependency refresh, `pnpm audit` reports no known
@@ -94,7 +94,7 @@ side-by-side arrangement keeps `@typescript/typescript6` aliased as the
 `typescript` package and exposes its `tsc6` binary through
 `typecheck:legacy`. Both compiler paths are explicit CI gates.
 [src: file: frontend/package.json:11-13#tsc6] [src: file: frontend/package.json:56#native] [src: file: frontend/package.json:64#typescript]
-[src: file: .github/workflows/ci-test.yml:653-660#typecheck] [src: url:
+[src: file: .github/workflows/ci-test.yml:667-674#typecheck] [src: url:
 https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/]
 
 The earlier preview pilot produced zero diagnostics with both compilers on the
@@ -119,7 +119,7 @@ silently collapsed.
 Oxlint runs first as a fast feedback gate, followed by authoritative ESLint in
 CI. The generated configuration mirrors implemented rules and documents the
 fallback implicitly through the retained ESLint pass.
-[src: file: .github/workflows/ci-test.yml:667-671#oxlint]
+[src: file: .github/workflows/ci-test.yml:681-685#oxlint]
 [src: file: frontend/.oxlintrc.json:18-130#rules]
 
 Same-machine measurements:

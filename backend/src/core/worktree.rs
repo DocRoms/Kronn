@@ -5237,7 +5237,9 @@ mod tests {
 
     #[test]
     fn lane_target_follows_the_worktree_name() {
-        let repo = Path::new("/repo");
+        // Absolute on every platform: `/repo` is not on Windows.
+        let scratch = tempfile::tempdir().unwrap();
+        let repo = scratch.path();
         let worktree = repo.join(".kronn/worktrees/task-kt-9-abcd1234");
         assert_eq!(
             lane_target_for_worktree(repo, &worktree).unwrap(),
@@ -5341,6 +5343,24 @@ mod tests {
         Err("execution is Working".to_string())
     }
 
+    /// Windows opens a directory only with backup semantics, and setting a
+    /// time needs write access there.
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        #[cfg(not(windows))]
+        let file = fs::File::open(path).unwrap();
+        file.set_modified(when).unwrap();
+    }
+
     /// Back-date every entry under `path` (children first, so writing a
     /// directory's mtime is not undone by its own children).
     fn age_tree(path: &Path, ago: std::time::Duration) {
@@ -5351,11 +5371,11 @@ mod tests {
                     if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                         walk(&child, when);
                     } else {
-                        fs::File::open(&child).unwrap().set_modified(when).unwrap();
+                        set_mtime(&child, when);
                     }
                 }
             }
-            fs::File::open(path).unwrap().set_modified(when).unwrap();
+            set_mtime(path, when);
         }
         walk(path, std::time::SystemTime::now() - ago);
     }
@@ -5656,10 +5676,13 @@ mod tests {
         // Names a worktree that derives another lane, outside the managed root.
         fs::write(
             lane_target.join(LANE_OWNER_MARKER),
-            format!(
-                r#"{{"version":1,"lane":"forged","execution_id":"e","worktree":"{}"}}"#,
-                repo.path().join(".kronn/worktrees/task-other").display()
-            ),
+            serde_json::json!({
+                "version": 1,
+                "lane": "forged",
+                "execution_id": "e",
+                "worktree": repo.path().join(".kronn/worktrees/task-other"),
+            })
+            .to_string(),
         )
         .unwrap();
 

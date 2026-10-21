@@ -1424,7 +1424,7 @@ fn a_comment_reaches_the_asker_and_leaves_the_question_waiting() {
 }
 
 #[test]
-fn every_reply_to_a_finished_workflow_step_says_nobody_reads_it_now() {
+fn a_reply_to_a_finished_step_waits_but_a_comment_wakes_the_room_agent() {
     let warning = "L'étape qui a posé cette question est terminée";
 
     let answered = finished_step_question(payload());
@@ -1494,17 +1494,76 @@ fn every_reply_to_a_finished_workflow_step_says_nobody_reads_it_now() {
         )
         .unwrap();
     assert!(comment_content.contains(warning), "{comment_content}");
+    assert!(
+        comment_content.contains("l'agent de la room répond"),
+        "{comment_content}"
+    );
 
-    for conn in [&answered, &declined, &commented] {
+    let jobs = |conn: &Connection| -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    };
+    // A decision waits for the next run; it wakes nobody.
+    for conn in [&answered, &declined] {
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap(),
+            jobs(conn),
             0,
             "a revoked step session has no native dispatch to wake"
         );
     }
+    // A comment asks for an answer now: the room's own agent takes it.
+    assert_eq!(
+        jobs(&commented),
+        1,
+        "the room's native agent answers the comment"
+    );
+    let (agent, trigger): (String, String) = commented
+        .query_row(
+            "SELECT agent_override_json, trigger_message_id FROM agent_dispatch_jobs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(agent.contains("Codex"), "{agent}");
+    assert_eq!(
+        trigger,
+        "question-comment:question:step-question:0:finished-comment"
+    );
+    let question = list(&commented, "d").unwrap().questions.remove(0);
+    assert_eq!(
+        question.state,
+        DiscussionQuestionState::Pending,
+        "a comment decides nothing"
+    );
+
+    // A room without a native agent keeps the old notice and wakes nobody.
+    let quiet = finished_step_question(payload());
+    quiet
+        .execute("UPDATE discussions SET no_agent=1 WHERE id='d'", [])
+        .unwrap();
+    comment(
+        &quiet,
+        "d",
+        "question:step-question:0",
+        &remark,
+        "Romu",
+        None,
+    )
+    .unwrap();
+    let quiet_content: String = quiet
+        .query_row(
+            "SELECT content FROM messages WHERE id=?1",
+            ["question-comment:question:step-question:0:finished-comment"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        quiet_content.contains("personne ne lira"),
+        "{quiet_content}"
+    );
+    assert_eq!(jobs(&quiet), 0);
 }
 
 #[test]

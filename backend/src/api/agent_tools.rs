@@ -5132,6 +5132,7 @@ mod tests {
                     updated_at: chrono::Utc::now(),
                     image_model: None,
                     video_model: Some("google/veo-3.1-lite".into()),
+                    decision_model: None,
                     media_endpoint: None,
                 },
             )?;

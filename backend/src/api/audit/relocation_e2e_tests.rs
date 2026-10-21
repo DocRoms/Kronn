@@ -146,12 +146,14 @@ async fn a_full_audit_of_a_dot_ai_project_writes_everything_there_and_nothing_in
         // KT-1360 — the remit block names the root and the leftover folders
         // itself: it is built per root, not rewritten.
         let expected = ai
-            .relocate(
-                &default
-                    .replace(&reference_path, &path)
-                    .replace(&crate::api::audit::step_remit::remit_prompt_block(&DocsRoot::default_root()), "\u{0}"),
-            )
-            .replace('\u{0}', &crate::api::audit::step_remit::remit_prompt_block(&ai));
+            .relocate(&default.replace(&reference_path, &path).replace(
+                &crate::api::audit::step_remit::remit_prompt_block(&DocsRoot::default_root()),
+                "\u{0}",
+            ))
+            .replace(
+                '\u{0}',
+                &crate::api::audit::step_remit::remit_prompt_block(&ai),
+            );
         assert_eq!(relocated, &expected);
     }
     assert!(prompts[0].contains("`.ai/AGENTS.md`"));
@@ -1132,6 +1134,9 @@ fn an_applied_template_merge_on_a_dot_ai_project_writes_and_commits_under_its_ro
     let project = tmp.path().join("repo");
     std::fs::create_dir_all(&project).unwrap();
     git_in(&project, &["init", "-q", "-b", "main"]);
+    // The merge commits with the repository's identity: CI has no global one.
+    git_in(&project, &["config", "user.name", "Test"]);
+    git_in(&project, &["config", "user.email", "test@example.com"]);
     std::fs::write(
         project.join("AGENTS.md"),
         "# Agent guide\n\n## Running tests\n\nmake test\n",

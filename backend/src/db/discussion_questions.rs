@@ -531,15 +531,25 @@ fn publish_human_resolution(
     // False when the decision leaves the asker nothing to do: keeping a
     // partial answer after a ceiling must not buy one more turn.
     dispatch: bool,
+    // A comment asks for an answer now: when the step that asked has ended,
+    // the room's own agent takes it rather than nobody.
+    room_agent_if_step_ended: bool,
 ) -> Result<(), AnswerError> {
-    if question
+    let step_ended = question
         .requester_workflow_step
         .as_ref()
-        .is_some_and(|source| !source.active)
-    {
-        content.push_str(
-            "\n\nL'étape qui a posé cette question est terminée ; personne ne lira cette réponse maintenant. Elle sera disponible au prochain run.",
-        );
+        .is_some_and(|source| !source.active);
+    let room_agent = if step_ended && room_agent_if_step_ended && dispatch {
+        room_native_agent(conn, discussion_id)?
+    } else {
+        None
+    };
+    if step_ended {
+        content.push_str(if room_agent.is_some() {
+            "\n\nL'étape qui a posé cette question est terminée : l'agent de la room répond. La question reste en attente pour le prochain run."
+        } else {
+            "\n\nL'étape qui a posé cette question est terminée ; personne ne lira cette réponse maintenant. Elle sera disponible au prochain run."
+        });
     }
     let message = crate::models::DiscussionMessage {
         id: message_id.to_string(),
@@ -567,6 +577,28 @@ fn publish_human_resolution(
     };
     let sort_order = super::discussions::insert_message(conn, discussion_id, &message)?;
     if !dispatch {
+        return Ok(());
+    }
+    if let Some((agent, connection_id)) = room_agent {
+        let mut target = crate::models::MessageTarget::agent(agent.clone());
+        target.connection_id = connection_id.clone();
+        super::discussions::replace_message_targets(conn, &message.id, &[target])?;
+        super::agent_dispatch::enqueue_with_connection(
+            conn,
+            super::agent_dispatch::NewAgentDispatchJob {
+                id: &uuid::Uuid::new_v4().to_string(),
+                discussion_id,
+                trigger_message_id: &message.id,
+                trigger_sort_order: sort_order,
+                dedupe_key,
+                agent_override: Some(&agent),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+            connection_id.as_deref(),
+        )?;
         return Ok(());
     }
     let cli_target = super::discussions::message_cli_author_target(
@@ -616,6 +648,30 @@ fn publish_human_resolution(
         connection_id.as_deref(),
     )?;
     Ok(())
+}
+
+/// The room's own native agent and its connection, unless the room has none.
+fn room_native_agent(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<Option<(crate::models::AgentType, Option<String>)>, AnswerError> {
+    use rusqlite::OptionalExtension;
+    if super::discussions::disc_is_no_agent(conn, discussion_id)? {
+        return Ok(None);
+    }
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT agent, connection_id FROM discussions WHERE id=?1",
+            [discussion_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    let Some((agent, connection_id)) = row else {
+        return Ok(None);
+    };
+    let agent = super::discussions::parse_agent_type(&agent).map_err(anyhow::Error::from)?;
+    Ok(Some((agent, connection_id)))
 }
 
 /// Reserved launch data for one question resolution. Claiming stores the run
@@ -768,6 +824,7 @@ pub fn comment(
         author_pseudo,
         author_avatar_email,
         true,
+        true,
     );
     match published {
         Ok(()) => {
@@ -918,6 +975,7 @@ fn decline_inner(
         author_pseudo,
         author_avatar_email,
         ceiling == super::discussion_ceiling_requests::Answered::NotACeiling,
+        false,
     )?;
     conn.execute(
         "UPDATE discussion_questions SET state='declined', answer_json=?2, \
@@ -1285,6 +1343,7 @@ fn answer_inner(
                 author_pseudo,
                 author_avatar_email,
                 false,
+                false,
             )?;
             conn.execute(
                 "UPDATE discussion_questions SET updated_at=?2 WHERE id=?1 AND state='pending'",
@@ -1349,6 +1408,7 @@ fn answer_inner(
         author_pseudo,
         author_avatar_email,
         dispatch,
+        false,
     )?;
     conn.execute("UPDATE discussion_questions SET state='answered', answer_json=?2, answer_idempotency_key=?3, updated_at=?4 WHERE id=?1 AND state='pending'",
         params![question_id, serde_json::to_string(&answer).map_err(anyhow::Error::from)?, request.idempotency_key, answer.answered_at])

@@ -5,7 +5,7 @@ pull stream as server-sent events. Progress events expose the current status,
 digest, completed bytes and optional total bytes; terminal success and errors
 use separate event names. Connection/header and record-size limits terminate
 with an actionable error payload; the shared idle and event-count limits end the
-stream with a plain `error` event. [src: file: backend/src/models/ollama.rs:114-121#PullOllamaModelRequest] [src: file: backend/src/api/ollama.rs:525-578#pull] [src: file: backend/src/api/ollama.rs:580-645#pull_events] [src: file: backend/src/core/sse_limits.rs:55-100#bounded]
+stream with a plain `error` event. [src: file: backend/src/models/ollama.rs:119-126#PullOllamaModelRequest] [src: file: backend/src/api/ollama.rs:525-578#pull] [src: file: backend/src/api/ollama.rs:589-654#pull_events] [src: file: backend/src/core/sse_limits.rs:55-100#bounded]
 
 The Settings card holds one `AbortController` per active model. Cancelling a
 download aborts the browser request and removes that model's transient progress

@@ -3513,6 +3513,8 @@ export interface ExternalApiConnectionView {
   /** Override for a provider serving media from another host; absent or null
    * derives it from `endpoint`. */
   media_endpoint?: string | null;
+  /** The model Decision steps call (KT-1366); a capability, not a tier. */
+  decision_model?: string | null;
   created_at: string;
   updated_at: string;
   /** Whether a credential is currently stored; the value never crosses the wire. */
@@ -3531,6 +3533,7 @@ export interface UpsertExternalApiConnection {
   image_model?: string | null;
   video_model?: string | null;
   media_endpoint?: string | null;
+  decision_model?: string | null;
   /** Tri-state: omitted/null keeps the stored key, '' clears it, a value replaces it. */
   api_key?: string | null;
   /** Keep a tier model the proxy just refused; otherwise the save fails with `unreachable_model`. */

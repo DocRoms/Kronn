@@ -167,8 +167,13 @@ fn git_text(project: &Path, args: &[&str]) -> Option<String> {
 /// Tracked paths with a pending change, project-relative: `(path, ...)`
 /// from `git status -z`. Untracked and ignored entries are not listed.
 fn tracked_changes(project: &Path, prefix: &str) -> Option<Vec<String>> {
-    let raw = git(project, &["status", "--porcelain=v1", "-z", "--untracked-files=no"])?;
-    let mut parts = raw.split(|b| *b == 0).map(|p| String::from_utf8_lossy(p).into_owned());
+    let raw = git(
+        project,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=no"],
+    )?;
+    let mut parts = raw
+        .split(|b| *b == 0)
+        .map(|p| String::from_utf8_lossy(p).into_owned());
     let mut out = Vec::new();
     while let Some(entry) = parts.next() {
         if entry.len() < 4 {
@@ -190,9 +195,17 @@ fn tracked_changes(project: &Path, prefix: &str) -> Option<Vec<String>> {
 }
 
 fn local_refs(project: &Path) -> HashSet<String> {
-    git_text(project, &["for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags"])
-        .map(|t| t.lines().map(str::to_string).collect())
-        .unwrap_or_default()
+    git_text(
+        project,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/tags",
+        ],
+    )
+    .map(|t| t.lines().map(str::to_string).collect())
+    .unwrap_or_default()
 }
 
 fn short(sha: &str) -> &str {
@@ -216,7 +229,9 @@ fn ai_doc_folders(project: &Path, docs_root: &DocsRoot) -> Vec<String> {
         };
         let folder = match name {
             ".kronn.json" => dir,
-            "AGENTS.md" if crate::core::legacy_docs::is_kronn_managed_docs(&project.join(dir)) => dir,
+            "AGENTS.md" if crate::core::legacy_docs::is_kronn_managed_docs(&project.join(dir)) => {
+                dir
+            }
             n if n.starts_with("inconsistencies-") && n.ends_with(".md") => dir,
             n if n.starts_with("TD-") && n.ends_with(".md") => match dir.rsplit_once('/') {
                 Some((parent, "tech-debt")) => parent,
@@ -260,9 +275,10 @@ impl StepRemit {
     }
 
     fn in_ai_folder(&self, rel: &str) -> bool {
-        self.ai_folders
-            .iter()
-            .any(|f| rel.strip_prefix(f.as_str()).is_some_and(|r| r.starts_with('/')))
+        self.ai_folders.iter().any(|f| {
+            rel.strip_prefix(f.as_str())
+                .is_some_and(|r| r.starts_with('/'))
+        })
     }
 
     /// A path a step may legitimately touch, or whose restoration is Kronn's.
@@ -308,7 +324,9 @@ impl StepRemit {
         let now = match git_text(&self.project, &["rev-parse", "--verify", "-q", "HEAD"]) {
             Some(now) => now,
             None => {
-                report.warnings.push("HEAD could not be read after the step".to_string());
+                report
+                    .warnings
+                    .push("HEAD could not be read after the step".to_string());
                 return false;
             }
         };
@@ -325,9 +343,16 @@ impl StepRemit {
             return false;
         }
         let range = format!("{}..{now}", self.head);
-        let descends = git(&self.project, &["merge-base", "--is-ancestor", &self.head, &now]).is_some();
+        let descends = git(
+            &self.project,
+            &["merge-base", "--is-ancestor", &self.head, &now],
+        )
+        .is_some();
         // `%H %at %P`: only plain commits on a straight line are the step's.
-        let log = git_text(&self.project, &["log", "--format=%H%x09%at%x09%P%x09%s", &range]);
+        let log = git_text(
+            &self.project,
+            &["log", "--format=%H%x09%at%x09%P%x09%s", &range],
+        );
         let commits: Vec<Vec<String>> = log
             .as_deref()
             .unwrap_or_default()
@@ -341,7 +366,11 @@ impl StepRemit {
                     && c[1].parse::<i64>().is_ok_and(|at| at >= self.started)
                     && c[2].split_whitespace().count() == 1
             });
-        let foreign = if all_the_step_s { self.foreign_paths(&commits) } else { Vec::new() };
+        let foreign = if all_the_step_s {
+            self.foreign_paths(&commits)
+        } else {
+            Vec::new()
+        };
         if !foreign.is_empty() {
             report.warnings.push(format!(
                 "HEAD moved during the step ({} → {}) by commits that touch files beyond the docs root and the AI-doc folders ({}); they may be yours, so Kronn left them as they are",
@@ -382,7 +411,14 @@ impl StepRemit {
         for c in commits {
             let Some(raw) = git(
                 &self.project,
-                &["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", &c[0]],
+                &[
+                    "diff-tree",
+                    "--no-commit-id",
+                    "--name-only",
+                    "-r",
+                    "-z",
+                    &c[0],
+                ],
             ) else {
                 foreign.insert(format!("(commit {} unreadable)", short(&c[0])));
                 continue;
@@ -427,7 +463,8 @@ impl StepRemit {
             let before = self.dirty_outside.get(&rel);
             if !self.in_ai_folder(&rel) {
                 // Source, config, anything else: the user works here too.
-                let unchanged = before.is_some_and(|b| *b == std::fs::read(self.project.join(&rel)).ok());
+                let unchanged =
+                    before.is_some_and(|b| *b == std::fs::read(self.project.join(&rel)).ok());
                 if !unchanged {
                     left_alone.push(rel);
                 }
@@ -462,12 +499,16 @@ impl StepRemit {
         if !self.project.join(rel).is_file() {
             return Ok(None);
         }
-        git_text(&self.project, &["hash-object", "-w", "--no-filters", "--", rel])
-            .filter(|sha| !sha.is_empty())
-            .map(Some)
-            .ok_or_else(|| {
-                "the current content could not be kept as a git blob, so it was not overwritten".to_string()
-            })
+        git_text(
+            &self.project,
+            &["hash-object", "-w", "--no-filters", "--", rel],
+        )
+        .filter(|sha| !sha.is_empty())
+        .map(Some)
+        .ok_or_else(|| {
+            "the current content could not be kept as a git blob, so it was not overwritten"
+                .to_string()
+        })
     }
 
     /// `Some(blob)` when the file was restored, the blob being what it held.
@@ -484,7 +525,11 @@ impl StepRemit {
             .ok_or_else(|| "git checkout failed".to_string())
     }
 
-    fn restore_content(&self, rel: &str, before: Option<&[u8]>) -> Result<Option<Option<String>>, String> {
+    fn restore_content(
+        &self,
+        rel: &str,
+        before: Option<&[u8]>,
+    ) -> Result<Option<Option<String>>, String> {
         let path = self.project.join(rel);
         let now = std::fs::read(&path).ok();
         if now.as_deref() == before {
@@ -510,13 +555,15 @@ pub(crate) fn warning_events(
         .into_iter()
         .map(|reason| {
             tracing::warn!("Audit step {}: {reason}", file);
-            axum::response::sse::Event::default().event("step_warning").data(
-                serde_json::json!({
-                    "step": step, "file": file, "reason": reason,
-                    "repaired_from_template": false,
-                })
-                .to_string(),
-            )
+            axum::response::sse::Event::default()
+                .event("step_warning")
+                .data(
+                    serde_json::json!({
+                        "step": step, "file": file, "reason": reason,
+                        "repaired_from_template": false,
+                    })
+                    .to_string(),
+                )
         })
         .collect()
 }

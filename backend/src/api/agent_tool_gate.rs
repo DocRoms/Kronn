@@ -21,6 +21,8 @@ struct GateRequest {
     params: Vec<(String, String)>,
     query: Option<String>,
     body: Option<Value>,
+    /// The first id argument the call left out or empty.
+    missing_id: Option<&'static str>,
 }
 
 /// A call the gate let through: the arguments the tool must run with (the
@@ -244,6 +246,7 @@ impl KronnToolExecutor {
                 params,
                 query,
                 body: None,
+                missing_id: None,
             })
         };
         let send = |method: &'static str,
@@ -256,9 +259,17 @@ impl KronnToolExecutor {
                 params,
                 query: None,
                 body: Some(body),
+                missing_id: None,
             })
         };
-        let id = |key: &str| text(args, key).unwrap_or_default();
+        let missing = std::cell::Cell::new(None);
+        let id = |key: &'static str| {
+            let value = text(args, key).unwrap_or_default();
+            if value.trim().is_empty() && missing.get().is_none() {
+                missing.set(Some(key));
+            }
+            value
+        };
         let task = || vec![("id".to_string(), id("task_id"))];
         // A Page is named by id or slug; the gate resolves either.
         let page = || {
@@ -266,7 +277,7 @@ impl KronnToolExecutor {
                 .or_else(|| text(args, "id"))
                 .unwrap_or_default()
         };
-        match call.name.as_str() {
+        let request = match call.name.as_str() {
             // Reading the room's reach, or filing a request a human decides.
             "room_scope" => {
                 let disc = own_disc?;
@@ -289,10 +300,13 @@ impl KronnToolExecutor {
                 }
             }
             "plan_get" => {
-                let disc = own_disc.or_else(|| text(args, "discussion_id"))?;
+                let disc = own_disc.or_else(|| text(args, "discussion_id"));
+                if disc.is_none() {
+                    missing.set(Some("discussion_id"));
+                }
                 get(
                     "/api/discussions/{id}/plan",
-                    vec![("id".into(), disc)],
+                    vec![("id".into(), disc.unwrap_or_default())],
                     None,
                 )
             }
@@ -348,6 +362,7 @@ impl KronnToolExecutor {
                 ],
                 query: None,
                 body: None,
+                missing_id: None,
             }),
             "qa_list" => get("/api/quick-apis", Vec::new(), None),
             "qa_create_draft" => send("POST", "/api/quick-apis", Vec::new(), args.clone()),
@@ -398,13 +413,25 @@ impl KronnToolExecutor {
                 Vec::new(),
                 json!({ "qp_id": id("qp_id") }),
             ),
-            "api_call" => send(
-                "POST",
-                "/api/agent-api/call",
-                Vec::new(),
-                json!({ "api_config_id": text(args, "api_config_id") }),
-            ),
-            "mcp_list" | "api_endpoints" => get("/api/mcps", Vec::new(), None),
+            "api_call" => {
+                if text(args, "api_plugin_slug").is_none() && text(args, "api_config_id").is_none()
+                {
+                    missing.set(Some("api_plugin_slug"));
+                }
+                send(
+                    "POST",
+                    "/api/agent-api/call",
+                    Vec::new(),
+                    json!({ "api_config_id": text(args, "api_config_id") }),
+                )
+            }
+            "api_endpoints" => {
+                if text(args, "api_plugin_slug").is_none() {
+                    missing.set(Some("api_plugin_slug"));
+                }
+                get("/api/mcps", Vec::new(), None)
+            }
+            "mcp_list" => get("/api/mcps", Vec::new(), None),
             "media_job_status" => get(
                 "/api/media/jobs/{id}",
                 vec![("id".into(), id("job_id"))],
@@ -473,7 +500,11 @@ impl KronnToolExecutor {
                 None,
             ),
             _ => None,
-        }
+        };
+        request.map(|request| GateRequest {
+            missing_id: missing.get(),
+            ..request
+        })
     }
 
     /// Decide one call before it runs. A tool that is neither routed nor in
@@ -494,10 +525,21 @@ impl KronnToolExecutor {
         }
         let Some(request) = self.gate_request(call) else {
             return Err(format!(
-                "Kronn refused `{}`: this tool has no access rule",
+                "Kronn refused `{}`: unknown tool, or a tool with no access rule",
                 call.name
             ));
         };
+        // Nothing to check without the id, and the model can fix its call.
+        if let Some(key) = request.missing_id {
+            return Err(if key == "discussion_id" {
+                format!(
+                    "`{}` works inside a Kronn discussion: run it from one, or pass `discussion_id`",
+                    call.name
+                )
+            } else {
+                format!("`{}` needs `{key}`", call.name)
+            });
+        }
         let route = bridge_token::route_for(request.method, request.pattern)
             .ok_or_else(|| format!("`{}` has no Kronn route to be checked against", call.name))?;
         let grant = self.bridge_grant()?;

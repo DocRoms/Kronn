@@ -16,7 +16,7 @@ meanwhile. Only the ended dispatch's id is matched.
 [src: file: backend/src/api/discussions/runtime.rs:551-553#reap_task_worker_processes]
 [src: file: backend/src/api/orchestration.rs:791-793#reap_task_worker_processes]
 [src: file: backend/src/api/discussions/runtime.rs:618-634#reap_task_worker_processes]
-[src: file: backend/src/core/dispatch_reaper.rs:574-628#reap_dispatch]
+[src: file: backend/src/core/dispatch_reaper.rs:638-693#reap_dispatch]
 
 What is taken, and what is not:
 
@@ -38,9 +38,9 @@ What is taken, and what is not:
   (`agent_orphans::start_stamp`) is compared at kill time, and the tag or the
   session is read again right before each signal (SIGTERM and SIGKILL).
   A process whose stamp could not be read is never a target.
-[src: file: backend/src/core/dispatch_reaper.rs:144-184#run_processes]
-[src: file: backend/src/core/dispatch_reaper.rs:406-442#macos_procargs]
-[src: file: backend/src/core/dispatch_reaper.rs:519-552#is_still_ours]
+[src: file: backend/src/core/dispatch_reaper.rs:147-187#run_processes]
+[src: file: backend/src/core/dispatch_reaper.rs:476-512#macos_procargs]
+[src: file: backend/src/core/dispatch_reaper.rs:583-616#is_still_ours]
 
 - macOS hides the environment of platform binaries (`/bin/sh`, `/bin/sleep`,
   `/usr/bin/*`), as `ps eww` does: such a process is found only as a descendant
@@ -48,9 +48,14 @@ What is taken, and what is not:
   visible. A test that needs a tagged process must not use a system binary.
 - The table is read with libproc and `KERN_PROCARGS2` on macOS and `/proc` on
   Linux: no `ps`, which the worker sandbox refuses to execute.
-  [src: file: backend/src/core/dispatch_reaper.rs:303-336#process_table]
-  [src: file: backend/src/core/dispatch_reaper.rs:361-404#process_table]
-[src: file: backend/src/core/dispatch_reaper_test.rs:183-187#start_python_under_shell]
+  [src: file: backend/src/core/dispatch_reaper.rs:365-428#process_table]
+  [src: file: backend/src/core/dispatch_reaper.rs:430-474#process_table]
+- On Linux the kernel refuses `/proc/<pid>/environ` of a zombie and of a
+  process of the same user that is not dumpable (`(sd-pam)`, `ssh-agent`).
+  A zombie is skipped; any other such process makes the reap unverified only
+  when it is the backend's child or descends from a run process.
+  [src: file: backend/src/core/dispatch_reaper.rs:303-332#hidden_kin]
+[src: file: backend/src/core/dispatch_reaper_test.rs:195-199#start_python_under_shell]
 - Nothing sweeps at boot: a lane's own backend (started by a worker, with its
   own scratch database) would otherwise kill every worker of the host.
 - A daemon that also calls `setsid` *and* clears its environment cannot be told
