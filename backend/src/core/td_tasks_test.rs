@@ -295,3 +295,86 @@ fn briefing_option_line_is_recognised() {
         "# Project Briefing\n## Purpose\nTasks: yes\n"
     ));
 }
+
+fn task_status(conn: &Connection, project: &str, td_id: &str) -> (PlanningTaskStatus, String) {
+    let (id, _) = crate::db::planning::task_by_idempotency_key(conn, &td_task_key(project, td_id))
+        .unwrap()
+        .unwrap();
+    let task = crate::db::planning::get_task(conn, &id).unwrap().unwrap();
+    (task.summary.status, task.description)
+}
+
+#[test]
+fn a_sheet_that_leaves_the_active_list_closes_its_task() {
+    let conn = conn();
+    let dir = tempfile::tempdir().unwrap();
+    let docs = dir.path().join("docs");
+    let td = docs.join("tech-debt");
+    std::fs::create_dir_all(&td).unwrap();
+    let ids = [
+        "TD-20261001-a",
+        "TD-20261001-b",
+        "TD-20261001-c",
+        "TD-20261001-d",
+    ];
+    let sources: Vec<TdTaskSource> = ids
+        .iter()
+        .map(|id| sheet(id, "High", "Verified in source", ""))
+        .collect();
+    for id in ids {
+        std::fs::write(
+            td.join(format!("{id}.md")),
+            "- **Status**: Verified in source\n",
+        )
+        .unwrap();
+    }
+    convert(&conn, "p1", &sources, &actor()).unwrap();
+    // a rejected, b accepted, c removed, d still active.
+    std::fs::write(td.join("TD-20261001-a.md"), "- **Status**: Rejected\n").unwrap();
+    std::fs::write(
+        td.join("TD-20261001-b.md"),
+        "- **Status**: Accepted decision\n",
+    )
+    .unwrap();
+    std::fs::remove_file(td.join("TD-20261001-c.md")).unwrap();
+    // Work on c has started: it is annotated, never archived under the worker.
+    let (c_id, _) =
+        crate::db::planning::task_by_idempotency_key(&conn, &td_task_key("p1", "TD-20261001-c"))
+            .unwrap()
+            .unwrap();
+    conn.execute(
+        "UPDATE planning_tasks SET status='in_progress' WHERE id=?1",
+        [&c_id],
+    )
+    .unwrap();
+
+    let closed = close_inactive(&conn, "p1", &docs, &actor()).unwrap();
+    let summary: Vec<(&str, InactiveReason, bool)> = closed
+        .iter()
+        .map(|c| (c.td_id.as_str(), c.reason, c.archived))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("TD-20261001-a", InactiveReason::Rejected, true),
+            ("TD-20261001-b", InactiveReason::AcceptedDecision, true),
+            ("TD-20261001-c", InactiveReason::SheetRemoved, false),
+        ]
+    );
+    let (a, a_desc) = task_status(&conn, "p1", "TD-20261001-a");
+    assert_eq!(a, PlanningTaskStatus::Archived);
+    assert!(a_desc.contains("`TD-20261001-a` was rejected"), "{a_desc}");
+    let (c, c_desc) = task_status(&conn, "p1", "TD-20261001-c");
+    assert_eq!(c, PlanningTaskStatus::InProgress);
+    assert!(c_desc.contains("no longer on file"), "{c_desc}");
+    assert_eq!(
+        task_status(&conn, "p1", "TD-20261001-d").0,
+        PlanningTaskStatus::Todo
+    );
+
+    // A second pass changes nothing: closed tasks stay closed, notes are not repeated.
+    assert!(close_inactive(&conn, "p1", &docs, &actor())
+        .unwrap()
+        .is_empty());
+    assert_eq!(task_status(&conn, "p1", "TD-20261001-c").1, c_desc);
+}

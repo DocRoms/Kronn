@@ -167,6 +167,7 @@ import type {
   DependencyUpdateSummary,
   AuditEvidenceResponse,
   AuditTimelineData,
+  ValidationState,
   ContextAuditResponse,
   ModelTier,
   ModelTiersConfig,
@@ -538,8 +539,9 @@ const isStepList = (v: unknown): v is number[] =>
  *  never coerced into a success:
  *  - the three lists partition `requestedSteps` exactly (disjoint, complete);
  *  - `complete`  ⇒ succeeded non-empty, failed empty, discussion + run ids;
- *  - `no_change` ⇒ only unchanged non-empty, no discussion;
- *  - `interrupted` ⇒ failed non-empty, no discussion. */
+ *  - `no_change` ⇒ only unchanged non-empty (re-verified, the run completed);
+ *    a discussion unless the validation came back (KT-1207);
+ *  - `interrupted` ⇒ failed non-empty; a discussion only for done steps. */
 function parsePartialDone(
   p: Record<string, unknown>,
   requestedSteps: number[],
@@ -592,16 +594,13 @@ function parsePartialDone(
       if (succeeded.length > 0 || failed.length > 0 || unchanged.length === 0) {
         return 'Malformed audit done event: no_change requires an all-unchanged partition';
       }
-      if (discussionId !== null) {
-        return 'Malformed audit done event: no_change cannot carry a discussion';
-      }
       break;
     case 'interrupted':
       if (failed.length === 0) {
         return 'Malformed audit done event: interrupted requires failed steps';
       }
-      if (discussionId !== null) {
-        return 'Malformed audit done event: interrupted cannot carry a discussion';
+      if (discussionId !== null && succeeded.length + unchanged.length === 0) {
+        return 'Malformed audit done event: an interrupted run without done steps cannot carry a discussion';
       }
       break;
   }
@@ -1127,6 +1126,8 @@ export const projects = {
   /** Recent runs, their steps and the branch's recorded audits, in one request. */
   auditTimeline: (id: string) => api<AuditTimelineData>('GET', `/projects/${id}/audit-timeline`),
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
+  /** KT-1122 — the server's verdict on validating the latest run (the one parser). */
+  validationState: (id: string) => api<ValidationState>('GET', `/projects/${id}/validation-state`),
   markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
   cancelAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/cancel-audit`),
   /** KT-1131 — a human accepts a failed step of the latest interrupted run. */
@@ -1265,6 +1266,9 @@ export const projects = {
       }>;
     }>('GET', `/discussions/${id}/source`),
   checkDrift: (id: string) => api<DriftCheckResponse>('GET', `/projects/${id}/drift`),
+  /** KT-1207 — « Vérifié, inchangé »: these stale sections still hold. */
+  acknowledgeDrift: (id: string, sections: string[]) =>
+    api<DriftCheckResponse>('POST', `/projects/${id}/drift/acknowledge`, { sections }),
   citationDrift: (id: string) => api<CitationDriftResponse>('GET', `/projects/${id}/citation-drift`),
   acknowledgeCitations: (id: string, doc: string) =>
     api<SectionCitations>('POST', `/projects/${id}/citation-drift/acknowledge`, { doc }),
@@ -1444,6 +1448,9 @@ export const projects = {
       /** NON-terminal warning after a committed run (e.g. baseline write
        * failed post-Completed) — `done` still follows and stays coherent. */
       onWarning?: (message: string) => void;
+      /** The briefing asks for the cross-agent audit, but a partial refresh
+       * runs every step single-agent. Informational, fired after `start`. */
+      onSingleAgent?: () => void;
       /** Typed terminal payload (matrix v2): `complete` | `interrupted` |
        * `no_change` + the exact requested-steps partition. Undefined on a
        * user abort (fetch cancelled before any done event). */
@@ -1494,6 +1501,7 @@ export const projects = {
             // the `done interrupted` that follows.
             case 'step_error': handlers.onStepError?.(p.error ?? 'Step error', p.step); break;
             case 'warning': handlers.onWarning?.(p.message ?? 'Audit warning'); break;
+            case 'single_agent': handlers.onSingleAgent?.(); break;
             case 'done': {
               // Runtime-validated: a malformed terminal payload must never
               // read as success.
@@ -1526,7 +1534,7 @@ export const projects = {
    * relaunch resumes: the backend recomputes the plan every time. */
   revalidateAuditStream: async (
     id: string,
-    req: RevalidateAuditRequest,
+    req: RevalidateAuditRequest & { deterministic_only?: boolean },
     handlers: {
       onReanchored?: (doc: string, count: number) => void;
       onStepStart?: (step: number, total: number, file: string) => void;

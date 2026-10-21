@@ -14,14 +14,14 @@ responders may all be Codex without being interchangeable:
 `message_targets` preserves those identities in textual order.
 `messages.target_agent` and `target_agents` remain compatibility projections
 for older clients and peers.
-[src: file: backend/src/models/discussions.rs:665-691#MessageTarget]
+[src: file: backend/src/models/discussions.rs:673-699#MessageTarget]
 [src: file: backend/src/db/sql/099_typed_message_targets.sql:1-37#message_targets]
 
 The composer parses prose once and submits the typed target list. The backend
 validates that every CLI session belongs to the discussion before accepting
 the message; it never reparses Markdown to guess an owner.
 [src: file: frontend/src/lib/messageTargets.ts:176-208#targetsFromComposerText]
-[src: file: backend/src/api/discussions/messaging.rs:191-307#canonical_targets]
+[src: file: backend/src/api/discussions/messaging.rs:191-333#canonical_targets]
 
 ## Human turn (UI): complete target matrix
 
@@ -42,7 +42,7 @@ This is the supported escape hatch when a human or agent needs to discuss the
 syntax itself (write `` `@codex` `` rather than a live mention). The UI composer
 and MCP bridge apply the same exemption before resolving targets.
 [src: file: frontend/src/lib/messageTargets.ts:131-147#proseOnly]
-[src: file: backend/scripts/disc-introspection-mcp.py:5015-5026#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5011-5022#_structured_message_targets]
 
 | Room mode | Target state | Result |
 |---|---|---|
@@ -114,7 +114,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
 [src: file: backend/src/db/discussions.rs:1290-1310#insert_user_message_with_dispatches]
 [src: file: backend/src/db/agent_dispatch.rs:677-770#recover_after_restart]
-[src: file: backend/src/db/discussions.rs:3334-3340#DispatchInProgress]
+[src: file: backend/src/db/discussions.rs:3391-3397#DispatchInProgress]
 [src: file: backend/src/api/federation.rs:26-70#federate_message]
 
 New-discussion aliases follow the same independent fan-out contract. Creation
@@ -150,11 +150,11 @@ mention that launched nobody is annotated with its reason (already scheduled
 on the root turn, or no marker), computed from `message_targets`.
 [src: file: frontend/src/lib/agentDelegation.ts:62-149#detectDelegation]
 [src: file: backend/src/db/discussions.rs:1746-1789#native_agents_scheduled_for_root_turn]
-[src: file: backend/src/api/discussions/crud.rs:531-541#initial_participants]
+[src: file: backend/src/api/discussions/crud.rs:538-548#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/api/discussions/crud.rs:883-887#attach_discussion_participants]
+[src: file: backend/src/api/discussions/crud.rs:886-890#attach_discussion_participants]
 [src: file: backend/src/api/discussions/streaming.rs:1930-1940#independent_sibling_notice]
-[src: file: backend/src/db/discussions.rs:1972-1986#already_scheduled]
+[src: file: backend/src/db/discussions.rs:2016-2030#already_scheduled]
 
 ## Joined agent turn (MCP)
 
@@ -164,7 +164,7 @@ from exact joined aliases (`@codex-cli`, `@codex-cli-2`, …) using the
 discussion's participant order. Several mentions fan out once per durable
 identity. The legacy single `target_agent` field remains accepted during
 rolling upgrades, with its historical provider-level semantics.
-[src: file: backend/scripts/disc-introspection-mcp.py:5015-5101#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5011-5097#_structured_message_targets]
 [src: file: backend/src/api/disc_source.rs:434-454#legacy_requested_target]
 
 For each native identity, the message and its dispatch obligation commit in one
@@ -233,7 +233,7 @@ Two distinctions the reason must not blur, and does not:
   New-discussion `@alias` routing is persisted on the initial user message
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
-  [src: file: backend/src/api/discussions/crud.rs:592-633#replace_message_targets]
+  [src: file: backend/src/api/discussions/crud.rs:599-640#replace_message_targets]
   [src: file: backend/src/api/discussions/runtime.rs:615-634#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.

@@ -1746,6 +1746,18 @@ pub struct ManifestTest {
     pub evidence: Option<String>,
 }
 
+/// KT-1246 — the worker's explicit statement of whether any test was actually
+/// executed, and which. Replaces a sentence at the end of a report: a reviewer
+/// reads `executed` and `which` instead of inferring them from `tests`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TestsExecuted {
+    pub executed: bool,
+    /// The commands (or suites) that ran. Empty exactly when `executed` is false.
+    #[serde(default)]
+    pub which: Vec<String>,
+}
+
 /// A per-DoD coverage claim. `dod_id` references the task's DoD item; the schema
 /// only enforces shape — the approve guard (DoD-5, tranche 3) enforces coverage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1775,6 +1787,10 @@ pub struct DeliveryManifestV1 {
     pub risks: Vec<String>,
     pub limitations: Vec<String>,
     pub summary: String,
+    /// KT-1246 — absent on deliveries made before the field existed and on
+    /// joined-CLI deliveries; a spawned worker must always state it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests_executed: Option<TestsExecuted>,
 }
 
 /// JSON-subset schema for [`DeliveryManifestV1`] (triage precedent). Required
@@ -1834,7 +1850,17 @@ pub fn delivery_manifest_v1_schema() -> serde_json::Value {
             "migrations": { "type": "array", "items": { "type": "string" } },
             "risks": { "type": "array", "items": { "type": "string" } },
             "limitations": { "type": "array", "items": { "type": "string" } },
-            "summary": { "type": "string", "minLength": 1 }
+            "summary": { "type": "string", "minLength": 1 },
+            // Optional here (legacy and joined-CLI producers); required by the
+            // spawned-worker projection, which is where it is authored.
+            "tests_executed": {
+                "type": "object",
+                "required": ["executed", "which"],
+                "properties": {
+                    "executed": { "type": "boolean" },
+                    "which": { "type": "array", "items": { "type": "string" } }
+                }
+            }
         }
     })
 }

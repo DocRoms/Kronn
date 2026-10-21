@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { discussionPath, planningTaskPath } from '../lib/routes';
 import { newTabClickProps } from '../lib/newTabNavigation';
 import {
@@ -588,7 +588,7 @@ function PlanningPageView({
                     )}
                     <button type="button" className="planning-detail-close" onClick={() => setSelectedId(null)} aria-label={t('common.close')}><X size={16} /></button>
                   </header>
-                  {detailLoading && <LoadingState message={t('common.loading')} />}
+                  {detailLoading && <div className="planning-state"><LoadingState message={t('common.loading')} /></div>}
                   {detail && (
                     <PlanningDetailForm
                       key={detail.id}

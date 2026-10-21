@@ -108,14 +108,14 @@ Only a matching row with `source_kind: orchestration` enables that path; an
 orchestrator display label or ordinary notification alone renders no card and
 no false refusal notice.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:36-60#ImportantMessageCard]
-[src: file: frontend/src/components/MessageBubble.tsx:1107-1114#serverEventOnly]
+[src: file: frontend/src/components/MessageBubble.tsx:1115-1122#serverEventOnly]
 
 The bar re-fetches when the transcript's newest durable message id changes
 (`messageRevision`, the same idiom `DiscussionQuestionBanner` uses) — one
 fetch per arrival, not one per render or per bubble, and never stuck on the
 first GET while a new card lands.
-[src: file: frontend/src/components/ImportantMessageCard.tsx:156-162]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4131-4138]
+[src: file: frontend/src/components/ImportantMessageCard.tsx:182-192#messageRevision]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4682-4686#ImportantMessagesBar]
 
 ## Human form (0.13.0, KT-643)
 
@@ -125,9 +125,9 @@ select an existing task from this discussion's plan. This does not create,
 complete or otherwise modify a task. The card's task link resolves a fresh plan
 and opens that exact task; a removed link or unavailable plan is explained
 instead of selecting an unrelated task.
-[src: file: frontend/src/components/ImportantMessageForm.tsx:1]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:1385]
-[src: file: frontend/src/components/DiscussionPlanPanel.tsx:62]
+[src: file: frontend/src/components/ImportantMessageForm.tsx:19#ImportantMessageForm]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:1456-1483#openPlan]
+[src: file: frontend/src/components/DiscussionPlanPanel.tsx:87-90#initialTaskId]
 
 The publication-key field appears only inside the open form. It uses the
 existing enrolled credential and single-use proof; Settings remains the place
@@ -155,7 +155,7 @@ category without rewriting migrations 172/174, preserving the previous rows,
 identities, foreign keys, category checks and indexes.
 [src: file: frontend/src/lib/importantMessageDraft.ts:54-60#takeScalars]
 [src: file: backend/src/db/sql/175_important_message_information_category.sql:1-3#discussion_important_messages_next]
-[src: file: backend/src/db/migrations.rs:1701-1705#migration_175_preserves_populated_cards_and_closes_information_category]
+[src: file: backend/src/db/migrations.rs:1742-1746#migration_175_preserves_populated_cards_and_closes_information_category]
 
 ## Tests
 

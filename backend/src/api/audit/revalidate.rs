@@ -69,7 +69,7 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
             broken: Vec::new(),
             human: Vec::new(),
         };
-        for citation in &section.citations {
+        for citation in reanchor_statuses(project_path, &content, section) {
             for (name, labels) in &human_sections {
                 if labels.contains(&citation.cite) {
                     entry.human.push(HumanCitationTodo {
@@ -110,6 +110,64 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
     plan
 }
 
+/// Citation checks alone cannot see changed prose or newly pulled docs.
+/// Extend their bounded plan from the latest run's locally recorded contents.
+fn plan_with_documents(
+    project_path: &FsPath,
+    documents: Option<&str>,
+) -> Result<RevalidationPlan, String> {
+    let mut planned = plan(project_path);
+    let Some(documents) = documents else {
+        return Ok(planned);
+    };
+    let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
+    let chain = super::steps_for(AuditKind::Full, &docs_root);
+    for doc in crate::core::audit_documents::changed_since(project_path, documents)? {
+        if let Some(section) = planned
+            .sections
+            .iter_mut()
+            .find(|section| section.doc == doc)
+        {
+            // An ordinary move already has its deterministic action. An
+            // additional prose edit is not certified by moving a citation:
+            // advance_local_changes retains the old document proof for it.
+            if section.doc_missing || !section.broken.is_empty() || !section.reanchor.is_empty() {
+                continue;
+            }
+            section.action = if section.step.is_some() {
+                RevalidationAction::Agent
+            } else {
+                RevalidationAction::Manual
+            };
+            if let Some(step) = section.step {
+                planned.agent_steps.push(step);
+            }
+            continue;
+        }
+        let step = owning_step(&chain, &doc, &docs_root);
+        let doc_missing = !project_path.join(&doc).is_file();
+        planned.sections.push(RevalidationSection {
+            doc_missing,
+            doc,
+            step,
+            action: if step.is_some() && !doc_missing {
+                RevalidationAction::Agent
+            } else {
+                RevalidationAction::Manual
+            },
+            reanchor: Vec::new(),
+            broken: Vec::new(),
+            human: Vec::new(),
+        });
+        if let Some(step) = step.filter(|_| !doc_missing) {
+            planned.agent_steps.push(step);
+        }
+    }
+    planned.agent_steps.sort_unstable();
+    planned.agent_steps.dedup();
+    Ok(planned)
+}
+
 /// One doc whose moved citations were re-anchored.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct Reanchored {
@@ -123,13 +181,16 @@ pub(crate) struct Reanchored {
 pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, String> {
     let mut done = Vec::new();
     for section in plan(project_path).sections {
-        let moves: Vec<Reanchor> = section.reanchor.iter().filter_map(Reanchor::of).collect();
-        if moves.is_empty() || section.doc_missing {
+        if section.reanchor.is_empty() || section.doc_missing {
             continue;
         }
         let path = project_path.join(&section.doc);
         let before = std::fs::read_to_string(&path)
             .map_err(|e| format!("Cannot read {}: {e}", section.doc))?;
+        let moves = reanchors_to_apply(project_path, &before, &section.doc, &section.reanchor);
+        if moves.is_empty() {
+            continue;
+        }
         let (after, count) = citation_drift::rewrite_citations(&before, &moves, |_| true);
         if count == 0 {
             continue;
@@ -154,6 +215,62 @@ pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, 
         });
     }
     Ok(done)
+}
+
+fn reanchor_statuses(
+    project_path: &FsPath,
+    content: &str,
+    section: &citation_drift::SectionCitations,
+) -> Vec<CitationStatus> {
+    let moves = reanchor_suggestions(project_path, content, &section.doc);
+    section
+        .citations
+        .iter()
+        .cloned()
+        .map(|mut citation| {
+            if citation.state != CitationState::Moved {
+                if let Some(mapped) = moves.iter().find(|mapped| mapped.from == citation.cite) {
+                    citation.state = CitationState::Moved;
+                    citation.current_line = Some(mapped.line);
+                }
+            }
+            citation
+        })
+        .collect()
+}
+
+fn reanchor_suggestions(project_path: &FsPath, content: &str, doc: &str) -> Vec<Reanchor> {
+    let base = crate::core::docs_citations::default_reanchor_base(project_path)
+        .inspect_err(|error| tracing::warn!("Citation diff mapping unavailable: {error}"))
+        .ok()
+        .flatten();
+    crate::core::docs_citations::suggested_reanchors(content, project_path, base.as_deref())
+        .unwrap_or_else(|error| {
+            tracing::warn!(doc, "Citation diff mapping unavailable: {error}");
+            Vec::new()
+        })
+}
+
+fn reanchors_to_apply(
+    project_path: &FsPath,
+    content: &str,
+    doc: &str,
+    statuses: &[CitationStatus],
+) -> Vec<Reanchor> {
+    let suggestions = reanchor_suggestions(project_path, content, doc);
+    statuses
+        .iter()
+        .filter_map(|status| {
+            let fallback = Reanchor::of(status)?;
+            Some(
+                suggestions
+                    .iter()
+                    .find(|mapped| mapped.from == fallback.from && mapped.line == fallback.line)
+                    .cloned()
+                    .unwrap_or(fallback),
+            )
+        })
+        .collect()
 }
 
 fn finding_line(c: &CitationStatus) -> String {
@@ -188,12 +305,15 @@ pub(crate) fn prompt_blocks(plan: &RevalidationPlan) -> HashMap<usize, String> {
         };
         let mut block = format!(
             "\n\n{skill}\n\n## KRONN FINDINGS — `{}`\n\
-             Kronn compared each citation of this file with the fingerprint of the cited lines \
-             recorded at validation, deterministically and without a model. These no longer match:\n",
+             Kronn checked citation fingerprints and the documents recorded with the completed audit. \
+             Review these findings against the actual repository:\n",
             section.doc
         );
         for c in &section.broken {
             block.push_str(&finding_line(c));
+        }
+        if section.broken.is_empty() && section.reanchor.is_empty() {
+            block.push_str("The document's content changed since the completed audit or validation. Re-read this document and its actual sources, including uncited prose, and verify the changed claims. Keep accurate human wording; do not invent citations.\n");
         }
         if !section.reanchor.is_empty() {
             block.push_str(&format!(
@@ -223,13 +343,15 @@ pub(crate) struct RevalidationRun {
     pub blocks: HashMap<usize, String>,
 }
 
-/// After a revalidation that rewrote nothing — every agent step unchanged,
+/// After a partial run that rewrote nothing — every agent step unchanged,
 /// or stopped before writing — the validation it revoked at launch comes
-/// back: the docs are byte-identical to what the human validated.
+/// back: the docs are byte-identical to what the human validated. Only a
+/// `provenance` reason re-dates each doc's own validation.
 pub(crate) fn restore_validation_if_untouched(
     project_path: &FsPath,
     validated_at: Option<&str>,
     snapshots: &[(String, super::validation::TargetSnapshot)],
+    provenance: Option<crate::core::doc_provenance::ValidationReason>,
 ) -> bool {
     let Some(date) = validated_at else {
         return false;
@@ -240,12 +362,11 @@ pub(crate) fn restore_validation_if_untouched(
     if !(untouched && crate::core::kronn_state::restore_validated(project_path, date).is_ok()) {
         return false;
     }
+    let Some(reason) = provenance else {
+        return true;
+    };
     let docs: Vec<String> = snapshots.iter().map(|(target, _)| target.clone()).collect();
-    if let Err(e) = crate::core::doc_provenance::refresh_validation(
-        project_path,
-        &docs,
-        crate::core::doc_provenance::ValidationReason::Revalidation,
-    ) {
+    if let Err(e) = crate::core::doc_provenance::refresh_validation(project_path, &docs, reason) {
         tracing::warn!("Human-validation provenance not recorded: {e}");
     }
     true
@@ -264,6 +385,15 @@ async fn project_of(state: &AppState, id: &str) -> Result<Project, String> {
     }
 }
 
+async fn latest_documents(state: &AppState, id: &str) -> Result<Option<String>, String> {
+    let id = id.to_string();
+    state
+        .db
+        .with_read_conn(move |conn| crate::db::audit_documents::latest(conn, &id))
+        .await
+        .map_err(|e| format!("Cannot read final audit documents: {e}"))
+}
+
 /// GET /api/projects/:id/revalidation
 pub async fn revalidation_plan(
     State(state): State<AppState>,
@@ -274,8 +404,15 @@ pub async fn revalidation_plan(
         Err(e) => return Json(ApiResponse::err(e)),
     };
     let path = scanner::resolve_host_path(&project.path);
-    match tokio::task::spawn_blocking(move || plan(&path)).await {
-        Ok(plan) => Json(ApiResponse::ok(plan)),
+    let documents = match latest_documents(&state, &id).await {
+        Ok(documents) => documents,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+    match tokio::task::spawn_blocking(move || plan_with_documents(&path, documents.as_deref()))
+        .await
+    {
+        Ok(Ok(plan)) => Json(ApiResponse::ok(plan)),
+        Ok(Err(e)) => Json(ApiResponse::err(e)),
         Err(e) => Json(ApiResponse::err(format!("Revalidation plan failed: {e}"))),
     }
 }
@@ -302,18 +439,34 @@ pub async fn revalidate_audit(
         Err(e) => return single_error(e),
     };
     let project_path = scanner::resolve_host_path(&project.path);
+    if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+        return single_error(error);
+    }
     // A configured folder failing containment refuses the run (KT-1192).
     if let Err(reason) = crate::core::docs_location::DocsRoot::for_project(&project_path) {
         return single_error(reason);
     }
+    let documents = match latest_documents(&state, &id).await {
+        Ok(documents) => documents,
+        Err(e) => return single_error(e),
+    };
     let planned = {
         let path = project_path.clone();
-        match tokio::task::spawn_blocking(move || plan(&path)).await {
-            Ok(plan) => plan,
+        match tokio::task::spawn_blocking(move || plan_with_documents(&path, documents.as_deref()))
+            .await
+        {
+            Ok(Ok(plan)) => plan,
+            Ok(Err(e)) => return single_error(e),
             Err(e) => return single_error(format!("Revalidation plan failed: {e}")),
         }
     };
-    if planned.sources_state == SourcesState::Unknown {
+    // A free re-anchor action must never dispatch an agent merely because
+    // other sections in the same plan still need one. Recompute what remains
+    // under the lease and return it to the caller for an explicit next choice.
+    if req.deterministic_only.unwrap_or(false) {
+        return deterministic_only(state, project.id, project_path);
+    }
+    if planned.sources_state == SourcesState::Unknown && planned.agent_steps.is_empty() {
         return single_error(
             "No citation fingerprints recorded yet: validate the audit first, then revalidate it."
                 .into(),
@@ -344,29 +497,51 @@ fn deterministic_only(
     project_path: std::path::PathBuf,
 ) -> Sse<SseStream> {
     let stream: SseStream = Box::pin(async_stream::try_stream! {
-        let tracker = state.audit_tracker.clone();
-        if !tracker.lock().map(|mut t| t.try_acquire_lease(&project_id)).unwrap_or(false) {
-            yield Event::default().event("error").data(serde_json::json!({
-                "error": "An audit is currently running on this project; revalidate once it has finished.",
-            }).to_string());
+        let lease = match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
+            Ok(lease) => lease,
+            Err(error) => {
+                yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+                return;
+            }
+        };
+        if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
             return;
         }
         let path = project_path.clone();
-        let applied = tokio::task::spawn_blocking(move || {
+        let applied = lease.blocking(move || {
+            let before = crate::core::audit_documents::capture(&path)?;
             let reanchored = apply_reanchors(&path)?;
-            Ok::<_, String>((reanchored, plan(&path)))
+            let after = crate::core::audit_documents::capture(&path)?;
+            Ok::<_, String>((reanchored, before, after))
         })
         .await
         .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
-        if let Ok(mut t) = tracker.lock() {
-            t.release_lease(&project_id);
-        }
+        let applied = match applied {
+            Ok((reanchored, before, after)) => {
+                let pid = project_id.clone();
+                match state.db.with_conn(move |conn| {
+                    crate::db::audit_documents::advance_local_changes(conn, &pid, &before, &after)?;
+                    crate::db::audit_documents::latest(conn, &pid)
+                }).await {
+                    Ok(documents) => {
+                        let path = project_path.clone();
+                        lease.blocking(move || {
+                            plan_with_documents(&path, documents.as_deref()).map(|plan| (reanchored, plan))
+                        }).await.unwrap_or_else(|e| Err(format!("Task failed: {e}")))
+                    }
+                    Err(e) => Err(format!("Cannot record reanchored documents: {e}")),
+                }
+            }
+            Err(e) => Err(e),
+        };
+        drop(lease);
         match applied {
             Ok((reanchored, after)) => {
                 for doc in &reanchored {
                     yield Event::default().event("reanchored").data(serde_json::to_string(doc).unwrap_or_default());
                 }
-                let status = if after.sources_state == SourcesState::Clean { "clean" } else { "todo" };
+                let status = if after.sources_state == SourcesState::Clean && after.sections.is_empty() { "clean" } else { "todo" };
                 yield Event::default().event("done").data(serde_json::json!({
                     "status": status,
                     "revalidation": true,

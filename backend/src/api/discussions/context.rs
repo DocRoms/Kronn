@@ -1169,4 +1169,118 @@ mod tests {
             .expect("count");
         assert_eq!(messages, 0, "a refusal must not write a transcript slot");
     }
+
+    /// KT-1202 — media generated before the move sit in the config dir, outside
+    /// every project. The route serves the stored `disk_path` as is, so they
+    /// still display, and the agent gets a mirror of them in its own work dir.
+    #[tokio::test]
+    #[serial_test::serial] // KRONN_DATA_DIR is process-wide
+    async fn media_saved_in_the_config_dir_before_the_move_still_displays() {
+        use http_body_util::BodyExt;
+        let _data_dir = crate::core::config::TestDataDir::new();
+        let project = tempfile::tempdir().expect("project dir");
+
+        // The legacy layout, written by the very function the runner used.
+        let image = crate::core::context_files::save_file_to_disk(
+            "11111111-aaaa",
+            "image-11111111.png",
+            b"legacy-png",
+        )
+        .expect("legacy image");
+        let video = crate::core::context_files::save_file_to_disk(
+            "22222222-bbbb",
+            "video-22222222.mp4",
+            b"legacy-mp4",
+        )
+        .expect("legacy video");
+        let config_dir = crate::core::config::config_dir().expect("config dir");
+        for path in [&image, &video] {
+            assert!(
+                std::path::Path::new(path).starts_with(config_dir.join("context-files")),
+                "{path} must be a legacy config-dir path"
+            );
+        }
+
+        let db = Database::open_in_memory().expect("in-memory db");
+        let (image_row, video_row, project_path) = (
+            image.clone(),
+            video.clone(),
+            project.path().to_string_lossy().to_string(),
+        );
+        db.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('p-1', 'P', ?1, '2026-09-01 09:00:00', '2026-09-01 09:00:00')",
+                [&project_path],
+            )?;
+            conn.execute(
+                "INSERT INTO discussions (id, title, project_id, created_at, updated_at)
+                 VALUES ('d-1', 'Media', 'p-1', '2026-09-01 09:00:00', '2026-09-01 09:00:00')",
+                [],
+            )?;
+            crate::db::discussions::insert_context_file(
+                conn,
+                "img-1",
+                "d-1",
+                "image-11111111.png",
+                "image/png",
+                10,
+                "",
+                Some(&image_row),
+            )?;
+            crate::db::discussions::insert_context_file(
+                conn,
+                "vid-1",
+                "d-1",
+                "video-22222222.mp4",
+                "video/mp4",
+                10,
+                "",
+                Some(&video_row),
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed");
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            std::sync::Arc::new(db),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+
+        for (file_id, content_type, bytes) in [
+            ("img-1", "image/png", b"legacy-png"),
+            ("vid-1", "video/mp4", b"legacy-mp4"),
+        ] {
+            let response = get_context_file_content(
+                State(state.clone()),
+                Path(("d-1".to_string(), file_id.to_string())),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{file_id}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                content_type
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            assert_eq!(body.as_ref(), bytes, "{file_id}");
+        }
+
+        // The agent is handed a copy inside its work dir; the legacy file stays.
+        let given = crate::core::context_files::agent_readable_path(&image, project.path());
+        assert!(
+            std::path::Path::new(&given)
+                .starts_with(project.path().join(".kronn").join("context-files")),
+            "{given}"
+        );
+        assert_eq!(std::fs::read(&given).expect("mirror"), b"legacy-png");
+        assert_eq!(std::fs::read(&image).expect("legacy copy"), b"legacy-png");
+    }
 }

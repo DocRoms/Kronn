@@ -4,7 +4,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
@@ -27,16 +26,6 @@ const MAX_REASON_CHARS: usize = 2000;
 const MAX_TALK_MESSAGE_CHARS: usize = 8000;
 const EXCERPT_MAX: usize = 1200;
 const TD_MESSAGE_MAX: usize = 8000;
-
-struct LeaseGuard(Arc<std::sync::Mutex<crate::AuditTracker>>, String);
-
-impl Drop for LeaseGuard {
-    fn drop(&mut self) {
-        if let Ok(mut tracker) = self.0.lock() {
-            tracker.release_lease(&self.1);
-        }
-    }
-}
 
 /// The project and its directory on this host.
 async fn project_dir(state: &AppState, id: String) -> Result<(Project, PathBuf), ApiErrorBody> {
@@ -88,6 +77,7 @@ struct ListContext {
     tasks: HashMap<String, TdLinkedTask>,
     mentions: HashMap<String, u32>,
     talks: HashMap<String, (String, u32)>,
+    disputes: Vec<crate::db::audit_cross::PendingDispute>,
 }
 
 fn list_context(conn: &Connection, project_id: &str) -> anyhow::Result<ListContext> {
@@ -147,6 +137,7 @@ fn list_context(conn: &Connection, project_id: &str) -> anyhow::Result<ListConte
         tasks,
         mentions,
         talks,
+        disputes: crate::db::audit_cross::pending_disputes(conn, project_id)?,
     })
 }
 
@@ -162,13 +153,15 @@ fn assemble(mut items: Vec<TdReviewItem>, context: ListContext, validated: bool)
         item.talk_count = mentions + talk_count;
     }
     let (counts, by_severity) = td_review::counts(&items);
+    let open = td_review::open_disputes(&items, &context.disputes);
     TdReviewList {
-        gate: td_review::gate(&items),
+        gate: td_review::with_disputes(td_review::gate(&items), open.len()),
         counts,
         by_severity,
         validated,
         audit_date: context.audit_date,
         validation_discussion_id: context.validation_discussion_id,
+        dispute_discussion_id: open.first().map(|d| d.discussion_id.clone()),
         items,
     }
 }
@@ -304,22 +297,52 @@ pub async fn decide_tds(
         Ok(found) => found,
         Err(e) => return err(e),
     };
-    // A running audit rewrites the same sheets.
-    if !state
-        .audit_tracker
-        .lock()
-        .map(|mut t| t.try_acquire_lease(&project.id))
-        .unwrap_or(false)
-    {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Conflict,
-            "An audit is currently running on this project — decide once it has finished.",
-        ));
-    }
-    let _lease = LeaseGuard(state.audit_tracker.clone(), project.id.clone());
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err_coded(ApiErrorCode::Conflict, error)),
+        };
     let items = req.items;
-    match tokio::task::spawn_blocking(move || decide_at(&project_path, &items)).await {
-        Ok(Ok(outcome)) => Json(ApiResponse::ok(outcome)),
+    let docs_root = DocsRoot::of(&project_path);
+    let docs_dir = docs_root.dir(&project_path);
+    let docs_rel = docs_root.rel().to_string();
+    match lease
+        .blocking(move || {
+            let before = crate::core::audit_documents::capture(&project_path)?;
+            let outcome = decide_at(&project_path, &items)?;
+            let after = crate::core::audit_documents::capture(&project_path)?;
+            Ok::<_, String>((outcome, before, after))
+        })
+        .await
+    {
+        Ok(Ok((mut outcome, documents_before, documents_after))) => {
+            let pid = project.id.clone();
+            let after = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::audit_documents::advance_local_changes(
+                        conn,
+                        &pid,
+                        &documents_before,
+                        &documents_after,
+                    )?;
+                    td_tasks::close_inactive_logged(conn, &pid, &docs_dir, "tech-debt review");
+                    let pending = crate::db::audit_cross::pending_disputes(conn, &pid)?;
+                    Ok((td_review::read_items_rel(&docs_dir, &docs_rel), pending))
+                })
+                .await;
+            let (items, pending) = match after {
+                Ok(result) => result,
+                Err(e) => {
+                    return Json(ApiResponse::err(format!(
+                        "Could not record the tech-debt review: {e}"
+                    )))
+                }
+            };
+            let open = td_review::open_disputes(&items, &pending).len();
+            outcome.gate = td_review::with_disputes(outcome.gate, open);
+            Json(ApiResponse::ok(outcome))
+        }
         Ok(Err(message)) => Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
         Err(e) => Json(ApiResponse::err(format!("Task failed: {e}"))),
     }

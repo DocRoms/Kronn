@@ -7809,6 +7809,48 @@ class AuditToolsTests(unittest.TestCase):
             out = self.mod.call_audit_prepare({"project_id": "p1"})
         self.assertEqual(out, info, "AuditInfo must round-trip verbatim")
 
+    def test_audit_prepare_exposes_template_update_and_owning_steps_verbatim(self):
+        update = {"available": True, "installed_version": "1.0", "current_version": "1.1",
+                  "missing_files": [{"path": "docs/glossary.md", "step": 2}],
+                  "renames": [{"from": "docs/old.md", "to": "docs/new.md", "conflict": False}],
+                  "unresolved_files": [], "spec_modified": False}
+        info = {"files": [], "todos": [], "tech_debt_items": [], "template_update": update}
+        with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": info}):
+            out = self.mod.call_audit_prepare({"project_id": "p1"})
+        self.assertEqual(out["template_update"], update)
+        description = next(t["description"] for t in self.mod.TOOLS if t["name"] == "audit_prepare")
+        self.assertIn("audit_install_template", description)
+        self.assertIn("owning steps", description)
+
+    def test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui(self):
+        # KT-1218 — one entry point, one name: the MCP descriptions and manuals
+        # say « Verify docs » exactly as the English UI labels the entry point,
+        # present the full audit as an explicit advanced option, and never
+        # bring back the three retired CTA names.
+        locale = (Path(__file__).resolve().parent.parent.parent
+                  / "frontend" / "src" / "lib" / "i18n" / "locales" / "en.ts").read_text(encoding="utf-8")
+        label = re.search(r"'audit\.revalidate\.button':\s*'([^']+)'", locale)
+        self.assertIsNotNone(label, "the English UI label of the entry point must exist")
+        self.assertEqual(label.group(1), "Verify docs")
+
+        tools = {t["name"]: t for t in self.mod.TOOLS}
+        manuals = self.mod.TOOL_MANUALS
+        self.assertIn(label.group(1), tools["audit_prepare"]["description"])
+        self.assertIn(label.group(1), tools["audit_launch"]["description"])
+        self.assertIn(label.group(1), manuals["audit_launch"])
+        # check -> smallest fix -> full audit, in that order of escalation.
+        manual = manuals["audit_launch"]
+        self.assertLess(manual.index("deterministic checks"), manual.index("smallest fix"))
+        self.assertLess(manual.index("smallest fix"), manual.index("full audit"))
+        self.assertIn("advanced option", manual)
+        self.assertIn("advanced", tools["audit_launch"]["inputSchema"]["properties"]["mode"]["description"])
+
+        retired = re.compile(r"revalidate the audit|re-?verify the doc|reverify the doc|revalider l.audit|rev[ée]rifier la doc|mettre [àa] jour \(",
+                             re.IGNORECASE)
+        for name in ("audit_prepare", "audit_install_template", "audit_launch", "audit_status"):
+            self.assertIsNone(retired.search(tools[name]["description"]), name)
+            self.assertIsNone(retired.search(manuals.get(name, "")), name)
+
     # ── audit_status ─────────────────────────────────────────────────
 
     def test_audit_status_null_live_falls_back_to_db_and_says_so(self):

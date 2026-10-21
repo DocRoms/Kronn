@@ -66,6 +66,20 @@ async function openConfirmation() {
 }
 
 describe('TemplateReinstall', () => {
+  it('shows proven renames and occupied destinations before any reinstall', async () => {
+    api.templateReinstallPlan.mockResolvedValue(plan({ template_update: {
+      available: true, installed_version: '1.0', current_version: '1.1', missing_files: [],
+      renames: [{ from: 'docs/old.md', to: 'docs/new.md', conflict: true }],
+      unresolved_files: [], spec_modified: false,
+    } }));
+    await openConfirmation();
+    const notice = screen.getByTestId('template-reinstall-renames');
+    expect(within(notice).getByText('docs/old.md')).toBeTruthy();
+    expect(within(notice).getByText('docs/new.md')).toBeTruthy();
+    expect(notice.textContent).toContain('les deux fichiers sont conservés');
+    expect(api.templateReinstall).not.toHaveBeenCalled();
+  });
+
   it('shows only the button at first and reads nothing from the server', () => {
     wrap(<TemplateReinstall projectId="p1" />);
     expect(screen.getByRole('button', { name: 'Recréer les fichiers du template' })).toBeTruthy();

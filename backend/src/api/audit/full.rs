@@ -260,14 +260,13 @@ pub(crate) async fn stop_validation_agents(state: &AppState, project_id: &str) -
 /// One-shot SSE error response, used for every pre-launch refusal (bad
 /// project, non-resumable run, already-running, unwired kind). Keeps the
 /// refusal shape identical everywhere so clients parse one `error` event.
-fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
-    let msg = msg.into();
+pub(super) fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
+    sse_refusal(serde_json::json!({ "error": msg.into() }))
+}
+
+fn sse_refusal(payload: serde_json::Value) -> Sse<SseStream> {
     let stream: SseStream = Box::pin(futures::stream::once(async move {
-        Ok::<_, Infallible>(
-            Event::default()
-                .event("error")
-                .data(serde_json::json!({ "error": msg }).to_string()),
-        )
+        Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
     }));
     Sse::new(stream)
 }
@@ -297,28 +296,28 @@ pub async fn full_audit(
     let project_id = project.id.clone();
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
+    if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+        return sse_error(error);
+    }
     // Every artefact derives from this one root (KT-1192); a configured
     // folder failing containment refuses the run.
     let docs_root = match crate::core::docs_location::DocsRoot::for_project(&project_path) {
         Ok(docs_root) => docs_root,
         Err(reason) => return sse_error(reason),
     };
+    if let Some(refusal) = super::legacy_layout_refusal(&project_path) {
+        return sse_refusal(refusal);
+    }
     let project_default_skill_ids = project.default_skill_ids.clone();
     let briefing_notes =
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
-    let td_tasks_option = super::td_tasks::briefing_option_set(
-        briefing_notes.as_deref(),
-        project.briefing_notes.as_deref(),
-    );
+    let td_tasks_option = super::td_tasks::briefing_option_set(briefing_notes.as_deref(), None);
     // KT-1193 — the team's rules and bans: prompt block, detector, coding-rules doc.
     let project_rules = briefing_notes
         .as_deref()
         .and_then(super::briefing_rules::parse);
     // KT-1183 — experimental cross-agent audit; `None` keeps every step single-agent.
-    let cross_agents = super::cross_audit::briefing_cross_agents(
-        briefing_notes.as_deref(),
-        project.briefing_notes.as_deref(),
-    );
+    let cross_agents = super::cross_audit::briefing_cross_agents(briefing_notes.as_deref(), None);
     // KT-926 — the only other repos this prompt names are the ones the user
     // explicitly linked to the project. Never the list of the machine's Kronn
     // projects: the prompt goes to the model provider, and a companion list
@@ -356,6 +355,38 @@ pub async fn full_audit(
     };
 
     let resume_run_id_req = req.resume_run_id.clone();
+    // A human's docs are never moved or written over without the briefing's
+    // explicit choice; refused before the run takes the project's lease. A
+    // resume continues a run that already started on this folder.
+    // Read before this run records itself: only an earlier run is a proof.
+    let recorded_run = {
+        let id = project_id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| crate::db::audit_runs::has_any_full(conn, &id))
+            .await
+            .unwrap_or(false)
+    };
+    if resume_run_id_req.is_none()
+        && matches!(req.kind.unwrap_or_default(), crate::models::AuditKind::Full)
+    {
+        if let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } =
+            crate::core::docs_folder::folder_state_with_runs(
+                &project_path,
+                docs_root.rel(),
+                recorded_run,
+            )
+        {
+            return sse_refusal(serde_json::json!({
+                "error": format!(
+                    "The folder {}/ used by Kronn already exists and holds {files} file(s) Kronn did not write. \
+                     Open the briefing and choose: another folder, or move them to {}/legacy/.",
+                    docs_root.rel(), docs_root.rel()
+                ),
+                "error_code": "docs_folder_choice_required",
+            }));
+        }
+    }
     let retry_steps_req = req.retry_steps.clone();
     let fresh_req = req.fresh.unwrap_or(false);
     let requested_kind = req.kind;
@@ -392,6 +423,12 @@ pub async fn full_audit(
             project_id.clone(),
         );
         drop_guard.hold_lease();
+        if let Some(error) = crate::api::projects::template_merge::audit_launch_refusal(&project_path) {
+            drop_guard.disarm();
+            yield Event::default().event("error").data(serde_json::json!({"error":error}).to_string());
+            return;
+        }
+
 
         // Clear any stale cancellation flag for this project.
         if let Ok(mut tracker) = audit_tracker.lock() {
@@ -737,6 +774,14 @@ pub async fn full_audit(
             }
         }
 
+        let run_docs_snapshot = match crate::core::doc_provenance::snapshot_tracked(&project_path) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                yield Event::default().event("error").data(serde_json::json!({"error": error, "fatal": true}).to_string());
+                return;
+            }
+        };
+
         // ── Phase 1: Install template if needed ──
         // 0.8.2 — Specialized audit kinds (non-Full) skip template
         // installation. They are focused re-scans that assume Full has
@@ -744,39 +789,26 @@ pub async fn full_audit(
         // bare project would produce findings against a non-existent
         // baseline, which is rarely what the user wants.
         let is_full = matches!(kind, crate::models::AuditKind::Full);
-        let status = scanner::detect_audit_status(&project_path_str);
-        // KT-1192 — a folder whose human docs were moved to `legacy/` on the
-        // briefing's choice gets the templates too.
-        let moved_aside = docs_root.file(&project_path, "legacy").is_dir()
-            && !docs_root.file(&project_path, "AGENTS.md").is_file();
-        let template_installed =
-            is_full && (matches!(status, AiAuditStatus::NoTemplate) || moved_aside);
-        // A human's docs are never moved or written over without the
-        // briefing's explicit choice. A resume continues a run that already
-        // started on this folder.
-        if is_full && resume_run_id_req.is_none() {
-            if let crate::core::docs_folder::DocsFolderState::HumanDocs { files, .. } =
-                crate::core::docs_folder::folder_state(&project_path, docs_root.rel())
-            {
-                if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
-                let err = serde_json::json!({
-                    "error": format!(
-                        "The folder {}/ used by Kronn already exists and holds {files} file(s) Kronn did not write. \
-                         Open the briefing and choose: another folder, or move them to {}/legacy/.",
-                        docs_root.rel(), docs_root.rel()
-                    ),
-                    "error_code": "docs_folder_choice_required",
-                });
-                yield Event::default().event("error").data(err.to_string());
-                return;
-            }
-        }
+        use crate::core::docs_folder::DocsFolderState;
+        // Decided from the folder's content, not the scanner status: a human
+        // `docs/` or `AGENTS.md` reads TemplateInstalled without any template.
+        let folder = crate::core::docs_folder::folder_state_with_runs(
+            &project_path,
+            docs_root.rel(),
+            recorded_run,
+        );
+        let template_installed = is_full && matches!(folder, DocsFolderState::Missing);
+        // Kronn's own docs get the template files they lack, never over existing ones.
+        let install_template =
+            template_installed || (is_full && matches!(folder, DocsFolderState::KronnManaged));
         let configured_adapter =
             crate::core::root_agent_files::adapter_for_agent_type(&agent_type);
 
-        if template_installed {
+        if install_template {
             let pp = project_path_str.clone();
             let install_root = docs_root.clone();
+            let install_briefing = briefing_notes.clone();
+            let fresh_install = template_installed;
             let install_result = tokio::task::spawn_blocking(move || -> Result<(crate::core::legacy_docs::LegacyMigrationReport,), String> {
                 let project_path = scanner::resolve_host_path(&pp);
                 if !project_path.exists() {
@@ -789,11 +821,8 @@ pub async fn full_audit(
                     detected_adapters.insert(adapter);
                 }
 
-                // 0.7.1 — bootstrap to docs/ (or respect legacy ai/ when
-                // present). Permission check runs on whichever the project
-                // already uses, then template install lands at docs/ for
-                // fresh projects (default).
-                let docs_target = scanner::detect_docs_dir(&project_path);
+                // The run's root: the steps, checks and state files read the same folder.
+                let docs_target = install_root.dir(&project_path);
                 if docs_target.exists() {
                     if let Err(e) = check_ai_dir_permissions(&docs_target) {
                         return Err(format!("{}/ permission error: {}",
@@ -811,19 +840,15 @@ pub async fn full_audit(
                 }
 
                 let docs_template = template_dir.join("docs");
+                crate::core::template_manifest::apply_renames(&project_path, &docs_template)?;
                 if docs_template.is_dir() {
                     crate::api::projects::copy_dir_nondestructive_in(&docs_template, &docs_target, &install_root)?;
                 }
-                // The anti-hallucination section STEP 0 writes links to this
-                // spec: without it the documentary gate blocks step 1 of a
-                // first audit (same install as the template endpoint).
-                if let Err(e) = crate::core::fs_guard::guarded_write_new(
-                    &project_path,
-                    &docs_target.join("conventions/agents-md-format-v1.md"),
-                    crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
-                ) {
-                    tracing::warn!("anti-hallu spec not installed: {e}");
-                }
+                super::briefing::sync_briefing_file(&project_path, install_briefing.as_deref())?;
+                // Ownership first: a run stopped before its end leaves a folder
+                // a fresh relaunch still reads as Kronn's.
+                crate::core::kronn_state::mark_template_installed(&project_path)?;
+                crate::core::template_manifest::record_install(&project_path, &docs_template)?;
                 crate::api::projects::ensure_agent_writable_subfolders(&project_path, &docs_target);
 
                 // 0.8.4 (#295) — auto-write `docs/linked-repos.md` from
@@ -843,6 +868,11 @@ pub async fn full_audit(
                 // target repository or explicitly selected for this audit.
                 // Every emitted template is rendered before publication, so a
                 // crashed audit cannot leave raw placeholders.
+                // A top-up leaves the root agent files as the last audit left them.
+                if !fresh_install {
+                    runner::fix_file_ownership(&project_path);
+                    return Ok((legacy_report,));
+                }
                 let adapter_report =
                     crate::core::root_agent_files::install_detected_agent_files(
                         &project_path,
@@ -981,6 +1011,12 @@ pub async fn full_audit(
         ).await;
         tracing::info!("audit {}: version source {:?}", project_id, version_ctx.source);
 
+        if let Err(error) = crate::core::doc_provenance::note_snapshot_writes(
+            &project_path, &run_docs_snapshot, crate::core::doc_provenance::DocWriter::FullAudit,
+        ) {
+            yield Event::default().event("step_warning").data(serde_json::json!({"step": 0, "reason": error}).to_string());
+        }
+
         // ── Phase 2: Run the assembled audit chain ──
         // Remove bootstrap prompt
         let index_file = docs_root.file(&project_path, "AGENTS.md");
@@ -1041,6 +1077,8 @@ pub async fn full_audit(
         let pre_audit_td_snapshot = super::reconciliation::snapshot_tech_debt_dir(
             &docs_root.dir(&project_path),
         );
+        // KT-1208 — human TD decisions, restored after the run if it undid one.
+        let td_decisions_before = crate::core::td_decisions::snapshot(&docs_root.dir(&project_path));
 
         // chantier 4 (2026-06-04) — Option C re-audit dedup list. When the
         // project already has tech-debt entries, an in-place re-audit tends
@@ -1330,7 +1368,7 @@ pub async fn full_audit(
             // legacy/ subdir).
             let legacy_dir_exists = docs_root.file(&project_path, "legacy").is_dir();
             if legacy_dir_exists {
-                full_prompt.push_str(&docs_root.relocate("\n\n## Legacy docs (PRIMARY SOURCE for this audit)\nThis project had a hand-curated `docs/` folder BEFORE Kronn was bootstrapped. We moved that content under `docs/legacy/` so the freshly-installed Kronn templates don't collide with it. **READ every `*.md` under `docs/legacy/` BEFORE filling the Kronn templates.** That content is the human-curated knowledge — the README and source code alone would lose 6 months of accumulated context.\n\nWhen filling each Kronn template, cite the legacy source inline (`see docs/legacy/installation.md`, `cf docs/legacy/architecture/overview.md`) so the user can verify the mapping and decide what to keep / discard after the audit. After the audit, the user reviews `docs/legacy/` and either deletes it or migrates remaining pieces into the Kronn structure manually.\n\n**Navigation requirement for `docs/AGENTS.md` ONLY (Step 1):** when filling `docs/AGENTS.md`, add ONE line in the appropriate section (or a small dedicated `## Legacy docs (pre-Kronn snapshot)` section if none fits) that points future agents to `docs/legacy/` — wording like `> Hand-curated docs from before Kronn — see [docs/legacy/README.md](legacy/README.md) for context preserved from the previous structure.` Without this pointer the folder is invisible to anyone re-reading `AGENTS.md` next week. Do NOT add this line to other Kronn templates (`glossary.md`, `repo-map.md`, etc.) — the entry point is enough.\n"));
+                full_prompt.push_str(&docs_root.relocate(include_str!("prompts/legacy-docs.md")));
             }
             if let Some(ref block) = linked_repos_block {
                 full_prompt.push_str(&format!("\n\n{}\n", block));
@@ -1427,9 +1465,12 @@ pub async fn full_audit(
                         step_target: analysis_step.target_file.to_string(),
                     };
                     let outcome = super::cross_audit::run_cross_step(&runner, &project_path, agents, &full_prompt).await;
+                    let briefing_warning = super::helpers::restore_step_briefing(&project_path, &validated_docs_snapshot).err();
+                    let mut cross_unchanged = false;
                     let (mut success, mut warning, report) = match outcome {
                         Ok(mut report) => match super::cross_audit::write_outputs(&project_path, analysis_step.target_file, agents, &audit_run_id, &mut report) {
-                            Ok(()) => {
+                            Ok(changed) => {
+                                cross_unchanged = !changed;
                                 // KT-1079: the writes stay; validated docs are marked, a failed record only warns.
                                 let unmarked = super::helpers::mark_validated_doc_writes(
                                     &project_path,
@@ -1437,7 +1478,7 @@ pub async fn full_audit(
                                     crate::core::doc_provenance::DocWriter::FullAudit,
                                 )
                                 .err()
-                                .map(|e| format!("human-validation provenance not recorded for {file_label}: {e}"));
+                                .map(|e| format!("documentation protection notice for {file_label}: {e}"));
                                 let (ok, w) = super::validation::validate_step_output(true, &project_path, analysis_step.target_file);
                                 (ok, unmarked.or(w.map(|w| w.reason)), Some(report))
                             }
@@ -1445,6 +1486,7 @@ pub async fn full_audit(
                         },
                         Err(e) => (false, Some(format!("cross-agent audit: {e}")), None),
                     };
+                    warning = briefing_warning.or(warning);
                     if let Some(report) = report.as_ref() {
                         let disputes = super::cross_audit::dispute_discussion(&project_id, &agent_type, &language, audit_tier, report);
                         let mut dispute_id = disputes.as_ref().map(|(d, _)| d.id.clone());
@@ -1472,10 +1514,15 @@ pub async fn full_audit(
                     let cost = report.as_ref().and_then(|r| r.cost_usd_micros());
                     let duration_ms = step_started_at.elapsed().as_millis() as u64;
                     run_tokens.add(usage.total());
+                    if success && cross_unchanged {
+                        yield Event::default().event("step_unchanged").data(
+                            serde_json::json!({ "step": step, "file": file_label }).to_string(),
+                        );
+                    }
                     yield Event::default().event("step_done").data(serde_json::json!({
                         "step": step,
                         "success": success,
-                        "outcome": step_outcome_label(success, false),
+                        "outcome": step_outcome_label(success, cross_unchanged),
                         "file": file_label,
                         "tokens": usage.total(),
                         "duration_ms": duration_ms,
@@ -1488,7 +1535,7 @@ pub async fn full_audit(
                         if let Err(e) = db.with_conn(move |conn| {
                             crate::db::audit_runs::finalize_audit_step_with_outcome(
                                 conn, &run_id, step as u32, Utc::now(), duration_ms, &usage,
-                                recorded_total, success, warn_reason.as_deref(), false, false,
+                                recorded_total, success, warn_reason.as_deref(), false, success && cross_unchanged,
                             )?;
                             if let Some(cost) = cost {
                                 crate::db::audit_runs::set_step_cost(conn, &run_id, step as u32, cost)?;
@@ -1914,7 +1961,7 @@ pub async fn full_audit(
                         crate::core::doc_provenance::DocWriter::FullAudit,
                     ) {
                         let reason = format!(
-                            "human-validation provenance not recorded for {file_label}: {reason}"
+                            "documentation protection notice for {file_label}: {reason}"
                         );
                         tracing::warn!("Audit step {} ({}): {}", step, file_label, reason);
                         yield Event::default().event("step_warning").data(
@@ -2441,6 +2488,13 @@ pub async fn full_audit(
                     return;
                 }
             }
+            if let Err(reason) = super::helpers::mark_validated_doc_writes(
+                &project_path, &validated_docs_snapshot, crate::core::doc_provenance::DocWriter::FullAudit,
+            ) {
+                yield Event::default().event("step_warning").data(serde_json::json!({
+                    "step": step, "file": file_label, "reason": reason, "repaired_from_template": false,
+                }).to_string());
+            }
         }
 
         // ── Auto-detect project skills ──
@@ -2497,6 +2551,11 @@ pub async fn full_audit(
                 yield Event::default().event("error").data(ev.to_string());
                 return;
             }
+        }
+
+        // Before reconciliation, which must not read a restored decision as a fix.
+        if let Some(event) = super::td_tasks::guard_decisions(&project_path, td_decisions_before).await {
+            yield event;
         }
 
         // ── Phase 2.5: Reconciliation pass (0.8.2) ──
@@ -2846,7 +2905,7 @@ pub async fn full_audit(
         let pp = project_path_str.clone();
         let audit_info = tokio::task::spawn_blocking(move || {
             compute_audit_info_sync(&pp)
-        }).await.unwrap_or_else(|_| AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] });
+        }).await.unwrap_or_else(|_| AuditInfo { template_update: None, files: vec![], todos: vec![], tech_debt_items: vec![] });
 
         // Detect if project has an issue tracker MCP (GitHub, GitLab, Jira, Linear, etc.)
         let has_issue_tracker_mcp = detect_issue_tracker_mcp(&project_path);
@@ -3067,7 +3126,10 @@ pub async fn full_audit(
             } else {
                 serde_json::to_string(&recs).ok()
             };
-            (counts, resolved, new, carried, score, recs_json)
+            let documents = if audit_fully_succeeded {
+                Some(crate::core::audit_documents::capture_json(&project_path_for_count)?)
+            } else { None };
+            Ok::<_, String>((counts, resolved, new, carried, score, recs_json, documents))
         })
         .await;
         // The terminal write is AUTHORITATIVE and ATOMIC. Happy path: ONE
@@ -3081,7 +3143,7 @@ pub async fn full_audit(
         // a `done`, no disarm — the guard's Drop retries mark_interrupted and
         // keeps the lease fail-closed on failure.
         let finalize_result: Result<(), String> = match completion_counts {
-            Ok((counts, resolved, new, carried, score, recs_json)) => {
+            Ok(Ok((counts, resolved, new, carried, score, recs_json, documents))) => {
                 let write = TerminalWrite {
                     run_id: run_id_for_complete.clone(),
                     ended_at,
@@ -3092,6 +3154,7 @@ pub async fn full_audit(
                     carried,
                     score,
                     recs_json,
+                    documents,
                     validation: pending_validation.clone(),
                     interruption_reason: interruption_reason(
                         progress.succeeded_count(),
@@ -3105,6 +3168,7 @@ pub async fn full_audit(
                     .await
                     .map_err(|e| format!("terminal write failed: {e}"))
             }
+            Ok(Err(e)) => Err(e),
             Err(e) => Err(format!("completion metrics task failed: {e}")),
         };
 
@@ -3124,6 +3188,20 @@ pub async fn full_audit(
             return;
         }
 
+        // KT-1122 — who opened this validation: the operator whose audit
+        // just created and linked it. Best-effort, never fails the run.
+        if pending_validation.is_some() {
+            let by = super::validate::operator_pseudo(&state_for_validation).await;
+            let run_for_by = run_id_for_complete.clone();
+            if let Err(e) = db
+                .with_conn(move |conn| {
+                    crate::db::audit_validation::set_started_by(conn, &run_for_by, &by)
+                })
+                .await
+            {
+                tracing::warn!("Validation starter not recorded: {e}");
+            }
+        }
         // ── Terminal status durably persisted — side effects may fire. ──
         // Progress goes first: the validation agent below is held back while an
         // audit of the project shows progress (KT-1134).
@@ -3161,6 +3239,8 @@ pub async fn full_audit(
             warned_steps: progress.failed_steps().to_vec(),
             discussion_id: disc_id.clone(),
         });
+
+        super::td_tasks::close_after_audit(&db, &project_id, &project_path, &audit_run_id).await;
 
         // KT-1167 — the briefing asked for the tech debt as Kronn tasks. A
         // failure only warns: the audit itself is finished.
@@ -3458,6 +3538,7 @@ pub(crate) struct TerminalWrite {
     pub carried: u32,
     pub score: u8,
     pub recs_json: Option<String>,
+    pub documents: Option<String>,
     /// The validation discussion and its prompt, inserted with the status in
     /// the SAME transaction. Present for a `Completed` run and — KT-931 — for
     /// an `Interrupted` partial run (the validation of its successful steps).
@@ -3502,6 +3583,14 @@ pub(crate) fn write_terminal_state(
         if let Some((disc, _)) = write.validation.as_ref() {
             crate::db::audit_runs::set_validation_discussion(&tx, &write.run_id, &disc.id)?;
         }
+        crate::db::audit_documents::record(
+            &tx,
+            &write.run_id,
+            write
+                .documents
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Missing final document fingerprints"))?,
+        )?;
     } else {
         // 0.8.3 (#311) — mark as Interrupted (not Completed, not Failed):
         // the resume mechanism will pick this row up via `latest_resumable`
@@ -4001,6 +4090,11 @@ pub async fn cancel_audit(
         ));
     }
 
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     // 2. Delete audit-created files — DATA-LOSS GUARDS via
     // `should_preserve_docs_folder()`.
     //
@@ -4030,12 +4124,13 @@ pub async fn cancel_audit(
     // overwritten on every audit run anyway. The operator never edits
     // them by hand.
     let project_path_str = project.path.clone();
-    let cleanup_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let project_path = scanner::resolve_host_path(&project_path_str);
-        cleanup_audit_files(&project_path)
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    let cleanup_result = lease
+        .blocking(move || -> Result<(), String> {
+            let project_path = scanner::resolve_host_path(&project_path_str);
+            cleanup_audit_files(&project_path)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = cleanup_result {
         // Clear cancellation flag before returning error
@@ -4109,20 +4204,9 @@ pub(crate) fn resume_drift_message(
     ))
 }
 
-/// True when a TD detail file's `- **Status**: <value>` line (mirrors the
-/// latest `audit_history` entry — see `mod.rs`'s Step 8 template) is
-/// `Rejected`. The user explicitly dismissed the finding during validation
-/// (Phase 2 "reject all/selected"); the file stays on disk as an audit
-/// trail (its row is removed from the index, not the detail file itself),
-/// so it must not keep weighing on the health score or severity tallies.
-fn td_status_is_rejected(content: &str) -> bool {
-    crate::core::audit_validation::td_decision(content)
-        == Some(crate::core::audit_validation::TdDecision::Rejected)
-}
-
-/// Scan every `TD-*.md` file in the tech-debt directory (skipping
-/// scaffolding/reconciliation reports and TDs the user explicitly
-/// `Rejected` during validation) and tally findings by severity.
+/// Scan every sheet of the tech-debt directory that is active debt (the
+/// same rule as the project badge: rejected and accepted sheets and
+/// `_`-prefixed reports are skipped) and tally findings by severity.
 ///
 /// The severity is matched from the line shape:
 ///   `- **Severity**: Critical | High | Medium | Low`
@@ -4139,18 +4223,13 @@ pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        // Skip scaffolding + reconciliation reports — same filter as
-        // `count_tech_debt` in scanner.rs to stay consistent.
-        if !name.ends_with(".md")
-            || name.starts_with('_')
-            || matches!(name, "README.md" | "TEMPLATE.md" | "_template.md")
-        {
+        let Some(id) = crate::core::td_index::counted_sheet_stem(name) else {
             continue;
-        }
+        };
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if td_status_is_rejected(&content) {
+        if !crate::core::td_index::content_is_active(id, &content) {
             continue;
         }
         // Pick the FIRST Severity line — multiple lines in the same
@@ -5276,6 +5355,7 @@ mod partial_run_tests {
             carried: 0,
             score: 100,
             recs_json: None,
+            documents: fully_succeeded.then(|| "{}".to_string()),
             validation,
             interruption_reason: interruption_reason(15, TOTAL, &[FAILED_STEP], &[FAILED_STEP]),
             step_outcomes_json: "{}".into(),
@@ -6254,9 +6334,17 @@ mod severity_tests {
         )
         .unwrap();
 
+        // Accepted as a decision: not active debt either.
+        std::fs::write(
+            td_dir.join("TD-004.md"),
+            "# W\n- **Severity**: Medium\n- **Status**: Accepted decision\n",
+        )
+        .unwrap();
+
         let counts = count_td_severities(td_dir);
         assert_eq!(counts.critical, 1, "only the confirmed TD counts");
         assert_eq!(counts.high, 0, "the rejected High TD must not count");
+        assert_eq!(counts.medium, 0, "the accepted Medium TD must not count");
     }
 
     #[test]

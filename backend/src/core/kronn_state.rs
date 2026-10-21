@@ -73,8 +73,25 @@ pub struct KronnState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validated_at: Option<String>,
 
+    /// Pseudo of the operator who validated (KT-1122). Meaningful only next
+    /// to `validated_at`: a revocation clears the date and leaves this stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validated_by: Option<String>,
+
+    /// Pseudo of the operator whose audit opened the validation (KT-1122).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_started_by: Option<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrapped_at: Option<String>,
+
+    /// When an audit installed Kronn's template here: the folder is Kronn's
+    /// from then on, even if that first audit never finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_installed_at: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<crate::core::template_manifest::TemplateManifest>,
 }
 
 impl KronnState {
@@ -118,7 +135,7 @@ fn read_for_mutation(project_path: &Path) -> Result<Option<KronnState>, String> 
 /// file, `Err` (with a warn) for an unreadable/corrupt one so the caller aborts
 /// instead of clobbering. Seeding from legacy evidence keeps a marker-only
 /// project's Validated/Bootstrapped state when its first state file is written.
-fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
+pub(crate) fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
     crate::core::docs_location::guard_write(project_path)?;
     read_for_mutation(project_path)
         .map(|state| {
@@ -162,12 +179,29 @@ fn kronn_version() -> String {
 /// full/partial run).
 pub fn record_audit(project_path: &Path, audit_type: &str) -> Result<(), String> {
     let mut state = load_for_mutation(project_path)?;
+    let templates = crate::api::projects::template::resolve_templates_dir().join("docs");
+    if templates.is_dir() {
+        state.template = Some(crate::core::template_manifest::for_audit(
+            project_path,
+            &templates,
+            state.template.as_ref(),
+        )?);
+    }
     state.audits.push(AuditEntry {
         date: today_iso(),
         kronn_version: kronn_version(),
         audit_type: audit_type.to_string(),
         provenance: AuditProvenance::KronnAudit,
     });
+    write(project_path, &mut state)
+}
+
+/// Record that an audit installed the template into the folder.
+pub fn mark_template_installed(project_path: &Path) -> Result<(), String> {
+    let mut state = load_for_mutation(project_path)?;
+    if state.template_installed_at.is_none() {
+        state.template_installed_at = Some(today_iso());
+    }
     write(project_path, &mut state)
 }
 
@@ -196,6 +230,24 @@ pub fn mark_validated(project_path: &Path) -> Result<(), String> {
     let mut state = load_for_mutation(project_path)?;
     if state.validated_at.is_none() {
         state.validated_at = Some(today_iso());
+    }
+    write(project_path, &mut state)
+}
+
+/// Set `validated_at` (kept if already set) and record who validated and who
+/// opened the validation, so a clone shows who signed off (KT-1122).
+pub fn mark_validated_by(
+    project_path: &Path,
+    by: &str,
+    started_by: Option<&str>,
+) -> Result<(), String> {
+    let mut state = load_for_mutation(project_path)?;
+    if state.validated_at.is_none() {
+        state.validated_at = Some(today_iso());
+    }
+    state.validated_by = Some(by.to_string());
+    if let Some(started_by) = started_by {
+        state.validation_started_by = Some(started_by.to_string());
     }
     write(project_path, &mut state)
 }

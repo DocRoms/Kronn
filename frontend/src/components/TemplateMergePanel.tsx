@@ -271,6 +271,9 @@ export function TemplateMergePanel({ projectId, gate = false, onLaunchAuditAnywa
     [resultFiles, selected],
   );
 
+  const waitingForIntegration = phase.kind === 'plan'
+    ? phase.plan.merge.branch_ahead_commits > 0
+    : phase.kind === 'result' && (phase.accepted !== null || phase.view.merge.branch_ahead_commits > 0);
   const gateInProgress = phase.kind === 'plan' && templateMergeStatus(phase.plan.merge) === 'in_progress';
 
   return (
@@ -291,7 +294,7 @@ export function TemplateMergePanel({ projectId, gate = false, onLaunchAuditAnywa
       {gate && (
         <div className="tm-gate" data-testid="template-merge-gate">
           <p>{t(gateInProgress ? 'templateMerge.gate.inProgress' : 'templateMerge.gate.desc')}</p>
-          {onLaunchAuditAnyway && (
+          {onLaunchAuditAnyway && !waitingForIntegration && (
             <button type="button" className="tm-btn" onClick={onLaunchAuditAnyway}>
               {t('templateMerge.gate.auditAnyway')}
             </button>

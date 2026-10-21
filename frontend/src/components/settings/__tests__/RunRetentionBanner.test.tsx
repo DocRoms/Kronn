@@ -33,6 +33,7 @@ describe('RunRetentionBanner', () => {
     render(<RunRetentionBanner retentionDays={0} onOpenSetting={open} />);
     expect(screen.getByTestId('run-retention-banner')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText(/config.runRetentionBannerSize 1.00 Go/)).toBeInTheDocument());
+    expect(configApi.dbUsage).toHaveBeenCalledWith({ sizeOnly: true });
     // A real link to the setting's address (new tab, copy link), followed in the app on a plain click.
     expect(screen.getByText('config.runRetentionBannerOpen').closest('a')).toHaveAttribute('href', '/config#run-payload-retention');
     fireEvent.click(screen.getByText('config.runRetentionBannerOpen'));

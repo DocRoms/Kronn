@@ -79,7 +79,7 @@ describe('TechDebtReview', () => {
         { td_id: 'TD-20261001-crit', state: 'rejected' },
         { td_id: 'TD-20261001-high', state: 'rejected' },
       ],
-      gate: { blocking_total: 2, blocking_settled: 2, met: true },
+      gate: { blocking_total: 2, blocking_settled: 2, met: true, open_disputes: 0 },
     });
     const props = setup();
     fireEvent.click(screen.getByTestId('td-group-toggle-Critical'));
@@ -100,7 +100,7 @@ describe('TechDebtReview', () => {
   it('keeps an item on purpose with its reason, then moves to the next one', async () => {
     mocked(projectsApi.decideTds).mockResolvedValueOnce({
       results: [{ td_id: 'TD-20261001-crit', state: 'accepted_decision' }],
-      gate: { blocking_total: 2, blocking_settled: 1, met: false },
+      gate: { blocking_total: 2, blocking_settled: 1, met: false, open_disputes: 0 },
     });
     setup();
     fireEvent.change(screen.getByPlaceholderText('techDebt.detail.reasonPlaceholder'), {

@@ -5,7 +5,7 @@ import { Outlet, useLocation } from 'react-router';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, pages as pagesApi, config as configApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
-import type { AgentType, RemoteRepo, RepoSource, DiscoverSourceError, AuditProgress } from '../types/generated';
+import type { RemoteRepo, RepoSource, DiscoverSourceError, AuditProgress } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { preloadPagesWhenIdle } from '../lib/lazyPage';
 import { BootHold } from '../components/LoadingState';
@@ -321,68 +321,6 @@ export function Dashboard({ onReset }: DashboardProps) {
   const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
   const agents = agentList ?? [];
   const allDiscussions = useMemo(() => discussionList ?? [], [discussionList]);
-  // Automation and Planning are memoized: stable props keep the Dashboard's
-  // polls (workflows every 3-10 s, discussions) from re-rendering them.
-  const usableAgentKey = (agentList ?? []).filter(isUsable).map(a => a.agent_type).join('\n');
-  const usableAgentTypes = useMemo(
-    () => (usableAgentKey ? usableAgentKey.split('\n') : []) as AgentType[],
-    [usableAgentKey],
-  );
-  const clearOpenWorkflow = useCallback(() => {
-    setOpenWorkflowId(null);
-    setOpenWorkflowRunId(null);
-  }, []);
-  const clearPendingWorkflowPreset = useCallback(() => setPendingWorkflowPreset(null), []);
-  const openBatchFromWorkflows = useCallback((batchRunId: string) => {
-    setFocusBatchMode('batch');
-    setFocusBatchId(batchRunId);
-    setPage('discussions');
-  }, []);
-  const runDiscussionFromWorkflows = useCallback((discId: string) => {
-    setAutoRunDiscussionId(discId);
-    setPage('discussions');
-  }, []);
-  const openPageFromWorkflows = useCallback((pageId: string) => {
-    setOpenPageId(pageId);
-    setPage('pages');
-  }, []);
-  const openMcpsPage = useCallback(() => setPage('mcps'), []);
-  const openSettingsPage = useCallback(() => setPage('settings'), []);
-  const openDiscussionFromPlanning = useCallback((discussionId: string) => {
-    setOpenDiscussionId(discussionId);
-    setPage('discussions');
-  }, []);
-  const markBatchLaunched = useCallback((discIds: string[], batchRunId: string, mode: 'batch' | 'compare' = 'batch') => {
-    // Mark every batch-child disc as sending so the sidebar
-    // spinner lights up for all of them in parallel, not just
-    // the one we navigate to. The parent (Dashboard) owns
-    // sendingMap; WorkflowsPage only lives in the workflow tab.
-    setSendingMap(prev => {
-      const next = { ...prev };
-      for (const id of discIds) next[id] = true;
-      return next;
-    });
-    setSendingStartMap(prev => {
-      const next = { ...prev };
-      const now = Date.now();
-      for (const id of discIds) next[id] = now;
-      return next;
-    });
-    // Navigate to the discussions tab and focus the batch
-    // group in the sidebar — expand the project group + the
-    // batch group + scroll to it. `focusBatchId` is consumed
-    // by DiscussionsPage's useEffect which handles the expand
-    // + scroll after the refetch settles.
-    if (discIds.length > 0) {
-      setOpenDiscussionId(discIds[0]);
-      setFocusBatchMode(mode);
-      setFocusBatchId(batchRunId);
-      setPage('discussions');
-    }
-    // Force a refetch so the new discs show up in the sidebar
-    // grouped under their batch run.
-    refetchDiscussions?.();
-  }, [refetchDiscussions]);
   const allSkills = skillList ?? [];
 
   // ─── Unseen count (computed here so it works across all pages) ─────────

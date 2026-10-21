@@ -9,6 +9,7 @@ import {
   type AutomationIntent, type AutomationSelection, type SelectionReason,
 } from '../lib/routes';
 import { WorkflowsPage } from '../pages/WorkflowsPage';
+import type { AgentType } from '../types/generated';
 import { useLocationIntent } from './useLocationIntent';
 
 type AutomationParams = {
@@ -53,10 +54,40 @@ export function WorkflowsRoute() {
     if (sameAutomationSelection(next, addressed.current)) return;
     nav.toAutomation(next, { replace: reason === 'restore' });
   }, [nav]);
+  // The page is memoized: every prop below keeps its identity across the
+  // Dashboard's polls (the arrays are keyed on content, the callbacks are
+  // stable), so a poll no longer re-renders Automation (KT-1148).
+  const { agents, markBatchSending, refetchDiscussions } = ctx;
+  const usableAgentKey = agents.filter(isUsable).map(a => a.agent_type).join('\n');
+  const installedAgentTypes = useMemo(
+    () => (usableAgentKey ? usableAgentKey.split('\n') : []) as AgentType[],
+    [usableAgentKey],
+  );
+  const navigateToBatch = useCallback(
+    (batchRunId: string) => nav.toDiscussions({ focusBatch: { id: batchRunId, mode: 'batch' } }),
+    [nav],
+  );
+  const navigateDiscussion = useCallback(
+    (discussionId: string) => nav.toDiscussion(discussionId, { autoRun: true }),
+    [nav],
+  );
+  const navigateMcp = useCallback(() => nav.toPage('mcps'), [nav]);
+  const navigateSettings = useCallback(() => nav.toPage('settings'), [nav]);
+  const navigateSettingsAnchor = useCallback((anchorId: string) => nav.toSettingsSection(anchorId), [nav]);
+  const batchLaunched = useCallback((discussionIds: string[], batchRunId: string, mode: 'batch' | 'compare' = 'batch') => {
+    markBatchSending(discussionIds);
+    // Land on the first child and focus its batch group in the sidebar:
+    // the Discussions page expands and scrolls to it once the refetch
+    // below has brought the new discussions in.
+    if (discussionIds.length > 0) {
+      nav.toDiscussion(discussionIds[0], { focusBatch: { id: batchRunId, mode } });
+    }
+    refetchDiscussions();
+  }, [nav, markBatchSending, refetchDiscussions]);
   return (
     <WorkflowsPage
       projects={ctx.projects}
-      installedAgentTypes={ctx.agents.filter(isUsable).map(a => a.agent_type)}
+      installedAgentTypes={installedAgentTypes}
       agentAccess={ctx.agentAccess ?? undefined}
       configLanguage={ctx.configLanguage ?? undefined}
       toast={ctx.toast}
@@ -67,22 +98,13 @@ export function WorkflowsRoute() {
       onPendingPresetConsumed={consumeIntent}
       highlightQuickPromptId={intent?.highlightQuickPrompt && tab === 'quickPrompts' ? resourceId : null}
       onHighlightConsumed={consumeIntent}
-      onNavigateToBatch={(batchRunId) => nav.toDiscussions({ focusBatch: { id: batchRunId, mode: 'batch' } })}
-      onNavigateDiscussion={(discussionId) => nav.toDiscussion(discussionId, { autoRun: true })}
+      onNavigateToBatch={navigateToBatch}
+      onNavigateDiscussion={navigateDiscussion}
       onNavigatePage={nav.toLivePage}
-      onNavigateMcp={() => nav.toPage('mcps')}
-      onNavigateSettings={() => nav.toPage('settings')}
-      onNavigateSettingsAnchor={anchorId => nav.toSettingsSection(anchorId)}
-      onBatchLaunched={(discussionIds, batchRunId, mode = 'batch') => {
-        ctx.markBatchSending(discussionIds);
-        // Land on the first child and focus its batch group in the sidebar:
-        // the Discussions page expands and scrolls to it once the refetch
-        // below has brought the new discussions in.
-        if (discussionIds.length > 0) {
-          nav.toDiscussion(discussionIds[0], { focusBatch: { id: batchRunId, mode } });
-        }
-        ctx.refetchDiscussions();
-      }}
+      onNavigateMcp={navigateMcp}
+      onNavigateSettings={navigateSettings}
+      onNavigateSettingsAnchor={navigateSettingsAnchor}
+      onBatchLaunched={batchLaunched}
     />
   );
 }

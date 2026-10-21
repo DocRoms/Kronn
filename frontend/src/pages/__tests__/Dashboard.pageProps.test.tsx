@@ -1,8 +1,11 @@
-// KT-1148 — Automation and Planning are memoized; that only helps if the
-// Dashboard hands them the same props when one of its polls re-renders it.
+// KT-1148 — Automation and Planning are memoized; that only helps if their
+// route components hand them the same props when a Dashboard poll re-renders
+// them. Rendered through the real router and route table, as in production.
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../lib/I18nContext';
+import { withDashboardRoutes } from '../../test/routerWrapper';
+import { tourAlreadyTaken } from '../../test/tour';
 
 const pageRenders = vi.hoisted(() => ({
   workflows: [] as Record<string, unknown>[],
@@ -40,7 +43,8 @@ const sameDiscussions: never[] = [];
 
 beforeEach(() => {
   sessionStorage.clear();
-  window.location.hash = '';
+  localStorage.clear();
+  tourAlreadyTaken();
   pageRenders.workflows.length = 0;
   pageRenders.planning.length = 0;
   vi.mocked(discussionsApi.list).mockResolvedValue(sameDiscussions);
@@ -53,15 +57,13 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   sessionStorage.clear();
+  localStorage.clear();
   vi.clearAllMocks();
 });
 
-async function openTab(id: 'workflows' | 'planning', testId: string) {
+async function openPage(path: '/workflows' | '/planning', testId: string) {
   await act(async () => {
-    render(<I18nProvider><Dashboard onReset={vi.fn()} /></I18nProvider>);
-  });
-  await act(async () => {
-    document.querySelector<HTMLButtonElement>(`[data-tour-id="nav-${id}"]`)?.click();
+    render(<I18nProvider>{withDashboardRoutes(<Dashboard onReset={vi.fn()} />, path)}</I18nProvider>);
   });
   expect(await screen.findByTestId(testId)).toBeInTheDocument();
 }
@@ -87,20 +89,20 @@ function expectSameProps(renders: Record<string, unknown>[]) {
   };
 }
 
-describe('Dashboard page props across a poll', () => {
+describe('Route page props across a Dashboard poll', () => {
   beforeEach(() => {
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
   });
 
   it('hands Automation the same props', async () => {
-    await openTab('workflows', 'workflow-page');
+    await openPage('/workflows', 'workflow-page');
     const check = expectSameProps(pageRenders.workflows);
     await pollAgain();
     check();
   });
 
   it('hands Planning the same props', async () => {
-    await openTab('planning', 'planning-page');
+    await openPage('/planning', 'planning-page');
     const check = expectSameProps(pageRenders.planning);
     await pollAgain();
     check();

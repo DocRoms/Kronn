@@ -423,6 +423,140 @@ pub fn convert(
     Ok(outcome)
 }
 
+/// Why a linked sheet left the active list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InactiveReason {
+    Rejected,
+    AcceptedDecision,
+    SheetRemoved,
+}
+
+impl InactiveReason {
+    fn phrase(self) -> &'static str {
+        match self {
+            Self::Rejected => "was rejected: it is not real debt",
+            Self::AcceptedDecision => "was accepted as an intentional decision",
+            Self::SheetRemoved => {
+                "is no longer on file (fixed, reconciled or removed since the task was created)"
+            }
+        }
+    }
+}
+
+/// A task `close_inactive` archived or annotated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosedTdTask {
+    pub td_id: String,
+    pub task_reference: String,
+    pub reason: InactiveReason,
+    /// False when the task was in progress or blocked: only annotated.
+    pub archived: bool,
+}
+
+fn inactive_reason(td_dir: &Path, td_id: &str) -> Option<InactiveReason> {
+    match std::fs::read_to_string(td_dir.join(format!("{td_id}.md"))) {
+        Ok(content) => match parse_sheet(td_id, &content).decision {
+            Some(TdDecision::Rejected) => Some(InactiveReason::Rejected),
+            Some(TdDecision::AcceptedDecision) => Some(InactiveReason::AcceptedDecision),
+            _ => None,
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(InactiveReason::SheetRemoved),
+        Err(_) => None,
+    }
+}
+
+/// Closes the KT-1167 task of every sheet that left the active list: an open
+/// task is archived, one already being worked on is only annotated. Done and
+/// archived tasks are left alone, and a task is annotated once per reason.
+pub fn close_inactive(
+    conn: &Connection,
+    project_id: &str,
+    docs_dir: &Path,
+    actor: &PlanningActor,
+) -> Result<Vec<ClosedTdTask>> {
+    use crate::db::planning::{get_task, tasks_by_idempotency_prefix, update_task};
+
+    let prefix = format!("audit:{project_id}:");
+    let td_dir = docs_dir.join("tech-debt");
+    let mut closed = Vec::new();
+    for (key, task_id, reference) in tasks_by_idempotency_prefix(conn, &format!("{prefix}TD-"))? {
+        let Some(td_id) = key.strip_prefix(&prefix).filter(|id| is_td_id(id)) else {
+            continue;
+        };
+        let Some(reason) = inactive_reason(&td_dir, td_id) else {
+            continue;
+        };
+        let Some(task) = get_task(conn, &task_id)? else {
+            continue;
+        };
+        let status = task.summary.status;
+        if matches!(
+            status,
+            PlanningTaskStatus::Done | PlanningTaskStatus::Archived
+        ) {
+            continue;
+        }
+        let archive = matches!(status, PlanningTaskStatus::Idea | PlanningTaskStatus::Todo);
+        let note = format!(
+            "Kronn: the tech-debt sheet `{td_id}` {}{}",
+            reason.phrase(),
+            if archive {
+                "; the task was archived."
+            } else {
+                "; the task was left as it is because work on it has started."
+            }
+        );
+        if task.description.contains(&note) {
+            continue;
+        }
+        let description = format!("{}\n\n{note}\n", task.description.trim_end());
+        update_task(
+            conn,
+            &task_id,
+            &crate::models::UpdatePlanningTaskRequest {
+                title: None,
+                description: Some(description),
+                status: archive.then_some(PlanningTaskStatus::Archived),
+                priority: None,
+                parent_id: None,
+                blocked_reason: None,
+                rank: None,
+                project_ids: None,
+                tags: None,
+                definition_of_done: None,
+                links: None,
+                actor: actor.clone(),
+            },
+        )?;
+        closed.push(ClosedTdTask {
+            td_id: td_id.to_string(),
+            task_reference: reference,
+            reason,
+            archived: archive,
+        });
+    }
+    Ok(closed)
+}
+
+/// `close_inactive` for a backend transition, logged instead of failing: the
+/// decision that triggered it is already on the sheet.
+pub fn close_inactive_logged(conn: &Connection, project_id: &str, docs_dir: &Path, origin: &str) {
+    let actor = PlanningActor {
+        kind: crate::models::PlanningActorKind::Backend,
+        id: Some(origin.to_string()),
+        session_id: None,
+        source_message_id: None,
+    };
+    match close_inactive(conn, project_id, docs_dir, &actor) {
+        Ok(closed) if !closed.is_empty() => tracing::info!(
+            "Closed {} tech-debt task(s) of project {project_id} whose sheet left the active list ({origin})",
+            closed.len()
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Tech-debt tasks of project {project_id} not closed ({origin}): {e}"),
+    }
+}
+
 #[cfg(test)]
 #[path = "td_tasks_test.rs"]
 mod tests;

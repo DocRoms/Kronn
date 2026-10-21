@@ -1,5 +1,6 @@
 use super::*;
 use std::fs;
+use std::process::Command;
 
 const RULES: &str = "docs/coding-rules.md";
 
@@ -37,6 +38,110 @@ fn drifted() -> tempfile::TempDir {
         "// header\nfn alpha() {\n    let retries = 3;\n}\n\nfn beta() {\n    let timeout_ms = 9000;\n}\n",
     )
     .unwrap();
+    tmp
+}
+
+fn git(dir: &FsPath, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn commit(dir: &FsPath, message: &str, paths: &[&str]) {
+    let mut add = vec!["add", "--"];
+    add.extend_from_slice(paths);
+    git(dir, &add);
+    git(
+        dir,
+        &[
+            "-c",
+            "user.name=Kronn Test",
+            "-c",
+            "user.email=kronn@example.invalid",
+            "commit",
+            "-m",
+            message,
+        ],
+    );
+}
+
+/// A repeated anchor whose second occurrence moves beyond the fingerprint
+/// search window. The optional edit puts the old range's first line inside a
+/// changed hunk, which must make diff mapping refuse it.
+fn repeated_anchor_repo(change_endpoint: bool) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn target() {}\n\nfn helper() {}\nfn target() {\n    let first = 1;\n    let second = 2;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join(RULES),
+        "# Rules\nTarget [src: file: src/lib.rs:4-7#target].\n",
+    )
+    .unwrap();
+    git(dir, &["init", "-b", "main"]);
+    commit(dir, "baseline", &["src/lib.rs", RULES]);
+    citation_drift::record_all(dir).unwrap();
+    git(dir, &["switch", "-c", "feature"]);
+
+    let mut moved = String::from("fn target() {}\n\nfn helper() {}\n");
+    for index in 0..60 {
+        moved.push_str(&format!("// inserted {index}\n"));
+    }
+    if change_endpoint {
+        moved.push_str("pub fn target() {\n");
+    } else {
+        moved.push_str("fn target() {\n");
+    }
+    moved.push_str("    let first = 1;\n    let second = 2;\n}\n");
+    fs::write(dir.join("src/lib.rs"), moved).unwrap();
+    commit(dir, "move target", &["src/lib.rs"]);
+    tmp
+}
+
+/// A repeated anchor sits on the old range's last line. The feature adds one
+/// block before that range and another inside it, so the mapped span grows.
+fn repeated_anchor_with_internal_insertion_repo() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn target() {}\n\nfn helper() {}\nfn scope() {\n    let first = 1;\n    let second = 2;\n    let third = 3;\n    fn target() {}\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join(RULES),
+        "# Rules\nTarget [src: file: src/lib.rs:4-8#target].\n",
+    )
+    .unwrap();
+    git(dir, &["init", "-b", "main"]);
+    commit(dir, "baseline", &["src/lib.rs", RULES]);
+    citation_drift::record_all(dir).unwrap();
+    git(dir, &["switch", "-c", "feature"]);
+
+    let mut moved = String::from("fn target() {}\n\nfn helper() {}\n");
+    for index in 0..60 {
+        moved.push_str(&format!("// before {index}\n"));
+    }
+    moved.push_str(
+        "fn scope() {\n    let first = 1;\n    // inside 0\n    // inside 1\n    let second = 2;\n    let third = 3;\n    fn target() {}\n}\n",
+    );
+    fs::write(dir.join("src/lib.rs"), moved).unwrap();
+    commit(dir, "move and widen target range", &["src/lib.rs"]);
     tmp
 }
 
@@ -91,6 +196,23 @@ fn the_plan_sorts_each_citation_into_reanchor_agent_human_or_manual() {
 }
 
 #[test]
+fn document_proof_plans_prose_edits_but_never_recreates_a_deleted_doc_silently() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir(tmp.path().join("docs")).unwrap();
+    fs::write(tmp.path().join(RULES), "# Reviewed policy\n").unwrap();
+    let documents = crate::core::audit_documents::capture_json(tmp.path()).unwrap();
+    fs::write(tmp.path().join(RULES), "# A changed policy\n").unwrap();
+    let changed = plan_with_documents(tmp.path(), Some(&documents)).unwrap();
+    assert_eq!(changed.agent_steps, vec![rules_step()]);
+    assert!(prompt_blocks(&changed)[&rules_step()].contains("content changed since"));
+    fs::remove_file(tmp.path().join(RULES)).unwrap();
+    let deleted = plan_with_documents(tmp.path(), Some(&documents)).unwrap();
+    assert!(deleted.agent_steps.is_empty());
+    assert_eq!(deleted.sections[0].action, RevalidationAction::Manual);
+    assert!(deleted.sections[0].doc_missing);
+}
+
+#[test]
 fn re_anchoring_rewrites_a_human_section_too_and_marks_it_to_reconfirm() {
     let tmp = drifted();
     let dir = tmp.path();
@@ -130,6 +252,82 @@ fn re_anchoring_rewrites_a_human_section_too_and_marks_it_to_reconfirm() {
     );
     // Idempotent: a second pass has nothing left to move.
     assert!(apply_reanchors(dir).unwrap().is_empty());
+}
+
+#[test]
+fn revalidation_uses_the_git_diff_to_disambiguate_a_repeated_anchor() {
+    let tmp = repeated_anchor_repo(false);
+    let dir = tmp.path();
+    let before = plan(dir);
+    let rules = before.sections.iter().find(|s| s.doc == RULES).unwrap();
+    assert_eq!(rules.action, RevalidationAction::Reanchor);
+    assert_eq!(rules.reanchor.len(), 1);
+    assert_eq!(rules.reanchor[0].current_line, Some(64));
+    assert!(rules.broken.is_empty());
+
+    let done = apply_reanchors(dir).unwrap();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].count, 1);
+    assert_eq!(
+        fs::read_to_string(dir.join(RULES)).unwrap(),
+        "# Rules\nTarget [src: file: src/lib.rs:64-67#target].\n"
+    );
+    assert!(plan(dir)
+        .sections
+        .iter()
+        .all(|section| section.doc != RULES));
+}
+
+#[test]
+fn revalidation_keeps_the_diff_mapped_end_after_an_internal_insertion() {
+    let tmp = repeated_anchor_with_internal_insertion_repo();
+    let dir = tmp.path();
+    let before_doc = fs::read_to_string(dir.join(RULES)).unwrap();
+    let base = crate::core::docs_citations::default_reanchor_base(dir)
+        .unwrap()
+        .unwrap();
+    let mapped =
+        crate::core::docs_citations::suggested_reanchors(&before_doc, dir, Some(&base)).unwrap();
+    assert_eq!(mapped.len(), 1);
+    assert_eq!(mapped[0].line, 64);
+    assert_eq!(mapped[0].end_line, 70);
+
+    let before = plan(dir);
+    let rules = before.sections.iter().find(|s| s.doc == RULES).unwrap();
+    assert_eq!(rules.action, RevalidationAction::Reanchor);
+    assert_eq!(rules.reanchor.len(), 1);
+    assert_eq!(rules.reanchor[0].current_line, Some(mapped[0].line));
+
+    let done = apply_reanchors(dir).unwrap();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].count, 1);
+    let after_doc = fs::read_to_string(dir.join(RULES)).unwrap();
+    assert_eq!(
+        after_doc,
+        "# Rules\nTarget [src: file: src/lib.rs:64-70#target].\n"
+    );
+    assert!(
+        crate::core::docs_citations::check_doc(&after_doc, dir).is_empty(),
+        "the rewritten range must still resolve its anchor"
+    );
+}
+
+#[test]
+fn revalidation_never_maps_an_endpoint_inside_a_changed_hunk() {
+    let tmp = repeated_anchor_repo(true);
+    let dir = tmp.path();
+    let before_doc = fs::read_to_string(dir.join(RULES)).unwrap();
+    let before = plan(dir);
+    let rules = before.sections.iter().find(|s| s.doc == RULES).unwrap();
+    assert_eq!(rules.action, RevalidationAction::Agent);
+    assert!(rules.reanchor.is_empty());
+    assert_eq!(
+        cites(&rules.broken),
+        vec![("src/lib.rs:4-7", CitationState::Changed)]
+    );
+
+    assert!(apply_reanchors(dir).unwrap().is_empty());
+    assert_eq!(fs::read_to_string(dir.join(RULES)).unwrap(), before_doc);
 }
 
 #[test]
@@ -213,12 +411,13 @@ fn the_validation_comes_back_only_when_no_target_changed() {
     )];
     crate::core::kronn_state::revoke_validated(dir).unwrap();
     // Nothing validated before: nothing to give back.
-    assert!(!restore_validation_if_untouched(dir, None, &snapshot));
+    assert!(!restore_validation_if_untouched(dir, None, &snapshot, None));
     fs::write(dir.join(RULES), "# Rules\nRewritten.\n").unwrap();
     assert!(!restore_validation_if_untouched(
         dir,
         Some(&date),
-        &snapshot
+        &snapshot,
+        None
     ));
     assert!(crate::core::kronn_state::read(dir)
         .unwrap()
@@ -231,7 +430,8 @@ fn the_validation_comes_back_only_when_no_target_changed() {
     assert!(restore_validation_if_untouched(
         dir,
         Some(&date),
-        &untouched
+        &untouched,
+        None
     ));
     assert_eq!(
         crate::core::kronn_state::read(dir).unwrap().validated_at,

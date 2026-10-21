@@ -188,10 +188,14 @@ describe('ProjectCard — KT-1169 "Reprendre" after every audit error', () => {
     const { rerender, props } = renderCard({ driftStatus: DRIFT });
     await screen.findByTestId('audit-timeline-launch');
     await waitFor(() => expect(projectsApi.auditResumable).toHaveBeenCalled());
-    await waitFor(() => expect(screen.queryAllByTitle('audit.updateStale 1')).toHaveLength(0));
+    await waitFor(() => expect(screen.getByTestId('project-revalidate')).toHaveTextContent('audit.resumeFromStep'));
+    expect(screen.queryByTestId('revalidate-stale-update')).toBeNull();
 
     vi.mocked(projectsApi.auditResumable).mockResolvedValue(null);
     rerender(<ProjectCard {...(props as any)} project={{ ...PROJECT, audit_status: 'Validated' }} />);
-    await waitFor(() => expect(screen.queryAllByTitle('audit.updateStale 1').length).toBeGreaterThan(0));
+    const verify = await screen.findByTestId('project-revalidate');
+    await waitFor(() => expect(verify).toHaveTextContent('audit.revalidate.button'));
+    await act(async () => { fireEvent.click(verify); await Promise.resolve(); });
+    expect(await screen.findByTestId('revalidate-stale-update')).toBeInTheDocument();
   });
 });

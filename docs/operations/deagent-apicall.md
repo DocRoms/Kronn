@@ -135,8 +135,8 @@ used directly. Fetch the thumbnails through the broker and publish data URIs:
 
 The whole path, with a mock server that requires the credential, is covered by
 `batch_thumbnails_reach_a_page_dataset_as_data_uris_indexed_by_attachment`.
-[src: file: backend/src/workflows/api_call_binary.rs:663]
-[src: file: frontend/src/lib/live-page-sandbox.ts:7]
+[src: file: backend/src/workflows/api_call_binary.rs:663-666#batch_thumbnails_reach_a_page_dataset_as_data_uris_indexed_by_attachment]
+[src: file: frontend/src/lib/live-page-sandbox.ts:5-7#LIVE_PAGE_CSP]
 
 ## Status (2026-04-26)
 
@@ -282,8 +282,8 @@ The workflow wizard flags references already missing from the saved catalogue,
 including old deletions or imported workflows. It waits for a successful
 catalogue read and clears the warning when the reference is replaced or removed.
 The warning identifies the step and missing id and remains visible across wizard
-stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1260-1274]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1323-1335]
+stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1353-1365#missingQuickApis]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1435-1442#missingQuickApiReference]
 
 ## Run-anchored time templates
 

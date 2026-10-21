@@ -4,7 +4,7 @@
 data` and names nothing. Four carriers produce that identical error — the
 program name, any argument, any environment entry, and the working directory —
 each verified by a real spawn rather than assumed.
-[src: file: backend/src/agents/runner.rs:9009]
+[src: file: backend/src/agents/runner.rs:9102]
 
 A `\0` is valid UTF-8, so `read_to_string` carries one out of a file without a
 word. Any value Kronn reads from disk or decrypts can therefore reach a command
@@ -19,7 +19,7 @@ into a C string, it substitutes the literal `<string-with-nul>`. Only
 
 A byte scan alone — the obvious implementation — therefore detects the
 environment case and stays blind to the other three, with nothing to signal it.
-Both checks are needed. [src: file: backend/src/agents/runner.rs:8975]
+Both checks are needed. [src: file: backend/src/agents/runner.rs:9068]
 
 A test pins that library behaviour, so a future Rust release that stops
 substituting the placeholder fails there instead of quietly blinding the
@@ -39,7 +39,7 @@ Such a failure is deterministic, so deferring it only repeats it. It was
 classified as a runtime outage and replayed every 30 seconds — 282 identical
 attempts in one report, diagnosing nothing. It is now a hard preflight failure
 that surfaces in the discussion.
-[src: file: backend/src/api/discussions/streaming.rs:4929]
+[src: file: backend/src/api/discussions/streaming.rs:4990]
 [src: url: https://github.com/DocRoms/Kronn/issues/201]
 
 ## Attachment previews and legacy history (KT-633 / issue 208)
@@ -84,7 +84,7 @@ provider or claim a browser/full-runtime end-to-end demonstration. Truly absent
 runtimes still use the existing deferral policy; this patch does not cap it.
 [src: file: backend/tests/context_file_safety.rs:82-233]
 [src: file: backend/src/api/discussions/streaming.rs:775]
-[src: file: backend/src/api/discussions/streaming.rs:4961]
+[src: file: backend/src/api/discussions/streaming.rs:5022]
 
 Initial production-path regression replay: **9 failed / 0 passed** before the
 preview/prompt corrections. Expanded focused replay: **12 passed**; two HTTP

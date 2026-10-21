@@ -8,6 +8,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import { buildApiMock } from '../../test/apiMock';
 import { projects } from '../../lib/api';
+import { I18nProvider } from '../../lib/I18nContext';
 
 // Tree is inlined in the factory (vi.mock is hoisted above module consts).
 vi.mock('../../lib/api', () => buildApiMock({
@@ -145,5 +146,28 @@ describe('AiDocViewer — docs/ root folder + project README', () => {
     expect(await screen.findByText('AGENTS.md')).toBeInTheDocument();
     await waitFor(() =>
       expect(projects.readAiFile).toHaveBeenCalledWith('p2', 'packages/x/docs/AGENTS.md'));
+  });
+
+  it('explains why the selected doc is stale and opens the shared verification flow', async () => {
+    const onOpenDocState = vi.fn();
+    render(
+      <I18nProvider>
+        <AiDocViewer
+          projectId="p1"
+          staleSections={[{
+            ai_file: 'docs/AGENTS.md',
+            audit_step: 1,
+            changed_sources: ['src/lib.rs', 'Cargo.toml'],
+          }]}
+          onOpenDocState={onOpenDocState}
+        />
+      </I18nProvider>,
+    );
+
+    const banner = await screen.findByTestId('aidoc-stale-banner');
+    expect(banner).toHaveTextContent('Le code cité par ces sections a changé depuis le dernier audit : la doc peut ne plus être exacte.');
+    expect(banner).toHaveTextContent('src/lib.rs, Cargo.toml');
+    fireEvent.click(screen.getByTestId('aidoc-open-doc-state'));
+    expect(onOpenDocState).toHaveBeenCalledTimes(1);
   });
 });

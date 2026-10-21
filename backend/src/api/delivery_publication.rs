@@ -606,6 +606,7 @@ mod tests {
             risks: vec!["touches a hot file".into()],
             limitations: vec!["no UI yet".into()],
             summary: "Wired the delivery contract to the approval path.".into(),
+            tests_executed: None,
         }
     }
 

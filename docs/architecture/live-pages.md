@@ -8,8 +8,8 @@ workflow steps, stored IDs and sandbox event names keep their established
 contracts. An Artifact is the same persisted resource; renaming its product
 label does not migrate or duplicate it. Historical code and documentation use
 “Page” for that domain model.
-[src: file: frontend/src/lib/i18n/locales/en.ts:55]
-[src: file: frontend/src/lib/live-page-navigation.ts:50-55]
+[src: file: frontend/src/lib/i18n/locales/en.ts:152-153#nav.pages]
+[src: file: frontend/src/lib/live-page-navigation.ts:50-55#standaloneLivePageUrl]
 
 ## Portable JSON bundles
 
@@ -50,6 +50,17 @@ an unspecified method is shown as unknown, not inferred.
 [src: file: backend/src/api/artifact_portability/import.rs:497-503#approved_quick_exec_ids]
 [src: file: backend/src/api/artifact_portability/import.rs:712-714#digest]
 [src: file: frontend/src/components/ArtifactImportDialog.tsx:67-70#setApprovedExecIds]
+
+Imported snapshots retain the publisher's values, including any identity a
+workflow previously collected from an API's current-user endpoint. They are
+not the recipient's identity: import copies dataset values as initial data,
+and the runtime delivers those stored datasets without resolving a viewer.
+When a Page uses such a dataset for a personal default, recollect using the
+recipient's configured connection and reopen the Page before checking that
+default; do not infer the viewer from an imported identity snapshot.
+[src: file: backend/src/api/artifact_portability.rs:114-122]
+[src: file: backend/src/api/artifact_portability/import.rs:827-839]
+[src: file: frontend/src/lib/live-page-sandbox.ts:314-333#runtimeData]
 
 Configured connections, their stored credentials, agent-library entries and
 local files are not bundled. Definitions retain those references; preview lists missing known
@@ -239,7 +250,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#recordsToRows]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:306-346]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:475-487#delimiter]`
 
 ## Theme and refresh behavior
 
@@ -323,7 +334,7 @@ value and the Page the frame shows; it stores it in the host's `localStorage`
 (`kronn:page-pref:<page id>:<key>`, errors swallowed) and never acts on it.
 `runtimeData` hands the stored flags back as `KronnPageData.prefs`.
 `[src: file: frontend/src/lib/live-page-sandbox.ts:579-582#KronnPagePref]`
-`[src: file: frontend/src/lib/live-page-sandbox.ts:881-887#LIVE_PAGE_PREF_KEYS]`
+`[src: file: frontend/src/lib/live-page-sandbox.ts:888-894#LIVE_PAGE_PREF_KEYS]`
 
 `TaskBoard` (zero tokens) reads or changes the planning tasks carrying the
 board tag; it refuses any task without it. The order of open cards lives in
@@ -347,7 +358,7 @@ tokens pass: keys `^[a-z][a-z0-9_]{0,31}$`, values `^[A-Za-z0-9_.-]{0,64}$`,
 at most 8, first occurrence wins; anything else is dropped. The embedded viewer
 and mosaic tiles have no URL of their own and send no `params` key. Parameters
 are hints for the Page's own rendering, never an authorization input.
-`[src: file: frontend/src/lib/live-page-navigation.ts:43-73#livePageViewParams]`
+`[src: file: frontend/src/lib/live-page-navigation.ts:40-70#livePageViewParams]`
 `[src: file: frontend/src/lib/live-page-sandbox.ts:314-325#runtimeData]`
 
 The embedded viewer, standalone Page and mosaic skip automatic data
@@ -417,7 +428,7 @@ Images load only from `data:` and `blob:` URIs. An image behind authentication,
 such as a Jira attachment thumbnail, is fetched by an `ApiCall` with
 `api_response: Binary` and published as a data URI; see
 [binary responses](../operations/deagent-apicall.md#binary-responses-images-and-other-files).
-[src: file: frontend/src/lib/live-page-sandbox.ts:7]
+[src: file: frontend/src/lib/live-page-sandbox.ts:5-7#LIVE_PAGE_CSP]
 
 PDF and DOCX export starts from the materialized iframe DOM, not from the stored
 HTML template. A request/response `postMessage` bridge keeps the opaque-origin
@@ -525,11 +536,41 @@ fence carries one intention.
 [src: file: backend/src/db/live_page_actions.rs:620-624#latest_launches_for_live_page]
 [src: file: frontend/src/lib/live-page-sandbox.ts:296-311#postLivePageActionStates]
 [src: file: frontend/src/lib/live-page-sandbox.ts:490-509#markActions]
-[src: file: frontend/src/lib/live-page-sandbox.ts:337-340#ACTION_STATE_STYLE]
+[src: file: frontend/src/lib/live-page-sandbox.ts:339-342#ACTION_STATE_STYLE]
 [src: file: frontend/src/hooks/useLivePageActions.ts:174-218#handleIntent]
 [src: file: frontend/src/hooks/useLivePageActions.ts:276-288#anyInFlight]
 [src: file: frontend/src/components/LivePageActionOverlay.tsx:40#Escape]
 [src: file: frontend/src/components/DiscussionActionCard.tsx:478-485#discussionActionOperations]
+
+When authoring a local row move after an action succeeds, preserve the row's
+detail fields and update any separate detail dataset and in-memory index before
+rendering the destination. In particular, keep descriptions and repository
+components when moving a ticket between queues; missing cached details must not
+be treated as a confirmed absence of components. Action-state marking and
+dataset delivery are separate bridge operations, so an action's `succeeded`
+state alone does not refresh those details.
+[src: file: frontend/src/lib/live-page-sandbox.ts:490-509#markActions]
+[src: file: frontend/src/lib/live-page-sandbox.ts:725-728]
+
+Authoring guidance for shared automation reports: the next action must be
+understandable without the author's operational knowledge. A failed attempt
+alone is not a sufficient reason to offer a retry: account for pending human
+decisions, configuration blockers and unfinished planning, and label blocked
+tasks explicitly. Keep attempt history distinct from the current work state.
+[src: user: 2026-10-13: autoCode shared-artifact retry UX]
+
+When a report shows planned workers, distinguish the requested capability tier
+from the worker and model actually used. A plan is not a reservation of provider
+capacity. The worker catalogue reports availability and per-tier refusals, and
+includes already-recorded quota exhaustion; it does not promise remaining
+tokens. Recheck the selected target with execution preflight before launching,
+preserve an existing execution when reassignment is possible, and present a
+resource wait separately from a failed plan. Do not send a generation request
+merely to guess whether a quota is available.
+[src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
+[src: file: backend/src/api/orchestration.rs:10263-10306]
+[src: file: backend/src/api/orchestration.rs:10693-10735#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:10976-11005#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -561,7 +602,7 @@ its discussions under a child batch run. Each one carries its agent's state
 and the head of its latest answer, where agents put their verdict. A launch
 whose result is a discussion reads `GET /api/discussions/{id}/outcome`.
 `[src: file: backend/src/db/run_outcome.rs:61-70#for_run]`
-`[src: file: frontend/src/components/RunOutcomePanel.tsx:22-27#RunOutcomePanel]`
+`[src: file: frontend/src/components/RunOutcomePanel.tsx:24-29#RunOutcomePanel]`
 
 Agents learn this contract where they write Page HTML: the MCP manuals of
 `page_create` and `page_update_html` share one text (one block per row,
@@ -591,10 +632,10 @@ even when two tiles share the same `action_ref` string for different Pages.
 `[src: file: frontend/src/hooks/useLivePageActions.ts:220-227#handleChanged]`
 `[src: file: frontend/src/components/LivePageActionOverlay.tsx:105-116#LivePageActionCard]`
 The standalone tab and mosaic tiles have no Dashboard shell to navigate
-within, so a terminal action's "open discussion" jump opens it in a fresh
-same-origin tab addressed by `#discussion-<id>` instead of switching in place.
-It still seeds the session-storage checkpoint Dashboard reads on mount
-(`dashboard-navigation.ts`), so a reload of the original tab keeps its place. `[src: file: frontend/src/lib/live-page-navigation.ts:144-164#openStandaloneDiscussion]`
+within, so a terminal action's "open discussion" jump seeds the same
+session-storage reload checkpoint Dashboard already reads on mount
+(`dashboard-navigation.ts`) and opens it in a fresh same-origin tab instead of
+switching in place. `[src: file: frontend/src/lib/live-page-navigation.ts:114-120#openStandaloneDiscussion]`
 
 Workflow export bundle v2 includes each statically referenced Page's current
 HTML template and dataset contract, then remaps every `PublishPageData.page_id`
@@ -803,12 +844,12 @@ own cap (8) is applied by the host after its check, so refused placeholders
 never crowd out allowed ones. A fresh port always receives the full list,
 even empty. The message needs no user activation: it only positions
 host-owned content.
-[src: file: frontend/src/lib/live-page-sandbox.ts:550]
-[src: file: frontend/src/lib/live-page-sandbox.ts:569]
+[src: file: frontend/src/lib/live-page-sandbox.ts:667-696#sendEmbeds]
+[src: file: frontend/src/lib/live-page-sandbox.ts:697-706#queueEmbeds]
 
 Host. The relay checks the list structurally (bounded, finite rectangles, key
 grammar, URL length; a malformed clip becomes an empty one, never none)
-[src: file: frontend/src/lib/live-page-sandbox.ts:136], then
+[src: file: frontend/src/lib/live-page-sandbox.ts:178-180#parseLivePageEmbeds], then
 `planLivePageEmbeds` decides: nothing before the allowed sites are known; an
 allowed origin gets a player (at most 8); a valid URL from another site gets a
 warning drawn by Kronn (at most 8), naming the origin, with a "Configure
@@ -922,10 +963,10 @@ JSON parsing failures retain their respective diagnostics. The workflow history
 list deliberately omits outputs; expanding a run fetches its full detail and
 reports a failed detail read with a retry action. A focused navigation keeps
 the full run even when the compact list already contains its id.
-[src: file: backend/src/workflows/collect_api_data_step.rs:60-67]
-[src: file: backend/src/workflows/collect_api_data_step.rs:508-529]
-[src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:1]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:814-817]
+[src: file: backend/src/workflows/collect_api_data_step.rs:556-577#source_id]
+[src: file: backend/src/workflows/collect_api_data_step.rs:900-943#missing_required_api_keeps_its_alias_id_and_cause]
+[src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:18-40#needsDetail]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1012-1022#focusedRun]
 
 Rolling windows use the common run-anchored time grammar in source variables,
 for example

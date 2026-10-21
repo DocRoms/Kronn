@@ -12161,8 +12161,13 @@ pub fn resolve_agent_work_dir(
 /// Build the complete Claude sandbox policy for one task worktree.
 ///
 /// Keep this invocation-local and bounded regardless of how many unrelated
-/// worktrees exist on the host. The current task worktree is the only explicit
-/// write root; sandbox availability and unsandboxed fallback remain fail-closed.
+/// worktrees exist on the host. The write roots are the task worktree and its
+/// lane's private Cargo target (KT-1246, `core::task_worker_env`); sandbox
+/// availability and unsandboxed fallback remain fail-closed.
+///
+/// The widening is exactly what building and testing needs: loopback binding
+/// (no `allowedDomains`, so no external host), and read access to the host's
+/// dependency caches. Nothing else is added.
 fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
     let work_dir = work_dir.canonicalize().map_err(|error| {
         format!(
@@ -12170,6 +12175,9 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             work_dir.display()
         )
     })?;
+    let lane = crate::core::task_worker_env::WorkerLane::for_worktree(&work_dir)?;
+    let caches =
+        crate::core::task_worker_env::SharedCaches::discover(lane.main_checkout.as_deref());
     serde_json::to_string(&serde_json::json!({
         "sandbox": {
             "enabled": true,
@@ -12177,10 +12185,23 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             "autoAllowBashIfSandboxed": true,
             "allowUnsandboxedCommands": false,
             "excludedCommands": [],
-            "filesystem": { "allowWrite": [work_dir] }
+            "filesystem": {
+                "allowWrite": lane.write_roots(),
+                "allowRead": lane.read_roots(&caches),
+            },
+            "network": { "allowLocalBinding": true }
         }
     }))
     .map_err(|error| format!("Unable to encode the Claude task-worker sandbox policy: {error}"))
+}
+
+/// Whether the task-worker sandbox policy Kronn builds allows loopback binding;
+/// the smoke check's port capability is the conjunction with a real bind.
+pub(crate) fn claude_task_worker_allows_loopback_binding(work_dir: &Path) -> bool {
+    claude_task_worker_settings(work_dir)
+        .ok()
+        .and_then(|settings| serde_json::from_str::<serde_json::Value>(&settings).ok())
+        .is_some_and(|settings| settings["sandbox"]["network"]["allowLocalBinding"] == true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13817,6 +13838,13 @@ pub(crate) fn try_spawn(
         } else {
             cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
         }
+    }
+    // KT-1246 — a Claude task worker builds and tests in its own lane: private
+    // Cargo target and home, offline Cargo, a scratch Kronn data dir, and the
+    // main checkout's frontend dependencies linked read-only. Other runtimes
+    // keep their own sandbox's defaults.
+    if task_worker_context.is_some() && is_claude_code_launch(binary, npx_package) {
+        crate::core::task_worker_env::apply_launch_env(cmd.as_std_mut(), work_dir);
     }
     // Hint shell-aware tools to use bash (dash does not support `-l`).
     // Only on Unix — Windows doesn't use SHELL env var.

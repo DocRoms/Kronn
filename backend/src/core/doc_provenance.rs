@@ -86,6 +86,12 @@ pub struct DocRecord {
     pub sections: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kronn_writes: Vec<KronnWrite>,
+    /// Last observed Kronn output distinguishes a later human edit from a retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_kronn_sha256: Option<String>,
+    /// Earlier unreviewed baselines survive a new human edit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_originals: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -94,6 +100,12 @@ pub struct ProvenanceFile {
     pub readme: String,
     #[serde(default)]
     pub docs: BTreeMap<String, DocRecord>,
+    /// Machine-created docs need a last-write digest before their first validation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_kronn_docs: BTreeMap<String, String>,
+    /// A retry uses the same pre-step snapshot, even after an earlier output.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_kronn_inputs: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -189,14 +201,20 @@ pub fn read_strict(project: &Path) -> Result<ProvenanceFile, String> {
 
 fn write(project: &Path, file: &mut ProvenanceFile) -> Result<(), String> {
     let path = provenance_path(project);
-    if file.docs.is_empty() && !path.exists() {
+    if file.docs.is_empty() && file.last_kronn_docs.is_empty() && !path.exists() {
         return Ok(());
     }
     file.readme = README.to_string();
     let json = serde_json::to_string_pretty(file).map_err(|e| format!("JSON error: {e}"))?;
     crate::core::fs_guard::assert_contained_no_symlink(project, &path)?;
     crate::core::mcp_scanner::atomic_write(&path, &format!("{json}\n"))?;
-    let keep: BTreeSet<String> = file.docs.values().map(|r| r.doc_sha256.clone()).collect();
+    let keep: BTreeSet<String> = file
+        .docs
+        .values()
+        .flat_map(|r| {
+            std::iter::once(r.doc_sha256.clone()).chain(r.pending_originals.iter().cloned())
+        })
+        .collect();
     crate::core::audit_state::prune_validated_originals(project, &keep);
     Ok(())
 }
@@ -239,6 +257,8 @@ fn whole_doc_record(
         doc_sha256: sha256_hex(content.as_bytes()),
         sections: BTreeMap::new(),
         kronn_writes: Vec::new(),
+        last_kronn_sha256: None,
+        pending_originals: Vec::new(),
     })
 }
 
@@ -263,6 +283,8 @@ fn sections_record(
         doc_sha256: sha256_hex(content.as_bytes()),
         sections,
         kronn_writes: Vec::new(),
+        last_kronn_sha256: None,
+        pending_originals: Vec::new(),
     }))
 }
 
@@ -315,11 +337,18 @@ pub fn refresh_validation(
     Ok(())
 }
 
-/// `validate-audit`: every doc of the set is human-validated as it is now.
+/// Validate new and unchanged docs without accepting unreviewed reconfirmation diffs.
 pub fn record_all(project: &Path, reason: ValidationReason) -> Result<(), String> {
     let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let mut file = ProvenanceFile::default();
+    let mut file = read_strict(project)?;
     for doc in crate::core::citation_drift::doc_files(project) {
+        if file
+            .docs
+            .get(&doc)
+            .is_some_and(|record| is_modified(record, read_doc(project, &doc).as_deref()))
+        {
+            continue;
+        }
         if let Some(content) = read_doc(project, &doc) {
             let record = whole_doc_record(project, &content, reason)?;
             file.docs.insert(doc, record);
@@ -350,6 +379,17 @@ pub fn note_write(
     after: &str,
     writer: DocWriter,
 ) -> Result<bool, String> {
+    note_write_in(project, doc, before, after, writer, false)
+}
+
+fn note_write_in(
+    project: &Path,
+    doc: &str,
+    before: &str,
+    after: &str,
+    writer: DocWriter,
+    all_text: bool,
+) -> Result<bool, String> {
     if before == after || !is_doc(project, doc) {
         return Ok(false);
     }
@@ -358,20 +398,54 @@ pub fn note_write(
     let after_digests = digests(&named_sections(after), false);
     match file.docs.get_mut(doc) {
         Some(record) => {
-            let touched = match record.scope {
-                ProvenanceScope::Doc => true,
-                ProvenanceScope::Sections => {
-                    let before_digests = digests(&named_sections(before), false);
-                    record
-                        .sections
-                        .keys()
-                        .any(|name| before_digests.get(name) != after_digests.get(name))
+            let before_hash = sha256_hex(before.as_bytes());
+            let last_known = record
+                .last_kronn_sha256
+                .as_ref()
+                .unwrap_or(&record.doc_sha256);
+            if &before_hash != last_known && before_hash != record.doc_sha256 {
+                crate::core::audit_state::preserve_validated_original(project, before)?;
+                if !record.kronn_writes.is_empty()
+                    && !record.pending_originals.contains(&record.doc_sha256)
+                {
+                    record.pending_originals.push(record.doc_sha256.clone());
                 }
-            };
+                record.doc_sha256 = before_hash;
+                record.scope = ProvenanceScope::Doc;
+                record.sections.clear();
+            }
+            if all_text && record.scope == ProvenanceScope::Sections {
+                record.scope = ProvenanceScope::Doc;
+                record.sections.clear();
+            }
+            let touched = all_text
+                || match record.scope {
+                    ProvenanceScope::Doc => true,
+                    ProvenanceScope::Sections => {
+                        let before_digests = digests(&named_sections(before), false);
+                        record
+                            .sections
+                            .keys()
+                            .any(|name| before_digests.get(name) != after_digests.get(name))
+                    }
+                };
             if !touched {
                 return Ok(false);
             }
             push_write(record, writer);
+            record.last_kronn_sha256 = Some(sha256_hex(after.as_bytes()));
+        }
+        None if all_text => {
+            let before_hash = sha256_hex(before.as_bytes());
+            if file.last_kronn_docs.get(doc) == Some(&before_hash)
+                || file.last_kronn_inputs.get(doc) == Some(&before_hash)
+            {
+                return Ok(false);
+            }
+            let mut record = whole_doc_record(project, before, ValidationReason::HumanOwned)?;
+            push_write(&mut record, writer);
+            record.last_kronn_sha256 = Some(sha256_hex(after.as_bytes()));
+            file.docs.insert(doc.to_string(), record);
         }
         None => {
             let human = digests(&named_sections(before), true);
@@ -388,6 +462,7 @@ pub fn note_write(
                 return Ok(false);
             };
             push_write(&mut record, writer);
+            record.last_kronn_sha256 = Some(sha256_hex(after.as_bytes()));
             file.docs.insert(doc.to_string(), record);
         }
     }
@@ -395,21 +470,41 @@ pub fn note_write(
     Ok(true)
 }
 
-/// The docs a writer may touch whose provenance matters: those with a record
-/// or an `owner="human"` section, with their text before the write.
+/// Snapshot the managed Markdown surface, including unrecorded text, without
+/// a file cap. Legacy and runtime folders remain outside the audit surface.
 pub fn snapshot_tracked(project: &Path) -> Result<Vec<(String, String)>, String> {
-    let recorded = read_strict(project)?;
+    read_strict(project)?;
+    let docs = crate::core::scanner::detect_docs_dir(project);
+    if !docs.exists() {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
-    for doc in crate::core::citation_drift::doc_files(project) {
-        let Some(content) = read_doc(project, &doc) else {
-            continue;
-        };
-        if recorded.docs.contains_key(&doc)
-            || crate::api::audit::anti_hallu_enforce::contains_human_owned_section(&content)
-        {
+    let entries = walkdir::WalkDir::new(&docs)
+        .into_iter()
+        .filter_entry(|entry| {
+            !(entry.depth() == 1 && matches!(entry.file_name().to_str(), Some("legacy" | "var")))
+        });
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Cannot snapshot docs: {e}"))?;
+        if entry.file_type().is_symlink() {
+            return Err(format!(
+                "Cannot snapshot symbolic link {}",
+                entry.path().display()
+            ));
+        }
+        if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "md") {
+            let doc = entry
+                .path()
+                .strip_prefix(project)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let content = std::fs::read_to_string(entry.path())
+                .map_err(|e| format!("Cannot snapshot {doc}: {e}"))?;
             out.push((doc, content));
         }
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 
@@ -423,12 +518,36 @@ pub fn note_snapshot_writes(
     let mut errors = Vec::new();
     for (doc, before) in snapshot {
         let after = read_doc(project, doc).unwrap_or_default();
-        match note_write(project, doc, before, &after, writer) {
+        match note_write_in(project, doc, before, &after, writer, true) {
             Ok(true) => marked += 1,
             Ok(false) => {}
             Err(e) => errors.push(format!("{doc}: {e}")),
         }
     }
+    // Register new outputs too: the next step must not mistake a generated
+    // template or the previous agent's prose for an unrecorded human edit.
+    let current = snapshot_tracked(project)?;
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut file = read_strict(project)?;
+    let before: BTreeMap<_, _> = snapshot
+        .iter()
+        .map(|(path, content)| (path, content))
+        .collect();
+    for (doc, after) in current {
+        if before.get(&doc).is_none_or(|before| *before != &after) {
+            if let Some(input) = before.get(&doc) {
+                let digest = sha256_hex(input.as_bytes());
+                if file.last_kronn_docs.get(&doc) == Some(&digest)
+                    || file.last_kronn_inputs.get(&doc) == Some(&digest)
+                {
+                    file.last_kronn_inputs.insert(doc.clone(), digest);
+                }
+            }
+            file.last_kronn_docs
+                .insert(doc, sha256_hex(after.as_bytes()));
+        }
+    }
+    write(project, &mut file)?;
     if errors.is_empty() {
         Ok(marked)
     } else {
@@ -449,6 +568,9 @@ fn changed_sections(record: &DocRecord, current: &str) -> Vec<String> {
 }
 
 fn is_modified(record: &DocRecord, current: Option<&str>) -> bool {
+    if !record.pending_originals.is_empty() {
+        return true;
+    }
     match (current, record.scope) {
         (None, _) => true,
         (Some(text), ProvenanceScope::Doc) => sha256_hex(text.as_bytes()) != record.doc_sha256,
@@ -529,6 +651,12 @@ fn evaluate(project: &Path, doc: &str, record: &DocRecord, detail: bool) -> DocP
                 .collect()
         }
     };
+    for digest in &record.pending_originals {
+        let before = crate::core::audit_state::read_validated_original(project, digest);
+        status
+            .changes
+            .push(change(None, before, read_doc(project, doc)));
+    }
     status
 }
 
@@ -572,6 +700,17 @@ pub fn confirm(project: &Path, docs: &[String]) -> Result<Vec<String>, String> {
         }
         docs.to_vec()
     };
+    // Preflight the entire selection before advancing any provenance. Deleted
+    // documents keep the established behavior of removing their old record.
+    for doc in &targets {
+        if read_doc(project, doc).is_some_and(|content| {
+            crate::core::document_optimization::contains_placeholder(&content)
+        }) {
+            return Err(format!(
+                "Cannot confirm `{doc}`: unresolved template or TODO placeholders remain."
+            ));
+        }
+    }
     for doc in &targets {
         let Some(record) = file.docs.get(doc) else {
             continue;
@@ -626,6 +765,15 @@ fn parse_reference(project: &Path, reference: &str) -> Option<(String, Option<us
 /// a person validated that text and nothing changed it since, AI-generated
 /// otherwise. `None` for a source outside the docs.
 pub fn source_provenance(project: &Path, reference: &str) -> Option<SourceProvenance> {
+    source_provenance_with_citations(project, reference, None)
+}
+
+/// A learning batch can share one citation report across its evidence rows.
+pub(crate) fn source_provenance_with_citations(
+    project: &Path,
+    reference: &str,
+    citations: Option<&crate::core::citation_drift::CitationDriftReport>,
+) -> Option<SourceProvenance> {
     let (doc, line) = parse_reference(project, reference)?;
     if !is_doc(project, &doc) {
         return None;
@@ -648,7 +796,12 @@ pub fn source_provenance(project: &Path, reference: &str) -> Option<SourceProven
         },
         None => line_in(&|s| s.human),
     };
-    Some(if human {
+    let citations_clean = citations.is_none_or(|report| {
+        report.section(&doc).is_none_or(|section| {
+            !section.doc_missing && !section.citations.iter().any(|c| c.state.is_broken())
+        })
+    });
+    Some(if human && citations_clean {
         SourceProvenance::HumanValidated
     } else {
         SourceProvenance::AiGenerated

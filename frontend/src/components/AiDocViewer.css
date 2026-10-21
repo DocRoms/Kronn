@@ -1,5 +1,49 @@
 /* AiDocViewer — component-specific styles (aidoc- prefix) */
 
+.aidoc-stale-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-bottom: 1px solid var(--kr-warning);
+  background: var(--kr-warning-bg);
+  color: var(--kr-warning-soft);
+  font-size: var(--kr-fs-xs);
+}
+
+.aidoc-stale-banner > div {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.aidoc-stale-banner span {
+  overflow-wrap: anywhere;
+  color: var(--kr-text-secondary);
+}
+
+.aidoc-stale-banner button {
+  flex: 0 0 auto;
+  padding: var(--kr-sp-1) var(--kr-sp-3);
+  border: 1px solid var(--kr-warning);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-warning-soft);
+  font: inherit;
+  cursor: pointer;
+}
+
+@media (max-width: 560px) {
+  .aidoc-stale-banner {
+    flex-wrap: wrap;
+  }
+
+  .aidoc-stale-banner button {
+    width: 100%;
+  }
+}
+
 /* State banner rendered above the viewer when audit_status isn't yet
    Validated. Wrapper just provides bottom spacing — the banner div
    itself carries the visual style (dash-doc-banner-* in Dashboard.css). */

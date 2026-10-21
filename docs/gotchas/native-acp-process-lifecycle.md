@@ -59,7 +59,7 @@ session-creation failures, and no longer discards its own cleanup error. A
 scripted transport counts its shutdowns, so "did this path clean up?" is
 asserted on all three outcomes rather than read off the source — and a failing
 cleanup never replaces the failure that caused it.
-[src: file: backend/src/agents/runner.rs:3792]
-[src: file: backend/src/agents/runner.rs:4099]
+[src: file: backend/src/agents/runner.rs:3885]
+[src: file: backend/src/agents/runner.rs:4192]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:51-92]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:260]

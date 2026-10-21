@@ -1,8 +1,9 @@
 //! What the AI doc folder already holds (KT-1192): nothing, Kronn's own docs
 //! (updated in place, never asked about), or a human's docs (the briefing
 //! asks: another folder, or move them to `<folder>/legacy/`). Kronn's docs
-//! need both proofs: a `.kronn.json` recording an audit or a bootstrap, and a
-//! structural marker. Anything less is a human's docs.
+//! need both proofs: a record (a `.kronn.json` recording an audit, a bootstrap
+//! or a template install, or a Full run this instance recorded for the
+//! project) and a structural marker. Anything less is a human's docs.
 
 use std::path::Path;
 
@@ -79,11 +80,21 @@ fn has_kronn_state(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join(crate::core::kronn_state::KRONN_STATE_FILENAME))
         .ok()
         .and_then(|raw| serde_json::from_str::<crate::core::kronn_state::KronnState>(&raw).ok())
-        .is_some_and(|state| state.has_any_audit() || state.bootstrapped_at.is_some())
+        .is_some_and(|state| {
+            state.has_any_audit()
+                || state.bootstrapped_at.is_some()
+                || state.template_installed_at.is_some()
+        })
 }
 
 /// The state of `<root>/<rel>`. Never follows a symlink.
 pub fn folder_state(root: &Path, rel: &str) -> DocsFolderState {
+    folder_state_with_runs(root, rel, false)
+}
+
+/// `folder_state`, where a Full run this instance recorded for the project
+/// stands for the record: a first audit stopped before writing `.kronn.json`.
+pub fn folder_state_with_runs(root: &Path, rel: &str, recorded_run: bool) -> DocsFolderState {
     let dir = root.join(rel);
     let Ok(meta) = std::fs::symlink_metadata(&dir) else {
         return DocsFolderState::Missing;
@@ -91,7 +102,7 @@ pub fn folder_state(root: &Path, rel: &str) -> DocsFolderState {
     if !meta.is_dir() {
         return DocsFolderState::Missing;
     }
-    let recorded = has_kronn_state(&dir);
+    let recorded = recorded_run || has_kronn_state(&dir);
     let mut files = 0u32;
     let mut managed = false;
     let walker = walkdir::WalkDir::new(&dir)

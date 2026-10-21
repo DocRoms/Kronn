@@ -165,6 +165,23 @@ describe('projects.partialAuditStream', () => {
     expect(onDone).toHaveBeenCalledTimes(1);
   });
 
+  it('reports a single-agent refresh without ending the stream', async () => {
+    mockStreamingFetch([
+      sse('start', START_OK),
+      sse('single_agent', { message: 'single-agent' }),
+      sse('done', { ...DONE_OK, cross_agent_skipped: true }),
+    ]);
+    const { projects } = await import('../api');
+    const onSingleAgent = vi.fn();
+    const onDone = vi.fn();
+    await projects.partialAuditStream('p-1', REQ, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onSingleAgent, onDone, onError: vi.fn(),
+    });
+    expect(onSingleAgent).toHaveBeenCalledTimes(1);
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onDone.mock.calls[0][0]?.status).toBe('complete');
+  });
+
   it('treats an aborted fetch as a clean done (no error)', async () => {
     mockAbortingFetch();
     const { projects } = await import('../api');
@@ -330,6 +347,40 @@ describe('projects.partialAuditStream', () => {
         discussion_id: 'd-forged', audit_run_id: 'r-1' },
       'cannot carry a discussion',
     );
+  });
+
+  /** KT-1207 — done steps carry their scoped validation, whatever the status. */
+  async function expectAccepted(requested: number[], payload: unknown) {
+    mockStreamingFetch([sse('start', { total_steps: requested.length, requested_steps: requested }), sse('done', payload)]);
+    const { projects } = await import('../api');
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.partialAuditStream('p-1', { agent: 'ClaudeCode', steps: requested } as never, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onDone, onError,
+    });
+    expect(onError).not.toHaveBeenCalled();
+    return onDone.mock.calls[0][0];
+  }
+
+  it('an interrupted run with a done step carries its scoped validation', async () => {
+    const info = await expectAccepted([3, 8], {
+      status: 'interrupted', succeeded_steps: [3], unchanged_steps: [], failed_steps: [8],
+      discussion_id: 'd-done', audit_run_id: 'r-1',
+    });
+    expect(info).toMatchObject({ status: 'interrupted', discussionId: 'd-done', failedSteps: [8] });
+  });
+
+  it('a re-verified run carries a validation or none', async () => {
+    const opened = await expectAccepted([3], {
+      status: 'no_change', succeeded_steps: [], unchanged_steps: [3], failed_steps: [],
+      discussion_id: 'd-reverified', audit_run_id: 'r-1',
+    });
+    expect(opened).toMatchObject({ status: 'no_change', discussionId: 'd-reverified' });
+    const restored = await expectAccepted([3], {
+      status: 'no_change', succeeded_steps: [], unchanged_steps: [3], failed_steps: [],
+      audit_run_id: 'r-2',
+    });
+    expect(restored).toMatchObject({ status: 'no_change', discussionId: null });
   });
 
   it('a baseline reorder is legitimate: the done partition follows the CANONICAL start list', async () => {

@@ -477,7 +477,8 @@ pub fn detect_docs_dir(project_path: &Path) -> PathBuf {
 /// legacy `index.md` for projects that haven't migrated yet.
 pub fn detect_docs_entry(project_path: &Path) -> PathBuf {
     let dir = detect_docs_dir(project_path);
-    if dir.file_name().and_then(|n| n.to_str()) == Some("ai") {
+    // An audit run in an `ai/` folder writes `AGENTS.md` like any other root.
+    if dir.file_name().and_then(|n| n.to_str()) == Some("ai") && !dir.join("AGENTS.md").is_file() {
         dir.join("index.md")
     } else {
         dir.join("AGENTS.md")
@@ -760,18 +761,14 @@ pub fn count_ai_todos(project_path: &str) -> u32 {
     count
 }
 
-/// Count tech-debt entries in a project's documentation, deduplicated
-/// by ID. Sources:
-///   - `.md` file names directly under `docs/tech-debt/` (id = stem,
-///     e.g. `TD-20260314-openapi-coverage`).
-///   - Table rows in `docs/inconsistencies-tech-debt.md` that start
-///     with `| TD-` (id = the first `TD-...` token in the row).
+/// Count the active tech-debt entries of a project, deduplicated by id:
+///   - sheets directly under `docs/tech-debt/` that are active debt
+///     (`TdSheet::is_active`: rejected and accepted sheets are settled);
+///     `_`-prefixed reports and scaffolding are never sheets;
+///   - rows of `docs/inconsistencies-tech-debt.md` starting with `| TD-`
+///     whose id has no sheet (a sheet, when present, decides).
 ///
-/// An entry counted from both sources counts once. This matches user
-/// expectation: the badge "<N> TD" should equal the unique tech-debt
-/// items the user can actually open, not 2×N when both the index row
-/// and the detail file exist (the common case for well-documented
-/// projects). Path-agnostic like `count_ai_todos`.
+/// The health score's severity tally applies the same sheet rule.
 pub fn count_tech_debt(project_path: &str) -> u32 {
     let path = resolve_host_path(project_path);
     let docs_dir = detect_docs_dir(&path);
@@ -779,55 +776,52 @@ pub fn count_tech_debt(project_path: &str) -> u32 {
         return 0;
     }
 
-    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut active: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut with_sheet: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Detail files under tech-debt/
-    let td_dir = docs_dir.join("tech-debt");
-    if td_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&td_dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                // Only count top-level .md files; a README/TEMPLATE.md
-                // in the same folder is excluded so it doesn't inflate
-                // the badge.
-                if p.is_file()
-                    && p.extension().is_some_and(|ext| ext == "md")
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| !matches!(n, "README.md" | "TEMPLATE.md" | "_template.md"))
-                {
-                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                        ids.insert(stem.to_string());
-                    }
-                }
+    if let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(id) = crate::core::td_index::counted_sheet_stem(name) else {
+                continue;
+            };
+            with_sheet.insert(id.to_string());
+            // An unreadable sheet still counts: the file is there.
+            let is_active = std::fs::read_to_string(&p).map_or(true, |content| {
+                crate::core::td_index::content_is_active(id, &content)
+            });
+            if is_active {
+                active.insert(id.to_string());
             }
         }
     }
 
-    // Index file table rows
-    let index_path = docs_dir.join("inconsistencies-tech-debt.md");
-    if let Ok(content) = std::fs::read_to_string(&index_path) {
+    if let Ok(content) = std::fs::read_to_string(docs_dir.join("inconsistencies-tech-debt.md")) {
         for line in content.lines() {
-            let trimmed = line.trim_start();
-            // Markdown table rows starting with `| TD-`. We extract the
-            // ID (everything up to the next space, pipe, or end) so a
-            // row that mirrors an existing detail file is deduped.
-            if let Some(rest) = trimmed.strip_prefix('|') {
-                let cell = rest.trim_start();
-                if cell.starts_with("TD-") {
-                    let id: String = cell
-                        .chars()
-                        .take_while(|c| !c.is_whitespace() && *c != '|')
-                        .collect();
-                    if !id.is_empty() {
-                        ids.insert(id);
-                    }
-                }
+            let Some(rest) = line.trim_start().strip_prefix('|') else {
+                continue;
+            };
+            let cell = rest.trim_start();
+            if !cell.starts_with("TD-") {
+                continue;
+            }
+            let id: String = cell
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != '|')
+                .collect();
+            if !with_sheet.contains(&id) {
+                active.insert(id);
             }
         }
     }
 
-    ids.len() as u32
+    active.len() as u32
 }
 
 /// Expand ~ in paths
@@ -856,6 +850,16 @@ pub fn is_wsl_unc_path_str(path: &str) -> bool {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ai_folder_audited_in_place_is_entered_by_its_agents_md() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("ai")).unwrap();
+        assert_eq!(detect_docs_entry(root), root.join("ai/index.md"));
+        std::fs::write(root.join("ai/AGENTS.md"), "# Project\n").unwrap();
+        assert_eq!(detect_docs_entry(root), root.join("ai/AGENTS.md"));
+    }
     use serial_test::serial;
 
     // ─── shellexpand ────────────────────────────────────────────────────────

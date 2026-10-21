@@ -11,6 +11,56 @@ use crate::db::discussion_questions::{
 use crate::models::{ApiErrorCode, ApiResponse};
 use crate::AppState;
 
+type Refusal = (StatusCode, Json<ApiResponse<DiscussionQuestion>>);
+
+/// Briefing cards and cross-agent disputes can write docs: they take the
+/// project's audit lease, like every other writer of those files.
+async fn dispute_lease(
+    state: &AppState,
+    discussion_id: &str,
+    question_id: &str,
+) -> Result<Option<crate::api::audit::docs_write::DocsWriteLease>, Box<Refusal>> {
+    let (discussion, question) = (discussion_id.to_string(), question_id.to_string());
+    let project = state
+        .db
+        .with_read_conn(move |conn| {
+            if let Some(project) =
+                crate::db::audit_cross::dispute_project_of_question(conn, &discussion, &question)?
+            {
+                return Ok(Some(project));
+            }
+            Ok(discussion_questions::list(conn, &discussion)?
+                .questions
+                .into_iter()
+                .find(|card| card.id == question)
+                .and_then(|card| card.task_ref)
+                .and_then(|task_ref| {
+                    crate::api::audit::briefing_cards::parse_task_ref(&task_ref)
+                        .filter(|(_, owner, _)| *owner == discussion)
+                        .map(|(project, _, _)| project.to_string())
+                }))
+        })
+        .await
+        .map_err(|error| {
+            Box::new((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::err(error.to_string())),
+            ))
+        })?;
+    let Some(project_id) = project else {
+        return Ok(None);
+    };
+    crate::api::audit::docs_write::DocsWriteLease::acquire(state, &project_id)
+        .await
+        .map(Some)
+        .map_err(|error| {
+            Box::new((
+                StatusCode::CONFLICT,
+                Json(ApiResponse::err_coded(ApiErrorCode::Conflict, error)),
+            ))
+        })
+}
+
 /// Launch a workflow declared by a resolved workflow-step question. The
 /// question row claims its run id first; creation and spawning happen only for
 /// the winning claim, so an HTTP replay observes the existing result.
@@ -164,10 +214,15 @@ pub async fn answer(
             config.server.avatar_email.clone(),
         )
     };
+    let lease = match dispute_lease(&state, &discussion_id, &question_id).await {
+        Ok(lease) => lease,
+        Err(refusal) => return *refusal,
+    };
     let resolution_discussion_id = discussion_id.clone();
     let result = state
         .db
         .with_conn(move |conn| {
+            let _lease = lease;
             Ok(discussion_questions::answer(
                 conn,
                 &resolution_discussion_id,
@@ -228,10 +283,15 @@ pub async fn decline(
             config.server.avatar_email.clone(),
         )
     };
+    let lease = match dispute_lease(&state, &discussion_id, &question_id).await {
+        Ok(lease) => lease,
+        Err(refusal) => return *refusal,
+    };
     let resolution_discussion_id = discussion_id.clone();
     let result = state
         .db
         .with_conn(move |conn| {
+            let _lease = lease;
             Ok(discussion_questions::decline(
                 conn,
                 &resolution_discussion_id,

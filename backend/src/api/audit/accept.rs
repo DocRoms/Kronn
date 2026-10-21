@@ -177,34 +177,15 @@ pub async fn accept_audit_step(
         Err(e) => return Json(ApiResponse::err(format!("target check failed: {e}"))),
     }
 
-    // The audit lease keeps a resume from starting between the check and the
-    // write, as the validate gate does.
-    if !state
-        .audit_tracker
-        .lock()
-        .map(|mut t| t.try_acquire_lease(&project.id))
-        .unwrap_or(false)
-    {
-        return Json(ApiResponse::err(
-            "An audit is running on this project — accept the step once it has finished.",
-        ));
-    }
-    struct LeaseGuard(
-        std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
-        String,
-    );
-    impl Drop for LeaseGuard {
-        fn drop(&mut self) {
-            if let Ok(mut t) = self.0.lock() {
-                t.release_lease(&self.1);
-            }
-        }
-    }
-    let _lease = LeaseGuard(state.audit_tracker.clone(), project.id.clone());
-
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     let at = Utc::now();
     let label = super::full::step_file_label(analysis_step).to_string();
     let written = {
+        let lease = lease.clone();
         let rid = run.id.clone();
         let pid = project.id.clone();
         let by = by.clone();
@@ -212,6 +193,7 @@ pub async fn accept_audit_step(
         state
             .db
             .with_conn(move |conn| {
+                let _lease = lease;
                 // Re-read under the lease: the run must still be the latest.
                 let latest = crate::db::audit_runs::list_recent(conn, &pid, 1)?
                     .into_iter()

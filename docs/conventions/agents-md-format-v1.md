@@ -68,6 +68,28 @@ is strictly opt-in by presence.
   what the person approved in `docs/provenance.json`, next to `citations.json`.
   No marker is added to the prose. A doc whose validated text changed reads as
   AI-generated, for the learning gate too, until it is reconfirmed.
+- **Text added between runs** — audits snapshot every Markdown document in the
+  resolved documentation directory, excluding its `legacy/` and `var/`
+  subdirectories. Symbolic links are refused. A change since the last Kronn write or
+  validation becomes the next diff's baseline, including unmarked human text.
+  Older unreviewed baselines remain available, and whole-audit validation does
+  not clear pending reconfirmations. Generated files are tracked separately
+  until a human changes or validates them.
+  `backend/src/core/doc_provenance.rs` (`record_all`)
+  `backend/src/core/doc_provenance.rs` (`snapshot_tracked`)
+  `backend/src/core/doc_provenance.rs` (`note_snapshot_writes`)
+- **Briefing protection** — each audit step snapshots the briefing and restores
+  a rewrite, deletion or unauthorized creation with a visible warning. Review
+  completion requires a nonempty file and a successful save; a failure remains
+  visible in the open discussion. Reviews restore saved project facts, rules,
+  documentation choices and Kronn options before storing the result.
+  `backend/src/api/audit/helpers.rs` (`restore_step_briefing`)
+  `backend/src/api/audit/briefing.rs` (`complete_reviewed_briefing`)
+  `backend/src/api/audit/project_doc.rs` (`reattach_facts`)
+- **Keep accurate prose** — finding and review steps also reverify existing
+  documentation and must keep true statements as written.
+  `backend/src/api/audit/mod.rs` (`REVERIFY_BLOCK`)
+  `backend/src/api/audit/mod.rs` (`reverifies_target`)
 - **Asymmetric conversion** — a human may convert a `curated="ai"` section to
   `curated="human"`. The reverse never happens automatically: human authority outranks AI,
   never the other way around.
@@ -141,9 +163,13 @@ textual and deterministic: no code is parsed.
 **One anchor rule, no tolerance window.** The runtime verifier, the `verified` badge it feeds
 and Kronn's docs check apply this same rule: the symbol is inside the cited lines, or the
 citation fails; one line past the range fails everywhere. A tool that re-anchors a moved
-citation rewrites the range only when the symbol occurs once in the cited file, keeping the
-span length and the anchor; with several occurrences a human picks the line. A missing file
-or line is never re-anchored.
+citation first rewrites the range when the symbol occurs once in the cited file. If the symbol
+occurs several times, the tool may instead map the old range's endpoints through a zero-context
+Git diff from the chosen base to `HEAD`; a line inside a changed hunk has no mapping, and the
+rewrite is allowed only when the mapped range still contains the symbol as a whole word. The
+path and anchor stay unchanged, and a single-line citation stays single-line while a range stays
+a range. Anything still ambiguous is listed with its candidate lines for a human to choose; a
+missing file or line is never re-anchored.
 
 A marker quoted in inline backticks is verified too: it is `verified` when it resolves, but a
 failure there counts as *unverified*, not fabricated, because backticks also quote the grammar

@@ -39,9 +39,15 @@ use walkdir::WalkDir;
 /// Files exempt from the rule:
 ///   - `core/cmd.rs` is the wrapper that legitimately wraps `Command::new`.
 ///   - Anything matching `*_test.rs` is test-only by convention.
+///   - Files under a `tests/` directory are modules of a `#[cfg(test)] mod tests`,
+///     a cfg this per-file parse cannot see.
 fn is_exempt_file(path: &Path) -> bool {
     let p = path.to_string_lossy();
-    p.ends_with("core/cmd.rs") || p.ends_with("core\\cmd.rs") || p.contains("_test.rs")
+    p.ends_with("core/cmd.rs")
+        || p.ends_with("core\\cmd.rs")
+        || p.contains("_test.rs")
+        || p.contains("/tests/")
+        || p.contains("\\tests\\")
 }
 
 /// True when an attribute is `#[cfg(test)]` or `#[cfg(any(test, ...))]` or

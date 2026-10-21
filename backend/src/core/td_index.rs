@@ -54,6 +54,19 @@ pub struct ResyncOutcome {
     pub adr_downgraded: Vec<String>,
 }
 
+/// The id of a `tech-debt/` file that counts as a sheet: `_`-prefixed reports
+/// (`_reconciliation-*.md`) and scaffolding never do.
+pub fn counted_sheet_stem(file_name: &str) -> Option<&str> {
+    let stem = file_name.strip_suffix(".md")?;
+    let scaffolding = matches!(file_name, "README.md" | "TEMPLATE.md");
+    (!stem.is_empty() && !file_name.starts_with('_') && !scaffolding).then_some(stem)
+}
+
+/// Whether a sheet's content is active debt, as the index and the counts read it.
+pub fn content_is_active(id: &str, content: &str) -> bool {
+    parse_sheet(id, content).is_active()
+}
+
 pub fn is_td_id(value: &str) -> bool {
     value.len() > 3
         && value.len() <= 100
@@ -66,7 +79,12 @@ pub fn is_td_id(value: &str) -> bool {
 /// Every `TD-*.md` file directly under `<docs>/tech-debt/`, sorted by id.
 /// Symlinks are skipped: a sheet must live in the repository.
 pub fn read_sheets(docs_dir: &Path) -> Vec<TdSheet> {
-    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
+    read_sheets_in(&docs_dir.join("tech-debt"))
+}
+
+/// [`read_sheets`] of a `tech-debt/` directory itself.
+pub fn read_sheets_in(td_dir: &Path) -> Vec<TdSheet> {
+    let Ok(entries) = std::fs::read_dir(td_dir) else {
         return Vec::new();
     };
     let mut sheets: Vec<TdSheet> = entries

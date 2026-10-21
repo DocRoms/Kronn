@@ -97,7 +97,7 @@ The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
 execution, with no fallback to Custom; unknown provider strings remain errors.
 [src: file: backend/src/db/orchestration.rs:244-258#agent_type_from_db]
-[src: file: backend/src/db/orchestration_tests.rs:3630-3647#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
+[src: file: backend/src/db/orchestration_tests.rs:3977-3994#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
 
 ## Known asymmetries
 
@@ -118,7 +118,7 @@ the same job.
   negotiated `session/resume` contract and exact proof boundaries.
   [src: file: backend/src/agents/runner.rs:2764-2824#completion_checkpoint]
   [src: file: backend/src/api/discussions/streaming.rs:2223-2290#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:8266-8274#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:8346-8354#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP
@@ -150,7 +150,7 @@ the same job.
   nor the worker permission scope. `task_worker_route_policy` decides this for
   worker preparation and for every launch route; an exact joined CLI session
   of the same agent stays eligible.
-  [src: file: backend/src/agents/runner.rs:3740-3758#task_worker_route_policy]
+  [src: file: backend/src/agents/runner.rs:3743-3761#task_worker_route_policy]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.
@@ -170,8 +170,8 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:5711-5772#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:14919-14998#run_acp_session_reports_redacted_prompt_and_persistence_failures]
+[src: file: backend/src/agents/runner.rs:5804-5865#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:14979-15058#run_acp_session_reports_redacted_prompt_and_persistence_failures]
 [src: file: backend/src/core/redact.rs:522-528#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
@@ -188,11 +188,11 @@ read; opening a selector additionally refreshes stale CLI targets in the
 background, preserving visible options and configuration. Claude's
 initialization-only SDK catalogue is independent of the ACP execution toggle.
 See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
-[src: file: frontend/src/components/settings/AgentsSection.tsx:168-187]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1229-1276]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:33-70]
-[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:67-72]
-[src: file: backend/src/core/model_catalog/codex_discovery.rs:75-158]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:197-198#useModelCatalogSnapshot]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1292-1316#SearchableSelect]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:95-145#catalogModelOptions]
+[src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]
+[src: file: backend/src/core/model_catalog/mod.rs:363-373#discover_inner]
 
 Saving a tier rereads the current settings and replaces only the selected
 field, preserving other agents' values and showing the new value only after
@@ -225,7 +225,7 @@ discussion PATCH correction is backend-owned: it clears the persisted model
 only on an actual target/tier change, distinguishes an absent connection from
 explicit null, and preserves historical message models. Isolated API tests
 cover this path, not provider inference or a new browser qualification.
-[src: file: frontend/src/lib/agentSelection.ts:1-16]
-[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1303-1333]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1242-1263]
-[src: file: backend/tests/discussion_target_model.rs:94-211]
+[src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
+[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1361-1368#currentConnectionId]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1169-1174#agentSettingsForSelection]
+[src: file: backend/tests/discussion_target_model.rs:99-211#changing_agent_clears_the_previous_explicit_model]

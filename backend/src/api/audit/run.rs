@@ -252,6 +252,10 @@ pub struct AuditTimelineData {
     /// attestation, legacy evidence), oldest first. Empty without the file.
     pub recorded_audits: Vec<crate::core::kronn_state::AuditEntry>,
     pub recorded_validated_at: Option<String>,
+    /// Who validated and who opened the validation, from `.kronn.json`
+    /// (only while `recorded_validated_at` is set).
+    pub recorded_validated_by: Option<String>,
+    pub recorded_validation_started_by: Option<String>,
     /// The validation discussion linked to the latest run when that run is
     /// Completed, archived or not: the timeline offers to validate once it
     /// has finished.
@@ -259,15 +263,24 @@ pub struct AuditTimelineData {
     /// The project's audit lease is held by a run that could not be settled:
     /// every launch is refused until the cleanup action releases it (KT-1134).
     pub lease_orphaned: bool,
+    /// Why the server would refuse a validation now (`None` = it accepts):
+    /// the UI shows the reason instead of offering the action.
+    pub validation_block: Option<super::validate::ValidationBlock>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export)]
 pub struct AuditTimelineValidation {
     pub discussion_id: String,
-    /// Same terminal-signal parser as the validate-audit gate.
+    /// The server's verdict, from the durable completion stamp: the one
+    /// parser of the signal lives in the backend.
     pub finished: bool,
     pub archived: bool,
+    pub completed_at: Option<String>,
+    /// Pseudo of the operator whose audit opened the validation.
+    pub started_by: Option<String>,
+    pub validated_by: Option<String>,
+    pub validated_at: Option<String>,
 }
 
 /// GET /api/projects/{id}/audit-timeline
@@ -280,6 +293,11 @@ pub async fn audit_timeline(
         .lock()
         .map(|t| t.lease_orphaned(&id))
         .unwrap_or(false);
+    let audit_running = state
+        .audit_tracker
+        .lock()
+        .map(|t| t.leased.contains(&id))
+        .unwrap_or(true);
     let result = state
         .db
         .with_read_conn(move |conn| {
@@ -295,23 +313,34 @@ pub async fn audit_timeline(
             }
             crate::db::audit_runs::price_steps(conn, &mut steps)?;
             // The latest run of any kind, as the validate-audit gate reads it.
-            let latest_validation = match runs.first() {
-                Some(run) if run.status == "Completed" => match &run.validation_discussion_id {
-                    Some(disc_id) => crate::db::discussions::get_discussion(conn, disc_id)?
-                        .filter(|disc| disc.project_id.as_deref() == Some(id.as_str()))
-                        .map(|disc| AuditTimelineValidation {
-                            finished: super::validate::validation_discussion_finished(&disc),
-                            archived: disc.archived,
-                            discussion_id: disc.id,
-                        }),
-                    None => None,
-                },
+            let state = super::validate::validation_state(conn, &id, audit_running)?;
+            let foreign_or_missing = matches!(
+                state.blocked,
+                Some(
+                    super::validate::ValidationBlock::ForeignDiscussion
+                        | super::validate::ValidationBlock::DiscussionMissing
+                )
+            );
+            let latest_validation = match (runs.first(), state.discussion_id.clone()) {
+                (Some(run), Some(discussion_id))
+                    if run.status == "Completed" && !foreign_or_missing =>
+                {
+                    Some(AuditTimelineValidation {
+                        discussion_id,
+                        finished: state.finished,
+                        archived: state.archived,
+                        completed_at: state.completed_at.clone(),
+                        started_by: state.started_by.clone(),
+                        validated_by: state.validated_by.clone(),
+                        validated_at: state.validated_at.clone(),
+                    })
+                }
                 _ => None,
             };
-            Ok((project, runs, steps, latest_validation))
+            Ok((project, runs, steps, (latest_validation, state.blocked)))
         })
         .await;
-    let (project, runs, steps, latest_validation) = match result {
+    let (project, runs, steps, (latest_validation, validation_block)) = match result {
         Ok((Some(project), runs, steps, latest)) => (project, runs, steps, latest),
         Ok((None, _, _, _)) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("db: {e}"))),
@@ -323,16 +352,20 @@ pub async fn audit_timeline(
     .await
     .ok()
     .flatten();
-    let (recorded_audits, recorded_validated_at) = recorded
-        .map(|state| (state.audits, state.validated_at))
-        .unwrap_or_default();
+    let recorded = recorded.unwrap_or_default();
+    let validated = recorded.validated_at.is_some();
+    let recorded_validated_by = recorded.validated_by.filter(|_| validated);
+    let recorded_validation_started_by = recorded.validation_started_by.filter(|_| validated);
     Json(ApiResponse::ok(AuditTimelineData {
         runs,
         steps,
-        recorded_audits,
-        recorded_validated_at,
+        recorded_audits: recorded.audits,
+        recorded_validated_at: recorded.validated_at,
+        recorded_validated_by,
+        recorded_validation_started_by,
         latest_validation,
         lease_orphaned,
+        validation_block,
     }))
 }
 
@@ -518,3 +551,7 @@ mod audit_status_tests {
 #[cfg(test)]
 #[path = "run_states_tests.rs"]
 mod run_states_tests;
+
+#[cfg(test)]
+#[path = "docs_writer_tests.rs"]
+mod docs_writer_tests;

@@ -756,6 +756,11 @@ pub async fn set_linked_repos(
         )));
     }
 
+    let _lease = match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &id).await {
+        Ok(lease) => lease,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+
     let pid = id.clone();
     let list = payload.clone();
     match state
@@ -830,6 +835,22 @@ pub async fn set_linked_repos(
                             })
                             .await;
                         if let Ok(Some(target)) = target_proj {
+                            let _target_lease =
+                                match crate::api::audit::docs_write::DocsWriteLease::acquire(
+                                    &state, &target.id,
+                                )
+                                .await
+                                {
+                                    Ok(lease) => lease,
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "Reverse linked-repo docs sync held for {}: {}",
+                                            target.id,
+                                            error
+                                        );
+                                        continue;
+                                    }
+                                };
                             let target_path = crate::core::scanner::resolve_host_path(&target.path);
                             if let Err(e) =
                                 super::sync_linked_repos_doc(&target_path, &upd.new_linked_repos)
