@@ -742,7 +742,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 - TLS certificate checks use rustls-webpki 0.103.16 and webpki-roots /
   webpki-root-certs 1.0.10 (RUSTSEC-2026-0381, -0382, -0383: distrusted
-  intermediates and emSign roots were accepted).
+  intermediates and emSign roots were accepted). The frontend tooling moves to
+  vite 8.3.4 (launch-editor advisories in vite 8.2.0-8.2.3, dev server only).
 
 - An Exec line awaiting a human's approval is visible before the run and can
   be approved where it is used (KT-1398). Since KT-1017 a run value handed to
