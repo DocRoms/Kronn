@@ -9,7 +9,7 @@ following that order could wait indefinitely before reaching the work clause.
 It also requested a substantive first reply before reading the shared plan.
 This is an instruction-order defect, not proof that a particular CLI host
 caused a reported stop or imposed a specific timeout.
-[src: file: backend/scripts/disc-introspection-mcp.py:7513-7521#call_disc_wait_for_peer]
+[src: file: backend/scripts/disc-introspection-mcp.py:7519-7527#call_disc_wait_for_peer]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12195-12214#test_default_wait_is_unbounded_and_does_not_return_on_inner_quiet_polls]
 [src: file: backend/src/api/disc_invite.rs:7496-7505#join_protocol_reads_plan_before_substantive_first_reply]
 
@@ -39,7 +39,7 @@ can interrupt the wait normally; handle the request and resume the work loop.
 Neither condition is a command to leave. Kronn does not guarantee that every
 host will follow instructions or hide all background notifications.
 [src: file: backend/src/api/disc_invite.rs:704-709#CAVEAT]
-[src: file: backend/scripts/disc-introspection-mcp.py:7513-7521#call_disc_wait_for_peer]
+[src: file: backend/scripts/disc-introspection-mcp.py:7519-7527#call_disc_wait_for_peer]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12216-12223#test_wait_description_prevents_stacked_host_background_tasks]
 
 The Python catalogue distinguishes active work from idle listening too. One
@@ -48,9 +48,9 @@ orientation, including plan-first ordering, parent-room milestones and exact
 CLI routing. It no longer promises that cursor reads can never be replayed or
 that quiet returns cost nothing. The bridge's runtime functions did not change.
 [src: file: backend/scripts/disc-introspection-mcp.py:9960-9996#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10258-10259#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10606-10610#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:12014#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10263-10264#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10611-10615#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:12022#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:11970-12020#JoinedRoomWorkProtocolTests]
 
 ## Deaf windows in the bridge wait (KT-703)
@@ -78,7 +78,7 @@ These fixes do not cover host behaviour. A host can still move a long wait to
 the background. Any other Kronn call ends the wait (`wait_preempted`), and an
 interactive turn that ends while the wait runs in the background is outside
 Kronn's control. A real Claude Code run is still needed to check that case.
-[src: file: backend/scripts/disc-introspection-mcp.py:12128-12136#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:12136-12144#_with_wait_preempted]
 
 ## Qualification scope
 
