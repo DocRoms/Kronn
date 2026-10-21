@@ -47,7 +47,7 @@ stored model's availability or operator metadata. Opening a mention/picker
 reads a snapshot once; typing filters locally, without provider discovery.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:64-75#AGENT_RUNTIME_TARGETS]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/lib/modelCatalogSelection.ts:95-146#catalogModelOptions]
+[src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 
 | Surface | Shared path and source |
@@ -58,7 +58,7 @@ reads a snapshot once; typing filters locally, without provider discovery.
 | Planning launch/reassignment | The same agent and model controls, without clearing unrelated execution policy/history. [src: file: frontend/src/components/TaskLaunchDialog.tsx:214-231#AgentSwitchPicker] [src: file: frontend/src/components/DiscussionPlanPanel.tsx:1142-1159#AgentSwitchPicker] |
 | Comparison rerun/reviewer | Shared target picker for new selections; historical identity stays recorded/attested/unknown rather than being replaced by current settings. [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343#AgentSwitchPicker] [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:412#AgentSwitchPicker] See [comparison identity](compare-model-identity.md). |
 | Agent and Ollama settings | Shared `catalogModelOptions`, exact runtime target and searchable model choices. [src: file: frontend/src/components/settings/AgentsSection.tsx:1309#catalogModelOptions] [src: file: frontend/src/components/settings/OllamaCard.tsx:653#catalogModelOptions] See [tier settings](agent-tier-catalogue-settings.md). |
-| HTTP connection draft | Searchable choices come from that draft's test result; missing/untested saved IDs remain visible but unverified. A changed endpoint cannot borrow another saved target's verified catalogue. [src: file: frontend/src/components/settings/ExternalApiSection.tsx:229-237#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:403-413#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:650-656#changeConnection] See [HTTP probe isolation](http-probe-catalogue-isolation.md). |
+| HTTP connection draft | Searchable choices come from that draft's test result; missing/untested saved IDs remain visible but unverified. A changed endpoint cannot borrow another saved target's verified catalogue. [src: file: frontend/src/components/settings/ExternalApiSection.tsx:236-244#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:403-413#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:650-656#changeConnection] See [HTTP probe isolation](http-probe-catalogue-isolation.md). |
 | Manual catalogue management | Searchable runtime target, model/ID/source filtering and shared derived provenance. Failed refresh/reload retains identities as cached; manual provenance is preserved. [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:104-114#visibleRows] [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:272-289#SearchableSelect] [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:92-102#rows] |
 
 `ModelCatalogPicker` additionally preserves an unrecognized saved reasoning
@@ -76,7 +76,7 @@ busy state, now aligned with the other mutation controls.
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:182-211#save]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:212-229#remove]
 [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:366-375#mutationPending]
-[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:472#remove]
+[src: file: frontend/src/components/settings/ModelCatalogSection.tsx:473#remove]
 [src: file: frontend/src/components/settings/__tests__/ModelCatalogSection.test.tsx:153-186#serializes]
 [src: file: frontend/src/components/settings/__tests__/ModelCatalogSection.test.tsx:188-222#cached]
 

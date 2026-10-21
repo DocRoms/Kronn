@@ -44,7 +44,11 @@ fn read(dir: &Path, rel: &str) -> String {
 fn repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
-    write(dir.path(), "docs/inconsistencies-performance.md", "old docs\n");
+    write(
+        dir.path(),
+        "docs/inconsistencies-performance.md",
+        "old docs\n",
+    );
     write(dir.path(), "docs/tech-debt/TD-1.md", "td one\n");
     write(dir.path(), ".ai/AGENTS.md", "new root\n");
     write(dir.path(), "CLAUDE.md", "pointer\n");
@@ -68,26 +72,46 @@ fn a_commit_made_during_the_step_is_soft_reset_and_reported() {
     let before = git(dir.path(), &["rev-parse", "HEAD"]);
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
 
-    write(dir.path(), ".ai/inconsistencies-performance.md", "audit output\n");
+    write(
+        dir.path(),
+        ".ai/inconsistencies-performance.md",
+        "audit output\n",
+    );
     git(dir.path(), &["add", "-A"]);
-    git(dir.path(), &["commit", "-q", "-m", "DOPS-0: step 12 quality review"]);
+    git(
+        dir.path(),
+        &["commit", "-q", "-m", "DOPS-0: step 12 quality review"],
+    );
     write(dir.path(), ".ai/more.md", "second\n");
     git(dir.path(), &["add", "-A"]);
     git(dir.path(), &["commit", "-q", "-m", "DOPS-0: follow-up"]);
 
     let report = remit.settle_blocking();
 
-    assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), before, "HEAD is back");
+    assert_eq!(
+        git(dir.path(), &["rev-parse", "HEAD"]),
+        before,
+        "HEAD is back"
+    );
     assert_eq!(git(dir.path(), &["branch", "--show-current"]), "main");
     assert_eq!(report.commits_undone.len(), 2, "{report:?}");
     assert!(report.commits_undone[0].contains("step 12 quality review"));
-    assert!(report.commits_undone[1].contains("follow-up"), "oldest first");
+    assert!(
+        report.commits_undone[1].contains("follow-up"),
+        "oldest first"
+    );
     assert!(report.warnings.is_empty(), "{report:?}");
     // Nothing is lost: the work stays, uncommitted.
-    assert_eq!(read(dir.path(), ".ai/inconsistencies-performance.md"), "audit output\n");
+    assert_eq!(
+        read(dir.path(), ".ai/inconsistencies-performance.md"),
+        "audit output\n"
+    );
     assert_eq!(read(dir.path(), ".ai/more.md"), "second\n");
     let status = git(dir.path(), &["status", "--porcelain"]);
-    assert!(status.contains(".ai/inconsistencies-performance.md"), "{status}");
+    assert!(
+        status.contains(".ai/inconsistencies-performance.md"),
+        "{status}"
+    );
     assert!(report.messages()[0].contains("uncommitted"));
 }
 
@@ -106,7 +130,11 @@ fn settling_twice_finds_nothing_left_to_do() {
 fn a_step_without_commit_or_stray_edit_reports_nothing() {
     let dir = repo();
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
-    write(dir.path(), ".ai/inconsistencies-performance.md", "audit output\n");
+    write(
+        dir.path(),
+        ".ai/inconsistencies-performance.md",
+        "audit output\n",
+    );
     write(dir.path(), "untracked.txt", "left alone\n");
     assert!(remit.settle_blocking().is_empty());
     assert_eq!(read(dir.path(), "untracked.txt"), "left alone\n");
@@ -130,7 +158,13 @@ fn a_commit_authored_before_the_step_is_never_touched() {
 
     assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), user_head);
     assert!(report.commits_undone.is_empty());
-    assert!(report.warnings.iter().any(|w| w.contains("not all the step's own")), "{report:?}");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("not all the step's own")),
+        "{report:?}"
+    );
 }
 
 #[test]
@@ -151,7 +185,11 @@ fn a_step_commit_stacked_on_a_user_commit_is_left_with_a_warning() {
 
     let report = remit.settle_blocking();
 
-    assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head, "mixed history is not rewritten");
+    assert_eq!(
+        git(dir.path(), &["rev-parse", "HEAD"]),
+        head,
+        "mixed history is not rewritten"
+    );
     assert!(report.commits_undone.is_empty());
     assert!(!report.warnings.is_empty());
 }
@@ -168,7 +206,10 @@ fn a_branch_switch_is_reported_and_not_undone() {
 
     let report = remit.settle_blocking();
 
-    assert_eq!(git(dir.path(), &["branch", "--show-current"]), "audit/step-12");
+    assert_eq!(
+        git(dir.path(), &["branch", "--show-current"]),
+        "audit/step-12"
+    );
     assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head);
     assert!(report.commits_undone.is_empty());
     let text = report.messages().join("\n");
@@ -182,14 +223,23 @@ fn a_new_tag_is_reported() {
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
     git(dir.path(), &["tag", "audit-done"]);
     let report = remit.settle_blocking();
-    assert!(report.warnings.iter().any(|w| w.contains("refs/tags/audit-done")), "{report:?}");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("refs/tags/audit-done")),
+        "{report:?}"
+    );
 }
 
 #[test]
 fn a_history_rewrite_is_never_touched() {
     let dir = repo();
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
-    git(dir.path(), &["commit", "-q", "--amend", "-m", "initial, reworded"]);
+    git(
+        dir.path(),
+        &["commit", "-q", "--amend", "-m", "initial, reworded"],
+    );
     let head = git(dir.path(), &["rev-parse", "HEAD"]);
     let report = remit.settle_blocking();
     assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head);
@@ -203,18 +253,36 @@ fn edits_to_the_old_docs_folder_are_reverted_when_the_root_moved() {
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
 
     // Step 12 followed the existing TD sheets of docs/ instead of .ai/.
-    write(dir.path(), "docs/inconsistencies-performance.md", "old docs\naudit_history: x\n");
-    write(dir.path(), "docs/tech-debt/TD-1.md", "td one\naudit_history: x\n");
-    write(dir.path(), ".ai/inconsistencies-performance.md", "the real output\n");
+    write(
+        dir.path(),
+        "docs/inconsistencies-performance.md",
+        "old docs\naudit_history: x\n",
+    );
+    write(
+        dir.path(),
+        "docs/tech-debt/TD-1.md",
+        "td one\naudit_history: x\n",
+    );
+    write(
+        dir.path(),
+        ".ai/inconsistencies-performance.md",
+        "the real output\n",
+    );
     write(dir.path(), "CLAUDE.md", "pointer\nKronn block\n");
 
     let report = remit.settle_blocking();
 
-    assert_eq!(read(dir.path(), "docs/inconsistencies-performance.md"), "old docs\n");
+    assert_eq!(
+        read(dir.path(), "docs/inconsistencies-performance.md"),
+        "old docs\n"
+    );
     assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
     assert_eq!(report.reverted.len(), 2, "{report:?}");
     // Inside the root, and a Kronn-owned pointer: kept.
-    assert_eq!(read(dir.path(), ".ai/inconsistencies-performance.md"), "the real output\n");
+    assert_eq!(
+        read(dir.path(), ".ai/inconsistencies-performance.md"),
+        "the real output\n"
+    );
     assert_eq!(read(dir.path(), "CLAUDE.md"), "pointer\nKronn block\n");
     let text = report.messages().join("\n");
     assert!(text.contains("docs/tech-debt/TD-1.md"), "{text}");
@@ -245,7 +313,10 @@ fn a_users_uncommitted_edit_in_another_ai_folder_is_restored_to_what_it_was() {
     write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
     let report = remit.settle_blocking();
     assert_eq!(paths(&report), vec!["docs/tech-debt/TD-1.md"]);
-    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one, user wip\n");
+    assert_eq!(
+        read(dir.path(), "docs/tech-debt/TD-1.md"),
+        "td one, user wip\n"
+    );
 }
 
 #[test]
@@ -253,16 +324,29 @@ fn a_source_file_changed_during_the_step_is_never_touched_only_reported() {
     let dir = repo();
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
     // The user keeps coding while the audit runs.
-    write(dir.path(), "src/main.rs", "fn main() { /* edited during the audit */ }\n");
+    write(
+        dir.path(),
+        "src/main.rs",
+        "fn main() { /* edited during the audit */ }\n",
+    );
     git(dir.path(), &["add", "src/main.rs"]);
 
     let report = remit.settle_blocking();
 
-    assert_eq!(read(dir.path(), "src/main.rs"), "fn main() { /* edited during the audit */ }\n");
-    assert!(git(dir.path(), &["status", "--porcelain"]).contains("M  src/main.rs"), "index untouched");
+    assert_eq!(
+        read(dir.path(), "src/main.rs"),
+        "fn main() { /* edited during the audit */ }\n"
+    );
+    assert!(
+        git(dir.path(), &["status", "--porcelain"]).contains("M  src/main.rs"),
+        "index untouched"
+    );
     assert!(report.reverted.is_empty());
     assert!(
-        report.warnings.iter().any(|w| w.contains("src/main.rs") && w.contains("left untouched")),
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("src/main.rs") && w.contains("left untouched")),
         "{report:?}"
     );
 }
@@ -276,13 +360,20 @@ fn a_source_file_the_user_already_had_dirty_is_reported_only_when_it_changes_aga
     write(dir.path(), "src/main.rs", "wip, more\n");
     let report = remit.settle_blocking();
     assert_eq!(read(dir.path(), "src/main.rs"), "wip, more\n");
-    assert!(report.warnings.iter().any(|w| w.contains("src/main.rs")), "{report:?}");
+    assert!(
+        report.warnings.iter().any(|w| w.contains("src/main.rs")),
+        "{report:?}"
+    );
 }
 
 #[test]
 fn a_nested_agents_md_does_not_make_a_source_folder_an_ai_folder() {
     let dir = repo();
-    write(dir.path(), "src/AGENTS.md", "# my own notes for the agent\n");
+    write(
+        dir.path(),
+        "src/AGENTS.md",
+        "# my own notes for the agent\n",
+    );
     git(dir.path(), &["add", "-A"]);
     git(dir.path(), &["commit", "-q", "-m", "notes"]);
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
@@ -296,15 +387,25 @@ fn a_nested_agents_md_does_not_make_a_source_folder_an_ai_folder() {
 fn what_a_restore_overwrites_stays_readable_as_a_blob() {
     let dir = repo();
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
-    write(dir.path(), "docs/tech-debt/TD-1.md", "td one\nedited during the step\n");
+    write(
+        dir.path(),
+        "docs/tech-debt/TD-1.md",
+        "td one\nedited during the step\n",
+    );
 
     let report = remit.settle_blocking();
 
     assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
     let blob = report.reverted[0].blob.clone().expect("a blob is reported");
-    assert_eq!(git(dir.path(), &["cat-file", "-p", &blob]), "td one\nedited during the step");
+    assert_eq!(
+        git(dir.path(), &["cat-file", "-p", &blob]),
+        "td one\nedited during the step"
+    );
     let text = report.messages().join("\n");
-    assert!(text.contains(&blob) && text.contains("git cat-file -p"), "{text}");
+    assert!(
+        text.contains(&blob) && text.contains("git cat-file -p"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -312,13 +413,20 @@ fn a_restore_of_a_user_dirty_ai_file_keeps_the_newer_bytes_as_a_blob() {
     let dir = repo();
     write(dir.path(), "docs/tech-debt/TD-1.md", "user wip\n");
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
-    write(dir.path(), "docs/tech-debt/TD-1.md", "user wip\nlater edit\n");
+    write(
+        dir.path(),
+        "docs/tech-debt/TD-1.md",
+        "user wip\nlater edit\n",
+    );
 
     let report = remit.settle_blocking();
 
     assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "user wip\n");
     let blob = report.reverted[0].blob.clone().unwrap();
-    assert_eq!(git(dir.path(), &["cat-file", "-p", &blob]), "user wip\nlater edit");
+    assert_eq!(
+        git(dir.path(), &["cat-file", "-p", &blob]),
+        "user wip\nlater edit"
+    );
 }
 
 #[test]
@@ -333,10 +441,17 @@ fn a_commit_touching_source_is_kept_with_a_warning() {
 
     let report = remit.settle_blocking();
 
-    assert_eq!(git(dir.path(), &["rev-parse", "HEAD"]), head, "history untouched");
+    assert_eq!(
+        git(dir.path(), &["rev-parse", "HEAD"]),
+        head,
+        "history untouched"
+    );
     assert!(report.commits_undone.is_empty());
     assert!(
-        report.warnings.iter().any(|w| w.contains("src/main.rs") && w.contains("may be yours")),
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("src/main.rs") && w.contains("may be yours")),
         "{report:?}"
     );
 }
@@ -381,7 +496,11 @@ fn an_outside_edit_the_agent_committed_is_restored_after_the_soft_reset() {
     let dir = repo();
     let before = git(dir.path(), &["rev-parse", "HEAD"]);
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
-    write(dir.path(), "docs/tech-debt/TD-1.md", "td one\naudit_history: x\n");
+    write(
+        dir.path(),
+        "docs/tech-debt/TD-1.md",
+        "td one\naudit_history: x\n",
+    );
     write(dir.path(), ".ai/a.md", "a\n");
     git(dir.path(), &["add", "-A"]);
     git(dir.path(), &["commit", "-q", "-m", "everything"]);
@@ -392,7 +511,9 @@ fn an_outside_edit_the_agent_committed_is_restored_after_the_soft_reset() {
     assert_eq!(report.commits_undone.len(), 1);
     assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
     assert_eq!(read(dir.path(), ".ai/a.md"), "a\n");
-    assert!(git(dir.path(), &["status", "--porcelain"]).lines().all(|l| l.contains(".ai/")));
+    assert!(git(dir.path(), &["status", "--porcelain"])
+        .lines()
+        .all(|l| l.contains(".ai/")));
 }
 
 #[test]
@@ -439,12 +560,22 @@ fn the_step_prompt_forbids_commits_and_marks_the_old_folder_read_only() {
     let now = chrono::Utc::now();
     let moved = super::super::dated_step_prompt("", "STEP BODY", now, &root(".ai"));
     assert!(moved.contains("NEVER run `git commit`"), "{moved}");
-    assert!(moved.contains("`git push`") && moved.contains("`git branch`") && moved.contains("`git tag`"));
+    assert!(
+        moved.contains("`git push`")
+            && moved.contains("`git branch`")
+            && moved.contains("`git tag`")
+    );
     assert!(moved.contains("the repository's own commit conventions"));
     assert!(moved.contains("Write documentation ONLY under `.ai/`"));
     assert!(moved.contains("read-only history"));
-    assert!(moved.contains("a leftover docs/, ai/, .ai/ or doc/ folder"), "the old folder is named: {moved}");
-    assert!(!moved.contains("`docs/"), "a moved root's prompt never quotes `docs/`");
+    assert!(
+        moved.contains("a leftover docs/, ai/, .ai/ or doc/ folder"),
+        "the old folder is named: {moved}"
+    );
+    assert!(
+        !moved.contains("`docs/"),
+        "a moved root's prompt never quotes `docs/`"
+    );
     assert!(moved.contains("`.ai/tech-debt/`"));
 
     let default = super::super::dated_step_prompt("", "STEP BODY", now, &DocsRoot::default());
@@ -458,15 +589,23 @@ fn the_report_reads_as_one_line_per_finding() {
     let report = RemitReport {
         commits_undone: vec!["abc123 DOPS-0: x".into()],
         reverted: vec![
-            Reverted { path: "docs/a.md".into(), blob: Some("deadbeef".into()) },
-            Reverted { path: "docs/b.md".into(), blob: None },
+            Reverted {
+                path: "docs/a.md".into(),
+                blob: Some("deadbeef".into()),
+            },
+            Reverted {
+                path: "docs/b.md".into(),
+                blob: None,
+            },
         ],
         warnings: vec!["w".into()],
     };
     let lines = report.messages();
     assert_eq!(lines.len(), 3);
     assert!(lines[0].contains("soft reset") && lines[0].contains("abc123 DOPS-0: x"));
-    assert!(lines[1].contains("docs/a.md (the version before the restore is blob deadbeef: `git cat-file -p deadbeef`)"));
+    assert!(lines[1].contains(
+        "docs/a.md (the version before the restore is blob deadbeef: `git cat-file -p deadbeef`)"
+    ));
     assert!(lines[1].contains("docs/b.md (deleted by the step)"));
     assert_eq!(lines[2], "w");
 }

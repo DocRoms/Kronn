@@ -33,14 +33,14 @@ a parenthesised `(src: file: …)` is refused (only the bracketed marker is
 verified), and every path or range the gate suggests is one it accepts. A Stack table
 row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
-[src: file: backend/src/core/document_optimization.rs:1370-1385#inspect_stack_currency]
-[src: file: backend/src/core/document_optimization.rs:1401-1473#stack_currency_problems]
-[src: file: backend/src/core/document_optimization.rs:1471-1488#diag]
+[src: file: backend/src/core/document_optimization.rs:1380-1395#inspect_stack_currency]
+[src: file: backend/src/core/document_optimization.rs:1411-1483#stack_currency_problems]
+[src: file: backend/src/core/document_optimization.rs:1481-1498#diag]
 
 A citation into a path git ignores (a vendored dependency, a build output) that
 is absent from the checkout is refused as before, but the message says the path
 is git-ignored and cannot be verified from a fresh clone, instead of leaving a
-bare "does not exist". [src: file: backend/src/core/document_optimization.rs:774-784#ignored_citation_message]
+bare "does not exist". [src: file: backend/src/core/document_optimization.rs:784-794#ignored_citation_message]
 
 A tech-debt sheet is referenced from prose with a markdown link relative to the
 document, or with the `:exists` presence form of a file citation; the rows Kronn
@@ -58,10 +58,10 @@ secret file (and a bare tech-debt sheet) given its `:exists` presence form; a
 citation whose path resolves to exactly one other file that holds the cited
 lines (the "did you mean" path); a range ending one line past the end of a file
 with no closing newline, clamped to the last line. Also applied (KT-1357, from
-the 18/10 matrix): a list of lines of one file (`[src: file: deploy.yml:210,214,218]`)
+the 18/10 matrix): a list of lines of one file in one marker (`deploy.yml:210,214,218`)
 split into one marker per line when every line is in range; a comment after a
 `path:line` the gate accepts as written
-(`[src: file: docs/AGENTS.md:38-39: never edit generated files]`) moved out of the
+(`docs/AGENTS.md:38-39: never edit generated files` inside the marker) moved out of the
 marker, after it, in parentheses; a bare citation of an empty text file replaced
 by the backticked path followed by `(empty)`. Never applied: a comma bundle that
 is not fully verified (one line out of range, a path that is not there), a

@@ -1148,6 +1148,7 @@ async fn a_named_connection_audit_calls_that_connection_with_its_tier_model() {
         updated_at: now,
         image_model: None,
         video_model: None,
+        decision_model: None,
         media_endpoint: None,
     };
     state
@@ -2287,6 +2288,7 @@ async fn latest_run(state: &AppState) -> crate::models::AuditRun {
 /// KT-1318 — a full audit writes a lot of files and builds: below the
 /// configured free space it is refused before anything is recorded or written,
 /// with the number and the setting named.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_full_audit_under_disk_pressure_is_refused_before_it_creates_anything() {
     use axum::response::IntoResponse;

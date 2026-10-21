@@ -384,6 +384,54 @@ async fn partial_refresh_detector_gate_retries_with_feedback() {
     }
 }
 
+/// A partial refresh of the TD index step on a project whose earlier Full run
+/// was interrupted, as the revalidation launches it; returns the SSE body.
+async fn refresh_the_tech_debt_index(state: &AppState, project: &std::path::Path) -> String {
+    let agents = project.join("docs/AGENTS.md");
+    let mut body = std::fs::read_to_string(&agents).unwrap();
+    body.push_str(
+        "<!-- KRONN-MANAGED-BLOCK:START -->\nManaged.\n<!-- KRONN-MANAGED-BLOCK:END -->\n",
+    );
+    std::fs::write(&agents, body).unwrap();
+    state
+        .db
+        .with_conn(|conn| {
+            crate::db::audit_runs::insert_running(
+                conn,
+                "earlier-full",
+                PROJECT_ID,
+                "Full",
+                "LiteLlm",
+                chrono::Utc::now(),
+            )?;
+            crate::db::audit_runs::mark_failed(conn, "earlier-full", "interrupted")
+        })
+        .await
+        .unwrap();
+    let docs_root = crate::core::docs_location::DocsRoot::default();
+    let step = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root)
+        .iter()
+        .position(|s| s.target_file.ends_with("inconsistencies-tech-debt.md"))
+        .expect("the TD index step")
+        + 1;
+    sse_body(
+        crate::api::audit::drift::partial_audit(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(PROJECT_ID.into()),
+            axum::Json(crate::models::PartialAuditRequest {
+                agent: AgentType::LiteLlm,
+                connection_id: None,
+                tier: Some(ModelTier::Reasoning),
+                steps: vec![step],
+                accept_unverified_agents: None,
+            }),
+        )
+        .await
+        .into_response(),
+    )
+    .await
+}
+
 /// KT-1357 — the partial refresh of the TD index gives a malformed coverage
 /// matrix back to the agent like the Full pipeline, instead of failing the step
 /// on its first attempt (apollo's revalidation lost step 8 so).
@@ -398,7 +446,7 @@ async fn partial_refresh_gives_a_bad_coverage_matrix_back_within_the_attempt_bud
             index(&disposed),
             index(&disposed).replace(
                 "| Accessibility | scanned — nothing substantiable | Reviewed the repository sources |",
-                "| Accessibility | N/A: backend has no UI |",
+                "| Accessibility | findings |",
             ),
         );
         assert_ne!(good, bad);
@@ -412,49 +460,7 @@ async fn partial_refresh_gives_a_bad_coverage_matrix_back_within_the_attempt_bud
         .await;
         let state = litellm_state(&server.uri()).await;
         project_among_others(&state, project.path(), false).await;
-        let agents = project.path().join("docs/AGENTS.md");
-        let mut body = std::fs::read_to_string(&agents).unwrap();
-        body.push_str(
-            "<!-- KRONN-MANAGED-BLOCK:START -->\nManaged.\n<!-- KRONN-MANAGED-BLOCK:END -->\n",
-        );
-        std::fs::write(&agents, body).unwrap();
-        state
-            .db
-            .with_conn(|conn| {
-                crate::db::audit_runs::insert_running(
-                    conn,
-                    "earlier-full",
-                    PROJECT_ID,
-                    "Full",
-                    "LiteLlm",
-                    chrono::Utc::now(),
-                )?;
-                crate::db::audit_runs::mark_failed(conn, "earlier-full", "interrupted")
-            })
-            .await
-            .unwrap();
-        let docs_root = crate::core::docs_location::DocsRoot::default();
-        let step = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root)
-            .iter()
-            .position(|s| s.target_file.ends_with("inconsistencies-tech-debt.md"))
-            .expect("the TD index step")
-            + 1;
-        let stream = sse_body(
-            crate::api::audit::drift::partial_audit(
-                axum::extract::State(state.clone()),
-                axum::extract::Path(PROJECT_ID.into()),
-                axum::Json(crate::models::PartialAuditRequest {
-                    agent: AgentType::LiteLlm,
-                    connection_id: None,
-                    tier: Some(ModelTier::Reasoning),
-                    steps: vec![step],
-                    accept_unverified_agents: None,
-                }),
-            )
-            .await
-            .into_response(),
-        )
-        .await;
+        let stream = refresh_the_tech_debt_index(&state, project.path()).await;
         let expected = if repair { 2 } else { 3 };
         assert_eq!(
             *attempts.lock().unwrap(),
@@ -479,4 +485,45 @@ async fn partial_refresh_gives_a_bad_coverage_matrix_back_within_the_attempt_bud
             );
         }
     }
+}
+
+/// KT-1364 — the partial refresh splits apollo's merged Outcome/Evidence rows
+/// itself: the step passes on its first attempt, with no retry per row.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn partial_refresh_splits_merged_coverage_rows_without_a_retry() {
+    let (_templates, project, _restore) = fixture("src/page.html", false);
+    let disposed = format!("{OTHER_ANCHORS} src/page.html");
+    let good = index(&disposed);
+    let mut merged = good.clone();
+    for (dimension, cell) in [
+        ("Security", "Findings: [TD-20261016-apache-root-user](tech-debt/TD-20261016-apache-root-user.md) (root user…) ; no hardcoded secrets found"),
+        ("Code quality", "Findings: [TD-20261016-large-modules](tech-debt/TD-20261016-large-modules.md) (modules over 800 lines)"),
+        ("Accessibility", "N/A — backend API service, no rendered UI"),
+        ("Compliance", "N/A: no personal data processed"),
+    ] {
+        merged = merged.replace(
+            &format!("| {dimension} | scanned — nothing substantiable | Reviewed the repository sources |"),
+            &format!("| {dimension} | {cell} |"),
+        );
+    }
+    assert_ne!(good, merged);
+    let (server, _requests, attempts) =
+        mock_agent_writing(project.path(), move |_| merged.clone()).await;
+    let state = litellm_state(&server.uri()).await;
+    project_among_others(&state, project.path(), false).await;
+    let stream = refresh_the_tech_debt_index(&state, project.path()).await;
+    assert_eq!(*attempts.lock().unwrap(), 1, "{stream}");
+    assert!(sse_events(&stream, "step_retry").is_empty(), "{stream}");
+    assert!(sse_events(&stream, "step_warning").is_empty(), "{stream}");
+    let written = std::fs::read_to_string(project.path().join(TARGET)).unwrap();
+    assert!(
+        written.contains("| Accessibility | N/A | backend API service, no rendered UI |"),
+        "{written}"
+    );
+    assert!(
+        written.contains("| Compliance | N/A | no personal data processed |"),
+        "{written}"
+    );
 }

@@ -1787,6 +1787,9 @@ fn prelude_start(text: &[&str], line: usize) -> usize {
 /// sibling lines before them: a range that starts a whole function early
 /// drifts from the function it names.
 pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Option<AnchorMiss> {
+    if crate::acp::secret_files::is_secret_path(path) {
+        return None; // never read: the range itself is refused upstream
+    }
     if std::fs::metadata(path).ok()?.len() > LINE_COUNT_SIZE_CAP_BYTES {
         return None;
     }
@@ -1978,6 +1981,9 @@ pub(crate) fn range_is_citable(lines: usize, last: usize, start: usize, end: usi
 /// `(real line count, last citable line)` of a file, `None` when it is too big
 /// to bounds-check. An empty file has no line: both are 0.
 fn count_lines_capped(path: &Path) -> Option<(usize, usize)> {
+    if crate::acp::secret_files::is_secret_path(path) {
+        return None; // a secret file is never read for its lines
+    }
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > LINE_COUNT_SIZE_CAP_BYTES {
         return None; // too big — skip the bounds check, existence is enough
@@ -1988,6 +1994,9 @@ fn count_lines_capped(path: &Path) -> Option<(usize, usize)> {
 
 /// [`last_citable_line`] of a file on disk; 0 when it cannot be read.
 pub(crate) fn last_citable_line_of(path: &Path) -> usize {
+    if crate::acp::secret_files::is_secret_path(path) {
+        return 0;
+    }
     std::fs::read_to_string(path).map_or(0, |content| last_citable_line(&content))
 }
 
@@ -2104,6 +2113,33 @@ fn clean_reference(reference: &str) -> &str {
     s
 }
 
+/// The verdict for a line or range cited into a secret file.
+fn secret_line_verdict() -> (SourceStatus, String) {
+    (
+        SourceStatus::Rejected,
+        "this file may hold secrets, so no line of it is cited — state that it exists \
+         with `path:exists` and do not quote its content"
+            .into(),
+    )
+}
+
+/// Refusal for a line or range cited into a secret file, judged on the written
+/// path (`rel` under `root`) AND on `resolved`, the file the jail settled on:
+/// `.env -> settings-data` is secret by its name although its target is not.
+/// `None` for presence-only citations and ordinary files.
+pub(crate) fn secret_line_refusal(
+    root: &Path,
+    rel: &Path,
+    resolved: &Path,
+    line_spec: Option<(usize, usize)>,
+) -> Option<(SourceStatus, String)> {
+    line_spec?;
+    let secret = crate::acp::secret_files::is_secret_file(rel)
+        || crate::acp::secret_files::is_secret_path(&root.join(rel))
+        || crate::acp::secret_files::is_secret_path(resolved);
+    secret.then(secret_line_verdict)
+}
+
 /// Line-bounds verdict for an existing candidate file.
 pub(crate) fn line_bounds_status(
     candidate: &Path,
@@ -2111,6 +2147,12 @@ pub(crate) fn line_bounds_status(
 ) -> (SourceStatus, String) {
     match line_spec {
         None => (SourceStatus::Verified, "file exists".into()),
+        // The gate every line check ends in (verifier, documentary gate, step
+        // lint): a line of a secret file, written or reached through a symlink,
+        // is a pointer into its content. Only presence may be cited. Callers that
+        // hold the written path check it first (`secret_line_refusal`), since
+        // `candidate` is already resolved.
+        Some(_) if crate::acp::secret_files::is_secret_path(candidate) => secret_line_verdict(),
         Some(_) if is_binary_file(candidate) => (
             SourceStatus::OutOfBounds,
             "binary file has no lines — cite it by bare path, without a line".into(),
@@ -2475,7 +2517,8 @@ fn verify_file_ref_as_written(
             );
         };
         return match resolve_in_root(root, &rel) {
-            Jailed::Inside(found) => anchored_bounds_status(&found, line_spec, anchor),
+            Jailed::Inside(found) => secret_line_refusal(root, &rel, &found, line_spec)
+                .unwrap_or_else(|| anchored_bounds_status(&found, line_spec, anchor)),
             Jailed::Missing => (
                 SourceStatus::NotFound,
                 format!("file not found: {}", path_str),
@@ -2499,7 +2542,10 @@ fn verify_file_ref_as_written(
         }
         all_escaped = false;
         match resolve_in_root(root, path) {
-            Jailed::Inside(found) => return anchored_bounds_status(&found, line_spec, anchor),
+            Jailed::Inside(found) => {
+                return secret_line_refusal(root, path, &found, line_spec)
+                    .unwrap_or_else(|| anchored_bounds_status(&found, line_spec, anchor))
+            }
             Jailed::Missing => continue,
             Jailed::Escapes => {
                 return (

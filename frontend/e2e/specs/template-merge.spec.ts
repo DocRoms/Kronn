@@ -42,6 +42,8 @@ const planView = {
   ],
   existing_targets: ['docs/AGENTS.md'],
   untracked_in_checkout: ['docs/draft-notes.md'],
+  // The backend always sends `warnings` (KT-1310); a plan without it crashes the panel.
+  warnings: [],
   table_markdown: '',
   // KT-1212: the plan always says where the merge stands on disk. Never
   // started here: no worktree, no branch, nothing to integrate.

@@ -44,7 +44,7 @@ asked. Kronn starts `opencode acp` with an inline configuration
 - `permission.read` denies `*.env` and `*.env.*`, then allows the four template
   suffixes (`*.env.<suffix>` and `*.env.*.<suffix>`). OpenCode honours the last
   matching rule, in the order written, so the allows follow the deny — a test
-  pins that order [src: file: backend/src/acp/secret_files.rs:247-281#the_opencode_config_denies_real_env_files_and_allows_templates_in_that_order]. A denial is not a
+  pins that order [src: file: backend/src/acp/secret_files.rs:337-371#the_opencode_config_denies_real_env_files_and_allows_templates_in_that_order]. A denial is not a
   question put to Kronn: OpenCode hands its model an error as the tool's answer
   and the turn goes on.
 - `experimental.continue_loop_on_deny` is `true`, so a refusal the broker does
@@ -145,7 +145,7 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:14096-14102#total_cost_usd] [src: file: backend/src/agents/runner.rs:5706-5708#usd_micros] [src: file: backend/src/agents/runner.rs:9857-9863#cost_usd_micros].
+  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:14113-14119#total_cost_usd] [src: file: backend/src/agents/runner.rs:5706-5708#usd_micros] [src: file: backend/src/agents/runner.rs:9874-9880#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost

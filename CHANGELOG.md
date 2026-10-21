@@ -13,6 +13,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Decision models are recognised (KT-1366). Kronn reads what Ollama's
+  `/api/show` says each local model can do, so a decision model such as
+  `clef-flash:9b` (which answers typed questions and cannot chat) is no longer
+  offered as a chat or agent model, and a launch on it is refused before it
+  reaches Ollama. The decision model is chosen like the tiers, with the same
+  picker: a « 🧭 Décision » row on the Ollama card and a Decision slot next to
+  image and video on an HTTP connection, each listing decision models only.
+  A local Ollama image model (such as `x/flux2-klein:4b`), or any model
+  whose declared capabilities do not include chat, is no longer offered as a
+  chat model either. An OpenRouter connection lists its decision models (Perplexity Decider,
+  Jev, Clef…), which OpenRouter returns only when asked for by output
+  modality. The manual catalogue form offers the `decision` capability, and a pull that
+  needs a newer Ollama says to update it instead of showing the raw error.
 - The audit repairs more of what it used to fail on, and tells a human the rest
   (KT-1357, 18/10 audit matrix). Kronn splits a list of lines of one file
   (`deploy.yml:210,214,218`) into one marker per line, moves the comment that
@@ -653,6 +666,14 @@ Release notes for 0.9.3 and earlier are available in the
   Migration 259 adds `messages.session_continuity`.
 
 ### Fixed
+
+- A comment on an arbitration card whose workflow step has ended is answered
+  by the room's own agent instead of nobody. It used to go to the step's
+  closed CLI session and wake no one ("personne ne lira cette réponse
+  maintenant"), so questions asked back on a framing room's cards got no
+  reply. The agent's reply answers the comment, and the question stays
+  pending for the next run; an answer or a refusal still waits for that run
+  and wakes nobody, and a room without a native agent keeps the old notice.
 
 - Confluence links read from Jira no longer come back as `***spaces/…`
   (KT-1331, the rest of KT-1249). The Atlassian plugin declares

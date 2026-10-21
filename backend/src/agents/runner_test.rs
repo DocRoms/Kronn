@@ -12454,6 +12454,7 @@ Suite de la réponse.";
                 storage_format: Some("safetensors".into()),
                 kv_shape: None,
                 vision: crate::agents::vision::ImageSupport::Unknown,
+                capabilities: None,
             }
         );
 
@@ -12464,6 +12465,7 @@ Suite de la réponse.";
                 storage_format: None,
                 kv_shape: None,
                 vision: crate::agents::vision::ImageSupport::Unknown,
+                capabilities: None,
             }
         );
     }

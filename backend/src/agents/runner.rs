@@ -6637,11 +6637,18 @@ pub(crate) struct OllamaModelProfile {
     storage_format: Option<String>,
     kv_shape: Option<KvShape>,
     vision: super::vision::ImageSupport,
+    capabilities: Option<Vec<String>>,
 }
 
 impl OllamaModelProfile {
     pub(crate) fn context_length(&self) -> Option<u64> {
         self.context_length
+    }
+
+    /// Ollama's own `capabilities` words (`completion`, `vision`, `decision`…),
+    /// `None` when the server sent no such list.
+    pub(crate) fn capabilities(&self) -> Option<&[String]> {
+        self.capabilities.as_deref()
     }
 }
 
@@ -6654,6 +6661,16 @@ pub(crate) fn parse_ollama_model_profile(show_response: &serde_json::Value) -> O
             .map(str::to_string),
         kv_shape: kv_shape_from_show(show_response),
         vision: super::vision::ollama_show_vision(show_response),
+        capabilities: show_response
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .map(|words| {
+                words
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            }),
     }
 }
 

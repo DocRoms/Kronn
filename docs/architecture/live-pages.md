@@ -8,7 +8,7 @@ workflow steps, stored IDs and sandbox event names keep their established
 contracts. An Artifact is the same persisted resource; renaming its product
 label does not migrate or duplicate it. Historical code and documentation use
 “Page” for that domain model.
-[src: file: frontend/src/lib/i18n/locales/en.ts:152-153#nav.pages]
+[src: file: frontend/src/lib/i18n/locales/en.ts:154-155#nav.pages]
 [src: file: frontend/src/lib/live-page-navigation.ts:50-55#standaloneLivePageUrl]
 
 ## Portable JSON bundles

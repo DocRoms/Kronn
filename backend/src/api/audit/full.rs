@@ -2395,6 +2395,14 @@ pub async fn full_audit(
                             analysis_step.target_file,
                             &chrono::Utc::now().format("%Y-%m-%d").to_string(),
                         );
+                        // KT-1364 — an outcome and its evidence merged in one cell
+                        // is split here, not sent back for a retry per row.
+                        if crate::api::audit::validation::repair_coverage_rows(
+                            &project_path,
+                            analysis_step.target_file,
+                        ) {
+                            tracing::info!("Audit step {} ({}): split merged coverage matrix rows", step, file_label);
+                        }
                     }
                     let (mut success, mut warning) = crate::api::audit::validation::validate_step_output(
                         cli_success,

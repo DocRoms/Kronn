@@ -15,7 +15,7 @@ are checked again before persistence. A changed or deleted connection, or a
 rotated credential, makes the result ineligible for durable reconciliation.
 The response still describes the submitted test, not a new saved configuration.
 [src: file: backend/src/api/external_api_connections.rs:1468-1507#saved_connection]
-[src: file: backend/src/api/external_api_connections.rs:1578-1623#persisted]
+[src: file: backend/src/api/external_api_connections.rs:1592-1637#persisted]
 
 Credential comparison is held under the configuration read lock, while the row
 comparison, catalogue reconciliation and refresh log use one SQLite transaction.

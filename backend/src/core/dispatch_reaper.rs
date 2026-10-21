@@ -122,6 +122,9 @@ struct ProcessRow {
     stamp: Option<String>,
     /// The process's environment names `DISPATCH_ENV=<this dispatch>`.
     tagged: bool,
+    /// A live process of this user whose environment the kernel withheld (it
+    /// is not dumpable, or runs under other credentials): its tag is unknown.
+    hidden: bool,
 }
 
 /// Why a process is taken as the run's.
@@ -207,6 +210,7 @@ fn parse_process_table(output: &str, dispatch_job_id: &str) -> Vec<ProcessRow> {
                 sid: None,
                 stamp: None,
                 tagged: carries_token(line, &needle),
+                hidden: false,
             }),
             None => {
                 if let Some(last) = rows.last_mut() {
@@ -269,10 +273,13 @@ fn carries_tag(pid: u32, dispatch_job_id: &str) -> bool {
 #[derive(Debug, Default)]
 struct ProcessTable {
     rows: Vec<ProcessRow>,
-    /// Processes of this user that exist but whose parent or environment could
-    /// not be read (a `hidepid` mount, a restricted `/proc`): one of them may
-    /// be the run's, and it cannot be told.
+    /// Processes of this user that exist but whose parent could not be read (a
+    /// `hidepid` mount, a restricted `/proc`): one of them may be the run's,
+    /// and it cannot be told.
     unreadable: usize,
+    /// Even the backend's own environment could not be read back: no hidden
+    /// row can be ruled out.
+    restricted: bool,
 }
 
 impl ProcessTable {
@@ -282,8 +289,63 @@ impl ProcessTable {
         Self {
             rows,
             unreadable: 0,
+            restricted: false,
         }
     }
+
+    /// The processes that may be the run's but could not be checked.
+    #[cfg(any(unix, test))]
+    fn unverifiable(&self, targets: &[Target], own_pid: u32) -> usize {
+        self.unreadable + hidden_kin(&self.rows, targets, own_pid, self.restricted)
+    }
+}
+
+/// Hidden rows that may be the run's: a child of the backend, or a descendant
+/// of a run process that the session rule did not take (a daemon it started).
+/// Any other hidden process of this user (`(sd-pam)`, an `ssh-agent`) was not
+/// started from the run's tree. Under a restricted `/proc` every hidden row
+/// counts.
+#[cfg(any(unix, test))]
+fn hidden_kin(rows: &[ProcessRow], targets: &[Target], own_pid: u32, restricted: bool) -> usize {
+    let parent_of = |pid: u32| rows.iter().find(|row| row.pid == pid).map(|row| row.ppid);
+    let is_run = |pid: u32| targets.iter().any(|target| target.pid == pid);
+    rows.iter()
+        .filter(|row| row.hidden && !is_run(row.pid))
+        .filter(|row| {
+            if restricted {
+                return true;
+            }
+            let mut parent = row.ppid;
+            // Bounded: a pid reused mid-scan can make the chain loop.
+            for _ in 0..rows.len() {
+                if parent == own_pid || is_run(parent) {
+                    return true;
+                }
+                match parent_of(parent) {
+                    Some(next) if parent > 1 => parent = next,
+                    _ => return false,
+                }
+            }
+            false
+        })
+        .count()
+}
+
+/// State and parent from `/proc/<pid>/stat`. The command (field 2) may hold
+/// spaces and parentheses: the fields are read after its last ')'.
+#[cfg(any(target_os = "linux", test))]
+fn parse_stat(stat: &str) -> Option<(char, u32)> {
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let ppid = fields.next()?.parse::<u32>().ok()?;
+    Some((state, ppid))
+}
+
+/// A zombie (or dead) process has exited: nothing of it runs, its
+/// environment is gone (the kernel refuses to read it) and its parent reaps it.
+#[cfg(any(target_os = "linux", test))]
+fn has_exited(state: char) -> bool {
+    matches!(state, 'Z' | 'X' | 'x')
 }
 
 /// An unreadable `/proc` entry matters only if it could be this user's: every
@@ -307,7 +369,11 @@ fn process_table(dispatch_job_id: &str) -> Option<ProcessTable> {
     // SAFETY: a plain query of the caller's own uid.
     let own_uid = unsafe { libc::geteuid() };
     let needle = format!("{DISPATCH_ENV}={dispatch_job_id}");
-    let mut table = ProcessTable::default();
+    let stat_of = |path: &std::path::Path| std::fs::read_to_string(path.join("stat"));
+    let mut table = ProcessTable {
+        restricted: std::fs::read(format!("/proc/{}/environ", std::process::id())).is_err(),
+        ..ProcessTable::default()
+    };
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let Some(pid) = entry
             .file_name()
@@ -316,43 +382,46 @@ fn process_table(dispatch_job_id: &str) -> Option<ProcessTable> {
         else {
             continue;
         };
+        let path = entry.path();
         let owner = match entry.metadata() {
             Ok(meta) => Some(meta.uid()),
             Err(error) if vanished(&error) => continue,
             Err(_) => None,
         };
-        // Field 2 (the command) may hold spaces: read after its closing ')'.
-        let ppid = match std::fs::read_to_string(entry.path().join("stat")) {
-            Ok(stat) => stat
-                .rsplit_once(')')
-                .and_then(|(_, after)| after.split_whitespace().nth(1)?.parse::<u32>().ok()),
+        let ours = could_be_ours(owner, own_uid);
+        let Some((state, ppid)) = (match stat_of(&path) {
+            Ok(stat) => parse_stat(&stat),
             Err(error) if vanished(&error) => continue,
             Err(_) => None,
-        };
-        let (tagged, environ_read) = match std::fs::read(entry.path().join("environ")) {
-            Ok(environ) => (
-                environ.split(|b| *b == 0).any(|e| e == needle.as_bytes()),
-                true,
-            ),
-            Err(error) if vanished(&error) => continue,
-            Err(_) => (false, false),
-        };
-        let Some(ppid) = ppid else {
+        }) else {
             // Without its parent the process cannot be followed either.
-            if could_be_ours(owner, own_uid) {
+            if ours {
                 table.unreadable += 1;
             }
             continue;
         };
-        if !environ_read && could_be_ours(owner, own_uid) {
-            table.unreadable += 1;
+        if has_exited(state) {
+            continue;
         }
+        let (tagged, hidden) = match std::fs::read(path.join("environ")) {
+            Ok(environ) => (
+                environ.split(|b| *b == 0).any(|e| e == needle.as_bytes()),
+                false,
+            ),
+            Err(error) if vanished(&error) => continue,
+            // It may have exited since its `stat` was read.
+            Err(_) => match stat_of(&path).ok().as_deref().and_then(parse_stat) {
+                Some((state, _)) if !has_exited(state) => (false, ours),
+                _ => continue,
+            },
+        };
         table.rows.push(ProcessRow {
             pid,
             ppid,
             sid: session_of(pid),
             stamp: start_stamp(pid),
             tagged,
+            hidden,
         });
     }
     Some(table)
@@ -398,6 +467,7 @@ fn process_table(dispatch_job_id: &str) -> Option<ProcessTable> {
             sid: session_of(pid as u32),
             stamp: start_stamp(pid as u32),
             tagged: carries_tag(pid as u32, dispatch_job_id),
+            hidden: false,
         });
     }
     Some(ProcessTable::of(rows))
@@ -501,14 +571,8 @@ fn is_alive(pid: u32) -> bool {
 fn is_zombie(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
-        .and_then(|stat| {
-            stat.rsplit_once(')')?
-                .1
-                .split_whitespace()
-                .next()
-                .map(|state| state == "Z")
-        })
-        .unwrap_or(false)
+        .and_then(|stat| parse_stat(&stat))
+        .is_some_and(|(state, _)| has_exited(state))
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -594,15 +658,16 @@ pub fn reap_dispatch(dispatch_job_id: &str) -> ReapReport {
             report.unverified = true;
             return report;
         };
-        if table.unreadable > 0 {
+        let targets = run_processes(&table.rows, own_pid);
+        let unverifiable = table.unverifiable(&targets, own_pid);
+        if unverifiable > 0 {
             tracing::warn!(
                 dispatch_job_id,
-                unreadable = table.unreadable,
+                unverifiable,
                 "processes of this user cannot be inspected: the dispatch's run cannot be fully verified"
             );
             report.unverified = true;
         }
-        let targets = run_processes(&table.rows, own_pid);
         if targets.is_empty() {
             report.survivors.clear();
             return report;

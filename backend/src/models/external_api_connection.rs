@@ -30,6 +30,10 @@ pub struct ExternalApiConnection {
     /// endpoint. Empty means "derive from `endpoint`".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_endpoint: Option<String>,
+    /// The model Decision steps call on this connection (KT-1366). A
+    /// capability like the media slots, not a quality tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

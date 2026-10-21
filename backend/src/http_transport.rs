@@ -185,6 +185,7 @@ mod tests {
             updated_at: now,
             image_model: None,
             video_model: None,
+            decision_model: None,
             media_endpoint: None,
         }
     }
