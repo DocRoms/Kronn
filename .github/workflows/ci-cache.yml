@@ -1,0 +1,341 @@
+name: CI Cache
+
+# A pull request reads the caches of main, never those of another pull request.
+# A push to main tests nothing new: the ruleset requires every pull request to
+# be up to date and green, and a rebase merge keeps its tree. So this workflow
+# only fills the caches CI Tests and CI Build read, under their exact keys and
+# paths, building what their jobs build without running the suites. Each job
+# looks its cache up first and stops there when main already holds it.
+# backend/scripts/test_cli_docker_wrappers.py keeps the cache blocks identical.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Keys follow Cargo.lock: the newest push warms whatever an older one would.
+concurrency:
+  group: ci-cache
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # See ci-test.yml.
+  ONNXRUNTIME_NODE_INSTALL: skip
+
+jobs:
+  # ci-test.yml test-backend.
+  warm-test-backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look up the cache on main
+        id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          lookup-only: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/llvm-cov-target/debug/.kronn-backend-cache-v3
+            target/llvm-cov-target/debug/.fingerprint
+            target/llvm-cov-target/debug/build
+            target/llvm-cov-target/debug/deps
+          key: cargo-hot-v3-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Cache cargo registry and bounded backend build (hot)
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/llvm-cov-target/debug/.kronn-backend-cache-v3
+            target/llvm-cov-target/debug/.fingerprint
+            target/llvm-cov-target/debug/build
+            target/llvm-cov-target/debug/deps
+          key: cargo-hot-v3-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Install Rust toolchain
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov and cargo-nextest
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      # nextest-archive compiles with the environment `cargo llvm-cov nextest`
+      # sets, into the same target directory, and runs nothing.
+      - name: Build the instrumented test binaries
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: |
+          cargo llvm-cov nextest-archive --workspace --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst"
+          rm -f "$RUNNER_TEMP/kronn-tests.tar.zst"
+
+      # test-backend rejects a restored cache without this marker.
+      - name: Mark bounded compiled backend cache ready
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: |
+          for directory in .fingerprint build deps; do
+            [ -d "../target/llvm-cov-target/debug/$directory" ]
+          done
+          find ../target/llvm-cov-target/debug/deps -type f -print -quit | grep -q .
+          echo 'schema=3' > ../target/llvm-cov-target/debug/.kronn-backend-cache-v3
+
+  # ci-test.yml test-backend-quality.
+  warm-test-backend-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look up the cache on main
+        id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          lookup-only: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+          key: clippy-v1-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Cache cargo registry and clippy dependencies
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+          key: clippy-v1-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Install Rust toolchain
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # The two compilations of test-backend-quality: clippy's metadata, then
+      # the dependencies doctests link (no doctest exists to run).
+      - name: Compile what the quality job compiles
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test --doc
+
+  # ci-test.yml test-e2e: same container, so the same toolchain and archive format.
+  warm-test-e2e:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      options: --user root
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look up the cache on main
+        id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          lookup-only: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+          key: e2e-dev-v1-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Cache cargo registry and the e2e backend dependencies
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+          key: e2e-dev-v1-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Install C toolchain + Rust
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev cmake curl
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build backend (dev profile)
+        if: steps.lookup.outputs.cache-hit != 'true'
+        working-directory: backend
+        run: cargo build --locked --bin kronn
+
+  # ci-test.yml security-scan.
+  warm-security-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Look up the cache on main
+        id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          lookup-only: true
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-v0.21
+
+      - name: Cache cargo-audit binary
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-v0.21
+
+      - name: Install Rust toolchain
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked
+
+  # ci-build.yml test-backend-portability.
+  warm-test-backend-portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 45 || 30 }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look up the cache on main
+        id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          lookup-only: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: portability-${{ matrix.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Cache cargo registry and build
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: portability-${{ matrix.os }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: portability-${{ matrix.os }}-
+
+      # The library test binary every filtered portability suite runs.
+      - name: Build the library tests
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: cargo test --lib --no-run
+
+  # ci-build.yml build-release.
+  warm-build-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look up the cache on main
+        id: lookup
+        uses: actions/cache/restore@v4
+        with:
+          lookup-only: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+          key: release-v1-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Cache cargo registry and release dependencies
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+          key: release-v1-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Install Rust toolchain
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build backend (release)
+        if: steps.lookup.outputs.cache-hit != 'true'
+        working-directory: backend
+        run: cargo build --release --locked --bin kronn
+
+  # ci-build.yml test-docs-sidecar-windows: setup-python's pip cache, and
+  # setup-msys2's own package cache on the same miss.
+  warm-test-docs-sidecar-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Python
+        id: python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/sidecars/docs/pyproject.toml
+
+      - name: Install Windows document-rendering libraries
+        if: steps.python.outputs.cache-hit != 'true'
+        id: msys2
+        uses: msys2/setup-msys2@v2.32.0
+        with:
+          update: false
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-pango
+
+      - name: Setup Node.js
+        if: steps.python.outputs.cache-hit != 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # Its pip installs fill the cache setup-python saves after the job.
+      - name: Build frozen document exporter
+        if: steps.python.outputs.cache-hit != 'true'
+        run: node desktop/scripts/build-docs-sidecar.mjs
+        env:
+          KRONN_DOCS_NATIVE_LIB_DIRS: ${{ format('{0}/ucrt64/bin', steps.msys2.outputs.msys2-location) }}

@@ -73,6 +73,207 @@ Release notes for 0.9.3 and earlier are available in the
   size in the instant its git index was last written: on Linux the safety
   snapshot copied the index with a new date, so git trusted stale file data.
 - `rustls` 0.23.46 fixes RUSTSEC-2026-0346 to 0349.
+### Added
+
+- A repository that already has its own docs can now receive the AI-doc
+  template v2 by merge (KT-1172). `GET /api/projects/:id/template-merge/plan`
+  shows, without writing anything, a correspondence table that maps each
+  existing doc, section by section, to a v2 file, plus one diff per file.
+  `POST /api/projects/:id/template-merge` (`{"base": "local"}` or
+  `"remote"` for the fetched default branch) applies it in a
+  `kronn/template-v2-merge` worktree: mapped sections are copied verbatim into
+  the v2 files that do not exist yet, existing files are never rewritten,
+  moved or quarantined, and the merge stops if any existing doc changes.
+  Unmapped sections are listed and stay where they are. Calling it again
+  resumes the same worktree. `.../accept` commits the files you keep on that
+  branch, and `DELETE` drops the worktree.
+- The project's Audit tab now offers this merge (KT-1181). On a documented
+  repository that was never merged, "Lancer l'audit" first opens the merge
+  panel, which also lets you run the audit without merging. The panel shows
+  the correspondence table with a badge per action, with unmapped sections
+  highlighted as left in place, and warns about docs that git does not track
+  yet so you commit them first. You pick the local or remote base, then get
+  one diff per file that you accept one by one or all at once. You can also
+  resume or abandon the merge. Every error says what to fix and offers
+  "Reprendre".
+
+### Fixed
+
+- The release body no longer mentions GitHub accounts by accident (KT-1179).
+  Multi-agent syntax examples in the CHANGELOG (an `at` sign followed by an
+  agent alias) were read by GitHub as mentions of real accounts, listed under
+  Contributors and notified. `release_notes.py` now wraps every bare mention
+  outside code, e-mail addresses and URLs in a code span, including one
+  that follows a lone backtick. Real human contributors, listed at release
+  time from the repository contributors API (bots dropped), stay mentions;
+  the maintainer is the fallback when the lookup fails or returns nothing.
+
+### Changed
+
+- CI no longer reruns the whole suite on a tree a pull request already
+  tested green (KT-1170). A push to `main` now runs only **CI Cache**, which
+  fills the caches pull requests read from `main`, under the same keys and
+  paths, without running a test, and stops at once when `main` already holds
+  them. A release tag first looks for a green CI Tests and CI Build
+  pull-request run on the same tree (the base an ancestor of the head) and
+  reruns a workflow only without that proof; the release still requires one
+  or the other for each. A flaky test can no longer turn `main` red after a
+  green merge, and a release saves two full passes.
+
+### Fixed
+
+- The desktop app now applies the saved anti-hallucination mode at startup
+  (KT-1149). Only the standalone backend armed it, so on desktop the setting
+  was ignored until it was saved again in Settings. The arming moved into the
+  shared startup config load, so both boot paths run it and cannot diverge.
+- Creating an isolated worktree no longer edits the operator's checkout
+  (KT-1125). It used to create or append to the project `.gitignore` to hide
+  `.kronn/`, which left a new file or a modified tracked file in `git status`.
+  The rule now goes into the repository's local `info/exclude` (the shared git
+  common dir), once, and nothing at all when `.kronn/` is already ignored.
+  The same holds for every other private path Kronn used to add to the project
+  `.gitignore` (`.kronn/tmp/`, `.kronn/context-files/`, generated `.mcp.json`,
+  `.kiro/`, `.gemini/`, `.vibe/`, `.ai/mcp/`, agent profile files, `docs/var/`
+  on project status) and for the startup sweep over all projects.
+  A `.kronn/` line that an older version already added to a `.gitignore` is
+  left in place: Kronn never removes lines from your files.
+- The legacy-docs check recognises the v2 template's `docs/AGENTS.md` again
+  (KT-1172). It compared the first line with the template heading, but the v2
+  file opens with `<!-- kronn:doc-version -->` comments, so a Kronn-managed
+  `docs/` was taken for hand-written docs.
+- After a Full audit, the central tech-debt index lists every TD sheet,
+  including the ones the seven sub-audits wrote (KT-949). Bench runs had
+  indexed 7 of 35, 6 of 37 and 13 of 57. Kronn now rewrites the
+  `## Current list` table of `docs/inconsistencies-tech-debt.md` from
+  `docs/tech-debt/TD-*.md`, without a model. Each active sheet gets one row
+  with its title, area, severity and status, the dimension index that lists
+  it, and a link to the sheet. Rejected sheets and accepted trade-offs are
+  counted but left out of the table. A row written by hand for a TD that
+  has no sheet is kept, and no sheet is deleted or merged. The table is
+  rewritten the same way after each TD validation card. A
+  `Dimension coverage` row that says `N/A` or `scanned — nothing
+  substantiable` while sheets exist for that dimension now reads `findings`.
+  The row names the TDs and keeps its previous outcome. A new `unindexed_td`
+  warning reports an active sheet the index does not reach. The audit
+  summary now counts the TDs of every sub-audit, not only the central rows.
+  The sheets in `docs/tech-debt/` stay the source of truth.
+- A second Full audit of a repository whose documentation is already up to
+  date no longer fails in a loop (KT-1130). A step whose agent had nothing to
+  change used to fail with "rewrote nothing", and "Reprendre" replayed it into
+  the same failure, so the run never reached Completed. When every other check
+  passes, the step now ends **Inchangé**: it counts as done, the run completes,
+  a resume skips it, and the validation discussion lists these steps in their
+  own section for the human to confirm. The timeline shows a neutral
+  "Inchangé" badge and an info toast instead of a red failure. A target that
+  still holds a placeholder, or that cannot be read, still fails. The outcome
+  is stored on the step (`audit_run_steps.unchanged`, migration 245) and in the
+  run's `step_outcomes_json`. A first audit of a blank repository also gets the
+  anti-hallucination spec its `docs/AGENTS.md` links to, so the documentary
+  check no longer blocks step 1. The outdated "no template to restore" advice
+  is gone from the step-failure toast.
+- `kronn dev` stops on Ctrl-C or TERM in every phase (KT-1145). Under bash
+  5.2 the backend supervisor could drop a TERM that arrived while it expanded
+  a command substitution, right after its Cargo build, and keep running. It
+  also waited for a long initial build to finish before honouring the signal.
+  It now uses no command substitution once its traps are set and runs the
+  build in the background, so the signal stops the build at once.
+- In a multi-agent room, an agent launched in parallel on the same message now
+  knows who it is and who the message is for (KT-1153). Its prompt gives its
+  room alias (`@codex`), the main addressee (the message's first target), and
+  the sentences of the message that name it. It is told to answer in its own
+  role, without taking over the main agent's or speaking for it, instead of
+  "reply directly to the user". It also sees the whole agent thread under the
+  message, replies to replies included, not only the direct replies. The
+  deeper replies are capped at the 24 most recent and 24 000 bytes.
+- An HTTP agent whose endpoint does not answer now fails in under a second
+  with the VPN card, and the other agents of the turn start anyway (KT-1154).
+  The start runs the KT-697 probe first (0.8 s budget, shared 30 s cache): a
+  DNS, refused, TLS, invalid-address or connect failure refuses that agent
+  alone, before any model call and without the runner's three retries. A
+  timeout or a 5xx lets the run try, so a slow proxy is never refused. Off the
+  VPN, LiteLLM used to show its card about 7 s after it was mentioned.
+- A model the catalogue refuses before the start now leaves a System card in
+  the discussion instead of a toast only. The card names the model and the
+  cause (access denied, not found, gone from the catalogue, sign-in needed...),
+  gives the date the catalogue recorded it, and the step that applies. The old
+  "not found or access denied, choose another model" sentence is gone.
+- The composer warns on the mentioned agent while you write: an endpoint the
+  last probe could not reach, with the reason, or a model the catalogue
+  refuses, with the date of that refusal. The probe runs when the set of
+  mentioned agents changes, not on each keystroke
+  (`POST /api/agents/reachability`).
+- A Full audit no longer leaves its working files in your `docs/` (KT-1165,
+  issue #231). The citation originals and the documentary optimization report
+  now live in `.kronn/audit/`, which Kronn lists in the repository's local
+  `.git/info/exclude` and never in your `.gitignore`, so `git add docs` picks
+  up only documentation. Files an older version left in
+  `docs/.kronn-citation-originals/` move there on the next audit, after a
+  sha256 check of each one, and the old `docs/.kronn-document-optimization.json`
+  is removed, as each audit writes it again.
+- A full audit can now pass on a project made of documents (KT-1164, #226).
+  A binary file (.docx, .pdf, image) has no lines, so it is cited by its bare
+  path, `[src: file: Budget 2026.docx]`, and the documentary gate accepts that
+  form. Kronn tells a binary file from a text file by its content, not its
+  extension. A line on a binary file is refused with a message that says to
+  drop the line; a text file still needs one. Percent-encoded links and
+  citations (`My%20File.docx`) are decoded before they are resolved, and a
+  path that leaves the project stays refused. The audit prompts, the repair
+  messages and the citation spec now describe the same form.
+- A native agent's `disc_append` during its own turn is checked to stay in
+  that turn's thread (KT-1171). With no explicit `reply_to_message_id`, the
+  post replies to the message that started its running job, so the other
+  agents of the turn see it in their view of the thread. An explicit reply
+  wins. A post from a joined CLI, outside a running job, or naming a job of
+  another discussion keeps no inherited reply. The orphan reply seen in a
+  0.14.3 room came from a backend older than this rule (KT-1151); new tests
+  now pin each case.
+- A Kronn backend started on its own `KRONN_DATA_DIR`, for a test or a bench,
+  no longer rewrites the CLI MCP configs in your home directory (KT-1144):
+  `~/.copilot/mcp-config.json`, `~/.codex/config.toml`, `~/.claude.json` and
+  `~/.gemini/settings.json` are left as they are, and the log says why. The
+  desktop app, `kronn start` and the Docker container sync as before, and so
+  does a backend whose `KRONN_DATA_DIR` names the default data directory or
+  that sets `KRONN_HOST_HOME`. `KRONN_HOST_MCP_SYNC=1` writes them anyway,
+  and `KRONN_HOST_MCP_SYNC=0` still turns the sync off.
+- The same isolated backend no longer writes your API keys into
+  `~/.codex/auth.json` or `~/.gemini/settings.json` (KT-1162). "Sync agent
+  tokens" and the OpenAI and Google override toggles answer HTTP 409 with a
+  message naming `KRONN_HOST_HOME` and `KRONN_HOST_MCP_SYNC=1`, and change
+  nothing. With `KRONN_HOST_HOME` set, both files are written under that home
+  only; Codex used to ignore it outside Docker. The default instance syncs as
+  before, `KRONN_HOST_MCP_SYNC=0` included, and "Sync agent tokens" now lists
+  only the files it actually wrote.
+- The Codex and Copilot syncs keep the MCP servers you added yourself. They
+  used to replace the whole `[mcp_servers]` table and the whole
+  `mcp-config.json`; Kronn now records the servers it wrote in
+  `kronn-mcp-state.json` beside each file and replaces only those. Servers
+  left there by an older Kronn whose MCP has since been deleted are not
+  recognised as Kronn's, so they stay until you remove them.
+- Mistral Vibe in Kronn can call Kronn's own tools again (KT-1158). Its
+  permission request names only the call id, so Kronn refused every
+  `disc_meta`/`disc_list` call, even with full access. Kronn now reads the tool
+  from the update that announced the call. A call to another tool is governed
+  as before. A refusal now says what was refused, why, and what the user can
+  change. `disc_meta`, `disc_list` and `disc_load_other` refuse an unexpected
+  argument and point to the right tool (`disc_meta` reads only the current
+  discussion).
+- An Agent step inside a foreach sub-workflow no longer crashes the backend
+  with a stack overflow (KT-1161). In a debug build each nested workflow run
+  takes about 1 MiB of stack, so a foreach child filled the 2 MiB default of a
+  runtime worker before its Agent step started. The backend and desktop
+  runtimes now give their threads 8 MiB, and the static tool catalogue is
+  built once instead of on the stack at every Agent step.
+- Automation and Planning no longer stall (KT-1148). Automation re-rendered
+  in full on every workflow poll (every 3 to 10 seconds), and these renders
+  kept the browser busy for close to a second at a time on a loaded machine.
+  Both pages now re-render only when their own data changes. Planning starts
+  its first load at once instead of waiting 180 ms for typing to settle. While
+  a list or a detail loads, both pages show the spinning Kronn logo instead of
+  an empty state or the old spinner. The database-size banner on Automation
+  now reads the file size only (a few milliseconds) instead of measuring
+  every table. That measurement took 1.7 to 2.4 seconds on an 11 GB database,
+  and Settings still runs it, but on a connection of its own: it no longer
+  holds up the requests queued behind it.
 
 ## [0.15.0] - 2026-10-10
 

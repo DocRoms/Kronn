@@ -162,7 +162,7 @@ pub async fn install_template(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("docs");
-    crate::core::mcp_scanner::ensure_gitignore_public(
+    crate::core::mcp_scanner::ensure_local_exclude(
         &project.path,
         &format!("{}/var/", docs_dir_name),
     );
@@ -713,7 +713,7 @@ mod tests {
             }
         }
         let _ = crate::core::docs_migration::prefill_files(&project, &created);
-        crate::core::mcp_scanner::ensure_gitignore_public(project.to_str().unwrap(), "docs/var/");
+        crate::core::mcp_scanner::ensure_local_exclude(project.to_str().unwrap(), "docs/var/");
 
         // ZERO bytes outside the root; every trap intact.
         assert!(

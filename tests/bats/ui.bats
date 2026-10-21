@@ -699,6 +699,114 @@ EOF
     done
 }
 
+# Bash 5.2 drops a trap that fires while it parses a command or process
+# substitution. Only the setup lines that run before the traps may use one.
+@test "dev backend supervisor uses no command substitution once its traps are set" {
+    local supervisor="$PROJECT_ROOT/scripts/dev-backend-supervisor.sh"
+    local first_trap allowed offending
+    first_trap="$(grep -n '^trap ' "$supervisor" | head -1 | cut -d: -f1)"
+    [[ -n "$first_trap" ]] || { echo "no trap found"; return 1; }
+    offending="$(grep -nE '\$\([^(]|\$\($|[<>]\(|`' "$supervisor" \
+        | grep -vE '^[0-9]+:[[:space:]]*#' \
+        | grep -vE '^[0-9]+:(SCRIPT_DIR|PROJECT_ROOT|state_dir)=' || true)"
+    if [[ -n "$offending" ]]; then
+        echo "substitution in code that runs after the traps:"
+        echo "$offending"
+        return 1
+    fi
+    allowed="$(grep -nE '^(SCRIPT_DIR|PROJECT_ROOT|state_dir)=' "$supervisor" | cut -d: -f1)"
+    local line
+    for line in $allowed; do
+        if (( line > first_trap )); then
+            echo "setup substitution on line $line runs after the first trap (line $first_trap)"
+            return 1
+        fi
+    done
+}
+
+@test "dev backend supervisor stops on TERM while the initial Cargo build is still running" {
+    local fixture="$BATS_TEST_TMPDIR/supervisor-blocked-build"
+    mkdir -p "$fixture/bin" "$fixture/backend"
+    cat >"$fixture/bin/cargo" <<'EOF2'
+#!/usr/bin/env bash
+echo $$ >"$KRONN_TEST_FIXTURE/cargo_pid"
+exec sleep 1000
+EOF2
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture/bin/curl"
+    cat >"$fixture/bin/df" <<'EOF2'
+#!/usr/bin/env bash
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/test 100 0 104857600 0%% /tmp\n'
+EOF2
+    cat >"$fixture/kronn" <<'EOF2'
+#!/usr/bin/env bash
+echo $$ >"$KRONN_TEST_FIXTURE/backend_pid"
+exec sleep 1000
+EOF2
+    cat >"$fixture/check" <<'EOF2'
+#!/usr/bin/env bash
+supervisor=""
+cleanup_fixture() {
+    local file
+    for file in "$KRONN_TEST_FIXTURE/cargo_pid" "$KRONN_TEST_FIXTURE/backend_pid"; do
+        [[ -s "$file" ]] && kill -KILL "$(cat "$file")" 2>/dev/null
+    done
+    if [[ -n "$supervisor" ]]; then
+        kill -KILL "$supervisor" 2>/dev/null || true
+        wait "$supervisor" 2>/dev/null || true
+    fi
+}
+trap cleanup_fixture EXIT
+"$1" >/dev/null 2>&1 3>&- &
+supervisor=$!
+for ((attempt = 0; attempt < 200; attempt++)); do
+    [[ -s "$KRONN_TEST_FIXTURE/cargo_pid" && -s "$KRONN_TEST_FIXTURE/backend_pid" ]] && break
+    sleep 0.025
+done
+if [[ ! -s "$KRONN_TEST_FIXTURE/cargo_pid" ]]; then
+    echo 'the fake Cargo build never started'
+    exit 1
+fi
+kill -TERM "$supervisor"
+for ((attempt = 0; attempt < 200; attempt++)); do
+    kill -0 "$supervisor" 2>/dev/null || break
+    sleep 0.025
+done
+if kill -0 "$supervisor" 2>/dev/null; then
+    echo 'supervisor still running 5s after TERM during the build'
+    exit 1
+fi
+wait "$supervisor"
+status=$?
+supervisor=""
+if [[ "$status" -ne 143 ]]; then
+    echo "supervisor exit status $status, expected 143"
+    exit 1
+fi
+for name in cargo_pid backend_pid; do
+    if kill -0 "$(cat "$KRONN_TEST_FIXTURE/$name")" 2>/dev/null; then
+        echo "unreaped child: $name"
+        exit 1
+    fi
+done
+if [[ -n "$(ls "$KRONN_TEST_FIXTURE/tmp")" ]]; then
+    echo 'supervisor left its state directory behind'
+    exit 1
+fi
+EOF2
+    chmod +x "$fixture/bin/cargo" "$fixture/bin/curl" "$fixture/bin/df" "$fixture/kronn"
+    mkdir -p "$fixture/tmp"
+    run env \
+        PATH="$fixture/bin:$PATH" \
+        TMPDIR="$fixture/tmp" \
+        KRONN_DEV_BACKEND_DIR="$fixture/backend" \
+        KRONN_DEV_BACKEND_BINARY="$fixture/kronn" \
+        KRONN_DEV_BACKEND_TARGET_DIR="$fixture/target" \
+        KRONN_DEV_BACKEND_HEALTH_URL="http://test.invalid/health" \
+        KRONN_TEST_FIXTURE="$fixture" \
+        bash "$fixture/check" "$PROJECT_ROOT/scripts/dev-backend-supervisor.sh"
+    assert_success
+}
+
 @test "dev backend supervisor serves the last successful binary while Cargo is blocked" {
     local fake_bin="$BATS_TEST_TMPDIR/supervisor-warm-bin"
     local fake_backend_dir="$BATS_TEST_TMPDIR/backend-warm"

@@ -109,6 +109,7 @@ import {
 } from '../lib/automationSort';
 import './DiscussionsPage.css';
 import './WorkflowsPage.css';
+import { LoadingState } from '../components/LoadingState';
 import { safeSetItem } from '../lib/safeStorage';
 
 type CompareTarget = {
@@ -399,7 +400,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // 0.8.5 — post-deploy focus: when the user lands here right after
   // clicking "Deploy improved QP" in DiscussionsPage, this state holds
   // the target QP id and briefly highlights the matching card.
-  const { data: workflowList, refetch: refetchWorkflowList } = useApi(() => workflowsApi.list(), []);
+  const {
+    data: workflowList,
+    hasLoaded: workflowListLoaded,
+    error: workflowListError,
+    refetch: refetchWorkflowList,
+  } = useApi(() => workflowsApi.list(), []);
+  const workflowListPending = !workflowListLoaded && !workflowListError;
   // KT-1037 — workflows Kronn disabled on its own, refreshed with the list.
   const { data: autoDisabledList, refetch: refetchAutoDisabled } = useApi(() => workflowsApi.autoDisabled(), []);
   const refetch = useCallback(() => {
@@ -2807,7 +2814,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       )}
 
       {/* Workflow list */}
-      {!showCreate && !editingWorkflow && workflows.length === 0 && (
+      {!showCreate && !editingWorkflow && workflowListPending && (
+        <LoadingState message={t('common.loading')} />
+      )}
+
+      {!showCreate && !editingWorkflow && !workflowListPending && workflows.length === 0 && (
         <div className="wf-empty">
           <Zap size={32} className="text-ghost mb-4" />
           <p>{t('wf.empty')}</p>
@@ -3032,9 +3043,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               </button>
             )}
             {selectedId && loadingDetail && (
-              <div className="wf-empty" style={{ padding: 40 }}>
-                <Loader2 size={24} className="text-accent wf-spin" />
-              </div>
+              <LoadingState message={t('common.loading')} />
             )}
 
             {selectedId && !loadingDetail && detailWorkflow && (
@@ -4833,3 +4842,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     </div>
   );
 }
+
+// Memoized so the Dashboard's polls do not re-render the whole page (KT-1148).
+export const WorkflowsPage = memo(WorkflowsPageView);

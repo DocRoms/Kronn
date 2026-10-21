@@ -18,10 +18,7 @@ fn main() -> anyhow::Result<()> {
     let env_token = kronn::core::config::take_env_auth_token();
     // Same for the operator's raw key: kept in memory, never inherited.
     kronn::core::keyvault::take_env_kek();
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(run(env_token))
+    kronn::runtime_builder().build()?.block_on(run(env_token))
 }
 
 async fn run(env_token: Option<String>) -> anyhow::Result<()> {
@@ -32,13 +29,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
 
     // Load config before tracing init so `debug_mode` can influence the
     // tracing filter's default level; `config::load()` emits no logs.
-    // Also arms the process timezone (KT-1103), shared with the desktop boot.
+    // Also arms the process timezone and anti-hallucination mode, shared with the desktop boot.
     let mut app_config = kronn::load_startup_config().await?;
-
-    // 0.8.7 anti-hallucination — arm the process-global mode flag from config
-    // so the runner chokepoint can gate P1/P2 without threading config through
-    // every agent-spawn site. Re-set on every save (see api::setup).
-    kronn::core::anti_halluc::set_mode(&app_config.server.anti_hallucination_mode);
 
     // Initialize tracing — write to stdout (Docker best practice: stdout for
     // logs, stderr for panics) AND to the in-memory ringbuffer that the
@@ -708,7 +700,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         }
     }
 
-    // Ensure .kronn/ is gitignored in all projects
+    // Keep .kronn/ out of git status in all projects (local exclude, never .gitignore)
     // (retroactive fix — also migrates old .kronn-tmp/ and .kronn-worktrees/ patterns)
     {
         let db = state.db.clone();
@@ -721,7 +713,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
                         || resolved.join(".kronn-tmp").exists()
                         || resolved.join(".kronn-worktrees").exists()
                     {
-                        mcp_scanner::ensure_gitignore_public(&p.path, ".kronn/");
+                        mcp_scanner::ensure_local_exclude(&p.path, ".kronn/");
                     }
                 }
                 Ok(())

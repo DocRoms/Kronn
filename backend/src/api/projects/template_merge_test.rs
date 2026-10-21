@@ -1,0 +1,225 @@
+use super::*;
+use std::collections::BTreeMap;
+use std::process::Command;
+use tempfile::TempDir;
+
+fn sh_git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn write(root: &Path, rel: &str, content: &str) {
+    let path = root.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
+
+fn template_docs() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs")
+}
+
+/// A committed, documented repo with an identity for the accept commit.
+fn documented_git_repo() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    sh_git(root, &["init", "-q", "-b", "main"]);
+    sh_git(root, &["config", "user.name", "Test"]);
+    sh_git(root, &["config", "user.email", "test@example.com"]);
+    write(
+        root,
+        "AGENTS.md",
+        "# Agent guide\n\n## Running tests\n\nmake iso-test\n",
+    );
+    write(root, "doc/deploy.md", "# Deployment\n\nTag then push.\n");
+    write(
+        root,
+        "docs/coding-rules.md",
+        "# Rules\n\nNo ticket ids in code.\n",
+    );
+    sh_git(root, &["add", "-A"]);
+    sh_git(root, &["commit", "-q", "-m", "init"]);
+    tmp
+}
+
+fn hashes(root: &Path) -> BTreeMap<String, String> {
+    let files: Vec<String> = tracked_files(root).unwrap().into_iter().collect();
+    docs_merge::fingerprint(root, &files)
+}
+
+#[test]
+fn the_read_only_plan_writes_nothing_and_lists_untracked_docs() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    write(root, "docs/local-notes.md", "## Debugging\n\nuntracked\n");
+    let status_before = sh_git(root, &["status", "--porcelain"]);
+    let view = preview_plan(root, &template_docs()).unwrap();
+    assert_eq!(sh_git(root, &["status", "--porcelain"]), status_before);
+    assert!(!root.join("docs/AGENTS.md").exists());
+    assert_eq!(
+        view.untracked_in_checkout,
+        vec!["docs/local-notes.md".to_string()]
+    );
+    assert!(view
+        .files
+        .iter()
+        .all(|f| f.outcome.is_none() && !f.diff.is_empty()));
+    assert!(view.table_markdown.contains("`AGENTS.md`"));
+}
+
+#[test]
+fn a_local_merge_runs_in_a_worktree_with_one_diff_per_file_and_resumes() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let before = hashes(root);
+    let view = run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+
+    // The checkout is untouched: same bytes, nothing new.
+    assert_eq!(hashes(root), before);
+    assert!(!root.join("docs/AGENTS.md").exists());
+    let wt = PathBuf::from(view.worktree_path.clone().unwrap());
+    assert!(
+        wt.starts_with(root.join(".kronn/worktrees")) || wt.ends_with("fixture--template-v2-merge")
+    );
+    assert_eq!(view.branch.as_deref(), Some(docs_merge::MERGE_BRANCH));
+    assert!(!view.resumed);
+
+    // Every new file has its diff; no existing file appears as modified.
+    assert!(view.files.iter().any(|f| f.path == "docs/AGENTS.md"));
+    assert!(view
+        .files
+        .iter()
+        .any(|f| f.path == "docs/conventions/README.md"));
+    for file in &view.files {
+        assert!(file
+            .diff
+            .starts_with(&format!("--- /dev/null\n+++ b/{}\n", file.path)));
+        assert_eq!(file.outcome, Some(WriteOutcome::Created));
+    }
+    assert!(!view.files.iter().any(|f| f.path == "docs/coding-rules.md"));
+    assert!(modified_existing_docs(&wt).unwrap().is_empty());
+    let testing = std::fs::read_to_string(wt.join("docs/testing-quality.md")).unwrap();
+    assert!(testing.contains("make iso-test"));
+    let ci = std::fs::read_to_string(wt.join("docs/workflow/ci-cd.md")).unwrap();
+    assert!(ci.contains("Tag then push."));
+
+    // Resume: same worktree, same table, nothing rewritten.
+    let again = run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    assert!(again.resumed);
+    assert_eq!(again.worktree_path, view.worktree_path);
+    assert_eq!(again.correspondence, view.correspondence);
+    assert!(again
+        .files
+        .iter()
+        .filter(|f| view
+            .files
+            .iter()
+            .any(|v| v.path == f.path && v.imported_sections > 0))
+        .all(|f| f.outcome == Some(WriteOutcome::AlreadyPresent)));
+
+    // Accept two files: only they are committed, on the merge branch.
+    let accepted = accept_merge(
+        root,
+        &[
+            "docs/AGENTS.md".to_string(),
+            "docs/testing-quality.md".to_string(),
+        ],
+    )
+    .unwrap();
+    let committed = sh_git(&wt, &["show", "--name-only", "--format=", &accepted.commit]);
+    let committed: BTreeSet<&str> = committed.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        committed,
+        ["docs/AGENTS.md", "docs/testing-quality.md"]
+            .into_iter()
+            .collect()
+    );
+    assert!(
+        wt.join("docs/glossary.md").exists(),
+        "unaccepted files are kept"
+    );
+    assert_eq!(
+        sh_git(root, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "main"
+    );
+    assert_eq!(hashes(root), before);
+
+    // An existing doc cannot be "accepted" into the commit.
+    assert!(accept_merge(root, &["docs/coding-rules.md".to_string()]).is_err());
+
+    discard_merge(root).unwrap();
+    assert!(!wt.exists());
+    assert!(existing_merge_worktree(root).is_none());
+}
+
+#[test]
+fn an_edited_existing_doc_in_the_worktree_stops_the_resume() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let view = run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let wt = PathBuf::from(view.worktree_path.unwrap());
+    write(&wt, "docs/coding-rules.md", "rewritten\n");
+    let err =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap_err();
+    assert!(err.contains("docs/coding-rules.md"), "{err}");
+    assert!(err.contains("resume"), "{err}");
+}
+
+#[test]
+fn a_remote_merge_starts_from_the_fetched_default_branch() {
+    let origin = TempDir::new().unwrap();
+    sh_git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let origin_url = origin.path().to_string_lossy().to_string();
+    sh_git(root, &["remote", "add", "origin", &origin_url]);
+    sh_git(root, &["push", "-q", "origin", "main"]);
+
+    // A teammate documents the glossary on the remote only.
+    let other = TempDir::new().unwrap();
+    sh_git(other.path(), &["clone", "-q", &origin_url, "."]);
+    write(
+        other.path(),
+        "documentation/terms.md",
+        "## Glossary\n\nEW = Euronews\n",
+    );
+    sh_git(other.path(), &["add", "-A"]);
+    sh_git(other.path(), &["commit", "-q", "-m", "terms"]);
+    sh_git(other.path(), &["push", "-q", "origin", "main"]);
+
+    let view = run_merge_in_worktree(root, "Fixture", MergeBase::Remote, &template_docs()).unwrap();
+    assert_eq!(view.base, MergeBase::Remote);
+    assert!(view.base_ref.starts_with("origin/"), "{}", view.base_ref);
+    let row = view
+        .correspondence
+        .iter()
+        .find(|r| r.source == "documentation/terms.md")
+        .expect("remote-only doc is mapped");
+    assert_eq!(row.target.as_deref(), Some("docs/glossary.md"));
+    let wt = PathBuf::from(view.worktree_path.unwrap());
+    assert!(std::fs::read_to_string(wt.join("docs/glossary.md"))
+        .unwrap()
+        .contains("EW = Euronews"));
+    // The local checkout never received the remote commit.
+    assert!(!root.join("documentation/terms.md").exists());
+}
+
+#[test]
+fn a_non_git_project_gets_a_plan_but_no_worktree() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "docs/setup.md", "## Installation\n\nnpm i\n");
+    let view = preview_plan(tmp.path(), &template_docs()).unwrap();
+    assert!(view.files.iter().any(|f| f.path == "docs/AGENTS.md"));
+    let err =
+        run_merge_in_worktree(tmp.path(), "x", MergeBase::Local, &template_docs()).unwrap_err();
+    assert!(err.contains("not a git repository"));
+}

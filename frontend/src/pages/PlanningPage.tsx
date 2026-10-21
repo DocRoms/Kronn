@@ -40,6 +40,7 @@ import type {
 } from '../types/generated';
 import './DiscussionsPage.css';
 import './PlanningPage.css';
+import { LoadingState } from '../components/LoadingState';
 
 interface Props {
   /** The task to open on mount, when the page keeps its own selection. */
@@ -90,7 +91,7 @@ function titleTokens(value: string): Set<string> {
   );
 }
 
-export function PlanningPage({
+function PlanningPageView({
   initialSelectedTaskId,
   selectedTaskId,
   onSelectedTaskChange,
@@ -127,6 +128,9 @@ export function PlanningPage({
   const [saving, setSaving] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [tasksLoaded, setTasksLoaded] = useState(false);
+  // Settled on the first answer, failed or not: the loader never outlives it.
+  const [tasksSettled, setTasksSettled] = useState(false);
+  const scheduledFetchRef = useRef<((cursor?: number) => Promise<void>) | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(readCollapsedPlanningSections);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const createTriggerRef = useRef<HTMLButtonElement>(null);
@@ -185,10 +189,21 @@ export function PlanningPage({
       if (!append) setTasksLoaded(true);
     } catch (cause) {
       toast(userError(cause), 'error');
+    } finally {
+      if (!append) setTasksSettled(true);
     }
   }, [priorityFilter, projectId, search, status, tag, toast, withDiscussion]);
 
+  // The debounce is for typing in the filters; the first load starts at once.
+  // A re-run for the same query (StrictMode's double mount) fetches nothing.
   useEffect(() => {
+    const previous = scheduledFetchRef.current;
+    if (previous === fetchTasks) return;
+    scheduledFetchRef.current = fetchTasks;
+    if (previous === null) {
+      void fetchTasks();
+      return;
+    }
     const timer = setTimeout(() => { void fetchTasks(); }, 180);
     return () => clearTimeout(timer);
   }, [fetchTasks]);
@@ -547,7 +562,9 @@ export function PlanningPage({
                   </div>}
                 </div>}
 
-                {visibleItems.length === 0 && <div className="disc-empty"><Target size={24} /> {t('planning.emptyBacklog')}</div>}
+                {visibleItems.length === 0 && (tasksSettled
+                  ? <div className="disc-empty"><Target size={24} /> {t('planning.emptyBacklog')}</div>
+                  : <LoadingState message={t('common.loading')} />)}
               </div>;
             },
             sidebarFooter: <CollectionSidebarFooter
@@ -571,7 +588,7 @@ export function PlanningPage({
                     )}
                     <button type="button" className="planning-detail-close" onClick={() => setSelectedId(null)} aria-label={t('common.close')}><X size={16} /></button>
                   </header>
-                  {detailLoading && <div className="planning-state"><Loader2 size={16} className="spin" /></div>}
+                  {detailLoading && <LoadingState message={t('common.loading')} />}
                   {detail && (
                     <PlanningDetailForm
                       key={detail.id}
@@ -1162,3 +1179,6 @@ function PlanningDetailForm({
     </div>
   );
 }
+
+// Memoized so the Dashboard's polls do not re-render the whole page (KT-1148).
+export const PlanningPage = memo(PlanningPageView);

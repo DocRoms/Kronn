@@ -86,10 +86,39 @@ pub fn is_kronn_managed_docs(docs_dir: &Path) -> bool {
     let Ok(content) = fs::read_to_string(&agents) else {
         return false;
     };
-    let first_line = content.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let first_line = first_content_line(&content);
     KRONN_SIGNATURE_LINES
         .iter()
         .any(|s| first_line.trim() == *s)
+}
+
+/// First non-empty line outside HTML comments: the v2 template opens with
+/// `<!-- kronn:doc-version=… -->` metadata before its signature heading.
+fn first_content_line(content: &str) -> &str {
+    let mut in_comment = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if in_comment {
+            in_comment = !trimmed.contains("-->");
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("<!--") {
+            if rest.contains("-->") {
+                if rest.trim_end().ends_with("-->") {
+                    continue;
+                }
+                // Text after a closed comment is content.
+                return line;
+            }
+            in_comment = true;
+            continue;
+        }
+        return line;
+    }
+    ""
 }
 
 /// Run the migration on the given `docs/` directory. Idempotent: a
@@ -252,6 +281,40 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(p, content).unwrap();
+    }
+
+    #[test]
+    fn the_shipped_template_agents_md_is_recognized_as_kronn_managed() {
+        // The real template opens with version comments, not the heading.
+        let tmp = TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        let template = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs/AGENTS.md"),
+        )
+        .unwrap();
+        assert!(template.trim_start().starts_with("<!--"));
+        write(&docs.join("AGENTS.md"), &template);
+        write(&docs.join("user-doc.md"), "user-curated content");
+        assert!(is_kronn_managed_docs(&docs));
+        let r = migrate_user_docs_to_legacy(&docs).unwrap();
+        assert_eq!(r.skip_reason, "already-kronn-managed");
+        assert!(docs.join("user-doc.md").exists());
+    }
+
+    #[test]
+    fn a_multi_line_leading_comment_is_skipped_but_user_text_is_not() {
+        let tmp = TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        write(
+            &docs.join("AGENTS.md"),
+            "<!--\n  note\n-->\n# AI agent context — Entry point\n",
+        );
+        assert!(is_kronn_managed_docs(&docs));
+        write(
+            &docs.join("AGENTS.md"),
+            "<!-- x --> hand text\n# AI agent context — Entry point\n",
+        );
+        assert!(!is_kronn_managed_docs(&docs));
     }
 
     #[test]

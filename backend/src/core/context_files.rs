@@ -130,7 +130,7 @@ pub fn save_image_to_dir(
     std::fs::create_dir_all(&ctx_dir)?;
     // Ensure .kronn/context-files/ is gitignored
     if let Some(dir_str) = dir.to_str() {
-        crate::core::mcp_scanner::ensure_gitignore_public(dir_str, ".kronn/context-files/");
+        crate::core::mcp_scanner::ensure_local_exclude(dir_str, ".kronn/context-files/");
     }
     // Use original filename for readability (agent sees a meaningful name)
     let safe_name = format!("{}_{}", &id[..8], filename.replace(['/', '\\', ' '], "_"));

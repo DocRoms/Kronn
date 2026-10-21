@@ -10,6 +10,8 @@ import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import AuditRecapPanel from './AuditRecapPanel';
 import { AuditTimeline } from './AuditTimeline';
+import { TemplateMergeOfferSlot } from './TemplateMergePanel';
+import { useTemplateMergeOffer } from '../hooks/useTemplateMergeOffer';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import {
@@ -469,6 +471,13 @@ export function ProjectCard({
     return () => { cancelled = true; };
   }, [proj.id, proj.audit_status, auditActive]);
 
+  // KT-1181 — a documented repo never merged gets the template v2 merge before its audit.
+  const templateMerge = useTemplateMergeOffer(
+    proj.id,
+    proj.audit_status,
+    !auditActive && (detailMode ? detailView === 'audit' : isSectionOpen('aiContext')),
+  );
+
   // Keep the latest terminal result visible on an opened project card. The
   // live tracker owns the in-progress state; history owns the durable result
   // once the tracker clears (including Failed and Interrupted runs).
@@ -819,13 +828,12 @@ export function ProjectCard({
         // (re-running the step is the only repair path) and the run
         // will end non-green; this per-step toast tells the user which
         // step is the culprit.
-        onStepWarning: (_step, file, reason, repaired) => {
-          console.warn(`[audit] step warning on ${file}: ${reason} (repaired=${repaired})`);
-          toast(
-            t('audit.stepWarning', file, reason, repaired ? t('audit.stepWarningRepaired') : t('audit.stepWarningNotRepaired')),
-            'error',
-          );
+        onStepWarning: (_step, file, reason) => {
+          console.warn(`[audit] step warning on ${file}: ${reason}`);
+          toast(t('audit.stepWarning', file, reason), 'error');
         },
+        // KT-1130 — already up to date: a neutral note, never an error.
+        onStepUnchanged: (_step, file) => { toast(t('audit.stepUnchanged', file), 'info'); },
         // NON-terminal: the step closed with its own step_done and the run
         // continues — the done/interrupted terminal owns the cleanup UX.
         onStepError: (error) => {
@@ -2352,6 +2360,9 @@ export function ProjectCard({
                     </div>
                   </div>
                 )}
+                {!bootstrapInProgress && !auditActive && (
+                  <TemplateMergeOfferSlot offer={templateMerge} projectId={proj.id} />
+                )}
                 {!bootstrapInProgress && (
                   <AuditTimeline
                     projectId={proj.id}
@@ -2387,7 +2398,9 @@ export function ProjectCard({
                       : null}
                     onCancel={handleCancelAudit}
                     resumable={resumableAudit}
-                    onLaunch={() => void handleFullAudit()}
+                    onLaunch={() => resumableAudit
+                      ? void handleFullAudit()
+                      : void templateMerge.gateLaunch(() => void handleFullAudit())}
                     validationInProgress={validationInProgress}
                     onValidate={() => {
                       if (validationInProgress && validationDisc) {

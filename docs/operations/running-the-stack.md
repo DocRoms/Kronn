@@ -23,7 +23,7 @@ stack, not to start a task. Content verbatim.
   supervisor distinguishes a readiness timeout from an actual process exit;
   even exit 0 before readiness is a failed reload. An intentional stop does not
   create a backend-failure marker.
-  [src: file: scripts/dev-backend-supervisor.sh:66]
+  [src: file: scripts/dev-backend-supervisor.sh:109]
   [src: file: lib/ui.sh:367]
   [src: file: backend/src/main.rs:676]
 - The desktop app and native CLI share configuration, but the desktop's free

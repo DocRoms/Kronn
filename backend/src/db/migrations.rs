@@ -921,6 +921,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "244_trust_trigger_without_retention",
         include_str!("sql/244_trust_trigger_without_retention.sql"),
     ),
+    (
+        "245_audit_step_unchanged",
+        include_str!("sql/245_audit_step_unchanged.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

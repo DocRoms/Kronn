@@ -455,9 +455,9 @@ fn tracked_artifacts_from_listing(listing: &[u8], yarn_zero_install: bool) -> Ve
             dimension: "Maintainability",
             severity: Severity::Low,
             title: format!("Tracked {kind} should stay outside source control"),
-            // A bare path is the honest citation for generated/binary files:
-            // the source verifier accepts existence-only file evidence, while
-            // a synthetic line 0 is outside its valid line contract.
+            // A bare path, never a synthetic line 0: the source verifier accepts
+            // it as existence-only evidence, and the documentary gate accepts a
+            // bare `[src: file:]` marker only for a binary file.
             evidence: path.to_string(),
         });
     }

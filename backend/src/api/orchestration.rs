@@ -10109,7 +10109,7 @@ struct WorkerPreflight<'a> {
 
 /// What the catalogue says about a named connection's network. A missing or
 /// expired observation is unverified: the absence of a probe is never success.
-fn connection_connectivity(
+pub(crate) fn connection_connectivity(
     observation: Option<&crate::core::endpoint_reachability::EndpointObservation>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> crate::models::WorkerConnectivity {

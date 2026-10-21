@@ -43,6 +43,8 @@ import { discussions as discussionsApi, autoTriggersApi, config as configApi } f
 import type { ExternalApiConnectionView } from '../lib/api';
 import { resolveCatalogTier, matchesCatalogSearch, catalogTargetSearchTerms } from '../lib/modelCatalogSelection';
 import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
+import { useTargetReachability, reachabilityKey } from '../hooks/useTargetReachability';
+import { composerTargetWarning, formatWarningDate, type ComposerTargetWarning } from '../lib/composerTargetWarnings';
 import { MentionTierChoices } from './MentionTierChoices';
 import { MENTION_TIER_CHOICES, nextMentionTierIndex } from '../lib/mentionTierSelection';
 import { detectTriggeredSkills } from '../lib/autoTriggers';
@@ -504,7 +506,8 @@ export function ChatInput({
   }, [flushDraftNow, updateChatInput, updateMentionTierOverrides]);
 
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
-  const { catalog, catalogError } = useModelCatalogSnapshot(mentionQuery !== null);
+  // Also loaded while a draft names agents, so their chips can warn before sending.
+  const { catalog, catalogError } = useModelCatalogSnapshot(mentionQuery !== null || draftTargets.length > 0);
   const [mentionIndex, setMentionIndex] = useState(0);
   // Keyboard tier pick inside the mention palette. `null` means UNTOUCHED, and
   // that distinction is load-bearing: Tab/Enter must keep sending no tier at all
@@ -776,8 +779,41 @@ export function ChatInput({
       ),
       tier,
       unavailable: resolved.unavailable,
+      resolved,
     };
   }, [discussion, mentionTierOverrides, mentionTierResolution, preferredTiers, t]);
+  const mentionForTarget = useCallback((target: MessageTarget) => AGENT_MENTIONS.find(mention => mention.target
+    && mention.target.kind === target.kind
+    && mention.target.agent_type === target.agent_type
+    && (mention.target.cli_session_id ?? null) === (target.cli_session_id ?? null)
+    && (mention.target.connection_id ?? null) === (target.connection_id ?? null)), [AGENT_MENTIONS]);
+  // KT-1154 — HTTP agents named in the draft, with the connection they run on.
+  const reachabilityTargets = useMemo(() => draftTargets
+    .filter(target => target.kind !== 'cli'
+      && (Boolean(target.connection_id) || ['Ollama', 'LiteLlm', 'Nvidia', 'Custom'].includes(target.agent_type)))
+    .map(target => ({
+      agent_type: target.agent_type,
+      connection_id: target.connection_id
+        ?? (target.kind === 'discussion_agent' ? discussion?.connection_id ?? null : null),
+    })), [draftTargets, discussion?.connection_id]);
+  const targetReachability = useTargetReachability(reachabilityTargets);
+  const draftTargetWarnings = useMemo(() => draftTargets.flatMap(target => {
+    if (target.kind === 'cli') return [];
+    const mention = mentionForTarget(target);
+    const connectionId = target.connection_id
+      ?? (target.kind === 'discussion_agent' ? discussion?.connection_id ?? null : null);
+    const warning = composerTargetWarning(
+      targetReachability.get(reachabilityKey({ agent_type: target.agent_type, connection_id: connectionId })),
+      mention ? mentionRoutingMode(mention)?.resolved : null,
+    );
+    return warning ? [{ target, trigger: mention?.trigger ?? mentionTrigger(target.agent_type), warning }] : [];
+  }), [draftTargets, mentionForTarget, mentionRoutingMode, targetReachability, discussion?.connection_id]);
+  const targetWarningText = (trigger: string, warning: ComposerTargetWarning) => warning.kind === 'unreachable'
+    ? t('disc.targetWarning.unreachable', trigger, t(`disc.targetWarning.reason.${warning.reason}`),
+      formatWarningDate(warning.checkedAt))
+    : t('disc.targetWarning.refused', trigger, warning.model || t('disc.defaultAgentModel'),
+      warning.reason ? t(`modelCatalog.reason.${warning.reason}`) : t('modelCatalog.unavailable'),
+      formatWarningDate(warning.since));
   const selectMention = (mention: (typeof AGENT_MENTIONS)[number], tier?: ModelTier) => {
     const unavailable = tier ? mentionTierResolution(mention, tier).unavailable : mentionRoutingMode(mention)?.unavailable;
     if (unavailable) return;
@@ -1788,18 +1824,39 @@ export function ChatInput({
           >
             <Users size={11} aria-hidden="true" />
             <span>{t('disc.parallelLaunchCount', draftTargets.length)}</span>
-            {draftTargets.map(target => (
+            {draftTargets.map(target => {
+              const flagged = draftTargetWarnings.find(item => item.target === target);
+              return (
+                <span
+                  key={`${target.kind}:${target.agent_type}:${target.cli_session_id ?? ''}:${target.connection_id ?? ''}`}
+                  className="disc-composer-parallel-chip"
+                  data-warning={flagged?.warning.kind}
+                  title={flagged ? targetWarningText(flagged.trigger, flagged.warning) : undefined}
+                  style={{ color: agentTextColor(target.agent_type) }}
+                >
+                  {flagged && <AlertTriangle size={10} aria-hidden="true" />}
+                  {mentionForTarget(target)?.trigger ?? mentionTrigger(target.agent_type)}
+                </span>
+              );
+            })}
+          </div>
+        )}
+
+        {!delegationPrompt && draftTargetWarnings.length > 0 && (
+          <div
+            className="disc-composer-target-warnings"
+            role="status"
+            aria-live="polite"
+            data-testid="composer-target-warnings"
+          >
+            {draftTargetWarnings.map(({ target, trigger, warning }) => (
               <span
-                key={`${target.kind}:${target.agent_type}:${target.cli_session_id ?? ''}:${target.connection_id ?? ''}`}
-                className="disc-composer-parallel-chip"
-                style={{ color: agentTextColor(target.agent_type) }}
+                key={`${target.kind}:${target.agent_type}:${target.connection_id ?? ''}`}
+                className="disc-composer-target-warning"
+                data-warning={warning.kind}
               >
-                {AGENT_MENTIONS.find(mention => mention.target
-                  && mention.target.kind === target.kind
-                  && mention.target.agent_type === target.agent_type
-                  && (mention.target.cli_session_id ?? null) === (target.cli_session_id ?? null)
-                  && (mention.target.connection_id ?? null) === (target.connection_id ?? null))?.trigger
-                  ?? mentionTrigger(target.agent_type)}
+                <AlertTriangle size={11} aria-hidden="true" />
+                {targetWarningText(trigger, warning)}
               </span>
             ))}
           </div>

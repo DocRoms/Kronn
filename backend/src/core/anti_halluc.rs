@@ -1266,6 +1266,45 @@ fn normalize_lexical(p: &Path) -> PathBuf {
     out
 }
 
+/// Bytes sniffed to tell a binary file from a text one.
+const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+
+/// A file with no lines to cite (.docx, .pdf, images), told apart by content,
+/// not extension: a NUL byte, invalid UTF-8, or a PDF header in the first
+/// bytes. Such a file is cited by bare path, never `path:line`.
+pub(crate) fn is_binary_file(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = Vec::with_capacity(BINARY_SNIFF_BYTES);
+    if file
+        .take(BINARY_SNIFF_BYTES as u64)
+        .read_to_end(&mut head)
+        .is_err()
+    {
+        return false;
+    }
+    if head.starts_with(b"%PDF-") || head.contains(&0) {
+        return true;
+    }
+    // A multi-byte character cut by the sniff window is not invalid UTF-8.
+    std::str::from_utf8(&head).is_err_and(|e| e.error_len().is_some())
+}
+
+/// Percent-decoded relative form of a cited or linked path (`My%20File.docx`),
+/// or `None` when decoding changes nothing or yields a rooted path. The caller
+/// still jails the result like any other relative path.
+pub(crate) fn percent_decoded_relative(raw: &str) -> Option<String> {
+    let decoded = crate::core::message_file_links::percent_decode(raw)?;
+    let path = Path::new(&decoded);
+    let rooted = path.has_root()
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::Prefix(_)));
+    (decoded != raw && !decoded.contains('\0') && !rooted).then_some(decoded)
+}
+
 fn count_lines_capped(path: &Path) -> Option<usize> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > LINE_COUNT_SIZE_CAP_BYTES {
@@ -1368,6 +1407,10 @@ fn line_bounds_status(
 ) -> (SourceStatus, String) {
     match line_spec {
         None => (SourceStatus::Verified, "file exists".into()),
+        Some(_) if is_binary_file(candidate) => (
+            SourceStatus::OutOfBounds,
+            "binary file has no lines — cite it by bare path, without a line".into(),
+        ),
         Some((start, end)) => match count_lines_capped(candidate) {
             None => (
                 SourceStatus::Verified,
@@ -1554,6 +1597,21 @@ fn resolve_unique_path_suffix(needle: &str, roots: &[&Path]) -> BasenameResoluti
 /// - Bare basename (no separator) unresolved at root level → unique-match walk
 ///   (`resolve_unique_basename`) before NotFound.
 fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
+    let verdict = verify_file_ref_as_written(reference, roots);
+    if verdict.0 != SourceStatus::NotFound {
+        return verdict;
+    }
+    // `My%20File.docx` names `My File.docx`; the decoded form is relative only.
+    match percent_decoded_relative(clean_reference(reference)) {
+        Some(decoded) => match verify_file_ref_as_written(&decoded, roots) {
+            decoded_verdict if decoded_verdict.0 != SourceStatus::NotFound => decoded_verdict,
+            _ => verdict,
+        },
+        None => verdict,
+    }
+}
+
+fn verify_file_ref_as_written(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
     let reference = clean_reference(reference);
     if reference.is_empty() {
         return (SourceStatus::EmptyRef, "empty source reference".into());
@@ -5074,5 +5132,70 @@ probably [src: inferred: from the signature].";
             assert!(r.has_signal(), "the one verified file gives a green signal");
             std::fs::remove_dir_all(&root).ok();
         }
+    }
+}
+
+#[cfg(test)]
+mod binary_citations {
+    use super::*;
+
+    fn project() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("Budget 2026.docx"),
+            b"PK\x03\x04\x14\x00\x06\x00body",
+        )
+        .unwrap();
+        std::fs::write(root.join("notes.md"), "one\ntwo\n").unwrap();
+        std::fs::write(tmp.path().join("secret.md"), "outside\n").unwrap();
+        tmp
+    }
+
+    fn status(raw: &str, root: &Path) -> SourceStatus {
+        verify_source_marker(raw, Some(root)).status
+    }
+
+    #[test]
+    fn a_binary_file_has_no_lines_but_exists() {
+        let tmp = project();
+        let root = tmp.path().join("proj");
+        assert_eq!(
+            status("file: Budget 2026.docx", &root),
+            SourceStatus::Verified
+        );
+        let check = verify_source_marker("file: Budget 2026.docx:1", Some(&root));
+        assert_eq!(check.status, SourceStatus::OutOfBounds);
+        assert!(
+            check.detail.contains("cite it by bare path"),
+            "{}",
+            check.detail
+        );
+        assert_eq!(status("file: notes.md:2", &root), SourceStatus::Verified);
+    }
+
+    #[test]
+    fn percent_encoded_paths_resolve_without_escaping_the_root() {
+        let tmp = project();
+        let root = tmp.path().join("proj");
+        assert_eq!(
+            status("file: Budget%202026.docx", &root),
+            SourceStatus::Verified
+        );
+        assert_eq!(status("file: notes%2Emd:1", &root), SourceStatus::Verified);
+        assert_eq!(
+            status("file: ..%2Fsecret.md:1", &root),
+            SourceStatus::OutsideProject
+        );
+        let encoded_absolute = format!(
+            "file: %2F{}",
+            tmp.path()
+                .join("secret.md")
+                .display()
+                .to_string()
+                .trim_start_matches('/')
+        );
+        assert!(status(&encoded_absolute, &root).is_fabricated());
     }
 }

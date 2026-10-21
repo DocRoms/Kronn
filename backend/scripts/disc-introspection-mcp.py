@@ -4556,7 +4556,7 @@ def call_disc_question_list(args):
             "pending_count": data.get("pending_count", 0), "truncated": len(matches) > 50}
 
 
-def call_disc_meta(_args):
+def call_disc_meta(args):
     """Room metadata, plus who can actually be addressed in it (KT-372 DoD-4).
 
     The 2026-08-21 incident was not a resolution failure: `@claude` really is
@@ -4567,6 +4567,13 @@ def call_disc_meta(_args):
     So the cheap call an agent already makes before acting now carries the exact
     aliases — no second HTTP round trip, and no internal session pk to know.
     """
+    # An id passed here was silently ignored, so the agent read this room's
+    # metadata believing it was another discussion's.
+    _reject_unknown_args(
+        "disc_meta", args,
+        hint="disc_meta reads only the current discussion; for another one call "
+        "disc_load_other({disc_id}).",
+    )
     disc_id = _disc_id()
     meta = _unwrap(_http("GET", f"/api/discussions/{disc_id}/meta"))
     if not isinstance(meta, dict):
@@ -6662,6 +6669,10 @@ def call_disc_list(args):
     default (the rooms worth joining cross-instance); shared_only=false for all.
     No search keyword needed — complements disc_search (keyword) and
     disc_load_other (read one by id)."""
+    _reject_unknown_args(
+        "disc_list", args,
+        hint="To read one discussion by id call disc_load_other({disc_id}).",
+    )
     shared_only = args.get("shared_only", True)
     try:
         limit = int(args.get("limit") or 30)
@@ -7503,6 +7514,9 @@ def _wait_budget_hint(started, polls):
 
 
 def call_disc_load_other(args):
+    _reject_unknown_args(
+        "disc_load_other", args, hint="The discussion id goes in `disc_id`."
+    )
     disc_id = args.get("disc_id")
     if not disc_id:
         raise RuntimeError("disc_load_other: missing required 'disc_id'")
