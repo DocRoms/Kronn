@@ -456,6 +456,86 @@ pub(crate) fn human_references_block(
     format!("{title}\n{intro}\n{list}\n\n{rule}\n\n")
 }
 
+/// KT-1353 — what the documentary gate let through or repaired on its own, said
+/// to the human: the citation problems the committed docs already held in
+/// documents no step owns, and the exact replacements Kronn applied. Empty when
+/// there is nothing of either.
+pub(crate) fn documentary_notes_block(
+    preexisting: &[crate::core::document_optimization::Diagnostic],
+    autofixes: &[(u32, crate::core::document_optimization::AppliedFix)],
+    language: &str,
+) -> String {
+    if preexisting.is_empty() && autofixes.is_empty() {
+        return String::new();
+    }
+    const SHOWN: usize = 30;
+    let more = |n: usize| match language {
+        "en" => format!("- … and {n} more"),
+        "es" => format!("- … y {n} más"),
+        _ => format!("- … et {n} autres"),
+    };
+    let lines = |items: Vec<String>| {
+        let total = items.len();
+        let mut shown: Vec<String> = items.into_iter().take(SHOWN).collect();
+        if total > SHOWN {
+            shown.push(more(total - SHOWN));
+        }
+        shown.join("\n")
+    };
+    let held = lines(
+        preexisting
+            .iter()
+            .map(|d| format!("- `{}` — {}", d.path, d.message))
+            .collect(),
+    );
+    let fixed = lines(
+        autofixes
+            .iter()
+            .map(|(step, f)| {
+                format!(
+                    "- step {step}, `{}` — {} `{}` → `{}`",
+                    f.path, f.kind, f.from, f.to
+                )
+            })
+            .collect(),
+    );
+    let (title, held_title, held_rule, fixed_title) = match language {
+        "en" => (
+            "## DOCUMENTARY GATE — what it let through and what it repaired",
+            format!("{} citation problem(s) in documents no step owns (they were already there before the audit, and the audit left them as they were):", preexisting.len()),
+            "Editing one of these documents makes its problems blocking again: fix them there or leave the document alone.",
+            format!("{} exact replacement(s) Kronn applied itself, with the gate's own wording:", autofixes.len()),
+        ),
+        "es" => (
+            "## PUERTA DOCUMENTAL — lo que dejó pasar y lo que reparó",
+            format!("{} problema(s) de citas en documentos que ningún paso posee (ya estaban antes de la auditoría y ésta los dejó como estaban):", preexisting.len()),
+            "Editar uno de estos documentos vuelve a bloquear sus problemas: corrígelos ahí o deja el documento intacto.",
+            format!("{} reemplazo(s) exacto(s) que Kronn aplicó solo, con la formulación de la propia puerta:", autofixes.len()),
+        ),
+        _ => (
+            "## PORTE DOCUMENTAIRE — ce qu'elle a laissé passer et ce qu'elle a réparé",
+            format!("{} problème(s) de citation dans des documents qu'aucune étape ne possède (déjà là avant l'audit, que l'audit a laissés tels quels) :", preexisting.len()),
+            "Éditer l'un de ces documents rend ses problèmes de nouveau bloquants : corrige-les dans ce document ou ne le touche pas.",
+            format!("{} remplacement(s) exact(s) appliqué(s) par Kronn lui-même, avec la formulation de la porte :", autofixes.len()),
+        ),
+    };
+    let mut out = format!("{title}\n");
+    if !preexisting.is_empty() {
+        out.push_str(&format!("{held_title}\n{held}\n{held_rule}\n\n"));
+    }
+    if !autofixes.is_empty() {
+        out.push_str(&format!("{fixed_title}\n{fixed}\n\n"));
+    }
+    let rule = match language {
+        "en" => "List both to the user in a separate section of your first message; they are not yours to hide.",
+        "es" => "Enumera ambos al usuario en una sección aparte de tu primer mensaje; no te corresponde ocultarlos.",
+        _ => "Liste les deux à l'utilisateur dans une section à part de ton premier message ; ce n'est pas à toi de les cacher.",
+    };
+    out.push_str(rule);
+    out.push_str("\n\n");
+    out
+}
+
 /// KT-1130 — the steps that verified their document and had nothing to
 /// change, listed apart so the human confirms them. Empty when there is none.
 pub(crate) fn unchanged_steps_block(

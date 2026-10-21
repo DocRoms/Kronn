@@ -84,7 +84,7 @@ definitions and import identities, and refuses stale decisions. All resources,
 datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
-[src: file: backend/src/lib.rs:1454-1475#artifact_portability]
+[src: file: backend/src/lib.rs:1297-1318#artifact_portability]
 [src: file: backend/src/api/artifact_portability/import.rs:1029-1047#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
@@ -242,7 +242,7 @@ block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
 `[src: file: backend/src/api/live_pages.rs:563-573#delete_dataset]`
 `[src: file: backend/src/api/live_pages.rs:598-609#update_dataset]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:7967-7974#call_page_delete_dataset]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:7985-7992#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
 become rows, a single array inside an object envelope is expanded while scalar
@@ -615,8 +615,8 @@ Agents learn this contract where they write Page HTML: the MCP manuals of
 `data-kronn-action-state`, what the card shows), `page_update_html` adds that a
 block's reference must stay stable across revisions since it ties a button to
 its past launches, and the `workflow-architect` skill carries the same rules.
-`[src: file: backend/scripts/disc-introspection-mcp.py:9951-9986#_PAGE_ACTION_CONTRACT]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10274-10283#page_update_html]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:9974-10009#_PAGE_ACTION_CONTRACT]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10310-10319#page_update_html]`
 `[src: file: backend/src/skills/workflow-architect.md:384-391#data-kronn-action-state]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records

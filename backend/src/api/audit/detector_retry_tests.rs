@@ -107,6 +107,21 @@ async fn mock_agent(
     project: &std::path::Path,
     repair: bool,
 ) -> (MockServer, Arc<Mutex<Vec<Value>>>, Arc<Mutex<usize>>) {
+    mock_agent_writing(project, move |attempt| {
+        index(&if repair && attempt > 1 {
+            format!("{OTHER_ANCHORS} src/page.html")
+        } else {
+            OTHER_ANCHORS.to_string()
+        })
+    })
+    .await
+}
+
+/// [`mock_agent`] writing `content(launch)` as the TD index on its n-th launch.
+async fn mock_agent_writing(
+    project: &std::path::Path,
+    content: impl Fn(usize) -> String + Send + Sync + 'static,
+) -> (MockServer, Arc<Mutex<Vec<Value>>>, Arc<Mutex<usize>>) {
     let server = MockServer::builder().start().await;
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let attempts = Arc::new(Mutex::new(0usize));
@@ -140,16 +155,11 @@ async fn mock_agent(
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
                     .collect();
-                let disposed = if repair && *attempt > 1 {
-                    format!("{OTHER_ANCHORS} src/page.html")
-                } else {
-                    OTHER_ANCHORS.to_string()
-                };
                 tool_calls(&[
                     ("read_file", json!({"path":TARGET})),
                     (
                         "write_file",
-                        json!({"path":TARGET,"expected_sha256":digest,"content":index(&disposed)}),
+                        json!({"path":TARGET,"expected_sha256":digest,"content":content(*attempt)}),
                     ),
                 ])
             };
@@ -222,6 +232,7 @@ async fn detector_gate_retries_with_feedback_and_skips_generated_files() {
                     retry_steps: None,
                     redo_steps: None,
                     fresh: None,
+                    accept_unverified_agents: None,
                 }),
             )
             .await
@@ -248,6 +259,8 @@ async fn detector_gate_retries_with_feedback_and_skips_generated_files() {
             let second = requests.lock().unwrap()[2].to_string();
             assert!(second.contains("Detector signals"), "{second}");
             assert!(second.contains("src/page.html"), "{second}");
+            // The feedback names the exact text the check looks for.
+            assert!(second.contains("write `src/page.html`"), "{second}");
         } else {
             let first = requests.lock().unwrap()[0].to_string();
             assert!(
@@ -264,21 +277,22 @@ async fn detector_gate_retries_with_feedback_and_skips_generated_files() {
             .await
             .unwrap();
         let step = steps.iter().find(|step| step.step_index == 8).unwrap();
-        if scenario == 1 {
-            assert!(!step.cli_success, "{stream}");
-            assert!(
-                step.step_warning
-                    .as_deref()
-                    .unwrap()
-                    .contains(crate::api::audit::step_guard::DETECTOR_FRAGMENT),
-                "{:?}",
-                step.step_warning
-            );
-            assert_eq!(done["status"], "interrupted");
-        } else {
-            assert!(step.cli_success, "scenario {scenario}: {stream}");
-            assert_eq!(done["status"], "complete", "{stream}");
-        }
+        // KT-1357 — a signal still unaddressed after the budget no longer fails
+        // the run: Kronn lists it for triage in the index and says so.
+        assert!(step.cli_success, "scenario {scenario}: {stream}");
+        assert_eq!(done["status"], "complete", "{stream}");
+        let listed = std::fs::read_to_string(project.path().join(TARGET))
+            .unwrap()
+            .contains(crate::core::audit_detectors::UNADDRESSED_HEADING);
+        assert_eq!(listed, scenario == 1, "scenario {scenario}");
+        let notices = sse_events(&stream, "warning");
+        assert_eq!(
+            notices.iter().any(|w| w["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("Unaddressed detector signals"))),
+            scenario == 1,
+            "scenario {scenario}: {stream}"
+        );
     }
 }
 
@@ -333,6 +347,7 @@ async fn partial_refresh_detector_gate_retries_with_feedback() {
                     connection_id: None,
                     tier: Some(ModelTier::Reasoning),
                     steps: vec![step],
+                    accept_unverified_agents: None,
                 }),
             )
             .await
@@ -353,16 +368,113 @@ async fn partial_refresh_detector_gate_retries_with_feedback() {
         let second = requests.lock().unwrap()[2].to_string();
         assert!(second.contains("Detector signals"), "{second}");
         assert!(second.contains("src/page.html"), "{second}");
+        // KT-1357 — the spent budget lists the signal for triage, no failed step.
+        assert!(sse_events(&stream, "step_warning").is_empty(), "{stream}");
+        let listed = std::fs::read_to_string(project.path().join(TARGET))
+            .unwrap()
+            .contains(crate::core::audit_detectors::UNADDRESSED_HEADING);
+        assert_eq!(listed, !repair, "{stream}");
+        assert_eq!(
+            sse_events(&stream, "warning").iter().any(|w| w["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("Unaddressed detector signals"))),
+            !repair,
+            "{stream}"
+        );
+    }
+}
+
+/// KT-1357 — the partial refresh of the TD index gives a malformed coverage
+/// matrix back to the agent like the Full pipeline, instead of failing the step
+/// on its first attempt (apollo's revalidation lost step 8 so).
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn partial_refresh_gives_a_bad_coverage_matrix_back_within_the_attempt_budget() {
+    for repair in [true, false] {
+        let (_templates, project, _restore) = fixture("src/page.html", false);
+        let disposed = format!("{OTHER_ANCHORS} src/page.html");
+        let (good, bad) = (
+            index(&disposed),
+            index(&disposed).replace(
+                "| Accessibility | scanned — nothing substantiable | Reviewed the repository sources |",
+                "| Accessibility | N/A: backend has no UI |",
+            ),
+        );
+        assert_ne!(good, bad);
+        let (server, requests, attempts) = mock_agent_writing(project.path(), move |launch| {
+            if repair && launch > 1 {
+                good.clone()
+            } else {
+                bad.clone()
+            }
+        })
+        .await;
+        let state = litellm_state(&server.uri()).await;
+        project_among_others(&state, project.path(), false).await;
+        let agents = project.path().join("docs/AGENTS.md");
+        let mut body = std::fs::read_to_string(&agents).unwrap();
+        body.push_str(
+            "<!-- KRONN-MANAGED-BLOCK:START -->\nManaged.\n<!-- KRONN-MANAGED-BLOCK:END -->\n",
+        );
+        std::fs::write(&agents, body).unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::audit_runs::insert_running(
+                    conn,
+                    "earlier-full",
+                    PROJECT_ID,
+                    "Full",
+                    "LiteLlm",
+                    chrono::Utc::now(),
+                )?;
+                crate::db::audit_runs::mark_failed(conn, "earlier-full", "interrupted")
+            })
+            .await
+            .unwrap();
+        let docs_root = crate::core::docs_location::DocsRoot::default();
+        let step = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root)
+            .iter()
+            .position(|s| s.target_file.ends_with("inconsistencies-tech-debt.md"))
+            .expect("the TD index step")
+            + 1;
+        let stream = sse_body(
+            crate::api::audit::drift::partial_audit(
+                axum::extract::State(state.clone()),
+                axum::extract::Path(PROJECT_ID.into()),
+                axum::Json(crate::models::PartialAuditRequest {
+                    agent: AgentType::LiteLlm,
+                    connection_id: None,
+                    tier: Some(ModelTier::Reasoning),
+                    steps: vec![step],
+                    accept_unverified_agents: None,
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        let expected = if repair { 2 } else { 3 };
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            expected,
+            "repair {repair}: {stream}"
+        );
+        let retries = sse_events(&stream, "step_retry");
+        assert_eq!(retries.len(), expected - 1, "repair {repair}: {stream}");
+        assert!(retries.iter().all(|r| r["reason"] == "dimension_coverage"));
+        // The retry prompt carries the targeted correction.
+        let second = requests.lock().unwrap()[2].to_string();
+        assert!(second.contains("Coverage matrix"), "{second}");
         let warnings = sse_events(&stream, "step_warning");
         if repair {
             assert!(warnings.is_empty(), "{stream}");
         } else {
             assert!(
-                warnings
-                    .iter()
-                    .any(|w| w["reason"].as_str().is_some_and(|r| {
-                        r.contains(crate::api::audit::step_guard::DETECTOR_FRAGMENT)
-                    })),
+                warnings.iter().any(|w| w["reason"]
+                    .as_str()
+                    .is_some_and(|r| r.contains(crate::api::audit::step_guard::COVERAGE_FRAGMENT))),
                 "{stream}"
             );
         }

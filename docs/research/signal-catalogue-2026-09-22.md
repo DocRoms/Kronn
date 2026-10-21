@@ -9,8 +9,8 @@ cells also failed, so this is not evidence of general reliability for either
 prompt style.
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]
 [src: file: backend/src/api/signal_catalog.rs:66-69#get]
-[src: file: backend/src/api/agent_tools.rs:4309-4311#signals]
-[src: file: backend/scripts/disc-introspection-mcp.py:10647-10648#signals]
+[src: file: backend/src/api/agent_tools.rs:4418-4420#signals]
+[src: file: backend/scripts/disc-introspection-mcp.py:10706-10707#signals]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:579#decision]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:275-339]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:24-72]
@@ -33,9 +33,9 @@ The initial sandbox attempt could not reach localhost Ollama and produced no
 inference observations. No compilation or suite started by this agent overlapped
 the corrected host campaign; the reviewer had reported its heavy suites ended.
 Other host activity was not controlled.
-[src: file: backend/src/api/agent_tools.rs:40-41#signal_bench]
-[src: file: backend/src/api/agent_signal_bench.rs:157-167#bench_native_signal_discovery]
-[src: file: backend/src/api/agent_signal_bench.rs:267-275#KRONN_BENCH_REPORT]
+[src: file: backend/src/api/agent_tools.rs:41-42#signal_bench]
+[src: file: backend/src/api/agent_signal_bench.rs:167-177#bench_native_signal_discovery]
+[src: file: backend/src/api/agent_signal_bench.rs:277-285#KRONN_BENCH_REPORT]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:2-22#metadata]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:577#source_commit]
 
@@ -49,7 +49,7 @@ IDs and timestamps differ between cells. The within-pair order is reversed for
 QA. These are single observations, not randomized latency trials.
 [src: file: backend/src/api/agent_signal_bench.rs:5-8#INLINE_NOTICE]
 [src: file: backend/src/api/agent_signal_bench.rs:49-79#proposal_fixture]
-[src: file: backend/src/api/agent_signal_bench.rs:185-200#catalogue_bytes]
+[src: file: backend/src/api/agent_signal_bench.rs:195-210#catalogue_bytes]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:54-63#catalogue_bytes]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:95#notice_bytes]
 
@@ -61,7 +61,7 @@ The discovery mode also requires reading `tool_manual(signals)`. The response
 is passed unchanged through the actual message transaction and action parser;
 Markdown prose or a `json` fence is never repaired into a successful card.
 [src: file: backend/src/api/agent_signal_bench.rs:10-47#ProposalTools]
-[src: file: backend/src/api/agent_signal_bench.rs:81-93#ingest_proposal]
+[src: file: backend/src/api/agent_signal_bench.rs:91-103#ingest_proposal]
 [src: file: backend/src/api/agent_signal_bench.rs:238-263#target_read]
 
 The first instrument incorrectly refused three legitimate exploratory reads:
@@ -74,7 +74,7 @@ both from Qwen's inline-mode cells. These are retained as proposal-only failures
 Other calls outside the explicit read allowlist would still be refused; no
 claim of unrestricted agent-task performance is made.
 [src: file: backend/src/api/agent_signal_bench.rs:24-43#allowed]
-[src: file: backend/src/api/agent_signal_bench.rs:109-155#signal_benchmark_guard_preserves_exploratory_reads_and_refuses_launches]
+[src: file: backend/src/api/agent_signal_bench.rs:119-165#signal_benchmark_guard_preserves_exploratory_reads_and_refuses_launches]
 [src: file: docs/research/signal-catalogue-2026-09-22-attempt-1.json:552-553#instrument_limit]
 
 ## Corrected observations
@@ -116,7 +116,7 @@ within its existing budget. No net workflow-token or latency improvement is clai
 [src: file: docs/research/signal-catalogue-2026-09-22.json:91#first_prompt_tokens]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:326#first_prompt_tokens]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:370#first_prompt_tokens]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:134#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:143#CATALOGUE_MAX_BYTES]
 
 ## Functional checks and limits
 
@@ -128,8 +128,8 @@ pass. The full schema survives production history clamping under a 32,768-token
 cap. Discovery covers Automation cards in version 1; historical Planning, audit
 and QP-improvement parsers remain separate.
 [src: file: backend/tests/api_tests.rs:1034-1152#discussion_action_ingests_all_four_target_families_through_the_real_message_transaction]
-[src: file: backend/src/api/agent_quick_prompt_tests.rs:58-85#native_signal_manual_reads_the_shared_registry_without_creating_an_action]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:12646-12651#test_signal_catalogue_is_read_from_the_running_server_without_launching]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:67-94#native_signal_manual_reads_the_shared_registry_without_creating_an_action]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:12757-12762#test_signal_catalogue_is_read_from_the_running_server_without_launching]
 [src: file: backend/tests/api_tests.rs:935-1029#discussion_action_http_contract_is_durable_and_idempotent]
 [src: file: backend/tests/api_tests.rs:1403-1458#discussion_action_invalid_proposals_are_actionable_through_the_real_message_transaction]
 [src: file: backend/tests/api_tests.rs:1303-1398#discussion_action_allow_manual_override_never_leaks_plaintext_through_the_api]

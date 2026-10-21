@@ -5387,11 +5387,11 @@ class WorkflowActiveRunsTests(unittest.TestCase):
 
 
 class DiskUsageToolTests(unittest.TestCase):
-    """`disk_usage` (KT-1318) - the disk view and the orphan purge over HTTP.
+    """`disk_usage` (KT-1318, KT-1347) - the read-only disk view over HTTP.
 
-    The tool reads `GET /api/maintenance/disk`, keeps `entries` bounded, and its
-    only mutation is the default (orphans-only) purge: it can never name an
-    entry to delete.
+    The tool reads `GET /api/maintenance/disk` and keeps `entries` bounded. It
+    never calls the purge: that route is not on the bridge's list, so a bridge
+    token would be refused; purging is a human action in Settings > Disk.
     """
 
     REPORT = {
@@ -5404,18 +5404,7 @@ class DiskUsageToolTests(unittest.TestCase):
             "orphan_count": 2,
             "orphan_bytes": 5,
             "entries": [{"path": f"/r/target/wt-{n}"} for n in range(40)],
-        },
-    }
-    PURGE = {
-        "success": True,
-        "data": {
-            "mode": "orphans",
-            "freed_bytes": 77,
-            "kept": 3,
-            "items": [
-                {"path": "/r/target/wt-a", "purged": True},
-                {"path": "/r/target/wt-b", "purged": False},
-            ],
+            "scoped": True,
         },
     }
 
@@ -5425,19 +5414,17 @@ class DiskUsageToolTests(unittest.TestCase):
 
         def fake_http(method, path, body=None, **_kwargs):
             self.calls.append((method, path, body))
-            return self.PURGE if method == "POST" else self.REPORT
+            return self.REPORT
 
         patcher = mock.patch.object(self.mod, "_http", fake_http)
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_it_is_declared_with_a_manual_and_only_two_inputs(self):
+    def test_it_is_declared_read_only_with_a_manual(self):
         tool = next(t for t in self.mod.TOOLS if t["name"] == "disk_usage")
-        self.assertEqual(
-            sorted(tool["inputSchema"]["properties"]), ["project_id", "purge_orphans"]
-        )
-        self.assertIn("disk_usage", self.mod.TOOL_MANUALS)
-        self.assertIn("never removed", self.mod.TOOL_MANUALS["disk_usage"])
+        self.assertEqual(sorted(tool["inputSchema"]["properties"]), ["project_id"])
+        self.assertIn("human action", tool["description"])
+        self.assertIn("human action", self.mod.TOOL_MANUALS["disk_usage"])
         self.assertIs(self.mod.DISPATCH["disk_usage"], self.mod.call_disk_usage)
 
     def test_a_plain_call_only_reads_and_bounds_the_entries(self):
@@ -5446,24 +5433,24 @@ class DiskUsageToolTests(unittest.TestCase):
         self.assertEqual(out["entries_total"], 40)
         self.assertEqual(len(out["entries"]), 25)
         self.assertEqual(out["orphan_count"], 2)
+        self.assertTrue(out["scoped"])
         self.assertNotIn("purged", out)
 
     def test_the_project_filter_is_url_encoded(self):
         self.mod.call_disk_usage({"project_id": "a b&c"})
         self.assertEqual(self.calls[0][1], "/api/maintenance/disk?project_id=a%20b%26c")
 
-    def test_purge_orphans_takes_the_default_purge_then_reports_afresh(self):
+    def test_a_purge_request_never_reaches_the_backend(self):
         out = self.mod.call_disk_usage({"purge_orphans": True, "project_id": "p1"})
-        method, path, body = self.calls[0]
-        self.assertEqual((method, path), ("POST", "/api/maintenance/disk/purge"))
-        self.assertEqual(body, {"project_id": "p1"}, "no paths, no confirm: orphans only")
-        self.assertEqual(self.calls[1][0], "GET")
-        self.assertEqual(out["purged"]["removed"], ["/r/target/wt-a"])
-        self.assertEqual(out["purged"]["freed_bytes"], 77)
-
-    def test_a_truthy_string_does_not_trigger_the_purge(self):
-        self.mod.call_disk_usage({"purge_orphans": "false"})
         self.assertEqual([c[0] for c in self.calls], ["GET"])
+        self.assertFalse(any("purge" in c[1] for c in self.calls))
+        self.assertIn("human action", out["purged"])
+        self.assertIn("Settings > Disk", out["purged"])
+
+    def test_a_truthy_string_is_not_a_purge_request(self):
+        out = self.mod.call_disk_usage({"purge_orphans": "false"})
+        self.assertEqual([c[0] for c in self.calls], ["GET"])
+        self.assertNotIn("purged", out)
 
 
 class WorkflowRunStatusTests(unittest.TestCase):
@@ -7860,6 +7847,50 @@ class HttpAuthHeaderTests(unittest.TestCase):
             self.mod._http_text("GET", "/api/workflows/x/export")
         req = urlopen.call_args.args[0]
         self.assertEqual(req.get_header("Authorization"), "Bearer tok2")
+
+
+class ScopeRefusalMessageTests(unittest.TestCase):
+    """KT-1320 — a 403 for a resource outside the bridge token's scope says why
+    and what to do, because the agent runtime only relays "the tool returned an
+    error" otherwise."""
+
+    def setUp(self):
+        self.mod = _load_module(isolate_http=False)
+
+    def _refusal(self, status, error):
+        body = json.dumps({"success": False, "data": None, "error": error}).encode()
+        return urllib.error.HTTPError(
+            "http://127.0.0.1:3140/api/x", status, "Forbidden", {}, io.BytesIO(body))
+
+    def test_a_scope_refusal_tells_the_agent_what_to_do(self):
+        refusal = self._refusal(403, "a Discussion the request names is outside this bridge token's scope")
+        with mock.patch.dict(os.environ, {"KRONN_BACKEND_URL": "http://127.0.0.1:3140"}, clear=True), \
+             mock.patch("urllib.request.urlopen", side_effect=refusal):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod._http("GET", "/api/discussions/other")
+        msg = str(ctx.exception)
+        self.assertIn("HTTP 403", msg)
+        self.assertIn("outside this bridge token's scope", msg)
+        self.assertIn("Ask the human to attach that discussion", msg)
+        self.assertIn("disc_list", msg)
+
+    def test_the_text_variant_says_it_too(self):
+        refusal = self._refusal(403, "a Discussion the request names is outside this bridge token's scope")
+        with mock.patch.dict(os.environ, {"KRONN_BACKEND_URL": "http://127.0.0.1:3140"}, clear=True), \
+             mock.patch("urllib.request.urlopen", side_effect=refusal):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod._http_text("GET", "/api/x")
+        self.assertIn("Ask the human to attach that discussion", str(ctx.exception))
+
+    def test_other_errors_are_left_as_they_were(self):
+        for status, error in ((404, "not found"), (403, "this route is not available to a Kronn-launched agent's bridge token")):
+            with mock.patch.dict(os.environ, {"KRONN_BACKEND_URL": "http://127.0.0.1:3140"}, clear=True), \
+                 mock.patch("urllib.request.urlopen", side_effect=self._refusal(status, error)):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.mod._http("GET", "/api/x")
+            msg = str(ctx.exception)
+            self.assertTrue(msg.startswith(f"HTTP {status}: "), msg)
+            self.assertNotIn("Ask the human", msg)
 
 
 class AuditToolsTests(unittest.TestCase):
@@ -11988,6 +12019,86 @@ class JoinedRoomWorkProtocolTests(unittest.TestCase):
         self.assertNotIn("never re-delivers", room)
         self.assertNotIn("a quiet return costs nothing", room)
 
+    # KT-1329 — Claude Code cuts MCP `instructions` at 2048 chars. The card
+    # guidance used to start at char 1985 (onboarded) or 2438 (first contact),
+    # so a colleague's agent never learned to ask for an arbitration.
+    CLIENT_INSTRUCTIONS_LIMIT = 2048
+
+    def _initialize_instructions(self, onboarded):
+        with mock.patch.object(self.mod, "_onboarding_done_for", return_value=onboarded):
+            response = self.mod._handle({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+            })
+        return response["result"]["instructions"]
+
+    def test_decision_card_survives_the_2048_char_client_cut(self):
+        for onboarded in (True, False):
+            with self.subTest(onboarded=onboarded):
+                seen = self._initialize_instructions(onboarded)[: self.CLIENT_INSTRUCTIONS_LIMIT]
+                for needle in ("kronn-question", '"version":1', '"key"', '{"id"',
+                               "disc_append", "disc_question_list"):
+                    self.assertIn(needle, seen)
+
+    def test_decision_card_inline_example_is_valid_json_with_the_right_shape(self):
+        for onboarded in (True, False):
+            with self.subTest(onboarded=onboarded):
+                seen = self._initialize_instructions(onboarded)[: self.CLIENT_INSTRUCTIONS_LIMIT]
+                start = seen.index('{"version"')
+                example, _ = json.JSONDecoder().raw_decode(seen[start:])
+                self.assertIs(type(example["version"]), int)
+                self.assertEqual(example["version"], 1)
+                self.assertIn("key", example)
+                self.assertNotIn("id", example)
+                self.assertTrue(example["question"])
+                self.assertEqual(list(example["options"][0]), ["id", "label"])
+
+    def test_critical_bullets_end_before_the_client_cut(self):
+        for onboarded in (True, False):
+            with self.subTest(onboarded=onboarded):
+                instructions = self._initialize_instructions(onboarded)
+                limit = self.CLIENT_INSTRUCTIONS_LIMIT
+                for bullet in (self.mod.HUMAN_DECISION_CARD_BULLET.strip(),):
+                    start = instructions.index(bullet)
+                    self.assertLessEqual(start + len(bullet), limit)
+
+    def test_first_contact_offer_follows_the_card_inside_the_client_cut(self):
+        first = self._initialize_instructions(False)
+        onboarded = self._initialize_instructions(True)
+        bullet = self.mod.HUMAN_DECISION_CARD_BULLET
+        self.assertNotIn("FIRST CONTACT", onboarded)
+        self.assertGreater(first.index("FIRST CONTACT"), first.index(bullet) + len(bullet) - 1)
+        seen = first[: self.CLIENT_INSTRUCTIONS_LIMIT]
+        self.assertIn("FIRST CONTACT", seen)
+        self.assertIn("`kronn_intro`", seen)
+        self.assertEqual(first.count("FIRST CONTACT"), 1)
+
+    def test_step_tools_session_learns_the_card_only_when_it_can_post(self):
+        initialize = {"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}}
+        with mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=False):
+            for argv, expected in (
+                (["bridge", "--step-tools=disc_append,disc_question_list"], True),
+                (["bridge", "--step-tools=task_get"], False),
+            ):
+                with self.subTest(argv=argv), mock.patch.object(self.mod.sys, "argv", argv):
+                    result = self.mod._handle(initialize)["result"]
+                    self.assertEqual("instructions" in result, expected)
+                    if expected:
+                        self.assertIn("kronn-question", result["instructions"])
+                        self.assertIn('"version":1', result["instructions"])
+
+    def test_spawned_worker_is_told_why_it_cannot_post_a_card(self):
+        initialize = {"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}}
+        with mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=True):
+            instructions = self.mod._handle(initialize)["result"]["instructions"]
+        self.assertIn("cannot post a decision card", instructions)
+        self.assertIn("kronn-question", instructions)
+        self.assertIn("principal", instructions)
+
+    def test_disc_append_description_points_to_the_card(self):
+        description = next(t for t in self.mod.TOOLS if t["name"] == "disc_append")["description"]
+        self.assertIn("kronn-question", description)
+        self.assertIn("disc_question_list", description)
+
 
 class WaitOutsideLlmLoopTests(unittest.TestCase):
     """KT-189 — disc_wait_for_peer holds quiet waits bridge-side.
@@ -13595,3 +13706,26 @@ class BridgeSecretEnvFileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkflowGuideThroughToolManualTests(unittest.TestCase):
+    """KT-1341 — the workflow architect is read through tool_manual, by section."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_the_guide_is_listed_and_read_by_section(self):
+        listed = self.mod.call_tool_manual({})
+        self.assertIn("workflow-architect", listed["available"])
+        with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": {"skill": "workflow-architect", "content": "## Reach"}}) as http:
+            reach = self.mod.call_tool_manual({"tool": "workflow-architect", "section": "Reach — projects"})
+        http.assert_called_once_with("GET", "/api/skills/workflow-architect/guide?section=Reach%20%E2%80%94%20projects")
+        self.assertEqual(reach["content"], "## Reach")
+        with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": {"contents": []}}) as http:
+            self.mod.call_tool_manual({"tool": "workflow-architect"})
+        http.assert_called_once_with("GET", "/api/skills/workflow-architect/guide")
+
+    def test_the_room_scope_manual_names_the_workflow_scope(self):
+        manual = self.mod.TOOL_MANUALS["room_scope"]
+        self.assertIn("workflow's scope", manual)
+        self.assertIn("Projects accessible", manual)

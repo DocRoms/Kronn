@@ -1115,6 +1115,24 @@ pub struct AuditRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub resume_drift: Option<String>,
+    /// KT-1353 — JSON of what the documentary gate let through (blockers the
+    /// committed docs held before the run, in docs no step owns) and repaired
+    /// by itself (exact gate replacements) during this run:
+    /// `{"preexisting":[{path,message}],"autofixes":[{step,path,kind,from,to}]}`.
+    /// Absent when there was nothing to report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub documentary_notes: Option<String>,
+    /// KT-1320 — the model tier the run was launched with (`economy`,
+    /// `default`, `reasoning`); absent on a run recorded before it was kept.
+    /// A step retry or a resume reuses it unless the human picks another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tier: Option<String>,
+    /// KT-1320 — the named API connection the run's HTTP agent used, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
 }
 
 /// 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
@@ -1634,6 +1652,15 @@ pub struct LaunchAuditRequest {
     #[serde(default)]
     #[ts(optional)]
     pub fresh: Option<bool>,
+    /// KT-1324 — a launch first stops the agents the project's previous runs
+    /// left and settles their unfinished steps. When Kronn cannot read the
+    /// process table (a restricted `/proc`) it cannot tell that none is still
+    /// running and refuses; this is the human's word that none is, and the
+    /// steps are settled without the check. It never overrides a process Kronn
+    /// saw and could not stop: that one is stopped by hand.
+    #[serde(default)]
+    #[ts(optional)]
+    pub accept_unverified_agents: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -2206,6 +2233,10 @@ pub struct RevalidateAuditRequest {
     #[serde(default)]
     #[ts(optional)]
     pub deterministic_only: Option<bool>,
+    /// KT-1324 — see [`LaunchAuditRequest::accept_unverified_agents`].
+    #[serde(default)]
+    #[ts(optional)]
+    pub accept_unverified_agents: Option<bool>,
     #[serde(default)]
     #[ts(optional)]
     pub connection_id: Option<String>,
@@ -2227,6 +2258,10 @@ pub struct PartialAuditRequest {
     #[serde(default)]
     pub tier: Option<crate::models::ModelTier>,
     pub steps: Vec<usize>,
+    /// KT-1324 — see [`LaunchAuditRequest::accept_unverified_agents`].
+    #[serde(default)]
+    #[ts(optional)]
+    pub accept_unverified_agents: Option<bool>,
 }
 
 /// KT-977 — one step of the Full audit, known before any run: lets the UI

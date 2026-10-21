@@ -163,6 +163,7 @@ impl Validated {
             axum::extract::Path(PROJECT_ID.to_string()),
             axum::Json(crate::models::RevalidateAuditRequest {
                 deterministic_only: None,
+                accept_unverified_agents: None,
                 agent: AgentType::ClaudeCode,
                 connection_id: None,
                 tier: None,
@@ -170,6 +171,25 @@ impl Validated {
         )
         .await
         .into_response()
+    }
+
+    /// [`Self::revalidate`] with the human's word on a process table that could
+    /// not be read (KT-1324).
+    async fn revalidate_accepting_unverified_agents(&self) -> String {
+        let response = crate::api::audit::revalidate_audit(
+            axum::extract::State(self.h.state.clone()),
+            axum::extract::Path(PROJECT_ID.to_string()),
+            axum::Json(crate::models::RevalidateAuditRequest {
+                deterministic_only: None,
+                accept_unverified_agents: Some(true),
+                agent: AgentType::ClaudeCode,
+                connection_id: None,
+                tier: None,
+            }),
+        )
+        .await
+        .into_response();
+        sse_body(response).await
     }
 
     async fn partial(&self, steps: Vec<usize>) -> String {
@@ -185,6 +205,7 @@ impl Validated {
                 connection_id: None,
                 tier: None,
                 steps,
+                accept_unverified_agents: None,
             }),
         )
         .await
@@ -691,6 +712,7 @@ async fn revalidating_before_any_fingerprint_is_refused_with_a_reason() {
         axum::extract::Path(PROJECT_ID.to_string()),
         axum::Json(crate::models::RevalidateAuditRequest {
             deterministic_only: None,
+            accept_unverified_agents: None,
             agent: AgentType::ClaudeCode,
             connection_id: None,
             tier: None,
@@ -782,6 +804,212 @@ async fn a_dead_citation_is_named_before_the_agent_and_never_ends_unchanged() {
     );
 }
 
+/// KT-1324 — a revalidation, like every launch, waits for the agents a previous
+/// run of the project left: a survivor refuses it before any agent starts or
+/// any doc is touched, and a process table nobody can read lets it through only
+/// on the human's word.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_revalidation_waits_for_the_agents_a_previous_run_left() {
+    use crate::api::audit::step_guard::{plant_reap_of_run, unplant_reap_of_run};
+    use crate::core::dispatch_reaper::ReapReport;
+    let fx = Validated::new(|project| {
+        std::fs::write(
+            project.join("src/legacy.rs"),
+            "fn legacy_entry_point() {}\n",
+        )
+        .unwrap();
+        append(
+            project,
+            RULES,
+            "\n- The legacy entry point survives [src: file: src/legacy.rs:1]\n",
+        );
+    })
+    .await;
+    std::fs::remove_file(fx.project().join("src/legacy.rs")).unwrap();
+    reread_plain_docs(fx.project());
+    // A run no boot settled: still `Running`, its agent seen alive.
+    let left = format!("left-{}", uuid::Uuid::new_v4());
+    {
+        let left = left.clone();
+        fx.h.state
+            .db
+            .with_conn(move |conn| {
+                crate::db::audit_runs::insert_running(
+                    conn,
+                    &left,
+                    PROJECT_ID,
+                    "Partial",
+                    "ClaudeCode",
+                    chrono::Utc::now() - chrono::Duration::minutes(5),
+                )
+            })
+            .await
+            .unwrap();
+    }
+    arm(fx.h.tools.path(), "reverify", &[RULES]);
+    let doc_before = std::fs::read(fx.project().join(RULES)).unwrap();
+
+    plant_reap_of_run(
+        &left,
+        ReapReport {
+            survivors: vec![4242],
+            ..Default::default()
+        },
+    );
+    let body = fx.revalidate().await;
+    let error = sse_events(&body, "error").pop().expect("a refusal");
+    let error = error["error"].as_str().unwrap();
+    assert!(error.contains("kill -9 4242"), "{error}");
+    assert!(!error.contains("ReapReport"), "{error}");
+    assert!(sse_events(&body, "done").is_empty(), "{body}");
+    assert!(
+        fx.prompts().is_empty(),
+        "no agent started: {:?}",
+        fx.prompts()
+    );
+    assert_eq!(std::fs::read(fx.project().join(RULES)).unwrap(), doc_before);
+
+    // The table cannot be read: refused, in plain words, until the human says so.
+    plant_reap_of_run(
+        &left,
+        ReapReport {
+            unverified: true,
+            ..Default::default()
+        },
+    );
+    let body = fx.revalidate().await;
+    let error = sse_events(&body, "error").pop().expect("a refusal");
+    let error = error["error"].as_str().unwrap();
+    assert!(
+        error.contains("could not read the process table"),
+        "{error}"
+    );
+    assert!(fx.prompts().is_empty(), "{:?}", fx.prompts());
+    let body = fx.revalidate_accepting_unverified_agents().await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "complete", "{body}");
+    unplant_reap_of_run(&left);
+}
+
+/// KT-1324 — a revalidation with no agent step still rewrites docs (the
+/// re-anchors), so it waits for the agents a previous run left like the others:
+/// a survivor refuses it before a single citation moves, a process table nobody
+/// can read lets it through only on the human's word, and the settled run is not
+/// settled twice.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_deterministic_revalidation_waits_for_the_agents_a_previous_run_left() {
+    use crate::api::audit::step_guard::{plant_reap_of_run, unplant_reap_of_run};
+    use crate::core::dispatch_reaper::ReapReport;
+    let fx = Validated::new(|_| {}).await;
+    fx.edit_source(|lines| {
+        lines.insert(0, "// licence header".into());
+        lines.insert(0, "// generated banner".into());
+    });
+    let left = format!("left-{}", uuid::Uuid::new_v4());
+    {
+        let left = left.clone();
+        fx.h.state
+            .db
+            .with_conn(move |conn| {
+                crate::db::audit_runs::insert_running(
+                    conn,
+                    &left,
+                    PROJECT_ID,
+                    "Partial",
+                    "ClaudeCode",
+                    chrono::Utc::now() - chrono::Duration::minutes(5),
+                )
+            })
+            .await
+            .unwrap();
+    }
+    let deterministic = |accept: Option<bool>| {
+        let state = fx.h.state.clone();
+        async move {
+            sse_body(
+                crate::api::audit::revalidate_audit(
+                    axum::extract::State(state),
+                    axum::extract::Path(PROJECT_ID.to_string()),
+                    axum::Json(crate::models::RevalidateAuditRequest {
+                        deterministic_only: Some(true),
+                        accept_unverified_agents: accept,
+                        agent: AgentType::ClaudeCode,
+                        connection_id: None,
+                        tier: None,
+                    }),
+                )
+                .await
+                .into_response(),
+            )
+            .await
+        }
+    };
+    let docs_before = docs_snapshot(fx.project());
+
+    plant_reap_of_run(
+        &left,
+        ReapReport {
+            survivors: vec![4242],
+            ..Default::default()
+        },
+    );
+    let body = deterministic(None).await;
+    let error = sse_events(&body, "error").pop().expect("a refusal");
+    let error = error["error"].as_str().unwrap();
+    assert!(error.contains("kill -9 4242"), "{error}");
+    assert_eq!(
+        sse_events(&body, "error").pop().unwrap()["error_code"],
+        "agents_still_running",
+        "{body}"
+    );
+    assert!(sse_events(&body, "reanchored").is_empty(), "{body}");
+    assert!(sse_events(&body, "done").is_empty(), "{body}");
+    assert_eq!(
+        docs_snapshot(fx.project()),
+        docs_before,
+        "a survivor, yet docs were rewritten"
+    );
+    assert_eq!(fx.plan().await.reanchor_count, 2);
+
+    // Not even the human's word lifts a refusal for a process that was seen.
+    let body = deterministic(Some(true)).await;
+    assert!(!sse_events(&body, "error").is_empty(), "{body}");
+    assert_eq!(docs_snapshot(fx.project()), docs_before);
+
+    plant_reap_of_run(
+        &left,
+        ReapReport {
+            unverified: true,
+            ..Default::default()
+        },
+    );
+    let body = deterministic(None).await;
+    let error = sse_events(&body, "error").pop().expect("a refusal");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not read the process table"),
+        "{body}"
+    );
+    assert_eq!(error["error_code"], "agents_unverified", "{body}");
+    assert_eq!(docs_snapshot(fx.project()), docs_before);
+
+    let body = deterministic(Some(true)).await;
+    let done = sse_events(&body, "done").pop().expect("terminal done");
+    assert_eq!(done["status"], "clean", "{body}");
+    assert_ne!(
+        docs_snapshot(fx.project()),
+        docs_before,
+        "the re-anchors ran"
+    );
+    unplant_reap_of_run(&left);
+}
+
 /// KT-1187 — the citation broken under a doc edited by hand.
 fn broken_by_hand(fx: &Validated) -> Vec<(String, crate::core::citation_drift::CitationState)> {
     let report = crate::core::citation_drift::check(fx.project());
@@ -867,6 +1095,17 @@ async fn a_partial_refresh_after_a_stop_runs_to_its_end() {
     let fx = Validated::new(|_| {}).await;
     let step = fx.step_of(GLOSSARY) as usize;
 
+    // A tree the baseline did not record: an unchanged one would end the
+    // refresh `unchanged` without an agent (KT-1357), here and before the Stop.
+    let change_tree = |paragraph: &str| {
+        std::fs::write(
+            fx.project().join("README.md"),
+            format!("# Fixture\n\n{paragraph}\n"),
+        )
+        .unwrap()
+    };
+    change_tree("A new paragraph.");
+
     // A Stop nobody acknowledged leaves the flag set.
     fx.stop();
     arm(fx.h.tools.path(), "fill", &[GLOSSARY]);
@@ -880,6 +1119,7 @@ async fn a_partial_refresh_after_a_stop_runs_to_its_end() {
 
     // A Stop pressed during the refresh still stops it.
     std::fs::write(fx.h.tools.path().join("steps.log"), "").unwrap();
+    change_tree("Another paragraph.");
     arm(fx.h.tools.path(), "noop", &[GLOSSARY]);
     let body = fx.stopped_during_step(fx.partial(vec![step])).await;
     assert_eq!(sse_events(&body, "cancelled").len(), 1, "{body}");
@@ -902,6 +1142,7 @@ async fn deterministic_revalidation_refuses_with_docs_busy_and_reanchors_nothing
                 axum::extract::Path(PROJECT_ID.to_string()),
                 axum::Json(crate::models::RevalidateAuditRequest {
                     deterministic_only: Some(true),
+                    accept_unverified_agents: None,
                     agent: AgentType::ClaudeCode,
                     connection_id: None,
                     tier: None,

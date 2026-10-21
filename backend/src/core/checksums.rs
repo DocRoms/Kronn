@@ -958,6 +958,44 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
     }
 }
 
+/// KT-1357 — `doc#stepN` of every section the baseline maps to the whole source
+/// tree and whose tree fingerprint is exactly the one recorded, with no cited line
+/// gone stale. Unlike [`check_drift`], a section with citations is not judged by
+/// its cited lines alone: a refresh may skip the agent only when nothing it
+/// reads (the tree) differs from the last run's input.
+pub fn unchanged_tree_sections(project_path: &Path) -> BTreeSet<String> {
+    let Some(file) = read_checksums_file(project_path) else {
+        return BTreeSet::new();
+    };
+    let tree_mappings: Vec<_> = file
+        .mappings
+        .iter()
+        .filter(|mapping| {
+            mapping
+                .sources
+                .iter()
+                .any(|source| source == "__GIT_SOURCE_TREE__")
+        })
+        .collect();
+    if tree_mappings.is_empty() {
+        return BTreeSet::new();
+    }
+    let Some(fingerprint) = git_source_tree_fingerprint(project_path) else {
+        return BTreeSet::new();
+    };
+    let citations = crate::core::citation_drift::check(project_path);
+    tree_mappings
+        .into_iter()
+        .filter(|mapping| {
+            mapping.checksums.get("__GIT_SOURCE_TREE__") == Some(&fingerprint)
+                && !citations
+                    .section(&mapping.ai_file)
+                    .is_some_and(|section| section.stale)
+        })
+        .map(|mapping| format!("{}#step{}", mapping.ai_file, mapping.audit_step))
+        .collect()
+}
+
 /// How long a drift result is reused while the manifest is unchanged. Drift
 /// hashes every mapped source file; the Projects page asks for it per audited
 /// project, so recomputing it on each request cost seconds.

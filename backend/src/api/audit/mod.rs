@@ -40,6 +40,7 @@ pub(crate) mod run_state;
 #[cfg(test)]
 mod step_closing_tests;
 pub(crate) mod step_guard;
+pub(crate) mod step_remit;
 pub mod td_review;
 pub mod td_tasks;
 pub mod validate;
@@ -251,7 +252,9 @@ pub(crate) const ANALYSIS_STEPS: &[AnalysisStep] = &[
     AnalysisStep {
         target_file: "docs/glossary.md",
         prompt: include_str!("prompts/step2-glossary.md"),
-        sources: &[],
+        // The vocabulary of the code: the baseline records the tree it was
+        // written from, so a refresh of an unchanged tree is known unchanged.
+        sources: &["__GIT_SOURCE_TREE__"],
     },
     // Step 3: Repo map
     AnalysisStep {
@@ -433,8 +436,9 @@ pub(crate) fn dated_step_prompt(
     let today = now.format("%Y-%m-%d").to_string();
     let today_compact = now.format("%Y%m%d").to_string();
     format!(
-        "Today's date is {today} (YYYYMMDD: {today_compact}).\n\n{}\n\n{}{}",
+        "Today's date is {today} (YYYYMMDD: {today_compact}).\n\n{}\n\n{}\n\n{}{}",
         docs_root.relocate(PROMPT_PREAMBLE),
+        step_remit::remit_prompt_block(docs_root),
         gate,
         step_prompt
     )
@@ -1944,6 +1948,27 @@ mod prompt_tests {
     }
 
     #[test]
+    fn docs_agents_md_template_teaches_the_human_decision_card() {
+        // KT-1329 — colleagues' agents never asked for an arbitration because
+        // nothing they read at project level mentioned the card.
+        let tpl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("templates/docs/AGENTS.md");
+        let body = std::fs::read_to_string(&tpl_path)
+            .unwrap_or_else(|e| panic!("read template {}: {e}", tpl_path.display()));
+        for needle in [
+            "**Human decision**",
+            "`kronn-question` fence",
+            "`disc_append`",
+            "\"version\":1",
+            "`disc_question_list`",
+        ] {
+            assert!(body.contains(needle), "template must carry {needle}");
+        }
+    }
+
+    #[test]
     fn docs_agents_md_template_states_project_parameters_and_language_preservation() {
         // KT-843 DoD #3 — docs/tickets language, the comment→ticket
         // policy, and the test policy are project parameters (set once
@@ -2606,14 +2631,16 @@ mod prompt_tests {
     #[test]
     fn step8_prompt_stays_within_its_budget() {
         // KT-152 measured 19,941 bytes before and 10,6xx after; the ceiling
-        // keeps the baseline from growing back into the prompt.
+        // keeps the baseline from growing back into the prompt. KT-1353 added
+        // the accepted forms of a sheet citation (+158 B, measured 11,114): the
+        // ceiling moved by 200 B for that one sentence, not for new baseline.
         let prompt = ANALYSIS_STEPS
             .iter()
             .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
             .unwrap()
             .prompt;
         assert!(
-            prompt.len() <= 11_000,
+            prompt.len() <= 11_200,
             "Step 8 prompt is {} bytes",
             prompt.len()
         );

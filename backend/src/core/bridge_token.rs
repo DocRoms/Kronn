@@ -661,7 +661,12 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
         Effect,
         &[("id", P)],
     ),
+    // KT-1347: free space and aggregates, with the lanes of the token's own
+    // project only (`disk::scoped_for_bridge`). The purge
+    // (`POST /api/maintenance/disk/purge`) is a human action: not listed.
+    r("GET", "/api/maintenance/disk", Read, &[]),
     r("GET", "/api/skills", Read, &[]),
+    r("GET", "/api/skills/{id}/guide", Read, &[]),
     r("POST", "/api/skills", Denied, &[]),
     r("PUT", "/api/skills/{id}", Denied, &[]),
     r("DELETE", "/api/skills/{id}", Denied, &[]),
@@ -691,6 +696,7 @@ const UNBOUND_ROUTES: &[&str] = &[
     "/api/workflows/step-schema",
     "/api/signals/catalog",
     "/api/skills",
+    "/api/skills/{id}/guide",
     "/api/profiles",
     "/api/directives",
 ];
@@ -735,6 +741,74 @@ const CREATE_ROUTES: &[(&str, &str)] = &[
     ("/api/disc/create", "project_id"),
     ("/api/learnings/propose", "project_id"),
 ];
+
+/// Create routes a launch without a project may use once a human granted its
+/// room « General · write »: the resource is general, seen by every project (KT-1346).
+const GENERAL_WHEN_UNBOUND: &[&str] = &[
+    "/api/quick-prompts",
+    "/api/quick-apis",
+    "/api/pages",
+    "/api/workflows",
+];
+
+/// A refusal on another project, with the way out that fits the caller: a
+/// room's own agent asks with `room_scope`; a workflow step reaches others
+/// only through its workflow's scope; a worker, its task's project (KT-1341).
+pub fn project_refusal(scope: &BridgeScope, read_only: bool) -> String {
+    let what = if read_only {
+        "this room may read that project, not change it"
+    } else {
+        "the project the request names is outside this launch's reach"
+    };
+    if scope.owns_nothing() {
+        // No room, run or task: the editor's « Test step », an audit, a document agent.
+        format!("{what}: this launch reaches its project only; a workflow's real runs also reach the workflow's scope, which a human sets on the workflow page (Projects accessible)")
+    } else if scope.workflow_run_id.is_some() {
+        format!("{what}: a workflow step reaches another project only through its workflow's scope, which a human sets on the workflow page (Projects accessible)")
+    } else if scope.room_grant_discussions.is_empty() {
+        format!("{what}: a worker reaches its task's project only; the principal asks for more")
+    } else if read_only {
+        format!("{what}: ask a human for write access with room_scope({{project, access: \"write\", reason}})")
+    } else {
+        format!("{what}: ask a human with room_scope({{project, access, reason}})")
+    }
+}
+
+/// Why a project-less token's general write is refused, with the way out.
+pub const GENERAL_WRITE_NEEDS_GRANT: &str = "writing a general resource (seen by every project) needs a human to grant this room « General · write » in its Scope settings";
+
+/// The resources a token without a project may create and edit as general.
+const GENERAL_KINDS: &[Kind] = &[
+    Kind::QuickPrompt,
+    Kind::QuickApi,
+    Kind::Page,
+    Kind::Workflow,
+];
+
+/// How a general resource's kind is recorded in `general_resource_origins`.
+pub fn general_kind(kind: Kind) -> &'static str {
+    match kind {
+        Kind::QuickPrompt => "quick_prompt",
+        Kind::QuickApi => "quick_api",
+        Kind::Page => "page",
+        Kind::Workflow => "workflow",
+        _ => "other",
+    }
+}
+
+/// The general resource a creation route makes, for its provenance.
+pub fn general_created_kind(route: &BridgeRoute) -> Option<Kind> {
+    if route.method != "POST" {
+        return None;
+    }
+    match route.pattern {
+        "/api/quick-prompts" => Some(Kind::QuickPrompt),
+        "/api/quick-apis" => Some(Kind::QuickApi),
+        "/api/pages" => Some(Kind::Page),
+        "/api/workflows" => Some(Kind::Workflow),
+        _ => None,
+    }
+}
 
 /// Update routes whose handler resets or may drop the project when the body
 /// omits it: the token's project is sent explicitly.
@@ -847,8 +921,14 @@ pub fn prepare_body_in(
                         fields.insert(field.to_string(), serde_json::json!(project));
                         changed = true;
                     }
-                    // A project-less launch may create its own discussions only.
+                    // A project-less launch may create its own discussions, and
+                    // the general resources a human there would create.
                     (None, _) if route.pattern == "/api/disc/create" => {}
+                    (None, _) if GENERAL_WHEN_UNBOUND.contains(&route.pattern) => {
+                        if !reach.writes_general() {
+                            return Err(Refusal(GENERAL_WRITE_NEEDS_GRANT.into()));
+                        }
+                    }
                     (None, _) => {
                         return Err(Refusal(
                             "a bridge token without a project cannot create shared resources"
@@ -1511,6 +1591,12 @@ impl Reach {
         }
     }
 
+    /// Whether a token without a project may write the general resources: a
+    /// human granted its room « General · write » (KT-1346).
+    pub fn writes_general(&self) -> bool {
+        self.bound().is_none() && self.granted.general
+    }
+
     /// Whether the token may change `project`'s planning.
     pub fn writes(&self, project: &str) -> bool {
         use crate::models::discussion_scope::ScopeAccess;
@@ -1592,6 +1678,19 @@ fn mcp_config_visible(place: &Residence, bound: Option<&str>) -> bool {
 
 fn writable(grant: &BridgeGrant, kind: Kind, id: &str, place: &Residence, reach: &Reach) -> bool {
     if owns(grant, kind, id) || reach.bound().is_some_and(|project| place.only(project)) {
+        return true;
+    }
+    // Without a project, a human's « General · write » grant on the room lets
+    // its agents edit the general resources the room created (KT-1346); the
+    // rest stays the human's. A project's token never does.
+    if reach.writes_general()
+        && GENERAL_KINDS.contains(&kind)
+        && matches!(place, Residence::Global | Residence::General)
+        && reach
+            .granted
+            .general_own
+            .contains(&(general_kind(kind).to_owned(), id.to_owned()))
+    {
         return true;
     }
     // A granted project's planning: every project the task serves must be
@@ -1683,11 +1782,8 @@ pub fn authorize_in(
             if granted {
                 continue;
             }
-            return Err(Refusal(if reach.reads(id) && route.rule != Rule::Effect {
-                "this room may read that project, not change it: ask for write access with scope_request".into()
-            } else {
-                "a project the request names is outside this bridge token's project: a human can grant it (scope_request)".into()
-            }));
+            let read_only = reach.reads(id) && route.rule != Rule::Effect;
+            return Err(Refusal(project_refusal(&grant.scope, read_only)));
         }
         if kind == Kind::Discussion && route.rule == Rule::Own && !grant.owns_discussion(id) {
             return Err(Refusal(
@@ -1826,7 +1922,10 @@ pub fn residence(
             .map(|()| single_or_global(Some(id.to_owned())))),
         Kind::Connection => Ok(conn
             .query_row(
-                "SELECT 1 FROM external_api_connections WHERE id = ?1",
+                // The media route also takes a connection by alias or name.
+                "SELECT 1 FROM external_api_connections WHERE id = ?1 \
+                 OR lower(mention_alias) = lower(ltrim(?1, '@')) \
+                 OR lower(display_name) = lower(ltrim(?1, '@')) LIMIT 1",
                 [id],
                 |_| Ok(()),
             )

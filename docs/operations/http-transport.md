@@ -31,25 +31,25 @@ for repetition only; exhausted call budgets and open error circuits still
 apply, and effectful calls remain cached. Workers retain their separate bounded
 finalization policy. This prevents a post-edit verification from receiving the
 pre-edit file or a repetition refusal (KT-948).
-[src: file: backend/src/agents/runner.rs:11293-11336#observation_readers_to_restore]
+[src: file: backend/src/agents/runner.rs:11303-11346#observation_readers_to_restore]
 
 The HTTP runner also publishes structured input/output and reported cache-token
 counters through `AgentProcess`, which Full and partial audits consume. Each
 provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
-[src: file: backend/src/agents/runner.rs:8487-8498#cached_prompt_tokens]
-[src: file: backend/src/agents/runner.rs:1991-1998#reported_usage_counters] [src: file: backend/src/agents/runner.rs:9804-9833#task_usage]
+[src: file: backend/src/agents/runner.rs:8497-8508#cached_prompt_tokens]
+[src: file: backend/src/agents/runner.rs:1991-1998#reported_usage_counters] [src: file: backend/src/agents/runner.rs:9814-9843#task_usage]
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
 per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 `None` means unknown, never zero (KT-997). If any response of the run reported
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
-[src: file: backend/src/agents/runner.rs:7984-7990#request_provider_cost]
+[src: file: backend/src/agents/runner.rs:7994-8000#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:1984-1989#cost_incomplete]
-[src: file: backend/src/api/audit/full.rs:2127#reported_cost_usd_micros]
-[src: file: backend/src/api/audit/drift.rs:1165#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/full.rs:2195#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/drift.rs:1262#reported_cost_usd_micros]
 
 Audit executors have a separate bounded policy: 64 calls per file mutation tool
 (`write_file`, `edit_file`, `edit_lines`, `insert_after_line`), 48 for
@@ -71,8 +71,8 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:7992-7994#HOSTED_STEP_CTX_BUDGET]
-[src: file: backend/src/agents/runner.rs:7996-7998#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:8002-8004#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:8006-8008#HOSTED_AUDIT_STEP_INPUT_BUDGET]
 [src: file: backend/src/agents/runner.rs:11927-11942#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
@@ -85,12 +85,12 @@ rewritten. Originals are saved by content hash under
 agent correction attempts, with existing human-section protection. Invalid
 paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
-[src: file: backend/src/api/audit/document_repair.rs:241-315#split_verified_citations]
+[src: file: backend/src/api/audit/document_repair.rs:412-486#split_verified_citations]
 [src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
-[src: file: backend/src/api/audit/full.rs:2393-2423#check_attempt]
-[src: file: backend/src/api/audit/full.rs:1791-1795#max_attempts]
+[src: file: backend/src/api/audit/full.rs:2521-2551#check_attempt]
+[src: file: backend/src/api/audit/full.rs:1849-1853#max_attempts]
 [src: file: backend/src/api/audit/anti_hallu_enforce.rs:24#MAX_ATTEMPTS]
-[src: file: backend/src/api/audit/document_repair.rs:191-198#feedback]
+[src: file: backend/src/api/audit/document_repair.rs:337-344#feedback]
 
 An incomplete dimension-coverage matrix also receives targeted feedback in a
 Full audit after the agent exits successfully. This shares the same three-attempt
@@ -99,12 +99,12 @@ recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
 [src: file: backend/src/api/audit/validation.rs:96-117#coverage_repair_feedback]
-[src: file: backend/src/api/audit/full.rs:2317-2332#coverage_repair_feedback]
+[src: file: backend/src/api/audit/full.rs:2398-2413#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
 If a corrective attempt had already consumed tokens, that usage remains in the
 persisted step and its terminal SSE event; an unmeasured launch stays unknown.
-[src: file: backend/src/api/audit/full.rs:2700-2747#previous_attempt_usage]
+[src: file: backend/src/api/audit/full.rs:2817-2864#previous_attempt_usage]
 
 A provider error during a step also survives in its persisted warning and SSE
 recap. HTTP status 429 is identified as a rate limit or exhausted quota, not as
@@ -114,7 +114,7 @@ Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
 [src: file: backend/src/api/audit/validation.rs:119-159#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:8532-8536#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/runner.rs:8542-8546#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the
@@ -128,8 +128,8 @@ step (the baseline is taken before any write of the step, the cross-agent
 path's included); and a step is blocked only by diagnostics absent before it ran
 (`documentary_preexisting` reports the others) unless the recovery plan hands
 them to it (KT-1306).
-[src: file: backend/src/api/audit/document_repair.rs:140-172#recovery_plan]
-[src: file: backend/src/db/audit_runs.rs:1441-1459#invalidate_documentary_steps]
+[src: file: backend/src/api/audit/document_repair.rs:282-318#recovery_plan]
+[src: file: backend/src/db/audit_runs.rs:1509-1527#invalidate_documentary_steps]
 
 A `TypedSchema` step sends its envelope schema as `response_format` with
 `strict: false` on the OpenAI wire: the envelope does not satisfy OpenAI's
@@ -278,7 +278,7 @@ without a project. This exception grants no directory listing or writing rights;
 `.kronn/context-files` remains read-only inside a project too. Symlink
 attachments are refused. Unrelated files outside the workspace keep the existing
 refusal. Images are never returned as lossy text by `read_file`.
-[src: file: backend/src/api/agent_tools.rs:3330-3362#read_attached_file]
+[src: file: backend/src/api/agent_tools.rs:3429-3461#read_attached_file]
 [src: file: backend/src/api/agent_workspace_tools.rs:1297-1341#read_attachment_payload]
 
 CLI agents retain the existing attachment prompt: an image's path and an

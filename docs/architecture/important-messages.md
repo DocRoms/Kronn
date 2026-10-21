@@ -166,7 +166,7 @@ identities, foreign keys, category checks and indexes.
 [src: file: frontend/src/lib/importantMessageDraft.ts:54-72#takeScalars]
 [src: file: backend/src/db/sql/175_important_message_information_category.sql:3-24#discussion_important_messages_next]
 [src: file: backend/src/db/sql/175_important_message_information_category.sql:25-33#idx_disc_important_message]
-[src: file: backend/src/db/migrations.rs:1761-1893#migration_175_preserves_populated_cards_and_closes_information_category]
+[src: file: backend/src/db/migrations.rs:1781-1913#migration_175_preserves_populated_cards_and_closes_information_category]
 
 ## Tests
 

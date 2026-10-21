@@ -75,6 +75,7 @@ export const API_NAMESPACES = [
   'telemetry',
   // KT-243 — shared RunStatusCard/SharedRun read model.
   'runsApi',
+  'diskApi',
   'modelCatalogApi',
 ] as const;
 
@@ -136,6 +137,7 @@ interface DefaultMock {
   publicationCredentials: Record<string, AnyFn>;
   telemetry: Record<string, AnyFn>;
   runsApi: Record<string, AnyFn>;
+  diskApi: Record<string, AnyFn>;
   modelCatalogApi: Record<string, AnyFn>;
   measuredRatio: AnyFn;
 }
@@ -859,6 +861,11 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     runsApi: {
       list: resolve([]),
       get: resolve(null),
+    },
+    diskApi: {
+      report: resolve(null),
+      purgeOrphans: resolve(null),
+      purgeEntries: resolve(null),
     },
     modelCatalogApi: {
       list: resolve({ targets: [] }),

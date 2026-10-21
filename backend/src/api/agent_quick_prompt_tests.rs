@@ -34,6 +34,15 @@ pub(super) async fn state_with_prompts() -> AppState {
         for (id, project) in [("global", None), ("qp-a", Some("a")), ("qp-b", Some("b"))] {
             crate::db::quick_prompts::insert_quick_prompt(conn, &saved_prompt(id, project))?;
         }
+        // A human let the room without a project write the general resources.
+        crate::db::discussion_scope::grant(
+            conn,
+            "general",
+            None,
+            crate::models::discussion_scope::ScopeAccess::Write,
+            crate::models::discussion_scope::ScopeGrantSource::General,
+            "human",
+        )?;
         Ok(())
     }).await.unwrap();
     let mut config = crate::core::config::default_config();
@@ -119,9 +128,19 @@ async fn quick_prompt_authoring_filters_overrides_and_merges_the_stored_definiti
     );
     assert_eq!(created.variables[0].label, "Sujet");
 
-    let before = saved_prompt("global", None);
+    // With « General · write » a room without a project edits the general
+    // templates it created; one it did not create, like a project room's
+    // agent, it never edits (KT-1346).
+    let local = KronnToolExecutor::new(state.clone(), Some("room-a".into()));
+    for editor in [&local, &executor] {
+        let mut shared = attempted_overrides();
+        shared["qp_id"] = json!("global");
+        let refused = call(editor, "qp_update", shared).await;
+        assert!(!refused.ok, "{}", refused.content);
+    }
+    let before = created.clone();
     let mut arguments = attempted_overrides();
-    arguments["qp_id"] = json!("global");
+    arguments["qp_id"] = json!(created.id);
     arguments.as_object_mut().unwrap().remove("variables");
     let updated = call(&executor, "qp_update", arguments).await;
     assert!(updated.ok, "{}", updated.content);
@@ -139,13 +158,13 @@ async fn quick_prompt_authoring_filters_overrides_and_merges_the_stored_definiti
     assert_eq!(updated.profile_ids, before.profile_ids);
     assert_eq!(updated.directive_ids, before.directive_ids);
     assert_eq!(
-        updated.variables[0].label, "Topic",
+        updated.variables[0].label, before.variables[0].label,
         "omitted variables survive"
     );
     let replaced = call(
         &executor,
         "qp_update",
-        json!({"qp_id":"global", "variables":[]}),
+        json!({"qp_id":created.id, "variables":[]}),
     )
     .await;
     assert!(replaced.ok, "{}", replaced.content);
@@ -208,8 +227,10 @@ async fn quick_prompt_scope_applies_to_list_create_update_and_run() {
         json!({"name":"General","prompt_template":"Hello","project_id":null}),
     )
     .await;
+    // A project room's agent saves in its project, as a CLI agent does: a
+    // general template is saved from a room without a project (KT-1346).
     assert!(
-        general.ok && general.content["project_id"].is_null(),
+        general.ok && general.content["project_id"] == "a",
         "{}",
         general.content
     );

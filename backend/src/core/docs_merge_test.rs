@@ -137,8 +137,16 @@ fn no_existing_line_is_lost_every_one_is_extracted_or_listed_in_place() {
                     let target = row.target.as_ref().unwrap();
                     let written = std::fs::read_to_string(root.join(target)).unwrap();
                     let imported = written.split(IMPORT_START).nth(1).expect("import block");
+                    // Verbatim, but for the heading level: a copied heading
+                    // nests under the target's own (KT-1310).
+                    let hashes = line.len() - line.trim_start_matches('#').len();
+                    let demoted = if (1..=6).contains(&hashes) && line[hashes..].starts_with(' ') {
+                        format!("{}{}", "#".repeat((hashes + 3).min(6)), &line[hashes..])
+                    } else {
+                        line.to_string()
+                    };
                     assert!(
-                        imported.lines().any(|l| l == line),
+                        imported.lines().any(|l| l == line || l == demoted),
                         "{source}:{number} `{line}` not found in {target}"
                     );
                 }
@@ -408,4 +416,135 @@ fn classify_uses_word_boundaries() {
         Some("inconsistencies-tech-debt.md")
     );
     assert_eq!(classify("License"), None);
+}
+
+#[test]
+fn kronn_state_files_are_not_sources() {
+    let existing: BTreeSet<String> = [
+        "docs/briefing.md",
+        "docs/.kronn.json",
+        "docs/.kronn-audit-run.json",
+        "docs/guide/briefing.md",
+        "docs/guide.md",
+        "README.md",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    assert_eq!(
+        source_paths(&existing),
+        vec!["README.md", "docs/guide.md", "docs/guide/briefing.md"]
+    );
+}
+
+#[test]
+fn files_a_merge_wrote_are_not_read_as_sources() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    write(root, "docs/AGENTS.md", b"## Running tests\n\nmake test\n");
+    write(root, "docs/guide.md", b"## Testing\n\nrun it\n");
+    let existing = snapshot_tree(root).unwrap();
+    let template = load_template(&template_docs()).unwrap();
+    let owned: BTreeSet<String> = ["docs/AGENTS.md".to_string()].into_iter().collect();
+    let plan = plan_merge_excluding(root, &existing, &template, "docs", &owned).unwrap();
+    assert!(plan
+        .correspondence
+        .iter()
+        .all(|r| r.source != "docs/AGENTS.md"));
+    assert!(plan
+        .correspondence
+        .iter()
+        .any(|r| r.source == "docs/guide.md"));
+    // Still an existing target: never written over.
+    assert!(plan.existing_targets.iter().any(|p| p == "docs/AGENTS.md"));
+}
+
+#[test]
+fn kronns_own_v1_template_text_is_not_copied_as_team_content() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "documentation/decisions.md",
+        "# Architecture decisions (why, not what)\n\n\
+> **TEMPLATE FILE.** Filled during audit Step 9.\n\n\
+## How to fill (audit Step 9)\n\n- Target 3-8 real decisions.\n\n\
+## Examples (good shape — adapt to the actual repo)\n\n| Single Mutex on SQLite | fits |\n\n\
+## Decisions\n\n| {{DECISION_1}} | {{REASON}} |\n\n\
+## Why we picked Postgres\n\nBecause of JSONB.\n"
+            .as_bytes(),
+    );
+    write(
+        root,
+        "docs/conventions/agents-md-format-v1.md",
+        "# Kronn `AGENTS.md` convention — v1\n\n## 6. Annotated example\n\nsome example\n"
+            .as_bytes(),
+    );
+    let existing = snapshot_tree(root).unwrap();
+    let template = load_template(&template_docs()).unwrap();
+    let plan = plan_merge(root, &existing, &template, "docs").unwrap();
+    let decisions = plan
+        .writes
+        .iter()
+        .find(|w| w.path == "docs/decisions.md")
+        .expect("decisions.md is written");
+    assert!(decisions.content.contains("Because of JSONB."));
+    // The v2 template text itself may mention a phrase; the imported block must not.
+    let imported: String = plan
+        .writes
+        .iter()
+        .flat_map(|w| w.content.split(IMPORT_START).skip(1))
+        .collect();
+    for boilerplate in [
+        "Target 3-8 real decisions",
+        "Single Mutex on SQLite",
+        "{{DECISION_1}}",
+        "some example",
+        "TEMPLATE FILE",
+    ] {
+        assert!(!imported.contains(boilerplate), "{boilerplate} was copied");
+    }
+    // Left in place, and listed as Kronn's.
+    let skipped: Vec<_> = plan
+        .correspondence
+        .iter()
+        .filter(|r| r.action == MappingAction::KronnManaged)
+        .collect();
+    assert!(skipped
+        .iter()
+        .any(|r| r.source == "documentation/decisions.md"));
+    assert!(skipped
+        .iter()
+        .any(|r| r.source == "docs/conventions/agents-md-format-v1.md"));
+}
+
+#[test]
+fn copied_headings_nest_under_the_target_and_add_no_second_h1() {
+    let tmp = documented_repo();
+    let (_, plan) = plan_for(tmp.path());
+    let agents = plan
+        .writes
+        .iter()
+        .find(|w| w.path == "docs/AGENTS.md")
+        .unwrap();
+    let template = std::fs::read_to_string(template_docs().join("AGENTS.md")).unwrap();
+    let h1 = |text: &str| {
+        let mut fenced = false;
+        text.lines()
+            .filter(|l| {
+                if l.trim_start().starts_with("```") {
+                    fenced = !fenced;
+                }
+                !fenced && l.starts_with("# ")
+            })
+            .count()
+    };
+    assert!(agents.imported_sections > 0);
+    assert_eq!(h1(&agents.content), h1(&template));
+    let imported = agents.content.split(IMPORT_START).nth(1).unwrap();
+    assert!(imported.contains("\n#### Team agent guide\n"), "{imported}");
+    assert!(imported.contains("\n##### Critical rules\n"), "{imported}");
+    // A fenced `#` is a comment, not a heading.
+    let demoted = demote_headings(&["# a", "```sh", "# b", "```", "###### c", "text # d"]);
+    assert_eq!(demoted, "#### a\n```sh\n# b\n```\n###### c\ntext # d");
 }

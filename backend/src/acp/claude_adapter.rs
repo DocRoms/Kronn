@@ -362,6 +362,7 @@ impl AcpTransport for ClaudeAcpAdapter {
             self.launch.worker_context.as_ref(),
             self.launch.room_agent_context.as_ref(),
             self.launch.workflow_step_context.as_ref(),
+            self.launch.audit_run_id.as_deref(),
             &self.launch.github_env,
             self.launch.bridge_token.as_deref(),
         )
@@ -400,10 +401,11 @@ impl AcpTransport for ClaudeAcpAdapter {
         let mut failure: Option<String> = None;
         let mut tool_calls: u64 = 0;
         let mut text_blocks = crate::agents::runner::TextBlockJoiner::default();
+        let mut traces = crate::agents::tool_trace::ClaudeTraceReader::default();
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
-                    for trace in crate::agents::tool_trace::from_claude_line(&line) {
+                    for trace in traces.read(&line) {
                         if matches!(
                             trace.status.as_deref(),
                             Some("completed" | "failed" | "cancelled")
