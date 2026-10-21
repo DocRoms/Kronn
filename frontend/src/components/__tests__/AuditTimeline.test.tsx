@@ -483,6 +483,32 @@ describe('AuditTimeline', () => {
     expect(p.onBriefingSaved).toHaveBeenCalledTimes(1);
   });
 
+  it('reopens a saved briefing pre-filled, never while an audit runs (KT-1196)', async () => {
+    vi.mocked(projectsApi.savedBriefing).mockResolvedValueOnce({
+      purpose: 'Saved purpose', team: 'T', maturity: 'M', dependencies: 'D', traps: 'X', additional: '',
+      project: null, existing_docs: null, project_rules: null, td_to_tasks: false, cross_audit_agents: [],
+    });
+    const { unmount } = wrap(<AuditTimeline {...props({ briefingDone: true, auditActive: true })} />);
+    const locked = screen.getByTestId('audit-timeline-briefing-edit');
+    expect(locked).toBeDisabled();
+    expect(locked).toHaveAttribute('title');
+    unmount();
+
+    const p = props({ briefingDone: true });
+    wrap(<AuditTimeline {...p} />);
+    expect(screen.queryByTestId('audit-timeline-briefing-open')).toBeNull();
+    const edit = screen.getByTestId('audit-timeline-briefing-edit');
+    expect(edit).toHaveTextContent('Modifier le briefing');
+    fireEvent.click(edit);
+    await waitFor(() => expect(document.querySelector('.briefing-form textarea')).toHaveValue('Saved purpose'));
+    expect(projectsApi.savedBriefing).toHaveBeenCalledWith('p1');
+    await act(async () => { fireEvent.submit(document.querySelector('.briefing-form')!); });
+    await waitFor(() => expect(projectsApi.saveBriefing).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(projectsApi.saveBriefing).mock.calls[0][1].purpose).toBe('Saved purpose');
+    expect(p.onBriefingSaved).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('audit-timeline-briefing-edit')).toBeInTheDocument();
+  });
+
   it('explains once what changed, and remembers the dismissal', () => {
     const { unmount } = wrap(<AuditTimeline {...props()} />);
     const news = document.querySelector('.audit-tl-news')!;
@@ -524,5 +550,27 @@ describe('AuditTimeline', () => {
     expect(p.onMarkValid).not.toHaveBeenCalled();
     expect(screen.queryByTestId('audit-timeline-validation-finished')).toBeNull();
     expect(screen.queryByRole('button', { name: /Voir la discussion de validation/ })).toBeNull();
+  });
+
+  it('announces step changes, not ticks, through a polite live region (KT-1072)', async () => {
+    mockTimeline([{ id: 'run-1', started_at: '2026-10-02T10:00:00Z' }], [step(1)]);
+    const { rerender } = wrap(<AuditTimeline {...props()} />);
+    const region = await screen.findByTestId('audit-timeline-step-announce');
+    expect(region).toHaveAttribute('aria-live', 'polite');
+    expect(region).toHaveTextContent('');
+
+    const running = (over: Partial<AuditTimelineProps>) => (
+      <I18nProvider>
+        <AuditTimeline {...props({ auditActive: true, liveTotal: 16, liveStep: 2, liveFile: 'docs/step-2.md', ...over })} />
+      </I18nProvider>
+    );
+    rerender(running({ liveElapsed: '0:05', liveTotalTokens: 100 }));
+    await waitFor(() => expect(region.textContent).toMatch(/2.*16.*docs\/step-2\.md/));
+    const announced = region.textContent;
+    rerender(running({ liveElapsed: '0:06', liveTotalTokens: 250, liveTool: 'Read', liveToolCalls: 3 }));
+    expect(region.textContent).toBe(announced);
+    rerender(running({ liveStep: 3, liveFile: 'docs/step-3.md', liveElapsed: '0:07' }));
+    await waitFor(() => expect(region.textContent).toMatch(/3.*16.*docs\/step-3\.md/));
+    expect(screen.getByTestId('audit-timeline-step-announce')).toBe(region);
   });
 });

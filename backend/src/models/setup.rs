@@ -74,6 +74,11 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(skip)]
     pub embed_allowed_origins: Vec<String>,
+    /// Five-field cron for the scheduled re-verification of cited lines
+    /// (`citations.json`). Absent means off, the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
+    pub audit_reverify_cron: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -506,8 +506,18 @@ export function ChatInput({
   }, [flushDraftNow, updateChatInput, updateMentionTierOverrides]);
 
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
-  // Also loaded while a draft names agents, so their chips can warn before sending.
-  const { catalog, catalogError } = useModelCatalogSnapshot(mentionQuery !== null || draftTargets.length > 0);
+  const paletteOpen = mentionQuery !== null;
+  const { catalog, catalogError, refetch: refetchCatalog } = useModelCatalogSnapshot(paletteOpen);
+  // A draft naming agents also needs the catalogue (their chips warn before sending), but only
+  // when the palette has not loaded it: widening the hook's `open` would fetch again on the
+  // palette-to-draft handoff and stop reloading when the palette reopens.
+  const draftNamesAgents = draftTargets.length > 0;
+  const catalogLoaded = catalog !== null;
+  useEffect(() => {
+    if (draftNamesAgents && !paletteOpen && !catalogLoaded) void refetchCatalog();
+    // Asked when the draft starts naming agents or the palette closes, never when the answer lands.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftNamesAgents, paletteOpen]);
   const [mentionIndex, setMentionIndex] = useState(0);
   // Keyboard tier pick inside the mention palette. `null` means UNTOUCHED, and
   // that distinction is load-bearing: Tab/Enter must keep sending no tier at all

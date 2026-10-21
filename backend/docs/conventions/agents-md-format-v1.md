@@ -44,7 +44,7 @@ Free-form prose owned by humans. Kronn never validates this section.
 |---|---|---|
 | `name` | yes | Stable, unique-within-file section id. Survives reordering/renames. |
 | `curated` | yes | `"ai"` (provenance required) or `"human"` (free-form, never validated). |
-| `owner` | template v2 | `"audit"` (the audit may refresh it) or `"human"` (the audit must preserve it byte-for-byte and propose changes separately). If absent on a legacy marker, `curated="human"` implies human ownership; otherwise audit ownership is assumed. |
+| `owner` | template v2 | `"audit"` (the audit may refresh it) or `"human"` (a person wrote or validated it: Kronn may still correct it, and then asks for a reconfirmation). If absent on a legacy marker, `curated="human"` implies human ownership; otherwise audit ownership is assumed. |
 | `audit` | for `curated="ai"` | ISO-8601 date the section was last **verified against reality**. Distinct from git's "last edited". |
 
 The file SHOULD open with `<!-- kronn:doc-version="1.0" -->`. A file with **no**
@@ -56,12 +56,18 @@ is strictly opt-in by presence.
 - **`curated="ai"`** — provenance is required: every non-trivial assertion needs a
   `[src: …]` citation.
 - **`curated="human"`** — owned by a person, free-form, never validated.
-- **`owner="human"`** — never rewritten by a full or partial audit. A re-audit
-  restores the original block and records its proposal as a dated diff. The
-  legacy `curated="human"` spelling receives the same protection. This holds for
-  the audit's own STEP 0 too (the `anti-hallu` section included), and a
-  `kronn:section` marker inside a fenced code block (``` or `~~~`) is an example,
-  never a boundary: it neither opens nor closes a protected section.
+- **`owner="human"`** — written or validated by a person. No Kronn write is
+  refused or reverted because of it: an audit, a revalidation, a template
+  reinstall or a documentary repair applies its change, and the section is
+  then marked "to reconfirm" with the diff until its owner confirms it. The
+  legacy `curated="human"` spelling is read the same way. STEP 0 never restamps
+  a human opener, and a `kronn:section` marker inside a fenced code block
+  (``` or `~~~`) is an example, never a boundary.
+- **Human-validation provenance** — a validation (`validate-audit`, a TD
+  validation card, « Vérifié, inchangé », « Confirmer ») records the digest of
+  what the person approved in `docs/provenance.json`, next to `citations.json`.
+  No marker is added to the prose. A doc whose validated text changed reads as
+  AI-generated, for the learning gate too, until it is reconfirmed.
 - **Asymmetric conversion** — a human may convert a `curated="ai"` section to
   `curated="human"`. The reverse never happens automatically: human authority outranks AI,
   never the other way around.
@@ -101,6 +107,7 @@ names, versions, behaviour). The grammar:
 | `user` | **HIGH** | A traceable human declaration, e.g. `[src: user:romuald:2026-05-25: disc-123]`. Not machine-verifiable → `unchecked`, but a legitimate trust tier. |
 | `commit` | HIGH if recent | A commit hash. `unchecked`. |
 | `api` | HIGH if recent | A captured API response (`api_call_log#…`). `unchecked`. |
+| `deps` | HIGH, dated | A dependency-watch row: `deps: <manager>/<package>@<YYYY-MM-DD>`. An audit checks it against the snapshot it injected (absent = fabricated); elsewhere `unchecked`. |
 | `code-comment` | **LOW** ⚠️ | A code comment is **not authoritative** — a hint to verify, never a fact. |
 | `inferred` | **SOFT** | A derived guess, not a stated fact. |
 | `hypothesis` | **VERY SOFT** | Unverified, confirm before acting. |
@@ -110,16 +117,37 @@ names, versions, behaviour). The grammar:
 
 - `[src: file: backend/src/api/mod.rs:14]` — file + single line.
 - `[src: file: backend/src/api/mod.rs:14-22]` — file + line range.
-- `[src: backend/src/api/mod.rs]` — file only (type defaulted).
-- `[src: file: docs/specs/brief.docx]` — file only. Required for a binary file (.docx,
+- `[src: <path>:<line>]` — the `file:` type is the default.
+- `[src: file: backend/src/api/mod.rs:14-22#context_audit]` — line or range + **symbol anchor**.
+  The anchor (an identifier; `.` and `-` allowed inside, e.g. `Type.method`, `check-version`)
+  must appear as a whole word inside the cited lines. It is only read after a line spec. Use it
+  to say *what* the lines hold: when code moves, a stale range fails instead of silently
+  pointing beside the claim.
+- `[src: file: <path>.docx]` — file only. Required for a binary file (.docx,
   .pdf, images), which has no lines; detected by content, not extension. In audited `docs/`
   a text file always takes a line, and a binary file never does.
 - Percent-encoded paths (`My%20File.docx`) are decoded before resolving.
 
 Mechanical verification is **path-jailed to the project root**: a citation that escapes the
-root (`../../etc/passwd`) is rejected as `outside_project` without ever touching the
-filesystem. This is the ungameable core — an agent cannot fabricate a file or line that
-actually exists.
+root (`../../etc/passwd`, an absolute path such as `/etc/passwd`, or a symlink leading out) is
+rejected as `outside_project` without ever touching a file outside the root. An absolute path
+under the root is verified like a relative one. This is the ungameable core — an agent cannot
+fabricate a file or line that actually exists.
+
+An anchor absent from the cited lines makes the citation `out_of_bounds` (the range is wrong
+for what it names); the detail says where the symbol does appear, if anywhere. The check is
+textual and deterministic: no code is parsed.
+
+**One anchor rule, no tolerance window.** The runtime verifier, the `verified` badge it feeds
+and Kronn's docs check apply this same rule: the symbol is inside the cited lines, or the
+citation fails; one line past the range fails everywhere. A tool that re-anchors a moved
+citation rewrites the range only when the symbol occurs once in the cited file, keeping the
+span length and the anchor; with several occurrences a human picks the line. A missing file
+or line is never re-anchored.
+
+A marker quoted in inline backticks is verified too: it is `verified` when it resolves, but a
+failure there counts as *unverified*, not fabricated, because backticks also quote the grammar
+as an example. Markers inside fenced code blocks are not read.
 
 > **What verification proves — and what it does not.** A `verified` status means the cited
 > source *exists and is in bounds*. It does **not** prove the source *supports the claim*.
@@ -155,7 +183,7 @@ mode (`Settings → Anti-hallucination`, or `config.toml anti_hallucination_mode
 **P2 lint, concretely** — what is mechanically checked on each agent reply:
 1. A prose heuristic flags confident technical claims left **unsourced** (one confidence tier).
 2. Every `[src: …]` marker present is **mechanically verified**: file exists, path is jailed to
-   the project root, line/range is in bounds. A citation pointing at a non-existent or
+   the project root, line/range is in bounds, a `#symbol` anchor appears in the range. A citation pointing at a non-existent or
    out-of-project path is flagged **fabricated**; a `training-data` source is **rejected**.
 
 **Convention vs enforcement.** The markers and citation grammar above are a *writing

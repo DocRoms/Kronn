@@ -158,6 +158,8 @@ async fn prompt_of(kind: Kind, linked: bool) -> (String, tempfile::TempDir) {
                     kind: None,
                     custom_prompt: None,
                     resume_run_id: None,
+                    retry_steps: None,
+                    fresh: None,
                 }),
             )
             .await;

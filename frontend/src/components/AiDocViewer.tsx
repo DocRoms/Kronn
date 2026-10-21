@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode, type CSSProperties } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef, type ReactNode, type CSSProperties } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
@@ -8,11 +8,20 @@ import type { AiFileNode } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { rehypeRewriteDocImages } from '../lib/docImageRewrite';
 import { MermaidDiagram } from './MermaidDiagram';
+import { DocHeading, DocLink } from './DocLink';
+import { buildDocIndex, DocLinkContext, findDocHeading, type DocLinkTarget } from '../lib/docLinks';
+import { onActivationKey } from '../lib/keyboardActivation';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import './AiDocViewer.css';
 import {
   ChevronRight, ChevronDown, ChevronUp,
-  FileText, Folder, Loader2, Search, MessageSquare, X, AlertTriangle,
+  FileText, Folder, Loader2, Search, MessageSquare, X, AlertTriangle, ArrowLeft,
 } from 'lucide-react';
+
+const SourceCodeViewer = lazy(() => import('./SourceCodeViewer').then(m => ({ default: m.SourceCodeViewer })));
+const DOC_HISTORY_LIMIT = 20;
+
+type LinkNotice = { kind: 'missing' | 'outside'; target: string };
 
 interface AiDocViewerProps {
   projectId: string;
@@ -90,6 +99,11 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
   const [renderKey, setRenderKey] = useState(0);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const treeLoadRef = useRef(0);
+  const [history, setHistory] = useState<string[]>([]);
+  const [linkNotice, setLinkNotice] = useState<LinkNotice | null>(null);
+  const [codeTarget, setCodeTarget] = useState<{ path: string; line: number | null } | null>(null);
+  const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
+  const docIndex = useMemo(() => buildDocIndex(tree), [tree]);
 
   // ─── Load tree ──────────────────────────────────────────────────────────
   const readTree = useCallback(() => projectsApi.listAiFiles(projectId), [projectId]);
@@ -189,6 +203,16 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
     : EMPTY_DOC_SEARCH_RESULTS;
   const searchLoading = Boolean(trimmedSearchQuery) && !searchIsCurrent;
 
+  // Scroll once the target doc is rendered; a same-doc anchor applies immediately.
+  useEffect(() => {
+    if (!pendingAnchor || loading || content === null) return;
+    const container = contentRef.current;
+    if (!container) return;
+    const heading = findDocHeading(container, pendingAnchor);
+    heading?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    setPendingAnchor(null);
+  }, [pendingAnchor, loading, content, renderKey]);
+
   // ─── DOM highlighting (runs after markdown renders) ─────────────────────
   useEffect(() => {
     const container = contentRef.current;
@@ -207,10 +231,42 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery, currentMatchIdx, renderKey]);
 
-  const selectPath = useCallback((path: string) => {
+  const openDoc = useCallback((path: string, anchor: string | null) => {
+    setLinkNotice(null);
+    setPendingAnchor(anchor);
+    if (path === selectedPath) return;
+    if (selectedPath) setHistory(prev => [...prev, selectedPath].slice(-DOC_HISTORY_LIMIT));
     setSelectedPath(path);
     setCurrentMatchIdx(0);
-  }, []);
+  }, [selectedPath]);
+
+  const selectPath = useCallback((path: string) => openDoc(path, null), [openDoc]);
+
+  const goBack = useCallback(() => {
+    const previous = history[history.length - 1];
+    if (!previous) return;
+    setHistory(history.slice(0, -1));
+    setLinkNotice(null);
+    setPendingAnchor(null);
+    setSelectedPath(previous);
+    setCurrentMatchIdx(0);
+  }, [history]);
+
+  const navigateLink = useCallback((target: DocLinkTarget) => {
+    switch (target.kind) {
+      case 'doc': openDoc(target.path, target.anchor); break;
+      case 'anchor': setLinkNotice(null); setPendingAnchor(target.anchor); break;
+      case 'code': setLinkNotice(null); setCodeTarget({ path: target.path, line: target.line }); break;
+      case 'missing': setLinkNotice({ kind: 'missing', target: target.path }); break;
+      case 'outside': setLinkNotice({ kind: 'outside', target: target.href }); break;
+      default: break;
+    }
+  }, [openDoc]);
+
+  const docLinkContext = useMemo(
+    () => ({ currentPath: selectedPath ?? '', index: docIndex, onNavigate: navigateLink }),
+    [selectedPath, docIndex, navigateLink],
+  );
 
   // ─── Ordered list of files with matches (for cross-file nav) ────────────
   const filesWithMatches = useMemo(() => {
@@ -417,8 +473,15 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
         {/* Toolbar */}
         {selectedPath && content !== null && !loading && (
           <div className="aidoc-toolbar">
-            <span className="aidoc-toolbar-path">
-              {selectedPath}
+            <span className="aidoc-toolbar-lead">
+              {history.length > 0 && (
+                <button type="button" onClick={goBack} className="aidoc-back-btn" title={t('projects.docAi.back')} aria-label={t('projects.docAi.back')}>
+                  <ArrowLeft size={11} />
+                </button>
+              )}
+              <span className="aidoc-toolbar-path">
+                {selectedPath}
+              </span>
             </span>
             {onDiscussFile && (() => {
               // Tech-debt files (`docs/tech-debt/TD-*.md`) get a stronger
@@ -450,6 +513,17 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
             })()}
           </div>
         )}
+        {linkNotice && (
+          <div className="aidoc-link-notice" role="alert">
+            <AlertTriangle size={11} className="flex-shrink-0" />
+            <span>{linkNotice.kind === 'missing'
+              ? t('projects.docAi.linkMissing', linkNotice.target)
+              : t('projects.docAi.linkOutside', linkNotice.target)}</span>
+            <button type="button" onClick={() => setLinkNotice(null)} className="aidoc-link-notice-close" aria-label={t('projects.docAi.dismiss')}>
+              <X size={10} />
+            </button>
+          </div>
+        )}
         {/* Content area */}
         <div ref={contentRef} key={renderKey} className="aidoc-content-area">
           {loading ? (
@@ -457,11 +531,13 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
               <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.docAi.loading')}
             </div>
           ) : content !== null ? (
-            <DocMarkdown
-              content={content}
-              projectId={projectId}
-              baseDir={selectedPath && selectedPath.includes('/') ? selectedPath.slice(0, selectedPath.lastIndexOf('/')) : ''}
-            />
+            <DocLinkContext.Provider value={docLinkContext}>
+              <DocMarkdown
+                content={content}
+                projectId={projectId}
+                baseDir={selectedPath && selectedPath.includes('/') ? selectedPath.slice(0, selectedPath.lastIndexOf('/')) : ''}
+              />
+            </DocLinkContext.Provider>
           ) : (
             <div className="aidoc-select-file">
               {t('projects.docAi.selectFile')}
@@ -470,7 +546,36 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
         </div>
       </div>
       </div>
+      {codeTarget && (
+        <CodeOverlay projectId={projectId} target={codeTarget} onClose={() => setCodeTarget(null)} />
+      )}
     </>
+  );
+}
+
+function CodeOverlay({ projectId, target, onClose }: {
+  projectId: string;
+  target: { path: string; line: number | null };
+  onClose: () => void;
+}) {
+  const { t } = useT();
+  const dialogRef = useDialogFocus<HTMLDivElement>({ onEscape: onClose });
+  return (
+    <div className="aidoc-code-overlay" role="dialog" aria-modal="true" aria-label={target.path} ref={dialogRef}>
+      <div className="aidoc-code-panel">
+        <div className="aidoc-code-head">
+          <code>{target.path}{target.line ? `:${target.line}` : ''}</code>
+          <button type="button" className="aidoc-code-close" onClick={onClose} aria-label={t('projects.docAi.closeCode')}>
+            <X size={14} />
+          </button>
+        </div>
+        <div className="aidoc-code-body">
+          <Suspense fallback={null}>
+            <SourceCodeViewer projectId={projectId} initialPath={target.path} initialLine={target.line} />
+          </Suspense>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -577,6 +682,10 @@ function TreeNode({ node, selectedPath, expandedDirs, onSelect, onToggleDir, dep
           className="aidoc-tree-dir"
           style={{ paddingLeft: pl, padding: `3px 8px 3px ${pl}px` }}
           onClick={() => onToggleDir(node.path)}
+          onKeyDown={onActivationKey(() => onToggleDir(node.path))}
+          role="button"
+          tabIndex={0}
+          aria-expanded={isExpanded}
         >
           {isExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
           <Folder size={11} className="aidoc-tree-dir-icon" />
@@ -599,6 +708,10 @@ function TreeNode({ node, selectedPath, expandedDirs, onSelect, onToggleDir, dep
       data-dimmed={dimmed}
       style={{ paddingLeft: pl, padding: `3px 8px 3px ${pl}px` }}
       onClick={() => onSelect(node.path)}
+      onKeyDown={onActivationKey(() => onSelect(node.path))}
+      role="button"
+      tabIndex={0}
+      aria-current={isSelected ? 'true' : undefined}
     >
       <FileText size={11} className="flex-shrink-0" />
       <span className="aidoc-tree-file-name">
@@ -669,9 +782,12 @@ const DOC_MD_COMPONENTS = {
   // HTML lost its centering. Map the deprecated `align` attr → text-align.
   p: ({ children, align }: { children?: ReactNode; align?: string }) =>
     <p style={align ? { textAlign: align as CSSProperties['textAlign'] } : undefined}>{children}</p>,
-  h1: ({ children }: { children?: ReactNode }) => <h1>{children}</h1>,
-  h2: ({ children }: { children?: ReactNode }) => <h2>{children}</h2>,
-  h3: ({ children }: { children?: ReactNode }) => <h3>{children}</h3>,
+  h1: ({ children }: { children?: ReactNode }) => <DocHeading level={1}>{children}</DocHeading>,
+  h2: ({ children }: { children?: ReactNode }) => <DocHeading level={2}>{children}</DocHeading>,
+  h3: ({ children }: { children?: ReactNode }) => <DocHeading level={3}>{children}</DocHeading>,
+  h4: ({ children }: { children?: ReactNode }) => <DocHeading level={4}>{children}</DocHeading>,
+  h5: ({ children }: { children?: ReactNode }) => <DocHeading level={5}>{children}</DocHeading>,
+  h6: ({ children }: { children?: ReactNode }) => <DocHeading level={6}>{children}</DocHeading>,
   ul: ({ children }: { children?: ReactNode }) => <ul>{children}</ul>,
   ol: ({ children }: { children?: ReactNode }) => <ol>{children}</ol>,
   li: ({ children }: { children?: ReactNode }) => <li>{children}</li>,
@@ -700,8 +816,7 @@ const DOC_MD_COMPONENTS = {
   td: ({ children }: { children?: ReactNode }) => <td>{children}</td>,
   blockquote: ({ children }: { children?: ReactNode }) => <blockquote>{children}</blockquote>,
   hr: () => <hr />,
-  a: ({ href, children }: { href?: string; children?: ReactNode }) =>
-    <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+  a: DocLink,
   strong: ({ children }: { children?: ReactNode }) => <strong>{children}</strong>,
 };
 

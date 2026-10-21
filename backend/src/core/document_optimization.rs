@@ -100,7 +100,9 @@ pub fn analyze(project: &Path) -> Result<DocumentaryOptimizationReport, String> 
                 "unresolved template or TODO placeholder".into(),
             ));
         }
-        inspect_citations(project, &adapter_rel, &content, &mut diagnostics);
+        let (owned, human) =
+            crate::api::audit::anti_hallu_enforce::split_human_owned_sections(&content);
+        inspect_citations(project, &adapter_rel, &owned, &mut diagnostics);
         let visible = visible_markdown(&content);
         for line in visible.lines().filter(|line| mutable_line_reference(line)) {
             diagnostics.push(diag(
@@ -119,7 +121,13 @@ pub fn analyze(project: &Path) -> Result<DocumentaryOptimizationReport, String> 
                 ),
             ));
         }
-        let mut routed = routed_markdown(project, adapter, &content, &mut diagnostics);
+        let mut routed = routed_markdown(project, adapter, &owned, &mut diagnostics);
+        for (name, text) in &human {
+            let mut found = Vec::new();
+            inspect_citations(project, &adapter_rel, text, &mut found);
+            routed.extend(routed_markdown(project, adapter, text, &mut found));
+            demote_human_section(&adapter_rel, name, found, &mut diagnostics);
+        }
         let entry = project.join("docs/AGENTS.md");
         if entry.is_file() && adapter != &entry && !routed.contains(&entry) {
             routed.insert(0, entry);
@@ -287,7 +295,15 @@ fn inspect_docs(
     let mut linked = BTreeSet::new();
     for adapter in adapters {
         if let Ok(content) = read(adapter) {
-            collect_valid_links(project, adapter, &content, &mut linked, Some(out));
+            let rel = relative(project, adapter);
+            let (owned, human) =
+                crate::api::audit::anti_hallu_enforce::split_human_owned_sections(&content);
+            collect_valid_links(project, adapter, &owned, &mut linked, Some(out));
+            for (name, text) in human {
+                let mut found = Vec::new();
+                collect_valid_links(project, adapter, &text, &mut linked, Some(&mut found));
+                demote_human_section(&rel, &name, found, out);
+            }
         }
     }
     for path in docs {
@@ -327,8 +343,7 @@ fn inspect_docs(
                 ));
             }
         }
-        collect_valid_links(project, path, &content, &mut linked, Some(out));
-        inspect_citations(project, &rel, &content, out);
+        inspect_references(project, path, &rel, &content, &mut linked, out);
         if word_count(&content) >= budgets.large_inventory_min_words && !search_first(&content) {
             out.push(diag(
                 "large_inventory_not_search_first",
@@ -426,6 +441,47 @@ fn unindexed_tds(project: &Path, docs: &[PathBuf], out: &mut Vec<Diagnostic>) {
         }
     }
 }
+
+/// Links and citations of one document. A dead one inside an `owner="human"`
+/// section is reported for its owner and never blocks: human prose never
+/// holds a run back (KT-1079).
+fn inspect_references(
+    project: &Path,
+    source: &Path,
+    rel: &str,
+    content: &str,
+    linked: &mut BTreeSet<PathBuf>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let (owned, human) = crate::api::audit::anti_hallu_enforce::split_human_owned_sections(content);
+    collect_valid_links(project, source, &owned, linked, Some(out));
+    inspect_citations(project, rel, &owned, out);
+    for (name, text) in human {
+        let mut found = Vec::new();
+        collect_valid_links(project, source, &text, linked, Some(&mut found));
+        inspect_citations(project, rel, &text, &mut found);
+        demote_human_section(rel, &name, found, out);
+    }
+}
+
+fn demote_human_section(rel: &str, name: &str, found: Vec<Diagnostic>, out: &mut Vec<Diagnostic>) {
+    for d in found.into_iter().filter(|d| d.blocking) {
+        let item = diag(
+            HUMAN_SECTION_REFERENCE,
+            rel,
+            format!(
+                "human-owned section `{name}`: {}; reported for its owner, never blocking",
+                d.message
+            ),
+        );
+        if !out.contains(&item) {
+            out.push(item);
+        }
+    }
+}
+
+/// A dead link or citation inside a human-owned section: a to-do for a person.
+pub const HUMAN_SECTION_REFERENCE: &str = "human_section_reference";
 
 fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Diagnostic>) {
     let visible = visible_markdown(content);
@@ -909,6 +965,40 @@ mod tests {
     fn write(path: &Path, body: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn a_dead_reference_inside_a_human_section_is_a_to_do_not_a_blocker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(&root.join("src/kept.rs"), "fn main() {}\n");
+        write(
+            &root.join("docs/AGENTS.md"),
+            "# Projet\n\nAgent claim [src: file: src/gone.rs:1]\n\n\
+             <!-- kronn:section name=\"team\" owner=\"human\" -->\n\
+             Human claim [src: file: src/retired.rs:2] and [notes](missing.md).\n\
+             Still true [src: file: src/kept.rs:1]\n\
+             <!-- kronn:section:end -->\n",
+        );
+        let report = analyze(root).unwrap();
+        let blocking: Vec<_> = report.blocking_diagnostics().collect();
+        assert_eq!(blocking.len(), 1, "{blocking:?}");
+        assert!(blocking[0].message.contains("src/gone.rs"), "{blocking:?}");
+        let human: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == HUMAN_SECTION_REFERENCE)
+            .collect();
+        // The link is both a dead target and a dead routed document.
+        assert_eq!(human.len(), 3, "{human:?}");
+        assert!(human
+            .iter()
+            .all(|d| !d.blocking && d.path == "docs/AGENTS.md"));
+        assert!(human
+            .iter()
+            .all(|d| d.message.starts_with("human-owned section `team`: ")));
+        assert!(human.iter().any(|d| d.message.contains("`src/retired.rs`")));
+        assert!(human.iter().any(|d| d.message.contains("missing.md")));
     }
 
     #[test]
@@ -1618,7 +1708,14 @@ mod tests {
             unindexed(root),
             vec!["docs/tech-debt/TD-20261003-missing.md"]
         );
-        crate::core::td_index::resync(&root.join("docs")).unwrap();
+        crate::core::td_index::resync(
+            &root.join("docs"),
+            crate::core::adr::Trust::RunBaseline {
+                decisions: "",
+                records: "",
+            },
+        )
+        .unwrap();
         assert!(unindexed(root).is_empty());
     }
 }

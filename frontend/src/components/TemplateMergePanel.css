@@ -238,3 +238,23 @@
 }
 .tm-file-head code { font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs); word-break: break-all; }
 .tm-file .git-diff-container { max-height: 18rem; overflow: auto; }
+
+/* A merge already on disk (KT-1182): in progress, or accepted and waiting to be integrated. */
+.tm-state {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-5) var(--kr-sp-6);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-accent-bg);
+  border: 1px solid var(--kr-accent-border);
+}
+.tm-state[data-status='to_integrate'] {
+  background: var(--kr-success-bg);
+  border-color: rgba(var(--kr-success-rgb), 0.4);
+}
+.tm-state > div { flex: 1; min-width: 0; }
+.tm-state p { margin: var(--kr-sp-1) 0 var(--kr-sp-3); color: var(--kr-text-secondary); }
+.tm-state-icon { color: var(--kr-accent-ink); flex-shrink: 0; margin-top: 2px; }
+.tm-state[data-status='to_integrate'] .tm-state-icon,
+.tm-offer[data-status='to_integrate'] .tm-state-icon { color: var(--kr-success); }

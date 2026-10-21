@@ -1,0 +1,116 @@
+/* Compare targets — each active row combines a cheap include/exclude control
+ * with the same agent+tier picker used everywhere else in Kronn. */
+.qp-compare-selector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) 0;
+}
+.qp-compare-selector-label {
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-text-secondary);
+  margin-right: var(--kr-sp-1);
+}
+.qp-compare-target {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  white-space: nowrap;
+  transition: opacity 0.15s, background 0.15s, border-color 0.15s;
+}
+.qp-compare-target--active {
+  border: 1px solid;
+  opacity: 1;
+}
+.qp-compare-target--active:hover {
+  background: rgba(var(--kr-accent-rgb), 0.06);
+}
+.qp-compare-target--inactive {
+  border: 1px dashed var(--kr-border, rgba(255, 255, 255, 0.18));
+  color: var(--kr-text-tertiary);
+  opacity: 0.55;
+}
+.qp-compare-target--inactive:hover {
+  opacity: 0.85;
+}
+/* a connection that cannot run yet: shown, named, and not clickable. */
+.qp-compare-target--unusable {
+  border: 1px dashed var(--kr-border, rgba(255, 255, 255, 0.18));
+  color: var(--kr-text-tertiary);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.qp-compare-target-reason {
+  color: var(--kr-text-muted);
+  font-weight: 400;
+  font-size: var(--kr-fs-2xs);
+}
+
+.qp-compare-target-toggle {
+  width: 21px;
+  height: 21px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  color: var(--kr-text-secondary);
+  font: 700 var(--kr-fs-xs) var(--kr-font-mono);
+  cursor: pointer;
+}
+.qp-compare-target-toggle:hover {
+  background: rgba(var(--kr-accent-rgb), 0.16);
+  color: var(--kr-text-primary);
+}
+.qp-compare-target-empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 5px 0 2px;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+}
+.qp-compare-target .kr-agent-switch-btn {
+  min-height: 23px;
+  padding: 2px 5px;
+  background: transparent;
+  border: 0;
+}
+.qp-compare-add-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 2px 8px;
+  border: 1px dashed var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-info);
+  font-size: var(--kr-fs-2xs);
+  cursor: pointer;
+}
+.qp-compare-add-model:hover {
+  border-color: var(--kr-info);
+  background: rgba(var(--kr-info-rgb), 0.07);
+}
+.qp-compare-toggle-all {
+  font-size: var(--kr-fs-2xs);
+  background: transparent;
+  border: none;
+  color: var(--kr-info);
+  cursor: pointer;
+  padding: 2px var(--kr-sp-2);
+  margin-left: auto;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.qp-compare-toggle-all:hover {
+  color: var(--kr-text-primary);
+}

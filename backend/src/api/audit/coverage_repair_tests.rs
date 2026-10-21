@@ -23,6 +23,8 @@ fn matrix(valid: bool) -> String {
     ] {
         if dimension == "Accessibility" && !valid {
             content.push_str("| Accessibility | N/A: backend has no UI |\n");
+        } else if dimension == "Dependencies" {
+            content.push_str("| Dependencies | scanned — nothing substantiable | Reviewed the manifests; source used: dependency watch dated 2026-10-04 |\n");
         } else {
             content.push_str(&format!("| {dimension} | scanned — nothing substantiable | Reviewed the repository sources |\n"));
         }
@@ -167,6 +169,8 @@ async fn full_resume_repairs_coverage_with_bounded_feedback_and_preserves_prior_
                     kind: None,
                     custom_prompt: None,
                     resume_run_id: Some("before-coverage".into()),
+                    retry_steps: None,
+                    fresh: None,
                 }),
             )
             .await

@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { projects as projectsApi } from '../lib/api';
-import { MERGE_CANDIDATE_STATUSES, offersTemplateMerge } from '../lib/templateMerge';
-import type { AiAuditStatus, TemplateMergeView } from '../types/generated';
+import {
+  MERGE_CANDIDATE_STATUSES, offersTemplateMerge, templateMergeStatus, type TemplateMergeStatus,
+} from '../lib/templateMerge';
+import type { AiAuditStatus, TemplateMergeState, TemplateMergeView } from '../types/generated';
 
 export type TemplateMergeMode = 'closed' | 'browse' | 'gate';
 
 export interface TemplateMergeOffer {
   eligible: boolean;
+  /** Where the merge stands on disk, from the last plan read. */
+  status: TemplateMergeStatus;
+  merge: TemplateMergeState | null;
   mode: TemplateMergeMode;
   open: () => void;
   close: () => void;
@@ -17,8 +22,8 @@ export interface TemplateMergeOffer {
 }
 
 /**
- * Whether "Lancer l'audit" should offer the template v2 merge first. The
- * backend has no "documented / merged" flag, so the read-only plan decides.
+ * Whether "Lancer l'audit" should offer the template v2 merge first, from the
+ * read-only plan: its merge state first, then its content.
  */
 export function useTemplateMergeOffer(
   projectId: string,
@@ -29,6 +34,8 @@ export function useTemplateMergeOffer(
   const [plan, setPlan] = useState<TemplateMergeView | null>(null);
   const [mode, setMode] = useState<TemplateMergeMode>('closed');
   const [skipped, setSkipped] = useState(false);
+  // Bumped on close: the panel may have started, accepted or abandoned a merge.
+  const [reads, setReads] = useState(0);
   const request = useRef<Promise<TemplateMergeView | null> | null>(null);
   const pendingLaunch = useRef<(() => void) | null>(null);
   const planRef = useRef(plan);
@@ -48,9 +55,11 @@ export function useTemplateMergeOffer(
     // No state update when nothing changed: most projects read back no plan at all.
     void pending.then(p => { if (!cancelled && (p !== null || planRef.current !== null)) setPlan(p); });
     return () => { cancelled = true; };
-  }, [candidate, projectId]);
+  }, [candidate, projectId, reads]);
 
   const eligible = candidate && offersTemplateMerge(plan);
+  const merge = candidate ? plan?.merge ?? null : null;
+  const status = templateMergeStatus(merge);
 
   const gateLaunch = useCallback(async (launch: () => void) => {
     if (!candidate || skipped) { launch(); return; }
@@ -67,6 +76,7 @@ export function useTemplateMergeOffer(
   const close = useCallback(() => {
     pendingLaunch.current = null;
     setMode('closed');
+    setReads(n => n + 1);
   }, []);
   const launchAuditAnyway = useCallback(() => {
     const launch = pendingLaunch.current;
@@ -76,5 +86,5 @@ export function useTemplateMergeOffer(
     launch?.();
   }, []);
 
-  return { eligible, mode, open, close, gateLaunch, launchAuditAnyway };
+  return { eligible, status, merge, mode, open, close, gateLaunch, launchAuditAnyway };
 }

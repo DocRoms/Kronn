@@ -96,7 +96,9 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # KT-1104: `page_delete_dataset` was paid for by tightening the page family
 # and `convention_get` descriptions; re-measured on the 0.15.0 integration
 # head: exactly 85_341 B.
-CATALOGUE_MAX_BYTES = 85_341
+# KT-1210: audit_launch gains `fresh` and `retry_steps`, paid for by tightening
+# both audit descriptions; ceiling lowered by 73 B (85_341 -> 85_268).
+CATALOGUE_MAX_BYTES = 85_268
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

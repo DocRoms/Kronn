@@ -12,6 +12,7 @@ import { ImportantMessagesBar } from '../components/ImportantMessageCard';
 import { ImportantMessageForm } from '../components/ImportantMessageForm';
 import { submitImportantMessage } from '../lib/submitImportantMessage';
 import { refreshImportantMessages } from '../lib/importantMessages';
+import { pinScrollTarget } from '../lib/pinScrollTarget';
 import { preparePublication } from '../lib/importantPublication';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
@@ -340,6 +341,8 @@ interface MessageSearchMatch {
 interface GlobalSearchTarget {
   discussionId: string;
   messageId: string;
+  /** An element inside the message to centre instead of the whole row. */
+  anchorSelector?: string;
 }
 
 type HighlightRegistry = {
@@ -1164,18 +1167,11 @@ export function DiscussionsPage({
       registry.set(SEARCH_CURRENT_HIGHLIGHT_NAME, new HighlightCtor(range));
     }
     const match = messageSearchMatches[messageSearchIndex];
-    if (!match) return;
-    const row = messagesContainerRef.current?.querySelector<HTMLElement>(
-      `[data-message-id="${match.messageId}"]`,
-    );
-    if (row && typeof row.scrollIntoView === 'function') {
-      try {
-        row.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      } catch {
-        // jsdom and a few embedded webviews expose the method without
-        // implementing it. The current-row highlight remains sufficient.
-      }
-    }
+    const container = messagesContainerRef.current;
+    if (!match || !container) return;
+    return pinScrollTarget(container, () => Array.from(
+      container.querySelectorAll<HTMLElement>('[data-message-id]'),
+    ).find(row => row.dataset.messageId === match.messageId) ?? null);
   }, [messageSearchIndex, messageSearchMatches]);
 
   useEffect(() => () => clearMessageSearchHighlights(), [clearMessageSearchHighlights]);
@@ -1343,55 +1339,25 @@ export function DiscussionsPage({
     if ((activeDiscussion.messages?.length ?? 0) === 0) return;
     const container = messagesContainerRef.current;
     if (!container) return;
-    let frame: number | null = null;
     let clearTimer: number | null = null;
-    let settleDeadline: number | null = null;
-    const lookupDeadline = performance.now() + 1_500;
-    const stop = () => {
-      if (frame !== null) cancelAnimationFrame(frame);
-      frame = null;
-      container.removeEventListener('wheel', abortByUser);
-      container.removeEventListener('touchstart', abortByUser);
-    };
-    const abortByUser = () => {
-      stop();
+    const clearTarget = () => {
       globalSearchTargetRef.current = null;
       setGlobalSearchTarget(null);
     };
-    container.addEventListener('wheel', abortByUser, { passive: true });
-    container.addEventListener('touchstart', abortByUser, { passive: true });
-    const step = () => {
-      const now = performance.now();
+    const stop = pinScrollTarget(container, () => {
       const row = Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'))
         .find(message => message.dataset.messageId === globalSearchTarget.messageId);
-      if (!row) {
-        if (now < lookupDeadline) {
-          frame = requestAnimationFrame(step);
-        } else {
-          globalSearchTargetRef.current = null;
-          setGlobalSearchTarget(null);
-        }
-        return;
-      }
-      setStickToBottom(false);
-      settleDeadline ??= now + 700;
-      const rowRect = row.getBoundingClientRect();
-      const containerRect = container.getBoundingClientRect();
-      container.scrollTop += (
-        (rowRect.top + rowRect.bottom) / 2
-        - (containerRect.top + containerRect.bottom) / 2
-      );
-      if (now <= settleDeadline) {
-        frame = requestAnimationFrame(step);
-        return;
-      }
-      stop();
-      clearTimer = window.setTimeout(() => {
-        globalSearchTargetRef.current = null;
-        setGlobalSearchTarget(null);
-      }, 3_000);
-    };
-    frame = requestAnimationFrame(step);
+      if (!row) return null;
+      const anchor = globalSearchTarget.anchorSelector
+        ? row.querySelector<HTMLElement>(globalSearchTarget.anchorSelector)
+        : null;
+      return anchor ?? row;
+    }, {
+      onStep: () => setStickToBottom(false),
+      onSettled: () => { clearTimer = window.setTimeout(clearTarget, 3_000); },
+      onMissing: clearTarget,
+      onAbort: clearTarget,
+    });
     return () => {
       stop();
       if (clearTimer !== null) window.clearTimeout(clearTimer);
@@ -3474,9 +3440,9 @@ export function DiscussionsPage({
       });
     }
   }, [activeDiscussionId, editingMsgId, handleMsgEditCancel, refetchDiscussions, reloadDiscussion, t, toast]);
-  const handleReplyNavigate = useCallback((messageId: string) => {
+  const handleReplyNavigate = useCallback((messageId: string, anchorSelector?: string) => {
     if (!activeDiscussionId) return;
-    const target = { discussionId: activeDiscussionId, messageId };
+    const target = { discussionId: activeDiscussionId, messageId, anchorSelector };
     globalSearchTargetRef.current = target;
     setGlobalSearchTarget(target);
     setStickToBottom(false);
@@ -4698,6 +4664,7 @@ export function DiscussionsPage({
             <DiscussionQuestionBanner
               discussionId={activeDiscussion.id}
               messageRevision={activeDiscussion.messages.at(-1)?.id}
+              onNavigate={handleReplyNavigate}
             />
 
             {/* KT-619 — find the steering cards without scrolling the whole
@@ -5863,13 +5830,12 @@ export function DiscussionsPage({
                 }}
                 onNavigateMessage={(messageId) => {
                   setShowAssetsPanel(false);
-                  setStickToBottom(false);
+                  handleReplyNavigate(messageId);
                   requestAnimationFrame(() => {
                     const row = [...(messagesContainerRef.current?.querySelectorAll<HTMLElement>(
                       '[data-message-id]',
                     ) ?? [])].find(item => item.dataset.messageId === messageId);
                     if (!row) return;
-                    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
                     row.classList.add('disc-message-asset-target');
                     window.setTimeout(() => row.classList.remove('disc-message-asset-target'), 1800);
                   });

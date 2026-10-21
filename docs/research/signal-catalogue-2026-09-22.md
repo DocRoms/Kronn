@@ -103,6 +103,6 @@ cap. Discovery covers Automation cards in version 1; historical Planning, audit
 and QP-improvement parsers remain separate.
 [src: file: backend/tests/api_tests.rs:856]
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:1]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:11087]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:11154]
 [src: file: backend/src/agents/runner_test.rs:1480]
 [src: file: backend/src/api/signal_catalog.rs:1]

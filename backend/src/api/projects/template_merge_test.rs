@@ -223,3 +223,142 @@ fn a_non_git_project_gets_a_plan_but_no_worktree() {
         run_merge_in_worktree(tmp.path(), "x", MergeBase::Local, &template_docs()).unwrap_err();
     assert!(err.contains("not a git repository"));
 }
+
+/// Everything a read must leave alone: refs, worktrees, status and the index bytes.
+fn git_snapshot(root: &Path) -> (String, String, String, Vec<u8>) {
+    (
+        sh_git(root, &["for-each-ref"]),
+        sh_git(root, &["worktree", "list", "--porcelain"]),
+        sh_git(root, &["status", "--porcelain"]),
+        std::fs::read(root.join(".git/index")).unwrap(),
+    )
+}
+
+#[test]
+fn merge_state_without_a_merge_reports_nothing_in_progress() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let state = merge_state(root);
+    assert_eq!(
+        state,
+        TemplateMergeState {
+            branch: docs_merge::MERGE_BRANCH.to_string(),
+            checkout_branch: Some("main".to_string()),
+            ..TemplateMergeState::default()
+        }
+    );
+    let view = preview_plan(root, &template_docs()).unwrap();
+    assert_eq!(view.merge, state);
+
+    let plain = TempDir::new().unwrap();
+    write(plain.path(), "docs/setup.md", "## Installation\n\nnpm i\n");
+    let state = merge_state(plain.path());
+    assert!(!state.worktree_exists && !state.branch_exists);
+    assert_eq!(state.checkout_branch, None);
+}
+
+#[test]
+fn merge_state_sees_a_worktree_in_progress_without_writing() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    assert!(started.merge.worktree_exists);
+
+    let before = git_snapshot(root);
+    let view = preview_plan(root, &template_docs()).unwrap();
+    assert_eq!(git_snapshot(root), before);
+
+    let state = view.merge;
+    assert!(state.worktree_exists);
+    assert!(state.branch_exists);
+    assert_eq!(state.worktree_path, started.worktree_path);
+    assert_eq!(state.branch_ahead_commits, 0);
+    assert_eq!(state.pending_files as usize, started.files.len());
+    assert!(state.pending_files > 0);
+}
+
+#[test]
+fn merge_state_counts_accepted_commits_not_in_the_checkout_branch() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    accept_merge(root, &["docs/AGENTS.md".to_string()]).unwrap();
+    accept_merge(root, &["docs/glossary.md".to_string()]).unwrap();
+
+    let state = merge_state(root);
+    assert!(state.worktree_exists);
+    assert_eq!(state.branch_ahead_commits, 2);
+    assert_eq!(state.pending_files as usize, started.files.len() - 2);
+
+    // The worktree gone, the accepted branch still waits to be integrated.
+    let wt = started.worktree_path.unwrap();
+    sh_git(root, &["worktree", "remove", "--force", &wt]);
+    let before = git_snapshot(root);
+    let state = merge_state(root);
+    assert_eq!(git_snapshot(root), before);
+    assert!(!state.worktree_exists);
+    assert_eq!(state.worktree_path, None);
+    assert_eq!(state.pending_files, 0);
+    assert!(state.branch_exists);
+    assert_eq!(state.branch_ahead_commits, 2);
+}
+
+#[test]
+fn merge_state_reports_zero_ahead_once_the_branch_is_merged() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    accept_merge(root, &["docs/AGENTS.md".to_string()]).unwrap();
+    sh_git(
+        root,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            &started.worktree_path.unwrap(),
+        ],
+    );
+    sh_git(
+        root,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge v2",
+            docs_merge::MERGE_BRANCH,
+        ],
+    );
+
+    let state = merge_state(root);
+    assert!(state.branch_exists);
+    assert!(!state.worktree_exists);
+    assert_eq!(state.branch_ahead_commits, 0);
+}
+
+#[test]
+fn merge_state_does_not_count_the_remote_commits_a_remote_merge_started_from() {
+    let origin = TempDir::new().unwrap();
+    sh_git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let origin_url = origin.path().to_string_lossy().to_string();
+    sh_git(root, &["remote", "add", "origin", &origin_url]);
+    sh_git(root, &["push", "-q", "origin", "main"]);
+    let other = TempDir::new().unwrap();
+    sh_git(other.path(), &["clone", "-q", &origin_url, "."]);
+    for n in 0..3 {
+        write(other.path(), &format!("src/f{n}.txt"), "x\n");
+        sh_git(other.path(), &["add", "-A"]);
+        sh_git(other.path(), &["commit", "-q", "-m", "upstream"]);
+    }
+    sh_git(other.path(), &["push", "-q", "origin", "main"]);
+
+    run_merge_in_worktree(root, "Fixture", MergeBase::Remote, &template_docs()).unwrap();
+    accept_merge(root, &["docs/AGENTS.md".to_string()]).unwrap();
+    // The local main is three upstream commits behind; only the accepted one counts.
+    assert_eq!(merge_state(root).branch_ahead_commits, 1);
+}

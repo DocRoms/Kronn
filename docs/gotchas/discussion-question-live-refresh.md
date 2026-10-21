@@ -19,4 +19,4 @@ The browser regression checks hit testing at 360 px and 1200 px with both
 search states, without opening a real discussion or answering its arbitration.
 
 [src: file: frontend/src/pages/DiscussionsPage.css:3206-3219]
-[src: file: frontend/e2e/specs/discussion-question-layout.spec.ts:13-53]
+[src: file: frontend/e2e/specs/discussion-question-layout.spec.ts:13-49]

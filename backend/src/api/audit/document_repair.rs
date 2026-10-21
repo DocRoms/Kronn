@@ -46,20 +46,50 @@ pub(super) fn recovery_plan(
     plan
 }
 
+/// Adds the target's blocking diagnostics found before the agent runs, so a
+/// re-verified document whose citations no longer resolve cannot end
+/// `unchanged`: the step is told what is stale and stays blocked until fixed.
+pub(super) fn with_stale_target(
+    project: &Path,
+    target: &str,
+    mut recovery: Vec<Diagnostic>,
+) -> Result<Vec<Diagnostic>, String> {
+    let report = document_optimization::analyze(project)?;
+    for diagnostic in report.blocking_diagnostics().filter(|d| d.path == target) {
+        if !recovery.contains(diagnostic) {
+            recovery.push(diagnostic.clone());
+        }
+    }
+    Ok(recovery)
+}
+
 pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
     let mut text = String::from("## Documentary gate — targeted correction required\n\n");
     for d in diagnostics {
         text.push_str(&format!("- `{}`: {}\n", d.path, d.message));
     }
-    text.push_str("\nRead and correct EACH named document, including auxiliary findings. Use ONE `[src: file: path:line]` or `[src: file: path:start-end]` marker per reference; never bundle paths with commas. A binary file (.docx, .pdf, image) has no lines: cite it by bare path, `[src: file: path]`. Read the actual source before correcting a missing path or invalid line. If the evidence cannot be established, remove the unsupported claim entirely; do not invent a path or merely hide the citation. Preserve human-owned sections. A resolvable citation proves existence, not the truth of its claim.\n");
+    text.push_str("\nRead and correct EACH named document, including auxiliary findings. Use ONE `[src: file: path:line]` or `[src: file: path:start-end]` marker per reference; never bundle paths with commas. A binary file (.docx, .pdf, image) has no lines: cite it by bare path, `[src: file: path]`. Read the actual source before correcting a missing path or invalid line. If the evidence cannot be established, remove the unsupported claim entirely; do not invent a path or merely hide the citation. In a human-owned section, correct only what is wrong; Kronn asks its owner to reconfirm. A resolvable citation proves existence, not the truth of its claim.\n");
     text
 }
 
 pub(super) fn recovery_changed(project: &Path, before: &Snapshot, recovery: &[Diagnostic]) -> bool {
-    recovery.iter().any(|d| {
-        std::fs::read_to_string(project.join(&d.path))
-            .is_ok_and(|after| before.get(&d.path).is_some_and(|prior| prior != &after))
-    })
+    !changed_recovery_paths(project, before, recovery).is_empty()
+}
+
+/// The recovery documents the attempt actually rewrote.
+pub(super) fn changed_recovery_paths(
+    project: &Path,
+    before: &Snapshot,
+    recovery: &[Diagnostic],
+) -> BTreeSet<String> {
+    recovery
+        .iter()
+        .filter(|d| {
+            std::fs::read_to_string(project.join(&d.path))
+                .is_ok_and(|after| before.get(&d.path).is_some_and(|prior| prior != &after))
+        })
+        .map(|d| d.path.clone())
+        .collect()
 }
 
 /// Save the sanitized original before either mechanical or model correction.
@@ -81,12 +111,9 @@ pub(super) fn snapshot_for_recovery(
     Ok(before)
 }
 
+/// Never touches quoted examples. A human section is normalized like the rest:
+/// the caller marks a human-validated doc to reconfirm (KT-1079).
 fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
-    // Conservatively leave entire human-containing documents to the existing
-    // ownership-protected agent correction path; never touch quoted examples.
-    if super::anti_hallu_enforce::contains_human_owned_section(content) {
-        return None;
-    }
     let mask = super::anti_hallu_enforce::code_line_mask(content, true);
     let mut changed = false;
     let mut output = String::new();
@@ -176,7 +203,8 @@ pub(super) fn check_attempt(
         .map(|(path, _)| path.clone())
         .collect();
     targets.extend(recovery.iter().map(|d| d.path.clone()));
-    // Human-owned documents are never rewritten, even mechanically.
+    // Legacy docs and root files with their author's own content are not
+    // Kronn's docs: reported, never rewritten.
     targets.retain(|path| document_optimization::kronn_owns(project, path));
     for path in &targets {
         let Some(content) = after.get(path) else {
@@ -194,6 +222,15 @@ pub(super) fn check_attempt(
             preserve_original(project, content)?;
             crate::core::mcp_scanner::atomic_write(&project.join(path), &corrected)
                 .map_err(|e| e.to_string())?;
+            if let Err(e) = crate::core::doc_provenance::note_write(
+                project,
+                path,
+                content,
+                &corrected,
+                crate::core::doc_provenance::DocWriter::DocumentRepair,
+            ) {
+                tracing::warn!("Human-validation provenance of {path} not recorded: {e}");
+            }
         }
     }
     let report = document_optimization::analyze(project)?;
@@ -278,15 +315,45 @@ mod tests {
     }
 
     #[test]
-    fn normalization_preserves_human_sections_examples_and_unresolved_bundles() {
+    fn normalization_preserves_examples_and_unresolved_bundles() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("code.rs"), "line\n").unwrap();
         for text in [
-            "<!-- kronn:section name=\"team\" owner=\"human\" -->\n[src: file: code.rs:1, code.rs:1]\n<!-- kronn:section:end -->\n",
             "```md\n[src: file: code.rs:1, code.rs:1]\n```\n",
             "[src: file: code.rs:1, invented.rs:1]\n",
             "[src: file: code.rs:1, code.rs:2-1]\n",
-        ] { assert!(split_verified_citations(dir.path(), text).is_none(), "{text}"); }
+        ] {
+            assert!(
+                split_verified_citations(dir.path(), text).is_none(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_human_section_is_repaired_never_skipped_and_marked_to_reconfirm() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("code.rs"), "first\nsecond\n").unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "# P\n").unwrap();
+        let before = snapshot(root).unwrap();
+        let human = "# P\n<!-- kronn:section name=\"team\" owner=\"human\" -->\nRule [src: file: code.rs:1, code.rs:2]\n<!-- kronn:section:end -->\n";
+        std::fs::write(root.join("docs/AGENTS.md"), human).unwrap();
+
+        check_attempt(root, &before, &[]).unwrap();
+
+        let repaired = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
+        assert!(
+            repaired.contains("Rule [src: file: code.rs:1] [src: file: code.rs:2]"),
+            "{repaired}"
+        );
+        let provenance = crate::core::doc_provenance::report(root, true).unwrap();
+        assert_eq!(provenance.to_reconfirm, 1);
+        assert_eq!(
+            provenance.docs[0].kronn_writes[0].writer,
+            crate::core::doc_provenance::DocWriter::DocumentRepair
+        );
     }
 
     #[test]

@@ -41,3 +41,19 @@
   border-color: var(--kr-error);
   color: var(--kr-error);
 }
+
+/* Found, but only in an unmerged worktree of this project: the file exists,
+   it is just not in the checkout yet. Neutral, never the red of "not found". */
+.disc-src-chip[data-state='lane'] {
+  border-color: rgba(var(--kr-info-rgb), 0.45);
+  border-style: dashed;
+  color: var(--kr-text-primary);
+}
+
+.disc-src-chip-lane {
+  overflow: hidden;
+  max-width: 14ch;
+  color: var(--kr-info);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

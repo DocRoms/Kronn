@@ -253,3 +253,13 @@ fn a_reasoning_frame_is_recognised_by_its_shape_only() {
         assert!(!is_reasoning_frame(line), "{line}");
     }
 }
+
+#[test]
+fn stored_tool_detail_label_maps_raw_names_and_keeps_categories() {
+    assert_eq!(stored_tool_detail_label("mcp__github__get_issue"), "Mcp");
+    assert_eq!(stored_tool_detail_label("mcp__kronn-internal__x"), "Kronn");
+    assert_eq!(stored_tool_detail_label("Grep"), "Search");
+    assert_eq!(stored_tool_detail_label("Edit"), "Edit");
+    assert_eq!(stored_tool_detail_label("Mcp"), "Mcp");
+    assert_eq!(stored_tool_detail_label("unheard_of"), "Other");
+}

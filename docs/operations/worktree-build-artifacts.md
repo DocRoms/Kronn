@@ -42,7 +42,7 @@ The recurrence also exposed that non-terminal old executions and unregistered
 manual worktrees do not become reclaimable merely because a planning task is
 done. KT-638 keeps prevention open: it does not lower disk thresholds, ignore
 tests, scan recursively on a failing request, or authorise deletion of active
-or unowned targets. [src: file: backend/src/core/worktree.rs:451-558]
+or unowned targets. [src: file: backend/src/core/worktree.rs:489-553#ensure_build_disk_headroom]
 
 The retained maintenance record distinguishes each authorised batch. These are
 dated physical free-space observations, not quotas or reusable deletion grants:
@@ -148,16 +148,16 @@ critical limit. The guard never removes files. Its default is 5 GiB; when a
 deployment has changed either server disk threshold, the operator must supply
 the same approved values through `KRONN_DEV_BACKEND_DISK_WARNING_GIB` and
 `KRONN_DEV_BACKEND_DISK_CRITICAL_GIB` rather than reading a host configuration
-file from the shell. [src: file: scripts/dev-backend-supervisor.sh:16-23]
-[src: file: scripts/dev-backend-build-guard.sh:8-49]
+file from the shell. [src: file: scripts/dev-backend-supervisor.sh:19-22#CARGO_TARGET_DIR]
+[src: file: scripts/dev-backend-build-guard.sh:8-48#KRONN_DEV_BACKEND_DISK_CRITICAL_GIB]
 
 Kronn's versioned backend and desktop development profiles use line-table-only
 debug information, disable incremental compilation, and explicitly retain
 debug assertions and overflow checks. A developer needing full debug info may
 use Cargo's explicit command-line override, for example
 `cargo build --config 'profile.dev.debug=true'`; this is a local choice and is
-not a global Cargo setting. [src: file: backend/Cargo.toml:131-143]
-[src: file: desktop/src-tauri/Cargo.toml:44-51]
+not a global Cargo setting. [src: file: backend/Cargo.toml:146-157#profile.dev]
+[src: file: desktop/src-tauri/Cargo.toml:49-55#profile.dev]
 
 Qualification validation resolves a Cargo validation's effective target through
 `cargo metadata` before Quick Exec is allowed to spawn its build. The metadata
@@ -168,14 +168,14 @@ created only at Cargo's exact target path when its immediate parent is already a
 real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
-stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:491-558]
-[src: file: backend/src/api/orchestration.rs:2480-2585]
+stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:489-553#ensure_build_disk_headroom]
+[src: file: backend/src/api/orchestration.rs:3630-3761#validation_build_path]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
 the existing managed-worktree path: ownership, terminal execution state,
-attached sessions, and worker leases are all checked before deletion. [src: file: backend/src/core/worktree.rs:299-370]
-[src: file: backend/src/db/orchestration.rs:439-531]
+attached sessions, and worker leases are all checked before deletion. [src: file: backend/src/core/worktree.rs:291-373#clean_worktree_build_artifacts]
+[src: file: backend/src/db/orchestration.rs:439-531#worktree_cleanup_liveness]
 
 For an interactive or qualification cache outside that managed ownership path,
 the bounded policy is refusal and escalation: the build guard names its exact
@@ -183,9 +183,9 @@ target and configured critical threshold, while the maintenance inventory lists
 managed candidates and their refusal reason. An operator may request a manual,
 path-specific reclaim only after the inventory's ownership and terminal-state
 checks; this document does not authorise a broad purge or deletion of unknown,
-active, or leased targets. [src: file: backend/src/core/worktree.rs:451-558]
-[src: file: backend/src/api/orchestration.rs:2588-2680]
-[src: file: backend/src/db/orchestration.rs:439-531]
+active, or leased targets. [src: file: backend/src/core/worktree.rs:448-483#ensure_disk_headroom_for]
+[src: file: backend/src/api/maintenance.rs:77-142#list_build_artifacts]
+[src: file: backend/src/db/orchestration.rs:439-531#worktree_cleanup_liveness]
 
 ## KT-638 profile benchmark record
 
@@ -211,7 +211,7 @@ observations, not CI SLO samples or a general performance guarantee. Cold means
 an empty Cargo target, not a purged OS/registry cache; independent qualification
 work could run in the background. Desktop builds and the complete test-target
 footprint were not part of this size comparison.
-[src: file: docs/releases/0.13.0-rust-profile-benchmark.json:1]
+[src: file: docs/releases/0.13.0-rust-profile-benchmark.json:11-27#measurements]
 
 The new binary also emitted a macOS linker warning that `__eh_frame` exceeded
 the compact-unwind table's 16 MiB encoding limit and exception-handling
@@ -219,7 +219,7 @@ performance might be affected. It did not fail the build, but this record does
 not classify that warning as resolved or claim warning-free linking. Strict
 all-target Clippy on the candidate had separately passed; it is not a substitute
 for the linked-binary result.
-[src: file: docs/releases/0.13.0-rust-profile-benchmark.json:1]
+[src: file: docs/releases/0.13.0-rust-profile-benchmark.json:15-19#limitations]
 
 To reproduce the profile inputs with new owned targets:
 
@@ -233,12 +233,13 @@ logs are retained in `/private/tmp/kt638-profile-benchmark.utIscv`. Relevant
 compiler/profile overrides were removed from the child environment before the
 listed values were installed; system home variables were never changed. The
 versioned receipt below preserves the compact results independently of that
-temporary evidence directory. [src: file: docs/releases/0.13.0-rust-profile-benchmark.json:1]
+temporary evidence directory. [src: file: docs/releases/0.13.0-rust-profile-benchmark.json:13#raw_evidence_directory]
 
 This measurement completes the profile comparison, not release qualification.
 The combined unfiltered backend, frontend, Python, shell, desktop and browser
-gates remain separate requirements; host-sync test confinement must be proven
-before running the full backend suite. [src: file: docs/testing-quality.md:35-61]
+gates remain separate requirements; backend tests must run against their own
+data directory, never the real install. [src: file: docs/testing-quality.md:40-61#test-backend]
+[src: file: docs/testing-quality.md:70-75#KRONN_DATA_DIR]
 
 ## Maintenance command
 

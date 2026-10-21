@@ -95,6 +95,8 @@ describe('generated types — drift detection', () => {
       stale_sections: [staleSection],
       fresh_sections: ['ai/glossary.md'],
       total_sections: 2,
+      sources_state: 'needs_reverification',
+      broken_citations: 1,
     };
     expect(response.audit_date).toBe('2026-03-20T10:00:00Z');
     expect(response.stale_sections).toHaveLength(1);

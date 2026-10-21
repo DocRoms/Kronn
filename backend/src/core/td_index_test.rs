@@ -2,6 +2,11 @@ use super::*;
 use std::fs;
 use std::path::PathBuf;
 
+const NO_ADR: crate::core::adr::Trust = crate::core::adr::Trust::RunBaseline {
+    decisions: "",
+    records: "",
+};
+
 fn sheet(id: &str, title: &str, area: &str, severity: &str, status: &str, extra: &str) -> String {
     format!(
         "---\nname: {}\ndescription: {title}\nmetadata:\n  type: tech-debt\n  audit_history:\n    - date: 2026-10-01\n      status: {status}\n      reviewer: Full audit\n---\n\n# {id}\n\n- **Area**: {area}\n- **Severity**: {severity}\n- **Status**: {status}\n{extra}\n## Problem (fact)\nSomething.\n",
@@ -174,7 +179,7 @@ fn sheet_files(f: &Fixture) -> Vec<(String, Vec<u8>)> {
 fn every_sheet_of_every_sub_audit_is_listed_exactly_once() {
     let f = fixture();
     let before = sheet_files(&f);
-    let outcome = resync(&f.docs).unwrap();
+    let outcome = resync(&f.docs, NO_ADR).unwrap();
     let after = index(&f);
     assert!(outcome.changed);
     assert_eq!(outcome.listed, ACTIVE.len());
@@ -212,9 +217,9 @@ fn every_sheet_of_every_sub_audit_is_listed_exactly_once() {
 #[test]
 fn a_rerun_is_byte_identical() {
     let f = fixture();
-    resync(&f.docs).unwrap();
+    resync(&f.docs, NO_ADR).unwrap();
     let once = index(&f);
-    let outcome = resync(&f.docs).unwrap();
+    let outcome = resync(&f.docs, NO_ADR).unwrap();
     assert!(!outcome.changed);
     assert_eq!(index(&f), once);
 }
@@ -222,7 +227,7 @@ fn a_rerun_is_byte_identical() {
 #[test]
 fn false_no_finding_outcomes_are_recomputed_with_their_evidence() {
     let f = fixture();
-    let outcome = resync(&f.docs).unwrap();
+    let outcome = resync(&f.docs, NO_ADR).unwrap();
     let after = index(&f);
     assert_eq!(
         outcome.reconciled_dimensions,
@@ -242,7 +247,7 @@ fn false_no_finding_outcomes_are_recomputed_with_their_evidence() {
 #[test]
 fn sheets_added_after_a_first_resync_join_the_index() {
     let f = fixture();
-    resync(&f.docs).unwrap();
+    resync(&f.docs, NO_ADR).unwrap();
     let td = f.docs.join("tech-debt");
     fs::write(
         td.join("TD-20261006-perf-a.md"),
@@ -257,7 +262,7 @@ fn sheets_added_after_a_first_resync_join_the_index() {
     )
     .unwrap();
     fs::remove_file(td.join("TD-20261001-full-b.md")).unwrap();
-    let outcome = resync(&f.docs).unwrap();
+    let outcome = resync(&f.docs, NO_ADR).unwrap();
     let after = index(&f);
     assert_eq!(row_count(&after, "TD-20261006-perf-a"), 1);
     // A generated row follows its sheet away; a hand-written one stays.
@@ -266,7 +271,7 @@ fn sheets_added_after_a_first_resync_join_the_index() {
     assert!(after.contains("- `TD-20261001-phantom` — Row without a sheet"));
     assert_eq!(outcome.reconciled_dimensions, vec!["Performance"]);
     assert_eq!(after.matches(BLOCK_END).count(), 1);
-    assert!(!resync(&f.docs).unwrap().changed);
+    assert!(!resync(&f.docs, NO_ADR).unwrap().changed);
 }
 
 #[test]
@@ -277,12 +282,12 @@ fn an_index_without_a_current_list_gets_one_before_the_coverage_matrix() {
         "# Tech debt\n\n## Dimension coverage\n\n| Dimension | Outcome | Evidence |\n|---|---|---|\n",
     )
     .unwrap();
-    resync(&f.docs).unwrap();
+    resync(&f.docs, NO_ADR).unwrap();
     let after = index(&f);
     let list = after.find("## Current list").unwrap();
     assert!(list < after.find("## Dimension coverage").unwrap());
     assert_eq!(row_count(&after, "TD-20261002-sec-a"), 1);
-    assert!(!resync(&f.docs).unwrap().changed);
+    assert!(!resync(&f.docs, NO_ADR).unwrap().changed);
 }
 
 #[test]
@@ -303,17 +308,27 @@ fn a_table_quoted_in_a_code_fence_is_not_the_current_list() {
 }
 
 #[test]
-fn human_owned_or_missing_indexes_are_left_alone() {
+fn a_human_owned_index_is_resynced_and_marked_and_a_missing_one_left_alone() {
     let f = fixture();
     let human = format!("<!-- kronn:section name=\"debt\" owner=\"human\" -->\n{CENTRAL}<!-- kronn:section:end -->\n");
     fs::write(f.docs.join(CENTRAL_INDEX), &human).unwrap();
-    let outcome = resync(&f.docs).unwrap();
-    assert!(outcome.skipped.is_some() && !outcome.changed);
-    assert_eq!(index(&f), human);
+    let outcome = resync(&f.docs, NO_ADR).unwrap();
+    assert!(
+        outcome.skipped.is_none() && outcome.changed,
+        "never skipped"
+    );
+    assert_ne!(index(&f), human);
+    let project = f.docs.parent().unwrap();
+    let provenance = crate::core::doc_provenance::report(project, false).unwrap();
+    assert_eq!(provenance.to_reconfirm, 1, "{provenance:?}");
+    assert_eq!(
+        provenance.docs[0].kronn_writes[0].writer,
+        crate::core::doc_provenance::DocWriter::TdIndex
+    );
 
     fs::remove_file(f.docs.join(CENTRAL_INDEX)).unwrap();
     assert_eq!(
-        resync(&f.docs).unwrap().skipped.as_deref(),
+        resync(&f.docs, NO_ADR).unwrap().skipped.as_deref(),
         Some("no central index")
     );
     assert!(
@@ -343,4 +358,106 @@ fn sheet_fields_fall_back_from_front_matter_to_body() {
         "a status quoted in a fence is not the sheet's"
     );
     assert!(bare.is_active());
+}
+
+#[test]
+fn a_finding_an_accepted_adr_covers_leaves_the_index_and_references_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = dir.path().join("docs");
+    let td = docs.join("tech-debt");
+    fs::create_dir_all(&td).unwrap();
+    fs::write(docs.join(CENTRAL_INDEX), CENTRAL).unwrap();
+    fs::write(
+        docs.join("decisions.md"),
+        "# Architecture decisions\n\n## ADR-0001: CI is label-triggered\n\n- **Status**: accepted\n- **Date**: 2026-08-28\n- **Covers**: quality-gate-not-enforced\n- **Source**: user\n\n### Context\n\nPaid runners.\n\n### Decision\n\nCI runs on the `ci` label.\n\n### Consequences\n\nDo NOT run CI on every push.\n",
+    )
+    .unwrap();
+    let covered = "TD-20261011-quality-gate-not-enforced";
+    let w = |id: &str, title: &str| {
+        fs::write(
+            td.join(format!("{id}.md")),
+            sheet(id, title, "CI", "Medium", "Verified in source", ""),
+        )
+        .unwrap()
+    };
+    w(covered, "CI does not run on every push");
+    w("TD-20261011-no-lint-in-ci", "No lint step in CI");
+
+    let baseline = fs::read_to_string(docs.join("decisions.md")).unwrap();
+    let outcome = resync(
+        &docs,
+        crate::core::adr::Trust::RunBaseline {
+            decisions: &baseline,
+            records: "",
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.adr_settled,
+        vec![format!("{covered} → ADR-0001 — CI is label-triggered")]
+    );
+    let index = fs::read_to_string(docs.join(CENTRAL_INDEX)).unwrap();
+    assert!(!index.contains(&format!("| {covered} |")), "{index}");
+    assert!(index.contains("| TD-20261011-no-lint-in-ci |"), "{index}");
+    let settled = fs::read_to_string(td.join(format!("{covered}.md"))).unwrap();
+    assert!(settled.contains("- **Status**: Accepted decision"));
+    assert!(settled.contains("- **Decision record**: ADR-0001 — CI is label-triggered"));
+    let uncovered = fs::read_to_string(td.join("TD-20261011-no-lint-in-ci.md")).unwrap();
+    assert!(uncovered.contains("- **Status**: Verified in source"));
+    assert!(read_sheets(&docs)
+        .iter()
+        .any(|s| s.id == "TD-20261011-no-lint-in-ci" && s.is_active()));
+}
+
+#[test]
+fn an_adr_accepted_during_the_run_leaves_its_finding_in_the_index_for_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = dir.path().join("docs");
+    let td = docs.join("tech-debt");
+    fs::create_dir_all(&td).unwrap();
+    fs::write(docs.join(CENTRAL_INDEX), CENTRAL).unwrap();
+    let baseline = "# Architecture decisions\n";
+    // Step 9 wrote this ADR as accepted, with the finding's slug in Covers.
+    fs::write(
+        docs.join("decisions.md"),
+        "# Architecture decisions\n\n## ADR-0001: CI is label-triggered\n\n- **Status**: accepted\n- **Date**: 2026-10-11\n- **Covers**: quality-gate-not-enforced\n\n### Context\n\nc\n\n### Decision\n\nd\n\n### Consequences\n\nq\n",
+    )
+    .unwrap();
+    let id = "TD-20261011-quality-gate-not-enforced";
+    fs::write(
+        td.join(format!("{id}.md")),
+        sheet(
+            id,
+            "CI does not run on every push",
+            "CI",
+            "Medium",
+            "Verified in source",
+            "",
+        ),
+    )
+    .unwrap();
+
+    let outcome = resync(
+        &docs,
+        crate::core::adr::Trust::RunBaseline {
+            decisions: baseline,
+            records: "",
+        },
+    )
+    .unwrap();
+    assert!(outcome.adr_settled.is_empty(), "{outcome:?}");
+    assert_eq!(
+        outcome.adr_downgraded,
+        vec!["ADR-0001 — CI is label-triggered".to_string()]
+    );
+    let index = fs::read_to_string(docs.join(CENTRAL_INDEX)).unwrap();
+    assert!(index.contains(&format!("| {id} |")), "{index}");
+    // Still undecided: the validation asks the human about it.
+    let scope = crate::api::audit::reconciliation::td_validation_scope(
+        dir.path(),
+        &[format!("docs/{CENTRAL_INDEX}")],
+    );
+    assert!(scope.undecided.contains(&id.to_string()), "{scope:?}");
+    let decisions = fs::read_to_string(docs.join("decisions.md")).unwrap();
+    assert!(decisions.contains("- **Status**: proposed"), "{decisions}");
 }

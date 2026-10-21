@@ -221,6 +221,14 @@ pub fn revoke_validated(project_path: &Path) -> Result<(), String> {
     write(project_path, &mut state)
 }
 
+/// Put back the `validated_at` a run revoked, when that run rewrote nothing
+/// (KT-1168): the docs are still the ones the human validated.
+pub fn restore_validated(project_path: &Path, date: &str) -> Result<(), String> {
+    let mut state = load_for_mutation(project_path)?;
+    state.validated_at = Some(date.to_string());
+    write(project_path, &mut state)
+}
+
 /// Set `bootstrapped_at`. No-op if already set.
 pub fn mark_bootstrapped(project_path: &Path) -> Result<(), String> {
     let mut state = load_for_mutation(project_path)?;

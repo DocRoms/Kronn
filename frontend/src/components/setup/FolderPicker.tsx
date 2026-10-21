@@ -3,6 +3,7 @@ import { setup as setupApi } from '../../lib/api';
 import type { BrowseListing } from '../../types/generated';
 import { useT } from '../../lib/I18nContext';
 import { isTauriRuntime, invokeTauri } from '../../lib/tauri';
+import { useDialogFocus } from '../../hooks/useDialogFocus';
 import { ChevronUp, Folder, GitBranch, Loader2, X } from 'lucide-react';
 import './FolderPicker.css';
 
@@ -24,6 +25,7 @@ export function FolderPicker({ selected, onConfirm, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<string[]>(selected);
   const requestState = useRef({ latest: 0 });
+  const dialogRef = useDialogFocus<HTMLDivElement>({ onEscape: onClose });
 
   const open = useCallback(async (path?: string) => {
     const requests = requestState.current;
@@ -75,6 +77,7 @@ export function FolderPicker({ selected, onConfirm, onClose }: Props) {
 
   return (
     <div
+      ref={dialogRef}
       className="folder-picker-overlay"
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}
       role="dialog"

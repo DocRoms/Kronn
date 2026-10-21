@@ -9,8 +9,8 @@ following that order could wait indefinitely before reaching the work clause.
 It also requested a substantive first reply before reading the shared plan.
 This is an instruction-order defect, not proof that a particular CLI host
 caused a reported stop or imposed a specific timeout.
-[src: file: backend/scripts/disc-introspection-mcp.py:6838-6847]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:10166-10185]
+[src: file: backend/scripts/disc-introspection-mcp.py:6840-6849]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:10233-10252]
 
 The join protocol now orders introduction, plan read, addressed initial turns,
 scope announcement, then repeated bounded work. Between real steps it requests
@@ -20,7 +20,7 @@ when no actionable work or execution needs following. The bridge's wait,
 routing, cancellation and durable-cursor functions are unchanged.
 [src: file: backend/src/api/disc_invite.rs:487-519]
 [src: file: backend/src/api/disc_invite.rs:557-597]
-[src: file: backend/scripts/disc-introspection-mcp.py:6865-6936]
+[src: file: backend/scripts/disc-introspection-mcp.py:6867-6938]
 
 Each bounded step has a room announcement and an evidence/limits update.
 Delegated milestones belong in the parent room too. An exact CLI target in
@@ -34,8 +34,8 @@ must reach a terminal result before another wait starts. A queued MCP request
 can interrupt the wait normally; handle the request and resume the work loop.
 Neither condition is a command to leave. Kronn does not guarantee that every
 host will follow instructions or hide all background notifications.
-[src: file: backend/scripts/test_disc_introspection_mcp.py:10187-10194]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:10241-10254]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:10254-10261]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:10308-10321]
 
 The Python catalogue distinguishes active work from idle listening too. One
 shared `ROOM_WORK_PROTOCOL` supplies both join/wait manuals and the initialize
@@ -43,10 +43,10 @@ orientation, including plan-first ordering, parent-room milestones and exact
 CLI routing. It no longer promises that cursor reads can never be replayed or
 that quiet returns cost nothing. The bridge's runtime functions did not change.
 [src: file: backend/scripts/disc-introspection-mcp.py:1250-1274]
-[src: file: backend/scripts/disc-introspection-mcp.py:9354-9371]
-[src: file: backend/scripts/disc-introspection-mcp.py:9502]
-[src: file: backend/scripts/disc-introspection-mcp.py:9743-9747]
-[src: file: backend/scripts/disc-introspection-mcp.py:10815]
+[src: file: backend/scripts/disc-introspection-mcp.py:9356-9373]
+[src: file: backend/scripts/disc-introspection-mcp.py:9504]
+[src: file: backend/scripts/disc-introspection-mcp.py:9745-9749]
+[src: file: backend/scripts/disc-introspection-mcp.py:10841]
 
 ## Deaf windows in the bridge wait (KT-703)
 
@@ -59,7 +59,7 @@ the next poll, so a reply could take more than 8 minutes while presence showed
 the session as dormant but present. The bridge now chains polls without a pause,
 with a 1-second floor if the server answers early. The server's pacing values
 and the `next_poll_at` presence projection are unchanged.
-[src: file: backend/scripts/disc-introspection-mcp.py:7306-7415]
+[src: file: backend/scripts/disc-introspection-mcp.py:7308-7417]
 [src: file: backend/src/api/disc_introspection.rs:175-185]
 
 The `session_budget` block on a wake said "rotate this session" to any long
@@ -101,7 +101,7 @@ results; library time was 386.62 seconds and cold API time 153.79 seconds.
 Strict all-target Clippy passed in 1.69 seconds. Backend tree:
 `6040c89897a4913b9fb91a6a90bc62cba0df706f`; frontend tree remains
 `f8a2df947aa4ba9d8899caf8e121c1ee49e106bc`, with no new frontend qualification.
-[src: file: backend/scripts/test_disc_introspection_mcp.py:10021-10073]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:10088-10140]
 
 The MCP catalogue remains at 110 tools and shrinks to 86,824 bytes; its ceiling
 is ratcheted down from 86,900, without a waiver. Repository context remains

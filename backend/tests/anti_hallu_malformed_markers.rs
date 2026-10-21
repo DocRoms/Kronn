@@ -209,22 +209,28 @@ fn marker_inside_fenced_block_is_skipped() {
     cleanup(&root);
 }
 
-// ── 9. Marker inside `inline code` → SKIPPED (0.8.11 quick win) ────────────
+// ── 9. Marker inside `inline code` → verified, a failure only unverified ──
 
 #[test]
-fn marker_inside_inline_code_is_skipped() {
-    // A marker quoted in backticks is the agent showing the syntax, not
-    // citing — it false-positived as "fabricated" 4× in one live session.
+fn marker_inside_inline_code_is_verified_but_never_fabricated() {
+    // Backticks also quote the syntax as an example: a quoted marker is not a
+    // prose marker, but it is verified — green when it resolves, amber else.
     let txt = "Use this `[src: file: src/foo.rs:1]` syntax.";
     assert!(
         extract_source_markers(txt).is_empty(),
-        "an inline-code marker is a quoted example, never extracted"
+        "an inline-code marker is not a prose marker"
     );
 
     let root = temp_project();
     let report = analyze(txt, Some(&root));
-    assert_eq!(report.sources.len(), 0);
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].status, SourceStatus::Verified);
     assert_eq!(report.fabricated_count, 0);
+
+    let ghost = analyze("Use `[src: file: src/ghost.rs:1]` here.", Some(&root));
+    assert_eq!(ghost.fabricated_count, 0);
+    assert_eq!(ghost.unverified_count, 1);
+    assert_eq!(ghost.verified_count(), 0);
 
     // The same marker OUTSIDE backticks still extracts and verifies.
     let real = "Use this [src: file: src/foo.rs:1] citation.";

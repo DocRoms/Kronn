@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub const STATE_DIR: &str = ".kronn/audit";
 pub const REPORT_FILE: &str = ".kronn/audit/document-optimization.json";
 pub const CITATION_ORIGINALS_DIR: &str = ".kronn/audit/citation-originals";
+const TEMPLATE_BACKUPS: &str = "template-backups";
 const LEGACY_REPORT_FILE: &str = "docs/.kronn-document-optimization.json";
 const LEGACY_CITATION_ORIGINALS_DIR: &str = "docs/.kronn-citation-originals";
 
@@ -56,6 +57,31 @@ pub fn state_dir(project: &Path) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// A new, empty `template-backups/<stamp>` directory under the audit state:
+/// the originals a template reinstall is about to replace. A stamp already
+/// taken gets a numeric suffix, so one run never writes into another's folder.
+pub fn new_template_backup_dir(project: &Path, stamp: &str) -> Result<PathBuf, String> {
+    if stamp.is_empty() || !stamp.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(format!("invalid backup stamp {stamp:?}"));
+    }
+    let parent = state_dir(project)?.join(TEMPLATE_BACKUPS);
+    ensure_real_dir(&parent)?;
+    for attempt in 0..100u32 {
+        let name = if attempt == 0 {
+            stamp.to_string()
+        } else {
+            format!("{stamp}-{attempt}")
+        };
+        let dir = parent.join(name);
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("create {}: {e}", dir.display())),
+        }
+    }
+    Err("no free template backup folder".into())
+}
+
 /// Content-addressed, create-new store: each distinct original is kept once.
 fn store_original(dir: &Path, content: &[u8]) -> Result<(), String> {
     let path = dir.join(format!("{}.bak", sha256_hex(content)));
@@ -83,6 +109,61 @@ pub fn preserve_citation_original(project: &Path, content: &str) -> Result<(), S
     let dir = state_dir(project)?.join("citation-originals");
     ensure_real_dir(&dir)?;
     store_original(&dir, content.as_bytes())
+}
+
+const VALIDATED_ORIGINALS: &str = "validated-originals";
+
+/// Keep the text of a doc as a human validated it: the "before" of its diff.
+pub fn preserve_validated_original(project: &Path, content: &str) -> Result<(), String> {
+    let dir = state_dir(project)?.join(VALIDATED_ORIGINALS);
+    ensure_real_dir(&dir)?;
+    store_original(&dir, content.as_bytes())
+}
+
+fn validated_originals_dir(project: &Path) -> Option<PathBuf> {
+    let mut dir = project.to_path_buf();
+    for part in STATE_DIR.split('/').chain([VALIDATED_ORIGINALS]) {
+        dir.push(part);
+        let meta = fs::symlink_metadata(&dir).ok()?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return None;
+        }
+    }
+    Some(dir)
+}
+
+/// The validated text with this digest, if this machine kept it intact.
+pub fn read_validated_original(project: &Path, sha256: &str) -> Option<String> {
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let path = validated_originals_dir(project)?.join(format!("{sha256}.bak"));
+    if fs::symlink_metadata(&path).ok()?.file_type().is_symlink() {
+        return None;
+    }
+    let bytes = fs::read(&path).ok()?;
+    (sha256_hex(&bytes) == sha256)
+        .then(|| String::from_utf8(bytes).ok())
+        .flatten()
+}
+
+/// Drop the validated texts no record points to any more.
+pub fn prune_validated_originals(project: &Path, keep: &std::collections::BTreeSet<String>) {
+    let Some(dir) = validated_originals_dir(project) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(digest) = name.strip_suffix(".bak") else {
+            continue;
+        };
+        if !keep.contains(digest) && entry.file_type().is_ok_and(|t| t.is_file()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn migrate_legacy(root: &Path, state: &Path) -> Result<(), String> {

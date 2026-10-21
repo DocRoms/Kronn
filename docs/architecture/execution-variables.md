@@ -20,10 +20,10 @@ Existing templates written as `<env.NAME>` remain supported for compatibility.
 The editor lists only the names available to the selected project and inserts
 the recommended form; it never receives or displays their values.
 
-[src: file: backend/src/models/quick.rs:241]
-[src: file: backend/src/api/discussions/streaming.rs:2250]
-[src: file: backend/src/api/mcps.rs:82]
-[src: file: frontend/src/components/workflows/QuickPromptForm.tsx:276]
+[src: file: backend/src/models/quick.rs:235-242#declarations_with_template_environment_variables]
+[src: file: backend/src/api/quick_prompts.rs:1001-1013#declarations_with_template_environment_variables]
+[src: file: backend/src/api/mcps.rs:189-210#project_environment_names]
+[src: file: frontend/src/components/workflows/QuickPromptForm.tsx:162-166#insertEnvironmentVariable]
 
 ## Launch contract
 
@@ -57,9 +57,9 @@ renderer remains strict. Existing encrypted snapshots are immutable and are
 not rewritten; a new launch obtains the corrected snapshot. Resuming an
 already affected run retains its original snapshot.
 
-[src: file: backend/src/core/execution_variables.rs]
-[src: file: backend/src/api/execution_variables.rs]
-[src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx]
+[src: file: backend/src/core/execution_variables.rs:54-188#resolve]
+[src: file: backend/src/api/execution_variables.rs:23-101#preview]
+[src: file: frontend/src/components/workflows/ProvidedVariablesPreview.tsx:80-136#toggleReveal]
 
 ## Snapshot and discussion trace
 
@@ -74,8 +74,8 @@ Metadata access first verifies that the opaque run id still belongs to its
 durable discussion/run and project scope. Reveals are audited without storing
 the returned value.
 
-[src: file: backend/src/db/execution_variable_snapshots.rs]
-[src: file: frontend/src/components/MessageBubble.tsx]
+[src: file: backend/src/db/execution_variable_snapshots.rs:151-222#insert_execution_context_message] [src: file: backend/src/db/execution_variable_snapshots.rs:33-41#has_live_owner]
+[src: file: frontend/src/components/MessageBubble.tsx:1023-1050#revealExecutionVariable]
 
 ## Retention
 
@@ -98,7 +98,7 @@ purge. API tests prove that metadata and preview payloads stay masked. Frontend
 tests cover masked rendering, explicit reveal/remask, manual override and
 value-free errors.
 
-[src: file: backend/src/core/execution_variables.rs]
-[src: file: backend/src/db/execution_variable_snapshots.rs]
-[src: file: backend/tests/api_tests.rs]
-[src: file: frontend/src/components/workflows/__tests__/ProvidedVariablesPreview.test.tsx]
+[src: file: backend/src/core/execution_variables.rs:326-1013#tests]
+[src: file: backend/src/db/execution_variable_snapshots.rs:319-597#tests]
+[src: file: backend/tests/api_tests.rs:10897-11107#execution_variable_preview_is_short_lived_masked_and_audited]
+[src: file: frontend/src/components/workflows/__tests__/ProvidedVariablesPreview.test.tsx:71-120#ProvidedVariablesPreview]

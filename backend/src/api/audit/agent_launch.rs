@@ -216,6 +216,34 @@ impl AuditAgentLauncher {
         self.http.is_some() || self.acp
     }
 
+    /// Which live version sources this run's agent reaches (KT-1000). Read
+    /// from the same `.mcp.json` the agent will be handed; `watch` says
+    /// whether a dependency watch result is stored.
+    pub(super) fn version_source_inputs(
+        &self,
+        agent: &AgentType,
+        project_path: &Path,
+        project_path_str: &str,
+        watch: bool,
+    ) -> crate::core::version_sources::VersionSourceInputs {
+        let reach = version_reach(self.http.is_some(), self.acp, self.full_access, agent);
+        let context7 = reach.mcp.is_some_and(|stdio_only| {
+            // Same lookup order as the runner gives Claude (KT-971 stand-in first).
+            let mcp_json = crate::core::mcp_scanner::outside_agent_files_dir(project_path_str)
+                .map(|dir| dir.join(".mcp.json"))
+                .filter(|path| !self.acp && path.is_file())
+                .unwrap_or_else(|| project_path.join(".mcp.json"));
+            std::fs::read_to_string(mcp_json).is_ok_and(|raw| {
+                crate::core::version_sources::context7_configured(&raw, stdio_only)
+            })
+        });
+        crate::core::version_sources::VersionSourceInputs {
+            context7,
+            web: reach.web,
+            watch,
+        }
+    }
+
     /// Spawn the agent of one step. `project_path` is the directory the pipeline
     /// resolved and validates; an HTTP agent's file tools are scoped to it and
     /// cannot leave it. `cancel` is honoured by an HTTP or ACP agent (see
@@ -277,6 +305,48 @@ impl AuditAgentLauncher {
             ..AgentStartConfig::new(agent_type, &resolved, prompt, tokens)
         })
         .await
+    }
+}
+
+/// What an audit agent can reach beyond its prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VersionReach {
+    /// `Some(stdio_only)` when the agent mounts the project's MCP servers.
+    pub(super) mcp: Option<bool>,
+    /// A native web tool is available to it during an audit.
+    pub(super) web: bool,
+}
+
+/// Only what the launch code establishes: a direct Claude CLI gets the
+/// project's `.mcp.json` (`--mcp-config`) and, with full access, its own web
+/// tools; an ACP session gets the project's stdio servers; an HTTP agent has
+/// only `AUDIT_TOOLS`. Other CLIs are not known to mount either.
+pub(super) fn version_reach(
+    http: bool,
+    acp: bool,
+    full_access: bool,
+    agent: &AgentType,
+) -> VersionReach {
+    if http {
+        VersionReach {
+            mcp: None,
+            web: false,
+        }
+    } else if acp {
+        VersionReach {
+            mcp: Some(true),
+            web: false,
+        }
+    } else if *agent == AgentType::ClaudeCode {
+        VersionReach {
+            mcp: Some(false),
+            web: full_access,
+        }
+    } else {
+        VersionReach {
+            mcp: None,
+            web: false,
+        }
     }
 }
 

@@ -248,6 +248,10 @@ pub struct AuditTracker {
     /// idle, then both insert a Running row). Released by the run's
     /// drop-guard when it ends — normally, on cancel, or on abandonment.
     pub leased: HashSet<String>,
+    /// Leases whose run could not be settled (the drop guard's database write
+    /// failed): kept fail-closed, and named so the UI offers the cleanup that
+    /// releases them (KT-1134).
+    pub orphaned_leases: HashSet<String>,
 }
 
 impl AuditTracker {
@@ -261,6 +265,12 @@ impl AuditTracker {
     /// Release a project's audit lease. Idempotent.
     pub fn release_lease(&mut self, project_id: &str) {
         self.leased.remove(project_id);
+        self.orphaned_leases.remove(project_id);
+    }
+
+    /// Whether the project's lease is held by a run nobody can settle.
+    pub fn lease_orphaned(&self, project_id: &str) -> bool {
+        self.leased.contains(project_id) && self.orphaned_leases.contains(project_id)
     }
 
     /// Seed progress when an audit stream starts. Called from the `start`
@@ -1809,6 +1819,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::projects::install_template),
         )
         .route(
+            "/api/projects/{id}/template-reinstall/plan",
+            get(api::projects::template_reinstall::template_reinstall_plan),
+        )
+        .route(
+            "/api/projects/{id}/template-reinstall",
+            post(api::projects::template_reinstall::template_reinstall),
+        )
+        .route(
             "/api/projects/{id}/template-merge",
             post(api::projects::template_merge::template_merge_start)
                 .delete(api::projects::template_merge::template_merge_discard),
@@ -1838,8 +1856,32 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/{id}/audit-info", get(api::audit::audit_info))
         .route("/api/projects/{id}/drift", get(api::audit::check_drift))
         .route(
+            "/api/projects/{id}/citation-drift",
+            get(api::audit::citation_drift),
+        )
+        .route(
+            "/api/projects/{id}/citation-drift/acknowledge",
+            post(api::audit::acknowledge_citations),
+        )
+        .route(
+            "/api/projects/{id}/doc-provenance",
+            get(api::audit::doc_provenance_report),
+        )
+        .route(
+            "/api/projects/{id}/doc-provenance/confirm",
+            post(api::audit::confirm_doc_provenance),
+        )
+        .route(
             "/api/projects/{id}/partial-audit",
             post(api::audit::partial_audit),
+        )
+        .route(
+            "/api/projects/{id}/revalidation",
+            get(api::audit::revalidation_plan),
+        )
+        .route(
+            "/api/projects/{id}/revalidate-audit",
+            post(api::audit::revalidate_audit),
         )
         .route(
             "/api/projects/{id}/validate-audit",
@@ -1888,6 +1930,16 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/audit-runs/{run_id}/steps",
             get(api::audit::audit_run_steps),
+        )
+        .route(
+            "/api/audit-runs/{run_id}/cost",
+            get(api::audit::audit_run_cost),
+        )
+        // KT-1131 — a human accepts a failed step as it stands. Kept off the
+        // bridge route list: an agent's token is refused.
+        .route(
+            "/api/projects/{id}/audit-runs/{run_id}/steps/{step}/accept",
+            post(api::audit::accept_audit_step),
         )
         // 0.8.4 (#317 / B1) — admin: force-clear all `Running` audit_runs.
         // The boot hook handles the 30-min threshold automatically; this
@@ -1959,6 +2011,25 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/linked-repos/candidates",
             get(api::projects::linked_repos_candidates),
         )
+        // KT-999 — which AI doc each linked repo has, for the drawer badges.
+        .route(
+            "/api/projects/{id}/linked-repos/docs",
+            get(api::projects::linked_repos_docs),
+        )
+        // KT-999 — documentation locations for the briefing form.
+        .route(
+            "/api/projects/{id}/briefing/docs",
+            get(api::audit::detect_briefing_docs),
+        )
+        .route(
+            "/api/projects/{id}/briefing/docs/check",
+            post(api::audit::check_briefing_doc),
+        )
+        // KT-1196 — the saved briefing as answers, to pre-fill the form.
+        .route(
+            "/api/projects/{id}/briefing/answers",
+            get(api::audit::get_saved_briefing),
+        )
         .route(
             "/api/projects/{id}/briefing",
             get(api::audit::get_briefing).put(api::audit::set_briefing),
@@ -1973,6 +2044,27 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/save-briefing",
             post(api::audit::save_briefing_form),
+        )
+        .route(
+            "/api/projects/{id}/audit/td-tasks",
+            post(api::audit::convert_td_tasks),
+        )
+        .route("/api/projects/{id}/audit/tds", get(api::audit::list_tds))
+        .route(
+            "/api/projects/{id}/audit/tds/decide",
+            post(api::audit::decide_tds),
+        )
+        .route(
+            "/api/projects/{id}/audit/tds/{td_id}/task",
+            post(api::audit::create_td_task),
+        )
+        .route(
+            "/api/projects/{id}/audit/tds/{td_id}/talk",
+            get(api::audit::td_talk).post(api::audit::start_td_talk),
+        )
+        .route(
+            "/api/projects/{id}/audit/cross-estimate",
+            get(api::audit::cross_audit_estimate),
         )
         .route(
             "/api/projects/{id}/ai-files",
