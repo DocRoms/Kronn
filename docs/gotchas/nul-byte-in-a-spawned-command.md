@@ -75,7 +75,7 @@ existing hard preflight refusal rather than being silently repaired.
 [src: file: backend/src/api/disc_prompts.rs:387-398#build_agent_prompt]
 [src: file: backend/src/api/disc_prompts.rs:400-420#build_agent_delta_prompt]
 [src: file: backend/src/api/discussions/streaming.rs:2701#build_agent_delta_prompt]
-[src: file: backend/src/api/discussions/streaming.rs:4050#build_agent_prompt]
+[src: file: backend/src/api/discussions/streaming.rs:4051#build_agent_prompt]
 
 The new HTTP regressions use the real Router and SQLite with temporary config
 and files: upload preserves exact disk bytes, and export/import/re-export keeps

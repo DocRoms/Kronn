@@ -23,48 +23,37 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.15.0 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.15.1 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
-## What's new in 0.15.0
+## What's new in 0.15.1
 
-0.15.0 makes workflows and Live Pages safe to leave running. Read the upgrade
-notes in the [CHANGELOG](CHANGELOG.md) before updating: stored workflow
-Security settings now apply, and existing Cron and Watch triggers stay in UTC.
+0.15.1 makes the AI-doc audit trustworthy and gives agents local media.
 
-- **Trusted Page actions and « Ma Todo »:** a Live Page action you approve
-  once in the Page's details runs without its validation card, bound to the
-  exact action and workflow you approved. Kronn ships « Ma Todo », a task
-  board over your planning tasks that runs without an agent, and a Page's
-  datasets can be emptied, re-limited and deleted.
-- **A run executes what it started with:** a workflow run pins its revision
-  and every prompt, API, skill and sub-workflow it loads, a stopped run keeps
-  uncommitted work, anti-loop guards survive resumes, and a provider quota
-  refusal waits for the reset instead of failing the run.
-- **Security settings that bite, and a readiness verdict:** Sandbox, Approval
-  required and Max files / lines are enforced, and every workflow save, read
-  or import says whether it can start and what blocks it.
-- **Watch, timezone, quiet runs:** a `Watch` trigger runs a workflow only when
-  its source changed, Kronn has a timezone for crons and date templates, and
-  runs that changed nothing are hidden and purged, with per-workflow retention.
-- **API permissions:** a plugin's API can be limited to chosen agents, to local
-  models only, or blocked, as a whole and per endpoint.
-- **Multi-agent you can see:** agents are checked before a multi-agent start,
-  the reply bubble shows startup phases and tool activity, the composer says
-  who runs in parallel or orchestrates, and turns run in message order.
-- **Skills and repository profile:** a skill can belong to one project, Agent
-  steps load the repository's skills, `kronn/project.toml` feeds
-  `{{project.<path>}}`, and `DelegateSubtasks` runs a plan's subtasks without
-  an orchestrator agent.
-- **Bridge and desktop:** the `kronn-internal` bridge takes requests up to
-  8 MiB and edits a workflow one step at a time; the desktop app loads allowed
-  third-party players, and `caffeinate` no longer outlives Kronn.
+- **An audit you can trust:** the audit checks what its documents claim
+  against the repository, no longer reports committed secrets as absent,
+  repairs more of what it used to fail on and hands a human the rest.
+  « Revalider l'audit » also judges whether each doc is still relevant.
+- **Briefing and existing docs:** the briefing records the team's rules,
+  existing documentation and linked projects, reopens with its answers, and a
+  repository that already has docs can receive the AI-doc template by merge.
+  Tech debt is settled, or turned into tasks, from the project card.
+- **Local image and video:** ComfyUI generates images and videos on your
+  machine, LiteLLM image generation works, and an HTTP agent can use an image
+  attached to the discussion as its source.
+- **Rooms across projects:** a room reaches another project only when a human
+  grants it, read or write; the native Claude Code agent then reads it.
+- **Orchestration you can leave running:** arbitration cards are never lost,
+  a Definition of Done edited mid-run is adopted, finished executions and
+  lanes give their disk back, and orchestration messages can be hidden.
+- **Navigation:** every view has its own address; Back, Forward, reload and
+  Ctrl/Cmd-click work as in any web page.
 
 Earlier releases are described in the [CHANGELOG](CHANGELOG.md).
 
 ## Contents
 
-- [What's new in 0.15.0](#whats-new-in-0150)
+- [What's new in 0.15.1](#whats-new-in-0151)
 - [60-second pitch](#60-second-pitch)
 - [The Kronn way: engineering, not prompting](#the-kronn-way-engineering-not-prompting)
 - [Quick start](#quick-start)
@@ -125,7 +114,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.15.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.15.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -156,7 +145,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.15.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.15.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140

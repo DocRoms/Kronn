@@ -9,7 +9,7 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
-## [Unreleased]
+## [0.15.1] - 2026-10-21
 
 ### Added
 
@@ -763,8 +763,79 @@ Release notes for 0.9.3 and earlier are available in the
   new, resume not supported…). Agents that never resume record nothing.
   Migration 259 adds `messages.session_continuity`.
 
+### Changed
+
+- CI no longer reruns the whole suite on a tree a pull request already
+  tested green (KT-1170, reshaped by main's shared-cache change): a push to
+  `main` only builds and saves the caches pull requests read, and a release
+  tag reruns no test workflow.
+
+
+- The macOS and Windows portability CI job compiles only the four suites it
+  runs. A new default Cargo feature, `full-tests`, gates every other
+  unit-test module; the job builds with `--no-default-features`. The full
+  lib-test binary (9 200 tests) made rustc peak above 13 GB while the
+  standard macOS runner has 7 GB, so the first step swapped for 45 to 55
+  minutes. The job also prints its rustc and machine facts, since two runner
+  images with different Rust releases rotate and invalidate the shared
+  cache. Every other job keeps the default feature set. The `with_conn`
+  unwrap lint exempts exactly the item carrying a `#[cfg(test)]` or
+  `#[cfg(all(test, …))]` attribute instead of cutting each file at its
+  first `#[cfg(test)]`, so production code after a `mod tests;` line is
+  scanned again. (KT-15)
+- Every view has its own address, and the browser's Back, Forward and reload
+  follow it: the pages (`/projects`, `/discussions`, `/planning`,
+  `/workflows`, `/pages`, `/plugins`, `/config`), what is open in them
+  (`/projects/<id>`, `/discussions/<id>?message=<id>`, `/planning/<id>`,
+  `/workflows/<id>/runs/<id>`, `/workflows/qp/<id>` and the other Automation
+  tabs, `/pages/<id>`, `/plugins/<id>`) and the whole-window views
+  (`/standalone/pages/<id>`, with its view parameters such as `?tv=1`, the
+  Page and discussion mosaics). An address can be copied, sent and reopened.
+  The links written before — `#discussion-<id>`, `#project-<id>`,
+  `#page/<id>?…`, the mosaics' `#…/mosaic?…`, `#settings/artifacts?…` and
+  `#config` —
+  keep working for good, from Live Pages, messages, bookmarks and the `kronn`
+  CLI alike. The desktop app's embedded server answers a reload on any of these
+  addresses with the app.
+- Ctrl/Cmd-click, Shift-click or a middle click opens a page in a new tab:
+  the navigation tabs, an Artifact's related discussion, workflows and
+  publication runs, and the rows and links that open a discussion, a
+  project and its views, a workflow and its runs, a Quick Prompt/API/Exec, a
+  task, a plugin or an Artifact, the "Fix" of the pre-launch agent check and
+  a skill's "Open in Config". A plain click still opens it in place; the
+  look of every element is unchanged.
+- Views inside a page have their own address too: a project's view
+  (`/projects/<id>/code?file=<path>&line=<n>`, `/projects/<id>/git`, …), the
+  workflow wizard (`/workflows/new`, `/workflows/<id>/edit`), a comparison of
+  discussions (`/discussions/compare/<run>`) and a Configuration section
+  (`/config#<section>`). A file an agent cites, a just-validated audit or a
+  just-improved Quick Prompt now opens at such an address, so Back, a reload
+  and a shared link land on the same view. A code view opened without a file
+  names the file it shows in its address, so Back to it reopens that file;
+  choosing a type's list from one of its Automation resources is a step Back
+  undoes; a reload, Back or Forward on a Configuration section brings it
+  into view again.
+- "Open the retention setting" on the run-retention banner (Automation and
+  Configuration) lands on the setting, centred and focused, at its address
+  `/config#run-payload-retention`; it used to stop short of it while the page
+  was still loading. Every Configuration anchor (`/config#<section>`) waits
+  for the page to settle the same way, and the sections in Configuration's
+  side menu are links: Ctrl/Cmd-click opens one in a new tab.
+- A release tag only checks the version, builds and verifies the installers
+  and creates the draft; it no longer reruns the CI suites the merged pull
+  request already passed.
+
 ### Fixed
 
+- An HTTP agent (Ollama, OpenRouter, LiteLLM…) can now use an image attached to
+  the discussion as the source of an image generation (KT-1418). It was told
+  only the filename while `media_generate` needs the context file id, so every
+  call was refused and the refusal, reported as a success, was retried until the
+  tool budget ran out. The image notice now gives each id, `media_generate`
+  also accepts an exact filename of the same discussion, and the refusal lists
+  the usable images. Agents are also told that a video model starts from a
+  picture when its `frame_positions` lists `first_frame` or `last_frame`, and
+  that an unknown reference count is not a refusal.
 - A project granted to a discussion is now readable by its native Claude Code
   agent (KT-1406). From the next turn the project's checkout is a read-only
   directory of the agent (`--add-dir`; a write grant stays read-only on disk,
@@ -780,7 +851,9 @@ Release notes for 0.9.3 and earlier are available in the
 - TLS certificate checks use rustls-webpki 0.103.16 and webpki-roots /
   webpki-root-certs 1.0.10 (RUSTSEC-2026-0381, -0382, -0383: distrusted
   intermediates and emSign roots were accepted). The frontend tooling moves to
-  vite 8.3.4 (launch-editor advisories in vite 8.2.0-8.2.3, dev server only).
+  vite 8.3.4 (launch-editor advisories in vite 8.2.0-8.2.3, dev server only)
+  and vitest 4.1.12 (GHSA-qxg6-89mg-rqv8, GHSA-xp26-3454-mjgp in its mocker,
+  test runner only).
 
 - An Exec line awaiting a human's approval is visible before the run and can
   be approved where it is used (KT-1398). Since KT-1017 a run value handed to
@@ -1621,14 +1694,6 @@ Release notes for 0.9.3 and earlier are available in the
   time from the repository contributors API (bots dropped), stay mentions;
   the maintainer is the fallback when the lookup fails or returns nothing.
 
-### Changed
-
-- CI no longer reruns the whole suite on a tree a pull request already
-  tested green (KT-1170, reshaped by main's shared-cache change): a push to
-  `main` only builds and saves the caches pull requests read, and a release
-  tag reruns no test workflow.
-
-### Fixed
 
 - The desktop app now applies the saved anti-hallucination mode at startup
   (KT-1149). Only the standalone backend armed it, so on desktop the setting
@@ -1805,63 +1870,6 @@ Release notes for 0.9.3 and earlier are available in the
   and Settings still runs it, but on a connection of its own: it no longer
   holds up the requests queued behind it.
 
-### Changed
-
-- The macOS and Windows portability CI job compiles only the four suites it
-  runs. A new default Cargo feature, `full-tests`, gates every other
-  unit-test module; the job builds with `--no-default-features`. The full
-  lib-test binary (9 200 tests) made rustc peak above 13 GB while the
-  standard macOS runner has 7 GB, so the first step swapped for 45 to 55
-  minutes. The job also prints its rustc and machine facts, since two runner
-  images with different Rust releases rotate and invalidate the shared
-  cache. Every other job keeps the default feature set. The `with_conn`
-  unwrap lint exempts exactly the item carrying a `#[cfg(test)]` or
-  `#[cfg(all(test, …))]` attribute instead of cutting each file at its
-  first `#[cfg(test)]`, so production code after a `mod tests;` line is
-  scanned again. (KT-15)
-- Every view has its own address, and the browser's Back, Forward and reload
-  follow it: the pages (`/projects`, `/discussions`, `/planning`,
-  `/workflows`, `/pages`, `/plugins`, `/config`), what is open in them
-  (`/projects/<id>`, `/discussions/<id>?message=<id>`, `/planning/<id>`,
-  `/workflows/<id>/runs/<id>`, `/workflows/qp/<id>` and the other Automation
-  tabs, `/pages/<id>`, `/plugins/<id>`) and the whole-window views
-  (`/standalone/pages/<id>`, with its view parameters such as `?tv=1`, the
-  Page and discussion mosaics). An address can be copied, sent and reopened.
-  The links written before — `#discussion-<id>`, `#project-<id>`,
-  `#page/<id>?…`, the mosaics' `#…/mosaic?…`, `#settings/artifacts?…` and
-  `#config` —
-  keep working for good, from Live Pages, messages, bookmarks and the `kronn`
-  CLI alike. The desktop app's embedded server answers a reload on any of these
-  addresses with the app.
-- Ctrl/Cmd-click, Shift-click or a middle click opens a page in a new tab:
-  the navigation tabs, an Artifact's related discussion, workflows and
-  publication runs, and the rows and links that open a discussion, a
-  project and its views, a workflow and its runs, a Quick Prompt/API/Exec, a
-  task, a plugin or an Artifact, the "Fix" of the pre-launch agent check and
-  a skill's "Open in Config". A plain click still opens it in place; the
-  look of every element is unchanged.
-- Views inside a page have their own address too: a project's view
-  (`/projects/<id>/code?file=<path>&line=<n>`, `/projects/<id>/git`, …), the
-  workflow wizard (`/workflows/new`, `/workflows/<id>/edit`), a comparison of
-  discussions (`/discussions/compare/<run>`) and a Configuration section
-  (`/config#<section>`). A file an agent cites, a just-validated audit or a
-  just-improved Quick Prompt now opens at such an address, so Back, a reload
-  and a shared link land on the same view. A code view opened without a file
-  names the file it shows in its address, so Back to it reopens that file;
-  choosing a type's list from one of its Automation resources is a step Back
-  undoes; a reload, Back or Forward on a Configuration section brings it
-  into view again.
-- "Open the retention setting" on the run-retention banner (Automation and
-  Configuration) lands on the setting, centred and focused, at its address
-  `/config#run-payload-retention`; it used to stop short of it while the page
-  was still loading. Every Configuration anchor (`/config#<section>`) waits
-  for the page to settle the same way, and the sections in Configuration's
-  side menu are links: Ctrl/Cmd-click opens one in a new tab.
-- A release tag only checks the version, builds and verifies the installers
-  and creates the draft; it no longer reruns the CI suites the merged pull
-  request already passed.
-
-### Fixed
 
 - A workflow's file and line limits could miss a file rewritten at the same
   size in the instant its git index was last written: on Linux the safety

@@ -23,53 +23,41 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.15.0 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.15.1 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
-## Nouveautés de la 0.15.0
+## Nouveautés de la 0.15.1
 
-La 0.15.0 rend les workflows et les Live Pages sûrs à laisser tourner. Lisez
-les notes de mise à jour du [CHANGELOG](CHANGELOG.md) avant de mettre à jour :
-les réglages de Sécurité enregistrés s'appliquent désormais, et les
-déclencheurs Cron et Watch existants restent en UTC.
+La 0.15.1 rend l'audit de la doc IA fiable et donne aux agents des médias
+locaux.
 
-- **Actions de Page de confiance et « Ma Todo » :** une action de Live Page
-  approuvée une fois dans les détails de la Page s'exécute sans sa carte de
-  validation, liée à l'action et au workflow exacts approuvés. Kronn livre
-  « Ma Todo », un tableau de tâches sur votre planification qui tourne sans
-  agent, et les datasets d'une Page se vident, se re-bornent et se suppriment.
-- **Un run exécute ce avec quoi il a démarré :** un run épingle sa révision
-  et chaque prompt, API, skill et sous-workflow qu'il charge, un run arrêté
-  garde le travail non commité, les garde-fous anti-boucle survivent aux
-  reprises, et un refus de quota fournisseur attend la remise à zéro au lieu
-  de faire échouer le run.
-- **Des réglages de Sécurité appliqués et un verdict de disponibilité :**
-  Sandbox, Approbation requise et Max fichiers / lignes sont appliqués, et
-  chaque enregistrement, lecture ou import de workflow dit s'il peut démarrer
-  et ce qui le bloque.
-- **Watch, fuseau horaire, runs silencieux :** un déclencheur `Watch` ne lance
-  un workflow que si sa source a changé, Kronn a un fuseau horaire pour les
-  crons et les dates, et les runs qui n'ont rien changé sont masqués et purgés,
-  avec une rétention par workflow.
-- **Permissions d'API :** l'API d'un plugin peut être réservée à des agents
-  choisis, aux modèles locaux, ou bloquée, en entier et par endpoint.
-- **Le multi-agent visible :** les agents sont vérifiés avant un démarrage
-  multi-agent, la bulle de réponse montre les phases de démarrage et
-  l'activité des outils, le composeur dit qui tourne en parallèle ou
-  orchestre, et les tours suivent l'ordre des messages.
-- **Skills et profil de dépôt :** une skill peut appartenir à un projet, les
-  steps Agent chargent les skills du dépôt, `kronn/project.toml` alimente
-  `{{project.<path>}}`, et `DelegateSubtasks` exécute les sous-tâches d'un plan
-  sans agent orchestrateur.
-- **Pont et bureau :** le pont `kronn-internal` accepte des requêtes jusqu'à
-  8 Mio et modifie un workflow step par step ; l'app de bureau charge les
-  lecteurs tiers autorisés, et `caffeinate` ne survit plus à Kronn.
+- **Un audit fiable :** l'audit vérifie ce que ses documents affirment contre
+  le dépôt, ne déclare plus absents des secrets commités, répare davantage de
+  ce sur quoi il échouait et confie le reste à un humain. « Revalider l'audit »
+  juge aussi si chaque doc est encore pertinente.
+- **Briefing et docs existantes :** le briefing enregistre les règles de
+  l'équipe, la documentation existante et les projets liés, se rouvre avec ses
+  réponses, et un dépôt qui a déjà des docs peut recevoir le template IA par
+  fusion. La dette technique se règle, ou devient des tâches, depuis la carte
+  du projet.
+- **Image et vidéo en local :** ComfyUI génère images et vidéos sur ta
+  machine, la génération d'images LiteLLM fonctionne, et un agent HTTP peut
+  partir d'une image jointe à la discussion.
+- **Rooms multi-projets :** une room n'atteint un autre projet que si un
+  humain l'accorde, en lecture ou en écriture ; l'agent Claude Code natif le
+  lit alors.
+- **Une orchestration qu'on peut laisser tourner :** les cartes d'arbitrage
+  ne se perdent plus, une Definition of Done modifiée en cours d'exécution est
+  reprise, les exécutions et lanes terminées rendent leur disque, et les
+  messages d'orchestration peuvent être masqués.
+- **Navigation :** chaque vue a sa propre adresse ; Précédent, Suivant,
+  recharger et Ctrl/Cmd-clic fonctionnent comme sur n'importe quelle page web.
 
 Les versions précédentes sont décrites dans le [CHANGELOG](CHANGELOG.md).
 
 ## Sommaire
 
-- [Nouveautés de la 0.15.0](#nouveautés-de-la-0150)
+- [Nouveautés de la 0.15.1](#nouveautés-de-la-0151)
 - [Le pitch en 60 secondes](#le-pitch-en-60-secondes)
 - [L'approche Kronn : de l'ingénierie, pas de l'incantation](#lapproche-kronn--de-lingénierie-pas-de-lincantation)
 - [Démarrage rapide](#démarrage-rapide)
@@ -133,7 +121,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.15.0 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.15.1 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140

@@ -257,7 +257,7 @@ Ollama `images` base64 values. Settings → model catalogue exposes **Vision
 image-input declarations also populate it; without a catalogue declaration,
 Ollama `/api/show` and LiteLLM `/model/info` may confirm vision for the exact
 model. A missing declaration never causes an image to be sent speculatively.
-[src: file: backend/src/agents/vision.rs:495-526#attach_to_chat_body]
+[src: file: backend/src/agents/vision.rs:520-551#attach_to_chat_body]
 [src: file: backend/src/agents/vision.rs:145-169#ollama_show_vision]
 [src: file: backend/src/api/discussions/streaming.rs:2739-2780#http_context_images]
 
@@ -271,14 +271,21 @@ file. Failed decoding or remaining limits produce the same explicit withholding
 notice. Transmission/downscaling counts are logged without the image payload.
 Prompt estimates count a bounded image allowance instead of base64 text bytes.
 [src: file: backend/src/agents/vision.rs:40-56#MAX_IMAGE_BYTES]
-[src: file: backend/src/agents/vision.rs:426-486#withheld_sentence]
+[src: file: backend/src/agents/vision.rs:451-511#withheld_sentence]
+
+The notice names every attached image by filename and context file id; the id
+is the value for `media_generate`'s `reference_asset_ids`. `media_generate` also
+accepts the exact filename of exactly one image of the same discussion, and an
+unknown reference is refused with the list of this discussion's usable images.
+A refused generation is reported to the runner as a failed tool call.
+[src: file: backend/src/api/media.rs:2042-2061#unknown_reference_error]
 
 `read_file` accepts only file paths registered to the current discussion, even
 without a project. This exception grants no directory listing or writing rights;
 `.kronn/context-files` remains read-only inside a project too. Symlink
 attachments are refused. Unrelated files outside the workspace keep the existing
 refusal. Images are never returned as lossy text by `read_file`.
-[src: file: backend/src/api/agent_tools.rs:3429-3461#read_attached_file]
+[src: file: backend/src/api/agent_tools.rs:3439-3471#read_attached_file]
 [src: file: backend/src/api/agent_workspace_tools.rs:1297-1341#read_attachment_payload]
 
 CLI agents retain the existing attachment prompt: an image's path and an

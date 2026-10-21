@@ -9,7 +9,7 @@ pub(crate) struct ReadOnlyRepos {
 }
 
 /// A registered project's Git checkout that passed validation: the canonical
-/// root and the identity (device, inode) it had then. The launch opens this
+/// root and the identity (device, inode, birth time) it had then. The launch opens this
 /// root, never the path the project was registered under, and refuses it if
 /// the directory behind it is no longer the one that was validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +17,9 @@ pub struct VerifiedCheckout {
     root: PathBuf,
     device: u64,
     inode: u64,
+    /// Linux reuses a freed inode at once, so a checkout replaced at the same
+    /// path keeps (device, inode); its creation time does not.
+    born: Option<std::time::SystemTime>,
 }
 
 impl VerifiedCheckout {
@@ -63,11 +66,12 @@ impl VerifiedCheckout {
                 root.display()
             ));
         }
-        let (device, inode) = identity(&root)?;
+        let (device, inode, born) = identity(&root)?;
         Ok(Self {
             root,
             device,
             inode,
+            born,
         })
     }
 
@@ -79,7 +83,7 @@ impl VerifiedCheckout {
     fn still_holds(&self) -> Result<(), String> {
         refuse_redirection(&self.root)?;
         let again = canonical_directory(&self.root)?;
-        if again != self.root || identity(&again)? != (self.device, self.inode) {
+        if again != self.root || identity(&again)? != (self.device, self.inode, self.born) {
             return Err(format!(
                 "the project checkout {} changed since it was validated; it is not opened",
                 self.root.display()
@@ -144,16 +148,18 @@ fn refuse_redirection(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+type Identity = (u64, u64, Option<std::time::SystemTime>);
+
 #[cfg(unix)]
-fn identity(path: &Path) -> Result<(u64, u64), String> {
+fn identity(path: &Path) -> Result<Identity, String> {
     use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::metadata(path)
         .map_err(|error| format!("Cannot inspect {}: {error}", path.display()))?;
-    Ok((metadata.dev(), metadata.ino()))
+    Ok((metadata.dev(), metadata.ino(), metadata.created().ok()))
 }
 
 #[cfg(not(unix))]
-fn identity(_path: &Path) -> Result<(u64, u64), String> {
+fn identity(_path: &Path) -> Result<Identity, String> {
     Err("read_only_repos requires a native macOS or Linux runner".into())
 }
 
