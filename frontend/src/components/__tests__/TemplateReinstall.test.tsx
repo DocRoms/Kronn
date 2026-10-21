@@ -13,7 +13,8 @@ vi.mock('../../lib/api', async () => {
 });
 
 import { projects as projectsApi } from '../../lib/api';
-import { TemplateReinstall } from '../TemplateReinstall';
+import { PlaceholderDocsBadge, TemplateReinstall } from '../TemplateReinstall';
+import { placeholderSteps } from '../../lib/placeholderDocs';
 import type { TemplateReinstallPlan, TemplateReinstallReport } from '../../types/generated';
 
 const wrap = (ui: ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);
@@ -44,6 +45,12 @@ const REPORT: TemplateReinstallReport = {
   unchanged: ['docs/decisions.md'],
   to_reconfirm: ['docs/AGENTS.md'],
   skipped: ['docs/testing-quality.md'],
+  placeholder_docs: [
+    { path: 'docs/glossary.md', step: 2 },
+    { path: 'docs/repo-map.md', step: 3 },
+    { path: 'docs/workflow/tickets.md', step: null },
+  ],
+  audit_status: 'Validated',
 };
 
 beforeEach(() => {
@@ -229,5 +236,84 @@ describe('TemplateReinstall', () => {
     within(screen.getByTestId('template-reinstall-panel')).getByRole('button').focus();
     await userEvent.tab();
     expect(screen.getByText('after')).toHaveFocus();
+  });
+
+  // KT-1203 — a reinstall leaves blank docs: the report names them and offers the one next step.
+  it('says in the confirmation that recreated files stay empty until their audit steps run', async () => {
+    const dialog = await openConfirmation();
+    expect(dialog.textContent).toContain("Les fichiers recréés restent vides jusqu'à ce que les étapes d'audit qui les remplissent soient relancées");
+  });
+
+  it('names the docs left with placeholders and runs the audit for exactly their steps', async () => {
+    const onRunSteps = vi.fn();
+    const onChanged = vi.fn();
+    wrap(<TemplateReinstall projectId="p1" onRunSteps={onRunSteps} onChanged={onChanged} />);
+    fireEvent.click(screen.getByTestId('template-reinstall-open'));
+    fireEvent.click(await screen.findByTestId('template-reinstall-confirm-button'));
+    const done = await screen.findByTestId('template-reinstall-done');
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    const owned = within(done).getByTestId('template-reinstall-placeholders');
+    expect(within(owned).getByText('docs/glossary.md')).toBeTruthy();
+    expect(within(owned).getByText('docs/repo-map.md')).toBeTruthy();
+    expect(within(owned).queryByText('docs/workflow/tickets.md')).toBeNull();
+    fireEvent.click(within(done).getByTestId('template-reinstall-run-steps'));
+    expect(onRunSteps).toHaveBeenCalledWith([2, 3]);
+    // The panel hands over to the audit progress.
+    expect(screen.queryByTestId('template-reinstall-done')).toBeNull();
+  });
+
+  it('says honestly which docs no audit step fills, with no button for them', async () => {
+    api.templateReinstall.mockResolvedValue({ ...REPORT, placeholder_docs: [{ path: 'docs/workflow/tickets.md', step: null }] });
+    wrap(<TemplateReinstall projectId="p1" onRunSteps={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('template-reinstall-open'));
+    fireEvent.click(await screen.findByTestId('template-reinstall-confirm-button'));
+    const done = await screen.findByTestId('template-reinstall-done');
+    const unowned = within(done).getByTestId('template-reinstall-unowned');
+    expect(within(unowned).getByText('docs/workflow/tickets.md')).toBeTruthy();
+    expect(unowned.textContent).toContain("Aucune étape d'audit ne cible ces fichiers");
+    expect(within(done).queryByTestId('template-reinstall-run-steps')).toBeNull();
+  });
+
+  it('a recreated docs entry points to the full audit instead of a partial one', async () => {
+    api.templateReinstall.mockResolvedValue({
+      ...REPORT,
+      placeholder_docs: [{ path: 'docs/AGENTS.md', step: 1 }, { path: 'docs/glossary.md', step: 2 }],
+      audit_status: 'TemplateInstalled',
+    });
+    wrap(<TemplateReinstall projectId="p1" onRunSteps={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('template-reinstall-open'));
+    fireEvent.click(await screen.findByTestId('template-reinstall-confirm-button'));
+    const done = await screen.findByTestId('template-reinstall-done');
+    expect(within(done).getByTestId('template-reinstall-entry-template').textContent).toContain('audit complet');
+    expect(within(done).queryByTestId('template-reinstall-run-steps')).toBeNull();
+  });
+
+  it('placeholderSteps keeps each owning step once, ascending, and drops unowned docs', () => {
+    expect(placeholderSteps([
+      { path: 'docs/c.md', step: 8 },
+      { path: 'docs/a.md', step: 2 },
+      { path: 'docs/b.md', step: 8 },
+      { path: 'docs/x.md', step: null },
+    ])).toEqual([2, 8]);
+  });
+});
+
+describe('PlaceholderDocsBadge', () => {
+  it('counts the docs a step fills and runs those steps', () => {
+    const onRun = vi.fn();
+    wrap(<PlaceholderDocsBadge onRun={onRun} docs={[
+      { path: 'docs/glossary.md', step: 2 },
+      { path: 'docs/workflow/tickets.md', step: null },
+    ]} />);
+    const badge = screen.getByTestId('project-placeholder-docs');
+    expect(badge.textContent).toContain('1 doc(s) à compléter');
+    expect(badge.getAttribute('title')).toContain('docs/workflow/tickets.md');
+    fireEvent.click(screen.getByTestId('project-placeholder-fill'));
+    expect(onRun).toHaveBeenCalledWith([2]);
+  });
+
+  it('shows nothing when no audit step fills any of them', () => {
+    wrap(<PlaceholderDocsBadge onRun={vi.fn()} docs={[{ path: 'docs/workflow/tickets.md', step: null }]} />);
+    expect(screen.queryByTestId('project-placeholder-docs')).toBeNull();
   });
 });

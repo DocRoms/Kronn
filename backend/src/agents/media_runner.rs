@@ -277,7 +277,17 @@ async fn persist(
     // as 864x496, so the requested parameters describe nothing.
     let rendered = probe_rendered(&bytes, job.modality);
     let size = bytes.len() as u64;
-    let disk_path = crate::core::context_files::save_file_to_disk(&file_id, &filename, &bytes)?;
+    // Stored like an upload: durable copy served by the UI, mirror the agent can open.
+    let dirs = crate::core::context_files::discussion_attachment_dirs(db, &discussion_id).await;
+    let disk_path = crate::core::context_files::save_file_to_dir_or_disk(
+        &dirs.durable,
+        &file_id,
+        &filename,
+        &bytes,
+    )?;
+    if let Some(agent_dir) = dirs.agent.as_deref() {
+        crate::core::context_files::agent_readable_path(&disk_path, agent_dir);
+    }
 
     let job_id = job.id.clone();
     let anchor = job.message_id.clone();
@@ -1182,12 +1192,119 @@ mod tests {
             Some("m-launch"),
             "a generated asset must hang from the turn that asked for it"
         );
+        // KT-1202 — without a project the asset still falls back to the data dir.
+        let disk_path: String = db
+            .with_read_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT disk_path FROM context_files WHERE discussion_id = 'd-1'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .expect("stored path");
+        assert!(
+            std::path::Path::new(&disk_path).starts_with(&scratch),
+            "{disk_path} must fall back to the data dir"
+        );
 
         match previous {
             Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
             None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// KT-1202 — a generated asset is kept in the project's main checkout, so
+    /// removing the worktree never takes it away, and mirrored in the worktree
+    /// so the agent running there can open it.
+    #[tokio::test]
+    async fn a_generated_asset_survives_its_worktree_and_is_mirrored_for_the_agent() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let project = root.path().join("project");
+        let worktree = root.path().join("worktree");
+        std::fs::create_dir_all(&project).expect("project dir");
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        let now = at("2026-09-01T10:00:00Z");
+        let db = Database::open_in_memory().expect("in-memory db");
+        let (project_path, worktree_path) = (
+            project.to_string_lossy().to_string(),
+            worktree.to_string_lossy().to_string(),
+        );
+        db.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at) \
+                 VALUES ('p-1', 'P', ?1, ?2, ?2)",
+                [&project_path, "2026-09-01T09:00:00Z"],
+            )?;
+            conn.execute(
+                "INSERT INTO discussions (id, title, project_id, workspace_path, created_at, updated_at) \
+                 VALUES ('d-1', 'Media', 'p-1', ?1, ?2, ?2)",
+                [&worktree_path, "2026-09-01T09:00:00Z"],
+            )?;
+            media_jobs::insert(
+                conn,
+                NewMediaJob {
+                    id: "job-img",
+                    modality: MediaModality::Image,
+                    connection_id: "conn-1",
+                    model: "google/gemini-2.5-flash-image",
+                    prompt: "un chat",
+                    params: &MediaParams::default(),
+                    discussion_id: Some("d-1"),
+                    message_id: None,
+                    project_id: Some("p-1"),
+                    scheduled_at: now,
+                    deadline_at: now + ChronoDuration::minutes(20),
+                },
+                now,
+            )?;
+            media_jobs::claim(conn, "job-img", now)?;
+            Ok(())
+        })
+        .await
+        .expect("seed");
+        let job = db
+            .with_read_conn(|conn| media_jobs::get(conn, "job-img"))
+            .await
+            .expect("read")
+            .expect("job");
+
+        let client = reqwest::Client::new();
+        let ctx = MediaContext {
+            codec: &crate::agents::media_codec::OpenRouterMediaCodec,
+            base: "http://unused.invalid",
+            api_key: "sk-test",
+            client: &client,
+        };
+        persist(&db, ctx, &job, b"png-bytes".to_vec(), None, None, now)
+            .await
+            .expect("persist");
+
+        let disk_path: String = db
+            .with_read_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT disk_path FROM context_files WHERE discussion_id = 'd-1'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .expect("stored row");
+        let stored = std::path::Path::new(&disk_path);
+        assert!(
+            stored.starts_with(project.join(".kronn").join("context-files")),
+            "{disk_path} must sit in the project's main checkout"
+        );
+        let mirror = worktree
+            .join(".kronn")
+            .join("context-files")
+            .join(stored.file_name().expect("name"));
+        assert_eq!(std::fs::read(&mirror).expect("agent mirror"), b"png-bytes");
+
+        // The route serves `disk_path`: it outlives the worktree.
+        std::fs::remove_dir_all(&worktree).expect("remove worktree");
+        assert_eq!(std::fs::read(stored).expect("still served"), b"png-bytes");
     }
 
     #[tokio::test]

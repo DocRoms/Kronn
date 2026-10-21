@@ -689,3 +689,53 @@ fn the_briefing_writes_the_option_under_the_kronn_options_heading() {
         Some(vec![CLAUDE, CODEX])
     );
 }
+
+/// Clears a project's docs-root override when the test ends.
+struct Relocated(String);
+impl Drop for Relocated {
+    fn drop(&mut self) {
+        crate::core::docs_location::set_project_override(&self.0, None);
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_relocated_project_gets_the_cross_step_documents_under_its_root() {
+    use crate::core::docs_location::DocsRoot;
+    let dir = repo();
+    let path = dir.path().to_string_lossy().into_owned();
+    crate::core::docs_location::set_project_override(&path, Some(".ai"));
+    let _relocated = Relocated(path);
+    let ai = DocsRoot::from_rel(".ai").unwrap();
+    let target = ".ai/inconsistencies-security.md";
+    assert!(engine::is_cross_checked_target(target, &ai));
+
+    let fake = Fake::default()
+        .answer("detect", &CLAUDE, findings(&[sql()]))
+        .answer("detect", &CODEX, findings(&[sql()]))
+        .answer(
+            "check",
+            &OPENCODE,
+            verdicts(serde_json::json!([{"id": "F1", "verdict": "refute", "argument": "trust me", "proof": []}])),
+        );
+    let agents = [CLAUDE, CODEX, OPENCODE];
+    let mut report = run_cross_step(&fake, dir.path(), &agents, STEP_PROMPT)
+        .await
+        .unwrap();
+    write_outputs(dir.path(), target, &agents, "run-ai", &mut report).unwrap();
+
+    let index = std::fs::read_to_string(dir.path().join(target)).unwrap();
+    assert!(
+        index.contains("Security findings (cross-agent audit)"),
+        "{index}"
+    );
+    let td_id = report.records[0].td_id.clone().unwrap();
+    assert!(dir
+        .path()
+        .join(format!(".ai/tech-debt/{td_id}.md"))
+        .is_file());
+    assert!(!dir.path().join("docs").exists());
+
+    let estimate = estimate(2, None, None, &ai);
+    assert_eq!(estimate.cross_checked_steps, vec![target.to_string()]);
+}

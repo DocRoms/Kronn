@@ -463,52 +463,14 @@ pub(crate) fn host_home_aliases() -> Vec<String> {
     aliases
 }
 
-/// Detect or default the project's documentation directory.
+/// The project's documentation directory (KT-263).
 ///
-/// Preference order : `docs/` (post-0.7.1 convention, modern plural) →
-/// `doc/` (legacy singular, some Ruby/Rails projects) → `ai/` (Kronn 0.7.0
-/// and earlier). Discriminated by the entry-point file:
-///   - `docs/AGENTS.md` (post-pivot)
-///   - `doc/AGENTS.md` (post-pivot, singular projects)
-///   - `ai/index.md` (legacy)
-///
-/// When NONE exists, returns `docs/` so fresh bootstraps install the new
-/// convention. Caller is responsible for creating the directory if it
-/// doesn't exist (some flows only need to know "where to write" not "is
-/// it real yet").
-///
-/// Path-agnostic detect-and-adapt strategy : every site that hardcoded
-/// `ai/` should call this instead. Existing projects keep working,
-/// migration becomes a `git mv` away, and new projects ship the new
-/// convention without ceremony.
+/// Resolved by `core::docs_location`: the project's override, then the global
+/// default from the settings, then the historical order — `docs/AGENTS.md`,
+/// `doc/AGENTS.md`, `ai/index.md`, then whichever of those folders exists, and
+/// `docs/` for a fresh project. Callers create the folder when they need it.
 pub fn detect_docs_dir(project_path: &Path) -> PathBuf {
-    // Prefer the dir that has the canonical entry file — most reliable
-    // signal that an audit was actually completed there.
-    if project_path.join("docs/AGENTS.md").is_file() {
-        return project_path.join("docs");
-    }
-    if project_path.join("doc/AGENTS.md").is_file() {
-        return project_path.join("doc");
-    }
-    if project_path.join("ai/index.md").is_file() {
-        return project_path.join("ai");
-    }
-    // No entry file — fall back to whichever folder physically exists
-    // (e.g. half-finished bootstrap, audit started but never sealed).
-    // Without this fallback, `ensure_redirectors`-style helpers that
-    // check `dir.is_dir()` no-op on legacy projects whose template was
-    // copied but where `ai/index.md` was never written.
-    if project_path.join("docs").is_dir() {
-        return project_path.join("docs");
-    }
-    if project_path.join("doc").is_dir() {
-        return project_path.join("doc");
-    }
-    if project_path.join("ai").is_dir() {
-        return project_path.join("ai");
-    }
-    // Default for fresh projects.
-    project_path.join("docs")
+    crate::core::docs_location::docs_dir(project_path)
 }
 
 /// File path of the docs directory's entry point. `AGENTS.md` post-pivot,
@@ -531,13 +493,11 @@ pub fn detect_docs_entry(project_path: &Path) -> PathBuf {
 /// treat a symlinked `ai/` (created post-migration for retro-compat) as
 /// "needs migration" because the docs/AGENTS.md check short-circuits.
 pub fn needs_docs_migration(project_path: &Path) -> bool {
-    if project_path.join("docs/AGENTS.md").is_file() {
-        return false;
-    }
-    if project_path.join("doc/AGENTS.md").is_file() {
-        return false;
-    }
-    project_path.join("ai/index.md").is_file()
+    // A configured folder is the operator's choice: never offer to move it.
+    let resolved = crate::core::docs_location::resolution(project_path);
+    resolved.source == crate::core::docs_location::DocsDirSource::Detected
+        && resolved.dir == project_path.join("ai")
+        && project_path.join("ai/index.md").is_file()
 }
 
 /// True when `content` still has an unfilled template placeholder like
@@ -572,9 +532,8 @@ pub fn detect_audit_status_with_runs(
     // legacy (`ai/index.md`) conventions during the migration window.
     // A directory in EITHER shape with NO entry file = TemplateInstalled
     // (partial state, audit was started but never finished).
-    let any_docs_dir_exists =
-        path.join("docs").is_dir() || path.join("doc").is_dir() || path.join("ai").is_dir();
-    if !any_docs_dir_exists {
+    // Unconfigured, the resolved folder exists iff one of docs/doc/ai does.
+    if !detect_docs_dir(&path).is_dir() {
         return AiAuditStatus::NoTemplate;
     }
     let index_file = detect_docs_entry(&path);
@@ -1196,6 +1155,81 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
         std::fs::create_dir_all(tmp.path().join("ai")).unwrap();
         assert_eq!(detect_docs_dir(tmp.path()), tmp.path().join("docs"));
+    }
+
+    // ─── KT-263: configured AI doc folder ───────────────────────────────────
+
+    #[test]
+    fn a_project_keeping_its_doc_in_dot_ai_is_detected_and_audited() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".ai")).unwrap();
+        std::fs::create_dir_all(root.join("ai")).unwrap();
+        std::fs::write(root.join("ai/index.md"), "# legacy\n").unwrap();
+        std::fs::write(root.join(".ai/AGENTS.md"), "# Project\n\n<!-- TODO x -->\n").unwrap();
+        let path = root.to_string_lossy().into_owned();
+
+        // Unconfigured: the legacy layout wins and `.ai/` is invisible.
+        assert_eq!(detect_docs_dir(&root), root.join("ai"));
+        assert!(needs_docs_migration(&root));
+
+        crate::core::docs_location::set_project_override(&path, Some(".ai"));
+        let dir = detect_docs_dir(&root);
+        let entry = detect_docs_entry(&root);
+        let migration = needs_docs_migration(&root);
+        let todos = count_ai_todos(&path);
+        let before_audit = detect_audit_status(&path);
+        let recorded = crate::core::kronn_state::record_audit(&root, "full");
+        let after_audit = detect_audit_status(&path);
+        crate::core::docs_location::set_project_override(&path, None);
+
+        assert_eq!(dir, root.join(".ai"));
+        assert_eq!(entry, root.join(".ai/AGENTS.md"));
+        assert!(
+            !migration,
+            "a configured folder is never offered a migration"
+        );
+        assert_eq!(todos, 1);
+        assert_eq!(
+            before_audit,
+            crate::models::AiAuditStatus::TemplateInstalled
+        );
+        recorded.unwrap();
+        assert!(root.join(".ai/.kronn.json").is_file());
+        assert!(!root.join("ai/.kronn.json").exists());
+        assert_eq!(after_audit, crate::models::AiAuditStatus::Audited);
+    }
+
+    #[test]
+    fn a_configured_folder_that_is_missing_reads_as_no_template() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), "# filled\n").unwrap();
+        let path = root.to_string_lossy().into_owned();
+        crate::core::docs_location::set_project_override(&path, Some("context"));
+        let status = detect_audit_status(&path);
+        crate::core::docs_location::set_project_override(&path, None);
+        assert_eq!(status, crate::models::AiAuditStatus::NoTemplate);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_override_reads_nothing_and_writes_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(outside.path().join("AGENTS.md"), "# outside\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join(".ai")).unwrap();
+        let path = root.to_string_lossy().into_owned();
+        crate::core::docs_location::set_project_override(&path, Some(".ai"));
+        let status = detect_audit_status(&path);
+        let write = crate::core::kronn_state::record_audit(&root, "full");
+        crate::core::docs_location::set_project_override(&path, None);
+        assert_eq!(status, crate::models::AiAuditStatus::NoTemplate);
+        assert!(write.unwrap_err().contains("symlink"));
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 1);
     }
 
     // ─── scan_kronn_markers (0.8.3 Feasibility-Gated Implementation) ─────────

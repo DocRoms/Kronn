@@ -16,8 +16,6 @@ use uuid::Uuid;
 use crate::models::*;
 use crate::AppState;
 
-use super::helpers::build_briefing_prompt;
-
 /// GET /api/projects/:id/briefing
 /// Returns the briefing notes for a project.
 pub async fn get_briefing(
@@ -119,7 +117,10 @@ pub(crate) const BRIEFING_PROMPT_MAX_CHARS: usize = 6_000;
 /// at [`BRIEFING_PROMPT_MAX_CHARS`] with an explicit truncation marker. The
 /// machine copy of the project answers is dropped: the readable facts above
 /// it say the same thing. The documentation section stays out (KT-999).
-pub(crate) fn briefing_prompt_section(notes: &str) -> String {
+pub(crate) fn briefing_prompt_section(
+    notes: &str,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> String {
     let notes = super::briefing_docs::strip_section(notes);
     let notes = super::briefing_rules::strip_section(&notes);
     let notes = super::project_doc::strip_answers_line(&notes);
@@ -137,7 +138,8 @@ pub(crate) fn briefing_prompt_section(notes: &str) -> String {
         }
         let shown = cut.chars().count();
         format!(
-            "{cut}\n\n[Briefing truncated by Kronn: {shown} of {total} characters shown. Read docs/briefing.md for the rest.]"
+            "{cut}\n\n[Briefing truncated by Kronn: {shown} of {total} characters shown. Read {} for the rest.]",
+            docs_root.path("briefing.md")
         )
     };
     format!("\n\n## Project briefing (from the user)\n{body}\n")
@@ -229,7 +231,11 @@ pub async fn start_briefing(
         crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
     // The documentation section is put back by `reattach_facts` after the review.
     let prefilled = prefilled.map(|notes| super::briefing_docs::strip_section(&notes));
-    let briefing_prompt = build_briefing_prompt(&language, prefilled.as_deref());
+    let briefing_prompt = super::helpers::build_briefing_prompt_in(
+        &language,
+        prefilled.as_deref(),
+        &crate::core::docs_location::DocsRoot::of(&project_path),
+    );
 
     // 4. Create discussion
     let now = Utc::now();
@@ -241,6 +247,7 @@ pub async fn start_briefing(
         recovered_partial: false,
         session_tokens_at_message: None,
         author_cli_ordinal: None,
+        session_continuity: None,
         model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),
@@ -333,7 +340,7 @@ pub async fn start_briefing(
 /// celui généré par l'ancien flow conversationnel — l'audit consomme
 /// le même fichier via `projects::resolve_briefing_notes` (audit/full.rs
 /// Phase 1 + chaque step prompt). Aucun changement nécessaire en aval.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct BriefingFormRequest {
     pub purpose: String,
     pub team: String,
@@ -356,32 +363,259 @@ pub struct BriefingFormRequest {
     /// KT-1193 — rules and bans the team states about the code; optional.
     #[serde(default)]
     pub project_rules: Option<BriefingProjectRules>,
+    /// KT-1192 — « Dossier de la documentation IA », relative to the project
+    /// root. Absent from older clients: the folder is left as it is.
+    #[serde(default)]
+    pub docs_dir: Option<String>,
+    /// KT-1192 — the folder holds docs Kronn did not write and the human chose
+    /// to move them to `<folder>/legacy/`. Without it, such a folder is refused.
+    #[serde(default)]
+    pub move_existing_to_legacy: bool,
 }
 
-pub async fn save_briefing_form(
+/// Why a briefing was not saved.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BriefingSaveError {
+    /// An answer is missing or malformed.
+    Invalid(String),
+    /// The docs folder leaves the project, or cannot be checked (HTTP 400).
+    DocsDir(String),
+    /// A listed documentation location is refused (HTTP 400, KT-999).
+    ExistingDocs(String),
+    /// A stated project rule is malformed (HTTP 400, KT-1193).
+    Rules(String),
+    NotFound,
+    Internal(String),
+}
+
+impl BriefingSaveError {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::Invalid(m)
+            | Self::DocsDir(m)
+            | Self::ExistingDocs(m)
+            | Self::Rules(m)
+            | Self::Internal(m) => m.clone(),
+            Self::NotFound => "Project not found".into(),
+        }
+    }
+}
+
+/// The folder the briefing proposes, and where the proposal comes from.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct BriefingDefaults {
+    /// Relative to the project root, without a trailing slash.
+    pub docs_dir: String,
+    pub docs_dir_source: BriefingDocsDirSource,
+    /// The folder already exists in the project.
+    pub folder_exists: bool,
+    /// What the proposed folder already holds.
+    pub folder: crate::core::docs_folder::DocsFolderState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingDocsDirSource {
+    /// The project's own override.
+    ProjectOverride,
+    /// A folder the project already documents itself in.
+    Existing,
+    /// The global default from the settings.
+    GlobalDefault,
+    /// `docs`.
+    Default,
+}
+
+/// The pre-fill of « Dossier de la documentation IA »: the project's
+/// override, else the folder it already documents itself in, else the global
+/// default, else `docs` (KT-1192). An existing folder wins over the global
+/// default so a documented project is never proposed a move.
+pub(crate) fn briefing_defaults(
+    project_root: &std::path::Path,
+    stored_override: Option<&str>,
+    global_default: Option<&str>,
+) -> BriefingDefaults {
+    use crate::core::docs_location;
+    let (docs_dir, docs_dir_source) = if let Some(rel) =
+        stored_override.and_then(|d| docs_location::normalize_relative(d).ok())
+    {
+        (rel, BriefingDocsDirSource::ProjectOverride)
+    } else {
+        let detected = docs_location::resolve(project_root, None);
+        match detected
+            .relative(project_root)
+            .filter(|_| detected.dir.is_dir())
+        {
+            Some(rel) => (rel, BriefingDocsDirSource::Existing),
+            None => match global_default.and_then(|d| docs_location::normalize_relative(d).ok()) {
+                Some(rel) => (rel, BriefingDocsDirSource::GlobalDefault),
+                None => (
+                    docs_location::DocsRoot::DEFAULT.to_string(),
+                    BriefingDocsDirSource::Default,
+                ),
+            },
+        }
+    };
+    BriefingDefaults {
+        folder_exists: project_root.join(&docs_dir).is_dir(),
+        folder: crate::core::docs_folder::folder_state(project_root, &docs_dir),
+        docs_dir,
+        docs_dir_source,
+    }
+}
+
+/// GET /api/projects/:id/briefing-defaults
+pub async fn get_briefing_defaults(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(form): Json<BriefingFormRequest>,
-) -> Response {
-    save_briefing_form_inner(state, id, form).await
+) -> Json<ApiResponse<BriefingDefaults>> {
+    let lookup = id.clone();
+    let found = state
+        .db
+        .with_read_conn(move |conn| {
+            let Some(project) = crate::db::projects::get_project(conn, &lookup)? else {
+                return Ok(None);
+            };
+            let dir = crate::db::projects::project_docs_dir(conn, &lookup)?;
+            Ok(Some((project.path, dir)))
+        })
+        .await;
+    let (path, stored) = match found {
+        Ok(Some(found)) => found,
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Project not found",
+            ))
+        }
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {e}"))),
+    };
+    let global = state.config.read().await.scan.default_docs_dir.clone();
+    let root = crate::core::scanner::resolve_host_path(&path);
+    Json(ApiResponse::ok(briefing_defaults(
+        &root,
+        stored.as_deref(),
+        global.as_deref(),
+    )))
 }
 
-fn json_bool(response: ApiResponse<bool>) -> Response {
-    Json(response).into_response()
-}
-
-async fn save_briefing_form_inner(
-    state: AppState,
-    id: String,
-    form: BriefingFormRequest,
-) -> Response {
-    if audit_running(&state, &id) {
-        return (
-            StatusCode::CONFLICT,
-            Json(ApiResponse::<bool>::err(BRIEFING_LOCKED)),
-        )
-            .into_response();
+/// Record the folder the briefing chose, in the caller's transaction. Stored
+/// as the project's override only when it differs from what the project
+/// resolves to without one, so a briefing that keeps the existing layout
+/// changes nothing. The override and the legacy move go to `after`.
+fn apply_briefing_docs_dir(
+    conn: &rusqlite::Connection,
+    project: &Project,
+    requested: &str,
+    move_existing_to_legacy: bool,
+    after: &mut BriefingAfterCommit,
+) -> Result<(), BriefingSaveError> {
+    use crate::core::docs_folder::{folder_state, DocsFolderState};
+    use crate::core::docs_location;
+    let root = crate::core::scanner::resolve_host_path(&project.path);
+    let rel = docs_location::validate_for_project(&root, requested)
+        .map_err(BriefingSaveError::DocsDir)?;
+    // A human's docs never move, and are never written over, without the
+    // explicit choice; old Kronn docs are updated in place, unasked.
+    let state = folder_state(&root, &rel);
+    if let DocsFolderState::HumanDocs {
+        files,
+        legacy_exists,
+        ..
+    } = &state
+    {
+        if !move_existing_to_legacy {
+            return Err(BriefingSaveError::DocsDir(format!(
+                "The folder {rel}/ used by Kronn already exists and holds {files} file(s) Kronn \
+                 did not write: choose another folder, or move them to {rel}/legacy/."
+            )));
+        }
+        if *legacy_exists {
+            return Err(BriefingSaveError::DocsDir(format!(
+                "{rel}/legacy/ already exists: Kronn never merges into it. Choose another folder."
+            )));
+        }
     }
+    let unconfigured = docs_location::resolve(&root, None).relative(&root);
+    let stored = (unconfigured.as_deref() != Some(rel.as_str())).then(|| rel.clone());
+    crate::db::projects::set_project_docs_dir(conn, &project.id, stored.as_deref())
+        .map_err(|e| BriefingSaveError::Internal(format!("DB error: {e}")))?;
+    after.docs_override = Some(stored);
+    if matches!(state, DocsFolderState::HumanDocs { .. }) {
+        after.legacy_move =
+            Some(docs_location::DocsRoot::from_rel(&rel).map_err(BriefingSaveError::DocsDir)?);
+    }
+    Ok(())
+}
+
+/// What a saved briefing still does outside the database. A rename cannot be
+/// rolled back, so it runs only once the briefing's rows are committed.
+#[must_use = "apply it once the transaction is committed"]
+pub(crate) struct BriefingAfterCommit {
+    project_path: String,
+    root: std::path::PathBuf,
+    docs_override: Option<Option<String>>,
+    legacy_move: Option<crate::core::docs_location::DocsRoot>,
+    body: String,
+    project_rules: Option<BriefingProjectRules>,
+}
+
+impl BriefingAfterCommit {
+    /// The override, the explicit legacy move, then `briefing.md` in the
+    /// folder. Pre-bootstrap projects have no docs folder yet: the DB only,
+    /// and the audit's Phase 1 install picks it up via `resolve_briefing_notes`.
+    pub(crate) fn apply(self) -> Result<(), BriefingSaveError> {
+        if let Some(stored) = &self.docs_override {
+            crate::core::docs_location::set_project_override(&self.project_path, stored.as_deref());
+        }
+        if let Some(docs_root) = &self.legacy_move {
+            crate::core::docs_folder::move_to_legacy(&self.root, docs_root)
+                .map_err(BriefingSaveError::DocsDir)?;
+        }
+        let docs_dir = crate::core::scanner::detect_docs_dir(&self.root);
+        if docs_dir.is_dir() {
+            let target = docs_dir.join("briefing.md");
+            crate::core::fs_guard::assert_contained_no_symlink(&self.root, &target)
+                .map_err(BriefingSaveError::DocsDir)?;
+            std::fs::write(&target, &self.body).map_err(|e| {
+                BriefingSaveError::Internal(format!("Failed to write {}: {}", target.display(), e))
+            })?;
+            // KT-1193 — every agent of the project reads the coding-rules doc.
+            if let Err(e) = super::briefing_rules::sync_coding_rules_doc(
+                &self.root,
+                self.project_rules.as_ref(),
+            ) {
+                tracing::warn!("project rules not written to the coding-rules doc: {e}");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Marks a briefing Kronn wrote with default answers for an unattended
+/// launch: shown on the project card until a human completes it.
+pub(crate) const DEFAULTS_MARKER: &str = "<!-- kronn:briefing-defaults -->";
+
+/// The answers of a briefing written for an unattended launch: nothing is
+/// invented, every field says it is still to be completed.
+pub(crate) fn default_answers() -> BriefingFormRequest {
+    let todo = "Not provided — default answer, to be completed by a human.".to_string();
+    BriefingFormRequest {
+        purpose: todo.clone(),
+        team: todo.clone(),
+        maturity: todo.clone(),
+        dependencies: todo.clone(),
+        traps: todo,
+        additional: String::new(),
+        ..BriefingFormRequest::default()
+    }
+}
+
+/// The mandatory answers and the cross-audit agents, checked before anything
+/// is read or written.
+fn check_answers(form: &BriefingFormRequest) -> Result<(), BriefingSaveError> {
     // 1. Validate: Q1-Q5 are mandatory (matches the conversational flow).
     if form.purpose.trim().is_empty()
         || form.team.trim().is_empty()
@@ -389,10 +623,11 @@ async fn save_briefing_form_inner(
         || form.dependencies.trim().is_empty()
         || form.traps.trim().is_empty()
     {
-        return json_bool(ApiResponse::err(
+        return Err(BriefingSaveError::Invalid(
             "Q1-Q5 are mandatory (purpose, team, maturity, dependencies, traps). \
              Q6 (additional) is optional. Use \"Not provided\" or \"None\" if you \
-             want to skip a mandatory question explicitly.",
+             want to skip a mandatory question explicitly."
+                .into(),
         ));
     }
 
@@ -403,11 +638,33 @@ async fn save_briefing_form_inner(
             .map(crate::core::cross_audit::agent_label)
             .collect();
         if crate::core::cross_audit::parse_agent_list(&names.join(",")).is_none() {
-            return json_bool(ApiResponse::err(
-                "The cross-agent audit needs 2 or 3 distinct audit-capable agents (a Custom connection cannot be one).",
+            return Err(BriefingSaveError::Invalid(
+                "The cross-agent audit needs 2 or 3 distinct audit-capable agents (a Custom connection cannot be one).".into(),
             ));
         }
     }
+    Ok(())
+}
+
+/// Save the briefing answers: validation, docs folder and DB notes, in the
+/// caller's transaction; the returned effects run once it is committed.
+/// Shared by the form, the briefing cards and the unattended defaults (KT-1192).
+pub(crate) fn save_briefing_in(
+    conn: &rusqlite::Connection,
+    project: &Project,
+    form: &BriefingFormRequest,
+    defaults: bool,
+    docs_section: Option<&str>,
+) -> Result<BriefingAfterCommit, BriefingSaveError> {
+    let mut after = BriefingAfterCommit {
+        project_path: project.path.clone(),
+        root: crate::core::scanner::resolve_host_path(&project.path),
+        docs_override: None,
+        legacy_move: None,
+        body: String::new(),
+        project_rules: None,
+    };
+    check_answers(form)?;
 
     let project_facts = match form
         .project
@@ -416,7 +673,7 @@ async fn save_briefing_form_inner(
     {
         None => None,
         Some(Ok(answers)) => super::project_doc::render_facts_section(&answers),
-        Some(Err(e)) => return json_bool(ApiResponse::err(e)),
+        Some(Err(e)) => return Err(BriefingSaveError::Invalid(e)),
     };
     let project_rules = match form
         .project_rules
@@ -425,88 +682,135 @@ async fn save_briefing_form_inner(
     {
         None => None,
         Some(Ok(rules)) => Some(rules),
-        Some(Err(e)) => {
-            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<bool>::err(e))).into_response()
-        }
+        Some(Err(e)) => return Err(BriefingSaveError::Rules(e)),
     };
     let rules_section = project_rules
         .as_ref()
         .and_then(super::briefing_rules::render_section);
 
-    // 2. Look up project for the on-disk path.
-    let pid = id.clone();
-    let project = state
-        .db
-        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
-        .await
-        .ok()
-        .flatten();
-    let Some(project) = project else {
-        return json_bool(ApiResponse::err("Project not found"));
-    };
+    // 2. The docs folder first: `briefing.md` is written into it.
+    if let Some(dir) = form
+        .docs_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        apply_briefing_docs_dir(conn, project, dir, form.move_existing_to_legacy, &mut after)?;
+    }
 
-    // A location outside the repository, missing or contradicting another
-    // source of truth is refused before anything is written.
-    let project_path = crate::core::scanner::resolve_host_path(&project.path);
+    // 3. The briefing.md body (EN headings: the canonical format the audit reads).
+    let mut body = compose_briefing(
+        form,
+        project_facts,
+        docs_section.map(str::to_string),
+        rules_section,
+    );
+    if defaults {
+        body = body.replacen(
+            "> Auto-generated by Kronn briefing form (no AI call). Source: user answers.\n",
+            &format!(
+                "{DEFAULTS_MARKER}\n> Default answers written by Kronn for an unattended launch: \
+                 to be completed by a human.\n"
+            ),
+            1,
+        );
+    }
+
+    // 4. DB notes; `briefing.md` is written after the commit.
+    match crate::db::projects::update_project_briefing_notes(conn, &project.id, Some(&body)) {
+        Ok(true) => {}
+        Ok(false) => return Err(BriefingSaveError::NotFound),
+        Err(e) => return Err(BriefingSaveError::Internal(format!("DB error: {e}"))),
+    }
+    after.body = body;
+    after.project_rules = project_rules;
+    Ok(after)
+}
+
+/// `save_briefing_in` for a project id, on the database's connection.
+pub(crate) async fn save_briefing_answers(
+    state: &AppState,
+    id: &str,
+    form: BriefingFormRequest,
+) -> Result<(), BriefingSaveError> {
+    save_briefing_with(state, id, form, false).await
+}
+
+pub(crate) async fn save_briefing_with(
+    state: &AppState,
+    id: &str,
+    form: BriefingFormRequest,
+    defaults: bool,
+) -> Result<(), BriefingSaveError> {
+    check_answers(&form)?;
+    // The documentation locations are dated with `git log` (KT-999): checked
+    // here, off the connection, and refused before anything is written.
     let docs_section = match form.existing_docs.as_ref() {
         None => None,
-        Some(docs) => match super::briefing_docs::normalize_with_dates(&project_path, docs).await {
-            Ok(docs) => super::briefing_docs::render_section(&docs),
-            Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(ApiResponse::<bool>::err(e))).into_response()
-            }
-        },
-    };
-
-    // 3. Format the briefing.md body (EN headings: the canonical format the audit reads).
-    let body = compose_briefing(&form, project_facts, docs_section, rules_section);
-
-    // 4. Write `docs/briefing.md` on disk + persist briefing_notes in DB.
-    // The on-disk file is what the audit reads at Phase 1; the DB
-    // column is what the ProjectCard / API surfaces back to the UI.
-    let docs_dir = crate::core::scanner::detect_docs_dir(&project_path);
-    if !docs_dir.is_dir() {
-        // Pre-bootstrap projects don't have docs/ yet — store in DB
-        // only; the audit's Phase 1 install will pick it up + emit
-        // the file via the existing `resolve_briefing_notes` path.
-        let notes = body.clone();
-        match state
-            .db
-            .with_conn(move |conn| {
-                crate::db::projects::update_project_briefing_notes(conn, &id, Some(&notes))
-            })
-            .await
-        {
-            Ok(true) => return json_bool(ApiResponse::ok(true)),
-            Ok(false) => return json_bool(ApiResponse::err("Project not found")),
-            Err(e) => return json_bool(ApiResponse::err(format!("DB error: {}", e))),
+        Some(docs) => {
+            let lookup = id.to_string();
+            let project = state
+                .db
+                .with_read_conn(move |conn| crate::db::projects::get_project(conn, &lookup))
+                .await
+                .map_err(|e| BriefingSaveError::Internal(format!("DB error: {e}")))?
+                .ok_or(BriefingSaveError::NotFound)?;
+            let project_path = crate::core::scanner::resolve_host_path(&project.path);
+            let docs = super::briefing_docs::normalize_with_dates(&project_path, docs)
+                .await
+                .map_err(BriefingSaveError::ExistingDocs)?;
+            super::briefing_docs::render_section(&docs)
         }
-    }
-    let target = docs_dir.join("briefing.md");
-    if let Err(e) = std::fs::write(&target, &body) {
-        return json_bool(ApiResponse::err(format!(
-            "Failed to write {}: {}",
-            target.display(),
-            e
-        )));
-    }
-    // KT-1193 — every agent of the project reads the coding-rules doc.
-    if let Err(e) =
-        super::briefing_rules::sync_coding_rules_doc(&project_path, project_rules.as_ref())
-    {
-        tracing::warn!("project rules not written to the coding-rules doc: {e}");
-    }
-    let notes = body.clone();
-    match state
+    };
+    let id = id.to_string();
+    state
         .db
         .with_conn(move |conn| {
-            crate::db::projects::update_project_briefing_notes(conn, &id, Some(&notes))
+            let Some(project) = crate::db::projects::get_project(conn, &id)? else {
+                return Ok(Err(BriefingSaveError::NotFound));
+            };
+            let tx = conn.unchecked_transaction()?;
+            let after =
+                match save_briefing_in(&tx, &project, &form, defaults, docs_section.as_deref()) {
+                    Ok(after) => after,
+                    Err(e) => return Ok(Err(e)),
+                };
+            tx.commit()?;
+            Ok(after.apply())
         })
         .await
-    {
-        Ok(true) => json_bool(ApiResponse::ok(true)),
-        Ok(false) => json_bool(ApiResponse::err("Project not found")),
-        Err(e) => json_bool(ApiResponse::err(format!("DB error: {}", e))),
+        .unwrap_or_else(|e| Err(BriefingSaveError::Internal(format!("DB error: {e}"))))
+}
+
+pub async fn save_briefing_form(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(form): Json<BriefingFormRequest>,
+) -> Response {
+    // KT-1196 — a running audit reads the briefing: no save meanwhile.
+    if audit_running(&state, &id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::<bool>::err(BRIEFING_LOCKED)),
+        )
+            .into_response();
+    }
+    match save_briefing_answers(&state, &id, form).await {
+        Ok(()) => Json(ApiResponse::ok(true)).into_response(),
+        Err(BriefingSaveError::DocsDir(reason)) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<bool>::err_coded(
+                ApiErrorCode::Validation,
+                reason,
+            )),
+        )
+            .into_response(),
+        Err(BriefingSaveError::ExistingDocs(reason) | BriefingSaveError::Rules(reason)) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<bool>::err(reason)),
+        )
+            .into_response(),
+        Err(error) => Json(ApiResponse::<bool>::err(error.message())).into_response(),
     }
 }
 
@@ -578,4 +882,54 @@ pub(crate) fn with_all_kronn_options(
         ));
     }
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn defaults(
+        root: &std::path::Path,
+        stored: Option<&str>,
+        global: Option<&str>,
+    ) -> (String, BriefingDocsDirSource) {
+        let d = briefing_defaults(root, stored, global);
+        (d.docs_dir, d.docs_dir_source)
+    }
+
+    /// KT-1192: override, then an existing folder, then the global default,
+    /// then `docs`.
+    #[test]
+    fn the_docs_folder_prefill_follows_its_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert_eq!(
+            defaults(root, None, None),
+            ("docs".into(), BriefingDocsDirSource::Default)
+        );
+        assert_eq!(
+            defaults(root, None, Some("./.ai/")),
+            (".ai".into(), BriefingDocsDirSource::GlobalDefault)
+        );
+        std::fs::create_dir_all(root.join("doc")).unwrap();
+        assert_eq!(
+            defaults(root, None, Some(".ai")),
+            ("doc".into(), BriefingDocsDirSource::Existing)
+        );
+        assert_eq!(
+            defaults(root, Some("context"), Some(".ai")),
+            ("context".into(), BriefingDocsDirSource::ProjectOverride)
+        );
+        assert!(!briefing_defaults(root, Some("context"), None).folder_exists);
+        assert!(briefing_defaults(root, None, None).folder_exists);
+    }
+
+    #[test]
+    fn an_invalid_global_default_falls_back_to_docs() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            defaults(tmp.path(), None, Some("../escape")),
+            ("docs".into(), BriefingDocsDirSource::Default)
+        );
+    }
 }

@@ -4,7 +4,7 @@
 
 Queue state comes from the durable dispatch row. A claimed dispatch without `agent_started_at` remains `queued`; the post-semaphore boundary becomes `launching`, followed by `upstream_wait` immediately before the provider call. Queue position is currently always omitted: scheduler admission constraints prevent a reliable rank. Missing continuous telemetry is represented as `unavailable` or `boundary_only`, never inferred as a stall. [src: file: backend/src/api/orchestration.rs:8024-8103#execution_progress]
 
-Process liveness is attached by both execution-status surfaces only when the runtime registry has observed a successfully created provider runtime. Cancellation-token presence or absence is not treated as process evidence. [src: file: backend/src/api/orchestration.rs:8107-8128#attach_runtime_liveness] [src: file: backend/src/api/orchestration.rs:11405-11416#attach_runtime_liveness] [src: file: backend/src/lib.rs:471-474#agent_runtime_registry]
+Process liveness is attached by both execution-status surfaces only when the runtime registry has observed a successfully created provider runtime. Cancellation-token presence or absence is not treated as process evidence. [src: file: backend/src/api/orchestration.rs:8107-8128#attach_runtime_liveness] [src: file: backend/src/api/orchestration.rs:11407-11418#attach_runtime_liveness] [src: file: backend/src/lib.rs:481-484#agent_runtime_registry]
 
 Native Claude stream tool boundaries update durable progress: tool start records `tool_activity`, and tool completion returns the phase to `upstream_wait`. [src: file: backend/src/api/discussions/streaming.rs:4434-4513#mark_progress]
 

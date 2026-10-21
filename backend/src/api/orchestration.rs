@@ -7138,6 +7138,7 @@ pub(crate) fn orchestrator_message(id: String, content: String) -> DiscussionMes
         target_agent: None,
         reply_to_message_id: None,
         author_cli_ordinal: None,
+        session_continuity: None,
     }
 }
 
@@ -7188,6 +7189,7 @@ fn build_control_offer_message(
         target_agent: None,
         reply_to_message_id: None,
         author_cli_ordinal: None,
+        session_continuity: None,
     }
 }
 

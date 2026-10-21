@@ -25,13 +25,15 @@ fn find_readme(root: &Path) -> Option<String> {
     names.into_iter().next()
 }
 
-/// `docs/AGENTS.md`, else legacy `ai/index.md`, else a README.
+/// `<docs root>/AGENTS.md` (the repo's own folder when Kronn manages it,
+/// else `docs/`), else legacy `ai/index.md`, else a README.
 pub fn detect_ai_doc(root: &Path) -> (LinkedRepoAiDoc, Option<String>) {
     if !root.is_dir() {
         return (LinkedRepoAiDoc::Missing, None);
     }
-    if root.join("docs/AGENTS.md").is_file() {
-        return (LinkedRepoAiDoc::AgentsMd, Some("docs/AGENTS.md".into()));
+    let entry = crate::core::docs_location::DocsRoot::of(root).path("AGENTS.md");
+    if root.join(&entry).is_file() {
+        return (LinkedRepoAiDoc::AgentsMd, Some(entry));
     }
     if root.join("ai/index.md").is_file() {
         return (LinkedRepoAiDoc::LegacyAiIndex, Some("ai/index.md".into()));
@@ -83,6 +85,21 @@ mod tests {
         assert_eq!(
             detect_ai_doc(dir.path()),
             (LinkedRepoAiDoc::AgentsMd, Some("docs/AGENTS.md".into()))
+        );
+    }
+
+    #[test]
+    fn a_linked_kronn_project_is_read_under_its_own_docs_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        std::fs::create_dir_all(dir.path().join(".ai")).unwrap();
+        std::fs::write(dir.path().join(".ai/AGENTS.md"), "a").unwrap();
+        crate::core::docs_location::set_project_override(&path, Some(".ai"));
+        let found = detect_ai_doc(dir.path());
+        crate::core::docs_location::set_project_override(&path, None);
+        assert_eq!(
+            found,
+            (LinkedRepoAiDoc::AgentsMd, Some(".ai/AGENTS.md".into()))
         );
     }
 

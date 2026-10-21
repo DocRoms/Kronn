@@ -60,6 +60,7 @@ mod tests {
             recovered_partial: false,
             session_tokens_at_message: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             model: None,
             lint_report: None,
             id: id.into(),
@@ -452,6 +453,26 @@ mod tests {
         assert_eq!(disc.messages.len(), 1);
         assert_eq!(disc.messages[0].content, "Content of m1");
         assert!(matches!(disc.messages[0].role, MessageRole::User));
+    }
+
+    /// KT-1202 — a turn's session continuity survives the round trip on both readers.
+    #[test]
+    fn session_continuity_is_stored_with_the_message() {
+        use crate::models::{SessionContinuity, SessionContinuityReason};
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+        let mut msg = make_message("m1", MessageRole::Agent, Some(AgentType::ClaudeCode));
+        let continuity =
+            SessionContinuity::fallback_because(SessionContinuityReason::SessionExpired);
+        msg.session_continuity = Some(continuity);
+        insert_message(&conn, "d1", &msg).unwrap();
+        insert_message(&conn, "d1", &make_message("m2", MessageRole::User, None)).unwrap();
+
+        let disc = get_discussion(&conn, "d1").unwrap().unwrap();
+        assert_eq!(disc.messages[0].session_continuity, Some(continuity));
+        assert_eq!(disc.messages[1].session_continuity, None);
+        let exported = list_discussions_with_messages(&conn).unwrap();
+        assert_eq!(exported[0].messages[0].session_continuity, Some(continuity));
     }
 
     #[test]

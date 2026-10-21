@@ -1549,6 +1549,7 @@ fn activity_watchdog_redispatches_once_then_escalates_execution() {
         recovered_partial: false,
         session_tokens_at_message: None,
         author_cli_ordinal: None,
+        session_continuity: None,
         model: None,
         lint_report: None,
         id: "watchdog-trigger".into(),
@@ -4966,6 +4967,7 @@ fn requested_changes_publish_a_steering_card_beside_the_findings() {
         target_agent: None,
         reply_to_message_id: None,
         author_cli_ordinal: None,
+        session_continuity: None,
     };
     let worker_target = MessageTarget::discussion_agent(AgentType::ClaudeCode);
     let outcome = commit_review_checkpoint(
@@ -5213,6 +5215,7 @@ fn a_replayed_campaign_gate_publishes_nothing_and_breaks_no_transition() {
         target_agent: None,
         reply_to_message_id: None,
         author_cli_ordinal: None,
+        session_continuity: None,
     };
     crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
         &conn,

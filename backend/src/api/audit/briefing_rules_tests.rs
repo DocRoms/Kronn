@@ -214,7 +214,10 @@ fn the_shared_briefing_prompt_leaves_the_rules_out() {
         "# Project Briefing\n## Purpose\nA shop.\n\n{}",
         render_section(&sample()).unwrap()
     );
-    let prompt = super::super::briefing::briefing_prompt_section(&notes);
+    let prompt = super::super::briefing::briefing_prompt_section(
+        &notes,
+        &crate::core::docs_location::DocsRoot::default_root(),
+    );
     assert!(prompt.contains("A shop."));
     assert!(!prompt.contains("lodash"), "{prompt}");
     assert!(!prompt.contains(RULES_ANSWERS_PREFIX));
@@ -229,6 +232,8 @@ fn the_prompt_block_goes_to_code_judging_steps_only() {
         "docs/inconsistencies-tech-debt.md",
         "docs/inconsistencies-security.md",
         "docs/inconsistencies-code-quality.md",
+        // A relocated root keeps its code-judging steps (KT-1192).
+        ".ai/inconsistencies-tech-debt.md",
     ] {
         let block = prompt_block(target, Some(&r));
         assert!(block.contains("## Project rules and bans"), "{target}");
@@ -341,6 +346,22 @@ fn sync_writes_the_coding_rules_doc_in_the_detected_docs_dir() {
     sync_from_notes(root, Some(&notes));
     let repaired = std::fs::read_to_string(root.join("doc/coding-rules.md")).unwrap();
     assert_eq!(repaired, written);
+}
+
+#[test]
+fn sync_writes_the_coding_rules_doc_under_a_configured_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let path = root.to_string_lossy().into_owned();
+    std::fs::create_dir_all(root.join(".ai")).unwrap();
+    std::fs::write(root.join(".ai/coding-rules.md"), CODING_RULES).unwrap();
+    crate::core::docs_location::set_project_override(&path, Some(".ai"));
+    let synced = sync_coding_rules_doc(root, Some(&sample()));
+    crate::core::docs_location::set_project_override(&path, None);
+    assert!(synced.unwrap());
+    let written = std::fs::read_to_string(root.join(".ai/coding-rules.md")).unwrap();
+    assert!(written.contains("ne jamais utiliser lodash"));
+    assert!(!root.join("docs").exists());
 }
 
 #[test]

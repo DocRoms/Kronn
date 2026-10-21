@@ -89,15 +89,30 @@ fn the_option_line_round_trips() {
 
 #[test]
 fn only_finding_steps_are_cross_checked() {
-    assert!(is_cross_checked_target("docs/inconsistencies-security.md"));
+    use crate::core::docs_location::DocsRoot;
+    let docs = DocsRoot::default_root();
+    assert!(is_cross_checked_target(
+        "docs/inconsistencies-security.md",
+        &docs
+    ));
     for doc in [
         "docs/AGENTS.md",
         "docs/glossary.md",
         "docs/repo-map.md",
         "REVIEW",
     ] {
-        assert!(!is_cross_checked_target(doc), "{doc}");
+        assert!(!is_cross_checked_target(doc, &docs), "{doc}");
     }
+    // A relocated chain keeps its cross-checked step (KT-1192).
+    let ai = DocsRoot::from_rel(".ai").unwrap();
+    assert!(is_cross_checked_target(
+        ".ai/inconsistencies-security.md",
+        &ai
+    ));
+    assert!(!is_cross_checked_target(
+        "docs/inconsistencies-security.md",
+        &ai
+    ));
 }
 
 // ── blocks ──

@@ -297,7 +297,7 @@ import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
 import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
-import type { AgentFilesPolicy, MigrateDocsResponse, ProjectAgentFiles, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
+import type { AgentFilesPolicy, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -898,6 +898,9 @@ export const config = {
   changeEmbedOrigins: (change: EmbedOriginsChange) => api<string[]>('POST', '/config/embed-origins', change),
   getScanIgnore: () => api<string[]>('GET', '/config/scan-ignore'),
   setScanIgnore: (patterns: string[]) => api<void>('POST', '/config/scan-ignore', patterns),
+  /** Default AI doc folder, relative to every project root (KT-263); null = historical detection. */
+  getDefaultDocsDir: () => api<string | null>('GET', '/config/default-docs-dir'),
+  saveDefaultDocsDir: (dir: string | null) => api<string | null>('POST', '/config/default-docs-dir', dir),
   getScanDepth: () => api<number>('GET', '/config/scan-depth'),
   setScanDepth: (depth: number) => api<number>('POST', '/config/scan-depth', depth),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
@@ -1007,6 +1010,11 @@ export const projects = {
     api<ProjectAgentFiles>('GET', `/projects/${encodeURIComponent(id)}/agent-files`),
   setAgentFiles: (id: string, policy: AgentFilesPolicy) =>
     api<ProjectAgentFiles>('PUT', `/projects/${encodeURIComponent(id)}/agent-files`, { policy }),
+  /** Where the project keeps its AI doc, and its own override (KT-263). */
+  docsLocation: (id: string) =>
+    api<ProjectDocsLocation>('GET', `/projects/${encodeURIComponent(id)}/docs-location`),
+  setDocsLocation: (id: string, dir: string | null) =>
+    api<ProjectDocsLocation>('PUT', `/projects/${encodeURIComponent(id)}/docs-location`, { dir }),
   repositoryResources: (id: string) =>
     api<ProjectRepositoryResources>('GET', `/projects/${encodeURIComponent(id)}/repository-resources`),
   /** The diffs behind one listed resource, built when its Compare sheet opens:
@@ -1292,6 +1300,10 @@ export const projects = {
     existing_docs?: BriefingDocsAnswers;
     /** KT-1193 — rules and bans, written to the coding-rules doc and checked by the audit. */
     project_rules?: BriefingProjectRules;
+    /** KT-1192 — the AI doc folder, relative to the project root. */
+    docs_dir?: string;
+    /** KT-1192 — the human's explicit choice to move existing docs to `legacy/`. */
+    move_existing_to_legacy?: boolean;
   }) => api<boolean>('POST', `/projects/${id}/save-briefing`, form),
   /** KT-1183 — the cross-agent audit's cost range, scaled from the last measured run. */
   crossAuditEstimate: (id: string, agents: number) =>
@@ -1301,6 +1313,9 @@ export const projects = {
   /** KT-999 — a location typed by hand; rejected (400) outside the repository or when missing. */
   checkBriefingDoc: (id: string, path: string) =>
     api<BriefingDetectedDoc>('POST', `/projects/${id}/briefing/docs/check`, { path }),
+  /** KT-1192 — the pre-filled « Dossier de la documentation IA ». */
+  briefingDefaults: (id: string) =>
+    api<BriefingDefaults>('GET', `/projects/${encodeURIComponent(id)}/briefing-defaults`),
   /** KT-1167 — the project's TD sheets as Kronn tasks; a re-click creates nothing. */
   convertTdTasks: (id: string) => api<TdTasksOutcome>('POST', `/projects/${id}/audit/td-tasks`),
   /** KT-982 — the review of the audit's tech-debt sheets. */

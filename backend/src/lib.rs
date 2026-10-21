@@ -53,6 +53,16 @@ pub async fn load_startup_config() -> anyhow::Result<AppConfig> {
     .await
 }
 
+/// Arm every project's AI doc folder override from the database (KT-263).
+/// Both entry points call it once the database is open.
+pub async fn arm_docs_locations(database: &Arc<Database>) -> anyhow::Result<()> {
+    let rows = database
+        .with_read_conn(crate::db::projects::list_docs_dir_overrides)
+        .await?;
+    crate::core::docs_location::load_project_overrides(rows);
+    Ok(())
+}
+
 // `arm_mode` is injected so tests observe the arming without touching the
 // process-global mode that many other tests set.
 async fn load_startup_config_with(
@@ -1627,6 +1637,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_scan_ignore).post(api::setup::set_scan_ignore),
         )
         .route(
+            "/api/config/default-docs-dir",
+            get(api::setup::get_default_docs_dir).post(api::setup::save_default_docs_dir),
+        )
+        .route(
             "/api/config/scan-depth",
             get(api::setup::get_scan_depth).post(api::setup::set_scan_depth),
         )
@@ -1746,6 +1760,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // tell (referenced native skills, skills Kronn published).
         .route("/api/projects/used-skills", get(api::projects::used_skills))
         .route("/api/projects/{id}", get(api::projects::get))
+        .route(
+            "/api/projects/{id}/docs-location",
+            get(api::projects::docs_location::get).put(api::projects::docs_location::set),
+        )
         .route(
             "/api/projects/{id}/agent-files",
             get(api::projects::agent_files::get).put(api::projects::agent_files::set),
@@ -1873,7 +1891,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/projects/{id}/partial-audit",
-            post(api::audit::partial_audit),
+            post(api::audit::briefing_cards::partial_audit_route),
         )
         .route(
             "/api/projects/{id}/revalidation",
@@ -1881,7 +1899,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/projects/{id}/revalidate-audit",
-            post(api::audit::revalidate_audit),
+            post(api::audit::briefing_cards::revalidate_audit_route),
         )
         .route(
             "/api/projects/{id}/validate-audit",
@@ -1893,7 +1911,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/projects/{id}/full-audit",
-            post(api::audit::full_audit),
+            post(api::audit::briefing_cards::full_audit_route),
         )
         .route(
             "/api/projects/{id}/cancel-audit",
@@ -2033,6 +2051,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/briefing",
             get(api::audit::get_briefing).put(api::audit::set_briefing),
+        )
+        .route(
+            "/api/projects/{id}/briefing-status",
+            get(api::audit::briefing_cards::briefing_status),
+        )
+        .route(
+            "/api/projects/{id}/briefing-defaults",
+            get(api::audit::get_briefing_defaults),
         )
         .route(
             "/api/projects/{id}/start-briefing",
@@ -3904,5 +3930,41 @@ mod startup_config_tests {
                 "{entry} loads its config directly and skips the timezone"
             );
         }
+    }
+
+    #[test]
+    fn every_entry_point_arms_the_project_docs_locations() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        for entry in ["backend/src/main.rs", "desktop/src-tauri/src/main.rs"] {
+            let source = std::fs::read_to_string(root.join(entry)).unwrap();
+            assert!(
+                source.contains("kronn::arm_docs_locations(&database).await?"),
+                "{entry} must arm the AI doc folder overrides at startup"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn arming_reads_the_saved_overrides_from_the_database() {
+        let repo = tempfile::tempdir().unwrap();
+        let path = repo.path().join("p").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&path).unwrap();
+        let database = Arc::new(Database::open_in_memory().unwrap());
+        let insert = path.clone();
+        database
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at, docs_dir) \
+                     VALUES ('p-arm', 'p', ?1, '2026-01-01', '2026-01-01', '.ai')",
+                    [&insert],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        arm_docs_locations(&database).await.unwrap();
+        let resolved = crate::core::docs_location::docs_dir(std::path::Path::new(&path));
+        crate::core::docs_location::set_project_override(&path, None);
+        assert_eq!(resolved, std::path::Path::new(&path).join(".ai"));
     }
 }

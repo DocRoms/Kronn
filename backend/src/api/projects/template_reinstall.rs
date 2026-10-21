@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::core::{audit_state, fs_guard, scanner};
-use crate::models::{ApiErrorCode, ApiResponse};
+use crate::models::{AiAuditStatus, ApiErrorCode, ApiResponse, PlaceholderDoc};
 use crate::AppState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -96,6 +96,10 @@ pub struct TemplateReinstallReport {
     pub skipped: Vec<String>,
     /// Human-validated docs this reinstall rewrote, now to reconfirm.
     pub to_reconfirm: Vec<String>,
+    /// Template docs still holding placeholders afterwards, with their step.
+    pub placeholder_docs: Vec<PlaceholderDoc>,
+    /// `TemplateInstalled` when the docs entry itself is a raw template again.
+    pub audit_status: AiAuditStatus,
 }
 
 struct Prepared {
@@ -129,6 +133,53 @@ fn template_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
+/// Template docs of `project` holding raw placeholders, each mapped to the
+/// Full-chain step whose target it is. Reads only the template's own file list.
+pub fn placeholder_docs(project: &Path, template_docs: &Path) -> Vec<PlaceholderDoc> {
+    let Ok(sources) = template_files(template_docs) else {
+        return Vec::new();
+    };
+    let docs_dir = scanner::detect_docs_dir(project);
+    let docs_root = crate::core::docs_location::DocsRoot::of(project);
+    let chain = crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root);
+    let mut out = Vec::new();
+    for source in sources {
+        let Ok(within) = source.strip_prefix(template_docs) else {
+            continue;
+        };
+        // A `TEMPLATE.md` is a gabarit to copy: its placeholders are by design.
+        let name = within.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "TEMPLATE.md" || !name.ends_with(".md") {
+            continue;
+        }
+        let dst = docs_dir.join(within);
+        if !std::fs::symlink_metadata(&dst).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&dst) else {
+            continue;
+        };
+        if crate::api::audit::validation::count_raw_placeholders(&content) == 0 {
+            continue;
+        }
+        let within = within.to_string_lossy().replace('\\', "/");
+        // Targets are relocated under the configured docs root, the run's own spelling.
+        let target = docs_root.path(&within);
+        let step = chain
+            .iter()
+            .position(|s| {
+                s.target_file == target && crate::api::audit::partial_selectable(s, &docs_root)
+            })
+            .map(|i| i + 1);
+        let path = dst
+            .strip_prefix(project)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or(within);
+        out.push(PlaceholderDoc { path, step });
+    }
+    out
+}
+
 /// Read-only: what a reinstall would do, and the first reason it could not.
 fn prepare(project: &Path, template_docs: &Path) -> Result<(PathBuf, Vec<Prepared>), String> {
     if !template_docs.is_dir() {
@@ -137,11 +188,13 @@ fn prepare(project: &Path, template_docs: &Path) -> Result<(PathBuf, Vec<Prepare
             template_docs.display()
         ));
     }
-    let docs_dir = scanner::detect_docs_dir(project);
-    let docs_dir = if docs_dir.exists() {
-        docs_dir
+    // The project's docs root (KT-1192); unconfigured, the detected folder
+    // (`docs/` for a fresh project), as before.
+    let docs_root = crate::core::docs_location::DocsRoot::for_project(project)?;
+    let docs_dir = if docs_root.is_default() {
+        scanner::detect_docs_dir(project)
     } else {
-        project.join("docs")
+        docs_root.dir(project)
     };
     let validated: Vec<String> = crate::core::doc_provenance::report(project, false)
         .map(|r| {
@@ -164,7 +217,13 @@ fn prepare(project: &Path, template_docs: &Path) -> Result<(PathBuf, Vec<Prepare
             .map_err(|e| e.to_string())?
             .to_string_lossy()
             .replace('\\', "/");
-        let new = std::fs::read(&source).map_err(|e| format!("read {}: {e}", source.display()))?;
+        let mut new =
+            std::fs::read(&source).map_err(|e| format!("read {}: {e}", source.display()))?;
+        if !docs_root.is_default() && source.extension().is_some_and(|ext| ext == "md") {
+            if let Ok(text) = std::str::from_utf8(&new) {
+                new = docs_root.relocate(text).into_owned().into_bytes();
+            }
+        }
         let (old, action, kind, new, human) = match std::fs::symlink_metadata(&dst) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 (None, ReinstallAction::Create, None, new, Vec::new())
@@ -450,6 +509,8 @@ pub fn reinstall(
             .map(|p| p.rel.clone())
             .collect(),
         to_reconfirm,
+        placeholder_docs: placeholder_docs(project, template_docs),
+        audit_status: scanner::detect_audit_status(&project.to_string_lossy()),
     })
 }
 

@@ -7969,6 +7969,39 @@ class AuditToolsTests(unittest.TestCase):
                 self.mod.call_audit_launch({"project_id": "p1", "mode": "full"})
         self.assertIn("already running", str(ctx.exception))
 
+    def test_a_launch_without_briefing_returns_the_cards_to_post(self):
+        # KT-1192 — the refusal is typed and carries the ready-to-post cards.
+        cards = [{"version": 1, "key": "briefing-purpose", "question": "Q",
+                  "options": [{"id": "not_provided", "label": "N"}],
+                  "task_ref": "audit-briefing:p1:d1"}]
+        stream = self._FakeSse(self._sse("error", {
+            "error": "This project has no briefing.",
+            "error_code": "briefing_required",
+            "discussion_id": "d1",
+            "briefing_cards": cards}))
+        with mock.patch.object(self.mod, "_audit_open_sse", return_value=stream):
+            out = self.mod.call_audit_launch({"project_id": "p1", "mode": "full"})
+        self.assertFalse(out["launched"])
+        self.assertEqual(out["error_code"], "briefing_required")
+        self.assertEqual(out["discussion_id"], "d1")
+        self.assertEqual(out["briefing_cards"], cards)
+
+    def test_audit_prepare_reports_a_missing_briefing_with_its_cards(self):
+        def fake_http(method, path, body=None, **kwargs):
+            if path.endswith("/audit-info"):
+                return {"success": True, "data": {"files": [], "todos": [], "tech_debt_items": []}}
+            if path.endswith("/briefing-status"):
+                return {"success": True, "data": {
+                    "present": False, "docs_dir": ".ai", "error_code": "briefing_required",
+                    "discussion_id": "d1", "briefing_cards": [{"key": "briefing-purpose"}]}}
+            return {"success": True, "data": {"audit_status": "NoTemplate", "path": "/x"}}
+
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http):
+            out = self.mod.call_audit_prepare({"project_id": "p1"})
+        self.assertFalse(out["briefing"]["present"])
+        self.assertEqual(out["briefing"]["briefing_cards"], [{"key": "briefing-purpose"}])
+        self.assertIn("briefing_required", out["briefing_hint"])
+
     def test_second_local_launch_is_refused_while_one_runs(self):
         with self.mod._AUDIT_LOCK:
             self.mod._AUDIT_STREAMS["p1"] = {"project_id": "p1", "state": "running"}

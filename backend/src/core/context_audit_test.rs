@@ -1044,3 +1044,39 @@ fn the_report_stays_within_its_budget() {
         text.len()
     );
 }
+
+/// KT-263: the audit reads the AI doc entry where the configuration puts it, so
+/// a redirect to `.ai/AGENTS.md` is followed and paid for like `docs/AGENTS.md`.
+#[test]
+fn a_configured_ai_doc_folder_is_scanned_and_followed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join(".ai")).unwrap();
+    std::fs::write(root.join("CLAUDE.md"), "Read `.ai/AGENTS.md` first.\n").unwrap();
+    std::fs::write(
+        root.join(".ai/AGENTS.md"),
+        "# Entry\n\nMUST run the tests.\n",
+    )
+    .unwrap();
+    let claude_files = |audit: &ContextAudit| {
+        audit
+            .per_agent
+            .iter()
+            .find(|c| c.agent == "ClaudeCode")
+            .unwrap()
+            .files
+            .clone()
+    };
+
+    let unconfigured = audit_repo(&root);
+    assert!(!claude_files(&unconfigured).contains(&".ai/AGENTS.md".to_string()));
+
+    let path = root.to_string_lossy().into_owned();
+    crate::core::docs_location::set_project_override(&path, Some(".ai"));
+    let configured = audit_repo(&root);
+    crate::core::docs_location::set_project_override(&path, None);
+    assert_eq!(
+        claude_files(&configured),
+        vec!["CLAUDE.md".to_string(), ".ai/AGENTS.md".to_string()]
+    );
+}

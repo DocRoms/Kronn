@@ -1125,6 +1125,17 @@ pub(crate) async fn fill_project_doc_for_audit(
 
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let body = render_project_doc(&answers, repo_inferred, &checks, &today);
+    // Only Kronn's marker names the briefing's path (KT-1192); the answers stay as written.
+    let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
+    let body = if docs_root.is_default() {
+        body
+    } else {
+        body.replacen(
+            "from docs/briefing.md;",
+            &format!("from {};", docs_root.path("briefing.md")),
+            1,
+        )
+    };
     let mut report = ProjectDocReport {
         mismatches: checks.mismatches(),
         ..ProjectDocReport::default()

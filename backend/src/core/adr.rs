@@ -746,7 +746,16 @@ pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleO
                 if already {
                     continue;
                 }
-                let settled = settle_sheet(&content, adr);
+                let mut settled = settle_sheet(&content, adr);
+                // The history note quotes the project's docs root (KT-1192).
+                let label = crate::core::docs_location::rel_label_for_dir(docs_dir);
+                if label != crate::core::docs_location::DocsRoot::DEFAULT {
+                    settled = settled.replacen(
+                        &format!(" in docs/{DECISIONS_FILE}:"),
+                        &format!(" in {label}/{DECISIONS_FILE}:"),
+                        1,
+                    );
+                }
                 crate::core::mcp_scanner::atomic_write(&path, &settled)?;
                 outcome.settled.push(format!("{id} → {}", adr.reference()));
             }

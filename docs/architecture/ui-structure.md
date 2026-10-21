@@ -304,7 +304,7 @@ full operational payload is collapsed behind “Show details” by default; that
 toggle lives in the fixed card header so expanding it never moves the pointer
 target. `[src: file: backend/src/db/discussions.rs:3198-3236#tombstone_message]`
 `[src: file: frontend/src/components/MessageBubble.tsx:456-468#orchestratorPreview]`
-`[src: file: frontend/src/components/MessageBubble.tsx:936-946#disc-msg-orchestrator-toggle]`
+`[src: file: frontend/src/components/MessageBubble.tsx:960-970#disc-msg-orchestrator-toggle]`
 
 **Attachment preview:** message attachments and the Assets panel share the
 same carousel for images, videos and disk-backed text files (including JSON
@@ -320,7 +320,7 @@ remain filename chips.
 `[src: file: frontend/src/components/TextAttachmentPreview.tsx:19-25#AbortController]`
 `[src: file: frontend/src/lib/textAttachmentPreview.ts:2-30#TEXT_PREVIEW_MAX_BYTES]`
 `[src: file: frontend/src/lib/mediaKind.ts:33-39#isTextAttachment]`
-`[src: file: backend/src/api/discussions/context.rs:683-706#get_context_file_content]`
+`[src: file: backend/src/api/discussions/context.rs:655-678#get_context_file_content]`
 
 **Compact routing receipt:** durable targets are shown inline in the human
 author header (`human → @agent · tier`) instead of consuming a separate message
@@ -371,7 +371,7 @@ Frontend modal includes **drag & drop file upload** for documents. Files uploade
 
 ### Pre-audit briefing (optional)
 
-`POST /api/projects/:id/start-briefing` — creates a briefing discussion where the AI asks 5 quick questions (project purpose, stack, team, conventions, watch points). The agent writes `docs/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The briefing content is injected into each audit step via `PROMPT_PREAMBLE`. Vibe (API-only) is excluded from the briefing. The audit itself is open to the CLI agents (Claude Code, Codex, OpenCode, Gemini CLI, Kiro, GitHub Copilot) and to the HTTP agents (Ollama and LiteLLM since 0.14.2, NVIDIA, and Custom through a validated named connection), whose file tools Kronn runs scoped to the project — see [HTTP-agent capabilities](http-agent-capabilities.md#audits-kt-924). Only Vibe is refused, with a message naming who is accepted [src: file: backend/src/api/audit/mod.rs:1300-1315#agent_can_audit] [src: file: backend/src/api/audit/mod.rs:1319-1328#audit_refusal_message].
+`POST /api/projects/:id/start-briefing` — creates a briefing discussion where the AI asks 5 quick questions (project purpose, stack, team, conventions, watch points). The agent writes `docs/briefing.md` and emits `KRONN:BRIEFING_COMPLETE`. The briefing content is injected into each audit step via `PROMPT_PREAMBLE`. Vibe (API-only) is excluded from the briefing. The audit itself is open to the CLI agents (Claude Code, Codex, OpenCode, Gemini CLI, Kiro, GitHub Copilot) and to the HTTP agents (Ollama and LiteLLM since 0.14.2, NVIDIA, and Custom through a validated named connection), whose file tools Kronn runs scoped to the project — see [HTTP-agent capabilities](http-agent-capabilities.md#audits-kt-924). Only Vibe is refused, with a message naming who is accepted [src: file: backend/src/api/audit/mod.rs:1366-1381#agent_can_audit] [src: file: backend/src/api/audit/mod.rs:1385-1394#audit_refusal_message].
 
 ### CI pipeline
 
@@ -406,7 +406,7 @@ Projects display 3 badges next to the title: `[FileCode] Project docs`, `[Cpu] A
 
 ### Audit drift detection
 
-`GET /api/projects/:id/drift` — compares source file checksums against `docs/checksums.json` (generated during audit). Returns stale sections without consuming tokens. `POST /api/projects/:id/partial-audit` re-runs only stale steps (~3-5K tokens vs ~20K for full audit). Since the A5 hardening a partial run gets its own `audit_runs` row (kind `Partial`, structured `step_outcomes_json`), revokes any prior Validated state on start, and — when every requested step succeeds — atomically creates a validation discussion scoped to the refreshed sections (the project stays Audited until that discussion ends on `KRONN:VALIDATION_COMPLETE` and the user validates). UI shows an amber badge on stale projects with a "Mettre à jour" button.
+`GET /api/projects/:id/drift` — compares source file checksums against `docs/checksums.json` (generated during audit). Returns stale sections without consuming tokens. `POST /api/projects/:id/partial-audit` re-runs only stale steps (~3-5K tokens vs ~20K for full audit). Since the A5 hardening a partial run gets its own `audit_runs` row (kind `Partial`, structured `step_outcomes_json`), revokes any prior Validated state on start, and — when every requested step succeeds — atomically creates a validation discussion scoped to the refreshed sections (the project stays Audited until that discussion ends on `KRONN:VALIDATION_COMPLETE` and the user validates). UI shows an amber badge on stale projects with a "Mettre à jour" button. The same response carries `placeholder_docs`: the template docs that still hold raw `{{PLACEHOLDERS}}` (gabarits named `TEMPLATE.md` excluded), each with the 1-based chain step whose `target_file` it is, or `null` when no step targets it. The card shows a "docs à compléter" badge whose button sends those steps to `partial-audit`; the template reinstall result offers the same action (KT-1203).
 
 **MCP drift auto-detection**: adding/removing/relinking a plugin on an audited project automatically invalidates the `.mcp.json` checksum, flagging drift for step 8 (MCP introspection) re-run.
 

@@ -266,6 +266,7 @@ async fn discussion(
             author_pseudo: None,
             author_avatar_email: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             source_msg_id: None,
             duration_ms: None,
             lint_report: None,

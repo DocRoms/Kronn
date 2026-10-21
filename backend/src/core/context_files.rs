@@ -151,6 +151,147 @@ pub fn save_file_to_dir(
     save_image_to_dir(dir, id, filename, "", data)
 }
 
+/// `save_file_to_dir`, falling back to the persistent config dir when `dir`
+/// refuses the write.
+pub fn save_file_to_dir_or_disk(
+    dir: &std::path::Path,
+    id: &str,
+    filename: &str,
+    data: &[u8],
+) -> Result<String> {
+    save_file_to_dir(dir, id, filename, data).or_else(|error| {
+        save_file_to_disk(id, filename, data)
+            .map_err(|fallback| anyhow::anyhow!("{error} / fallback: {fallback}"))
+    })
+}
+
+/// Where a discussion keeps its attachments, and where its agent can read them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentDirs {
+    /// The canonical copy the UI serves: the project's main checkout, which no
+    /// worktree removal deletes, else Kronn's data dir.
+    pub durable: std::path::PathBuf,
+    /// The agent's worktree when it differs from `durable`: it gets a mirror it
+    /// can open. A project-less discussion's folder is mirrored at prompt time.
+    pub agent: Option<std::path::PathBuf>,
+}
+
+/// `AttachmentDirs` from the discussion's recorded paths; `fallback` is the
+/// durable dir without a project.
+pub fn attachment_dirs_for(
+    workspace_path: Option<&str>,
+    project_path: Option<&str>,
+    fallback: std::path::PathBuf,
+) -> AttachmentDirs {
+    let project = project_path
+        .filter(|path| !path.is_empty())
+        .and_then(|project| crate::agents::runner::resolve_agent_work_dir(None, project).ok());
+    let Some(project) = project else {
+        return AttachmentDirs {
+            durable: fallback,
+            agent: None,
+        };
+    };
+    let agent = workspace_path
+        .filter(|path| !path.is_empty())
+        .and_then(|workspace| {
+            crate::agents::runner::resolve_agent_work_dir(Some(workspace), "").ok()
+        })
+        .filter(|workspace| *workspace != project);
+    AttachmentDirs {
+        durable: project,
+        agent,
+    }
+}
+
+/// `attachment_dirs_for` read from the discussion. Without a project the
+/// durable copy goes to the persistent data dir: the system temp dir is wiped
+/// on every Docker restart.
+pub async fn discussion_attachment_dirs(
+    db: &crate::db::Database,
+    discussion_id: &str,
+) -> AttachmentDirs {
+    let did = discussion_id.to_string();
+    let paths = db
+        .with_read_conn(move |conn| {
+            use rusqlite::OptionalExtension;
+            Ok(conn
+                .query_row(
+                    "SELECT d.workspace_path, p.path FROM discussions d
+                     LEFT JOIN projects p ON p.id = d.project_id WHERE d.id = ?1",
+                    rusqlite::params![did],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    },
+                )
+                .optional()?)
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let fallback = crate::core::config::config_dir().unwrap_or_else(|_| std::env::temp_dir());
+    attachment_dirs_for(paths.0.as_deref(), paths.1.as_deref(), fallback)
+}
+
+/// Where `canonical` is mirrored inside `work_dir`; `None` when it already
+/// sits there.
+pub fn mirror_path_for(
+    canonical: &std::path::Path,
+    work_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let inside = |dir: &std::path::Path| {
+        canonical.starts_with(dir)
+            || std::fs::canonicalize(dir).is_ok_and(|dir| {
+                std::fs::canonicalize(canonical).is_ok_and(|file| file.starts_with(dir))
+            })
+    };
+    if inside(work_dir) {
+        return None;
+    }
+    Some(
+        work_dir
+            .join(".kronn")
+            .join("context-files")
+            .join(canonical.file_name()?),
+    )
+}
+
+/// The path the agent should open for `canonical` from `work_dir`: the file
+/// itself when it sits there, else a git-excluded mirror under
+/// `<work_dir>/.kronn/context-files/`. A failed mirror is logged and the
+/// canonical path returned, never an error.
+pub fn agent_readable_path(canonical: &str, work_dir: &std::path::Path) -> String {
+    let source = std::path::Path::new(canonical);
+    let Some(mirror) = mirror_path_for(source, work_dir) else {
+        return canonical.to_string();
+    };
+    let copied = (|| -> std::io::Result<()> {
+        // Attachments are immutable under their unique name: same size = done.
+        let len = std::fs::metadata(source)?.len();
+        if std::fs::metadata(&mirror).is_ok_and(|meta| meta.len() == len) {
+            return Ok(());
+        }
+        if let Some(dir) = mirror.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        if let Some(work_dir) = work_dir.to_str() {
+            crate::core::mcp_scanner::ensure_local_exclude(work_dir, ".kronn/context-files/");
+        }
+        std::fs::copy(source, &mirror).map(|_| ())
+    })();
+    match copied {
+        Ok(()) => mirror.to_string_lossy().into_owned(),
+        Err(error) => {
+            tracing::warn!(canonical, mirror = %mirror.display(), %error, "attachment mirror not written");
+            canonical.to_string()
+        }
+    }
+}
+
 /// Fallback save (persistent config dir) when no project work_dir resolves —
 /// keeps the original filename so the agent sees a meaningful path.
 pub fn save_file_to_disk(id: &str, filename: &str, data: &[u8]) -> Result<String> {
@@ -1137,6 +1278,77 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("limit"), "unexpected error: {err}");
+    }
+
+    /// KT-1202 — the canonical copy stays in the project's main checkout, which
+    /// no worktree removal deletes; only the worktree gets a mirror.
+    #[test]
+    fn attachment_dirs_keep_the_durable_copy_out_of_the_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let worktree = root.path().join("worktree");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let (project_s, worktree_s) = (project.to_str().unwrap(), worktree.to_str().unwrap());
+        let gone = root.path().join("removed-worktree");
+        let data = root.path().join("data");
+        let dirs = |workspace: Option<&str>, project: Option<&str>| {
+            attachment_dirs_for(workspace, project, data.clone())
+        };
+
+        assert_eq!(
+            dirs(Some(worktree_s), Some(project_s)),
+            AttachmentDirs {
+                durable: project.clone(),
+                agent: Some(worktree.clone())
+            }
+        );
+        let direct = AttachmentDirs {
+            durable: project.clone(),
+            agent: None,
+        };
+        assert_eq!(dirs(None, Some(project_s)), direct);
+        assert_eq!(dirs(Some(project_s), Some(project_s)), direct);
+        assert_eq!(dirs(gone.to_str(), Some(project_s)), direct);
+        let no_project = AttachmentDirs {
+            durable: data.clone(),
+            agent: None,
+        };
+        assert_eq!(dirs(Some(worktree_s), None), no_project);
+        assert_eq!(dirs(None, Some("")), no_project);
+        assert_eq!(dirs(None, gone.to_str()), no_project);
+    }
+
+    /// KT-1202 — the agent is handed a path inside its own work dir; a file
+    /// already there is not copied, and a failed mirror falls back quietly.
+    #[test]
+    fn the_agent_reads_attachments_from_inside_its_work_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let durable = root.path().join("project/.kronn/context-files");
+        let work_dir = root.path().join("worktree");
+        std::fs::create_dir_all(&durable).unwrap();
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let canonical = durable.join("abcd1234_shot.png");
+        std::fs::write(&canonical, b"png").unwrap();
+        let canonical_s = canonical.to_str().unwrap();
+
+        let given = agent_readable_path(canonical_s, &work_dir);
+        assert!(
+            std::path::Path::new(&given).starts_with(work_dir.join(".kronn/context-files")),
+            "{given}"
+        );
+        assert_eq!(std::fs::read(&given).unwrap(), b"png");
+        assert_eq!(
+            agent_readable_path(canonical_s, &work_dir),
+            given,
+            "idempotent"
+        );
+
+        let project = root.path().join("project");
+        assert_eq!(agent_readable_path(canonical_s, &project), canonical_s);
+        let missing = durable.join("gone.png");
+        let missing = missing.to_str().unwrap();
+        assert_eq!(agent_readable_path(missing, &work_dir), missing);
     }
 
     #[test]

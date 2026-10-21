@@ -47,10 +47,10 @@ const baseProps = {
   t: (key: string) => key,
 };
 
-function renderBubble(over: Partial<DiscussionMessage>) {
+function renderBubble(over: Partial<DiscussionMessage>, t = baseProps.t) {
   return render(
     <I18nProvider>
-      <MessageBubble {...baseProps} msg={makeAgentMessage(over)} />
+      <MessageBubble {...baseProps} t={t} msg={makeAgentMessage(over)} />
     </I18nProvider>
   );
 }
@@ -102,5 +102,46 @@ describe('MessageBubble — per-message model', () => {
     });
 
     expect(screen.queryByTestId('disc-msg-attempted-model')).toBeNull();
+  });
+});
+
+describe('MessageBubble — session continuity (KT-1202)', () => {
+  const tWithArgs = (key: string, ...args: (string | number)[]) => [key, ...args].join('|');
+
+  it('marks a resumed turn next to the model', () => {
+    renderBubble({ model: 'sonnet', session_continuity: { status: 'resumed' } }, tWithArgs);
+    const marker = screen.getByTestId('disc-msg-session-continuity');
+    expect(marker.getAttribute('data-status')).toBe('resumed');
+    expect(marker.textContent).toContain('disc.session.resumed');
+    expect(marker.getAttribute('title')).toBe('disc.session.resumedHint');
+  });
+
+  it('explains why a turn started a new session', () => {
+    renderBubble(
+      { session_continuity: { status: 'new', reason: 'scope_changed' } },
+      tWithArgs,
+    );
+    const marker = screen.getByTestId('disc-msg-session-continuity');
+    expect(marker.textContent).toContain('disc.session.new');
+    expect(marker.getAttribute('title')).toBe(
+      'disc.session.newHint|disc.session.reason.scope_changed',
+    );
+  });
+
+  it('explains a refused resume that fell back to the full history', () => {
+    renderBubble(
+      { session_continuity: { status: 'fallback_full_history', reason: 'session_expired' } },
+      tWithArgs,
+    );
+    const marker = screen.getByTestId('disc-msg-session-continuity');
+    expect(marker.textContent).toContain('disc.session.fallback_full_history');
+    expect(marker.getAttribute('title')).toBe(
+      'disc.session.fallbackHint|disc.session.reason.session_expired',
+    );
+  });
+
+  it('stays silent when nothing was recorded', () => {
+    renderBubble({ model: 'qwen3:32b' });
+    expect(screen.queryByTestId('disc-msg-session-continuity')).toBeNull();
   });
 });

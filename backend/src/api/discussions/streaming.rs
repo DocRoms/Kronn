@@ -434,6 +434,7 @@ mod native_http_tools_scope_tests {
                         recovered_partial: false,
                         session_tokens_at_message: None,
                         author_cli_ordinal: None,
+                        session_continuity: None,
                         model: None,
                         lint_report: None,
                         id: "trigger-a".into(),
@@ -2294,7 +2295,13 @@ async fn resume_with_delta_if_possible(
     extra_context_len: usize,
     full_prompt: String,
     is_task_worker: bool,
-) -> (String, Option<String>, Option<String>) {
+) -> (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<crate::models::SessionContinuity>,
+) {
+    use crate::models::{SessionContinuity, SessionContinuityReason as Reason};
     let checkpoint = prompt_disc
         .messages
         .last()
@@ -2313,17 +2320,33 @@ async fn resume_with_delta_if_possible(
     );
     let acp_delta = native_acp || adapted_acp;
     let cli_print = runner::AcpSessionStore::tracks_cli_print(agent_type);
+    // Runtimes that never resume have nothing worth recording per turn.
     if is_task_worker || (!acp_delta && !cli_print) {
-        return (full_prompt, None, checkpoint);
+        return (full_prompt, None, checkpoint, None);
     }
+    let fresh = |reason| Some(SessionContinuity::new_because(reason));
     let Ok(scope) = runner::resolve_agent_work_dir(work_dir, project_path) else {
-        return (full_prompt, None, checkpoint);
+        return (full_prompt, None, checkpoint, fresh(Reason::ScopeChanged));
     };
-    let Ok(Some(completed)) = store
+    let completed = match store
         .load_completed_checkpoint(agent_type, &scope, !acp_delta)
         .await
-    else {
-        return (full_prompt, None, checkpoint);
+    {
+        Ok(Some(completed)) => completed,
+        Ok(None) => {
+            let reason = store
+                .explain_missing_checkpoint(agent_type, &scope, !acp_delta)
+                .await;
+            return (full_prompt, None, checkpoint, fresh(reason));
+        }
+        Err(_) => {
+            return (
+                full_prompt,
+                None,
+                checkpoint,
+                fresh(Reason::StoreUnavailable),
+            )
+        }
     };
     let conversation_id = completed.conversation_id;
     // Claude can probe its own `--print --resume` session before shrinking the
@@ -2337,12 +2360,22 @@ async fn resume_with_delta_if_possible(
     // fallback there when negotiated continuation reports a safe absence.
     if cli_print && !acp_delta && !runner::cli_print_session_is_resumable(&scope, &conversation_id)
     {
-        return (full_prompt, None, checkpoint);
+        return (full_prompt, None, checkpoint, fresh(Reason::SessionExpired));
     }
     let Some(mut unseen) =
         messages_not_yet_seen(&prompt_disc.messages, &completed.input_message_id)
     else {
-        return (full_prompt, None, checkpoint);
+        // The marker is gone (history rebuilt) or nothing follows it.
+        let reason = if prompt_disc
+            .messages
+            .iter()
+            .any(|message| message.id == completed.input_message_id)
+        {
+            Reason::NothingNew
+        } else {
+            Reason::HistoryChanged
+        };
+        return (full_prompt, None, checkpoint, fresh(reason));
     };
     // Only the exact durable response of the completed turn is already in the
     // provider's conversation. Never skip every message by this agent: a
@@ -2351,11 +2384,11 @@ async fn resume_with_delta_if_possible(
         .iter()
         .any(|message| message.id == completed.output_message_id)
     {
-        return (full_prompt, None, checkpoint);
+        return (full_prompt, None, checkpoint, fresh(Reason::HistoryChanged));
     }
     unseen.retain(|message| message.id != completed.output_message_id);
     if unseen.is_empty() {
-        return (full_prompt, None, checkpoint);
+        return (full_prompt, None, checkpoint, fresh(Reason::NothingNew));
     }
     let mut delta_disc = prompt_disc.clone();
     delta_disc.messages = unseen;
@@ -2366,14 +2399,24 @@ async fn resume_with_delta_if_possible(
     );
     // A delta that saves nothing is not worth the divergence risk it carries.
     if delta_prompt.len() >= full_prompt.len() {
-        return (full_prompt, None, checkpoint);
+        return (
+            full_prompt,
+            None,
+            checkpoint,
+            fresh(Reason::DeltaNotSmaller),
+        );
     }
     tracing::debug!(
         conversation_id = %conversation_id,
         saved_bytes = full_prompt.len() - delta_prompt.len(),
         "resuming the CLI conversation instead of replaying the discussion"
     );
-    (delta_prompt, Some(conversation_id), checkpoint)
+    (
+        delta_prompt,
+        Some(conversation_id),
+        checkpoint,
+        Some(SessionContinuity::resumed()),
+    )
 }
 
 /// What an HTTP agent needs to deliver a discussion's images (KT-946): the images
@@ -2800,6 +2843,7 @@ pub(super) async fn make_agent_stream_inner(
                         recovered_partial: false,
                         session_tokens_at_message: None,
                         author_cli_ordinal: None,
+                        session_continuity: None,
                         model: None,
                         lint_report: None,
                         id: Uuid::new_v4().to_string(),
@@ -2915,8 +2959,9 @@ pub(super) async fn make_agent_stream_inner(
                 let root = crate::core::scanner::resolve_host_path(
                     workspace_path.as_deref().unwrap_or(&project_path),
                 );
+                let docs_root = crate::core::docs_location::DocsRoot::of(&root);
                 let targets: Vec<String> =
-                    crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
+                    crate::api::audit::steps_for(crate::models::AuditKind::Full, &docs_root)
                         .into_iter()
                         .map(|step| step.target_file.to_string())
                         .collect();
@@ -2932,6 +2977,7 @@ pub(super) async fn make_agent_stream_inner(
                         recovered_partial: false,
                         session_tokens_at_message: None,
                         author_cli_ordinal: None,
+                        session_continuity: None,
                         model: None,
                         lint_report: None,
                         id: Uuid::new_v4().to_string(),
@@ -2991,6 +3037,7 @@ pub(super) async fn make_agent_stream_inner(
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: None,
                     model: None,
                     lint_report: None,
                     id: Uuid::new_v4().to_string(),
@@ -3233,6 +3280,20 @@ pub(super) async fn make_agent_stream_inner(
                 images,
             )
         } else {
+            // A CLI agent opens files by path: point it at a copy inside its
+            // own work dir, the durable copy may sit outside what it can read.
+            let mut entries = entries;
+            let has_work_dir = workspace_path.is_some() || !project_path.is_empty();
+            if let Some(work_dir) = has_work_dir
+                .then(|| runner::resolve_agent_work_dir(workspace_path.as_deref(), &project_path))
+                .and_then(Result::ok)
+            {
+                for entry in &mut entries {
+                    if let Some(path) = entry.disk_path.as_mut() {
+                        *path = crate::core::context_files::agent_readable_path(path, &work_dir);
+                    }
+                }
+            }
             (
                 crate::core::context_files::build_context_prompt(&entries),
                 Vec::new(),
@@ -3633,17 +3694,18 @@ pub(super) async fn make_agent_stream_inner(
     // conversation the CLI already holds whenever that can be proven safe.
     let acp_session_store = runner::AcpSessionStore::new(state.db.clone(), discussion_id.clone());
     let full_prompt = prompt.clone();
-    let (prompt, cli_resume_id, acp_progress_message_id) = resume_with_delta_if_possible(
-        &acp_session_store,
-        &agent_type,
-        workspace_path.as_deref(),
-        &project_path,
-        &prompt_disc,
-        extra_context_len,
-        prompt,
-        cli_task_worker_context.is_some(),
-    )
-    .await;
+    let (prompt, cli_resume_id, acp_progress_message_id, session_continuity) =
+        resume_with_delta_if_possible(
+            &acp_session_store,
+            &agent_type,
+            workspace_path.as_deref(),
+            &project_path,
+            &prompt_disc,
+            extra_context_len,
+            prompt,
+            cli_task_worker_context.is_some(),
+        )
+        .await;
 
     let auth_mode_str = auth_mode_for(&agent_type, &tokens);
 
@@ -4099,6 +4161,11 @@ pub(super) async fn make_agent_stream_inner(
                 let _runtime_guard = dispatch_job_id.as_ref().map(|job_id| {
                     crate::AgentRuntimeGuard::insert(&state.agent_runtime_registry, job_id.clone())
                 });
+                // A refused resume is only known once the runtime answered it.
+                let turn_continuity = process
+                    .resume_fallback()
+                    .map(crate::models::SessionContinuity::fallback_because)
+                    .or(session_continuity);
                 let mut full_response = catalog_warning_notice
                     .as_ref()
                     .map(|notice| format!("{notice}\n\n"))
@@ -5099,6 +5166,7 @@ pub(super) async fn make_agent_stream_inner(
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: turn_continuity,
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::Agent,
                     channel: MessageChannel::Main,
@@ -5260,6 +5328,7 @@ pub(super) async fn make_agent_stream_inner(
                         recovered_partial: false,
                         session_tokens_at_message: None,
                         author_cli_ordinal: None,
+                        session_continuity: None,
                         model: None,
                         lint_report: None,
                         id: Uuid::new_v4().to_string(),
@@ -5320,6 +5389,7 @@ pub(super) async fn make_agent_stream_inner(
                             recovered_partial: false,
                             session_tokens_at_message: None,
                             author_cli_ordinal: None,
+                            session_continuity: None,
                             model: None,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
@@ -5364,6 +5434,7 @@ pub(super) async fn make_agent_stream_inner(
                         recovered_partial: false,
                         session_tokens_at_message: None,
                         author_cli_ordinal: None,
+                        session_continuity: None,
                         model: None,
                         lint_report: None,
                         id: Uuid::new_v4().to_string(),
@@ -5417,6 +5488,7 @@ pub(super) async fn make_agent_stream_inner(
                             recovered_partial: false,
                             session_tokens_at_message: None,
                             author_cli_ordinal: None,
+                            session_continuity: None,
                             model: None,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
@@ -5470,6 +5542,7 @@ pub(super) async fn make_agent_stream_inner(
                             recovered_partial: false,
                             session_tokens_at_message: None,
                             author_cli_ordinal: None,
+                            session_continuity: None,
                             model: None,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
@@ -5763,6 +5836,7 @@ pub(super) async fn make_agent_stream_inner(
                     recovered_partial: false,
                     session_tokens_at_message: None,
                     author_cli_ordinal: None,
+                    session_continuity: None,
                     model: attempted_model.clone(),
                     lint_report: None,
                     id: Uuid::new_v4().to_string(),
@@ -5909,6 +5983,7 @@ fn auth_required_system_message(
         recovered_partial: false,
         session_tokens_at_message: None,
         author_cli_ordinal: None,
+        session_continuity: None,
         model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),
@@ -7803,6 +7878,7 @@ mod resume_delta_tests {
             author_pseudo: None,
             author_avatar_email: None,
             author_cli_ordinal: None,
+            session_continuity: None,
             source_msg_id: None,
             duration_ms: None,
             lint_report: None,
@@ -7970,7 +8046,7 @@ mod resume_delta_tests {
             "updated_at": "2026-01-01T00:00:00Z"
         }))
         .unwrap();
-        let (prompt, resume_id, checkpoint) = resume_with_delta_if_possible(
+        let (prompt, resume_id, checkpoint, continuity) = resume_with_delta_if_possible(
             &store,
             &AgentType::OpenCode,
             Some("."),
@@ -7984,6 +8060,10 @@ mod resume_delta_tests {
         assert_eq!(resume_id.as_deref(), Some("native-id"));
         assert_eq!(checkpoint.as_deref(), Some("m2"));
         assert!(prompt.contains("content of m2"));
+        assert_eq!(
+            continuity,
+            Some(crate::models::SessionContinuity::resumed())
+        );
     }
 
     #[tokio::test]
@@ -8029,7 +8109,7 @@ mod resume_delta_tests {
         }))
         .unwrap();
         let full_prompt = "short full prompt".to_owned();
-        let (prompt, resume_id, checkpoint) = resume_with_delta_if_possible(
+        let (prompt, resume_id, checkpoint, continuity) = resume_with_delta_if_possible(
             &store,
             &AgentType::OpenCode,
             Some("."),
@@ -8043,6 +8123,91 @@ mod resume_delta_tests {
         assert_eq!(prompt, full_prompt);
         assert_eq!(resume_id, None);
         assert_eq!(checkpoint.as_deref(), Some("m2"));
+        assert_eq!(
+            continuity,
+            Some(crate::models::SessionContinuity::new_because(
+                crate::models::SessionContinuityReason::DeltaNotSmaller
+            ))
+        );
+    }
+
+    /// KT-1202 — a turn that cannot resume records why: nothing stored yet,
+    /// or a conversation recorded for another directory.
+    #[tokio::test]
+    async fn a_fresh_turn_records_why_it_did_not_resume() {
+        use crate::models::{SessionContinuity, SessionContinuityReason as Reason};
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let store = AcpSessionStore::new(db.clone(), "fresh-turn");
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('fresh-turn', 'Fresh', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let discussion: crate::models::Discussion = serde_json::from_value(serde_json::json!({
+            "id": "fresh-turn", "project_id": null, "title": "Fresh", "agent": "OpenCode",
+            "language": "en", "participants": ["OpenCode"],
+            "messages": [message("m1", MessageRole::User), message("own-reply", MessageRole::Agent), message("m2", MessageRole::User)],
+            "message_count": 3,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let decide = || {
+            resume_with_delta_if_possible(
+                &store,
+                &AgentType::OpenCode,
+                Some("."),
+                ".",
+                &discussion,
+                0,
+                "full prompt with m1 and m2 ".repeat(200),
+                false,
+            )
+        };
+        let (_, resume_id, _, continuity) = decide().await;
+        assert_eq!(resume_id, None);
+        assert_eq!(
+            continuity,
+            Some(SessionContinuity::new_because(Reason::NoStoredId))
+        );
+
+        db.with_conn(|conn| {
+            seed_completed_checkpoint(
+                conn,
+                "fresh-turn",
+                "OpenCode",
+                "opencode_acp_v1",
+                "/another/worktree",
+                "native-id",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (_, resume_id, _, continuity) = decide().await;
+        assert_eq!(resume_id, None);
+        assert_eq!(
+            continuity,
+            Some(SessionContinuity::new_because(Reason::ScopeChanged))
+        );
+
+        // A runtime that never resumes records nothing.
+        let (_, _, _, continuity) = resume_with_delta_if_possible(
+            &store,
+            &AgentType::Ollama,
+            Some("."),
+            ".",
+            &discussion,
+            0,
+            "full".into(),
+            false,
+        )
+        .await;
+        assert_eq!(continuity, None);
     }
 
     /// KT-621 review — the CLI-print resumability probe checks for a
@@ -8108,7 +8273,7 @@ mod resume_delta_tests {
             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
         }))
         .unwrap();
-        let (prompt, resume_id, checkpoint) = resume_with_delta_if_possible(
+        let (prompt, resume_id, checkpoint, _) = resume_with_delta_if_possible(
             &store,
             &AgentType::ClaudeCode,
             Some("."),
@@ -8254,7 +8419,7 @@ mod resume_delta_tests {
             .unwrap()
             .unwrap();
         let full_prompt_t1 = super::build_agent_prompt(&discussion_t1, &AgentType::OpenCode, 0);
-        let (prompt1, resume_id1, checkpoint1) = resume_with_delta_if_possible(
+        let (prompt1, resume_id1, checkpoint1, _) = resume_with_delta_if_possible(
             &store,
             &AgentType::OpenCode,
             Some(project_path),
@@ -8345,7 +8510,7 @@ mod resume_delta_tests {
             .unwrap();
         assert_eq!(discussion_t2.messages.len(), 4);
         let full_prompt_t2 = super::build_agent_prompt(&discussion_t2, &AgentType::OpenCode, 0);
-        let (prompt2, resume_id2, checkpoint2) = resume_with_delta_if_possible(
+        let (prompt2, resume_id2, checkpoint2, _) = resume_with_delta_if_possible(
             &store2,
             &AgentType::OpenCode,
             Some(project_path),
@@ -8775,6 +8940,7 @@ for line in sys.stdin:
                 author_pseudo: None,
                 author_avatar_email: None,
                 author_cli_ordinal: None,
+                session_continuity: None,
                 source_msg_id: None,
                 duration_ms: None,
                 lint_report: None,
@@ -9100,6 +9266,7 @@ mod http_run_progress_tests {
                 author_pseudo: None,
                 author_avatar_email: None,
                 author_cli_ordinal: None,
+                session_continuity: None,
                 source_msg_id: None,
                 duration_ms: None,
                 lint_report: None,

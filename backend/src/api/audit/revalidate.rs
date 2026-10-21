@@ -34,17 +34,22 @@ fn human_parts(content: &str) -> Vec<(String, BTreeSet<String>)> {
         .collect()
 }
 
-fn owning_step(chain: &[super::AnalysisStep], doc: &str) -> Option<usize> {
+fn owning_step(
+    chain: &[super::AnalysisStep],
+    doc: &str,
+    docs_root: &crate::core::docs_location::DocsRoot,
+) -> Option<usize> {
     chain
         .iter()
-        .position(|s| s.target_file == doc && super::partial_selectable(s))
+        .position(|s| s.target_file == doc && super::partial_selectable(s, docs_root))
         .map(|i| i + 1)
 }
 
 /// What "Revalider l'audit" would do, computed without writing anything.
 pub fn plan(project_path: &FsPath) -> RevalidationPlan {
     let report = citation_drift::check(project_path);
-    let chain = super::assemble_chained_steps(AuditKind::Full);
+    let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
+    let chain = super::steps_for(AuditKind::Full, &docs_root);
     let mut plan = RevalidationPlan {
         sources_state: report.sources_state,
         ..Default::default()
@@ -57,7 +62,7 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
         let human_sections = human_parts(&content);
         let mut entry = RevalidationSection {
             doc: section.doc.clone(),
-            step: owning_step(&chain, &section.doc),
+            step: owning_step(&chain, &section.doc, &docs_root),
             action: RevalidationAction::Manual,
             doc_missing: section.doc_missing,
             reanchor: Vec::new(),
@@ -297,6 +302,10 @@ pub async fn revalidate_audit(
         Err(e) => return single_error(e),
     };
     let project_path = scanner::resolve_host_path(&project.path);
+    // A configured folder failing containment refuses the run (KT-1192).
+    if let Err(reason) = crate::core::docs_location::DocsRoot::for_project(&project_path) {
+        return single_error(reason);
+    }
     let planned = {
         let path = project_path.clone();
         match tokio::task::spawn_blocking(move || plan(&path)).await {

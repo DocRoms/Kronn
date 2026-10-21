@@ -179,7 +179,11 @@ pub(crate) fn strip_section(notes: &str) -> String {
 
 /// The steps that judge the code: every step writing a TD index.
 pub(crate) fn judges_code(target_file: &str) -> bool {
-    target_file.starts_with("docs/inconsistencies-")
+    // By file name: a step target lives under the project's docs root (KT-1192).
+    target_file
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.starts_with("inconsistencies-"))
 }
 
 /// The rules block for a step prompt; empty for a step that does not judge
@@ -319,7 +323,13 @@ pub(crate) fn sync_coding_rules_doc(
     project_root: &Path,
     rules: Option<&BriefingProjectRules>,
 ) -> Result<bool, String> {
-    let docs_dir = crate::core::scanner::detect_docs_dir(project_root);
+    // The configured docs root (KT-1192), else the detected folder.
+    let docs_root = crate::core::docs_location::DocsRoot::of(project_root);
+    let docs_dir = if docs_root.is_default() {
+        crate::core::scanner::detect_docs_dir(project_root)
+    } else {
+        docs_root.dir(project_root)
+    };
     let target = docs_dir.join(CODING_RULES_FILE);
     let current = match std::fs::read_to_string(&target) {
         Ok(c) => c,

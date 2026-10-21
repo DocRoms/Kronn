@@ -256,7 +256,7 @@ Cron and Watch take an optional IANA `timezone`; without one they follow Kronn's
 
 **ModelTier** — Enum: `economy`, `default`, `reasoning`. Selects the model quality/cost tier per agent. Configured globally in `ModelTiersConfig` (one `ModelTierConfig` per agent). Can be overridden per-message or per-workflow-step via `AgentSettings`. Stored in DB via migrations 015-016.
 
-**DriftCheckResponse** — Response from `GET /api/projects/:id/drift`. Contains `up_to_date: bool` and `stale_sections: Vec<DriftSection>`. Used by frontend to show amber badge on stale projects.
+**DriftCheckResponse** — Response from `GET /api/projects/:id/drift`. Contains `up_to_date: bool` and `stale_sections: Vec<DriftSection>`. Used by frontend to show amber badge on stale projects. Also lists `placeholder_docs` (`PlaceholderDoc`: path + owning step), the template docs still holding raw placeholders.
 
 **DriftSection** — A section of project documentation that has drifted from the source code. Contains section name, file path, and staleness indicator.
 

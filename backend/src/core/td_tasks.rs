@@ -34,6 +34,15 @@ pub struct TdTaskSource {
     pub source_path: String,
 }
 
+/// The folder the sheets live in, from their own paths (`docs/tech-debt`).
+fn sheets_dir(sources: &[&TdTaskSource]) -> String {
+    sources
+        .first()
+        .and_then(|s| s.source_path.rsplit_once('/'))
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_else(|| "docs/tech-debt".to_string())
+}
+
 pub fn briefing_wants_td_tasks(notes: &str) -> bool {
     notes
         .lines()
@@ -52,14 +61,21 @@ fn theme_task_key(project_id: &str, theme: &str) -> String {
 /// Every `TD-*.md` directly under `<docs>/tech-debt/`, sorted by id. Symlinks
 /// are skipped, as for the index.
 pub fn load_sources(docs_dir: &Path) -> Vec<TdTaskSource> {
-    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
-        return Vec::new();
-    };
     let docs_name = docs_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("docs")
         .to_string();
+    load_sources_rel(docs_dir, &docs_name)
+}
+
+/// `load_sources` with the sheets' paths under `docs_rel`, the docs root as
+/// the repository names it (`packages/x/docs`, KT-1192).
+pub fn load_sources_rel(docs_dir: &Path, docs_rel: &str) -> Vec<TdTaskSource> {
+    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
+        return Vec::new();
+    };
+    let docs_name = docs_rel;
     let mut sources: Vec<TdTaskSource> = entries
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
@@ -347,7 +363,8 @@ pub fn convert(
                     title: truncate(&format!("Tech debt: {label}"), TITLE_MAX),
                     description: format!(
                         "Audit tech debt of the theme `{slug}`, one subtask per sheet under \
-                         `docs/tech-debt/`. The sheets stay the source of truth."
+                         `{}/`. The sheets stay the source of truth.",
+                        sheets_dir(&pending)
                     ),
                     idempotency_key: Some(theme_key),
                     priority,

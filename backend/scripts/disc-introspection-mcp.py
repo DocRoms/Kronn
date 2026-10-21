@@ -9468,6 +9468,12 @@ def _audit_handle_event(entry, event_name, payload_raw):
         elif event_name == "error":
             entry["state"] = "error"
             entry["error"] = (payload.get("error") or payload_raw)[:500]
+            # KT-1192 — a launch refused for want of a briefing carries the
+            # cards the agent posts in its discussion.
+            entry["error_code"] = payload.get("error_code")
+            if payload.get("briefing_cards"):
+                entry["briefing_cards"] = payload.get("briefing_cards")
+                entry["briefing_discussion_id"] = payload.get("discussion_id")
             entry["_start_evt"].set()
         elif event_name in ("step_done", "step_error", "step_start", "step_unchanged"):
             entry["last_step_event"] = {"event": event_name, **{
@@ -9623,10 +9629,18 @@ def _audit_open_sse(path, body):
     return urllib.request.urlopen(req, timeout=None)  # noqa: S310
 
 
-def _briefing_state(project: dict) -> dict:
-    """Filesystem check (same host as the backend): does the project carry a
-    pre-audit briefing? Its absence measurably degrades the audit (user-known
-    pain points never reach the steps — observed live on docroms-web)."""
+def _briefing_state(project: dict, project_id: str = "") -> dict:
+    """Does the project carry a pre-audit briefing? Asked to the backend
+    (KT-1192: no audit starts without one, and the backend knows the project's
+    docs folder and the caller's discussion for the cards); the filesystem
+    check is the fallback when the backend cannot answer."""
+    if project_id:
+        try:
+            status = _unwrap(_http("GET", f"/api/projects/{project_id}/briefing-status"))
+            if isinstance(status, dict) and "present" in status:
+                return status
+        except Exception:
+            pass
     path = (project or {}).get("path") or ""
     for candidate in ("docs/briefing.md", "ai/briefing.md"):
         full = os.path.join(path, candidate)
@@ -9656,7 +9670,14 @@ def call_audit_prepare(args):
         status = project.get("audit_status") if isinstance(project, dict) else None
         if status is not None:
             info["audit_status"] = status
-            info["briefing"] = _briefing_state(project)
+            info["briefing"] = _briefing_state(project, project_id)
+            if not info["briefing"].get("present"):
+                info["briefing_hint"] = (
+                    "briefing_required: no audit starts without a briefing. Post each "
+                    "card of `briefing.briefing_cards` in your discussion as a "
+                    "```kronn-question fence; once the human has answered them all, "
+                    "Kronn saves the briefing and audit_launch works."
+                )
             if status == "NoTemplate":
                 info["hint"] = (
                     "The docs template is NOT installed — files/todos are empty "
@@ -10637,6 +10658,18 @@ def call_audit_launch(args):
             "Check audit_status / backend logs before retrying."
         )
     with _AUDIT_LOCK:
+        if entry["state"] == "error" and entry.get("error_code") == "briefing_required":
+            # Not a failure to hide: the agent posts the cards and relaunches.
+            refused = {
+                "launched": False,
+                "project_id": project_id,
+                "error_code": "briefing_required",
+                "message": entry.get("error"),
+            }
+            if entry.get("briefing_cards"):
+                refused["discussion_id"] = entry.get("briefing_discussion_id")
+                refused["briefing_cards"] = entry.get("briefing_cards")
+            return refused
         if entry["state"] == "error":
             raise RuntimeError(f"audit_launch refused: {entry.get('error')}")
         if not (entry.get("_saw_accepted") or entry.get("_saw_start")):
@@ -10651,7 +10684,7 @@ def call_audit_launch(args):
     briefing = None
     try:
         project = _unwrap(_http("GET", f"/api/projects/{project_id}"))
-        briefing = _briefing_state(project if isinstance(project, dict) else {})
+        briefing = _briefing_state(project if isinstance(project, dict) else {}, project_id)
     except Exception:
         pass
     lifecycle_warning = (

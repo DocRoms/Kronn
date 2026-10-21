@@ -211,7 +211,10 @@ fn a_review_rewrite_gets_the_form_facts_back() {
 #[test]
 fn briefing_injected_into_a_step_is_capped_with_a_marker() {
     use super::super::briefing::{briefing_prompt_section, BRIEFING_PROMPT_MAX_CHARS};
-    let small = briefing_prompt_section("# Project Briefing\n## Purpose\nShort.\n");
+    let small = briefing_prompt_section(
+        "# Project Briefing\n## Purpose\nShort.\n",
+        &crate::core::docs_location::DocsRoot::default(),
+    );
     assert!(small.contains("## Project briefing (from the user)"));
     assert!(small.contains("Short."));
     assert!(!small.contains("truncated"));
@@ -220,7 +223,7 @@ fn briefing_injected_into_a_step_is_capped_with_a_marker() {
     let line = "é".repeat(99) + "\n";
     let huge = line.repeat(200);
     let total = huge.trim_end().chars().count();
-    let capped = briefing_prompt_section(&huge);
+    let capped = briefing_prompt_section(&huge, &crate::core::docs_location::DocsRoot::default());
     assert!(
         capped.contains(&format!("of {total} characters shown")),
         "{}",
@@ -238,7 +241,10 @@ fn briefing_injected_into_a_step_is_capped_with_a_marker() {
 fn the_machine_copy_of_the_answers_never_reaches_a_step_prompt() {
     use super::super::briefing::briefing_prompt_section;
     let section = render_facts_section(&normalize_answers(&sample_answers()).unwrap()).unwrap();
-    let block = briefing_prompt_section(&format!("# Project Briefing\n\n{section}"));
+    let block = briefing_prompt_section(
+        &format!("# Project Briefing\n\n{section}"),
+        &crate::core::docs_location::DocsRoot::default(),
+    );
     assert!(block.contains("Tracker: Jira"));
     assert!(!block.contains("kronn:project-answers"));
 }
@@ -514,7 +520,10 @@ fn every_fact_note_is_rendered_next_to_its_fact_in_the_briefing() {
     );
     assert_eq!(parse_answers(&section), Some(answers.clone()));
     // The note reaches the audit prompts with its fact.
-    let block = super::super::briefing::briefing_prompt_section(&section);
+    let block = super::super::briefing::briefing_prompt_section(
+        &section,
+        &crate::core::docs_location::DocsRoot::default_root(),
+    );
     assert!(
         block.contains("  - Review note: how-review works"),
         "{block}"

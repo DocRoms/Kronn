@@ -12,7 +12,7 @@ import { onActivationKey } from '../lib/keyboardActivation';
 import AuditRecapPanel from './AuditRecapPanel';
 import { AuditTimeline } from './AuditTimeline';
 import { TemplateMergeOfferSlot } from './TemplateMergePanel';
-import { TemplateReinstall } from './TemplateReinstall';
+import { PlaceholderDocsBadge, TemplateReinstall } from './TemplateReinstall';
 import { useTemplateMergeOffer } from '../hooks/useTemplateMergeOffer';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
@@ -49,6 +49,7 @@ import { ProjectDependenciesBlock } from './project/ProjectDependenciesBlock';
 import { ProjectGithubRow } from './project/ProjectGithubRow';
 import { invalidateCachedResource, projectGitCacheKey } from '../hooks/useCachedResource';
 import { ProjectAgentFilesSetting } from './ProjectAgentFilesSetting';
+import { ProjectDocsLocationSetting } from './ProjectDocsLocationSetting';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
 import { rememberProjectRepositoryResourcesTab } from '../lib/projectRepositoryResourcesTab';
 import { PAGE_PATHS, PROJECT_VIEWS, discussionPath, projectPath, type ProjectLocation, type ProjectView } from '../lib/routes';
@@ -425,7 +426,7 @@ export function ProjectCard({
   const [auditLaunchError, setAuditLaunchError] = useState<{ message: string; retry: () => void } | null>(null);
   // A "Reprendre" replays the launch with the state of the moment it is clicked.
   const handleFullAuditRef = useRef<(options?: { retrySteps?: number[]; fresh?: boolean }) => Promise<void>>(async () => {});
-  const startPartialAuditRef = useRef<(drift: DriftCheckResponse) => Promise<void>>(async () => {});
+  const startPartialAuditRef = useRef<(steps: number[]) => Promise<void>>(async () => {});
   // Re-arms the status poll: an external launch, or a cancel left pending.
   const [externalAdoptTick, setExternalAdoptTick] = useState(0);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
@@ -553,10 +554,9 @@ export function ProjectCard({
   // blocking the new "Définir le briefing" CTA. Same for validation
   // + bootstrap below.
   const briefingDisc = projDiscussions.find(d => isBriefingDisc(d.title) && !d.archived);
-  const briefingDone = proj.audit_status !== 'NoTemplate' && (
-    !!proj.briefing_notes ||
-    proj.audit_status === 'Audited' || proj.audit_status === 'Validated'
-  );
+  // KT-1192 — what the backend's gate checks: a saved briefing.
+  const briefingDone = !!proj.briefing_notes?.trim();
+  const briefingDefaults = !!proj.briefing_notes?.includes('kronn:briefing-defaults');
   const projMcps = mcpConfigs.filter(c => c.is_global || c.project_ids.includes(proj.id));
   const projWorkflows = workflows.filter(w => w.project_id === proj.id);
   const contextDrift = contextAudit?.drift;
@@ -941,12 +941,11 @@ export function ProjectCard({
     }
   }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
 
-  const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
+  const startPartialAudit = useCallback(async (steps: number[]) => {
     if (auditActiveRef.current) return;
     auditActiveRef.current = true;
     setAuditLaunchError(null);
-    const retry = () => { void startPartialAuditRef.current(drift); };
-    const steps = drift.stale_sections.map(s => s.audit_step);
+    const retry = () => { void startPartialAuditRef.current(steps); };
     const controller = new AbortController();
     setAuditAbortController(controller);
     setAuditActive(true);
@@ -1354,13 +1353,16 @@ export function ProjectCard({
                     type="button"
                     className="dash-drift-update-btn"
                     data-testid="project-drift-update"
-                    onClick={() => startPartialAudit(driftStatus)}
+                    onClick={() => startPartialAudit(driftStatus.stale_sections.map(s => s.audit_step))}
                     title={t('audit.updateStale', String(driftStatus.stale_sections.length))}
                   >
                     <RefreshCw size={9} />
                     {t('audit.updateStale', String(driftStatus.stale_sections.length))}
                   </button>
                 </>
+              )}
+              {!auditActive && !resumableAudit && driftStatus && (
+                <PlaceholderDocsBadge docs={driftStatus.placeholder_docs ?? []} onRun={steps => { void startPartialAudit(steps); }} />
               )}
               <button
                 type="button"
@@ -1527,6 +1529,11 @@ export function ProjectCard({
                 </button>
               ) : null
             )}
+            {briefingDefaults && (
+              <span className="dash-badge-briefing-defaults" data-testid="project-briefing-defaults">
+                <AlertTriangle size={9} /> {t('projects.briefingDefaultsBadge')}
+              </span>
+            )}
             {!auditActive && (proj.tech_debt_count ?? 0) > 0 && (
               <button
                 type="button"
@@ -1566,7 +1573,7 @@ export function ProjectCard({
                   className="dash-drift-update-btn"
                   onClick={(e) => {
                     e.stopPropagation();
-                    startPartialAudit(driftStatus);
+                    startPartialAudit(driftStatus.stale_sections.map(s => s.audit_step));
                   }}
                   disabled={auditActive}
                   title={t('audit.updateStale', String(driftStatus.stale_sections.length))}
@@ -1575,6 +1582,9 @@ export function ProjectCard({
                   {t('audit.updateStale', String(driftStatus.stale_sections.length))}
                 </button>
               </>
+            )}
+            {!auditActive && !resumableAudit && driftStatus && (
+              <PlaceholderDocsBadge docs={driftStatus.placeholder_docs ?? []} onRun={steps => { void startPartialAudit(steps); }} />
             )}
             {/* Audit date — hidden during active audit (#326 / F6) */}
             {!auditActive && driftStatus?.audit_date && (
@@ -2053,6 +2063,7 @@ export function ProjectCard({
                 />
               </section>
               <ProjectAgentFilesSetting projectId={proj.id} t={t} />
+              <ProjectDocsLocationSetting projectId={proj.id} t={t} />
               <div className="dash-delete-zone" data-testid="project-overview-delete-zone">
                 {deleteConfirmId === proj.id ? (
                   <div>
@@ -2439,7 +2450,11 @@ export function ProjectCard({
                   <TemplateMergeOfferSlot offer={templateMerge} projectId={proj.id} />
                 )}
                 {!bootstrapInProgress && !auditActive && proj.audit_status !== 'NoTemplate' && (
-                  <TemplateReinstall projectId={proj.id} />
+                  <TemplateReinstall
+                    projectId={proj.id}
+                    onRunSteps={steps => { void startPartialAudit(steps); }}
+                    onChanged={() => { onRefetch(); onRefetchDrift(proj.id); }}
+                  />
                 )}
                 {!bootstrapInProgress && (
                   <AuditTimeline

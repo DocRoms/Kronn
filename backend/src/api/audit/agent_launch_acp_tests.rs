@@ -275,7 +275,12 @@ fn launch(
                 let chain = crate::api::audit::assemble_chained_steps(AuditKind::Full);
                 let step = chain
                     .iter()
-                    .position(crate::api::audit::partial_selectable)
+                    .position(|step| {
+                        crate::api::audit::partial_selectable(
+                            step,
+                            &crate::core::docs_location::DocsRoot::default(),
+                        )
+                    })
                     .expect("a refreshable section")
                     + 1;
                 crate::api::audit::drift::partial_audit(

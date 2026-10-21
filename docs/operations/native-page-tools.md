@@ -7,7 +7,7 @@ revisions and inert action ingestion. Dataset deletion (`page_delete_dataset`, K
 exists on the MCP bridge only; native discussion agents do not get it. See
 [Dataset lifecycle](../architecture/live-pages.md#dataset-lifecycle-kt-1104). The dispatcher returns real stored
 objects, not an HTML preview.
-[src: file: backend/src/api/agent_tools.rs:1698-1700#execute_page_tool]
+[src: file: backend/src/api/agent_tools.rs:1704-1706#execute_page_tool]
 [src: file: backend/src/api/agent_page_tools.rs:173-237#execute_page_tool]
 [src: file: backend/scripts/disc-introspection-mcp.py:7841-7843#call_page_delete_dataset]
 
@@ -52,10 +52,10 @@ among tools whose names contain `create`, `update`, `remove` or `link`.
 Workflows also publish data through the `PublishPageData` step.
 Rendering still uses the existing Page viewer and its network-denying CSP;
 persisting an action block never launches its automation.
-[src: file: backend/src/api/agent_tools.rs:333-338#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2304-2313#declarations_for_family]
+[src: file: backend/src/api/agent_tools.rs:339-344#TOOL_FAMILIES]
+[src: file: backend/src/api/agent_tools.rs:2310-2319#declarations_for_family]
 [src: file: backend/src/api/agent_tools.rs:1359-1384#workflow_tool_catalogue]
-[src: file: backend/src/api/agent_tools.rs:1698-1700#execute_page_tool]
+[src: file: backend/src/api/agent_tools.rs:1704-1706#execute_page_tool]
 [src: file: backend/src/api/agent_tools.rs:5340-5397#workflow_catalogue_is_bounded_and_contains_no_planning_mutation]
 [src: file: backend/src/api/agent_page_tests.rs:247#native_page_html_uses_shared_inert_action_ingestion]
 [src: file: backend/src/api/agent_page_tests.rs:354#native_workflow_page_tools_inherit_run_scope_and_execute_all_operations]

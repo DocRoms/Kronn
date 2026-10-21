@@ -11,6 +11,7 @@ const drift = (over: Partial<DriftCheckResponse>): DriftCheckResponse => ({
   total_sections: 0,
   sources_state: 'unknown',
   broken_citations: 0,
+  placeholder_docs: [],
   ...over,
 });
 

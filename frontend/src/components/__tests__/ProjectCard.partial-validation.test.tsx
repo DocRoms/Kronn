@@ -35,7 +35,7 @@ const PROJECT: Project = {
   token_override: null,
   ai_config: { detected: false, configs: [] },
   audit_status: 'Audited',
-  ai_todo_count: 0, tech_debt_count: 3, needs_docs_migration: false, path_exists: true,
+  briefing_notes: '# Project Briefing', ai_todo_count: 0, tech_debt_count: 3, needs_docs_migration: false, path_exists: true,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 };
@@ -61,6 +61,7 @@ const DRIFT: DriftCheckResponse = {
   total_sections: 1,
   sources_state: 'unknown',
   broken_citations: 0,
+  placeholder_docs: [],
 };
 
 function renderCard(overrides: Partial<Record<string, unknown>> = {}) {
@@ -205,9 +206,10 @@ describe('ProjectCard — full audit step_error visibility', () => {
       agents: [AGENT, CODEX_AGENT],
     });
     const trackerPrerequisite = screen.getByTestId('audit-tracker-prerequisite');
-    const briefingButton = screen.getByTestId('audit-timeline-briefing-open');
-    expect(trackerPrerequisite.compareDocumentPosition(briefingButton))
-      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    // The briefing is saved (KT-1192 gate): the prerequisite precedes the launch.
+    const launchButton = screen.getByTestId('audit-timeline-launch');
+    expect(trackerPrerequisite.compareDocumentPosition(launchButton) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
     expect(container.querySelector('select')).toBeNull();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Codex/ })); });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /disc\.tier\.economy/ })); });
@@ -231,6 +233,29 @@ describe('ProjectCard — full audit step_error visibility', () => {
     const greens = (props.toast as ReturnType<typeof vi.fn>).mock.calls
       .filter(([, kind]) => kind === 'success');
     expect(greens).toHaveLength(0);
+  });
+
+  // KT-1203 — docs still holding placeholders survive a reload through the drift API.
+  // The list card and the detail page each render the badge: both must launch the run.
+  it.each([false, true])('placeholder badge (detailMode=%s) launches the partial audit for the steps that fill those docs', async (detailMode) => {
+    vi.mocked(projectsApi.partialAuditStream).mockResolvedValue(undefined);
+    renderCard({
+      detailMode,
+      driftStatus: {
+        ...DRIFT,
+        stale_sections: [],
+        placeholder_docs: [
+          { path: 'docs/glossary.md', step: 2 },
+          { path: 'docs/inconsistencies-tech-debt.md', step: 8 },
+          { path: 'docs/workflow/tickets.md', step: null },
+        ],
+      },
+    });
+    const fill = await screen.findByTestId('project-placeholder-fill');
+    expect(screen.getByTestId('project-placeholder-docs').textContent).toContain('audit.placeholderDocs 2');
+    await act(async () => { fireEvent.click(fill); await Promise.resolve(); });
+    expect(projectsApi.partialAuditStream).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(projectsApi.partialAuditStream).mock.calls[0][1]).toMatchObject({ agent: 'ClaudeCode', steps: [2, 8] });
   });
 });
 

@@ -997,7 +997,12 @@ async fn partial_audit_stream(
     let chain = crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full);
     let step = chain
         .iter()
-        .position(crate::api::audit::partial_selectable)
+        .position(|step| {
+            crate::api::audit::partial_selectable(
+                step,
+                &crate::core::docs_location::DocsRoot::default(),
+            )
+        })
         .expect("a refreshable section")
         + 1;
     let response = crate::api::audit::drift::partial_audit(
@@ -1177,7 +1182,12 @@ fn refreshable_steps() -> Vec<usize> {
     crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
         .iter()
         .enumerate()
-        .filter(|(_, step)| crate::api::audit::partial_selectable(step))
+        .filter(|(_, step)| {
+            crate::api::audit::partial_selectable(
+                step,
+                &crate::core::docs_location::DocsRoot::default(),
+            )
+        })
         .map(|(index, _)| index + 1)
         .collect()
 }

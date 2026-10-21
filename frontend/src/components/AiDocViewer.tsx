@@ -119,9 +119,14 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
         return;
       }
     }
+    // The backend wraps the docs in one folder node, wherever the project's
+    // configuration puts it (`.ai`, `packages/x/docs`, KT-263).
+    const root = files.find(node => node.is_dir);
+    if (root) setExpandedDirs(prev => (prev.has(root.path) ? prev : new Set(prev).add(root.path)));
     const entry = findFile(files, 'docs/AGENTS.md')
       ?? findFile(files, 'doc/AGENTS.md')
-      ?? findFile(files, 'ai/index.md');
+      ?? findFile(files, 'ai/index.md')
+      ?? (root ? findFile(files, `${root.path}/AGENTS.md`) ?? findFile(files, `${root.path}/index.md`) : null);
     if (entry) setSelectedPath(entry.path);
   }, [initialExpandFolder]);
 
