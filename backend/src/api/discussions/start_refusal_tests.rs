@@ -267,6 +267,7 @@ async fn discussion(
             author_avatar_email: None,
             author_cli_ordinal: None,
             session_continuity: None,
+            kind: Default::default(),
             source_msg_id: None,
             duration_ms: None,
             lint_report: None,

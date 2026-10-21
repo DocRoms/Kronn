@@ -33,17 +33,43 @@ pub type ApprovalCheck<'a> = dyn FnMut(&Workflow) -> Result<Option<String>, Stri
 /// which needs the database: production callers use [`assess_in_db`].
 /// Sub-workflows resolve through `workflows` (`root` need not be in it).
 pub fn assess(root: &Workflow, workflows: &HashMap<String, Workflow>) -> WorkflowReadiness {
-    assess_with_approvals(root, workflows, &mut |_| Ok(None))
+    assess_full(root, workflows, &HashMap::new(), &mut |_| Ok(None))
+}
+
+/// [`assess`] that also reads the saved Quick Execs CollectApiData sources run
+/// by id (KT-1398): a line awaiting a human's approval there is a blocker too.
+pub fn assess_with(
+    root: &Workflow,
+    workflows: &HashMap<String, Workflow>,
+    quick_execs: &HashMap<String, QuickExec>,
+) -> WorkflowReadiness {
+    assess_full(root, workflows, quick_execs, &mut |_| Ok(None))
+}
+
+/// [`assess`] with the approval gate read through `approval`.
+pub fn assess_with_approvals(
+    root: &Workflow,
+    workflows: &HashMap<String, Workflow>,
+    approval: &mut ApprovalCheck<'_>,
+) -> WorkflowReadiness {
+    assess_full(root, workflows, &HashMap::new(), approval)
 }
 
 /// [`assess`] plus the repository-import approval gate the run checks before
-/// its first step, against the database the run reads.
+/// its first step and the saved Quick Execs, against the database the run reads.
 pub fn assess_in_db(
     conn: &rusqlite::Connection,
     root: &Workflow,
     workflows: &HashMap<String, Workflow>,
 ) -> WorkflowReadiness {
-    assess_with_approvals(root, workflows, &mut |wf| {
+    let quick_execs = match crate::db::quick_execs::list_quick_execs(conn) {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|exec| (exec.id.clone(), exec))
+            .collect(),
+        Err(error) => return collection_failure(root, &format!("Quick Execs: {error}")),
+    };
+    assess_full(root, workflows, &quick_execs, &mut |wf| {
         repository_approval_refusal(conn, wf)
     })
 }
@@ -66,10 +92,11 @@ pub fn repository_approval_refusal(
     crate::core::repository_resources::workflow_execution_refusal(conn, wf)
 }
 
-/// [`assess`] with the approval gate read through `approval`.
-pub fn assess_with_approvals(
+/// Every check: sub-workflows, saved Quick Execs and the approval gate.
+pub fn assess_full(
     root: &Workflow,
     workflows: &HashMap<String, Workflow>,
+    quick_execs: &HashMap<String, QuickExec>,
     approval: &mut ApprovalCheck<'_>,
 ) -> WorkflowReadiness {
     let mut walk = Walk {
@@ -155,6 +182,7 @@ impl Walk<'_, '_> {
             message,
             action,
             human_only,
+            quick_exec: None,
         });
     }
 

@@ -107,6 +107,42 @@ describe('InlineMediaJob', () => {
     expect(card.textContent).toContain('connection refused');
   });
 
+  // KT-1214 — a failure says which model failed and offers the way out.
+  it('names the model of a failed generation and offers to relaunch it', () => {
+    const onRetry = vi.fn();
+    render(
+      <InlineMediaJob
+        discussionId="disc-1"
+        messageId="message-1"
+        prompt="A small generated landscape"
+        run={mediaRun({
+          status: 'failed',
+          diagnostic: 'image response carries no image',
+          result: { schema_version: 1, modality: 'image', phase: 'persisting', model: 'vertex_ai/gemini-3-pro-image' },
+        })}
+        onOpenAsset={vi.fn()}
+        onRetry={onRetry}
+      />,
+    );
+    expect(screen.getByTestId('media-bubble-failure').textContent).toContain('vertex_ai/gemini-3-pro-image');
+    fireEvent.click(screen.getByTestId('media-bubble-retry'));
+    expect(onRetry).toHaveBeenCalledWith('A small generated landscape', 'image');
+  });
+
+  it('offers no relaunch while a generation is still running', () => {
+    render(
+      <InlineMediaJob
+        discussionId="disc-1"
+        messageId="message-1"
+        prompt="A small generated landscape"
+        run={mediaRun({ status: 'running' })}
+        onOpenAsset={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('media-bubble-retry')).toBeNull();
+  });
+
   it('stays in the same media bubble on success and opens the exact asset', () => {
     const onOpenAsset = vi.fn();
     renderJob(mediaRun({

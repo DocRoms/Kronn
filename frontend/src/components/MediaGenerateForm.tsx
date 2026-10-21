@@ -20,6 +20,9 @@ import type {
 import type { ContextFile } from '../types/generated';
 import './MediaGenerateForm.css';
 
+/** The local ComfyUI media source (KT-1381). */
+const LOCAL_COMFYUI_ID = 'local:comfyui';
+
 type T = (key: string, ...args: (string | number)[]) => string;
 
 // Fallbacks, used ONLY when the provider advertises nothing — NVIDIA serves no
@@ -102,6 +105,8 @@ export function MediaGenerateForm({
   onImageAttached,
   initialSlotKey,
   initialReference,
+  initialPrompt,
+  initialModality,
 }: {
   /** Existing room, or a creator used by the New discussion media entry. */
   discussionId?: string;
@@ -124,10 +129,14 @@ export function MediaGenerateForm({
    * slot and keep its current image attached while this form loads again. */
   initialSlotKey?: string;
   initialReference?: { assetId: string; mode: MediaReferenceMode } | null;
+  /** KT-1214 — a failed generation relaunched from its bubble: its prompt, and
+   * the first source of its modality unless a slot is named. */
+  initialPrompt?: string;
+  initialModality?: MediaModality;
 }) {
   const slots = useMemo(() => slotsOf(connections), [connections]);
   const [selectedKey, setSelectedKey] = useState<string>('');
-  const [prompt, setPrompt] = useState('');
+  const [prompt, setPrompt] = useState(initialPrompt ?? '');
   // What the operator picked, which the model in front of them may not accept.
   // `null` means "never chose", so the model's own default applies.
   const [storedDuration, setStoredDuration] = useState<number | null>(null);
@@ -191,6 +200,7 @@ export function MediaGenerateForm({
   // render late and made the form flicker through an invalid state.
   const selected = slots.find(slot => slot.key === selectedKey)
     ?? slots.find(slot => slot.key === initialSlotKey)
+    ?? (initialModality ? slots.find(slot => slot.modality === initialModality) : undefined)
     ?? slots[0]
     ?? null;
   const activeKey = selected?.key ?? '';
@@ -433,8 +443,10 @@ export function MediaGenerateForm({
   // Price of the click, derived from what this model was actually billed
   // before. Absent on a first run, and said so rather than shown as free.
   const estimateKey = selected ? `${selected.key}:${durationSecs}` : '';
+  // KT-1381 — the local ComfyUI bills nothing: no price to estimate.
+  const isLocalSource = selected?.connectionId === LOCAL_COMFYUI_ID;
   useEffect(() => {
-    if (!selected) return;
+    if (!selected || selected.connectionId === LOCAL_COMFYUI_ID) return;
     let cancelled = false;
     media
       .estimate(
@@ -771,9 +783,11 @@ export function MediaGenerateForm({
       </label>
 
       <p className="media-generate-estimate">
-        {estimate && estimate.usd !== null && estimate.samples > 0
-          ? t('disc.media.estimate', estimate.usd.toFixed(4), estimate.samples)
-          : t('disc.media.estimateUnknown')}
+        {isLocalSource
+          ? t('disc.media.localNoCost')
+          : estimate && estimate.usd !== null && estimate.samples > 0
+            ? t('disc.media.estimate', estimate.usd.toFixed(4), estimate.samples)
+            : t('disc.media.estimateUnknown')}
       </p>
 
       {error && <p className="media-generate-error" role="alert">{error}</p>}

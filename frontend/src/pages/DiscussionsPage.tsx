@@ -18,9 +18,11 @@ import { unseenBasis } from '../lib/discussionUiUtils';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
 import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
+import { foldOrchestrationRuns, isOrchestrationMessage } from '../lib/orchestrationFold';
+import { OrchestrationFoldMarker } from '../components/OrchestrationFoldMarker';
 import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, runsApi, publicationCredentials } from '../lib/api';
+import { discussions as discussionsApi, discussionActions as discussionActionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections, comfyui as comfyuiApi, runsApi, publicationCredentials } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { TerminalPanel } from '../components/TerminalPanel';
@@ -588,6 +590,26 @@ export function DiscussionsPage({
     setShowDiscussionNotes(true);
     try { localStorage.setItem('kronn:showDiscussionNotes', 'true'); } catch { /* non-fatal */ }
   }, []);
+  // KT-1330 — "hide orchestration messages", persisted exactly like "hide notes".
+  const [showOrchestrationMessages, setShowOrchestrationMessages] = useState<boolean>(() => {
+    try { return localStorage.getItem('kronn:showOrchestrationMessages') !== 'false'; } catch { return true; }
+  });
+  const toggleOrchestrationMessages = useCallback(() => {
+    setShowOrchestrationMessages(current => {
+      const next = !current;
+      try { localStorage.setItem('kronn:showOrchestrationMessages', String(next)); } catch { /* non-fatal */ }
+      return next;
+    });
+  }, []);
+  // Runs of folded orchestration messages the user opened, by first message id.
+  const [expandedOrchestrationRuns, setExpandedOrchestrationRuns] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleOrchestrationRun = useCallback((runId: string) => {
+    setExpandedOrchestrationRuns(current => {
+      const next = new Set(current);
+      if (!next.delete(runId)) next.add(runId);
+      return next;
+    });
+  }, []);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   const [globalSearchTarget, setGlobalSearchTarget] = useState<GlobalSearchTarget | null>(() =>
     initialActiveDiscussionId && initialMessageId ? { discussionId: initialActiveDiscussionId, messageId: initialMessageId } : null);
@@ -865,6 +887,13 @@ export function DiscussionsPage({
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [externalConnections, setExternalConnections] = useState<ExternalApiConnectionView[]>([]);
+  // KT-1381 — the local ComfyUI, shaped like a connection, offered only where
+  // media is generated (never as an agent or a mention target).
+  const [localMediaSource, setLocalMediaSource] = useState<ExternalApiConnectionView | null>(null);
+  const mediaConnections = useMemo(
+    () => (localMediaSource ? [...externalConnections, localMediaSource] : externalConnections),
+    [externalConnections, localMediaSource],
+  );
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
   // KT-1107 — the agent check of each room started from this page, until dismissed.
@@ -969,6 +998,23 @@ export function DiscussionsPage({
     setShowSettingsPanel(false);
     setShowAssetsPanel(true);
     setAssetOpenRequest(current => ({ assetId, nonce: (current?.nonce ?? 0) + 1 }));
+  }, []);
+  // KT-1214 — a failed generation reopens the Creator with what was asked.
+  const [mediaRetryRequest, setMediaRetryRequest] = useState<{ prompt: string; modality: 'image' | 'video'; nonce: number } | null>(null);
+  // Dropped when the panel closes, so reopening it does not replay the
+  // retried prompt.
+  const [retryPanelOpen, setRetryPanelOpen] = useState(showAssetsPanel);
+  if (retryPanelOpen !== showAssetsPanel) {
+    setRetryPanelOpen(showAssetsPanel);
+    if (!showAssetsPanel) setMediaRetryRequest(null);
+  }
+  const retryMediaGeneration = useCallback((prompt: string, modality: 'image' | 'video') => {
+    setShowGitPanel(false);
+    setShowTerminalPanel(false);
+    setShowPlanPanel(false);
+    setShowSettingsPanel(false);
+    setShowAssetsPanel(true);
+    setMediaRetryRequest(current => ({ prompt, modality, nonce: (current?.nonce ?? 0) + 1 }));
   }, []);
   const mediaJobsRelistTimer = useRef<{ id: number; discId: string } | null>(null);
   const scheduleMediaJobsRelist = useCallback((discId: string) => {
@@ -1707,9 +1753,21 @@ export function DiscussionsPage({
     directivesApi.list().then(setAvailableDirectives).catch(() => {});
     contactsApi.list().then(setContactsList).catch(() => {});
     externalApiConnections.list().then(setExternalConnections).catch(() => {});
+    // Re-read when the ComfyUI card saves a change, and when the tab comes
+    // back, so a model chosen elsewhere is offered without a reload.
+    const refetchLocalMediaSource = () => comfyuiApi.source()
+      .then(source => setLocalMediaSource(source ? { ...source, has_credential: false } : null))
+      .catch(() => {});
+    refetchLocalMediaSource();
     refetchBatchSummaries();
     window.addEventListener('kronn:profiles-changed', refetchProfiles);
-    return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
+    window.addEventListener('kronn:comfyui-changed', refetchLocalMediaSource);
+    window.addEventListener('focus', refetchLocalMediaSource);
+    return () => {
+      window.removeEventListener('kronn:profiles-changed', refetchProfiles);
+      window.removeEventListener('kronn:comfyui-changed', refetchLocalMediaSource);
+      window.removeEventListener('focus', refetchLocalMediaSource);
+    };
   }, [refetchBatchSummaries]);
 
   // WebSocket-based real-time events (presence, chat, invites).
@@ -3938,7 +3996,22 @@ export function DiscussionsPage({
         // The algorithm itself lives in `groupMessagesWithToolFold`
         // (pure fn, unit-tested in discussionMessageGrouping.test.ts) ;
         // here we just map render items to React elements.
-        const items = groupMessagesWithToolFold(msgs, { isAutoPrompt });
+        // KT-1330 — then fold runs of orchestration posts behind one marker
+        // each. A message the user must act on, or that a search / deep link
+        // points at, is never folded away.
+        const forceVisibleIds = new Set<string>();
+        if (globalSearchTarget?.messageId) forceVisibleIds.add(globalSearchTarget.messageId);
+        const currentSearchMatch = messageSearchMatches[messageSearchIndex]?.messageId;
+        if (currentSearchMatch) forceVisibleIds.add(currentSearchMatch);
+        const items = foldOrchestrationRuns(
+          groupMessagesWithToolFold(msgs, { isAutoPrompt }),
+          {
+            hide: !showOrchestrationMessages,
+            expandedRunIds: expandedOrchestrationRuns,
+            hasActions: messageId => (discussionActionsByMessageId.get(messageId)?.length ?? 0) > 0,
+            forceVisibleIds,
+          },
+        );
         const mainUserIds = new Set(
           msgs
             .filter(message => message.role === 'User' && message.channel === 'main')
@@ -4017,7 +4090,7 @@ export function DiscussionsPage({
         };
         let previousDayKey: string | null = null;
         return items.map(item => {
-          const firstMessage = item.kind === 'tool-group' ? item.messages[0] : item.msg;
+          const firstMessage = item.kind === 'message' ? item.msg : item.messages[0];
           const linkedDayAnchor = (firstMessage.role === 'Agent' || firstMessage.role === 'System')
             && firstMessage.reply_to_message_id
             ? messagesById.get(firstMessage.reply_to_message_id)
@@ -4035,6 +4108,27 @@ export function DiscussionsPage({
             />
           ) : null;
 
+          if (item.kind === 'orchestration-marker') {
+            // Collapsed, the marker stands in for its run, so replies pending
+            // on a folded message anchor after it. Expanded, each message
+            // that follows renders its own.
+            const pending = item.expanded
+              ? null
+              : renderPendingAfter(item.messages.map(message => message.id));
+            return (
+              <Fragment key={`orchestration-${item.runId}`}>
+                {separator}
+                <OrchestrationFoldMarker
+                  runId={item.runId}
+                  count={item.messages.length}
+                  expanded={item.expanded}
+                  onToggle={toggleOrchestrationRun}
+                  t={t}
+                />
+                {pending}
+              </Fragment>
+            );
+          }
           if (item.kind === 'tool-group') {
             const pending = renderPendingAfter(item.messages.map(message => message.id));
             return (
@@ -4078,6 +4172,7 @@ export function DiscussionsPage({
                   prompt={msg.content}
                   run={mediaRun}
                   onOpenAsset={openMediaAsset}
+                  onRetry={retryMediaGeneration}
                 />
                 {pending}
               </Fragment>
@@ -4159,7 +4254,8 @@ export function DiscussionsPage({
     messageSearchIndex, messageSearchMatches, stableNavigate, openMediaAsset, orchState, pendingFileMsgIds,
     pendingReplySlots, recoveryAgentLabel, replyIds, resilientStreamingText, sending, sendingElapsed, streamLost,
     showLogs, stableEditMessage, stableLaunchQp, stableOpenActionDiscussion, stableRetry,
-    stoppingDispatchIds, t, transcriptIndex, ttsPlayingMsgId, ttsState, visibleStreamingReply]);
+    stoppingDispatchIds, t, transcriptIndex, ttsPlayingMsgId, ttsState, visibleStreamingReply,
+    showOrchestrationMessages, expandedOrchestrationRuns, toggleOrchestrationRun]);
 
   return (
     <div className="disc-root">
@@ -4357,6 +4453,7 @@ export function DiscussionsPage({
             configLanguage={configLanguage}
             agentAccess={agentAccess}
             externalConnections={externalConnections}
+            mediaConnections={mediaConnections}
             prefill={prefill}
             onSubmit={handleCreateDiscussion}
             onCreateMediaDiscussion={handleCreateMediaDiscussion}
@@ -5600,6 +5697,9 @@ export function DiscussionsPage({
               hasDiscussionNotes={activeDiscussion.messages.some(message => message.channel === 'note')}
               showDiscussionNotes={showDiscussionNotes}
               onToggleDiscussionNotes={toggleDiscussionNotes}
+              hasOrchestrationMessages={activeDiscussion.messages.some(isOrchestrationMessage)}
+              showOrchestrationMessages={showOrchestrationMessages}
+              onToggleOrchestrationMessages={toggleOrchestrationMessages}
               onCancelReply={() => {
                 clearReplyDraft(activeDiscussion.id);
                 setReplyToMessageId(null);
@@ -5864,7 +5964,7 @@ export function DiscussionsPage({
               <DiscussionAssetsPanel
                 discussionId={activeDiscussion.id}
                 files={activeContextFiles}
-                connections={externalConnections}
+                connections={mediaConnections}
                 onClose={() => setShowAssetsPanel(false)}
                 onMediaLaunched={(jobId) => {
                   const launchedDiscussionId = activeDiscussion.id;
@@ -5878,6 +5978,7 @@ export function DiscussionsPage({
                   reloadDiscussion(activeDiscussion.id);
                 }}
                 openAssetRequest={showAssetsPanel ? assetOpenRequest : null}
+                retryRequest={showAssetsPanel ? mediaRetryRequest : null}
                 onAssetDeleted={(fileId) => {
                   // Dropped from the discussion's own inventory, which every
                   // surface reads: the grid, the counters, the carousel and a

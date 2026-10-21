@@ -5522,6 +5522,7 @@ fn agent_action_message(id: &str, content: &str) -> kronn::models::DiscussionMes
         session_tokens_at_message: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
         model: None,
         lint_report: None,
         id: id.into(),
@@ -17113,6 +17114,7 @@ async fn disc_sync_request_resends_missing_messages() {
         session_tokens_at_message: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
         model: None,
         lint_report: None,
         id: "sync-msg-1".into(),
@@ -17334,6 +17336,7 @@ async fn wait_for_peer_surfaces_same_agent_type_peer_but_not_own_local() {
         session_tokens_at_message: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
         model: None,
         lint_report: None,
         id: id.into(),
@@ -26380,6 +26383,346 @@ async fn media_generate_queues_a_job_using_the_configured_model() {
     // Nothing billed and nothing rendered yet: absent, not zero.
     assert!(job["data"]["cost_usd"].is_null());
     assert!(job["data"]["width"].is_null());
+}
+
+/// KT-1381 — the ComfyUI card reads ComfyUI's own API: version, installed
+/// models with their measured family (an unknown one listed without one),
+/// what a chosen video model still lacks, and slots that only take a model of
+/// their kind.
+#[tokio::test]
+async fn comfyui_status_reports_models_and_slots_refuse_the_wrong_kind() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    for (route, body) in [
+        (
+            "/system_stats",
+            serde_json::json!({"system": {"comfyui_version": "0.42.1"}}),
+        ),
+        (
+            "/models/checkpoints",
+            serde_json::json!(["RealVisXL_V5.0_fp16.safetensors", "mystery.safetensors"]),
+        ),
+        (
+            "/models/diffusion_models",
+            serde_json::json!(["wan2.1_t2v_1.3B_fp16.safetensors"]),
+        ),
+        (
+            "/models/text_encoders",
+            serde_json::json!(["umt5_xxl_fp8_e4m3fn_scaled.safetensors"]),
+        ),
+        ("/models/vae", serde_json::json!([])),
+        (
+            "/object_info/KSampler",
+            serde_json::json!({"KSampler": {"input": {"required": {
+                "sampler_name": [["euler", "dpmpp_sde"]],
+                "scheduler": [["simple", "karras"]]
+            }}}}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/view_metadata/checkpoints"))
+        .and(query_param("filename", "mystery.safetensors"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let state = test_state();
+    state.config.write().await.comfyui = kronn::models::ComfyUiConfig {
+        endpoint: Some(server.uri()),
+        image_model: None,
+        video_model: Some("wan2.1_t2v_1.3B_fp16.safetensors".into()),
+        ..Default::default()
+    };
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, status) = get_json(app.clone(), "/api/comfyui/status").await;
+    assert_eq!(status["success"], true, "{status}");
+    let data = &status["data"];
+    assert_eq!(data["state"], "online");
+    assert_eq!(data["version"], "0.42.1");
+    let family = |file: &str| {
+        data["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["file"] == file)
+            .map(|model| model["family"].clone())
+            .unwrap()
+    };
+    assert_eq!(family("RealVisXL_V5.0_fp16.safetensors"), "sdxl");
+    assert_eq!(family("wan2.1_t2v_1.3B_fp16.safetensors"), "wan21_t2v");
+    assert!(family("mystery.safetensors").is_null());
+    assert!(
+        data["video_blocker"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("wan_2.1_vae"),
+        "{data}"
+    );
+    // Suggestions: RealVisXL is already there; nothing is downloadable since
+    // this ComfyUI reports no model folder Kronn can write into.
+    let suggestion = |id: &str| {
+        data["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(suggestion("realvisxl-v5")["installed"], true);
+    assert_eq!(suggestion("flux1-schnell-fp8")["installed"], false);
+    assert_eq!(suggestion("wan21-t2v-1.3b")["downloadable"], false);
+
+    let put = |body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let request = axum::http::Request::builder()
+                .method("PUT")
+                .uri("/api/comfyui/slots")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+            let bytes = http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+    let wrong_kind =
+        put(serde_json::json!({"image_model": "wan2.1_t2v_1.3B_fp16.safetensors"})).await;
+    assert_eq!(wrong_kind["success"], false, "{wrong_kind}");
+    let unknown = put(serde_json::json!({"image_model": "mystery.safetensors"})).await;
+    assert_eq!(unknown["success"], false, "{unknown}");
+    let saved = put(serde_json::json!({"image_model": "RealVisXL_V5.0_fp16.safetensors"})).await;
+    assert_eq!(saved["success"], true, "{saved}");
+    assert_eq!(
+        state.config.read().await.comfyui.image_model.as_deref(),
+        Some("RealVisXL_V5.0_fp16.safetensors")
+    );
+
+    // Configurable for any machine: samplers come from this ComfyUI, the
+    // install folder defaults to Comfy Desktop's.
+    assert_eq!(data["samplers"], serde_json::json!(["euler", "dpmpp_sde"]));
+    assert!(
+        data["install_dir"]
+            .as_str()
+            .unwrap()
+            .ends_with("ComfyUI-Installs"),
+        "{data}"
+    );
+
+    // An unknown checkpoint runs once the user picks its workflow.
+    let put_at = |uri: &'static str, body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let request = axum::http::Request::builder()
+                .method("PUT")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+            let bytes = http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+    let wrong = put_at(
+        "/api/comfyui/model-family",
+        serde_json::json!({
+            "folder": "checkpoints", "file": "mystery.safetensors", "family": "wan21_t2v"
+        }),
+    )
+    .await;
+    assert_eq!(wrong["success"], false, "{wrong}");
+    let chosen = put_at(
+        "/api/comfyui/model-family",
+        serde_json::json!({
+            "folder": "checkpoints", "file": "mystery.safetensors", "family": "sdxl"
+        }),
+    )
+    .await;
+    assert_eq!(chosen["success"], true, "{chosen}");
+    let (_, status) = get_json(app.clone(), "/api/comfyui/status").await;
+    let mystery = status["data"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["file"] == "mystery.safetensors")
+        .cloned()
+        .unwrap();
+    assert_eq!(mystery["family"], "sdxl");
+    assert_eq!(mystery["chosen"], true);
+    let mystery_slot = put(serde_json::json!({"image_model": "mystery.safetensors"})).await;
+    assert_eq!(mystery_slot["success"], true, "{mystery_slot}");
+
+    // Address, install folder and per-slot settings are saved, and checked.
+    let bad_address = put_at(
+        "/api/comfyui/settings",
+        serde_json::json!({
+            "endpoint": "ftp://box", "install_dir": null
+        }),
+    )
+    .await;
+    assert_eq!(bad_address["success"], false, "{bad_address}");
+    let bad_steps = put_at(
+        "/api/comfyui/settings",
+        serde_json::json!({
+            "endpoint": null, "install_dir": null, "image_settings": {"steps": 0}
+        }),
+    )
+    .await;
+    assert_eq!(bad_steps["success"], false, "{bad_steps}");
+    let saved_settings = put_at(
+        "/api/comfyui/settings",
+        serde_json::json!({
+            "endpoint": "http://192.168.1.20:8000",
+            "install_dir": "~/apps/ComfyUI",
+            "image_settings": {"steps": 20, "sampler": "euler"}
+        }),
+    )
+    .await;
+    assert_eq!(saved_settings["success"], true, "{saved_settings}");
+    let comfyui = state.config.read().await.comfyui.clone();
+    assert_eq!(
+        comfyui.endpoint.as_deref(),
+        Some("http://192.168.1.20:8000")
+    );
+    assert_eq!(comfyui.install_dir.as_deref(), Some("~/apps/ComfyUI"));
+    assert_eq!(comfyui.image_settings.steps, Some(20));
+}
+
+/// KT-1214 — the media entry opens a human-only room with no prompt. It must
+/// start empty: the empty User message it used to store showed up as a blank
+/// turn right above the generation.
+#[tokio::test]
+async fn a_human_only_room_opened_without_a_prompt_starts_with_no_message() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/discussions",
+        serde_json::json!({
+            "title": "Génération de média", "agent": "ClaudeCode", "initial_prompt": "  ",
+            "language": "fr", "no_agent": true
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
+    let (_, read) = get_json(app.clone(), &format!("/api/discussions/{id}")).await;
+    assert_eq!(
+        read["data"]["messages"].as_array().map(Vec::len),
+        Some(0),
+        "{read}"
+    );
+
+    // A room that does say something still keeps its first message.
+    let (_, spoken) = post_json(
+        app,
+        "/api/discussions",
+        serde_json::json!({
+            "title": "Note", "agent": "ClaudeCode", "initial_prompt": "bonjour",
+            "language": "fr", "no_agent": true
+        }),
+    )
+    .await;
+    assert_eq!(
+        spoken["data"]["messages"].as_array().map(Vec::len),
+        Some(1),
+        "{spoken}"
+    );
+}
+
+/// KT-1381 — the local ComfyUI is a media source with no stored row: refused
+/// while no model is chosen, then reached by its alias or by omission, and
+/// held to the sizes its workflows were measured at.
+#[tokio::test]
+async fn media_generate_reaches_the_local_comfyui_once_a_model_is_chosen() {
+    let state = test_state();
+    // A connection with no image slot, so the local source is the only one.
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    let app = build_router_with_auth(state.clone(), false);
+    let request = |connection: Option<&str>, ratio: Option<&str>| {
+        let mut body = serde_json::json!({
+            "modality": "image",
+            "prompt": "un renard samouraï",
+            "discussion_id": "disc-media"
+        });
+        if let Some(connection) = connection {
+            body["connection_id"] = connection.into();
+        }
+        if let Some(ratio) = ratio {
+            body["aspect_ratio"] = ratio.into();
+        }
+        body
+    };
+
+    let (_, refused) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        request(Some("comfyui"), None),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+
+    state.config.write().await.comfyui.image_model = Some("RealVisXL_V5.0_fp16.safetensors".into());
+
+    let (_, by_alias) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        request(Some("@comfyui"), Some("16:9")),
+    )
+    .await;
+    assert_eq!(by_alias["success"], true, "{by_alias}");
+    assert_eq!(by_alias["data"]["connection_id"], "local:comfyui");
+
+    let (_, by_omission) = post_json(app.clone(), "/api/media/generate", request(None, None)).await;
+    assert_eq!(by_omission["success"], true, "{by_omission}");
+    assert_eq!(by_omission["data"]["connection_id"], "local:comfyui");
+
+    let (_, odd_ratio) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        request(Some("local:comfyui"), Some("5:1")),
+    )
+    .await;
+    assert_eq!(odd_ratio["success"], false, "{odd_ratio}");
+    assert!(
+        odd_ratio["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("5:1"),
+        "{odd_ratio}"
+    );
+
+    let (_, capabilities) = get_json(
+        app,
+        "/api/media/models?connection_id=local:comfyui&modality=image",
+    )
+    .await;
+    assert_eq!(capabilities["success"], true, "{capabilities}");
+    assert_eq!(
+        capabilities["data"]["capabilities"]["aspect_ratios"][1],
+        "16:9"
+    );
+    assert_eq!(
+        capabilities["data"]["capabilities"]["max_input_references"],
+        0
+    );
 }
 
 #[tokio::test]

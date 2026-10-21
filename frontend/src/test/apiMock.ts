@@ -55,6 +55,7 @@ export const API_NAMESPACES = [
   'directives',
   'stats',
   'ollama',
+  'comfyui',
   'liteLlm',
   'nvidia',
   'externalApi',
@@ -119,6 +120,7 @@ interface DefaultMock {
   directives: Record<string, AnyFn>;
   stats: Record<string, AnyFn>;
   ollama: Record<string, AnyFn>;
+  comfyui: Record<string, AnyFn>;
   liteLlm: Record<string, AnyFn>;
   nvidia: Record<string, AnyFn>;
   externalApi: Record<string, AnyFn>;
@@ -664,6 +666,15 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     stats: {
       getTokens: resolve({ total_tokens: 0, by_provider: [], by_project: [] }),
       getAgentUsage: resolve([]),
+    },
+
+    comfyui: {
+      status: resolve({ state: 'not_found', endpoint: 'http://127.0.0.1:8188', version: null, models: [], image_model: null, video_model: null, video_blocker: null, install_command: null, download_url: 'https://www.comfy.org/download', suggestions: [], install_dir: '/home/user/ComfyUI-Installs', configured_endpoint: null, configured_install_dir: null, image_settings: {}, video_settings: {}, family_defaults: [], samplers: [], schedulers: [] }),
+      setSlots: resolve({}),
+      setSettings: resolve({}),
+      setModelFamily: resolve({}),
+      source: resolve(null),
+      pull: vi.fn(),
     },
 
     ollama: {

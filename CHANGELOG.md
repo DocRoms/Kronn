@@ -13,6 +13,37 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Local image and video generation through ComfyUI (KT-1381). Config ›
+  Agents › Local gains a ComfyUI card next to Ollama: server state and
+  version, the one-command install on macOS (`brew install --cask comfy`), and
+  Image / Video pickers listing the installed models Kronn has a measured
+  workflow for (FLUX.1 schnell, SDXL such as RealVisXL, Wan 2.1). Once a model
+  is chosen, ComfyUI is offered wherever media is generated (new
+  conversation, the Assets Creator) and in `agent_list` as `local:comfyui`,
+  so agents generate on it through `media_generate`. Local generations cost
+  nothing and never enter estimates; ComfyUI never appears as a chat agent.
+  The card also downloads measured models (RealVisXL V5, FLUX.1 schnell, the
+  Wan 2.1 1.3B pack) into ComfyUI's own model folders, with progress, cancel,
+  resume and a disk-space check. Everything machine-dependent is a setting:
+  the server address, the install folder (default `~/ComfyUI-Installs`), the
+  workflow of a model Kronn cannot recognise on its own, and per-slot steps,
+  guidance, sampler and scheduler. A stopped ComfyUI, a job it lost or one
+  finished without a file fails at once with a sentence; a job that times out
+  or is cancelled is cancelled on ComfyUI by its id, never by a global
+  interrupt; downloads go only into the install folder of a ComfyUI on this
+  machine, never through a link, and are checked against their SHA-256
+  (macOS and Linux; Windows links to Hugging Face).
+- A « hide orchestration messages » toggle beside « hide notes » in the
+  discussion composer (KT-1330). What the orchestrator posts into a room
+  (review requests, delivery summaries, terminal events, bounces, timeouts,
+  worker-undelivered alerts) now carries a typed `kind: "orchestration"`
+  (`messages.kind`; rows older than the column resolve it from their `orch-…` /
+  `delivery-summary:…` id). Hiding folds each run of consecutive ones behind one
+  expandable marker, persisted like « hide notes » (`kronn:showOrchestrationMessages`).
+  A question card, a campaign gate waiting on a human, a message with an open
+  action and a search hit are never folded. Display only: agents and the
+  bridge/MCP read paths still get every message. Orchestration messages no
+  longer raise the unread badge. See `docs/architecture/orchestration-message-kind.md`.
 - Decision models are recognised (KT-1366). Kronn reads what Ollama's
   `/api/show` says each local model can do, so a decision model such as
   `clef-flash:9b` (which answers typed questions and cannot chat) is no longer
@@ -40,6 +71,32 @@ Release notes for 0.9.3 and earlier are available in the
   section built from the whole source tree ends `unchanged`, with no agent, while
   that tree is the one its baseline recorded; the glossary joins them (its
   baseline now records the tree). An `unchanged` partial step is stored as done.
+- The audit checks what its documents claim against the repository (KT-1387,
+  KT-1388, KT-1370, KT-1389; v1/v2 A/B KT-1358). A `make` target or a
+  `npm`/`yarn`/`pnpm`/`composer` script a document cites that no Makefile or
+  manifest defines is sent back to the step that wrote it; the commit
+  conventions are written from the observed history (`git log` pattern,
+  prefixes, language) and detected tooling, and called enforced only when a
+  GitHub Actions step under an established `bash`/`sh` shell or a dedicated
+  commit-message action runs the checker (a local hook, another CI system, a
+  Windows or matrix runner is « configured »); an unfilled commits template
+  fails its step. Stack facts read from lockfiles and runtime files are given
+  to the prompts, versions that contradict each other across documents are
+  flagged, and a debt is not declared resolved without proof in the code. A
+  citation marker no attempt could repair is demoted, after the last attempt,
+  to a flagged backticked path. All of these are advice measured on 754 real
+  audit documents (no false positive) and never fail a run: the partial
+  refresh feeds them back per attempt like the Full audit, they are recorded
+  as each step ends and survive a resume, and the audit timeline lists them
+  next to the unverified references. Repository files are read through the
+  project-rooted reader only, and a secret file is never cited by line.
+- Arbitration cards are never lost (KT-1401). A `kronn-question` whose label,
+  question or context is too long is recorded with the text shortened at a word
+  (the full text kept in its description or context); a card still invalid is
+  shown as such with its reason and returned to its author in the
+  `disc_append` result (`invalid_cards`). Answering the last pending card of a
+  workflow step that has ended wakes the room's agent once with every answer;
+  an earlier card says its answer will reach that agent.
 - One guide for building automations, read the same way by every agent
   (KT-1341). The built-in workflow architect is served section by section
   through `tool_manual({tool: "workflow-architect", section})` to CLI agents
@@ -682,6 +739,15 @@ Release notes for 0.9.3 and earlier are available in the
   - the run's refusal names the Quick Exec and where to approve it.
   An agent still cannot approve: the server refuses it.
 
+- LiteLLM image generation works (KT-1214). Kronn sent images to
+  `/v1/images`, a route a LiteLLM proxy does not have, and reported the 404 as
+  "image response carries no b64_json payload"; it now uses
+  `/v1/images/generations` with the OpenAI body (checked with
+  `vertex_ai/gemini-3-pro-image`). A provider `usage` that states tokens but
+  no price no longer records a 0 $ cost. A failed generation's bubble names
+  the model that ran and offers « Relancer… », which opens the Assets
+  Creator with the same prompt and kind. Opening a media room from the New
+  discussion entry no longer stores an empty first message.
 - A comment on an arbitration card whose workflow step has ended is answered
   by the room's own agent instead of nobody. It used to go to the step's
   closed CLI session and wake no one ("personne ne lira cette réponse

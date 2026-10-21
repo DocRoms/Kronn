@@ -1571,6 +1571,12 @@ pub struct TaskExecutionDetail {
     pub worker_sessions: Vec<TaskExecutionWorkerSession>,
     pub validation_runs: Vec<TaskExecutionValidationRun>,
     pub recovery: Option<TaskExecutionRecovery>,
+    /// KT-1402 — why the worker's latest `task_exec_deliver` was refused, while
+    /// it has not worked since: the cause an escalation otherwise hides in the
+    /// worker's sub-discussion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_delivery_refusal: Option<String>,
     pub usage: TaskExecutionUsage,
     pub progress: TaskExecutionProgress,
 }

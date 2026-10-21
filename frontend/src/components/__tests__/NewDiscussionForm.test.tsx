@@ -126,6 +126,35 @@ beforeEach(() => {
 });
 
 describe('NewDiscussionForm — creation flow layout', () => {
+  // KT-1381 — the local ComfyUI alone is enough to offer media, and it is
+  // never offered as an agent.
+  it('offers media mode when the local ComfyUI is the only media source', () => {
+    const local = {
+      id: 'local:comfyui', display_name: 'ComfyUI (local)', mention_alias: 'comfyui',
+      endpoint: 'http://127.0.0.1:8188', credential_slug: '', origin_preset: 'other',
+      has_credential: false, economy_model: null, default_model: null, reasoning_model: null,
+      image_model: 'RealVisXL_V5.0_fp16.safetensors', video_model: null,
+      created_at: '2026-10-19T10:00:00Z', updated_at: '2026-10-19T10:00:00Z',
+    } as unknown as NonNullable<Parameters<typeof NewDiscussionForm>[0]['externalConnections']>[number];
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        externalConnections={[]}
+        mediaConnections={[local]}
+        onSubmit={vi.fn()}
+        onCreateMediaDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    expect(screen.getByTestId('new-disc-media-mode')).toBeInTheDocument();
+    expect(screen.queryByText('ComfyUI (local)')).toBeNull();
+  });
+
   it('only offers media mode for configured image or video slots, and cancel creates no room', async () => {
     const onCreateMediaDiscussion = vi.fn().mockResolvedValue('d-media');
     const onClose = vi.fn();

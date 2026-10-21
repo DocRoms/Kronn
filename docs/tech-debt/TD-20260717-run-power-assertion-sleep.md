@@ -37,8 +37,8 @@
   [src: file: backend/src/core/power_guard.rs:148-181#PowerLease]
   [src: file: backend/src/api/audit/full.rs:35-96#AuditDropGuard]
   [src: file: backend/src/workflows/runner.rs:1197-1204#_power_lease]
-  [src: file: backend/src/api/discussions/runtime.rs:498-498#power_lease]
-  [src: file: backend/src/api/discussions/runtime.rs:541-542#power_lease]
+  [src: file: backend/src/api/discussions/runtime.rs:506#power_lease]
+  [src: file: backend/src/api/discussions/runtime.rs:549-550#power_lease]
 - **Residual fix** (macOS : livré, voir *Shipped scope* ; reste Linux/Windows) :
   poser une power assertion pendant tout run actif, la
   relâcher à la fin (et à l'abort) :

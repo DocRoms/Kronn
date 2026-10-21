@@ -519,6 +519,7 @@ pub async fn create(
         session_tokens_at_message: None,
         author_cli_ordinal: None,
         session_continuity: None,
+        kind: Default::default(),
         model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),
@@ -553,6 +554,13 @@ pub async fn create(
         }
     }
 
+    // A human-only room opened with nothing to say (the media entry) starts
+    // empty: an empty User message would show as a blank turn (KT-1214).
+    let initial_messages = if req.no_agent && initial_message.content.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![initial_message.clone()]
+    };
     let discussion = Discussion {
         awaiting_agent: false,
         agent_running: false,
@@ -566,9 +574,9 @@ pub async fn create(
         connection_id: req.connection_id.clone(),
         language,
         participants: initial_participants,
-        messages: vec![initial_message.clone()],
-        message_count: 1,
-        non_system_message_count: 1,
+        message_count: initial_messages.len() as u32,
+        non_system_message_count: initial_messages.len() as u32,
+        messages: initial_messages,
         skill_ids: req.skill_ids,
         profile_ids: req.profile_ids,
         directive_ids: req.directive_ids,
@@ -629,7 +637,9 @@ pub async fn create(
                     &launch_model_tiers,
                 )?;
             }
-            crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
+            if !disc.messages.is_empty() {
+                crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
+            }
             // The card has a foreign key to the discussion through the messages
             // table. Insert the durable owner first, then add the immutable,
             // value-free context record in the same transaction.
@@ -641,7 +651,7 @@ pub async fn create(
                     &disc.id,
                 )?;
             }
-            if !initial_targets.is_empty() {
+            if !initial_targets.is_empty() && !disc.messages.is_empty() {
                 crate::db::discussions::replace_message_targets(conn, &msg.id, &initial_targets)?;
             }
             if let Some((qp, Some(version))) = &launch_qp {
@@ -1586,6 +1596,7 @@ mod tests {
             session_tokens_at_message: None,
             author_cli_ordinal: None,
             session_continuity: None,
+            kind: Default::default(),
             model: None,
             lint_report: None,
             id: id.into(),

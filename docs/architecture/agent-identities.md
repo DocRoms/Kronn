@@ -54,7 +54,7 @@ autocomplete must always show which one is being picked (KT-211).
   Claude CLI unless Claude is the room's own agent. That CLI gets the
   wake and no punctual agent is spawned; with two candidate CLIs and no
   reply context nothing is guessed.
-  [src: file: backend/src/db/discussions.rs:4068-4094#agent_alias_cli_target]
+  [src: file: backend/src/db/discussions.rs:4083-4109#agent_alias_cli_target]
   [src: file: backend/src/db/discussions.rs:1967-2010#providers_resolved_to_cli]
   [src: file: backend/src/api/disc_source.rs:678-730#agent_alias_cli_target]
 
@@ -109,7 +109,7 @@ rows too: an untargeted agent turn replying to this session's message is
 do not poll. A punctual agent is also told it is a one-off, not the
 joined CLI of its provider, whose turns its transcript labels with
 the CLI alias.
-[src: file: backend/src/db/discussions.rs:2083-2086#reply_author]
+[src: file: backend/src/db/discussions.rs:2086-2089#reply_author]
 [src: file: backend/src/api/disc_invite.rs:1979-1999#addressed_to_session]
 [src: file: backend/src/api/disc_invite.rs:1708-1718#addressed_to_caller]
 [src: file: backend/scripts/disc-introspection-mcp.py:11113-11123#attention_required]
@@ -163,4 +163,4 @@ identities first (discussion agent, then joined CLIs, then punctual agents
 already in the room), and never present two identities under one
 undifferentiated label. The menu is a disambiguation device, not a shortcut:
 picking an entry always yields exactly the identity it names.
-[src: file: frontend/src/components/ChatInput.tsx:696-727#MENTION_OPTIONS] [src: file: frontend/src/lib/messageTargets.ts:107-121#displayTrigger]
+[src: file: frontend/src/components/ChatInput.tsx:703-734#MENTION_OPTIONS] [src: file: frontend/src/lib/messageTargets.ts:107-121#displayTrigger]

@@ -205,7 +205,7 @@ previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
 stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2029-2033#sync_runtime_config]
 [src: file: backend/src/db/external_api_connections.rs:21-46#sync_runtime_config]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1791-1796#onModelTiersChanged]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1796-1801#onModelTiersChanged]
 
 After upgrading, verify both migrated cards, run their connection tests and
 confirm the intended models for all three tiers before using them.
@@ -249,11 +249,11 @@ the runtime-resolution guide.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:12829-12835#task_worker_catalogue]
+  [src: file: backend/src/api/orchestration.rs:13252-13258#task_worker_catalogue]
   [src: file: backend/scripts/disc-introspection-mcp.py:6105-6120#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:144-162#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]
-  [src: file: backend/src/api/media.rs:385-414#usable_connections]
+  [src: file: backend/src/api/media.rs:404-433#usable_connections]
 - **Wrong model after an endpoint edit:** test again before selecting tiers;
   model choices are tied to the exact tested endpoint and credential state.
   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:650-656#changeConnection]
