@@ -638,6 +638,11 @@ pub async fn validate_audit(
             crate::core::audit_documents::verify(&project_path, documents.as_deref())?;
         }
         crate::core::citation_drift::record_all(&project_path)?;
+        // The docs nothing anchors are vouched for too (KT-1319); a failed
+        // stamp only queues them for a re-read, it never refuses the validation.
+        if let Err(e) = super::revalidate::stamp_validated_rereads(&project_path) {
+            tracing::warn!("Validation re-read stamps not recorded: {e}");
+        }
         // A failed record never refuses the validation: the docs simply read
         // as not yet human-validated.
         if let Err(e) = crate::core::doc_provenance::record_all(

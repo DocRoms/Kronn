@@ -65,8 +65,8 @@ impl RunProvenance {
     }
 }
 
-/// Scheme, host case, fragment and trailing `/` removed: two spellings of one
-/// page compare equal.
+/// Scheme, host case, a leading `www.`, fragment and trailing `/` removed: two
+/// spellings of one page compare equal.
 pub fn normalize_url(url: &str) -> String {
     let url = url.trim().split('#').next().unwrap_or("");
     let lower = url.to_ascii_lowercase();
@@ -77,24 +77,112 @@ pub fn normalize_url(url: &str) -> String {
     let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
     let path = path.trim_end_matches('/');
     let host = host.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
     if path.is_empty() {
-        host
+        host.to_owned()
     } else {
         format!("{host}/{path}")
     }
 }
 
-/// Whether a tool, by the name its runtime reports, fetches a page by URL:
-/// Claude's `WebFetch`, Kronn's `web_fetch`, an MCP `…fetch…` tool.
-fn is_fetch_tool(name: &str) -> bool {
-    name.to_ascii_lowercase().contains("fetch")
+/// Whether a tool, by the name its runtime reports, opens a page by the `url`
+/// it is given: Claude's `WebFetch`, Kronn's `web_fetch`, an MCP fetch tool, a
+/// browser's `browser_navigate` / `navigate_page` / `new_page`.
+fn opens_url(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "fetch", "navigate", "new_page", "browse", "goto", "scrape", "crawl",
+    ]
+    .iter()
+    .any(|word| name.contains(word))
+}
+
+/// Whether a tool is a documentation lookup whose RESULT names the pages it
+/// read (Context7): the agent then cites a URL it was handed, not one it sent.
+fn returns_urls(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("context7")
+}
+
+/// A sub-agent runs its own tools; whether their calls surface in the parent's
+/// stream is not something Kronn can rely on.
+fn is_subagent(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "task" | "agent")
+}
+
+/// Whether a shell command downloads a page.
+fn downloads(command: &str) -> bool {
+    command.contains("curl") || command.contains("wget")
+}
+
+fn url_pattern() -> &'static regex_lite::Regex {
+    static PATTERN: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    PATTERN.get_or_init(|| {
+        regex_lite::Regex::new(r#"https?://[^\s"'<>\\`)\]}|;]+"#).expect("url pattern compiles")
+    })
+}
+
+/// Every normalized `http(s)` URL written in `text`.
+fn urls_in(text: &str) -> Vec<String> {
+    url_pattern()
+        .find_iter(text)
+        .map(|m| normalize_url(m.as_str().trim_end_matches(['.', ',', ':'])))
+        .filter(|u| !u.is_empty())
+        .collect()
+}
+
+/// The text of a tool result: a string, or the `text` blocks of an array.
+fn result_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// The pages one tool call reads, from the input it was given: the `url` of a
+/// fetch or a browser navigation, the URLs of a `curl` / `wget` command.
+fn call_urls(name: &str, input: &str) -> Vec<String> {
+    let json = serde_json::from_str::<serde_json::Value>(input).ok();
+    let mut urls = Vec::new();
+    if opens_url(name) {
+        let url = json
+            .as_ref()
+            .and_then(|json| json.get("url").and_then(|u| u.as_str()).map(str::to_owned))
+            // The excerpt is bounded: a cut input may still hold its url.
+            .or_else(|| {
+                let tail = input.split("\"url\":\"").nth(1)?;
+                Some(tail.split('"').next()?.to_owned())
+            });
+        urls.extend(url.map(|u| normalize_url(&u)).filter(|u| !u.is_empty()));
+    }
+    let command = match &json {
+        Some(json) => json.get("command").map(|command| match command {
+            serde_json::Value::Array(parts) => parts
+                .iter()
+                .filter_map(|part| part.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            other => other.as_str().unwrap_or_default().to_owned(),
+        }),
+        None => input.contains("\"command\"").then(|| input.to_owned()),
+    };
+    if let Some(command) = command.filter(|c| downloads(c)) {
+        urls.extend(urls_in(&command));
+    }
+    urls
 }
 
 /// The URLs fetched by a CLI agent that streams its tool calls
 /// (Claude stream-json): a call starts, its input arrives in fragments, it ends.
 #[derive(Debug, Clone)]
 pub struct FetchTracker {
-    input: Option<String>,
+    open: Option<(String, String)>,
+    /// Ids of the documentation calls whose result is read for URLs.
+    docs_calls: BTreeSet<String>,
     urls: BTreeSet<String>,
     observable: bool,
 }
@@ -102,7 +190,8 @@ pub struct FetchTracker {
 impl Default for FetchTracker {
     fn default() -> Self {
         Self {
-            input: None,
+            open: None,
+            docs_calls: BTreeSet::new(),
             urls: BTreeSet::new(),
             observable: true,
         }
@@ -111,11 +200,11 @@ impl Default for FetchTracker {
 
 impl FetchTracker {
     pub fn tool_started(&mut self, name: &str) {
-        self.input = is_fetch_tool(name).then(String::new);
+        self.open = Some((name.to_owned(), String::new()));
     }
 
     pub fn tool_input(&mut self, fragment: &str) {
-        if let Some(input) = self.input.as_mut() {
+        if let Some((_, input)) = self.open.as_mut() {
             if input.len() + fragment.len() <= MAX_TOOL_INPUT_BYTES {
                 input.push_str(fragment);
             }
@@ -123,33 +212,75 @@ impl FetchTracker {
     }
 
     pub fn tool_ended(&mut self) {
-        let Some(input) = self.input.take() else {
+        if let Some((name, input)) = self.open.take() {
+            self.record(&name, &input);
+        }
+    }
+
+    fn record(&mut self, name: &str, input: &str) {
+        if is_subagent(name) {
+            self.observable = false;
+        }
+        self.urls.extend(call_urls(name, input));
+    }
+
+    /// One raw stream-json line: the complete tool calls of an `assistant`
+    /// message, and the result a documentation tool (Context7) sent back to the
+    /// agent, whose pages are the ones the agent read.
+    pub fn ingest_line(&mut self, line: &str) {
+        if !line.contains("\"tool_use\"") && !line.contains("\"tool_result\"") {
+            return;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             return;
         };
-        let url = serde_json::from_str::<serde_json::Value>(&input)
-            .ok()
-            .and_then(|json| json.get("url").and_then(|u| u.as_str()).map(normalize_url));
-        self.urls.extend(url.filter(|u| !u.is_empty()));
+        let Some(blocks) = json.pointer("/message/content").and_then(|c| c.as_array()) else {
+            return;
+        };
+        for block in blocks {
+            match block.get("type").and_then(|t| t.as_str()) {
+                Some("tool_use") => {
+                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let input = block
+                        .get("input")
+                        .map(|i| i.to_string())
+                        .unwrap_or_default();
+                    self.record(name, &input);
+                    if let (true, Some(id)) = (
+                        returns_urls(name),
+                        block.get("id").and_then(|id| id.as_str()),
+                    ) {
+                        self.docs_calls.insert(id.to_owned());
+                    }
+                }
+                Some("tool_result") => {
+                    let held = block
+                        .get("tool_use_id")
+                        .and_then(|id| id.as_str())
+                        .is_some_and(|id| self.docs_calls.contains(id));
+                    if held {
+                        let text = block.get("content").map(result_text).unwrap_or_default();
+                        self.urls.extend(urls_in(&text));
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// The fetches an ACP-hosted agent (Claude and Codex through their adapters,
     /// the native ACP agents) reported in the tool traces its process captured.
+    /// A trace never carries a tool's output, so the pages a documentation tool
+    /// returned stay unknown: such a run's `url:` citations are left unchecked.
     pub fn ingest_traces(&mut self, captured: &[String]) {
         for trace in crate::agents::tool_trace::collect(captured) {
-            if !trace.name.as_deref().is_some_and(is_fetch_tool) {
+            let Some(name) = trace.name.as_deref() else {
                 continue;
+            };
+            if returns_urls(name) {
+                self.observable = false;
             }
-            let input = trace.input.unwrap_or_default();
-            let url = serde_json::from_str::<serde_json::Value>(&input)
-                .ok()
-                .and_then(|json| json.get("url").and_then(|u| u.as_str()).map(str::to_owned))
-                // The excerpt is bounded: a cut input may still hold its url.
-                .or_else(|| {
-                    let tail = input.split("\"url\":\"").nth(1)?;
-                    Some(tail.split('"').next()?.to_owned())
-                });
-            self.urls
-                .extend(url.map(|u| normalize_url(&u)).filter(|u| !u.is_empty()));
+            self.record(name, &trace.input.unwrap_or_default());
         }
     }
 
@@ -183,6 +314,7 @@ mod tests {
                     latest: "2.0.0".into(),
                     major: true,
                     declared_only: false,
+                    lockfile: None,
                 })
                 .collect(),
             unchecked: vec![],
@@ -319,5 +451,200 @@ mod tests {
         );
         assert_eq!(url_reference("file: src/a.rs:1"), None);
         assert_eq!(normalize_url("HTTPS://A.dev/x/#top"), "a.dev/x");
+    }
+
+    fn cites(url: &str) -> String {
+        format!("Node 22 [src: url: {url}] (read 2026-10-16)")
+    }
+
+    fn run_of(tracker: &FetchTracker) -> RunProvenance {
+        RunProvenance::of(&Some(watch()), tracker)
+    }
+
+    fn assistant_call(id: &str, name: &str, input: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{input}}}]}}}}"#
+        )
+    }
+
+    fn user_result(id: &str, content: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}","content":{content}}}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_page_a_context7_result_names_is_a_page_the_run_read() {
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_line(&assistant_call(
+            "t1",
+            "mcp__context7__query-docs",
+            r#"{"libraryId":"/vercel/next.js","query":"app router"}"#,
+        ));
+        tracker.ingest_line(&user_result(
+            "t1",
+            r#"[{"type":"text","text":"Routing\nSource: https://nextjs.org/docs/app/building-your-application/routing\nSee [x](https://react.dev/reference/react)."}]"#,
+        ));
+        let run = run_of(&tracker);
+        assert!(run
+            .problems(&cites(
+                "https://nextjs.org/docs/app/building-your-application/routing"
+            ))
+            .is_empty());
+        assert!(run
+            .problems(&cites("https://react.dev/reference/react"))
+            .is_empty());
+        // A page the result did not name is still invented.
+        assert_eq!(run.problems(&cites("https://nodejs.org/en")).len(), 1);
+    }
+
+    #[test]
+    fn only_a_documentation_tool_result_is_read_for_urls() {
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_line(&assistant_call("r1", "Read", r#"{"file_path":"/a.md"}"#));
+        tracker.ingest_line(&user_result("r1", r#""see https://seen-in-a-file.dev/a""#));
+        assert_eq!(
+            run_of(&tracker)
+                .problems(&cites("https://seen-in-a-file.dev/a"))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_browser_navigation_is_a_fetch() {
+        let mut tracker = FetchTracker::default();
+        tracker.tool_started("mcp__Playwright__browser_navigate");
+        tracker.tool_input(r#"{"url":"https://nodejs.org/en/about/previous-releases"}"#);
+        tracker.tool_ended();
+        tracker.ingest_line(&assistant_call(
+            "d1",
+            "mcp__Chrome DevTools__navigate_page",
+            r#"{"type":"url","url":"https://vitest.dev/guide/"}"#,
+        ));
+        let run = run_of(&tracker);
+        assert!(run
+            .problems(&cites("https://nodejs.org/en/about/previous-releases"))
+            .is_empty());
+        assert!(run.problems(&cites("https://vitest.dev/guide")).is_empty());
+    }
+
+    #[test]
+    fn a_curl_or_wget_command_is_a_fetch() {
+        let mut tracker = FetchTracker::default();
+        tracker.tool_started("Bash");
+        tracker.tool_input(r#"{"command":"curl -sL 'https://nodejs.org/dist/index.json' | head"}"#);
+        tracker.tool_ended();
+        tracker.ingest_line(&assistant_call(
+            "b1",
+            "Bash",
+            r#"{"command":"wget -qO- https://registry.npmjs.org/jest/latest"}"#,
+        ));
+        // Codex reports the command as an array.
+        tracker.record(
+            "command_execution",
+            r#"{"command":["curl","https://endoflife.date/api/node.json"]}"#,
+        );
+        // A command that downloads nothing names no page it read.
+        tracker.ingest_line(&assistant_call(
+            "b2",
+            "Bash",
+            r#"{"command":"echo https://example.com/not-fetched"}"#,
+        ));
+        let run = run_of(&tracker);
+        for url in [
+            "https://nodejs.org/dist/index.json",
+            "https://registry.npmjs.org/jest/latest",
+            "https://endoflife.date/api/node.json",
+        ] {
+            assert!(run.problems(&cites(url)).is_empty(), "{url}");
+        }
+        assert_eq!(
+            run.problems(&cites("https://example.com/not-fetched"))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_leading_www_does_not_make_another_page() {
+        assert_eq!(normalize_url("https://www.Nodejs.org/en/"), "nodejs.org/en");
+        let mut tracker = FetchTracker::default();
+        tracker.tool_started("WebFetch");
+        tracker.tool_input(r#"{"url":"https://www.typescriptlang.org/docs"}"#);
+        tracker.tool_ended();
+        let run = run_of(&tracker);
+        assert!(run
+            .problems(&cites("https://typescriptlang.org/docs"))
+            .is_empty());
+        assert!(run
+            .problems(&cites("https://www.typescriptlang.org/docs/"))
+            .is_empty());
+    }
+
+    #[test]
+    fn a_sub_agent_leaves_the_url_citations_unchecked() {
+        for name in ["Task", "Agent"] {
+            let mut tracker = FetchTracker::default();
+            tracker.ingest_line(&assistant_call(
+                "s1",
+                name,
+                r#"{"description":"look up the LTS","prompt":"fetch it"}"#,
+            ));
+            assert!(
+                run_of(&tracker)
+                    .problems(&cites("https://nodejs.org/en"))
+                    .is_empty(),
+                "{name}"
+            );
+            // The dependency watch is still the run's own.
+            assert_eq!(
+                run_of(&tracker)
+                    .problems("Jest [src: deps: JS / TS/jest@2026-10-16]")
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn an_acp_run_reads_browsers_and_commands_and_cannot_see_a_docs_result() {
+        let trace = |id: &str, name: &str, input: &str| {
+            crate::agents::tool_trace::ToolTraceUpdate {
+                id: id.into(),
+                name: Some(name.into()),
+                input: Some(input.into()),
+                status: Some("in_progress".into()),
+            }
+            .marker()
+        };
+        let mut tracker = FetchTracker::default();
+        tracker.ingest_traces(&[
+            trace(
+                "a",
+                "mcp__playwright__browser_navigate",
+                r#"{"url":"https://vitest.dev/guide"}"#,
+            ),
+            trace(
+                "b",
+                "command_execution",
+                r#"{"command":"curl -s https://nodejs.org/dist/index.json"}"#,
+            ),
+        ]);
+        let run = run_of(&tracker);
+        assert!(run.problems(&cites("https://vitest.dev/guide")).is_empty());
+        assert!(run
+            .problems(&cites("https://nodejs.org/dist/index.json"))
+            .is_empty());
+        assert_eq!(run.problems(&cites("https://jestjs.io")).len(), 1);
+
+        tracker.ingest_traces(&[trace(
+            "c",
+            "mcp__context7__query-docs",
+            r#"{"query":"jest"}"#,
+        )]);
+        assert!(run_of(&tracker)
+            .problems(&cites("https://jestjs.io"))
+            .is_empty());
     }
 }

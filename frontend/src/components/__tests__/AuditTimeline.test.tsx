@@ -42,14 +42,14 @@ function mockTimeline(runs: RunStub[], steps: unknown[], recorded: unknown[] = [
 
 function props(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
   return {
-    projectId: 'p1', auditStatus: 'TemplateInstalled', techDebtCount: 0,
+    projectId: 'p1', auditStatus: 'TemplateInstalled',
     agents: [agent('ClaudeCode', 'Claude Code'), agent('LiteLlm', 'LiteLLM'), agent('Ollama', 'Ollama')],
     selectedAgent: 'ClaudeCode', selectedTier: 'reasoning', modelTiers: null, selectedConnectionId: null, onSelect: vi.fn(),
     briefingDone: true, onBriefingSaved: vi.fn(), auditActive: false, liveStep: 0, liveTotal: 0,
     liveFile: '', liveElapsed: null, liveTool: null, liveStartedAt: null, liveToolCalls: null, liveStepTokens: null,
     liveTotalTokens: null, onResumeBriefingDiscussion: null, onCancel: vi.fn(), resumable: null,
     onLaunch: vi.fn(), validationInProgress: false,
-    onMarkValid: vi.fn().mockResolvedValue(undefined), onOpenValidation: vi.fn(), onViewTechDebts: vi.fn(),
+    onMarkValid: vi.fn().mockResolvedValue(undefined), onOpenValidation: vi.fn(), techDebtEntry: null,
     refreshTrigger: 0, toast: vi.fn(), ...over,
   };
 }
@@ -650,5 +650,15 @@ describe('AuditTimeline', () => {
     rerender(running({ liveStep: 3, liveFile: 'docs/step-3.md', liveElapsed: '0:07' }));
     await waitFor(() => expect(region.textContent).toMatch(/3.*16.*docs\/step-3\.md/));
     expect(screen.getByTestId('audit-timeline-step-announce')).toBe(region);
+  });
+
+  it('renders the tech-debt entry in step 4 only once the project is validated (KT-1335)', async () => {
+    mockTimeline([{ id: 'run-1', status: 'Completed' }], [step(1)]);
+    const entry = <div data-testid="td-entry-slot" />;
+    const { rerender } = wrap(<AuditTimeline {...props({ auditStatus: 'Audited', techDebtEntry: entry })} />);
+    await screen.findByTestId('audit-timeline-launch');
+    expect(screen.queryByTestId('td-entry-slot')).toBeNull();
+    rerender(<I18nProvider><AuditTimeline {...props({ auditStatus: 'Validated', techDebtEntry: entry })} /></I18nProvider>);
+    expect(await screen.findByTestId('td-entry-slot')).toBeInTheDocument();
   });
 });

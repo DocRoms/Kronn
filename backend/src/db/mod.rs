@@ -25,6 +25,7 @@ pub mod discussion_important;
 pub(crate) mod discussion_launch_settings;
 pub mod discussion_monitor;
 pub mod discussion_questions;
+pub mod discussion_scope;
 pub mod discussion_sessions;
 pub mod discussion_video_sequences;
 pub mod discussion_weight;

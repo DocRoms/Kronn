@@ -779,7 +779,7 @@ where
 
 fn failure_reason(error: &str) -> String {
     let first = error.lines().next().unwrap_or("").trim();
-    let short: String = first.chars().take(160).collect();
+    let short = crate::core::anti_halluc::truncate_outside_markers(first, 160, false);
     format!("check failed ({short})")
 }
 

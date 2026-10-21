@@ -31,6 +31,7 @@ async fn watch_dependencies(state: &AppState) {
         latest: "30.0.0".into(),
         major: true,
         declared_only: false,
+        lockfile: None,
     };
     let summary = crate::models::DependencyUpdateSummary {
         managers: vec![crate::models::DependencyManagerUpdate {
@@ -39,6 +40,7 @@ async fn watch_dependencies(state: &AppState) {
             status: crate::models::DependencyCheckStatus::UpdatesAvailable,
             outdated: 2,
             major: 2,
+            reason: None,
             packages: vec![package("joi"), package("jest")],
         }],
         total_outdated: 2,

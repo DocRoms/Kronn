@@ -218,6 +218,11 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "room_scope",
+        "description": "Room's project reach; `project` asks a human for one. See tool_manual.",
+        "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "access": {"enum": ["read", "write"]}, "reason": {"type": "string"}}},
+    },
+    {
         "name": "disc_question_list",
         "description": "Read pending human arbitrations (latest 50), or the durable answer for an exact key. Never answers for the human. A kronn-question requires numeric version 1, not string \"1\". After publication, read back its exact key to verify recording; absence is not consent. Complete valid example and recovery protocol: tool_manual({tool: \"disc_question_list\"}).",
         "inputSchema": {"type": "object", "properties": {"key": {"type": "string", "maxLength": 100}}, "additionalProperties": False},
@@ -441,10 +446,7 @@ TOOLS = [
             "discussion unless `discussion_id` targets another, which works "
             "even with no bound discussion or `rejoin_required`. Call "
             "`plan_get` again immediately before, so a peer's recent write is "
-            "visible, and write directly only on unambiguous intent. Pass "
-            "`idempotency_key` for a stable retry identity; omitted, "
-            "`source_message_id` derives one, so several tasks from one "
-            "message need distinct explicit keys. Titles are never identities."
+            "visible, and write directly only on unambiguous intent."
         ),
         "inputSchema": {
             "type": "object",
@@ -456,7 +458,7 @@ TOOLS = [
                 },
                 "idempotency_key": {
                     "type": "string",
-                    "description": "Stable caller key for this one logical create; scoped to the effective target discussion by the bridge.",
+                    "description": "Stable key for this one logical create, scoped to the target discussion; see tool_manual.",
                 },
                 "description": {"type": "string"},
                 "status": {
@@ -1424,13 +1426,25 @@ TOOLS = [
     {
         "name": "workflow_active_runs",
         "description": (
-            "Unfinished runs (Running, WaitingApproval, Pending) across all "
-            "workflows, the latest per workflow: [{workflow_id, workflow_name, "
-            "project_id, run_id, status, started_at}]. Check it before acting so "
-            "you never step on another agent's run; drill down with "
-            "`workflow_run_status`."
+            "Unfinished runs (Running, WaitingApproval, Pending), latest per "
+            "workflow: [{workflow_id, workflow_name, project_id, run_id, status, "
+            "started_at}]. Check before acting; drill down: `workflow_run_status`."
         ),
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "disk_usage",
+        "description": (
+            "Free disk and Kronn's own artefacts by kind/task. `purge_orphans` "
+            "removes only finished, idle, worktree-less lanes: tool_manual."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "purge_orphans": {"type": "boolean"},
+            },
+        },
     },
     {
         "name": "workflow_runs",
@@ -1452,11 +1466,9 @@ TOOLS = [
     {
         "name": "workflow_run_get",
         "description": (
-            "Full detail of ONE run, incl per-step results (step_name · status · "
-            "duration_ms · tokens · kind · agent · truncated output) — for "
-            "debriefing a failed/finished run: which step failed and why. For an "
-            "agent step's full produced content, read the run's discussions via "
-            "`workflow_run_discussions`."
+            "Full detail of ONE run, incl per-step results (step_name, status, "
+            "duration_ms, tokens, kind, agent, truncated output) to debrief a "
+            "failed/finished run. Full agent output: `workflow_run_discussions`."
         ),
         "inputSchema": {
             "type": "object",
@@ -1470,11 +1482,9 @@ TOOLS = [
     {
         "name": "workflow_cancel_run",
         "description": (
-            "Cancel a RUNNING run (MCP equivalent of the UI 'Arrêter'). "
-            "DESTRUCTIVE — stops the run + its in-flight agents; completed "
-            "steps/commits are kept. Use to stop a stuck or duplicate run (e.g. "
-            "an overlapping cron tick). Confirm with the user before cancelling a "
-            "run you didn't start."
+            "Cancel a RUNNING run. DESTRUCTIVE: stops the run and its in-flight "
+            "agents; completed steps/commits are kept. Confirm with the user "
+            "before cancelling a run you didn't start."
         ),
         "inputSchema": {
             "type": "object",
@@ -2187,10 +2197,8 @@ TOOLS = [
         "description": (
             "Save a Quick API for later `qa_run` calls. "
             "Discover `api_plugin_slug`/`api_config_id` with `mcp_list`; the "
-            "endpoint remains allow-listed and Kronn owns credentials. String "
-            "leaves may use declared `{{var_name}}` values or the generic "
-            "run-anchored `{{time.now|...}}` grammar documented by "
-            "`workflow_step_schema`. Call "
+            "endpoint remains allow-listed and Kronn owns credentials. Strings take "
+            "declared `{{var_name}}` values. Call "
             "`tool_manual({tool: \"qa_create_draft\"})` first for the required "
             "probe/extract method and variable contract; iterate with `qa_update`."
         ),
@@ -4569,6 +4577,27 @@ def _attach_files_to_appended_message(disc_id, message_id, paths, duplicate):
 
 
 # ─── Tool dispatch ─────────────────────────────────────────────────────────
+
+def call_room_scope(args):
+    """KT-1270 — the room's reach, or a request a human decides in the room."""
+    _reject_unknown_args("room_scope", args)
+    disc_id = _disc_id()
+    project = args.get("project")
+    if project is None:
+        return _unwrap(_http("GET", f"/api/discussions/{disc_id}/scope"))
+    access = args.get("access") or "read"
+    reason = args.get("reason")
+    if not isinstance(project, str) or not project.strip():
+        raise RuntimeError("room_scope: project must be a project name or id")
+    if access not in ("read", "write"):
+        raise RuntimeError("room_scope: access must be read or write")
+    if not isinstance(reason, str) or not reason.strip():
+        raise RuntimeError("room_scope: say why the room needs this project (reason)")
+    return _unwrap(_http(
+        "POST", f"/api/discussions/{disc_id}/scope/requests",
+        {"project": project.strip(), "access": access, "reason": reason.strip()},
+    ))
+
 
 def call_disc_question_list(args):
     key = args.get("key")
@@ -7678,6 +7707,37 @@ def call_workflow_active_runs(_args):
     return out
 
 
+def call_disk_usage(args):
+    """KT-1318 - free disk and Kronn's own artefacts, compact; optionally purge
+    the orphans (finished, idle, worktree-less, Kronn-marked lanes only). A named
+    delete is a confirmed UI action, deliberately not offered here."""
+    project_id = args.get("project_id")
+    query = "?project_id=" + urllib.parse.quote(str(project_id)) if project_id else ""
+    limit = 25
+    out = {}
+    if args.get("purge_orphans") is True:
+        body = {"project_id": project_id} if project_id else {}
+        purged = _unwrap(_http("POST", "/api/maintenance/disk/purge", body))
+        out["purged"] = {
+            "freed_bytes": purged.get("freed_bytes"),
+            "removed": [item.get("path") for item in purged.get("items", []) if item.get("purged")],
+            "kept": purged.get("kept"),
+        }
+    report = _unwrap(_http("GET", "/api/maintenance/disk" + query))
+    entries = report.get("entries") or []
+    out.update({
+        "available_bytes": report.get("available_bytes"),
+        "under_pressure": report.get("under_pressure"),
+        "policy": report.get("policy"),
+        "totals": report.get("totals"),
+        "orphan_count": report.get("orphan_count"),
+        "orphan_bytes": report.get("orphan_bytes"),
+        "entries_total": len(entries),
+        "entries": entries[:limit],
+    })
+    return out
+
+
 def _compact_variable_contract(variable):
     """Display-safe PromptVariable metadata shared by QP/QA/QE catalogues.
 
@@ -10458,6 +10518,26 @@ TOOL_MANUALS = {
 
 # Launch deliberately shares the prepare guide: both calls form one typed,
 # preflight-bound contract and duplicating the text would invite drift.
+TOOL_MANUALS["task_create"] = (
+    "Pass `idempotency_key` for a stable retry identity; omitted, `source_message_id` "
+    "derives one, so several tasks from one message need distinct explicit keys. "
+    "Titles are never identities. A task lands in the room's project unless "
+    "`project_ids` names a project the room holds a write grant on (`room_scope`)."
+)
+TOOL_MANUALS["room_scope"] = (
+    "A room has one primary project: its working directory, where what it creates "
+    "lands, and the only project whose API configs and credentials it may use. A human "
+    "may also grant it other projects: read (tasks, rooms, runs, pages) or write "
+    "(planning only: create and edit tasks there, `project_ids` naming it), or every "
+    "project. `room_scope()` returns the grants, the pending requests and the journal. "
+    "When a call is refused as outside the token's project, ask with "
+    "`room_scope({project, access, reason})`: it files a request the human approves, "
+    "narrows or declines in the room, and grants nothing by itself. Do not wait or "
+    "retry: continue with what you can do; the decision and every grant or revoke "
+    "appear in the room as a kronn-scope line, and apply on the next call. A grant never "
+    "opens another project's credentials, never runs its workflows, and never passes "
+    "to worker rooms."
+)
 TOOL_MANUALS["disc_update"] = (
     "**What it changes** — `title` (rename), `pinned`, `archived`. Nothing "
     "else. Every field is optional; at least one must be present.\n\n"
@@ -10489,6 +10569,20 @@ TOOL_MANUALS["workflow_run_status"] = (
 )
 TOOL_MANUALS["workflow_trigger"] = (
     "Discovery first: `workflow_list` gives the `workflow_id`. The workflow must be enabled — a disabled draft is refused with a clear error.\n\n`next_check` has the form `{wait_seconds, reason, confidence}`. The first wait is always at least 30s, a sanity check that the run actually started. `confidence: baseline` means the average duration is reliable; `confidence: no_baseline` means this workflow has never run, so check every 60s.\n\nWhen the workflow declares manual launch variables, pass them as `variables: {name: value, …}`. Required ones must be non-empty — the same validation the UI form applies.\n\n`step_agents` changes the agent of some Agent steps for this run only: `{\"<step id or name>\": {\"agent\": \"Codex\", \"model\": \"…\", \"reasoning_effort\": \"…\"}}`. Omitted model or effort means the agent's default. The workflow is never modified; the step keeps its budget and tools. An unknown step, a non-Agent step, an agent not installed or enabled, or tools/budget the agent cannot apply is refused before the run starts."
+)
+TOOL_MANUALS["disk_usage"] = (
+    "Answers: how much disk is free, and what Kronn itself holds on it. `totals` groups bytes by "
+    "kind (`worktree`, `lane_build_dir`, `cache`); `entries` lists the largest first with their "
+    "owner (`task_ref`, `execution_id`, `status`), `idle_seconds` and a `state`: `orphan` "
+    "(finished, no live worktree, idle past `policy.sweep_idle_hours`: the default purge removes "
+    "it), `reclaimable` (finished but recent, or its clean worktree is kept: only a confirmed "
+    "delete in Settings > Disk takes it), `active` (a live execution claims it: never removed), "
+    "`kept` and `foreign` (not created by Kronn: never touched, whatever its name). Sizes are "
+    "floors when `bytes_are_partial`.\n\n"
+    "`purge_orphans: true` removes the orphans and only them, then returns the fresh report. "
+    "Below `policy.launch_min_free_gib` Kronn already sweeps them before it refuses a worker "
+    "launch or a full audit, and says so in the principal room.\n\n"
+    "`entries` is capped at 25 (largest first); `entries_total` is the full count."
 )
 TOOL_MANUALS["task_exec_launch"] = TOOL_MANUALS["task_exec_prepare"]
 TOOL_MANUALS["task_assign"] = (
@@ -11019,6 +11113,7 @@ DISPATCH = {
     "audit_status": call_audit_status,
     "disc_meta": call_disc_meta,
     "disc_question_list": call_disc_question_list,
+    "room_scope": call_room_scope,
     "disc_get_message": call_disc_get_message,
     "disc_note_list": call_disc_note_list,
     "disc_summarize": call_disc_summarize,
@@ -11079,6 +11174,7 @@ DISPATCH = {
     # new workflow without asking the user to paste them.
     "workflow_list": call_workflow_list,
     "workflow_active_runs": call_workflow_active_runs,
+    "disk_usage": call_disk_usage,
     # 0.8.8 (2026-06-25) — run HISTORY + per-run detail + cancel. The MCP only
     # exposed active runs / latest run; an agent debriefing a cron couldn't
     # enumerate past runs or their foreach children, and couldn't stop a

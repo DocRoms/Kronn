@@ -11,6 +11,9 @@
 //! `make docs-reanchor` repairs moved anchors ([`reanchor_corpus`]).
 
 mod diff_map;
+pub mod merge;
+#[cfg(test)]
+mod merge_tests;
 
 use crate::core::anti_halluc::{
     anchor_miss, anchor_miss_detail, file_citation_anchored, is_binary_file, line_bounds_status,
@@ -32,8 +35,12 @@ pub const CHANGED_ENV: &str = "KRONN_DOCS_CITATIONS_CHANGED";
 pub const REPORT_DIR_ENV: &str = "KRONN_DOCS_CITATIONS_REPORT_DIR";
 /// `all`, or the docs to re-anchor, space-separated: `make docs-reanchor`.
 pub const REANCHOR_ENV: &str = "KRONN_DOCS_REANCHOR";
-/// Git revision whose old line numbers the re-anchor run maps to `HEAD`.
+/// Git revision whose old line numbers the re-anchor run maps to `HEAD`, or
+/// [`REANCHOR_BASE_MERGE`].
 pub const REANCHOR_BASE_ENV: &str = "KRONN_DOCS_REANCHOR_BASE";
+/// The base of a re-anchor run inside an unfinished merge: no revision to name,
+/// both sides of the merge are the evidence (KT-1321).
+pub const REANCHOR_BASE_MERGE: &str = "merge";
 /// A pull request that changes it is a release: every doc is checked.
 const RELEASE_MARKER: &str = "VERSION";
 
@@ -648,21 +655,23 @@ pub(crate) fn default_reanchor_base(root: &Path) -> Result<Option<String>, Strin
     diff_map::default_merge_base(root)
 }
 
+/// Where a moved citation now belongs, if the evidence proves it.
+type SpanFor<'a> = dyn FnMut(&DocCitationFailure) -> Result<Option<(usize, usize)>, String> + 'a;
+
 /// `text` with every safely located moved anchor re-pointed at it.
 fn reanchor_doc(
     doc: &Path,
     text: &str,
     root: &Path,
-    base: Option<&str>,
+    span_for: &mut SpanFor<'_>,
     outcome: &mut ReanchorOutcome,
 ) -> Result<String, String> {
     let mut out = text.to_string();
-    let mut diff = base.map(|base| diff_map::DiffMap::new(root, base));
     for failure in check_doc(text, root) {
         let Some(moved) = &failure.moved else {
             continue;
         };
-        let Some(span) = reanchor_span(&failure, root, &mut diff)? else {
+        let Some(span) = span_for(&failure)? else {
             // Several candidates and no proof from the diff: rewriting would
             // guess which one the claim means.
             outcome.ambiguous.push((
@@ -713,7 +722,9 @@ pub fn reanchor_corpus(
         let path = root.join(doc);
         let text = std::fs::read_to_string(&path)
             .map_err(|error| format!("cannot read {}: {error}", doc.display()))?;
-        let new = reanchor_doc(doc, &text, root, base, &mut outcome)?;
+        let mut diff = base.map(|base| diff_map::DiffMap::new(root, base));
+        let mut span_for = |failure: &DocCitationFailure| reanchor_span(failure, root, &mut diff);
+        let new = reanchor_doc(doc, &text, root, &mut span_for, &mut outcome)?;
         if new != text {
             std::fs::write(&path, new)
                 .map_err(|error| format!("cannot write {}: {error}", doc.display()))?;
@@ -743,8 +754,13 @@ pub fn gate(root: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<GateRun
     let mut notes = String::new();
     if let Some(target) = env(REANCHOR_ENV).as_deref().and_then(ReanchorTarget::parse) {
         let base = env(REANCHOR_BASE_ENV).filter(|base| !base.trim().is_empty());
-        let outcome = reanchor_corpus(root, &target, base.as_deref())
-            .map_err(|e| format!("docs-reanchor: {e}"))?;
+        let outcome = match base.as_deref() {
+            Some(REANCHOR_BASE_MERGE) => {
+                merge::reanchor_merge_in_progress(root).map_err(|e| e.to_string())
+            }
+            base => reanchor_corpus(root, &target, base),
+        }
+        .map_err(|e| format!("docs-reanchor: {e}"))?;
         notes = outcome.report();
         if let ReanchorTarget::Docs(docs) = target {
             scope = Scope::Files(docs);
@@ -795,8 +811,8 @@ mod tests {
             ["file not found: src/gone.rs"]
         );
         assert_eq!(
-            reasons("[src: file: src/a.rs:2-4]", root),
-            ["line 4 beyond file length 3"]
+            reasons("[src: file: src/a.rs:2-5]", root),
+            ["line 5 beyond file length 3"]
         );
         assert_eq!(
             reasons("[src: file: src/a.rs]", root),
@@ -808,7 +824,10 @@ mod tests {
     fn the_last_line_passes_and_the_next_one_fails() {
         let tmp = repo();
         assert!(reasons("[src: file: src/a.rs:3]", tmp.path()).is_empty());
+        // Line 4 is the empty line a Read tool shows after the final newline.
+        assert!(reasons("[src: file: src/a.rs:3-4]", tmp.path()).is_empty());
         assert_eq!(reasons("[src: file: src/a.rs:4]", tmp.path()).len(), 1);
+        assert_eq!(reasons("[src: file: src/a.rs:5]", tmp.path()).len(), 1);
     }
 
     #[test]

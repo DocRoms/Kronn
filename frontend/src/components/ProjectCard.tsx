@@ -21,7 +21,7 @@ import { SourcesBadge } from './SourcesBadge';
 import { RevalidateAudit } from './RevalidateAudit';
 import { DocReconfirm } from './DocReconfirm';
 import { TdTasksButton } from './TdTasksButton';
-import { TechDebtBlock } from './TechDebtBlock';
+import { TechDebtBlock, TechDebtTimelineEntry } from './TechDebtBlock';
 import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
@@ -2677,7 +2677,6 @@ export function ProjectCard({
                   <AuditTimeline
                     projectId={proj.id}
                     auditStatus={proj.audit_status}
-                    techDebtCount={proj.tech_debt_count ?? 0}
                     agents={agents}
                     selectedAgent={selectedAuditAgent}
                     selectedTier={auditTierChoice}
@@ -2767,12 +2766,24 @@ export function ProjectCard({
                       onOpenDiscussion(discussionId);
                       onNavigate('discussions');
                     }}
-                    onViewTechDebts={() => {
-                      if (!isOpen) onToggleOpen();
-                      selectDetailView('docs');
-                      setExpandedTab('docAi');
-                      setDocDeepLink('docs/tech-debt');
-                    }}
+                    techDebtEntry={(
+                      <TechDebtTimelineEntry
+                        project={proj}
+                        auditActive={auditActive}
+                        agents={agents}
+                        modelTiers={modelTiers}
+                        toast={toast}
+                        onOpenDiscussion={onOpenDiscussion}
+                        onNavigate={onNavigate}
+                        onRefetch={onRefetch}
+                        onOpenFile={() => {
+                          if (!isOpen) onToggleOpen();
+                          selectDetailView('docs');
+                          setExpandedTab('docAi');
+                          setDocDeepLink('docs/inconsistencies-tech-debt.md');
+                        }}
+                      />
+                    )}
                     onVerifyDocs={() => setVerifyDocsOpen(true)}
                     docStateCounts={docStateCounts}
                     refreshTrigger={auditCompletedTick}
