@@ -142,6 +142,19 @@ pub trait MediaCodec: Send + Sync {
         reference: Option<&MediaReferenceImage>,
     ) -> Result<Value>;
 
+    fn video_body_with_references(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        references: &[MediaReferenceImage],
+    ) -> Result<Value> {
+        if references.len() > 1 {
+            bail!("this Kronn video adapter accepts only one input frame; multiple visual references are not implemented for this provider");
+        }
+        self.video_body(model, prompt, params, references.first())
+    }
+
     /// Payloads and billed cost of a synchronous image response.
     fn parse_image_response(&self, body: &str) -> Result<MediaImageResponse>;
     fn parse_submit_response(&self, body: &str) -> Result<MediaSubmitAck>;
@@ -697,6 +710,9 @@ pub struct ComfyUiMediaCodec {
     pub settings: crate::core::comfyui::ResolvedGenSettings,
     /// Resolved from ComfyUI before a video is submitted.
     pub video_companions: Option<crate::core::comfyui::WanCompanions>,
+    pub video_family: Option<crate::core::comfyui::ComfyFamily>,
+    pub source_images: Vec<String>,
+    pub denoise: f32,
 }
 
 impl ComfyUiMediaCodec {
@@ -704,9 +720,15 @@ impl ComfyUiMediaCodec {
         json!({ "prompt": workflow, "client_id": "kronn" })
     }
 
-    fn refuse_references(references: usize) -> Result<()> {
-        if references > 0 {
-            bail!("the local ComfyUI workflows do not take source images yet");
+    fn check_references(&self, references: &[MediaReferenceImage]) -> Result<()> {
+        if references.len() != self.source_images.len() {
+            bail!("the source images were not all uploaded to ComfyUI");
+        }
+        if references
+            .iter()
+            .any(|image| image.mode != MediaReferenceMode::Reference)
+        {
+            bail!("this ComfyUI workflow takes visual references, not a first or last frame");
         }
         Ok(())
     }
@@ -717,7 +739,7 @@ impl MediaCodec for ComfyUiMediaCodec {
         true
     }
     fn accepts_reference_images(&self) -> bool {
-        false
+        true
     }
     fn image_is_async(&self) -> bool {
         true
@@ -750,19 +772,23 @@ impl MediaCodec for ComfyUiMediaCodec {
         params: &MediaParams,
         references: &[MediaReferenceImage],
     ) -> Result<Value> {
-        Self::refuse_references(references.len())?;
+        self.check_references(references)?;
         let family = self.image_family.ok_or_else(|| {
             anyhow!(
                 "{model} has no image workflow yet: choose which one runs it in the ComfyUI card"
             )
         })?;
-        let workflow = crate::core::comfyui::image_workflow(
+        let workflow = crate::core::comfyui_references::image_workflow(
             family,
             model,
             prompt,
             params,
             self.seed,
             &self.settings,
+            crate::core::comfyui_references::ImageReferences {
+                images: &self.source_images,
+                denoise: self.denoise,
+            },
         )?;
         Ok(Self::submission(workflow))
     }
@@ -773,19 +799,49 @@ impl MediaCodec for ComfyUiMediaCodec {
         params: &MediaParams,
         reference: Option<&MediaReferenceImage>,
     ) -> Result<Value> {
-        Self::refuse_references(usize::from(reference.is_some()))?;
+        self.video_body_with_references(
+            model,
+            prompt,
+            params,
+            reference.map(std::slice::from_ref).unwrap_or(&[]),
+        )
+    }
+
+    fn video_body_with_references(
+        &self,
+        model: &str,
+        prompt: &str,
+        params: &MediaParams,
+        references: &[MediaReferenceImage],
+    ) -> Result<Value> {
+        self.check_references(references)?;
         let companions = self
             .video_companions
             .as_ref()
             .ok_or_else(|| anyhow!("the Wan text encoder and VAE were not resolved"))?;
-        let workflow = crate::core::comfyui::video_workflow(
-            model,
-            companions,
-            prompt,
-            params,
-            self.seed,
-            &self.settings,
-        )?;
+        let workflow = if self.source_images.is_empty() {
+            crate::core::comfyui::video_workflow(
+                model,
+                companions,
+                prompt,
+                params,
+                self.seed,
+                &self.settings,
+            )?
+        } else {
+            if self.video_family != Some(crate::core::comfyui::ComfyFamily::Wan21Vace) {
+                bail!("Kronn's Wan text-to-video workflow does not take references; select a Wan VACE model");
+            }
+            crate::core::comfyui_references::video_workflow(
+                model,
+                companions,
+                prompt,
+                params,
+                self.seed,
+                &self.settings,
+                &self.source_images,
+            )?
+        };
         Ok(Self::submission(workflow))
     }
     fn parse_image_response(&self, _body: &str) -> Result<MediaImageResponse> {
@@ -953,7 +1009,47 @@ mod tests {
                 text_encoder: "umt5_xxl_fp8_e4m3fn_scaled.safetensors".into(),
                 vae: "wan_2.1_vae.safetensors".into(),
             }),
+            video_family: Some(crate::core::comfyui::ComfyFamily::Wan21T2v),
+            source_images: Vec::new(),
+            denoise: 0.55,
         }
+    }
+
+    #[test]
+    fn three_sources_reach_both_comfy_workflows_and_cannot_be_silently_reduced_by_http_video() {
+        let references: Vec<_> = (0..3)
+            .map(|i| MediaReferenceImage {
+                mode: MediaReferenceMode::Reference,
+                mime_type: "image/png".into(),
+                bytes: vec![i],
+            })
+            .collect();
+        let mut codec = comfy(true);
+        codec.video_family = Some(crate::core::comfyui::ComfyFamily::Wan21Vace);
+        codec.source_images = vec!["a.png".into(), "b.png".into(), "c.png".into()];
+        let image = codec
+            .image_body("flux", "compose", &MediaParams::default(), &references)
+            .unwrap();
+        let video = codec
+            .video_body_with_references("vace", "compose", &MediaParams::default(), &references)
+            .unwrap();
+        for (i, name) in codec.source_images.iter().enumerate() {
+            for body in [&image, &video] {
+                assert_eq!(
+                    body["prompt"][format!("reference_load_{i}")]["inputs"]["image"],
+                    *name
+                );
+            }
+        }
+        assert!(OpenRouterMediaCodec
+            .video_body_with_references("m", "p", &MediaParams::default(), &references)
+            .unwrap_err()
+            .to_string()
+            .contains("only one"));
+        codec.source_images.pop();
+        assert!(codec
+            .image_body("flux", "p", &MediaParams::default(), &references)
+            .is_err());
     }
 
     /// KT-1381 — ComfyUI queues images too, and its own routes are used.
@@ -962,7 +1058,7 @@ mod tests {
         let codec = comfy(false);
         assert!(codec.image_is_async());
         assert!(!OpenRouterMediaCodec.image_is_async());
-        assert!(!codec.accepts_reference_images());
+        assert!(codec.accepts_reference_images());
         assert_eq!(
             codec.image_url("http://127.0.0.1:8188/"),
             "http://127.0.0.1:8188/prompt"
@@ -1043,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn comfyui_refuses_source_images_and_needs_its_video_companions() {
+    fn comfyui_refuses_unuploaded_frames_and_needs_its_video_companions() {
         let reference = MediaReferenceImage {
             mode: MediaReferenceMode::FirstFrame,
             mime_type: "image/png".into(),

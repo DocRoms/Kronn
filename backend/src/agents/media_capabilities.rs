@@ -71,6 +71,9 @@ pub struct MediaModelCapabilities {
     /// says nothing, which is not the same as zero — but the UI treats both as
     /// "do not offer it" rather than guessing.
     pub max_input_references: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reference_support: Option<crate::models::MediaReferenceSupport>,
     /// Whether the model itself advertises a soundtrack switch. A model that
     /// does not name it must not be shown an audio checkbox (KT-553).
     pub generate_audio: Option<bool>,
@@ -118,6 +121,7 @@ pub fn video_capabilities(entry: &Value) -> MediaModelCapabilities {
         // Videos advertise no reference-image count anywhere in this
         // catalogue: the only structured image input they name is a frame.
         max_input_references: None,
+        reference_support: None,
         generate_audio: entry.get("generate_audio").and_then(Value::as_bool),
     }
 }
@@ -148,6 +152,7 @@ pub fn image_capabilities(entry: &Value) -> MediaModelCapabilities {
         aspect_ratios,
         frame_positions: Vec::new(),
         max_input_references,
+        reference_support: None,
         generate_audio: None,
     }
 }

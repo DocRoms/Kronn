@@ -9,7 +9,7 @@ exists on the MCP bridge only; native discussion agents do not get it. See
 objects, not an HTML preview.
 [src: file: backend/src/api/agent_tools.rs:1775-1777#execute_page_tool]
 [src: file: backend/src/api/agent_page_tools.rs:173-386#execute_page_tool]
-[src: file: backend/scripts/disc-introspection-mcp.py:7985-7991#call_page_delete_dataset]
+[src: file: backend/scripts/disc-introspection-mcp.py:7991-7997#call_page_delete_dataset]
 
 Native and bridge access are two policies, not one:
 
@@ -56,7 +56,7 @@ Workflows also publish data through the `PublishPageData` step.
 Rendering still uses the existing Page viewer and its network-denying CSP;
 persisting an action block never launches its automation.
 [src: file: backend/src/api/agent_tools.rs:355-360#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2428-2437#declarations_for_family]
+[src: file: backend/src/api/agent_tools.rs:2429-2438#declarations_for_family]
 [src: file: backend/src/api/agent_tools.rs:1405-1429#workflow_tool_catalogue]
 [src: file: backend/src/api/agent_tools.rs:1775-1777#execute_page_tool]
 [src: file: backend/src/api/agent_tools.rs:5521-5579#workflow_catalogue_is_bounded_and_contains_no_planning_mutation]

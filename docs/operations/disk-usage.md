@@ -146,7 +146,7 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
   an agent, which can tell the user instead. [src: file: backend/src/api/disk.rs:932-944#run_purge]
 - MCP tool **`disk_usage`** (`project_id`) — the scoped report above, read-only, bounded to the 25 largest
   entries. It never calls the purge; a leftover `purge_orphans: true` argument returns a note that purging
-  is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7725-7757#call_disk_usage]
+  is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7731-7763#call_disk_usage]
 - **Settings → Disk** — measure on demand (never on page open), totals by kind, the table, **Purge
   orphans**, a per-entry delete behind a confirmation, and the two thresholds.
 

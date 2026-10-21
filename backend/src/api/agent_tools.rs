@@ -1181,6 +1181,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                     "type": "string",
                     "description": "Optional. Omit it and Kronn uses the only connection configured for this modality; pass an id or an alias, from `agent_list`, only when several can serve it."
                 },
+                "expected_model": {"type":"string", "description":"Optional model id read from agent_list. Refuse if the configured slot changed; this never selects another model."},
                 "modality": {"type": "string", "enum": ["image", "video"]},
                 "prompt": {"type": "string"},
                 "duration_secs": {"type": "integer"},
@@ -1190,7 +1191,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "reference_asset_ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Context file ids of pictures the generation starts from — typically an image you just generated in this room. A video can be driven by one; an image can be varied from one. That picture may also be the LAST IMAGE OF AN EARLIER CLIP: that is how several videos are chained into one continuous sequence. Kronn cannot cut that image out of a clip itself — ask the human to open the clip in the discussion's Assets carousel and keep its last image, which arrives here as an ordinary context file you then pass in this list."
+                    "description": "Ordered context file ids of images in this room. Image and video generations can take multiple sources in reference mode, up to agent_list's effective max_input_references. Read reference_support.blocker for missing Kronn adapters or ComfyUI dependencies; do not attribute those to the model. A single picture may also be the LAST IMAGE OF AN EARLIER CLIP: ask the human to keep it from the Assets carousel, then use first_frame to continue that clip."
                 },
                 "wake_when_ready": {
                     "type": "boolean",
@@ -1199,7 +1200,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "reference_mode": {
                     "type": "string",
                     "enum": ["first_frame", "last_frame", "reference"],
-                    "description": "What the referenced picture is to a video: the exact opening frame, the exact closing frame, or a visual the model draws from. Defaults to first_frame for a video."
+                    "description": "first_frame or last_frame pins ONE exact picture in a video. reference uses one or more visual sources for an image or video whose max_input_references permits it. Explicitly select reference for multiple sources; legacy default is first_frame for a video."
                 },
                 "idempotency_key": {
                     "type": "string",
@@ -2522,6 +2523,7 @@ impl KronnToolExecutor {
                             }),
                     ),
                     connection_id,
+                    expected_model: required_string(call, "expected_model"),
                     modality,
                     prompt,
                     // The asset belongs to the room the agent is answering in.

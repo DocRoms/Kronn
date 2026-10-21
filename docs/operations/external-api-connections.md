@@ -45,8 +45,8 @@ the same final route. [src: file: backend/src/api/external_api_connections.rs:24
    endpoint and credential have passed that test. Changing the endpoint, key or
    preset invalidates the prior result; previous mappings stay visible but
    cannot be changed until the new connection state succeeds.
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:235-235#modelsUnlocked]
-   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:650-656#changeConnection]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:236#modelsUnlocked]
+   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:656-662#changeConnection]
 
 The model tiers remain optional: leaving one blank stores no per-connection
 override for that tier. The connection card shows the saved endpoint,
@@ -56,7 +56,7 @@ an explicit click on the eye requests the stored value. **Replace** opens a
 blank editable field, while saving without replacement preserves the current
 credential. [src: file: backend/src/api/external_api_connections.rs:1754-1760#reveal_credential]
 [src: file: backend/src/api/external_api_connections.rs:2030-2031#set_credential]
-[src: file: frontend/src/components/settings/ExternalApiSection.tsx:997-1006#has_credential]
+[src: file: frontend/src/components/settings/ExternalApiSection.tsx:1000-1009#has_credential]
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:321-335#SecretField]
 
 ## LiteLLM proxy
@@ -250,10 +250,10 @@ the runtime-resolution guide.
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
   [src: file: backend/src/api/orchestration.rs:13252-13258#task_worker_catalogue]
-  [src: file: backend/scripts/disc-introspection-mcp.py:6105-6120#call_agent_list]
+  [src: file: backend/scripts/disc-introspection-mcp.py:6111-6126#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:144-162#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]
-  [src: file: backend/src/api/media.rs:404-433#usable_connections]
+  [src: file: backend/src/api/media.rs:417-446#usable_connections]
 - **Wrong model after an endpoint edit:** test again before selecting tiers;
   model choices are tied to the exact tested endpoint and credential state.
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:650-656#changeConnection]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:656-662#changeConnection]

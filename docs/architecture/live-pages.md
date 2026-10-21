@@ -8,7 +8,7 @@ workflow steps, stored IDs and sandbox event names keep their established
 contracts. An Artifact is the same persisted resource; renaming its product
 label does not migrate or duplicate it. Historical code and documentation use
 “Page” for that domain model.
-[src: file: frontend/src/lib/i18n/locales/en.ts:154-155#nav.pages]
+[src: file: frontend/src/lib/i18n/locales/en.ts:176-177#nav.pages]
 [src: file: frontend/src/lib/live-page-navigation.ts:50-55#standaloneLivePageUrl]
 
 ## Portable JSON bundles
@@ -242,7 +242,7 @@ block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
 `[src: file: backend/src/api/live_pages.rs:563-573#delete_dataset]`
 `[src: file: backend/src/api/live_pages.rs:598-609#update_dataset]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:7985-7992#call_page_delete_dataset]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:7991-7998#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
 become rows, a single array inside an object envelope is expanded while scalar
@@ -743,7 +743,7 @@ Allowed sites. One global list per Kronn, `embed_allowed_origins` in
 `POST /api/config/embed-origins` with `{add, remove}`; each origin is
 normalized (lowercase host, default port dropped, IDN as punycode) and a
 malformed one rejects the whole change.
-[src: file: backend/src/models/setup.rs:73-79#embed_allowed_origins]
+[src: file: backend/src/models/setup.rs:81-87#embed_allowed_origins]
 [src: file: backend/src/core/embed_origins.rs:52-55#normalize_origin]
 [src: file: backend/src/api/live_pages.rs:866-868#change_embed_origins]
 The UI is Configuration → Artifacts → External content (Allowed sites): type an

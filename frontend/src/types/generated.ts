@@ -695,7 +695,7 @@ export type AppConfig = { server: ServerConfig, tokens: TokensConfig, scan: Scan
 /**
  * Local ComfyUI media target (KT-1381).
  */
-comfyui?: ComfyUiConfig,
+comfyui?: ComfyUiConfig, media_reference_limits?: Array<MediaReferenceLimit>,
 /**
  * Output language used by agents when they write their replies.
  * Separate from `ui_language` below which controls the Kronn UI locale.
@@ -2168,13 +2168,18 @@ timeout_secs?: number | null,
  */
 output_format: CollectQuickExecOutputFormat, };
 
-export type ComfyFamily = "flux_schnell" | "sdxl" | "wan21_t2v";
+export type ComfyFamily = "flux_schnell" | "sdxl" | "wan21_t2v" | "wan21_vace";
 
 /**
  * Generation settings a user may override per slot in the card. Empty =
  * the family's measured default.
  */
-export type ComfyGenSettings = { steps?: number | null, cfg?: number | null, sampler?: string | null, scheduler?: string | null, };
+export type ComfyGenSettings = { steps?: number | null, cfg?: number | null, sampler?: string | null, scheduler?: string | null, denoise?: number, };
+
+/**
+ * The local workflow accepted with the source images, kept across queueing and retries.
+ */
+export type ComfyReferenceContext = { endpoint: string, family: ComfyFamily, settings: ComfyGenSettings, };
 
 /**
  * Saved under `[comfyui]` in config.toml. Empty slots mean "ComfyUI is not
@@ -5751,7 +5756,7 @@ frame_positions: Array<MediaFramePosition>,
  * says nothing, which is not the same as zero — but the UI treats both as
  * "do not offer it" rather than guessing.
  */
-max_input_references: number | null,
+max_input_references: number | null, reference_support?: MediaReferenceSupport,
 /**
  * Whether the model itself advertises a soundtrack switch. A model that
  * does not name it must not be shown an audio checkbox (KT-553).
@@ -5779,12 +5784,19 @@ reference_asset_id?: string | null,
 /**
  * What those images are for. Meaningless — and refused — without an asset.
  */
-reference_mode?: MediaReferenceMode | null, };
+reference_mode?: MediaReferenceMode | null, comfyui_reference_context?: ComfyReferenceContext, };
 
 /**
  * Coarse provider phase, for progress reporting.
  */
 export type MediaPhase = "submitting" | "polling" | "downloading" | "persisting";
+
+/**
+ * An operator limit belongs to an exact serving model, not to a mutable slot.
+ */
+export type MediaReferenceLimit = { connection_id: string, endpoint: string, workflow?: string, model: string, modality: MediaModality, max_input_references: number, };
+
+export type MediaReferenceLimitSource = "provider" | "workflow" | "configured" | "unknown";
 
 /**
  * How a source image is used by a generation.
@@ -5795,6 +5807,12 @@ export type MediaPhase = "submitting" | "polling" | "downloading" | "persisting"
  * not silently reinterpret a stored job as something else.
  */
 export type MediaReferenceMode = "first_frame" | "last_frame" | "reference";
+
+export type MediaReferenceSupport = { workflow?: string, source: MediaReferenceLimitSource, advertised_max: number | null, configured_max: number | null,
+/**
+ * A missing transport or dependency is not evidence about the model.
+ */
+blocker: string | null, };
 
 /**
  * What actually came back, read from the produced file.
@@ -9123,6 +9141,8 @@ endpoint?: string | null,
 install_dir?: string | null, image_settings?: ComfyGenSettings, video_settings?: ComfyGenSettings, };
 
 export type SetComfyUiSlotsRequest = { image_model?: string | null, video_model?: string | null, };
+
+export type SetMediaReferenceLimitRequest = { connection_id: string, model: string, modality: MediaModality, max_input_references?: number | null, };
 
 export type SetOllamaContextOverrideRequest = { model: string,
 /**
