@@ -1725,6 +1725,9 @@ pub struct DiscoverReposResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AuditInfo {
+    #[serde(default)]
+    #[ts(optional)]
+    pub template_update: Option<crate::core::template_manifest::TemplateUpdate>,
     pub files: Vec<AuditFileInfo>,
     pub todos: Vec<AuditTodo>,
     #[serde(default)]
@@ -1760,6 +1763,9 @@ pub struct AuditTodo {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DriftCheckResponse {
+    #[serde(default)]
+    #[ts(optional)]
+    pub template_update: Option<crate::core::template_manifest::TemplateUpdate>,
     pub audit_date: Option<String>,
     pub stale_sections: Vec<DriftSection>,
     pub fresh_sections: Vec<String>,
@@ -1791,6 +1797,14 @@ pub struct PlaceholderDoc {
 #[ts(export)]
 pub struct AcknowledgeCitationsRequest {
     pub doc: String,
+}
+
+/// `POST /api/projects/:id/drift/acknowledge` body: the stale sections (their
+/// `ai_file`) a human checked and found still true.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct AcknowledgeDriftRequest {
+    pub sections: Vec<String>,
 }
 
 /// `GET /api/projects/:id/citation-drift`: broken and moved citations per
@@ -2001,6 +2015,10 @@ pub struct TdValidationGate {
     pub blocking_total: u32,
     pub blocking_settled: u32,
     pub met: bool,
+    /// Sheets whose cross-agent dispute card still waits for a human: none
+    /// may be open for the project to be validated.
+    #[serde(default)]
+    pub open_disputes: u32,
 }
 
 /// `GET /api/projects/:id/audit/tds`.
@@ -2014,6 +2032,9 @@ pub struct TdReviewList {
     pub validated: bool,
     pub audit_date: Option<DateTime<Utc>>,
     pub validation_discussion_id: Option<String>,
+    /// The discussion holding the oldest open dispute card.
+    #[serde(default)]
+    pub dispute_discussion_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -2100,6 +2121,11 @@ pub struct TdTalkStart {
 #[ts(export)]
 pub struct RevalidateAuditRequest {
     pub agent: AgentType,
+    /// Apply only deterministic citation repairs, even when agent work remains.
+    /// Omitted or false preserves the existing combined reverification flow.
+    #[serde(default)]
+    #[ts(optional)]
+    pub deterministic_only: Option<bool>,
     #[serde(default)]
     #[ts(optional)]
     pub connection_id: Option<String>,

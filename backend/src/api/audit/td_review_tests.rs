@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 fn test_state() -> AppState {
@@ -88,6 +89,9 @@ async fn fixture() -> (AppState, tempfile::TempDir) {
                 )?;
             }
             crate::db::audit_runs::set_validation_discussion(conn, "r1", "dv")?;
+            let documents = crate::core::audit_documents::capture_json(std::path::Path::new(&path))
+                .map_err(anyhow::Error::msg)?;
+            crate::db::audit_documents::record(conn, "r1", &documents)?;
             Ok(())
         })
         .await
@@ -273,6 +277,46 @@ async fn decisions_wait_for_a_running_audit() {
     let response = decide(&state, vec![decision(A, TdReviewDecision::Confirm, None)]).await;
     assert!(!response.success);
     assert!(read(&tmp, A).contains("Verified in source"));
+}
+
+#[tokio::test]
+async fn a_td_decision_updates_its_proof_without_accepting_pulled_documents() {
+    for external_doc in [
+        None,
+        Some("docs/AGENTS.md"),
+        Some("docs/tech-debt/TD-20261001-a.md"),
+    ] {
+        let (state, tmp) = fixture().await;
+        if let Some(doc) = external_doc {
+            let file = tmp.path().join(doc);
+            let before = std::fs::read_to_string(&file).unwrap();
+            std::fs::write(file, before + "\nUnreviewed content pulled from Git.\n").unwrap();
+        }
+        let decision_result = decide(
+            &state,
+            vec![
+                decision(A, TdReviewDecision::Confirm, None),
+                decision(B, TdReviewDecision::Confirm, None),
+            ],
+        )
+        .await;
+        assert!(decision_result.success, "{:?}", decision_result.error);
+        assert!(decision_result.data.unwrap().gate.met);
+        let validated = crate::api::audit::validate_audit(State(state), Path("p1".into()))
+            .await
+            .0;
+        match external_doc {
+            None => assert!(validated.success, "{:?}", validated.error),
+            Some(doc) => {
+                assert!(!validated.success);
+                let error = validated.error.unwrap();
+                assert!(
+                    error.contains("changed since") && error.contains(doc),
+                    "{error}"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

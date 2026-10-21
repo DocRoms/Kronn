@@ -49,9 +49,9 @@ impl Validated {
                 .collect();
         arm(h.tools.path(), "fill", &chain);
         settle_on_validation(h.tools.path());
+        std::fs::write(h.tools.path().join("validation-hold"), "").unwrap();
         let body = run_full(&h.state, None).await;
         let done = sse_events(&body, "done").pop().expect("terminal done");
-        validation_settled(&h.state, &done).await;
         assert_eq!(done["status"], "complete", "{body}");
         append(
             project,
@@ -62,9 +62,27 @@ impl Validated {
         );
         append(project, RULES, HUMAN_RULE);
         extra(project);
+        // These facts belong to the documents the validation agent reviews,
+        // before it records its terminal message and final fingerprints.
+        std::fs::remove_file(h.tools.path().join("validation-hold")).unwrap();
+        validation_settled(&h.state, &done).await;
         let fx = Self { h, chain };
         let validated = fx.validate().await;
         assert!(validated.success, "{:?}", validated.error);
+        // KT-1209: validation does not silently accept the initial Full pass's
+        // change to the human-owned AGENTS section. This fixture represents a
+        // human who has reviewed and explicitly confirmed that initial change.
+        let confirmed = crate::api::audit::confirm_doc_provenance(
+            axum::extract::State(fx.h.state.clone()),
+            axum::extract::Path(PROJECT_ID.to_string()),
+            None,
+            axum::Json(crate::core::doc_provenance::ConfirmDocsRequest {
+                docs: vec!["docs/AGENTS.md".into()],
+            }),
+        )
+        .await
+        .0;
+        assert!(confirmed.success, "{:?}", confirmed.error);
         assert_eq!(fx.audit_status(), crate::models::AiAuditStatus::Validated);
         assert_eq!(
             crate::core::citation_drift::check(project).sources_state,
@@ -132,6 +150,7 @@ impl Validated {
             axum::extract::State(self.h.state.clone()),
             axum::extract::Path(PROJECT_ID.to_string()),
             axum::Json(crate::models::RevalidateAuditRequest {
+                deterministic_only: None,
                 agent: AgentType::ClaudeCode,
                 connection_id: None,
                 tier: None,
@@ -322,12 +341,32 @@ async fn a_changed_cited_line_is_corrected_by_the_agent_and_the_badge_goes_back_
     let validated = fx.validate().await;
     assert!(validated.success, "{:?}", validated.error);
     assert_eq!(fx.audit_status(), crate::models::AiAuditStatus::Validated);
+    // KT-1209: validating never silently accepts a Kronn rewrite of a
+    // human-owned section; only the owner's explicit confirmation does.
+    assert_eq!(
+        crate::core::doc_provenance::report(fx.project(), false)
+            .unwrap()
+            .to_reconfirm,
+        1,
+        "validating again must not confirm the rewrite on the human's behalf"
+    );
+    let confirmed = crate::api::audit::confirm_doc_provenance(
+        axum::extract::State(fx.h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        None,
+        axum::Json(crate::core::doc_provenance::ConfirmDocsRequest {
+            docs: vec![RULES.into()],
+        }),
+    )
+    .await
+    .0;
+    assert!(confirmed.success, "{:?}", confirmed.error);
     assert_eq!(
         crate::core::doc_provenance::report(fx.project(), false)
             .unwrap()
             .to_reconfirm,
         0,
-        "validating again confirms the rewrite"
+        "the explicit confirmation accepts the rewrite"
     );
 }
 
@@ -369,6 +408,14 @@ async fn a_moved_cited_line_is_re_anchored_without_an_agent() {
     let report = crate::core::citation_drift::check(fx.project());
     assert_eq!(report.moved_count, 0);
     assert_eq!(report.broken_count, 0);
+    let documents =
+        fx.h.state
+            .db
+            .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
+            .await
+            .unwrap()
+            .unwrap();
+    crate::core::audit_documents::verify(fx.project(), Some(&documents)).unwrap();
     assert!(fx.plan().await.sections.is_empty());
 }
 
@@ -569,6 +616,7 @@ async fn revalidating_before_any_fingerprint_is_refused_with_a_reason() {
         axum::extract::State(h.state.clone()),
         axum::extract::Path(PROJECT_ID.to_string()),
         axum::Json(crate::models::RevalidateAuditRequest {
+            deterministic_only: None,
             agent: AgentType::ClaudeCode,
             connection_id: None,
             tier: None,
@@ -761,4 +809,159 @@ async fn a_partial_refresh_after_a_stop_runs_to_its_end() {
     let body = fx.stopped_during_step(fx.partial(vec![step])).await;
     assert_eq!(sse_events(&body, "cancelled").len(), 1, "{body}");
     assert!(sse_events(&body, "done").is_empty(), "{body}");
+}
+
+#[path = "partial_refresh_e2e_tests.rs"]
+mod partial_refresh_e2e_tests;
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn prose_changed_after_validation_gets_a_bounded_reverification() {
+    let fx = Validated::new(|_| {}).await;
+    append(
+        fx.project(),
+        RULES,
+        "\nA colleague changed the prose after validation.\n",
+    );
+    let refused = fx.validate().await;
+    assert!(!refused.success);
+    assert!(refused.error.unwrap().contains("changed since"));
+    let plan = fx.plan().await;
+    assert_eq!(plan.agent_steps, vec![fx.step_of(RULES) as usize]);
+    assert!(plan
+        .sections
+        .iter()
+        .any(|s| s.doc == RULES && s.action == crate::models::RevalidationAction::Agent));
+    arm(fx.h.tools.path(), "noop", &[RULES]);
+    let body = fx.revalidate().await;
+    let done = sse_events(&body, "done").pop().expect("reverified");
+    validation_settled(&fx.h.state, &done).await;
+    assert_eq!(started_steps(&body), vec![fx.step_of(RULES)]);
+    let raw =
+        fx.h.state
+            .db
+            .with_read_conn(|conn| crate::db::audit_documents::latest(conn, PROJECT_ID))
+            .await
+            .unwrap()
+            .unwrap();
+    crate::core::audit_documents::verify(fx.project(), Some(&raw)).unwrap();
+    assert!(fx.plan().await.agent_steps.is_empty());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn reanchoring_does_not_accept_an_unreviewed_prose_change() {
+    let fx = Validated::new(|_| {}).await;
+    fx.edit_source(|lines| lines.insert(0, "// A new line before the cited code".into()));
+    append(
+        fx.project(),
+        RULES,
+        "\nUnreviewed prose from a colleague.\n",
+    );
+    assert!(fx.plan().await.reanchor_count > 0);
+    let body = fx.revalidate().await;
+    let done = sse_events(&body, "done").pop().expect("deterministic pass");
+    assert_eq!(done["status"], "todo", "{body}");
+    let refused = fx.validate().await;
+    assert!(!refused.success);
+    assert!(refused.error.unwrap().contains("changed since"));
+    assert_eq!(
+        fx.plan().await.agent_steps,
+        vec![fx.step_of(RULES) as usize]
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn only_explicitly_confirmed_docs_advance_the_local_run_proof() {
+    let fx = Validated::new(|_| {}).await;
+    append(fx.project(), RULES, "\nChanged rules.\n");
+    append(fx.project(), GLOSSARY, "\nChanged glossary.\n");
+    // A provenance file copied from Git cannot replace a local confirmation.
+    crate::core::doc_provenance::record_all(
+        fx.project(),
+        crate::core::doc_provenance::ValidationReason::AuditValidation,
+    )
+    .unwrap();
+    assert!(!fx.validate().await.success);
+    for doc in [RULES, GLOSSARY] {
+        let confirmed = crate::api::audit::provenance::confirm_doc_provenance(
+            axum::extract::State(fx.h.state.clone()),
+            axum::extract::Path(PROJECT_ID.to_string()),
+            None,
+            axum::Json(crate::core::doc_provenance::ConfirmDocsRequest {
+                docs: vec![doc.into()],
+            }),
+        )
+        .await
+        .0;
+        assert!(confirmed.success, "{:?}", confirmed.error);
+        let validated = fx.validate().await;
+        if doc == RULES {
+            assert!(!validated.success);
+            let error = validated.error.unwrap();
+            assert!(
+                error.contains(GLOSSARY) && !error.contains(RULES),
+                "{error}"
+            );
+        } else {
+            assert!(validated.success, "{:?}", validated.error);
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn explicit_reanchor_only_never_dispatches_agents_for_a_mixed_plan() {
+    let fx = Validated::new(|project| {
+        append(
+            project,
+            TESTING,
+            "\nThe sixth helper [src: file: src/kept.rs:6].\n",
+        );
+    })
+    .await;
+    fx.edit_source(|lines| {
+        lines[5] = "fn changed_sixth_helper() {}".into();
+        lines.insert(0, "// new header".into());
+        lines.insert(0, "// second header".into());
+    });
+    let plan = fx.plan().await;
+    assert!(plan.reanchor_count > 0, "{plan:?}");
+    assert_eq!(
+        plan.agent_steps,
+        vec![fx.step_of(TESTING) as usize],
+        "{plan:?}"
+    );
+    let runs = fx.run_count().await;
+    // An agent connection is deliberately unavailable. A free re-anchor
+    // must still work and must never fall through to agent dispatch.
+    let response = crate::api::audit::revalidate_audit(
+        axum::extract::State(fx.h.state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(
+            serde_json::from_value(serde_json::json!({
+                "agent": "Custom", "deterministic_only": true,
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .into_response();
+    let body = sse_body(response).await;
+    let done = sse_events(&body, "done")
+        .pop()
+        .expect("deterministic completion");
+    assert_eq!(done["status"], "todo", "{body}");
+    assert!(done["reanchored"].as_u64().unwrap() > 0, "{body}");
+    assert!(fx.prompts().is_empty(), "{:?}", fx.prompts());
+    assert_eq!(fx.run_count().await, runs);
+    let after = fx.plan().await;
+    assert_eq!(after.reanchor_count, 0, "{after:?}");
+    assert_eq!(after.agent_steps, plan.agent_steps, "{after:?}");
+    assert!(!section(&after, TESTING).broken.is_empty());
 }

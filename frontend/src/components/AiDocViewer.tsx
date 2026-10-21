@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { projects as projectsApi, getApiBase } from '../lib/api';
-import type { AiFileNode } from '../types/generated';
+import type { AiFileNode, DriftSection } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { rehypeRewriteDocImages } from '../lib/docImageRewrite';
 import { MermaidDiagram } from './MermaidDiagram';
@@ -36,9 +36,12 @@ interface AiDocViewerProps {
    *  aware guidance ("run the audit", "validate to finalize", etc.).
    *  Free-form so the caller controls icon + tone. */
   banner?: React.ReactNode;
+  /** Drift facts for the selected doc; the explanation opens the shared verifier. */
+  staleSections?: DriftSection[];
+  onOpenDocState?: () => void;
 }
 
-export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, banner }: AiDocViewerProps) {
+export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, banner, staleSections, onOpenDocState }: AiDocViewerProps) {
   return (
     <AiDocViewerProject
       key={`${projectId}:${initialExpandFolder ?? ''}`}
@@ -46,6 +49,8 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
       onDiscussFile={onDiscussFile}
       initialExpandFolder={initialExpandFolder}
       banner={banner}
+      staleSections={staleSections}
+      onOpenDocState={onOpenDocState}
     />
   );
 }
@@ -64,7 +69,7 @@ interface DocSearchResult {
 
 const EMPTY_DOC_SEARCH_RESULTS = new Map<string, number>();
 
-function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, banner }: AiDocViewerProps) {
+function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, banner, staleSections, onOpenDocState }: AiDocViewerProps) {
   const { t } = useT();
   const [tree, setTree] = useState<AiFileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -397,6 +402,9 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
   }
 
   const isSearching = searchQuery.trim().length > 0;
+  const selectedStaleSections = selectedPath
+    ? (staleSections ?? []).filter(section => section.ai_file === selectedPath)
+    : [];
 
   return (
     <>
@@ -516,6 +524,19 @@ function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, ban
                 </button>
               );
             })()}
+          </div>
+        )}
+        {selectedStaleSections.length > 0 && (
+          <div className="aidoc-stale-banner" role="status" data-testid="aidoc-stale-banner">
+            <AlertTriangle size={13} aria-hidden="true" />
+            <div>
+              <strong>{t('docState.staleDoc.title')}</strong>
+              <span>{t('docState.stale.explanation')}</span>
+              <span>{t('docState.staleDoc.sources', selectedStaleSections.flatMap(section => section.changed_sources).join(', '))}</span>
+            </div>
+            {onOpenDocState && (
+              <button type="button" data-testid="aidoc-open-doc-state" onClick={onOpenDocState}>{t('audit.revalidate.button')}</button>
+            )}
           </div>
         )}
         {linkNotice && (

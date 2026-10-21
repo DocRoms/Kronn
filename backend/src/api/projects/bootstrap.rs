@@ -53,108 +53,118 @@ pub async fn bootstrap(
     let agent_type = req.agent;
     let configured_adapter = crate::core::root_agent_files::adapter_for_agent_type(&agent_type);
 
+    let project_id = Uuid::new_v4().to_string();
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
+
     // 2. Create directory + git init on blocking thread
-    let setup_result = tokio::task::spawn_blocking({
-        let parent = parent_dir.clone();
-        let dirname = dir_name.clone();
-        move || -> Result<(), String> {
-            // Resolve the parent dir (which exists) then append the new dir name
-            let parent_resolved = scanner::resolve_host_path(&parent);
-            if !parent_resolved.exists() {
-                return Err(format!(
-                    "Parent directory not found: {}",
-                    parent_resolved.display()
-                ));
-            }
-            let project_path = parent_resolved.join(&dirname);
-            if project_path.exists() {
-                return Err(format!(
-                    "Directory already exists: {}",
-                    project_path.display()
-                ));
-            }
-            std::fs::create_dir_all(&project_path)
-                .map_err(|e| format!("Failed to create directory: {}", e))?;
+    let setup_result = lease
+        .blocking({
+            let parent = parent_dir.clone();
+            let dirname = dir_name.clone();
+            move || -> Result<(), String> {
+                // Resolve the parent dir (which exists) then append the new dir name
+                let parent_resolved = scanner::resolve_host_path(&parent);
+                if !parent_resolved.exists() {
+                    return Err(format!(
+                        "Parent directory not found: {}",
+                        parent_resolved.display()
+                    ));
+                }
+                let project_path = parent_resolved.join(&dirname);
+                if project_path.exists() {
+                    return Err(format!(
+                        "Directory already exists: {}",
+                        project_path.display()
+                    ));
+                }
+                std::fs::create_dir_all(&project_path)
+                    .map_err(|e| format!("Failed to create directory: {}", e))?;
 
-            // git init
-            let status = crate::core::cmd::git_cmd()
-                .arg("init")
-                .current_dir(&project_path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map_err(|e| format!("git init failed: {}", e))?;
-            if !status.success() {
-                return Err("git init failed".into());
-            }
+                // git init
+                let status = crate::core::cmd::git_cmd()
+                    .arg("init")
+                    .current_dir(&project_path)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map_err(|e| format!("git init failed: {}", e))?;
+                if !status.success() {
+                    return Err("git init failed".into());
+                }
 
-            // Install template — fresh projects get the modern `docs/`
-            // convention (post-0.7.1). Existing projects with a legacy
-            // `ai/` continue to work via `detect_docs_dir`; this path
-            // only fires for never-bootstrapped projects.
-            let template_dir = resolve_templates_dir();
-            if template_dir.exists() {
-                let docs_template = template_dir.join("docs");
-                // The project's docs root (KT-1192): `docs/` unless configured.
-                let docs_root = crate::core::docs_location::DocsRoot::for_project(&project_path)?;
-                let docs_target = docs_root.dir(&project_path);
-                if docs_template.is_dir() {
-                    super::template::copy_dir_nondestructive_in(
-                        &docs_template,
-                        &docs_target,
-                        &docs_root,
-                    )?;
+                // Install template — fresh projects get the modern `docs/`
+                // convention (post-0.7.1). Existing projects with a legacy
+                // `ai/` continue to work via `detect_docs_dir`; this path
+                // only fires for never-bootstrapped projects.
+                let template_dir = resolve_templates_dir();
+                if template_dir.exists() {
+                    let docs_template = template_dir.join("docs");
+                    // The project's docs root (KT-1192): `docs/` unless configured.
+                    let docs_root =
+                        crate::core::docs_location::DocsRoot::for_project(&project_path)?;
+                    let docs_target = docs_root.dir(&project_path);
+                    if docs_template.is_dir() {
+                        super::template::copy_dir_nondestructive_in(
+                            &docs_template,
+                            &docs_target,
+                            &docs_root,
+                        )?;
+                    }
+                    // 0.8.7 — copy the anti-hallu spec embedded in the binary
+                    // into the project's `docs/conventions/` so any agent
+                    // running on this project (with or without Kronn) can
+                    // open the convention locally. Idempotent : skip if
+                    // already present (re-bootstrap doesn't clobber user
+                    // edits ; PR3 endpoint `/anti-hallu/inject` is the
+                    // explicit re-sync path).
+                    let conventions_dir = docs_target.join("conventions");
+                    let _ = std::fs::create_dir_all(&conventions_dir);
+                    let spec_path = conventions_dir.join("agents-md-format-v1.md");
+                    if !spec_path.exists() {
+                        let _ =
+                            std::fs::write(&spec_path, crate::core::anti_halluc::SPEC_AGENTS_MD_V1);
+                    }
+                    // 0.7.1 — agent-writable subfolders. Bootstrapped only
+                    // when missing (idempotent), with a short README so a
+                    // human poking around immediately understands what each
+                    // folder is for.
+                    ensure_agent_writable_subfolders(&project_path, &docs_target);
+                    // Human-friendly landing page. AGENTS.md targets LLMs;
+                    // index.md is what a human sees when they open `docs/`
+                    // on GitHub. Idempotent — only writes when absent.
+                    if let Err(e) =
+                        crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target)
+                    {
+                        tracing::warn!("docs index not installed: {e}");
+                    }
+                    // A brand-new repository starts with no filesystem signal.
+                    // Install the shared entry plus the adapter explicitly chosen
+                    // for this bootstrap, when that provider has one.
+                    let mut detected =
+                        crate::core::root_agent_files::detect_agent_adapters(&project_path);
+                    if let Some(adapter) = configured_adapter {
+                        detected.insert(adapter);
+                    }
+                    let report = crate::core::root_agent_files::install_detected_agent_files(
+                        &project_path,
+                        &template_dir,
+                        &detected,
+                    );
+                    for failure in report.failed {
+                        tracing::warn!("Agent instruction install failed: {failure}");
+                    }
                 }
-                // 0.8.7 — copy the anti-hallu spec embedded in the binary
-                // into the project's `docs/conventions/` so any agent
-                // running on this project (with or without Kronn) can
-                // open the convention locally. Idempotent : skip if
-                // already present (re-bootstrap doesn't clobber user
-                // edits ; PR3 endpoint `/anti-hallu/inject` is the
-                // explicit re-sync path).
-                let conventions_dir = docs_target.join("conventions");
-                let _ = std::fs::create_dir_all(&conventions_dir);
-                let spec_path = conventions_dir.join("agents-md-format-v1.md");
-                if !spec_path.exists() {
-                    let _ = std::fs::write(&spec_path, crate::core::anti_halluc::SPEC_AGENTS_MD_V1);
-                }
-                // 0.7.1 — agent-writable subfolders. Bootstrapped only
-                // when missing (idempotent), with a short README so a
-                // human poking around immediately understands what each
-                // folder is for.
-                ensure_agent_writable_subfolders(&project_path, &docs_target);
-                // Human-friendly landing page. AGENTS.md targets LLMs;
-                // index.md is what a human sees when they open `docs/`
-                // on GitHub. Idempotent — only writes when absent.
-                if let Err(e) =
-                    crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target)
-                {
-                    tracing::warn!("docs index not installed: {e}");
-                }
-                // A brand-new repository starts with no filesystem signal.
-                // Install the shared entry plus the adapter explicitly chosen
-                // for this bootstrap, when that provider has one.
-                let mut detected =
-                    crate::core::root_agent_files::detect_agent_adapters(&project_path);
-                if let Some(adapter) = configured_adapter {
-                    detected.insert(adapter);
-                }
-                let report = crate::core::root_agent_files::install_detected_agent_files(
-                    &project_path,
-                    &template_dir,
-                    &detected,
-                );
-                for failure in report.failed {
-                    tracing::warn!("Agent instruction install failed: {failure}");
-                }
-            }
 
-            runner::fix_file_ownership(&project_path);
-            Ok(())
-        }
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+                runner::fix_file_ownership(&project_path);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = setup_result {
         return Json(ApiResponse::err(e));
@@ -162,7 +172,6 @@ pub async fn bootstrap(
 
     // 3. Create project in DB
     let now = Utc::now();
-    let project_id = Uuid::new_v4().to_string();
     let mut project = Project {
         id: project_id.clone(),
         name: project_name.clone(),

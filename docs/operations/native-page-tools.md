@@ -7,9 +7,9 @@ revisions and inert action ingestion. Dataset deletion (`page_delete_dataset`, K
 exists on the MCP bridge only; native discussion agents do not get it. See
 [Dataset lifecycle](../architecture/live-pages.md#dataset-lifecycle-kt-1104). The dispatcher returns real stored
 objects, not an HTML preview.
-[src: file: backend/src/api/agent_tools.rs:1704-1706#execute_page_tool]
+[src: file: backend/src/api/agent_tools.rs:1722-1724#execute_page_tool]
 [src: file: backend/src/api/agent_page_tools.rs:173-237#execute_page_tool]
-[src: file: backend/scripts/disc-introspection-mcp.py:7841-7843#call_page_delete_dataset]
+[src: file: backend/scripts/disc-introspection-mcp.py:7837-7839#call_page_delete_dataset]
 
 Native and bridge access are two policies, not one:
 
@@ -53,9 +53,9 @@ Workflows also publish data through the `PublishPageData` step.
 Rendering still uses the existing Page viewer and its network-denying CSP;
 persisting an action block never launches its automation.
 [src: file: backend/src/api/agent_tools.rs:339-344#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2310-2319#declarations_for_family]
+[src: file: backend/src/api/agent_tools.rs:2327-2336#declarations_for_family]
 [src: file: backend/src/api/agent_tools.rs:1359-1384#workflow_tool_catalogue]
-[src: file: backend/src/api/agent_tools.rs:1704-1706#execute_page_tool]
+[src: file: backend/src/api/agent_tools.rs:1722-1724#execute_page_tool]
 [src: file: backend/src/api/agent_tools.rs:5340-5397#workflow_catalogue_is_bounded_and_contains_no_planning_mutation]
 [src: file: backend/src/api/agent_page_tests.rs:247#native_page_html_uses_shared_inert_action_ingestion]
 [src: file: backend/src/api/agent_page_tests.rs:354#native_workflow_page_tools_inherit_run_scope_and_execute_all_operations]
@@ -127,4 +127,4 @@ envelope), of which KT-1098's optional `slug` on `page_update_html` costs
 25 bytes. These are byte counts, not provider token measurements. The bridge
 declarations keep their own byte ceiling (85,268 bytes, `mcp_surface_budget.py`).
 [src: file: backend/src/api/agent_page_tests.rs:327-345#native_page_surface_has_a_bounded_measured_cost]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:96-101#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:105#CATALOGUE_MAX_BYTES]

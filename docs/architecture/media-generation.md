@@ -195,9 +195,9 @@ a normal `no_agent` discussion at an explicit Generate click, then passes that
 room to the existing generation endpoint. A successfully created room is kept
 across a generation error, and the same idempotency key is retained for an
 explicit identical retry; the UI never automatically repeats an ambiguous
-billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:230-234]`
-`[src: file: frontend/src/components/MediaGenerateForm.tsx:476-532]`
-`[src: file: frontend/src/pages/DiscussionsPage.tsx:2408-2424]`
+billable request. `[src: file: frontend/src/components/NewDiscussionForm.tsx:397-415#createMediaDiscussion]`
+`[src: file: frontend/src/components/MediaGenerateForm.tsx:476-532#submit]`
+`[src: file: frontend/src/pages/DiscussionsPage.tsx:2615-2634#handleCreateMediaDiscussion]`
 
 ## What a model accepts, read rather than assumed
 
@@ -226,7 +226,7 @@ trimmed and case-insensitively, so a caller is never refused over `720P`.
 
 The same read serves both surfaces. `agent_list` sweeps every configured media
 slot concurrently, each under its own 8 s window, and attaches what came back
-[src: file: backend/src/api/orchestration.rs:10632-10677#bounded_media_capabilities]; the catalogue builder
+[src: file: backend/src/api/orchestration.rs:10754-10799#bounded_media_capabilities]; the catalogue builder
 itself stays pure and is handed the result, like the reachability and quota
 preflights beside it. An envelope is attached only when the model it was read
 for is still the configured one — a connection whose model changed between the

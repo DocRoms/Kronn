@@ -2419,6 +2419,18 @@ async fn resume_with_delta_if_possible(
     )
 }
 
+/// What the reply records once the runtime answered: a refused resume (the
+/// runtime fell back to the full history) overrides the plan made before the
+/// launch, which could only say "resumed" or "new".
+fn settle_turn_continuity(
+    resume_fallback: Option<crate::models::SessionContinuityReason>,
+    planned: Option<crate::models::SessionContinuity>,
+) -> Option<crate::models::SessionContinuity> {
+    resume_fallback
+        .map(crate::models::SessionContinuity::fallback_because)
+        .or(planned)
+}
+
 /// What an HTTP agent needs to deliver a discussion's images (KT-946): the images
 /// themselves, and which models of its target the catalogue declares as able to
 /// see. A catalogue that cannot be read is an empty set — "nobody said", which
@@ -3917,6 +3929,37 @@ pub(super) async fn make_agent_stream_inner(
 
     let (tx, rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(64);
 
+    // Durable responses use their dispatch id as the cancellation key. This
+    // lets the UI stop one queued/running reply without killing a sibling from
+    // another turn in the same discussion. Legacy non-dispatch streams keep
+    // the discussion id key used by the global Stop action.
+
+    let cancel_guard = match crate::api::audit::docs_write::validation_cancel_guard(
+        &state,
+        disc_id.clone(),
+        dispatch_job_id.clone(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(reason) => {
+            if let Some(sender) = completion_tx.take() {
+                let _ = sender.send(AgentExecutionOutcome::RuntimeUnavailable {
+                    reason: reason.clone(),
+                });
+            }
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(
+                    Event::default()
+                        .event("error")
+                        .data(serde_json::json!({"error":reason}).to_string()),
+                )
+            }));
+            return Sse::new(prepend_initial_event(stream, initial_event.take()));
+        }
+    };
+    let cancel_token = cancel_guard.token.clone();
+
     // An agent run WILL start past this point (every preflight
     // early-return is above): mark the disc as owed a reply so a restart
     // before the first durable trace is caught by the boot reconcile.
@@ -3941,14 +3984,6 @@ pub(super) async fn make_agent_stream_inner(
             );
         }
     }
-
-    // Durable responses use their dispatch id as the cancellation key. This
-    // lets the UI stop one queued/running reply without killing a sibling from
-    // another turn in the same discussion. Legacy non-dispatch streams keep
-    // the discussion id key used by the global Stop action.
-    let cancel_key = dispatch_job_id.clone().unwrap_or_else(|| disc_id.clone());
-    let cancel_guard = crate::CancelGuard::insert(&state.cancel_registry, cancel_key);
-    let cancel_token = cancel_guard.token.clone();
 
     // Spawn background task — always saves to DB even if client disconnects
     let semaphore = state.agent_semaphore.clone();
@@ -4162,10 +4197,8 @@ pub(super) async fn make_agent_stream_inner(
                     crate::AgentRuntimeGuard::insert(&state.agent_runtime_registry, job_id.clone())
                 });
                 // A refused resume is only known once the runtime answered it.
-                let turn_continuity = process
-                    .resume_fallback()
-                    .map(crate::models::SessionContinuity::fallback_because)
-                    .or(session_continuity);
+                let turn_continuity =
+                    settle_turn_continuity(process.resume_fallback(), session_continuity);
                 let mut full_response = catalog_warning_notice
                     .as_ref()
                     .map(|notice| format!("{notice}\n\n"))
@@ -4726,7 +4759,53 @@ pub(super) async fn make_agent_stream_inner(
                     full_response = "Validation bloquée : la suppression des secrets dans les artefacts d’audit a échoué après l’exécution de l’agent. Aucun signal de validation n’a été accepté.".to_string();
                 }
 
+                if success
+                    && super::ends_with_terminal_signal(&full_response, "KRONN:BRIEFING_COMPLETE")
+                {
+                    let saved = if let Some(pid) = disc_project_id.as_ref() {
+                        let resolved = crate::core::scanner::resolve_host_path(&project_path);
+                        let file =
+                            crate::core::scanner::detect_docs_dir(&resolved).join("briefing.md");
+                        crate::api::audit::briefing::complete_reviewed_briefing(
+                            &state,
+                            pid.clone(),
+                            file,
+                        )
+                        .await
+                    } else {
+                        Err("No project is linked to this briefing.".to_string())
+                    };
+                    if let Err(error) = saved {
+                        success = false;
+                        stopped_on_signal = None;
+                        full_response = format!("Briefing could not be completed. {error} The discussion stays open; save the briefing and try again.");
+                    }
+                }
+
                 let mut stderr_lines = process.captured_stderr_flushed().await;
+                // Capture only after the linked validation child has stopped
+                // and its artifacts have been sanitized. Later disk changes
+                // cannot borrow this reply's terminal marker.
+                let validation_documents = if success
+                    && super::ends_with_terminal_signal(&full_response, "KRONN:VALIDATION_COMPLETE")
+                {
+                    match validation_redaction_scope
+                        .as_ref()
+                        .map(|(root, _)| crate::core::audit_documents::capture_json(root))
+                        .transpose()
+                    {
+                        Ok(documents) => documents,
+                        Err(error) => {
+                            tracing::error!(disc_id = %disc_id, %error, "Cannot capture final validation documents");
+                            success = false;
+                            stopped_on_signal = None;
+                            full_response = "Validation blocked: the final documents could not be recorded. Reverify the documentation before validating.".to_string();
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 stderr_lines.extend(direct_tool_traces);
                 // `ollama_tokens:prompt:eval` is an internal accounting marker the
                 // token parser reads out of stderr. It has no meaning for a reader,
@@ -5242,7 +5321,7 @@ pub(super) async fn make_agent_stream_inner(
                     .db
                     .with_conn(move |conn| {
                         let outcome =
-                            crate::db::discussions::insert_native_agent_message_with_checkpoint(
+                            crate::db::discussions::insert_native_agent_message_with_audit_documents(
                                 conn,
                                 &did,
                                 &msg,
@@ -5253,6 +5332,7 @@ pub(super) async fn make_agent_stream_inner(
                                 handoffs_enabled,
                                 handoff_paid_limit,
                                 checkpoint.as_ref(),
+                                validation_documents.as_deref(),
                             )?;
                         // Best effort: the breakdown enriches the totals, and its
                         // absence only means "not reported" — it must never cost
@@ -5667,33 +5747,6 @@ pub(super) async fn make_agent_stream_inner(
                                 e,
                             ),
                         }
-                    }
-                }
-
-                // Detect KRONN:BRIEFING_COMPLETE marker
-                if success
-                    && agent_msg
-                        .content
-                        .to_uppercase()
-                        .contains("KRONN:BRIEFING_COMPLETE")
-                {
-                    if let Some(ref pid) = disc_project_id {
-                        let briefing_project_id = pid.clone();
-                        let briefing_project_path = project_path.clone();
-                        let briefing_state = state.clone();
-                        tokio::spawn(async move {
-                            // Path-agnostic — works on docs/ post-pivot AND legacy ai/.
-                            let resolved =
-                                crate::core::scanner::resolve_host_path(&briefing_project_path);
-                            let briefing_file = crate::core::scanner::detect_docs_dir(&resolved)
-                                .join("briefing.md");
-                            crate::api::audit::briefing::complete_reviewed_briefing(
-                                &briefing_state,
-                                briefing_project_id,
-                                briefing_file,
-                            )
-                            .await;
-                        });
                     }
                 }
 
@@ -7855,7 +7908,7 @@ mod resume_delta_tests {
     //! an invisible one: the agent replies confidently to a history it was
     //! never given.
     use super::runner;
-    use super::{messages_not_yet_seen, resume_with_delta_if_possible};
+    use super::{messages_not_yet_seen, resume_with_delta_if_possible, settle_turn_continuity};
     use crate::agents::runner::AcpSessionStore;
     use crate::models::{AgentType, DiscussionMessage, MessageChannel, MessageRole};
     use chrono::Utc;
@@ -8129,6 +8182,25 @@ mod resume_delta_tests {
                 crate::models::SessionContinuityReason::DeltaNotSmaller
             ))
         );
+    }
+
+    /// KT-1202 — a resume the runtime refused is what the reply records, not
+    /// the "resumed" the launch had planned; without a refusal the plan stands.
+    #[test]
+    fn a_refused_resume_overrides_the_planned_continuity() {
+        use crate::models::{SessionContinuity, SessionContinuityReason as Reason};
+        assert_eq!(
+            settle_turn_continuity(
+                Some(Reason::SessionExpired),
+                Some(SessionContinuity::resumed())
+            ),
+            Some(SessionContinuity::fallback_because(Reason::SessionExpired))
+        );
+        assert_eq!(
+            settle_turn_continuity(None, Some(SessionContinuity::resumed())),
+            Some(SessionContinuity::resumed())
+        );
+        assert_eq!(settle_turn_continuity(None, None), None);
     }
 
     /// KT-1202 — a turn that cannot resume records why: nothing stored yet,
@@ -9340,3 +9412,7 @@ mod http_run_progress_tests {
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "streaming_pin_tests.rs"]
 mod pinned_batch_child_tests;
+
+#[cfg(test)]
+#[path = "streaming_briefing_tests.rs"]
+mod briefing_completion_tests;

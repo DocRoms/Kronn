@@ -137,6 +137,11 @@ pub async fn set(
         }
     };
 
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project.id).await {
+            Ok(lease) => lease,
+            Err(error) => return coded(StatusCode::CONFLICT, ApiErrorCode::Conflict, error),
+        };
     let requested = request
         .dir
         .as_deref()
@@ -164,9 +169,11 @@ pub async fn set(
 
     let save_id = id.clone();
     let saved = normalized.clone();
+    let db_lease = lease.clone();
     if let Err(error) = state
         .db
         .with_conn(move |conn| {
+            let _lease = db_lease;
             crate::db::projects::set_project_docs_dir(conn, &save_id, saved.as_deref())
         })
         .await

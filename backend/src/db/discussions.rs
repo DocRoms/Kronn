@@ -1847,6 +1847,47 @@ pub fn insert_native_agent_message_with_checkpoint(
     paid_limit: Option<u32>,
     checkpoint: Option<&super::acp_runtime_sessions::TurnCompletion>,
 ) -> Result<NativeAgentMessageOutcome> {
+    insert_native_agent_message_with_audit_documents(
+        conn,
+        discussion_id,
+        msg,
+        child_run_was_success,
+        dispatch_job_id,
+        source_agent,
+        candidate_agents,
+        globally_enabled,
+        paid_limit,
+        checkpoint,
+        None,
+    )
+}
+
+/// A validation reply certifies the exact post-agent documents in the SAME
+/// transaction as its terminal message and conversation checkpoint.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_native_agent_message_with_audit_documents(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    child_run_was_success: bool,
+    dispatch_job_id: Option<&str>,
+    source_agent: &AgentType,
+    candidate_agents: &[AgentType],
+    globally_enabled: bool,
+    paid_limit: Option<u32>,
+    checkpoint: Option<&super::acp_runtime_sessions::TurnCompletion>,
+    validation_documents: Option<&str>,
+) -> Result<NativeAgentMessageOutcome> {
+    if validation_documents.is_some() {
+        anyhow::ensure!(
+            child_run_was_success
+                && crate::api::discussions::ends_with_terminal_signal(
+                    &msg.content,
+                    "KRONN:VALIDATION_COMPLETE"
+                ),
+            "Document fingerprints require a successful terminal validation reply"
+        );
+    }
     let checkpoint = checkpoint.filter(|_| child_run_was_success);
     if checkpoint.is_some_and(|proof| {
         proof.key.discussion_id != discussion_id
@@ -1856,6 +1897,9 @@ pub fn insert_native_agent_message_with_checkpoint(
         anyhow::bail!("conversation checkpoint does not match its native response");
     }
     let transaction = conn.unchecked_transaction()?;
+    if let Some(documents) = validation_documents {
+        super::audit_documents::finish_validation(&transaction, discussion_id, documents)?;
+    }
     let (no_agent, discussion_disabled, primary_agent, participants_json): (
         i64,
         i64,
@@ -2878,6 +2922,19 @@ fn insert_message_inner(
             &msg.id,
             &msg.content,
         )?;
+        super::audit_validation::on_agent_message(
+            conn,
+            discussion_id,
+            &msg.id,
+            &msg.content,
+            &msg.timestamp.to_rfc3339(),
+        )?;
+    }
+
+    // KT-1247 — a message from the worker is activity: it pushes the silent-
+    // worker clock of the execution that owns this room.
+    if matches!(msg.role, crate::models::MessageRole::Agent) {
+        let _ = super::orchestration::note_room_activity(conn, discussion_id);
     }
 
     Ok(next_order)

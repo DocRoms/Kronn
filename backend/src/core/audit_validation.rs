@@ -107,6 +107,16 @@ impl TdDecision {
         matches!(self, Self::Rejected | Self::AcceptedDecision)
     }
 
+    /// The `Status` value a human decision writes on a sheet.
+    pub(crate) fn status_label(self) -> &'static str {
+        match self {
+            Self::Confirmed => STATUS_CONFIRMED,
+            Self::Rejected => STATUS_REJECTED,
+            Self::AcceptedDecision => STATUS_ACCEPTED_DECISION,
+            Self::Deferred => STATUS_DEFERRED,
+        }
+    }
+
     fn from_status(value: &str) -> Option<Self> {
         let value = value
             .trim()
@@ -485,7 +495,24 @@ pub(crate) fn apply_td_resolutions(
     let project_path = linked_project_path(conn, discussion_id)?;
     let items: Vec<(&TdResolution, Option<&str>)> =
         resolutions.iter().map(|r| (r, rationale)).collect();
-    apply_td_resolutions_at(&project_path, &items, TdDecisionOrigin::Card)
+    apply_td_resolutions_at(&project_path, &items, TdDecisionOrigin::Card)?;
+    let project_id: Option<String> = conn
+        .query_row(
+            "SELECT project_id FROM discussions WHERE id = ?1",
+            [discussion_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(project_id) = project_id {
+        crate::core::td_tasks::close_inactive_logged(
+            conn,
+            &project_id,
+            &crate::core::docs_location::DocsRoot::of(&project_path).dir(&project_path),
+            "audit validation card",
+        );
+    }
+    Ok(())
 }
 
 /// Writes human TD decisions on the sheets of `project_path`. Every id is

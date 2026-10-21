@@ -602,3 +602,15 @@ fn fact_notes_are_put_back_after_a_review_rewrite() {
     );
     assert!(merged.contains("Refined"));
 }
+
+#[test]
+fn briefing_review_restores_options_even_without_form_facts() {
+    let options = "## Kronn options\n- Convert validated tech debt to tasks: yes\n- Cross audit: codex, claude\n";
+    let previous = format!("# Briefing\nOriginal answers.\n\n{options}");
+    for reviewed in ["# Briefing\nClarified answers.\n", "# Briefing\nClarified answers.\n\n## Kronn options\n- Convert validated tech debt to tasks: no\n"] {
+        let restored = reattach_facts(Some(&previous), reviewed);
+        assert!(restored.contains("Clarified answers."));
+        assert!(restored.ends_with(options), "{restored}");
+        assert_eq!(restored.matches("## Kronn options").count(), 1);
+    }
+}

@@ -32,11 +32,11 @@ pub(crate) async fn convert_project_tds(
         .await
 }
 
-/// The briefing option, read from `docs/briefing.md` or the DB notes: an
-/// agent rewriting the file must not silently turn it off.
+/// The file is authoritative; DB notes only cover a file not installed yet.
 pub(crate) fn briefing_option_set(file_notes: Option<&str>, db_notes: Option<&str>) -> bool {
-    file_notes.is_some_and(td_tasks::briefing_wants_td_tasks)
-        || db_notes.is_some_and(td_tasks::briefing_wants_td_tasks)
+    file_notes
+        .or(db_notes)
+        .is_some_and(td_tasks::briefing_wants_td_tasks)
 }
 
 /// The conversion that closes a successful Full audit, when the briefing
@@ -68,6 +68,75 @@ pub(crate) async fn convert_after_audit(
         )
         .await,
     )
+}
+
+/// Puts back the human TD decisions a run undid and flags new sheets that
+/// repeat a settled one (KT-1208); the SSE event reports what it did.
+pub(crate) async fn guard_decisions(
+    project_path: &FsPath,
+    before: crate::core::td_decisions::DecisionSnapshot,
+) -> Option<axum::response::sse::Event> {
+    if before.is_empty() {
+        return None;
+    }
+    let docs = crate::core::docs_location::DocsRoot::of(project_path).dir(project_path);
+    let outcome =
+        tokio::task::spawn_blocking(move || crate::core::td_decisions::restore(&docs, &before))
+            .await;
+    match outcome {
+        Ok(Ok(outcome)) if !outcome.is_empty() => {
+            tracing::info!(
+                "Tech-debt decisions guarded: {} restored, {} reverted, {} new sheet(s) repeat a settled one",
+                outcome.restored.len(),
+                outcome.reverted.len(),
+                outcome.settled_duplicates.len()
+            );
+            Some(
+                axum::response::sse::Event::default()
+                    .event("td_decisions")
+                    .data(
+                        serde_json::json!({
+                            "restored": outcome.restored,
+                            "reverted": outcome.reverted,
+                            "settled_duplicates": outcome.settled_duplicates,
+                        })
+                        .to_string(),
+                    ),
+            )
+        }
+        Ok(Ok(_)) => None,
+        Ok(Err(e)) => {
+            tracing::warn!("Tech-debt decisions not guarded after the run: {e}");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("Tech-debt decision guard panicked: {e}");
+            None
+        }
+    }
+}
+
+/// After any audit: the tasks of sheets that left the active list are closed.
+pub(crate) async fn close_after_audit(
+    db: &Arc<crate::db::Database>,
+    project_id: &str,
+    project_path: &FsPath,
+    audit_run_id: &str,
+) {
+    let (pid, docs, origin) = (
+        project_id.to_string(),
+        crate::core::docs_location::DocsRoot::of(project_path).dir(project_path),
+        format!("audit:{audit_run_id}"),
+    );
+    let closed = db
+        .with_conn(move |conn| {
+            td_tasks::close_inactive_logged(conn, &pid, &docs, &origin);
+            Ok(())
+        })
+        .await;
+    if let Err(e) = closed {
+        tracing::warn!("Tech-debt tasks not closed after audit {audit_run_id}: {e}");
+    }
 }
 
 /// POST /api/projects/{id}/audit/td-tasks

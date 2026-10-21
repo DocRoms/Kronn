@@ -69,27 +69,33 @@ pub async fn confirm_doc_provenance(
         Ok(found) => found,
         Err(e) => return Json(ApiResponse::err(e)),
     };
-    if !state
-        .audit_tracker
-        .lock()
-        .map(|mut t| t.try_acquire_lease(&project_id))
-        .unwrap_or(false)
-    {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Conflict,
-            "An audit is currently running on this project — confirm once it has finished.",
-        ));
-    }
-    let tracker = state.audit_tracker.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        doc_provenance::confirm(&path, &req.docs)?;
-        doc_provenance::report(&path, false)
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
-    if let Ok(mut t) = tracker.lock() {
-        t.release_lease(&project_id);
-    }
+    let lease =
+        match crate::api::audit::docs_write::DocsWriteLease::acquire(&state, &project_id).await {
+            Ok(lease) => lease,
+            Err(error) => return Json(ApiResponse::err_coded(ApiErrorCode::Conflict, error)),
+        };
+    let result = lease
+        .blocking(move || {
+            let confirmed = doc_provenance::confirm(&path, &req.docs)?;
+            let documents = crate::core::audit_documents::capture(&path)?;
+            Ok::<_, String>((doc_provenance::report(&path, false)?, confirmed, documents))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
+    let result = match result {
+        Ok((report, confirmed, documents)) => {
+            let pid = project_id.clone();
+            state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::audit_documents::confirm_paths(conn, &pid, &confirmed, &documents)
+                })
+                .await
+                .map(|()| report)
+                .map_err(|e| format!("Cannot record confirmed audit documents: {e}"))
+        }
+        Err(e) => Err(e),
+    };
     match result {
         Ok(report) => Json(ApiResponse::ok(report)),
         Err(e) => Json(ApiResponse::err(e)),

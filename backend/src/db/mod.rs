@@ -6,8 +6,10 @@ pub mod api_access_policies;
 pub mod api_call_logs;
 pub mod assistant_conversations;
 pub mod audit_cross;
+pub mod audit_documents;
 pub mod audit_run_cost;
 pub mod audit_runs;
+pub mod audit_validation;
 pub mod cli_telemetry;
 pub(crate) mod cli_worker_bindings;
 pub mod compare;
@@ -284,6 +286,18 @@ impl Database {
             Ok(0) => {}
             Ok(n) => tracing::info!("Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted", n),
             Err(e) => tracing::warn!("Failed to reconcile stale audit_runs: {}", e),
+        }
+
+        // KT-1122 — recognise validations that already signalled completion
+        // and archive the stale ones an old audit left open. Idempotent.
+        match audit_validation::repair(&conn) {
+            Ok(audit_validation::RepairReport { completed: 0, archived: 0 }) => {}
+            Ok(report) => tracing::info!(
+                "Repaired audit validations: {} completion(s) recognised, {} stale discussion(s) archived",
+                report.completed,
+                report.archived
+            ),
+            Err(e) => tracing::warn!("Failed to repair audit validation state: {}", e),
         }
 
         // 0.8.11 (B5) — same reconcile for workflow_runs: a run that was in

@@ -360,7 +360,13 @@ describe('constants', () => {
       expect(isValidationDisc('Validation audit AI')).toBe(true);
     });
 
+    it('recognises the validation of a sub-audit (KT-1122)', () => {
+      expect(isValidationDisc('Validation audit RGAA 4.1')).toBe(true);
+      expect(isValidationDisc('Validation audit Security')).toBe(true);
+    });
+
     it('rejects non-matching titles', () => {
+      expect(isValidationDisc('Validation audit')).toBe(false);
       expect(isValidationDisc('validation audit AI')).toBe(false);
       expect(isValidationDisc('Validation audit AI ')).toBe(false);
       expect(isValidationDisc('')).toBe(false);

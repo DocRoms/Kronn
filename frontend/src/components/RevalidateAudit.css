@@ -1,4 +1,4 @@
-/* « Revalider l'audit » (KT-1168). --kr- tokens only. */
+/* « Vérifier la doc » audit entry point. --kr- tokens only. */
 .rv-overlay {
   position: fixed;
   inset: 0;
@@ -87,3 +87,111 @@
   cursor: pointer;
 }
 .rv-icon-btn:hover { border-color: var(--kr-border); }
+
+.rv-stale {
+  display: grid;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4);
+  border: 1px solid var(--kr-warning);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-warning-bg);
+}
+
+.rv-stale h3,
+.rv-stale p {
+  margin: 0;
+}
+
+.rv-stale > ul,
+.rv-stale > ul > li > ul {
+  margin: 0;
+  padding-left: var(--kr-sp-5);
+}
+
+.rv-stale > ul {
+  display: grid;
+  gap: var(--kr-sp-3);
+}
+
+.rv-stale > ul > li {
+  display: grid;
+  gap: var(--kr-sp-1);
+}
+
+.rv-stale code {
+  overflow-wrap: anywhere;
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+}
+
+.rv-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+}
+
+.rv-placeholder-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-surface);
+}
+
+.rv-placeholder-action p,
+.rv-full-audit p {
+  margin: 0;
+}
+
+.rv-full-audit {
+  padding-top: var(--kr-sp-3);
+  border-top: 1px solid var(--kr-border-subtle);
+}
+
+.rv-full-audit summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+  font-weight: 600;
+  list-style: none;
+}
+
+.rv-full-audit summary::-webkit-details-marker {
+  display: none;
+}
+
+.rv-full-audit[open] summary svg {
+  transform: rotate(180deg);
+}
+
+.rv-full-audit > :not(summary) {
+  margin-top: var(--kr-sp-3);
+}
+
+@media (max-width: 560px) {
+  .rv-overlay {
+    align-items: stretch;
+    padding: var(--kr-sp-2);
+  }
+
+  .rv-panel {
+    max-height: calc(100vh - var(--kr-sp-4));
+    padding: var(--kr-sp-4);
+  }
+
+  .rv-footer,
+  .rv-placeholder-action {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .rv-btn {
+    justify-content: center;
+    white-space: normal;
+  }
+}

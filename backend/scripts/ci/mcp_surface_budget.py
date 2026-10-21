@@ -98,7 +98,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # head: exactly 85_341 B.
 # KT-1210: audit_launch gains `fresh` and `retry_steps`, paid for by tightening
 # both audit descriptions; ceiling lowered by 73 B (85_341 -> 85_268).
-CATALOGUE_MAX_BYTES = 85_268
+# KT-1205: the template update/fill flow lives in the audit_prepare manual;
+# compact audit descriptions lower the catalogue by 165 B.
+# KT-1205 + KT-1218: preserve both template and Verify docs guidance, measured
+# after integration and shortening repeated descriptions.
+CATALOGUE_MAX_BYTES = 85_095
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

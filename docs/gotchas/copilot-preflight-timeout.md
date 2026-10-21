@@ -22,7 +22,7 @@ Timeout explicitly awaits `Child::kill`, which also waits/reaps in Tokio;
 and spawn errors are covered separately. The timer budget still includes
 spawning; this does not alter account classification, authentication or worker
 reassignment policy.
-[src: file: backend/src/agents/runner.rs:8202-8295]
+[src: file: backend/src/agents/runner.rs:8295-8388]
 [Tokio Child lifecycle](https://docs.rs/tokio/latest/tokio/process/struct.Child.html#method.kill)
 
 These are local shell fixtures, not a real agent or account check. The release

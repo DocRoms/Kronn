@@ -4,8 +4,8 @@ Kronn's **Settings → Agents → External API mode** manages named connections 
 OpenAI-compatible chat services. LiteLLM, NVIDIA and OpenRouter provide endpoint
 presets; `Other` uses the same contract for an operator-supplied service. Every
 connection owns a display name, a unique discussion alias, an endpoint and
-optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1550-1552]
-[src: file: backend/src/models/external_api_connection.rs:5-30]
+optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1791-1796#ExternalApiSection]
+[src: file: backend/src/models/external_api_connection.rs:11-20#ExternalApiConnection]
 
 The required HTTP surface is `GET /v1/models` plus
 `POST /v1/chat/completions`. Kronn stores a base URL without a trailing `/v1`
@@ -139,14 +139,15 @@ Mention the saved alias, such as `@nvidia` or `@company-proxy`, in the message.
 Kronn resolves named connection mentions before canonicalizing the requested
 agent targets, and carries the exact connection identifier in that target.
 [src: file: backend/src/db/external_api_connections.rs:201-237#target_for_connection]
-[src: file: backend/src/api/discussions/messaging.rs:525-549#resolve_connection_mentions]
+[src: file: backend/src/api/discussions/messaging.rs:531-555#resolve_connection_mentions]
 
 The new-discussion form merges configured OpenRouter/Other aliases with native
 agent aliases. Each alias exposes its Economy, Default and Reasoning model in
 the shared selector, and creation persists the connection-qualified initial
 target rather than only the generic `Custom` wire type.
-[src: file: frontend/src/components/NewDiscussionForm.tsx:189-215]
-[src: file: frontend/src/components/NewDiscussionForm.tsx:492-546]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:216-227#launchTargets]
+[src: file: frontend/src/lib/externalAgentIdentity.ts:63-79#externalAgentTargets]
+[src: file: frontend/src/components/NewDiscussionForm.tsx:643-651#initialTargets]
 
 Discussion headers, messages and comparison views recover the provider name
 from that durable `MessageTarget.connection_id`; editable titles are not the
@@ -154,7 +155,7 @@ identity source once the detailed discussion is loaded. OpenAI-compatible
 usage markers are also counted for `Custom`, so OpenRouter token totals follow
 the same per-turn aggregation as LiteLLM and NVIDIA.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:81-107#discussionConnectionId]
-[src: file: backend/src/agents/runner.rs:14126-14190#parse_token_usage]
+[src: file: backend/src/agents/runner.rs:14154-14218#parse_token_usage]
 
 Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the
@@ -201,9 +202,9 @@ their endpoint and Economy, Default and Reasoning models. Saving either card
 immediately refreshes the global agent selectors, and startup projects any
 previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
-stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:595-695]
-[src: file: backend/src/db/external_api_connections.rs:18-59]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1549-1558]
+stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2009-2013#sync_runtime_config]
+[src: file: backend/src/db/external_api_connections.rs:21-47#sync_runtime_config]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1795-1800#onModelTiersChanged]
 
 After upgrading, verify both migrated cards, run their connection tests and
 confirm the intended models for all three tiers before using them.
@@ -244,8 +245,8 @@ the runtime-resolution guide.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:10811-10817#task_worker_catalogue]
-  [src: file: backend/scripts/disc-introspection-mcp.py:5992-5997#call_agent_list]
+  [src: file: backend/src/api/orchestration.rs:10933-10939#task_worker_catalogue]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5988-5993#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:144-162#resolve]
   [src: file: backend/src/api/media.rs:150-189#ConnectionReference]
   [src: file: backend/src/api/media.rs:385-414#usable_connections]

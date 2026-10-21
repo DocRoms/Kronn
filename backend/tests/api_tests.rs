@@ -7825,6 +7825,46 @@ async fn a_project_ai_doc_folder_leaving_the_root_is_refused_with_a_400() {
     assert_eq!(unknown["error_code"], "not_found");
 }
 
+#[tokio::test]
+async fn briefing_file_drives_http_reads_and_audited_project_cards() {
+    let state = test_state();
+    let repo = tempfile::tempdir().unwrap();
+    let docs = repo.path().join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(docs.join("AGENTS.md"), "# Project\nRead the briefing.\n").unwrap();
+    let mut project = docs_location_project("p-brief-source", repo.path());
+    project.briefing_notes = Some("Stale DB briefing".into());
+    state
+        .db
+        .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
+        .await
+        .unwrap();
+    kronn::core::kronn_state::record_audit(repo.path(), "full").unwrap();
+    let app = || build_router_with_auth(state.clone(), false);
+    for body in ["# Briefing\nCommitted on another machine.\n", " \n"] {
+        std::fs::write(docs.join("briefing.md"), body).unwrap();
+        let expected = if body.trim().is_empty() {
+            Value::Null
+        } else {
+            Value::String(body.into())
+        };
+        let (_, briefing) = get_json(app(), "/api/projects/p-brief-source/briefing").await;
+        assert_eq!(briefing["success"], true, "{briefing}");
+        assert_eq!(briefing["data"], expected, "{briefing}");
+        let (_, card) = get_json(app(), "/api/projects/p-brief-source").await;
+        assert_eq!(card["data"]["audit_status"], "Audited", "{card}");
+        assert_eq!(card["data"]["briefing_notes"], expected, "{card}");
+        let (_, cards) = get_json(app(), "/api/projects").await;
+        let card = cards["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "p-brief-source")
+            .unwrap();
+        assert_eq!(card["briefing_notes"], expected, "{cards}");
+    }
+}
+
 fn briefing_answers(docs_dir: Option<&str>) -> Value {
     let mut body = serde_json::json!({
         "purpose": "P", "team": "T", "maturity": "M",
@@ -12025,10 +12065,15 @@ fn analysis_steps_tech_debt_creates_detail_files() {
 
 #[test]
 fn analysis_steps_tech_debt_checks_outdated_prerequisites() {
-    let source = include_str!("../src/api/audit/mod.rs");
+    // KT-153: the step prompts live in embedded Markdown, not in mod.rs.
+    let source = include_str!("../src/api/audit/prompts/step8-tech-debt.md");
     // The tech debt step should mention checking for outdated prerequisites
     assert!(
-        source.contains("deprecated") || source.contains("EOL") || source.contains("outdated"),
+        source.contains("Outdated prerequisites"),
+        "Tech debt step should instruct filling the outdated prerequisites table"
+    );
+    assert!(
+        source.contains("deprecated") || source.contains("EOL"),
         "Tech debt step should instruct checking for outdated prerequisites"
     );
 }
@@ -22017,6 +22062,31 @@ mod cold_api_handlers_tests {
         }).await.unwrap();
     }
 
+    /// `seed_completed_validation` for a project whose docs are already on
+    /// disk: also record the final document fingerprints the way a completed
+    /// audit's terminal transaction does, so the KT-1206 gate sees a baseline
+    /// matching the reviewed contents (and still refuses any later edit).
+    async fn seed_completed_validation_with_docs(
+        state: &AppState,
+        project_id: &str,
+        repo: &std::path::Path,
+    ) {
+        seed_completed_validation(state, project_id).await;
+        let documents = kronn::core::audit_documents::capture_json(repo).unwrap();
+        let pid = project_id.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let run = kronn::db::audit_runs::list_recent(conn, &pid, 1)?
+                    .into_iter()
+                    .next()
+                    .expect("the seeded run");
+                kronn::db::audit_documents::record(conn, &run.id, &documents)
+            })
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn project_git_status_real_repo_returns_envelope() {
         let (_dir, repo) = seed_repo("proj-status");
@@ -22647,6 +22717,102 @@ mod cold_api_handlers_tests {
     }
 
     #[tokio::test]
+    async fn older_template_update_is_visible_in_ui_drift_and_mcp_audit_info() {
+        let (_dir, repo) = seed_repo("template-update");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let original =
+            "<!-- kronn:doc-version=\"1.0\" -->\n# Audited documentation\nHuman content.";
+        std::fs::write(repo.join("docs/AGENTS.md"), original).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+        for endpoint in ["drift", "audit-info"] {
+            let (status, json) =
+                get_json(app.clone(), &format!("/api/projects/{pid}/{endpoint}")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["success"], true, "{json}");
+            let update = &json["data"]["template_update"];
+            assert_eq!(update["available"], true, "{json}");
+            assert_eq!(update["installed_version"], "1.0");
+            assert_eq!(update["current_version"], "1.1");
+            assert!(update["missing_files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["path"] == "docs/glossary.md" && f["step"].is_number()));
+            assert_eq!(update["renames"], serde_json::json!([]));
+        }
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
+            original
+        );
+        assert!(
+            !repo.join("docs/.kronn.json").exists(),
+            "inspection does not install or rewrite state"
+        );
+    }
+
+    #[tokio::test]
+    async fn template_update_install_tracks_manifest_preserves_filled_docs_and_respects_audit_lease(
+    ) {
+        let (_dir, repo) = seed_repo("template-update-install");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let original = "# Human project docs\nVue example: {{ message }}";
+        std::fs::write(repo.join("docs/AGENTS.md"), original).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state.clone(), false);
+        assert!(state.audit_tracker.lock().unwrap().try_acquire_lease(&pid));
+        let (_, refused) = post_json(
+            app.clone(),
+            &format!("/api/projects/{pid}/install-template"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(refused["success"], false, "{refused}");
+        assert!(!repo.join("docs/environments.md").exists());
+        state.audit_tracker.lock().unwrap().release_lease(&pid);
+        std::fs::write(repo.join("docs/provenance.json"), "not valid JSON").unwrap();
+        let (_, refused) = post_json(
+            app.clone(),
+            &format!("/api/projects/{pid}/install-template"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(refused["success"], false, "{refused}");
+        assert!(refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("provenance.json"));
+        assert!(!repo.join("docs/environments.md").exists());
+        std::fs::remove_file(repo.join("docs/provenance.json")).unwrap();
+        let (_, installed) = post_json(
+            app.clone(),
+            &format!("/api/projects/{pid}/install-template"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(installed["success"], true, "{installed}");
+        assert!(repo.join("docs/environments.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
+            original
+        );
+        let recorded = kronn::core::kronn_state::read(&repo).unwrap();
+        assert_eq!(recorded.template.unwrap().version.as_deref(), Some("1.1"));
+        let (_, drift) = get_json(app, &format!("/api/projects/{pid}/drift")).await;
+        assert_eq!(
+            drift["data"]["template_update"]["available"], false,
+            "{drift}"
+        );
+        assert!(
+            state.audit_tracker.lock().unwrap().try_acquire_lease(&pid),
+            "install released the lease"
+        );
+        state.audit_tracker.lock().unwrap().release_lease(&pid);
+    }
+
+    #[tokio::test]
     async fn check_drift_unknown_project_returns_err_envelope() {
         // Already covered by the wrong-id sweep but pinning here too
         // because the audit_status -> drift handoff is a critical UX path.
@@ -22887,7 +23053,7 @@ mod cold_api_handlers_tests {
         std::fs::write(repo.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
-        seed_completed_validation(&state, &pid).await;
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
         let app = build_router_with_auth(state, false);
 
         let (st, json) = post_json(
@@ -22897,7 +23063,7 @@ mod cold_api_handlers_tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
 
         let kronn_state = repo.join("docs/.kronn.json");
         assert!(kronn_state.exists(), "docs/.kronn.json must be created");
@@ -22921,7 +23087,7 @@ mod cold_api_handlers_tests {
         .unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
-        seed_completed_validation(&state, &pid).await;
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
 
         let (_, json) = post_json(
             build_router_with_auth(state.clone(), false),
@@ -22988,7 +23154,9 @@ mod cold_api_handlers_tests {
         .unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
-        seed_completed_validation(&state, &pid).await;
+        // A revalidation is an audit run, and no audit starts without a briefing.
+        std::fs::write(repo.join("docs/briefing.md"), "Test briefing content\n").unwrap();
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
         let (_, json) = post_json(
             build_router_with_auth(state.clone(), false),
             &format!("/api/projects/{pid}/validate-audit"),
@@ -23061,7 +23229,7 @@ mod cold_api_handlers_tests {
         std::fs::write(repo.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
-        seed_completed_validation(&state, &pid).await;
+        seed_completed_validation_with_docs(&state, &pid, &repo).await;
 
         // First call.
         let (_, first_response) = post_json(
@@ -23070,7 +23238,11 @@ mod cold_api_handlers_tests {
             serde_json::json!({}),
         )
         .await;
-        assert_eq!(first_response["success"], serde_json::Value::Bool(true));
+        assert_eq!(
+            first_response["success"],
+            serde_json::Value::Bool(true),
+            "{first_response}"
+        );
         let first = std::fs::read_to_string(repo.join("docs/.kronn.json")).unwrap();
 
         // Second call (could be hours / days later).
@@ -23080,7 +23252,11 @@ mod cold_api_handlers_tests {
             serde_json::json!({}),
         )
         .await;
-        assert_eq!(second_response["success"], serde_json::Value::Bool(true));
+        assert_eq!(
+            second_response["success"],
+            serde_json::Value::Bool(true),
+            "{second_response}"
+        );
         let second = std::fs::read_to_string(repo.join("docs/.kronn.json")).unwrap();
 
         // The validated_at line must be unchanged (both runs happen on
@@ -23429,7 +23605,11 @@ mod cold_api_handlers_tests {
         .await;
         assert_eq!(st, StatusCode::CONFLICT, "{json}");
         assert!(
-            json["error"].as_str().unwrap_or("").contains("locked"),
+            // KT-1212: every docs writer refuses with the shared DOCS_BUSY message.
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("currently running"),
             "{json}"
         );
         assert!(!repo.join("docs/briefing.md").exists());

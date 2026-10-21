@@ -182,7 +182,7 @@ newly entered grant the restored message is ordinary text. The refusal notice
 does not claim the message was delivered before an acceptance receipt arrives.
 [src: file: frontend/src/hooks/useMessageQueue.ts:54-83#loadQueue]
 [src: file: frontend/src/lib/importantPublication.ts:55-74#preparePublication]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:544-547#publicationGrant]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:564-567#publicationGrant]
 [src: file: backend/src/api/discussions/messaging.rs:3571-3600#fresh_proof]
 
 ## Reading the code

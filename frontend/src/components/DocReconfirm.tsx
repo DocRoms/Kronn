@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CheckCircle2, FileWarning, Loader2, X } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
@@ -13,6 +13,10 @@ export interface DocReconfirmProps {
   project: Project;
   auditActive: boolean;
   toast: (msg: string, type: 'success' | 'error' | 'warning' | 'info') => void;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  hideTrigger?: boolean;
+  onChanged?: () => void;
 }
 
 function ChangeView({ change }: { change: ProvenanceChange }) {
@@ -48,12 +52,21 @@ function ChangeView({ change }: { change: ProvenanceChange }) {
  * Every Kronn write is applied; this only asks a person to confirm it, with
  * the diff, and never blocks anything.
  */
-export function DocReconfirm({ project, auditActive, toast }: DocReconfirmProps) {
+export function DocReconfirm({
+  project, auditActive, toast,
+  open: controlledOpen, onOpenChange, hideTrigger = false, onChanged,
+}: DocReconfirmProps) {
   const { t } = useT();
   const [count, setCount] = useState(0);
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
   const [report, setReport] = useState<DocProvenanceReport | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = useCallback((next: boolean) => {
+    if (!next) setReport(null);
+    if (controlledOpen === undefined) setInternalOpen(next);
+    onOpenChange?.(next);
+  }, [controlledOpen, onOpenChange]);
 
   useEffect(() => {
     if (auditActive) return;
@@ -67,22 +80,33 @@ export function DocReconfirm({ project, auditActive, toast }: DocReconfirmProps)
 
   const panelRef = useDialogFocus<HTMLDivElement>({ active: open, onEscape: () => setOpen(false) });
 
-  const openPanel = async () => {
-    setOpen(true);
+  useEffect(() => {
+    if (!open || auditActive) return;
+    let live = true;
     setReport(null);
-    try {
-      setReport(await projectsApi.docProvenance(project.id, true));
-    } catch (e) {
-      toast(t('docReconfirm.error', String(e instanceof Error ? e.message : e)), 'error');
-      setOpen(false);
-    }
-  };
+    projectsApi.docProvenance(project.id, true).then(
+      nextReport => { if (live) setReport(nextReport); },
+      error => {
+        if (!live) return;
+        toast(t('docReconfirm.error', String(error instanceof Error ? error.message : error)), 'error');
+        setOpen(false);
+      },
+    );
+    return () => { live = false; };
+  }, [auditActive, open, project.id, setOpen, t, toast]);
+
+  useEffect(() => {
+    if (auditActive && open) setOpen(false);
+  }, [auditActive, open, setOpen]);
+
+  const openPanel = () => setOpen(true);
 
   const confirm = useAsyncGuard(async (docs: string[]) => {
     setBusy(docs.length === 1 ? docs[0] : '*');
     try {
       const after = await projectsApi.confirmDocProvenance(project.id, docs);
       setCount(after.to_reconfirm);
+      onChanged?.();
       toast(t('docReconfirm.done', String(docs.length || (report?.to_reconfirm ?? 0))), 'success');
       if (after.to_reconfirm === 0) {
         setOpen(false);
@@ -96,7 +120,7 @@ export function DocReconfirm({ project, auditActive, toast }: DocReconfirmProps)
     }
   });
 
-  if (auditActive || count === 0) return null;
+  if (auditActive || (count === 0 && !open)) return null;
 
   const pending = (report?.docs ?? []).filter(d => d.state === 'to_reconfirm');
   const docRow = (doc: DocProvenanceStatus) => (
@@ -126,16 +150,18 @@ export function DocReconfirm({ project, auditActive, toast }: DocReconfirmProps)
 
   return (
     <>
-      <button
-        type="button"
-        className="dash-drift-update-btn"
-        data-testid="project-doc-reconfirm"
-        onClick={(e) => { e.stopPropagation(); void openPanel(); }}
-        title={t('docReconfirm.hint')}
-      >
-        <FileWarning size={9} />
-        {t('docReconfirm.button', String(count))}
-      </button>
+      {!hideTrigger && (
+        <button
+          type="button"
+          className="dash-drift-update-btn"
+          data-testid="project-doc-reconfirm"
+          onClick={(e) => { e.stopPropagation(); openPanel(); }}
+          title={t('docReconfirm.hint')}
+        >
+          <FileWarning size={9} />
+          {t('docReconfirm.button', String(count))}
+        </button>
+      )}
       {open && createPortal(
         <div className="dr-overlay" role="presentation" onClick={(e) => { e.stopPropagation(); setOpen(false); }}>
           <div

@@ -13,6 +13,12 @@ on:
 
 permissions: {}
 
+# One verdict per pull-request state: a burst of label events keeps only the
+# newest run, so a check that predates the label cannot outlive its successor.
+concurrency:
+  group: ci-verdict-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.event.pull_request.base.sha }}
+  cancel-in-progress: true
+
 jobs:
   ci-quality-gates:
     runs-on: ubuntu-latest

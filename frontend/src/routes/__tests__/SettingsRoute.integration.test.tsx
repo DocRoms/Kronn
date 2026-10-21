@@ -32,7 +32,8 @@ vi.mock('../../lib/api', async () => {
   const { buildApiMock } = await import('../../test/apiMock');
   const api = buildApiMock();
   api.config.getServerConfig = vi.fn<typeof RealApi.config.getServerConfig>().mockResolvedValue(serverConfig);
-  api.config.dbUsage = vi.fn<typeof RealApi.config.dbUsage>().mockResolvedValue({
+  // `dbUsage` takes an options object, which `AnyFn` cannot express.
+  api.config.dbUsage = vi.fn().mockResolvedValue({
     file_bytes: 534 * 1024 * 1024, wal_bytes: 0, free_bytes: 0, tables: [],
   });
   api.config.dbInfo = vi.fn<typeof RealApi.config.dbInfo>().mockResolvedValue({

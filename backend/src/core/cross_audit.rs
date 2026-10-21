@@ -596,6 +596,45 @@ pub fn arbitrate(challenge: Option<&ChallengeResult>, reply: Option<&ReplyResult
     }
 }
 
+/// A human's answer to a dispute card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanDecision {
+    Keep,
+    Dismiss,
+    /// The human refused to arbitrate: the finding stays, still disputed.
+    Declined,
+}
+
+impl HumanDecision {
+    pub fn from_option_id(id: &str) -> Option<Self> {
+        match id {
+            "keep" => Some(Self::Keep),
+            "dismiss" => Some(Self::Dismiss),
+            _ => None,
+        }
+    }
+
+    pub fn verdict(self) -> &'static str {
+        match self {
+            Self::Keep => "disputed — kept by a human",
+            Self::Dismiss => "disputed — dismissed by a human",
+            Self::Declined => "disputed — left undecided by a human",
+        }
+    }
+
+    /// The suffix of the finding's row in the index table.
+    fn mark(self) -> &'static str {
+        match self {
+            Self::Keep => " (disputed — kept by a human)",
+            Self::Dismiss => " (dismissed by a human)",
+            Self::Declined => " (disputed — left undecided by a human)",
+        }
+    }
+}
+
+const PENDING_MARK: &str = " (disputed — human decision pending)";
+
 // ── Provenance ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,8 +665,52 @@ pub struct CrossFindingRecord {
     pub reply: Option<ReplyResult>,
     pub outcome: Outcome,
     pub question_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_decision: Option<HumanDecision>,
+    /// Set when the finding repeats a sheet a human rejected or accepted:
+    /// the sheet keeps its decision and the finding stays out of the audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_as: Option<String>,
     #[serde(skip)]
     pub proposed_td_id: Option<String>,
+}
+
+impl CrossFindingRecord {
+    /// Listed as active debt: arbitration kept it, no human removed it.
+    pub fn in_audit(&self) -> bool {
+        self.outcome.in_audit()
+            && self.settled_as.is_none()
+            && self.human_decision != Some(HumanDecision::Dismiss)
+    }
+
+    /// Has a sheet: in the audit, or a re-detection of a settled sheet.
+    pub fn has_sheet(&self) -> bool {
+        self.outcome.in_audit()
+    }
+
+    /// Awaits a human: disputed, unanswered, not already settled.
+    pub fn awaits_human(&self) -> bool {
+        self.outcome == Outcome::Disputed
+            && self.settled_as.is_none()
+            && self.human_decision.is_none()
+    }
+
+    pub fn verdict_label(&self) -> String {
+        match (&self.settled_as, self.human_decision) {
+            (Some(settled), _) => format!("{} — the sheet stays {settled}", self.outcome.label()),
+            (None, Some(decision)) => decision.verdict().to_string(),
+            (None, None) => self.outcome.label().to_string(),
+        }
+    }
+
+    fn index_mark(&self) -> &'static str {
+        match (self.outcome, self.human_decision) {
+            (_, Some(decision)) => decision.mark(),
+            (Outcome::Disputed, None) => PENDING_MARK,
+            (Outcome::Contested, None) => " (contested)",
+            _ => "",
+        }
+    }
 }
 
 pub fn build_record(
@@ -672,6 +755,8 @@ pub fn build_record(
         reply,
         outcome,
         question_key: None,
+        human_decision: None,
+        settled_as: None,
         proposed_td_id: group.members.iter().find_map(|m| m.finding.td_id.clone()),
     }
 }
@@ -710,17 +795,38 @@ fn slug(title: &str) -> String {
 }
 
 /// The sheet id: the agent's proposed id when a sheet already holds it (no
-/// slug churn), else `TD-<date>-<slug>`, unique within the run.
+/// slug churn), else the rejected or accepted sheet the finding repeats (its
+/// decision stands, nothing new is minted), else `TD-<date>-<slug>`, unique
+/// within the run.
 pub fn assign_td_ids(records: &mut [CrossFindingRecord], tech_debt_dir: &Path, yyyymmdd: &str) {
+    let sheets = crate::core::td_index::read_sheets_in(tech_debt_dir);
     let mut taken: BTreeSet<String> = BTreeSet::new();
-    for record in records.iter_mut().filter(|r| r.outcome.in_audit()) {
+    for record in records.iter_mut().filter(|r| r.has_sheet()) {
         let reused = record
             .proposed_td_id
             .as_ref()
             .filter(|id| crate::core::td_index::is_td_id(id))
             .filter(|id| tech_debt_dir.join(format!("{id}.md")).is_file())
             .filter(|id| !taken.contains(*id))
-            .cloned();
+            .cloned()
+            .or_else(|| {
+                crate::core::td_decisions::settled_match(
+                    &record.citation.file,
+                    &record.title,
+                    &sheets,
+                )
+                .map(|s| s.id.clone())
+                .filter(|id| !taken.contains(id))
+            });
+        record.settled_as = reused
+            .as_ref()
+            .and_then(|id| sheets.iter().find(|s| &s.id == id))
+            .and_then(|s| s.decision)
+            .filter(|d| d.leaves_index())
+            .map(|d| match d {
+                crate::core::audit_validation::TdDecision::Rejected => "rejected".to_string(),
+                _ => "accepted as a decision".to_string(),
+            });
         let id = reused.unwrap_or_else(|| {
             let base = format!("TD-{yyyymmdd}-{}", slug(&record.title));
             let mut id = base.clone();
@@ -790,7 +896,7 @@ pub fn provenance_block(record: &CrossFindingRecord) -> String {
         BLOCK_START.to_string(),
         "## Cross-agent audit (experimental)".to_string(),
         String::new(),
-        format!("- **Verdict**: {}", record.outcome.label()),
+        format!("- **Verdict**: {}", record.verdict_label()),
         format!("- **Found by**: {}", found_by_line(record)),
         format!(
             "- **Detection count**: {} of {} agents (information only, never a verdict)",
@@ -910,7 +1016,14 @@ pub struct IndexInput<'a> {
     pub dropped: &'a [DroppedFinding],
     pub checklists: &'a [(AgentType, Vec<ChecklistLine>)],
     pub failed_agents: &'a [(AgentType, String)],
+    /// Rows of the previous index this run did not re-detect, kept as written.
+    pub carried_rows: &'a [String],
+    /// `(id, title, decision)` of settled sheets the previous index named.
+    pub settled: &'a [(String, String, String)],
 }
+
+pub const CARRIED_HEADING: &str = "## Carried from earlier runs";
+pub const SETTLED_HEADING: &str = "## Settled by a human";
 
 pub fn render_index(input: &IndexInput<'_>) -> String {
     let agents: Vec<String> = input.agents.iter().map(agent_label).collect();
@@ -922,17 +1035,9 @@ pub fn render_index(input: &IndexInput<'_>) -> String {
         input.heading,
         agents.join(", ")
     );
-    let audited: Vec<&CrossFindingRecord> = input
-        .records
-        .iter()
-        .filter(|r| r.outcome.in_audit())
-        .collect();
+    let audited: Vec<&CrossFindingRecord> = input.records.iter().filter(|r| r.in_audit()).collect();
     for r in &audited {
-        let mark = match r.outcome {
-            Outcome::Contested => " (contested)",
-            Outcome::Disputed => " (disputed — human decision pending)",
-            _ => "",
-        };
+        let mark = r.index_mark();
         out.push_str(&format!(
             "| {} | {}{mark} | `{}` | {} |\n",
             r.td_id.clone().unwrap_or_default(),
@@ -950,12 +1055,49 @@ pub fn render_index(input: &IndexInput<'_>) -> String {
         out.push_str(&format!(
             "| {} | {} | {} | {}/{} | {} |\n",
             r.td_id.clone().unwrap_or_else(|| r.group_id.clone()),
-            r.outcome.label(),
+            r.verdict_label(),
             found_by_line(r),
             r.detection_count,
             r.agents_total,
             r.challenger.clone().unwrap_or_else(|| "—".into())
         ));
+    }
+
+    if !input.carried_rows.is_empty() {
+        out.push_str(&format!(
+            "\n{CARRIED_HEADING}\n\nStill on file, or written by a person; this run did not detect them again. \
+             Settle them in the tech-debt review.\n\n| ID | Problem | Area | Severity |\n|----|---------|------|----------|\n"
+        ));
+        for row in input.carried_rows {
+            out.push_str(row.trim());
+            out.push('\n');
+        }
+    }
+
+    let mut settled: Vec<(String, String, String)> = input.settled.to_vec();
+    for r in input.records.iter().filter(|r| r.settled_as.is_some()) {
+        let id = r.td_id.clone().unwrap_or_default();
+        if !settled.iter().any(|(known, _, _)| *known == id) {
+            settled.push((
+                id,
+                r.title.clone(),
+                r.settled_as.clone().unwrap_or_default(),
+            ));
+        }
+    }
+    settled.sort();
+    if !settled.is_empty() {
+        out.push_str(&format!(
+            "\n{SETTLED_HEADING}\n\nNot active debt: a person rejected these or accepted them as decisions. \
+             A re-detection never reopens them.\n\n"
+        ));
+        for (id, title, decision) in &settled {
+            out.push_str(&format!(
+                "- `{id}` — {} — {}\n",
+                sanitize_inline(title),
+                sanitize_inline(decision)
+            ));
+        }
     }
 
     out.push_str("\n## Dismissed with verified proof (logged)\n\n");
@@ -1045,6 +1187,39 @@ pub fn render_index(input: &IndexInput<'_>) -> String {
         }
     }
     out
+}
+
+/// The index after a human answered the dispute on `td_id`: the finding's row
+/// and verdict carry the decision, and a dismissed finding leaves the table.
+pub fn apply_human_decision_to_index(
+    content: &str,
+    td_id: &str,
+    decision: HumanDecision,
+) -> String {
+    let first_cell = |line: &str| -> Option<String> {
+        let rest = line.trim().strip_prefix('|')?;
+        Some(rest.split('|').next()?.trim().to_string())
+    };
+    let pending_verdict = format!("| {} |", Outcome::Disputed.label());
+    let mut out: Vec<String> = Vec::new();
+    for line in content.lines() {
+        if first_cell(line).as_deref() != Some(td_id) {
+            out.push(line.to_string());
+        } else if line.contains(PENDING_MARK) {
+            if decision != HumanDecision::Dismiss {
+                out.push(line.replacen(PENDING_MARK, decision.mark(), 1));
+            }
+        } else if line.contains(&pending_verdict) {
+            out.push(line.replacen(&pending_verdict, &format!("| {} |", decision.verdict()), 1));
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    let mut text = out.join("\n");
+    if content.ends_with('\n') {
+        text.push('\n');
+    }
+    text
 }
 
 // ── Prompts ─────────────────────────────────────────────────────────────────
@@ -1163,6 +1338,8 @@ pub fn reply_prompt(agent: &AgentType, items: &[(&str, &RawFinding, &str, &[Cita
 
 // ── Human card ──────────────────────────────────────────────────────────────
 
+pub const QUESTION_KEY_PREFIX: &str = "cross-audit.";
+
 pub fn question_key(run_id: &str, record: &CrossFindingRecord) -> String {
     let run: String = run_id
         .chars()
@@ -1173,7 +1350,7 @@ pub fn question_key(run_id: &str, record: &CrossFindingRecord) -> String {
         .td_id
         .clone()
         .unwrap_or_else(|| record.group_id.clone());
-    let mut key = format!("cross-audit.{run}.{id}");
+    let mut key = format!("{QUESTION_KEY_PREFIX}{run}.{id}");
     key.truncate(100);
     key
 }

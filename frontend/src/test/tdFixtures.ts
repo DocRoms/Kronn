@@ -25,10 +25,11 @@ export function tdList(items: TdReviewItem[], extra: Partial<TdReviewList> = {})
     by_severity: groupTds(items).map(g => ({
       severity: g.severity, total: g.items.length, remaining: g.items.filter(i => !isTdSettled(i.state)).length,
     })),
-    gate: { blocking_total: blocking.length, blocking_settled: settled, met: items.length > 0 && settled === blocking.length },
+    gate: { blocking_total: blocking.length, blocking_settled: settled, met: items.length > 0 && settled === blocking.length, open_disputes: 0 },
     validated: false,
     audit_date: '2026-10-01T10:00:00Z',
     validation_discussion_id: 'disc-validation',
+    dispute_discussion_id: null,
     ...extra,
   };
 }

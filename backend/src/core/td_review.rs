@@ -222,16 +222,39 @@ pub fn gate(items: &[TdReviewItem]) -> TdValidationGate {
         blocking_total: blocking.len() as u32,
         blocking_settled: settled,
         met: !items.is_empty() && settled as usize == blocking.len(),
+        open_disputes: 0,
     }
 }
 
 /// Reads the sheets where the audit writes them: the project's docs root.
-pub fn validation_gate(project_path: &Path) -> TdValidationGate {
+pub fn validation_items(project_path: &Path) -> Vec<TdReviewItem> {
     let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
-    gate(&read_items_rel(
-        &docs_root.dir(project_path),
-        docs_root.rel(),
-    ))
+    read_items_rel(&docs_root.dir(project_path), docs_root.rel())
+}
+
+/// The pending dispute cards whose sheet a human has not settled another
+/// way, one per sheet, oldest first.
+pub fn open_disputes<'a>(
+    items: &[TdReviewItem],
+    pending: &'a [crate::db::audit_cross::PendingDispute],
+) -> Vec<&'a crate::db::audit_cross::PendingDispute> {
+    let mut seen = BTreeSet::new();
+    pending
+        .iter()
+        .filter(|d| {
+            items
+                .iter()
+                .any(|i| i.id == d.td_id && !is_settled(i.state))
+        })
+        .filter(|d| seen.insert(d.td_id.as_str()))
+        .collect()
+}
+
+/// The gate once open disputes are counted: any one of them blocks it.
+pub fn with_disputes(mut gate: TdValidationGate, open: usize) -> TdValidationGate {
+    gate.open_disputes = open as u32;
+    gate.met = gate.met && open == 0;
+    gate
 }
 
 /// TD ids a text names, as whole tokens.

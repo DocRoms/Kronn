@@ -895,7 +895,7 @@ fn measure(path: &str, content: &str) -> DocumentMeasure {
 fn word_count(s: &str) -> usize {
     s.split_whitespace().count()
 }
-fn contains_placeholder(s: &str) -> bool {
+pub(crate) fn contains_placeholder(s: &str) -> bool {
     crate::api::audit::validation::count_raw_placeholders(s) > 0
         || visible_markdown(s).lines().any(|line| {
             let trimmed = line.trim();

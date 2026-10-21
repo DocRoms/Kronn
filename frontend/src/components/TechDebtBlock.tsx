@@ -99,6 +99,22 @@ export function TechDebtBlock({
             ? t('techDebt.ruleMet', gate.blocking_total)
             : t('techDebt.rule', gate.blocking_total, gate.blocking_settled)}
       </p>
+      {gate.open_disputes > 0 && (
+        <p className="td-disputes" data-testid="td-disputes">
+          <AlertTriangle size={13} />
+          {t('techDebt.disputes', gate.open_disputes)}
+          {list.dispute_discussion_id && (
+            <button
+              type="button"
+              className="td-link-btn"
+              data-testid="td-disputes-link"
+              onClick={() => { onOpenDiscussion(list.dispute_discussion_id as string); onNavigate('discussions'); }}
+            >
+              <MessageSquare size={12} /> {t('techDebt.disputesLink')}
+            </button>
+          )}
+        </p>
+      )}
       <div className="td-block-actions">
         <button type="button" className="td-primary-btn" data-testid="td-open-review" onClick={() => setOpen(true)}>
           {remaining > 0 ? t('techDebt.open', remaining) : t('techDebt.openAll')}

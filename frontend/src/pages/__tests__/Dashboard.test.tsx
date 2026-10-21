@@ -34,6 +34,7 @@ vi.mock('../../lib/api', () => ({
     }),
     auditStatusAll: vi.fn().mockResolvedValue([]),
     auditHistory: vi.fn().mockResolvedValue([]),
+    auditTimeline: vi.fn().mockResolvedValue([]),
     auditEvidence: vi.fn().mockResolvedValue({
       project_id: '', status: 'NoTemplate', kind: 'no_documentation',
       state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',

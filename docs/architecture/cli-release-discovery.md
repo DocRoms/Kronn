@@ -60,6 +60,6 @@ timeouts, runtime shutdown, local HTTP error/oversize/chunked fixtures, fake
 CLI arguments and bounded output, the real HTTP envelope, and Settings rechecks.
 The shared frontend API mock includes the generated RTK response shape because
 the version read is no longer conditional on an installed RTK binary.
-[src: file: backend/src/core/versions.rs:512]
-[src: file: backend/tests/api_tests.rs:27]
-[src: file: frontend/src/test/apiMock.ts:540]
+[src: file: backend/src/core/versions.rs:512-722#concurrent_callers_share_refresh_even_after_first_waiter_is_cancelled]
+[src: file: backend/tests/api_tests.rs:202-233#cli_release_recheck_returns_agent_metadata_and_distinct_rtk_ccusage_versions]
+[src: file: frontend/src/test/apiMock.ts:616-621#RtkVersionInfo]

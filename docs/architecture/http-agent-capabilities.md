@@ -83,7 +83,7 @@ And, since 0.13.0, media generation: `media_generate` and `media_job_status`
 catalogue, so an HTTP agent replying in a discussion has them, and a bounded worker keeps
 them — they are deliberately absent from the principal-only list a worker room strips
 [src: file: backend/src/api/agent_tools.rs:1396-1447#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
-discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1523-1541#orchestration_tool_catalogue].
+discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1530-1548#orchestration_tool_catalogue].
 
 Until then only CLI agents could generate an image or a video, because the tools were
 declared in the MCP bridge and an HTTP agent structurally cannot reach it. The capability
@@ -274,7 +274,7 @@ setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
 [src: file: backend/src/api/agent_tools.rs:329-405#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2304-2310#tools_load]
+[src: file: backend/src/api/agent_tools.rs:2321-2327#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -305,11 +305,11 @@ that "succeed" without writing anything.
 
 **Who is accepted.** Every agent but Vibe: the CLI agents (Claude Code, Codex,
 OpenCode, Gemini CLI, Kiro, GitHub Copilot) and the HTTP agents Ollama, LiteLLM,
-NVIDIA and Custom [src: file: backend/src/api/audit/mod.rs:1366-1381#agent_can_audit].
+NVIDIA and Custom [src: file: backend/src/api/audit/mod.rs:657-672#agent_can_audit].
 Vibe is refused because it has no file tools. Both launch endpoints (Full and
 partial) share the gate and its refusal message, which lists the accepted agents
 and is pinned to the gate by a test
-[src: file: backend/src/api/audit/mod.rs:2109-2135#a_refused_agent_is_told_who_is_accepted_and_the_message_matches_the_gate].
+[src: file: backend/src/api/audit/mod.rs:1422-1448#a_refused_agent_is_told_who_is_accepted_and_the_message_matches_the_gate].
 A hosted HTTP agent (NVIDIA, a Custom endpoint) receives the repository content the
 audit reads, so choosing one is choosing what leaves the machine.
 
@@ -332,7 +332,7 @@ No `web_fetch` (it would send the model off the project), no `git_commit` (the
 audit never commits), no plan, REST-plugin or discussion tools. A call to any
 other name is refused before a handler sees it, and so is a write to the
 target document of another step of the chain (the consolidation step excepted)
-[src: file: backend/src/api/agent_tools.rs:1610-1613#AUDIT_TOOLS]
+[src: file: backend/src/api/agent_tools.rs:1617-1620#AUDIT_TOOLS]
 [src: file: backend/src/api/agent_tools.rs:206-231#foreign_step_target_refusal].
 
 **What the audit prompt says about other repos (KT-926).** An audit's file tools
@@ -346,8 +346,8 @@ discussion or workflow Agent step does either (the audit's validation and
 briefing are discussions). The only
 other repos a step names are those the user linked to the project
 (`Project.linked_repos`), a voluntary declaration that stays in every step
-[src: file: backend/src/api/audit/full.rs:327-328#format_linked_repos_for_prompt]
-[src: file: backend/src/api/audit/drift.rs:355-356#format_linked_repos_for_prompt]. What remains: the block for a
+[src: file: backend/src/api/audit/full.rs:326-327#format_linked_repos_for_prompt]
+[src: file: backend/src/api/audit/drift.rs:450-451#format_linked_repos_for_prompt]. What remains: the block for a
 linked repo still says to start with `<repo-path>/docs/AGENTS.md`, a path an HTTP
 agent's tools refuse because it is outside the project, so for that agent the
 block is information, not something it can follow. Making that block
@@ -366,8 +366,8 @@ one.
 **Stopping.** An HTTP agent's request and tool loop are a task, not a process:
 killing the lifeline PID does not stop it. A Full audit therefore registers a
 cancellation token per step, and `cancel_audit` trips it
-[src: file: backend/src/api/audit/full.rs:1577-1582#agent_cancels]
-[src: file: backend/src/api/audit/full.rs:3956-3960#agent_cancels]. Since KT-927 the partial audit does
+[src: file: backend/src/api/audit/full.rs:1624-1629#agent_cancels]
+[src: file: backend/src/api/audit/full.rs:4045-4049#agent_cancels]. Since KT-927 the partial audit does
 the same, and so does an ACP agent, whose PID is a lifeline too: see
 [auditing with an ACP agent](audit-acp-agents.md).
 
@@ -416,7 +416,7 @@ shipping it. Three things changed:
   which would not apply to the response the next `extract` runs on, and is told to
   select less. Other tools are shortened exactly as before
   [src: file: backend/src/agents/runner.rs:7071-7099#shape_of]
-  [src: file: backend/src/agents/runner.rs:7105-7130#working_extract_examples].
+  [src: file: backend/src/agents/runner.rs:7198-7223#working_extract_examples].
 - **A call that differs only by its `extract` or its query is not a repeat.** The
   duplicate guard compares the tool name and every argument, sorted by key, so an
   identical call is still replayed once and then refused, and a call with another
@@ -463,7 +463,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-467#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9380-9382#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9376-9378#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON
@@ -474,7 +474,7 @@ undergo the existing clamping. This protects a protocol contract;
 it does not establish model authoring quality. The measured attempts and their
 execution checks are recorded in
 [`native-workflow-2026-09-22.md`](../research/native-workflow-2026-09-22.md).
-[src: file: backend/src/agents/runner.rs:7514-7522#workflow_step_schema]
+[src: file: backend/src/agents/runner.rs:7521-7529#workflow_step_schema]
 [src: file: backend/src/agents/runner_test.rs:2275-2342#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 
 ### Further capabilities

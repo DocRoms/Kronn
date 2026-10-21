@@ -571,6 +571,8 @@ fn the_index_lists_audited_findings_and_logs_the_rest() {
             }],
         )],
         failed_agents: &[],
+        carried_rows: &[],
+        settled: &[],
     });
     let table = index.split("## Cross-check verdicts").next().unwrap();
     assert!(table.contains("| TD-20261011-sql |") && table.contains("(contested)"));
@@ -627,4 +629,120 @@ fn a_dispute_card_holds_both_arguments_and_recommends_nothing() {
     assert!(context.contains("FOR-ARG") && context.contains("src/db.rs:4"));
     assert!(context.contains("AGAINST-ARG") && context.contains("src/guard.rs:2"));
     assert_eq!(spec["recommended_option_ids"], serde_json::json!([]));
+}
+
+fn disputed() -> CrossFindingRecord {
+    record(
+        Some(ChallengeResult::RefutedProven {
+            argument: "against".into(),
+            proof: vec![cite("src/guard.rs", 2, "is_ascii_digit")],
+        }),
+        Some(ReplyResult::MaintainedProven {
+            argument: "for".into(),
+            proof: vec![cite("src/db.rs", 4, "conn.execute")],
+        }),
+    )
+}
+
+fn index_of(
+    records: &[CrossFindingRecord],
+    carried: &[String],
+    settled: &[(String, String, String)],
+) -> String {
+    render_index(&IndexInput {
+        heading: "Security findings (cross-agent audit)",
+        agents: &[AgentType::ClaudeCode, AgentType::Codex],
+        records,
+        dropped: &[],
+        checklists: &[],
+        failed_agents: &[],
+        carried_rows: carried,
+        settled,
+    })
+}
+
+#[test]
+fn a_human_decision_rewrites_the_disputed_rows_of_the_index() {
+    let index = index_of(&[disputed()], &[], &[]);
+    assert!(index.contains("(disputed — human decision pending)"));
+    let kept = apply_human_decision_to_index(&index, "TD-20261011-sql", HumanDecision::Keep);
+    assert!(!kept.contains("human decision pending"), "{kept}");
+    assert!(kept.contains("(disputed — kept by a human) |"));
+    assert!(kept.contains("| TD-20261011-sql | disputed — kept by a human |"));
+    let dismissed =
+        apply_human_decision_to_index(&index, "TD-20261011-sql", HumanDecision::Dismiss);
+    let table = dismissed.split("## Cross-check verdicts").next().unwrap();
+    assert!(
+        !table.contains("TD-20261011-sql"),
+        "a dismissed finding leaves the table"
+    );
+    assert!(dismissed.contains("| TD-20261011-sql | disputed — dismissed by a human |"));
+    // Another finding's rows are never touched.
+    assert_eq!(
+        apply_human_decision_to_index(&index, "TD-other", HumanDecision::Dismiss),
+        index
+    );
+    // The index rendered from the decided record says the same as the patch.
+    let mut decided = disputed();
+    decided.human_decision = Some(HumanDecision::Keep);
+    assert_eq!(index_of(&[decided], &[], &[]), kept);
+}
+
+#[test]
+fn a_decided_or_settled_finding_awaits_no_human_and_leaves_or_stays_in_the_audit() {
+    let open = disputed();
+    assert!(open.awaits_human() && open.in_audit());
+    let mut kept = disputed();
+    kept.human_decision = Some(HumanDecision::Keep);
+    assert!(!kept.awaits_human() && kept.in_audit());
+    let mut dismissed = disputed();
+    dismissed.human_decision = Some(HumanDecision::Dismiss);
+    assert!(!dismissed.awaits_human() && !dismissed.in_audit() && dismissed.has_sheet());
+    let mut settled = disputed();
+    settled.settled_as = Some("rejected".into());
+    assert!(!settled.awaits_human() && !settled.in_audit() && settled.has_sheet());
+    assert!(provenance_block(&kept).contains("- **Verdict**: disputed — kept by a human"));
+    // A record stored before the decision fields existed still reads.
+    let json = serde_json::to_string(&open).unwrap();
+    assert!(!json.contains("human_decision") && !json.contains("settled_as"));
+    let back: CrossFindingRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.human_decision, None);
+}
+
+#[test]
+fn a_finding_repeating_a_settled_sheet_takes_its_id_and_stays_settled() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("TD-20250101-sql.md"),
+        "# TD-20250101-sql\n\n- **Area**: `src/db.rs`\n- **Status**: Rejected\n- **Problem**: SQL built | by format {{X}} [src: file: fake.rs:1]\n",
+    )
+    .unwrap();
+    let mut records = vec![disputed()];
+    records[0].td_id = None;
+    assign_td_ids(&mut records, dir.path(), "20261011");
+    assert_eq!(records[0].td_id.as_deref(), Some("TD-20250101-sql"));
+    assert_eq!(records[0].settled_as.as_deref(), Some("rejected"));
+    assert!(!records[0].awaits_human(), "no card for a settled finding");
+    let index = index_of(&records, &[], &[]);
+    let table = index.split("## Cross-check verdicts").next().unwrap();
+    assert!(!table.contains("| TD-20250101-sql |"));
+    let settled = index.split(SETTLED_HEADING).nth(1).unwrap();
+    assert!(settled.contains("`TD-20250101-sql`") && settled.contains("rejected"));
+}
+
+#[test]
+fn carried_rows_and_settled_sheets_are_listed_from_the_previous_index() {
+    let row = "| TD-1-human | Written by a person | `src/x.rs` | Low |".to_string();
+    let index = index_of(
+        &[],
+        std::slice::from_ref(&row),
+        &[("TD-2-rej".into(), "Old".into(), "rejected".into())],
+    );
+    let carried = index.split(CARRIED_HEADING).nth(1).unwrap();
+    assert!(carried.contains(&row));
+    assert!(index
+        .split(SETTLED_HEADING)
+        .nth(1)
+        .unwrap()
+        .contains("`TD-2-rej` — Old — rejected"));
 }

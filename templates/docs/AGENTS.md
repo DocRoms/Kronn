@@ -1,4 +1,4 @@
-<!-- kronn:doc-version="1.0" -->
+<!-- kronn:doc-version="1.1" -->
 <!-- kronn:spec="https://github.com/DocRoms/Kronn/blob/main/docs/conventions/agents-md-format-v1.md" local="docs/conventions/agents-md-format-v1.md" -->
 # AI agent context — Entry point
 

@@ -282,10 +282,13 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         resumable_after_step: null, state_in_history: null,
       }),
       validateAudit: resolve('NoTemplate'),
+      // KT-1122 — null = verdict unknown: banners offer nothing until a test sets one.
+      validationState: resolve(null),
       cancelAudit: resolve('NoTemplate'),
       acceptAuditStep: resolve({ step: 1, accepted_by: 'operator', accepted_at: '2026-10-11T00:00:00Z', remaining_failed: [] }),
       auditRunsCleanup: resolve(0),
       checkDrift: resolve({ stale_steps: [], checksums_outdated: false }),
+      acknowledgeDrift: resolve({ audit_date: null, stale_sections: [], fresh_sections: [], total_sections: 0, sources_state: 'unknown', broken_citations: 0 }),
       // Code view: source browsing.
       listSourceFiles: resolve({ entries: [], truncated: false }),
       readSourceFile: resolve({ path: '', content: '' }),
@@ -305,10 +308,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       convertTdTasks: resolve({ created: 0, already_linked: 0, skipped: 0, themes: [], items: [] }),
       auditTds: resolve({
         items: [], counts: { pending: 0, confirmed: 0, accepted_decision: 0, deferred: 0, rejected: 0 },
-        by_severity: [], gate: { blocking_total: 0, blocking_settled: 0, met: false },
-        validated: false, audit_date: null, validation_discussion_id: null,
+        by_severity: [], gate: { blocking_total: 0, blocking_settled: 0, met: false, open_disputes: 0 },
+        validated: false, audit_date: null, validation_discussion_id: null, dispute_discussion_id: null,
       }),
-      decideTds: resolve({ results: [], gate: { blocking_total: 0, blocking_settled: 0, met: false } }),
+      decideTds: resolve({ results: [], gate: { blocking_total: 0, blocking_settled: 0, met: false, open_disputes: 0 } }),
       createTdTask: resolve({ created: 0, already_linked: 0, skipped: 0, themes: [], items: [] }),
       tdTalk: resolve({ validation_discussion_id: null, discussion_id: null, messages: [] }),
       startTdTalk: resolve({ discussion_id: 'td-disc', created: true }),
@@ -372,7 +375,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       // 0.8.4 (#298) — recap chip strip. Default empty history; tests
       // override to seed the chip list.
       auditHistory: resolve([]),
-      auditTimeline: resolve({ runs: [], steps: [], recorded_audits: [], recorded_validated_at: null }),
+      auditTimeline: resolve({
+        runs: [], steps: [], recorded_audits: [], recorded_validated_at: null,
+        latest_validation: null, lease_orphaned: false,
+      }),
       restoreAuditState: resolve({
         project_id: '', status: 'Audited', kind: 'kronn_audit',
         state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',

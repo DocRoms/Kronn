@@ -1,4 +1,4 @@
-import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'react';
+import { Fragment, memo, useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { RunRetentionBanner, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
 import { automationPath, sameAutomationSelection, type AutomationSelection, type AutomationTab, type SelectionReason } from '../lib/routes';
 import { writeAutomationLastVisit, type AutomationLastVisit } from '../lib/automationNavigation';
@@ -113,16 +113,6 @@ import './DiscussionsPage.css';
 import './WorkflowsPage.css';
 import { LoadingState } from '../components/LoadingState';
 import { safeSetItem } from '../lib/safeStorage';
-
-type CompareTarget = {
-  agent: AgentType;
-  tier: ModelTier;
-  connection_id?: string;
-};
-
-function compareTargetKey(target: Pick<CompareTarget, 'agent' | 'connection_id'>) {
-  return `${target.agent}:${target.connection_id ?? ''}`;
-}
 
 function externalConnectionSwitchTarget(
   connection: ExternalApiConnectionView,
@@ -357,7 +347,7 @@ const WORKFLOW_RUN_STATUS_KEYS: Record<RunStatus, string> = {
 const RUN_FETCH_PAGE_SIZE = 10;
 const RUN_FETCH_MAX_PAGE_SIZE = 500;
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, selection, onSelectionChange, addressToken, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, highlightQuickPromptId = null, onHighlightConsumed, onNavigatePage, onNavigateMcp, onNavigateSettings, onNavigateSettingsAnchor }: WorkflowsPageProps) {
+function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, selection, onSelectionChange, addressToken, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, highlightQuickPromptId = null, onHighlightConsumed, onNavigatePage, onNavigateMcp, onNavigateSettings, onNavigateSettingsAnchor }: WorkflowsPageProps) {
   const { t } = useT();
   // The 380px workflow list plus the detail panel needs substantially more
   // room than a phone-only breakpoint. Switch to the existing single-pane

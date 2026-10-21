@@ -134,6 +134,10 @@ html5ever = "0.40.1"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 
 [dev-dependencies]
+# This package, with its `test-support` feature: the one way the integration
+# crates (tests/*) arm the real-agent guard. Dev-dependencies never reach
+# `cargo build`, so the feature is off for the shipped binary (KT-1189).
+kronn = { path = ".", features = ["test-support"] }
 # `test-util` only: it lets a test reach a 30-minute agent deadline on a paused
 # clock instead of waiting for it (KT-80). Dev-only, no production feature change.
 tokio = { version = "1", features = ["test-util"] }

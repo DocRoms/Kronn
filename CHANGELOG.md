@@ -11,68 +11,6 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
-### Changed
-
-- The macOS and Windows portability CI job compiles only the four suites it
-  runs. A new default Cargo feature, `full-tests`, gates every other
-  unit-test module; the job builds with `--no-default-features`. The full
-  lib-test binary (9 200 tests) made rustc peak above 13 GB while the
-  standard macOS runner has 7 GB, so the first step swapped for 45 to 55
-  minutes. The job also prints its rustc and machine facts, since two runner
-  images with different Rust releases rotate and invalidate the shared
-  cache. Every other job keeps the default feature set. The `with_conn`
-  unwrap lint exempts exactly the item carrying a `#[cfg(test)]` or
-  `#[cfg(all(test, …))]` attribute instead of cutting each file at its
-  first `#[cfg(test)]`, so production code after a `mod tests;` line is
-  scanned again. (KT-15)
-- Every view has its own address, and the browser's Back, Forward and reload
-  follow it: the pages (`/projects`, `/discussions`, `/planning`,
-  `/workflows`, `/pages`, `/plugins`, `/config`), what is open in them
-  (`/projects/<id>`, `/discussions/<id>?message=<id>`, `/planning/<id>`,
-  `/workflows/<id>/runs/<id>`, `/workflows/qp/<id>` and the other Automation
-  tabs, `/pages/<id>`, `/plugins/<id>`) and the whole-window views
-  (`/standalone/pages/<id>`, with its view parameters such as `?tv=1`, the
-  Page and discussion mosaics). An address can be copied, sent and reopened.
-  The links written before — `#discussion-<id>`, `#project-<id>`,
-  `#page/<id>?…`, the mosaics' `#…/mosaic?…`, `#settings/artifacts?…` and
-  `#config` —
-  keep working for good, from Live Pages, messages, bookmarks and the `kronn`
-  CLI alike. The desktop app's embedded server answers a reload on any of these
-  addresses with the app.
-- Ctrl/Cmd-click, Shift-click or a middle click opens a page in a new tab:
-  the navigation tabs, an Artifact's related discussion, workflows and
-  publication runs, and the rows and links that open a discussion, a
-  project and its views, a workflow and its runs, a Quick Prompt/API/Exec, a
-  task, a plugin or an Artifact, the "Fix" of the pre-launch agent check and
-  a skill's "Open in Config". A plain click still opens it in place; the
-  look of every element is unchanged.
-- Views inside a page have their own address too: a project's view
-  (`/projects/<id>/code?file=<path>&line=<n>`, `/projects/<id>/git`, …), the
-  workflow wizard (`/workflows/new`, `/workflows/<id>/edit`), a comparison of
-  discussions (`/discussions/compare/<run>`) and a Configuration section
-  (`/config#<section>`). A file an agent cites, a just-validated audit or a
-  just-improved Quick Prompt now opens at such an address, so Back, a reload
-  and a shared link land on the same view. A code view opened without a file
-  names the file it shows in its address, so Back to it reopens that file;
-  choosing a type's list from one of its Automation resources is a step Back
-  undoes; a reload, Back or Forward on a Configuration section brings it
-  into view again.
-- "Open the retention setting" on the run-retention banner (Automation and
-  Configuration) lands on the setting, centred and focused, at its address
-  `/config#run-payload-retention`; it used to stop short of it while the page
-  was still loading. Every Configuration anchor (`/config#<section>`) waits
-  for the page to settle the same way, and the sections in Configuration's
-  side menu are links: Ctrl/Cmd-click opens one in a new tab.
-- A release tag only checks the version, builds and verifies the installers
-  and creates the draft; it no longer reruns the CI suites the merged pull
-  request already passed.
-
-### Fixed
-
-- A workflow's file and line limits could miss a file rewritten at the same
-  size in the instant its git index was last written: on Linux the safety
-  snapshot copied the index with a new date, so git trusted stale file data.
-- `rustls` 0.23.46 fixes RUSTSEC-2026-0346 to 0349.
 ### Added
 
 - The briefing records the team's rules and bans (KT-1193). « Règles et
@@ -512,6 +450,20 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A Full audit installs its template from what the AI doc folder holds, not
+  from the project's displayed status (KT-1204). An empty `docs/`, or a folder
+  Kronn's docs left behind, read "template installed" and got no template, no
+  anti-hallucination spec and placeholder prompts for missing files. An empty
+  folder now gets the template, Kronn's own docs get the files they lack (never
+  over existing ones), and a folder of human docs is refused before the run
+  starts, with the same answer for the UI and for MCP `audit_launch`. A project
+  documented in `doc/` or `ai/` is audited there instead of in a second
+  `docs/` tree, and a legacy `ai/index.md` layout is asked to migrate first.
+  The install records the folder as Kronn's in `.kronn.json` before step 1, so
+  a first audit that crashed or was cancelled relaunches fresh without the
+  folder question; a folder with Kronn's structural markers and a Full run this
+  instance recorded for the project counts as Kronn's too.
+
 - A native agent's reply to a joined CLI now reaches that CLI (KT-1201). When
   the room's agent answered a CLI turn without naming it, the reply had no
   target, and the bridge reported it as `withheld_by_routing` ("target another
@@ -557,6 +509,41 @@ Release notes for 0.9.3 and earlier are available in the
   with the same action. The count comes from `GET /api/projects/{id}/drift`
   (`placeholder_docs`), so it survives a reload. It reads only the template's
   own files, and `TEMPLATE.md` templates are not counted.
+- A stale-sections refresh that re-verifies a section without rewriting it
+  now completes (KT-1207). It used to end Failed: the baseline stayed stale,
+  the validation revoked at launch stayed revoked, and the validate gate
+  refused the project until a whole 16-step audit ran. An `unchanged` step
+  now counts as re-verified: the run ends Completed and its sections get a
+  fresh baseline. Any partial run that rewrote nothing, stopped before its
+  first write included, restores the `validated_at` it revoked. When no
+  validation comes back, the re-verified sections get their own validation
+  discussion. An interrupted refresh now keeps what it did: the baseline is
+  merged for its done steps, and they get a validation discussion scoped to
+  them, while the run stays Interrupted. A new « Vérifié, inchangé » button
+  next to « Mettre à jour » marks the stale sections as still true without an
+  agent (`POST /api/projects/{id}/drift/acknowledge`). It refreshes their
+  checksum mappings, and their citation fingerprints when recorded, never
+  rewrites a doc, takes the audit lease, and is refused to a bridge token.
+- Tech-debt and cross-agent decisions now stick (KT-1208). Answering a
+  cross-agent dispute card applies it under the project's audit lease:
+  « dismiss » rejects the sheet, « keep » leaves it active, a refusal keeps
+  it disputed, and the sheet's Kronn block, the step index and the central
+  index say so instead of « human decision pending ». The project card shows
+  the open disputes with a link to their discussion, and `validate-audit`
+  refuses while one is open. Before a run Kronn snapshots the decided
+  sheets; afterwards it puts back a rejected or accepted sheet the run
+  deleted and any decision the run changed (a confirmed sheet the run
+  deleted stays deleted, reconciliation reports it), and flags a new sheet
+  that repeats a rejected or accepted one (same file, same problem). The
+  cross-agent pass reuses such a sheet instead of minting an id, keeps the
+  previous index's undetected rows, settled sheets and `owner="human"`
+  sections, and reports a step that rewrote nothing as `unchanged`. The
+  project badge and the health score count the same active sheets: rejected
+  and accepted sheets and `_`-prefixed reports are left out of both. The
+  Kronn task of a sheet that is rejected, accepted or removed is archived
+  (annotated only when work on it has started). A partial refresh states, in
+  its stream and its UI, that it runs single-agent when the briefing asks for
+  the cross-agent audit.
 - A favourite stays in Favoris while an agent runs or waits in it. From 20
   discussions on, a live pinned discussion moved to « À suivre » and left
   Favoris until the run ended. Favoris now lists every pinned discussion,
@@ -892,6 +879,69 @@ Release notes for 0.9.3 and earlier are available in the
   every table. That measurement took 1.7 to 2.4 seconds on an 11 GB database,
   and Settings still runs it, but on a connection of its own: it no longer
   holds up the requests queued behind it.
+
+### Changed
+
+- The macOS and Windows portability CI job compiles only the four suites it
+  runs. A new default Cargo feature, `full-tests`, gates every other
+  unit-test module; the job builds with `--no-default-features`. The full
+  lib-test binary (9 200 tests) made rustc peak above 13 GB while the
+  standard macOS runner has 7 GB, so the first step swapped for 45 to 55
+  minutes. The job also prints its rustc and machine facts, since two runner
+  images with different Rust releases rotate and invalidate the shared
+  cache. Every other job keeps the default feature set. The `with_conn`
+  unwrap lint exempts exactly the item carrying a `#[cfg(test)]` or
+  `#[cfg(all(test, …))]` attribute instead of cutting each file at its
+  first `#[cfg(test)]`, so production code after a `mod tests;` line is
+  scanned again. (KT-15)
+- Every view has its own address, and the browser's Back, Forward and reload
+  follow it: the pages (`/projects`, `/discussions`, `/planning`,
+  `/workflows`, `/pages`, `/plugins`, `/config`), what is open in them
+  (`/projects/<id>`, `/discussions/<id>?message=<id>`, `/planning/<id>`,
+  `/workflows/<id>/runs/<id>`, `/workflows/qp/<id>` and the other Automation
+  tabs, `/pages/<id>`, `/plugins/<id>`) and the whole-window views
+  (`/standalone/pages/<id>`, with its view parameters such as `?tv=1`, the
+  Page and discussion mosaics). An address can be copied, sent and reopened.
+  The links written before — `#discussion-<id>`, `#project-<id>`,
+  `#page/<id>?…`, the mosaics' `#…/mosaic?…`, `#settings/artifacts?…` and
+  `#config` —
+  keep working for good, from Live Pages, messages, bookmarks and the `kronn`
+  CLI alike. The desktop app's embedded server answers a reload on any of these
+  addresses with the app.
+- Ctrl/Cmd-click, Shift-click or a middle click opens a page in a new tab:
+  the navigation tabs, an Artifact's related discussion, workflows and
+  publication runs, and the rows and links that open a discussion, a
+  project and its views, a workflow and its runs, a Quick Prompt/API/Exec, a
+  task, a plugin or an Artifact, the "Fix" of the pre-launch agent check and
+  a skill's "Open in Config". A plain click still opens it in place; the
+  look of every element is unchanged.
+- Views inside a page have their own address too: a project's view
+  (`/projects/<id>/code?file=<path>&line=<n>`, `/projects/<id>/git`, …), the
+  workflow wizard (`/workflows/new`, `/workflows/<id>/edit`), a comparison of
+  discussions (`/discussions/compare/<run>`) and a Configuration section
+  (`/config#<section>`). A file an agent cites, a just-validated audit or a
+  just-improved Quick Prompt now opens at such an address, so Back, a reload
+  and a shared link land on the same view. A code view opened without a file
+  names the file it shows in its address, so Back to it reopens that file;
+  choosing a type's list from one of its Automation resources is a step Back
+  undoes; a reload, Back or Forward on a Configuration section brings it
+  into view again.
+- "Open the retention setting" on the run-retention banner (Automation and
+  Configuration) lands on the setting, centred and focused, at its address
+  `/config#run-payload-retention`; it used to stop short of it while the page
+  was still loading. Every Configuration anchor (`/config#<section>`) waits
+  for the page to settle the same way, and the sections in Configuration's
+  side menu are links: Ctrl/Cmd-click opens one in a new tab.
+- A release tag only checks the version, builds and verifies the installers
+  and creates the draft; it no longer reruns the CI suites the merged pull
+  request already passed.
+
+### Fixed
+
+- A workflow's file and line limits could miss a file rewritten at the same
+  size in the instant its git index was last written: on Linux the safety
+  snapshot copied the index with a new date, so git trusted stale file data.
+- `rustls` 0.23.46 fixes RUSTSEC-2026-0346 to 0349.
 
 ## [0.15.0] - 2026-10-10
 

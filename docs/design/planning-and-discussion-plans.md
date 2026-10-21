@@ -115,8 +115,8 @@ The selected view is saved per discussion in session storage. A small spinner
 on in-progress rows reflects Planning status only, not a worker heartbeat; it
 stops animating when reduced motion is requested. Background plan refreshes
 update membership and indicators without resetting the selected view.
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:387-427]`
-`[src: file: frontend/src/lib/orch-panel-state.ts:50-70]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:383-423]`
+`[src: file: frontend/src/lib/orch-panel-state.ts:47-69]`
 `[src: file: frontend/src/components/DiscussionPlanPanel.css:163-182]`
 
 Agents may instead emit structured proposals that the UI renders as existing
@@ -171,7 +171,7 @@ Planning state changes, agents also receive a compact change notification and
 then pull only the required details. This prevents unrelated agents from paying
 for unused task content while ensuring “create the discussion plan” works on a
 new room. `[src: file: backend/src/api/disc_prompts.rs:471-492]`
-`[src: file: backend/src/api/discussions/streaming.rs:3268-3298]`
+`[src: file: backend/src/api/discussions/streaming.rs:3311-3341]`
 
 The intended read surface is:
 

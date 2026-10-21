@@ -99,6 +99,7 @@ vi.mock('../../lib/api', () => ({
     // audit). Tests that need the running state override per-test.
     auditStatus: vi.fn().mockResolvedValue(null),
     validateAudit: vi.fn().mockResolvedValue('Validated'),
+    validationState: vi.fn().mockResolvedValue(null),
     // 0.8.4 (#294) — sidebar fetches this once per mount to decorate
     // disc rows with the "bound to X" badge. Empty = no bindings,
     // badge stays hidden.
@@ -259,6 +260,8 @@ beforeEach(() => {
   vi.mocked(runsApi.list).mockResolvedValue([]);
   vi.mocked(projectsApi.validateAudit).mockReset();
   vi.mocked(projectsApi.validateAudit).mockResolvedValue('Validated');
+  vi.mocked(projectsApi.validationState).mockReset();
+  vi.mocked(projectsApi.validationState).mockResolvedValue(null as never);
   sessionStorage.clear();
   vi.mocked(planningApi.proposals).mockReset();
   vi.mocked(planningApi.proposals).mockResolvedValue({
@@ -4901,6 +4904,15 @@ describe('DiscussionsPage', () => {
     open.mockRestore();
   });
 
+  // KT-1122 — the validation banners read the server's verdict for the
+  // project's latest run, not the title or the last message of the discussion.
+  const verdict = (projectId: string, discussionId: string | null, over: Record<string, unknown> = {}) => ({
+    project_id: projectId, run_id: 'r1', run_status: 'Completed', discussion_id: discussionId,
+    archived: false, finished: true, completed_at: '2026-01-01T00:01:00+00:00',
+    completed_message_id: 'm-agent', started_by: 'Romu', validated_by: null, validated_at: null,
+    can_validate: true, blocked: null, ...over,
+  });
+
   it('validation CTA validates, records the Audit deep-link, refreshes, and opens the project', async () => {
     const proj = makeProject('p-validation', 'Audited', 'context');
     const disc: Discussion = {
@@ -4913,6 +4925,7 @@ describe('DiscussionsPage', () => {
       non_system_message_count: 2,
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(verdict(proj.id, disc.id) as never);
     const onNavigate = vi.fn();
     const refetchProjects = vi.fn();
     const refetchDiscussions = vi.fn();
@@ -4953,6 +4966,7 @@ describe('DiscussionsPage', () => {
       non_system_message_count: 2,
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(verdict(proj.id, disc.id, { archived: true }) as never);
 
     await wrap(
       <DiscussionsPage
@@ -4972,6 +4986,93 @@ describe('DiscussionsPage', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Marquer l'audit comme valide/i }));
     await waitFor(() => expect(projectsApi.validateAudit).toHaveBeenCalledWith(proj.id));
+  });
+
+  it('validation CTA stays after later agent messages: the server verdict is durable (KT-1122)', async () => {
+    const proj = makeProject('p-durable', 'Audited', 'context');
+    const disc: Discussion = {
+      ...makeProjectDisc('d-durable', proj.id, 'Validation audit AI'),
+      archived: true,
+      messages: [
+        { id: 'm-user', role: 'User', channel: 'main', content: 'Validate', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm-signal', role: 'Agent', channel: 'main', content: 'Fin.\nKRONN:VALIDATION_COMPLETE', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:01:00Z', tokens_used: 10, auth_mode: null },
+        { id: 'm-pr', role: 'Agent', channel: 'main', content: 'Commit pushed (PR #34)', agent_type: 'ClaudeCode', timestamp: '2026-01-02T00:01:00Z', tokens_used: 10, auth_mode: null },
+      ],
+      message_count: 3,
+      non_system_message_count: 3,
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(verdict(proj.id, disc.id, { archived: true }) as never);
+
+    await renderWithDisc(proj, disc);
+
+    expect(await screen.findByRole('button', { name: /Marquer l'audit comme valide/i })).toBeInTheDocument();
+  });
+
+  it('no validate CTA when the server has not finished the validation, even if the text mentions the marker', async () => {
+    const proj = makeProject('p-mention', 'Audited', 'context');
+    const disc: Discussion = {
+      ...makeProjectDisc('d-mention', proj.id, 'Validation audit AI'),
+      messages: [
+        { id: 'm-user', role: 'User', channel: 'main', content: 'Validate', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm-agent', role: 'Agent', channel: 'main', content: 'I will end with KRONN:VALIDATION_COMPLETE once done', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:01:00Z', tokens_used: 10, auth_mode: null },
+      ],
+      message_count: 2,
+      non_system_message_count: 2,
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(
+      verdict(proj.id, disc.id, { finished: false, completed_at: null, can_validate: false, blocked: 'not_finished' }) as never,
+    );
+
+    await renderWithDisc(proj, disc);
+    await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+
+    expect(screen.queryByRole('button', { name: /Marquer l'audit comme valide/i })).toBeNull();
+    expect(screen.queryByTestId('validation-blocked-banner')).toBeNull();
+  });
+
+  it('shows the reason instead of a validate button the server would refuse (KT-1122)', async () => {
+    const proj = makeProject('p-blocked', 'Audited', 'context');
+    const disc: Discussion = {
+      ...makeProjectDisc('d-blocked', proj.id, 'Validation audit AI'),
+      messages: [
+        { id: 'm-user', role: 'User', channel: 'main', content: 'Validate', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm-agent', role: 'Agent', channel: 'main', content: 'KRONN:VALIDATION_COMPLETE', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:01:00Z', tokens_used: 10, auth_mode: null },
+      ],
+      message_count: 2,
+      non_system_message_count: 2,
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(
+      verdict(proj.id, disc.id, { can_validate: false, blocked: 'no_local_run' }) as never,
+    );
+
+    await renderWithDisc(proj, disc);
+
+    const banner = await screen.findByTestId('validation-blocked-banner');
+    expect(banner).toHaveTextContent(/Lecture seule/);
+    expect(screen.queryByRole('button', { name: /Marquer l'audit comme valide/i })).toBeNull();
+  });
+
+  it('flags a validation of an older audit run and offers the current one (KT-1122)', async () => {
+    const proj = makeProject('p-old', 'Audited', 'context');
+    const stale: Discussion = {
+      ...makeProjectDisc('d-april', proj.id, 'Validation audit AI'),
+      messages: [
+        { id: 'm-user', role: 'User', channel: 'main', content: 'Validate', agent_type: null, timestamp: '2026-04-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm-agent', role: 'Agent', channel: 'main', content: 'KRONN:VALIDATION_COMPLETE', agent_type: 'ClaudeCode', timestamp: '2026-04-01T00:01:00Z', tokens_used: 10, auth_mode: null },
+      ],
+      message_count: 2,
+      non_system_message_count: 2,
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(stale);
+    vi.mocked(projectsApi.validationState).mockResolvedValue(verdict(proj.id, 'd-august', { archived: true }) as never);
+
+    await renderWithDisc(proj, stale);
+
+    expect(await screen.findByTestId('validation-superseded-banner')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Marquer l'audit comme valide/i })).toBeNull();
   });
 
   // ─── Audit-running MCP filter banner (0.8.3 #280) ────────────────────

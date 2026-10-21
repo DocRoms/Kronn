@@ -87,7 +87,7 @@ describe('AuditTimeline — every run state offers an action', () => {
     action: string;
   }[] = [
     { state: 'never audited', auditStatus: 'NoTemplate', runStatus: 'none', steps: [], action: fr['audit.startFullAudit'] },
-    { state: 'completed, to validate', auditStatus: 'Audited', runStatus: 'Completed', steps: [step(1), step(2)], action: fr['audit.validate'] },
+    { state: 'completed without linked validation', auditStatus: 'Audited', runStatus: 'Completed', steps: [step(1), step(2)], action: fr['audit.revalidate.button'] },
     { state: 'validated', auditStatus: 'Validated', runStatus: 'Completed', steps: [step(1), step(2)], action: fr['auditTimeline.relaunch'] },
     { state: 'cancelled', auditStatus: 'Audited', runStatus: 'Cancelled', steps: [step(1)], action: fr['auditTimeline.relaunch'] },
     {

@@ -1163,7 +1163,7 @@ const VALIDATION_HOLD_RETRY_DELAY_SECONDS: i64 = 5;
 
 /// KT-1134 — an agent answering in a validation discussion linked to an audit
 /// run writes `docs/`: it never starts while an audit of the same project
-/// shows progress. The claimed job goes back to the queue, its attempts intact.
+/// holds the documentation lease. The claimed job goes back to the queue, its attempts intact.
 async fn hold_validation_during_audit(
     state: &AppState,
     job: &crate::db::agent_dispatch::AgentDispatchJob,
@@ -1183,7 +1183,9 @@ async fn hold_validation_during_audit(
     let audit_running = state
         .audit_tracker
         .lock()
-        .map(|tracker| tracker.progress.contains_key(&project_id))
+        .map(|tracker| {
+            tracker.leased.contains(&project_id) || tracker.progress.contains_key(&project_id)
+        })
         .unwrap_or(true);
     if !audit_running {
         return false;

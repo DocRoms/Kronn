@@ -1874,6 +1874,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/{id}/audit-info", get(api::audit::audit_info))
         .route("/api/projects/{id}/drift", get(api::audit::check_drift))
         .route(
+            "/api/projects/{id}/drift/acknowledge",
+            post(api::audit::acknowledge_drift),
+        )
+        .route(
             "/api/projects/{id}/citation-drift",
             get(api::audit::citation_drift),
         )
@@ -1904,6 +1908,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/validate-audit",
             post(api::audit::validate_audit),
+        )
+        .route(
+            "/api/projects/{id}/validation-state",
+            get(api::audit::get_validation_state),
         )
         .route(
             "/api/projects/{id}/mark-bootstrapped",

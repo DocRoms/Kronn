@@ -23,6 +23,8 @@ pub mod resources;
 pub mod skill_migration;
 pub mod template;
 pub mod template_merge;
+#[cfg(test)]
+mod template_provenance_tests;
 pub mod template_reinstall;
 pub mod used_skills;
 
@@ -183,20 +185,20 @@ pub(crate) fn format_linked_repos_for_prompt_with(
     Some(out)
 }
 
-/// Read briefing notes: try `<docs>/briefing.md` from the filesystem
-/// first (path-agnostic — picks docs/ post-pivot or ai/ legacy), fall
-/// back to the DB field.
+/// An existing briefing file is authoritative, including empty or unreadable
+/// files. The DB is only a fallback before the file has been installed.
 pub(crate) fn resolve_briefing_notes(
     project_path: &std::path::Path,
     db_notes: &Option<String>,
 ) -> Option<String> {
     let briefing_file = scanner::detect_docs_dir(project_path).join("briefing.md");
-    if let Ok(content) = std::fs::read_to_string(&briefing_file) {
-        if !content.trim().is_empty() {
-            return Some(content);
+    match std::fs::read_to_string(&briefing_file) {
+        Ok(content) => (!content.trim().is_empty()).then_some(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            db_notes.clone().filter(|notes| !notes.trim().is_empty())
         }
+        Err(_) => None,
     }
-    db_notes.clone()
 }
 
 /// Populate audit_status, ai_todo_count and needs_docs_migration on a
@@ -221,6 +223,7 @@ pub(crate) fn enrich_audit_status_with_runs(project: &mut Project, completed_ful
     // land somewhere unintended. The UI surfaces the flag as a banner + badge.
     project.path_exists = resolved.exists();
     project.write_access = Some(scanner::diagnose_project_write_access(&project.path));
+    project.briefing_notes = resolve_briefing_notes(&resolved, &project.briefing_notes);
     if !project.path_exists {
         project.audit_status = crate::models::AiAuditStatus::default();
         project.ai_todo_count = 0;

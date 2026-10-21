@@ -414,7 +414,7 @@ restart. Boot first quiesces due dispatches and moves non-terminal executions to
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:267-367#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:5322-5393#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:5413-5484#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
 dead worker `[src: file: backend/src/api/orchestration.rs:566-722#start_resilience_watchdog]`.
 
@@ -498,7 +498,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
 - **Concurrency** — one active TaskExecution per task (a partial-unique index, like the one-primary and
   one-live-session invariants). Across a parent discussion / OrchestrationRun, a configurable
   `max_concurrent_executions`, enforced via the `agent_dispatch_jobs` `group_id` concurrency limit
-  `[src: file: backend/src/db/agent_dispatch.rs:604-613]`.
+  `[src: file: backend/src/db/agent_dispatch.rs:611-620]`.
 - **Human escalation** — `Escalated` surfaces a Human Gate in the parent discussion (reuse the gate
   decide endpoint `[src: file: backend/src/api/workflows.rs:5741-5928]`): the user force-approves (→ `Integrating`),
   hands back with guidance (→ `Working`), or abandons (→ `Cancelled`). An optional

@@ -33,7 +33,7 @@ references for the lifecycle actions they steer. A worker is still offered
 so a local model never has to reconstruct an opaque UUID, and it answers only
 the execution's principal or its own native worker.
 `[src: file: backend/src/api/agent_tools.rs:1455-1462#task_exec_deliver]`
-`[src: file: backend/src/api/agent_tools.rs:2685-2713#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:2702-2730#native_worker_execution_for_trusted_dispatch]`
 `[src: file: backend/src/api/agent_tools.rs:2655-2663#task_reference]`
 `[src: file: backend/src/api/agent_tools.rs:3787-3814#native_execution_for_caller]`
 
@@ -273,7 +273,7 @@ its schema.
 `runner::effective_model_flag` resolves the requested model without inventing
 one. Empty or whitespace-only values are unset; a nonblank explicit ID is
 preserved exactly.
-[src: file: backend/src/agents/runner.rs:3462-3478#effective_model_flag]
+[src: file: backend/src/agents/runner.rs:3465-3481#effective_model_flag]
 
 1. **Explicit model** (`AgentStartConfig.model_override`) — wins outright.
    Fed from a workflow step's `agent_settings.model` (`steps.rs`) or a
@@ -284,7 +284,7 @@ preserved exactly.
 3. **Durable catalogue** → the available assigned tier projected at bootstrap
    or after catalogue writes. HTTP-chat agents may use their assigned Default
    if their selected tier has no assignment. No assignment means no model.
-[src: file: backend/src/agents/runner.rs:3390-3459#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3393-3462#resolve_model_flag]
 [src: file: backend/src/core/model_catalog/mod.rs:112-130#refresh_runtime_cache]
 
 An unresolved Ollama launch is refused before any provider request, with an
@@ -304,7 +304,7 @@ This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3348-3353#is_http_chat_agent]
 [src: file: backend/src/agents/runner.rs:4240-4265#start_ollama_http_with_idle]
 [src: file: backend/src/agents/runner.rs:4470-4477#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:13091-13100#Ollama]
+[src: file: backend/src/agents/runner.rs:13112-13121#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's
@@ -593,7 +593,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:3849-3877#count_arg] [src: file: backend/src/api/agent_tools.rs:3580-3598#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:3866-3894#count_arg] [src: file: backend/src/api/agent_tools.rs:3597-3615#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes

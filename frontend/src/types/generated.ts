@@ -24,6 +24,12 @@ remaining_failed: Array<number>, };
  */
 export type AcknowledgeCitationsRequest = { doc: string, };
 
+/**
+ * `POST /api/projects/:id/drift/acknowledge` body: the stale sections (their
+ * `ai_file`) a human checked and found still true.
+ */
+export type AcknowledgeDriftRequest = { sections: Array<string>, };
+
 export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string,
 /**
  * Number of times this durable dispatch has been claimed. A value above
@@ -875,7 +881,7 @@ export type AuditFileInfo = { path: string, filled: boolean, };
 
 export type AuditFinding = { severity: string, what: string, where_: string, };
 
-export type AuditInfo = { files: Array<AuditFileInfo>, todos: Array<AuditTodo>, tech_debt_items: Array<TechDebtItem>, };
+export type AuditInfo = { template_update?: TemplateUpdate, files: Array<AuditFileInfo>, todos: Array<AuditTodo>, tech_debt_items: Array<TechDebtItem>, };
 
 /**
  * 0.8.2 — Specialized audit types ("Design C").
@@ -1245,6 +1251,11 @@ steps: Array<AuditRunStep>,
  */
 recorded_audits: Array<AuditEntry>, recorded_validated_at: string | null,
 /**
+ * Who validated and who opened the validation, from `.kronn.json`
+ * (only while `recorded_validated_at` is set).
+ */
+recorded_validated_by: string | null, recorded_validation_started_by: string | null,
+/**
  * The validation discussion linked to the latest run when that run is
  * Completed, archived or not: the timeline offers to validate once it
  * has finished.
@@ -1254,13 +1265,23 @@ latest_validation: AuditTimelineValidation | null,
  * The project's audit lease is held by a run that could not be settled:
  * every launch is refused until the cleanup action releases it (KT-1134).
  */
-lease_orphaned: boolean, };
+lease_orphaned: boolean,
+/**
+ * Why the server would refuse a validation now (`None` = it accepts):
+ * the UI shows the reason instead of offering the action.
+ */
+validation_block: ValidationBlock | null, };
 
 export type AuditTimelineValidation = { discussion_id: string,
 /**
- * Same terminal-signal parser as the validate-audit gate.
+ * The server's verdict, from the durable completion stamp: the one
+ * parser of the signal lives in the backend.
  */
-finished: boolean, archived: boolean, };
+finished: boolean, archived: boolean, completed_at: string | null,
+/**
+ * Pseudo of the operator whose audit opened the validation.
+ */
+started_by: string | null, validated_by: string | null, validated_at: string | null, };
 
 export type AuditTodo = { file: string, line: number, text: string, };
 
@@ -2627,7 +2648,12 @@ export type DeleteManualModelRequest = { runtime_target_id: string, model_id: st
  * present even when empty, so "no migrations" is an explicit `[]`, never a
  * silent omission.
  */
-export type DeliveryManifestV1 = { version: string, task_ref: string, head_sha: string, files_touched: Array<ManifestFile>, tests: Array<ManifestTest>, dod_status: Array<ManifestDodStatus>, docs: Array<string>, migrations: Array<string>, risks: Array<string>, limitations: Array<string>, summary: string, };
+export type DeliveryManifestV1 = { version: string, task_ref: string, head_sha: string, files_touched: Array<ManifestFile>, tests: Array<ManifestTest>, dod_status: Array<ManifestDodStatus>, docs: Array<string>, migrations: Array<string>, risks: Array<string>, limitations: Array<string>, summary: string,
+/**
+ * KT-1246 — absent on deliveries made before the field existed and on
+ * joined-CLI deliveries; a spawned worker must always state it.
+ */
+tests_executed?: TestsExecuted | null, };
 
 export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut";
 
@@ -3780,7 +3806,7 @@ unused_files: Array<string>,
  */
 paid_agent_growth: Array<AgentContextGrowth>, };
 
-export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number,
+export type DriftCheckResponse = { template_update?: TemplateUpdate, audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number,
 /**
  * "Sources clean" badge, recomputed from the cited lines.
  */
@@ -7543,7 +7569,12 @@ export type RetryAgentDispatchResponse = { dispatch_id: string, trigger_message_
 
 export type RetryConfig = { max_retries: number, backoff: string, };
 
-export type RevalidateAuditRequest = { agent: AgentType, connection_id?: string, tier?: ModelTier | null, };
+export type RevalidateAuditRequest = { agent: AgentType,
+/**
+ * Apply only deterministic citation repairs, even when agent work remains.
+ * Omitted or false preserves the existing combined reverification flow.
+ */
+deterministic_only?: boolean, connection_id?: string, tier?: ModelTier | null, };
 
 /**
  * What "Revalider l'audit" does with one section (KT-1168).
@@ -9372,7 +9403,11 @@ talk_count: number, talk_discussion_id: string | null, };
 /**
  * `GET /api/projects/:id/audit/tds`.
  */
-export type TdReviewList = { items: Array<TdReviewItem>, counts: TdStateCounts, by_severity: Array<TdSeverityCount>, gate: TdValidationGate, validated: boolean, audit_date: string | null, validation_discussion_id: string | null, };
+export type TdReviewList = { items: Array<TdReviewItem>, counts: TdStateCounts, by_severity: Array<TdSeverityCount>, gate: TdValidationGate, validated: boolean, audit_date: string | null, validation_discussion_id: string | null,
+/**
+ * The discussion holding the oldest open dispute card.
+ */
+dispute_discussion_id: string | null, };
 
 /**
  * KT-982 — where a tech-debt sheet stands in the human review.
@@ -9437,7 +9472,12 @@ export type TdTaskTheme = { theme: string, label: string, task_reference: string
  * The rule that lets a project be validated without the discussion marker:
  * every Critical and High sheet settled (a deferral does not count).
  */
-export type TdValidationGate = { blocking_total: number, blocking_settled: number, met: boolean, };
+export type TdValidationGate = { blocking_total: number, blocking_settled: number, met: boolean,
+/**
+ * Sheets whose cross-agent dispute card still waits for a human: none
+ * may be open for the project to be validated.
+ */
+open_disputes: number, };
 
 export type TechDebtItem = { id: string, problem: string, area: string, severity: string, };
 
@@ -9497,7 +9537,7 @@ export type TemplateReinstallPlan = { docs_dir: string, files: Array<ReinstallFi
 /**
  * An audit holds the project's lease: the reinstall would be refused.
  */
-audit_running: boolean, };
+audit_running: boolean, template_update?: TemplateUpdate, };
 
 export type TemplateReinstallReport = {
 /**
@@ -9527,6 +9567,18 @@ export type TemplateReinstallRequest = {
  * files are always created; a path the plan does not offer is refused.
  */
 paths?: Array<string> | null, };
+
+export type TemplateRename = { from: string, to: string,
+/**
+ * An occupied destination is preserved and needs human reconciliation.
+ */
+conflict: boolean, };
+
+export type TemplateUpdate = { available: boolean, installed_version: string | null, current_version: string | null, missing_files: Array<PlaceholderDoc>, renames: Array<TemplateRename>,
+/**
+ * Removed upstream paths whose successor cannot be proven uniquely.
+ */
+unresolved_files: Array<string>, spec_modified: boolean, };
 
 export type TestApiCallRequest = {
 /**
@@ -9620,6 +9672,17 @@ is_empty: boolean,
  * shows this inline under the input.
  */
 error: string | null, };
+
+/**
+ * KT-1246 — the worker's explicit statement of whether any test was actually
+ * executed, and which. Replaces a sentence at the end of a report: a reviewer
+ * reads `executed` and `which` instead of inferring them from `tests`.
+ */
+export type TestsExecuted = { executed: boolean,
+/**
+ * The commands (or suites) that ran. Empty exactly when `executed` is false.
+ */
+which: Array<string>, };
 
 /**
  * A test verdict in a [`DeliveryManifestV1`].
@@ -10032,12 +10095,41 @@ model_breakdowns: Array<UsageModelBreakdown>, input_tokens: number, output_token
  */
 export type UsageTotals = { input_tokens: number, output_tokens: number, cache_creation_tokens: number, cache_read_tokens: number, total_tokens: number, total_cost: number, };
 
+/**
+ * Why validating the project's latest audit run is not possible now. The
+ * timeline and the discussion banners show this reason instead of offering
+ * an action the server would refuse.
+ */
+export type ValidationBlock = "no_local_run" | "audit_running" | "run_not_completed" | "no_linked_discussion" | "discussion_missing" | "foreign_discussion" | "not_finished";
+
 export type ValidationReason = "audit_validation" | "validation_card" | "acknowledged" | "revalidation" | "confirmed" | "human_owned";
 
 /**
  * One validation to run on the candidate before the parent is advanced (§6).
  */
 export type ValidationSpec = { command: string, quick_exec_id?: string | null, timeout_secs?: number | null, };
+
+/**
+ * The validation of a project's latest audit run, and what can be done.
+ */
+export type ValidationState = { project_id: string, run_id: string | null, run_status: string | null,
+/**
+ * The discussion linked to the latest run (never a title match).
+ */
+discussion_id: string | null, archived: boolean,
+/**
+ * The linked discussion has signalled completion; never undone.
+ */
+finished: boolean, completed_at: string | null, completed_message_id: string | null,
+/**
+ * Pseudo of the operator whose audit opened the validation.
+ */
+started_by: string | null, validated_by: string | null, validated_at: string | null,
+/**
+ * The server accepts a validation now (the tech-debt sheet path, which
+ * reads the filesystem, is decided by the POST itself).
+ */
+can_validate: boolean, blocked: ValidationBlock | null, };
 
 export type VersionCheck = { current: string, latest: string | null, release_url: string | null, up_to_date: boolean, };
 
