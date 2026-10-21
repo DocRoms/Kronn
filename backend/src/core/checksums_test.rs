@@ -435,6 +435,56 @@ fn source_tree_fingerprint_ignores_kronn_output_commits_but_not_source() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn only_a_section_built_from_the_unchanged_source_tree_is_unchanged() {
+    // KT-1357 — a refresh may skip its agent only when the whole tree is the one
+    // the baseline recorded; a mapping on a few files says nothing about the rest.
+    let dir = temp_dir("unchanged_tree_sections");
+    git(&dir, &["init", "-q"]);
+    fs::write(dir.join("app.js"), "console.log(1)").unwrap();
+    fs::write(dir.join("package.json"), "{}").unwrap();
+    let tree = compute_step_checksums(&dir, &["__GIT_SOURCE_TREE__"]);
+    assert!(tree.contains_key("__GIT_SOURCE_TREE__"));
+    let mapping = |doc: &str, step: usize, source: &str, checksums| ChecksumMapping {
+        ai_file: doc.into(),
+        audit_step: step,
+        sources: vec![source.into()],
+        checksums,
+    };
+    let mappings = vec![
+        mapping("docs/glossary.md", 2, "__GIT_SOURCE_TREE__", tree),
+        mapping(
+            "docs/testing-quality.md",
+            5,
+            "package.json",
+            compute_step_checksums(&dir, &["package.json"]),
+        ),
+        // Recorded before the tree changed: not unchanged.
+        mapping(
+            "docs/repo-map.md",
+            3,
+            "__GIT_SOURCE_TREE__",
+            BTreeMap::from([("__GIT_SOURCE_TREE__".to_string(), "0".repeat(64))]),
+        ),
+    ];
+    write_checksums_file(&dir, &mappings, &[]).unwrap();
+    assert_eq!(
+        unchanged_tree_sections(&dir),
+        BTreeSet::from(["docs/glossary.md#step2".to_string()])
+    );
+
+    // A new source file moves the tree: nothing is unchanged any more.
+    fs::write(dir.join("new-module.js"), "export {}").unwrap();
+    assert!(unchanged_tree_sections(&dir).is_empty());
+
+    // No baseline: nothing to compare with.
+    let bare = temp_dir("unchanged_tree_sections_bare");
+    git(&bare, &["init", "-q"]);
+    assert!(unchanged_tree_sections(&bare).is_empty());
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&bare);
+}
+
 #[cfg(unix)]
 #[test]
 fn source_tree_fingerprint_survives_hostile_paths_and_tracks_mode() {

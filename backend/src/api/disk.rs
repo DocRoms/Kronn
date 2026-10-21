@@ -122,6 +122,10 @@ pub struct DiskReport {
     pub orphan_count: usize,
     /// Largest first.
     pub entries: Vec<DiskEntry>,
+    /// A bridge token's view (see [`scoped_for_bridge`]): the lanes and
+    /// volumes are its own project's only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scoped: bool,
 }
 
 /// State, reason and purgeability of a lane build dir (pure, so the ownership
@@ -503,7 +507,24 @@ pub async fn build_disk_report(
         orphan_bytes: orphans.iter().map(|entry| entry.bytes).sum(),
         orphan_count: orphans.len(),
         entries,
+        scoped: false,
     })
+}
+
+/// What a Kronn-launched agent's bridge token may learn (KT-1347): free space,
+/// the policy and the totals by kind stay (aggregates over every project), but
+/// the volumes and the per-lane entries (paths, lane names, task refs) are the
+/// token's own project's, or none when it has no project. The operator and the
+/// UI keep the full report.
+pub fn scoped_for_bridge(mut report: DiskReport, own_project: Option<&str>) -> DiskReport {
+    report
+        .volumes
+        .retain(|volume| Some(volume.project_id.as_str()) == own_project);
+    report
+        .entries
+        .retain(|entry| Some(entry.project_id.as_str()) == own_project);
+    report.scoped = true;
+    report
 }
 
 // ─── Purge ──────────────────────────────────────────────────────────────────
@@ -872,12 +893,17 @@ pub struct DiskQuery {
 }
 
 /// `GET /api/maintenance/disk[?project_id=…]` — free space and Kronn's usage.
+/// A bridge token gets [`scoped_for_bridge`]'s view.
 pub async fn get_disk_report(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     axum::extract::Query(query): axum::extract::Query<DiskQuery>,
 ) -> Json<ApiResponse<DiskReport>> {
     match build_disk_report(&state.db, query.project_id.as_deref()).await {
-        Ok(report) => Json(ApiResponse::ok(report)),
+        Ok(report) => Json(ApiResponse::ok(match bridge {
+            Some(axum::Extension(caller)) => scoped_for_bridge(report, caller.project.as_deref()),
+            None => report,
+        })),
         Err(error) => Json(ApiResponse::err(error)),
     }
 }
@@ -911,7 +937,9 @@ pub async fn run_purge(db: &Database, request: PurgeRequest) -> Result<PurgeResu
 }
 
 /// `POST /api/maintenance/disk/purge` — orphans by default; named entries only
-/// with `confirm: true`. An active lane is never removed by either.
+/// with `confirm: true`. An active lane is never removed by either. Human / UI
+/// only: the route is not on `BRIDGE_ROUTES`, so a bridge token is refused
+/// before this runs (KT-1347).
 pub async fn post_disk_purge(
     State(state): State<AppState>,
     Json(request): Json<PurgeRequest>,

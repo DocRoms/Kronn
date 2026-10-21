@@ -99,9 +99,9 @@ credential patterns before truncation, and keep observed states. Missing runtime
 metadata remains explicitly unknown. Tool output, MCP result bodies and patches
 are not copied into the trace. Redaction is heuristic, not a proof that arbitrary
 input cannot contain private information.
-[src: file: backend/src/agents/tool_trace.rs:219-256#collect]
-[src: file: backend/src/agents/tool_trace.rs:17-74#safe_excerpt]
-[src: file: backend/src/agents/tool_trace.rs:128-176#from_codex]
+[src: file: backend/src/agents/tool_trace.rs:341-380#collect]
+[src: file: backend/src/agents/tool_trace.rs:52-109#safe_excerpt]
+[src: file: backend/src/agents/tool_trace.rs:198-262#from_codex]
 [src: file: backend/src/agents/tool_trace.rs:1]
 
 The dedicated discussion folder and automatic-attachment filters are not a

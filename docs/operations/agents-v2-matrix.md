@@ -128,7 +128,7 @@ the same job.
   never free. This is an implementation limit, not a protocol prohibition.
   [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
   [src: file: backend/src/acp.rs:1396-1418#usage_from_prompt_result]
-  [src: file: backend/src/acp/claude_adapter.rs:432-449#Cost]
+  [src: file: backend/src/acp/claude_adapter.rs:450-467#Cost]
 - **Statistics distinguish missing cost from a recorded zero.** Token-usage
   aggregates retain recorded amounts, fresh pricing estimates and unpriced
   tokens separately. A mixed total is partial; an existing recorded amount is
@@ -171,8 +171,8 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:5827-5837#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:14921-15202#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/agents/runner.rs:5837-5847#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:14933-15214#run_acp_session_streams_usage_through_agent_process]
 [src: file: backend/src/core/redact.rs:510-534#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
@@ -228,5 +228,5 @@ explicit null, and preserves historical message models. Isolated API tests
 cover this path, not provider inference or a new browser qualification.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
 [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1363-1371#currentConnectionId]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1157-1174#agentSettingsForSelection]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1163-1180#agentSettingsForSelection]
 [src: file: backend/tests/discussion_target_model.rs:98-219#changing_agent_clears_the_previous_explicit_model]

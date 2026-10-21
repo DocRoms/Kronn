@@ -23147,9 +23147,10 @@ mod cold_api_handlers_tests {
         std::fs::create_dir_all(repo.join("docs")).unwrap();
         std::fs::create_dir_all(repo.join("src")).unwrap();
         std::fs::write(repo.join("src/config.rs"), "pub const RETRIES: u32 = 3;\n").unwrap();
+        // Kronn's header: since KT-1299 a revalidation refuses a docs folder Kronn did not write.
         std::fs::write(
             repo.join("docs/AGENTS.md"),
-            "# AGENTS\nRetries are three [src: src/config.rs:1].\n",
+            "<!-- kronn:doc-version=\"1.0\" -->\n# AGENTS\nRetries are three [src: src/config.rs:1].\n",
         )
         .unwrap();
         let state = test_state();
@@ -23183,7 +23184,7 @@ mod cold_api_handlers_tests {
         // Reading the plan writes nothing.
         assert_eq!(
             std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
-            "# AGENTS\nRetries are three [src: src/config.rs:1].\n"
+            "<!-- kronn:doc-version=\"1.0\" -->\n# AGENTS\nRetries are three [src: src/config.rs:1].\n"
         );
 
         let req = Request::builder()
@@ -23208,7 +23209,7 @@ mod cold_api_handlers_tests {
         assert!(body.contains(r#""status":"clean""#), "{body}");
         assert_eq!(
             std::fs::read_to_string(repo.join("docs/AGENTS.md")).unwrap(),
-            "# AGENTS\nRetries are three [src: src/config.rs:2].\n"
+            "<!-- kronn:doc-version=\"1.0\" -->\n# AGENTS\nRetries are three [src: src/config.rs:2].\n"
         );
         let (_, json) = get_json(build_router_with_auth(state.clone(), false), &plan_url).await;
         assert_eq!(json["data"]["sections"], serde_json::json!([]), "{json}");

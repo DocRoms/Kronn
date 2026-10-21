@@ -133,6 +133,26 @@ discussion (or one task execution, or one workflow run) and to its project.
   (no bridge token); an agent may only file a request a human decides. No bridge
   response carries a credential field such as `token_override`. Details and
   refused attacks: `docs/design/discussion-project-scope.md`.
+- **HTTP agents cross the same gate (KT-1346).** LiteLLM, OpenRouter, NVIDIA,
+  Ollama and other HTTP agents run their native tools in process, without a
+  bridge script. Their run now holds a bridge token too, minted on its first
+  Kronn tool call with the scope a CLI launch at the same place gets (the
+  room's grants for the room's own agent, none for a worker or a step, the
+  run for a workflow step). Each tool that reads or writes a Kronn object is
+  decided as the route it mirrors, by the same `admit` and `scope_json`
+  functions the HTTP middleware calls (`backend/src/core/bridge_admit.rs`), so
+  the two paths cannot drift. A tool is either routed or listed in
+  `UNGATED_TOOLS` with its reason (no Kronn object, or a stricter rule of its
+  own such as `disc_read` or `task_exec_*`); any other tool is refused, and a
+  test fails when a declared tool is in neither. The token is minted once the
+  runner has bound the launch's model. A worker's token carries its room, not
+  its execution id: delivery tools check the dispatch themselves.
+- From a room **without a project**, a token reads the general resources.
+  Creating a general Quick Prompt, Quick API, Page or workflow needs the
+  room's « General · write » grant, which a human gives behind a typed
+  confirmation (`docs/design/discussion-project-scope.md`); the room's agents
+  then edit only what the room created, the rest stays a human's. A token
+  bound to a project never writes a general resource.
 
 **Human proof per action.** Every secret-class route (section 3 rows 3 and 4,
 plus human-credential administration) requires a **proof bound to one action**:
@@ -871,10 +891,10 @@ bearer, OAuth2 client id and secret, token-exchange credentials and a
 public config unmasked too.
 [src: file: backend/src/workflows/api_call_executor.rs:232-255#add_url_parts]
 [src: file: backend/src/workflows/api_call_executor.rs:257-292#is_public_config]
-[src: file: backend/src/workflows/api_call_executor.rs:294-308#has_credential_marker]
-[src: file: backend/src/workflows/api_call_executor.rs:310-346#is_credential_free_url]
-[src: file: backend/src/workflows/api_call_executor.rs:348-372#auth_env_keys]
-[src: file: backend/src/api/plugin_portability.rs:663-672#without_public_flags]
+[src: file: backend/src/workflows/api_call_executor.rs:300-314#has_credential_marker]
+[src: file: backend/src/workflows/api_call_executor.rs:316-352#is_credential_free_url]
+[src: file: backend/src/workflows/api_call_executor.rs:354-378#auth_env_keys]
+[src: file: backend/src/api/plugin_portability.rs:672-681#without_public_flags]
 
 Every automatic disable is recorded on the workflow (reason, who, when, a
 short summary; migration 223) and listed on the Automations page for review;

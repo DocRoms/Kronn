@@ -201,8 +201,8 @@ Runtime parity is capability-based:
 - Vibe runs without MCP to avoid its stdio hang. It therefore emits a durable
   `kronn-plan-action` proposal for human validation instead of pretending that
   a direct task write succeeded.
-  `[src: file: backend/src/api/agent_tools.rs:2065-2272#plan_get]` `[src: file: backend/src/api/agent_tools.rs:2117-2148#task_create]` `[src: file: backend/src/api/agent_tools.rs:3746-3753#actor]`
-  `[src: file: backend/src/api/agent_tools.rs:4561-4588#unwrap_api_compact_task]`
+  `[src: file: backend/src/api/agent_tools.rs:2065-2272#plan_get]` `[src: file: backend/src/api/agent_tools.rs:2190-2221#task_create]` `[src: file: backend/src/api/agent_tools.rs:3845-3852#actor]`
+  `[src: file: backend/src/api/agent_tools.rs:4670-4697#unwrap_api_compact_task]`
   `[src: file: backend/src/api/disc_prompts.rs:278-287#agent_has_native_planning]`
 
 The first release is local-only. Actor/audit metadata must still distinguish
@@ -247,7 +247,7 @@ assignees. The role is optional (`owner` | `reviewer`).
 6. **Project workspace — implemented** — project cards expose their linked
    tasks, quick creation/completion and direct navigation to each task's global
    Planning detail without duplicating task state.
-   `[src: file: frontend/src/components/ProjectCard.tsx:2359-2370#ProjectTasksPanel]` `[src: file: frontend/src/components/ProjectTasksPanel.tsx:80-113#createTask]`
+   `[src: file: frontend/src/components/ProjectCard.tsx:2439-2450#ProjectTasksPanel]` `[src: file: frontend/src/components/ProjectTasksPanel.tsx:80-113#createTask]`
    `[src: file: frontend/src/components/ProjectTasksPanel.tsx:152-161#onOpenPlanning]` `[src: file: frontend/src/routes/ProjectsRoute.tsx:51-58#toPlanningTask]`
 7. **Deferred delegation** — task-to-discussion briefing and agent launch only
    after the task workflow is proven manually.

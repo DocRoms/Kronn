@@ -79,6 +79,7 @@ async fn litellm_state(endpoint: &str) -> AppState {
     let mut config = crate::core::config::default_config();
     config.agents.lite_llm.base_url = Some(endpoint.to_string());
     config.agents.model_tiers.lite_llm.reasoning = Some("audit-model".into());
+    config.agents.model_tiers.lite_llm.economy = Some("economy-model".into());
     AppState::new_defaults(
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(crate::db::Database::open_in_memory().unwrap()),
@@ -431,6 +432,7 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
                 resume_run_id: Some("before-repair".into()),
                 retry_steps: None,
                 redo_steps: None,
+                accept_unverified_agents: None,
                 fresh: None,
             }),
         )
@@ -651,6 +653,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
             resume_run_id: Some("before-unavailable".into()),
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )
@@ -1030,6 +1033,7 @@ async fn partial_audit_stream(
             connection_id: connection.map(str::to_string),
             tier: None,
             steps: vec![step],
+            accept_unverified_agents: None,
         }),
     )
     .await
@@ -1248,6 +1252,7 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
                 resume_run_id: None,
                 retry_steps: None,
                 redo_steps: None,
+                accept_unverified_agents: None,
                 fresh: None,
             }),
         )
@@ -1262,6 +1267,7 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
                 connection_id: None,
                 tier: None,
                 steps: refreshable_steps(),
+                accept_unverified_agents: None,
             }),
         )
         .await
@@ -1526,6 +1532,7 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
             resume_run_id: Some("run-prev".into()),
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )
@@ -1675,6 +1682,7 @@ async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
             resume_run_id: Some("run-prev".into()),
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )
@@ -2107,6 +2115,175 @@ async fn version_source_inputs_read_the_mcp_config_the_agent_is_handed() {
     assert_eq!(pick(&acp, false), VersionSource::None);
 }
 
+/// KT-1320 — the connection a resumed run had may have been deleted since: the
+/// resume runs on the agent's default connection and says so, it is not refused.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_whose_connection_was_deleted_falls_back_with_a_visible_note() {
+    resume_after_the_run_connection_was_deleted(None).await;
+}
+
+/// KT-1320 — the UI echoes the run's connection id back on a resume with an
+/// untouched picker: the server still recognises it as the run's own choice.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_echoing_the_deleted_connection_of_its_run_falls_back_too() {
+    resume_after_the_run_connection_was_deleted(Some("deleted-conn")).await;
+}
+
+/// KT-1320 — the same fallback on an HTTP provider: the retried step reaches the
+/// agent's default endpoint on the run's economy model, not the reasoning one.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resume_whose_connection_was_deleted_reaches_the_default_provider_on_the_run_tier() {
+    let prose = text("The documentation is unchanged.");
+    let (server, requests) = provider(prose.clone(), prose).await;
+    let state = litellm_state(&server.uri()).await;
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    seed_run_on_a_deleted_connection(&state, project.path(), "LiteLlm").await;
+
+    let stream = resume_run_gone(&state, AgentType::LiteLlm, Some("deleted-conn")).await;
+
+    assert!(!stream.contains("event: error"), "{stream}");
+    assert!(
+        sse_events(&stream, "warning").iter().any(|w| w["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("deleted-conn") && m.contains("no longer exists"))),
+        "{stream}"
+    );
+    let seen = requests.lock().unwrap().clone();
+    assert!(
+        !seen.is_empty(),
+        "the retried step reached the default endpoint: {stream}"
+    );
+    assert!(
+        seen.iter().all(|body| body["model"] == "economy-model"),
+        "the run's economy tier picks the model: {seen:?}"
+    );
+    let run = latest_run(&state).await;
+    assert_eq!(run.tier.as_deref(), Some("economy"));
+    assert_eq!(run.connection_id, None);
+}
+
+#[cfg(unix)]
+async fn resume_after_the_run_connection_was_deleted(requested_connection: Option<&str>) {
+    let tools = tempfile::tempdir().unwrap();
+    let (fixture, _log) = recording_claude(tools.path());
+    let state = fresh_state();
+    let project = tempfile::tempdir().unwrap();
+    project_among_others(&state, project.path(), false).await;
+    let _route = route_claude(project.path(), &fixture);
+    seed_run_on_a_deleted_connection(&state, project.path(), "ClaudeCode").await;
+
+    let stream = resume_run_gone(&state, AgentType::ClaudeCode, requested_connection).await;
+
+    assert!(!stream.contains("event: error"), "{stream}");
+    let warnings = sse_events(&stream, "warning");
+    assert!(
+        warnings.iter().any(|w| w["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("deleted-conn") && m.contains("no longer exists"))),
+        "{stream}"
+    );
+    let run = latest_run(&state).await;
+    assert_ne!(run.id, "run-gone");
+    assert_eq!(
+        run.tier.as_deref(),
+        Some("economy"),
+        "the tier is still the run's"
+    );
+    assert_eq!(run.connection_id, None);
+}
+
+/// An interrupted economy run on `agent` and on a connection that no longer
+/// exists, whose step 5 is the one left to retry.
+#[cfg(unix)]
+async fn seed_run_on_a_deleted_connection(state: &AppState, project: &Path, agent: &'static str) {
+    std::fs::create_dir_all(project.join("docs/conventions")).unwrap();
+    std::fs::write(project.join("docs/AGENTS.md"), "# Audited project\n").unwrap();
+    std::fs::write(
+        project.join("docs/conventions/agents-md-format-v1.md"),
+        "# AGENTS.md format\n",
+    )
+    .unwrap();
+    let total =
+        crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() as u32;
+    state
+        .db
+        .with_conn(move |conn| {
+            use crate::db::audit_runs as runs;
+            let started = chrono::Utc::now() - chrono::Duration::hours(1);
+            runs::insert_running(conn, "run-gone", PROJECT_ID, "Full", agent, started)?;
+            runs::set_run_launch(conn, "run-gone", ModelTier::Economy, Some("deleted-conn"))?;
+            for step in 1..=total {
+                let label = format!("docs/step-{step}.md");
+                runs::insert_audit_step_start(conn, "run-gone", step, &label, started)?;
+                runs::finalize_audit_step(
+                    conn,
+                    "run-gone",
+                    step,
+                    started,
+                    10,
+                    &runs::StepTokens::UNKNOWN,
+                    None,
+                    step != 5,
+                    (step == 5).then_some("Mac went to sleep"),
+                    false,
+                )?;
+                if step != 5 {
+                    runs::update_last_completed_step(conn, "run-gone", step.min(4))?;
+                }
+            }
+            runs::mark_interrupted(conn, "run-gone", "warned steps: [5]")
+        })
+        .await
+        .unwrap();
+}
+
+/// Resumes `run-gone` the way the UI does, naming no tier, and returns the stream.
+#[cfg(unix)]
+async fn resume_run_gone(
+    state: &AppState,
+    agent: AgentType,
+    requested_connection: Option<&str>,
+) -> String {
+    use axum::response::IntoResponse;
+    let response = crate::api::audit::full::full_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(PROJECT_ID.to_string()),
+        axum::Json(crate::models::LaunchAuditRequest {
+            agent,
+            connection_id: requested_connection.map(str::to_string),
+            tier: None,
+            kind: None,
+            custom_prompt: None,
+            resume_run_id: Some("run-gone".into()),
+            retry_steps: None,
+            redo_steps: None,
+            fresh: None,
+            accept_unverified_agents: None,
+        }),
+    )
+    .await
+    .into_response();
+    sse_body(response).await
+}
+
+#[cfg(unix)]
+async fn latest_run(state: &AppState) -> crate::models::AuditRun {
+    state
+        .db
+        .with_conn(|conn| {
+            Ok(crate::db::audit_runs::list_recent(conn, PROJECT_ID, 1)?
+                .into_iter()
+                .next())
+        })
+        .await
+        .unwrap()
+        .expect("the resumed run")
+}
+
 /// KT-1318 — a full audit writes a lot of files and builds: below the
 /// configured free space it is refused before anything is recorded or written,
 /// with the number and the setting named.
@@ -2131,6 +2308,7 @@ async fn a_full_audit_under_disk_pressure_is_refused_before_it_creates_anything(
             resume_run_id: None,
             retry_steps: None,
             redo_steps: None,
+            accept_unverified_agents: None,
             fresh: None,
         }),
     )

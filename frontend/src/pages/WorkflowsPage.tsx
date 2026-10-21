@@ -703,11 +703,17 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
   // the entry without it), so the prop goes back to null and the wizard would
   // remount without the preset. The snapshot survives the ack.
   const [pendingPresetLocal, setPendingPresetLocal] = useState<{ presetId: string; projectId: string } | null>(null);
+  // Captured during render (not in an effect) so the wizard opens in the same pass.
+  const [seenPendingPreset, setSeenPendingPreset] = useState<WorkflowsPageProps['pendingPreset']>(null);
+  if ((pendingPreset ?? null) !== seenPendingPreset) {
+    setSeenPendingPreset(pendingPreset ?? null);
+    if (pendingPreset) {
+      setPendingPresetLocal(pendingPreset);
+      setShowCreate(true);
+    }
+  }
   useEffect(() => {
-    if (!pendingPreset) return;
-    setPendingPresetLocal(pendingPreset);
-    setShowCreate(true);
-    onPendingPresetConsumed?.();
+    if (pendingPreset) onPendingPresetConsumed?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingPreset]);
 

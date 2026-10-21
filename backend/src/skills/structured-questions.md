@@ -1,6 +1,6 @@
 ---
 name: structured-questions
-description: Teaches agents to ask questions using {{var}}: format so the UI renders a structured form. Also teaches agents to understand var: value replies. Activate when you want clean Q&A exchanges instead of free-form prose.
+description: Teaches agents to collect free-text FACTS from the user with the {{var}}: format so the UI renders a structured form, and to read var: value replies. A choice or approval the human must arbitrate is NOT a form field — it is a kronn-question card. Activate for clean fact-gathering Q&A instead of free-form prose.
 license: AGPL-3.0
 category: domain
 icon: 📋
@@ -15,6 +15,7 @@ builtin: true
 
 ## Do NOT apply when
 
+- **The human must arbitrate** (a choice between options, a trade-off, an approval, an ambiguous scope): post a closed `kronn-question` JSON fence with `disc_append` instead — `{"version":1,"key":"stable-key","question":"…","options":[{"id":"a","label":"…"}]}` (`tool_manual({tool: "disc_question_list"})` has the full schema). The card is durable, can be read back by `key` and can be answered once; a `{{var}}:` form field is none of that. Use this skill only to collect facts, never to ask for a decision.
 - You're having a free-form discussion or brainstorming
 - You're delivering a report or analysis (no questions needed)
 - The question is a simple yes/no that doesn't need a form

@@ -139,9 +139,14 @@ fn a_local_merge_runs_in_a_worktree_with_one_diff_per_file_and_resumes() {
     let committed: BTreeSet<&str> = committed.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(
         committed,
-        ["docs/AGENTS.md", "docs/testing-quality.md"]
-            .into_iter()
-            .collect()
+        // The folder's state file travels with the files it records as Kronn's.
+        [
+            "docs/.kronn.json",
+            "docs/AGENTS.md",
+            "docs/testing-quality.md"
+        ]
+        .into_iter()
+        .collect()
     );
     assert!(
         wt.join("docs/glossary.md").exists(),
@@ -361,4 +366,322 @@ fn merge_state_does_not_count_the_remote_commits_a_remote_merge_started_from() {
     accept_merge(root, &["docs/AGENTS.md".to_string()]).unwrap();
     // The local main is three upstream commits behind; only the accepted one counts.
     assert_eq!(merge_state(root).branch_ahead_commits, 1);
+}
+
+#[test]
+fn kronn_state_files_are_not_untracked_docs() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    write(root, "docs/briefing.md", "# Project Briefing\n");
+    write(root, "docs/.kronn.json", "{}");
+    write(root, "docs/.kronn-audit-run.json", "{}");
+    assert!(untracked_docs(root).is_empty());
+    let view = preview_plan(root, &template_docs()).unwrap();
+    assert!(view.untracked_in_checkout.is_empty());
+    // A doc of the team's, even next to them, is still reported.
+    write(root, "docs/local-notes.md", "## Debugging\n");
+    assert_eq!(
+        untracked_docs(root),
+        vec!["docs/local-notes.md".to_string()]
+    );
+}
+
+#[test]
+fn an_accept_records_the_files_as_kronns_and_the_folder_as_installed() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let wt = PathBuf::from(started.worktree_path.unwrap());
+    accept_merge(
+        root,
+        &["docs/AGENTS.md".to_string(), "docs/glossary.md".to_string()],
+    )
+    .unwrap();
+    let state = crate::core::kronn_state::read(&wt).expect("a state file in the commit");
+    assert!(state.template_installed_at.is_some());
+    assert_eq!(
+        state
+            .kronn_written
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["AGENTS.md", "glossary.md"]
+    );
+    assert!(sh_git(&wt, &["status", "--porcelain", "docs/.kronn.json"]).is_empty());
+
+    // A second accept adds to the record; the first entries stay.
+    accept_merge(root, &["docs/decisions.md".to_string()]).unwrap();
+    let state = crate::core::kronn_state::read(&wt).unwrap();
+    assert_eq!(state.kronn_written.len(), 3);
+    assert!(state.kronn_written.contains_key("AGENTS.md"));
+}
+
+#[test]
+fn a_corrupt_state_file_stops_the_accept_without_committing() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let wt = PathBuf::from(started.worktree_path.unwrap());
+    write(&wt, "docs/.kronn.json", "{ not json");
+    let err = accept_merge(root, &["docs/AGENTS.md".to_string()]).unwrap_err();
+    assert!(err.contains("not valid JSON"), "{err}");
+    assert_eq!(merge_state(root).branch_ahead_commits, 0);
+}
+
+#[test]
+fn the_pending_integration_refusal_carries_an_error_code() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    assert!(audit_launch_refusal(root).is_none());
+    run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    accept_merge(root, &["docs/AGENTS.md".to_string()]).unwrap();
+    let refusal = audit_launch_refusal(root).expect("pending integration");
+    assert_eq!(refusal["error_code"], PENDING_INTEGRATION_CODE);
+    assert!(refusal["error"]
+        .as_str()
+        .unwrap()
+        .contains("pending integration"));
+}
+
+#[test]
+fn an_integrated_merge_leaves_neither_worktree_nor_branch() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let wt = PathBuf::from(started.worktree_path.unwrap());
+
+    // Files still to review: nothing is cleaned.
+    clean_integrated_merge(root);
+    assert!(wt.exists() && branch_exists(root));
+
+    let all: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    accept_merge(root, &all).unwrap();
+    // Accepted, not integrated: nothing is cleaned.
+    clean_integrated_merge(root);
+    assert!(wt.exists() && branch_exists(root));
+
+    sh_git(
+        root,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge v2",
+            docs_merge::MERGE_BRANCH,
+        ],
+    );
+    let state = merge_state(root);
+    assert!(state.worktree_exists);
+    assert_eq!((state.pending_files, state.branch_ahead_commits), (0, 0));
+    clean_integrated_merge(root);
+    assert!(!wt.exists());
+    assert!(!branch_exists(root));
+    let state = merge_state(root);
+    assert!(!state.worktree_exists && !state.branch_exists);
+}
+
+#[test]
+fn a_resumed_plan_never_reads_the_merges_own_files_as_sources() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let human: BTreeSet<String> = started
+        .correspondence
+        .iter()
+        .map(|r| r.source.clone())
+        .collect();
+    let all: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    accept_merge(root, &all).unwrap();
+    let again = run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let sources: BTreeSet<String> = again
+        .correspondence
+        .iter()
+        .map(|r| r.source.clone())
+        .collect();
+    assert_eq!(sources, human);
+}
+
+#[test]
+fn a_remote_plan_warns_about_local_docs_the_remote_base_lacks() {
+    let origin = TempDir::new().unwrap();
+    sh_git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let origin_url = origin.path().to_string_lossy().to_string();
+    sh_git(root, &["remote", "add", "origin", &origin_url]);
+    sh_git(root, &["push", "-q", "origin", "main"]);
+
+    // Nothing local-only yet: no warning.
+    let clean =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Remote, &template_docs()).unwrap();
+    assert!(clean.warnings.is_empty(), "{:?}", clean.warnings);
+    discard_merge(root).unwrap();
+
+    // A doc committed but not pushed, and one never committed.
+    write(root, "docs/unpushed.md", "## Debugging\n\nlogs\n");
+    sh_git(root, &["add", "-A"]);
+    sh_git(root, &["commit", "-q", "-m", "unpushed"]);
+    write(root, "docs/untracked.md", "## Glossary\n\nx\n");
+    let view = run_merge_in_worktree(root, "Fixture", MergeBase::Remote, &template_docs()).unwrap();
+    assert_eq!(view.warnings.len(), 1, "{:?}", view.warnings);
+    let warning = &view.warnings[0];
+    assert_eq!(warning.code, REMOTE_BASE_MISSES_LOCAL_DOCS);
+    assert_eq!(
+        warning.paths,
+        vec![
+            "docs/unpushed.md".to_string(),
+            "docs/untracked.md".to_string()
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+    );
+    assert_eq!(warning.more, 0);
+    // The local base has everything: nothing to warn about.
+    assert!(preview_plan(root, &template_docs())
+        .unwrap()
+        .warnings
+        .is_empty());
+}
+
+/// A checkout whose `origin/HEAD` names a default branch that no longer exists.
+/// The bare remote lives in the returned guard.
+fn repo_with_dangling_origin_head() -> (TempDir, TempDir) {
+    let origin = TempDir::new().unwrap();
+    sh_git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let origin_url = origin.path().to_string_lossy().to_string();
+    sh_git(root, &["remote", "add", "origin", &origin_url]);
+    sh_git(root, &["push", "-q", "origin", "main"]);
+    sh_git(root, &["fetch", "-q", "origin"]);
+    sh_git(
+        root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/gone",
+        ],
+    );
+    (tmp, origin)
+}
+
+#[test]
+fn a_dangling_origin_head_never_makes_accepted_commits_look_integrated() {
+    let (tmp, _origin) = repo_with_dangling_origin_head();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let wt = PathBuf::from(started.worktree_path.unwrap());
+    let all: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    accept_merge(root, &all).unwrap();
+    let tip = sh_git(root, &["rev-parse", docs_merge::MERGE_BRANCH]);
+
+    // The remote default branch is found without origin/HEAD: the count is real.
+    assert_eq!(
+        known_remote_default_ref(root).as_deref(),
+        Some("origin/main")
+    );
+    assert_eq!(merge_state(root).branch_ahead_commits, 1);
+    assert!(audit_launch_refusal(root).is_some());
+
+    // Neither the cleanup (audit launch, merge start) nor a restart drops them.
+    clean_integrated_merge(root);
+    assert!(wt.exists() && branch_exists(root));
+    run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    assert_eq!(sh_git(root, &["rev-parse", docs_merge::MERGE_BRANCH]), tip);
+}
+
+#[test]
+fn a_git_error_counting_the_merge_branch_means_not_integrated() {
+    let (tmp, _origin) = repo_with_dangling_origin_head();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let wt = PathBuf::from(started.worktree_path.unwrap());
+    let all: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    accept_merge(root, &all).unwrap();
+    let tip = sh_git(root, &["rev-parse", docs_merge::MERGE_BRANCH]);
+
+    // `git rev-list` fails when HEAD names an unborn branch.
+    sh_git(root, &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+    assert_eq!(merge_branch_ahead(root), None);
+    assert!(audit_launch_refusal(root).is_some());
+    assert_eq!(merge_state(root).branch_ahead_commits, 1);
+    clean_integrated_merge(root);
+    assert!(wt.exists());
+    sh_git(root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    assert_eq!(sh_git(root, &["rev-parse", docs_merge::MERGE_BRANCH]), tip);
+}
+
+#[test]
+fn an_integrated_merge_is_still_cleaned_when_origin_head_dangles() {
+    let (tmp, _origin) = repo_with_dangling_origin_head();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let all: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    accept_merge(root, &all).unwrap();
+    sh_git(
+        root,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge v2",
+            docs_merge::MERGE_BRANCH,
+        ],
+    );
+    clean_integrated_merge(root);
+    assert!(!branch_exists(root));
+    assert!(audit_launch_refusal(root).is_none());
+}
+
+/// KT-1359: Kronn excludes `docs/var/` locally, yet the template ships
+/// `docs/var/.gitkeep`. The merge writes it, git does not see it as untracked, so
+/// it was listed as proposed and then refused by the accept.
+#[test]
+fn every_proposed_file_can_be_accepted_even_with_a_locally_excluded_placeholder() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    crate::core::mcp_scanner::ensure_local_exclude(root.to_str().unwrap(), "docs/var/");
+    assert!(template_docs().join("var/.gitkeep").exists());
+
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let wt = PathBuf::from(started.worktree_path.clone().unwrap());
+    assert!(wt.join("docs/var/.gitkeep").exists());
+    let proposed: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    assert!(!proposed.is_empty());
+    assert!(!proposed.iter().any(|p| p == "docs/var/.gitkeep"));
+    assert_eq!(started.merge.pending_files as usize, proposed.len());
+
+    let err = accept_merge(root, &["docs/var/.gitkeep".to_string()]).unwrap_err();
+    assert!(err.contains("docs/var/.gitkeep"));
+    let accepted = accept_merge(root, &proposed).unwrap();
+    assert_eq!(accepted.committed, proposed);
+
+    // Resumed after the accept: the committed files are no longer proposed either.
+    let again = run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    assert!(again.files.is_empty());
+    assert_eq!(again.merge.pending_files, 0);
+}
+
+/// Without the local exclude the placeholder is an ordinary untracked file: proposed and accepted.
+#[test]
+fn an_untracked_placeholder_is_proposed_and_accepted_like_any_file() {
+    let tmp = documented_git_repo();
+    let root = tmp.path();
+    let started =
+        run_merge_in_worktree(root, "Fixture", MergeBase::Local, &template_docs()).unwrap();
+    let proposed: Vec<String> = started.files.iter().map(|f| f.path.clone()).collect();
+    assert!(proposed.iter().any(|p| p == "docs/var/.gitkeep"));
+    accept_merge(root, &proposed).unwrap();
 }

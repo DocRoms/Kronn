@@ -793,13 +793,22 @@ fn the_standard_td_sheet_shapes_name_gone_files_without_claiming_them() {
 #[test]
 fn a_missing_elsewhere_in_the_clause_does_not_exempt_a_present_tense_claim() {
     let claims = [
-        ("a", "The build reads `config/gone.yml` when the cache is missing."),
+        (
+            "a",
+            "The build reads `config/gone.yml` when the cache is missing.",
+        ),
         ("b", "`src/api/x.rs` returns 404 Not Found."),
         ("c", "`src/api/x.rs` is missing error handling."),
-        ("d", "The route in `src/api/x.rs` is not found by the router."),
+        (
+            "d",
+            "The route in `src/api/x.rs` is not found by the router.",
+        ),
         ("e", "A dangling pointer is freed by `src/api/x.rs`."),
         ("f", "If the cache is missing, `config/gone.yml` is read."),
-        ("g", "`config/gone.yml` is missing a null check in the loader."),
+        (
+            "g",
+            "`config/gone.yml` is missing a null check in the loader.",
+        ),
         ("h", "`src/api/x.rs` is missing on error paths."),
         ("i", "`src/api/x.rs` is missing now that the loader moved."),
         ("j", "The key is missing `src/api/x.rs` rejects it."),

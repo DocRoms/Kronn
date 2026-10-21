@@ -605,7 +605,7 @@ export type ApiCallStatus = "OK" | "ERROR" | "RateLimited" | "TimedOut";
  * these as plain inputs (no mask). Prompts may reference them symbolically;
  * the broker resolves values server-side when it builds full URLs.
  */
-export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string, 
+export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string,
 /**
  * The value is not a credential (a base URL, a workspace id): the call
  * keeps it intact in the data it hands on instead of masking it as a
@@ -1202,7 +1202,25 @@ cancelled_at_step?: number,
  * and the resume itself; saved so the timeline and the validation prompt
  * can say so after the one-off toast is gone.
  */
-resume_drift?: string, };
+resume_drift?: string,
+/**
+ * KT-1353 — JSON of what the documentary gate let through (blockers the
+ * committed docs held before the run, in docs no step owns) and repaired
+ * by itself (exact gate replacements) during this run:
+ * `{"preexisting":[{path,message}],"autofixes":[{step,path,kind,from,to}]}`.
+ * Absent when there was nothing to report.
+ */
+documentary_notes?: string,
+/**
+ * KT-1320 — the model tier the run was launched with (`economy`,
+ * `default`, `reasoning`); absent on a run recorded before it was kept.
+ * A step retry or a resume reuses it unless the human picks another.
+ */
+tier?: string,
+/**
+ * KT-1320 — the named API connection the run's HTTP agent used, if any.
+ */
+connection_id?: string, };
 
 /**
  * An audit run's tokens and cost per phase and in total (KT-1084).
@@ -3684,7 +3702,12 @@ export type DiscussionProjectGrant = { id: string, discussion_id: string,
  */
 project_id: string | null, project_name: string | null, access: ScopeAccess, source: ScopeGrantSource, request_id: string | null, granted_by: string, granted_at: string, revoked_by: string | null, revoked_at: string | null, revoked_reason: string | null, };
 
-export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null, options: Array<DiscussionQuestionOption>, items: Array<DiscussionQuestionItem>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, requester_workflow_step: DiscussionQuestionWorkflowStep | null, resume: DiscussionQuestionResume | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
+export type DiscussionQuestion = { id: string, discussion_id: string, source_message_id: string, fence_index: number, key: string, question: string, context: string | null,
+/**
+ * The TDs a partial audit card could not record, with the reason for each;
+ * cleared once the card is fully answered.
+ */
+td_errors: string | null, options: Array<DiscussionQuestionOption>, items: Array<DiscussionQuestionItem>, multiple: boolean, recommended_option_ids: Array<string>, task_ref: string | null, requester_workflow_step: DiscussionQuestionWorkflowStep | null, resume: DiscussionQuestionResume | null, state: DiscussionQuestionState, answer: DiscussionQuestionAnswer | null, created_at: string, updated_at: string, };
 
 export type DiscussionQuestionAnswer = { selected_option_ids: Array<string>, item_answers: Array<DiscussionQuestionItemAnswer>, text: string | null, author_pseudo: string, answered_at: string, message_id: string, };
 
@@ -4454,9 +4477,14 @@ export type GrantDiscussionProjectRequest = {
 /**
  * The project to open; omitted with `all: true`.
  */
-project_id?: string | null, all?: boolean, access: ScopeAccess,
+project_id?: string | null, all?: boolean,
 /**
- * Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`].
+ * The general resources, for a room without a project; write only.
+ */
+general?: boolean, access: ScopeAccess,
+/**
+ * Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`];
+ * for the general resources: [`GENERAL_WRITE_CONFIRMATION`].
  */
 confirm?: string | null,
 /**
@@ -4820,7 +4848,16 @@ redo_steps?: Array<number>,
  * project's latest run can be resumed, unless this explicit choice says
  * to run the whole audit again.
  */
-fresh?: boolean, };
+fresh?: boolean,
+/**
+ * KT-1324 — a launch first stops the agents the project's previous runs
+ * left and settles their unfinished steps. When Kronn cannot read the
+ * process table (a restricted `/proc`) it cannot tell that none is still
+ * running and refuses; this is the human's word that none is, and the
+ * steps are settled without the check. It never overrides a process Kronn
+ * saw and could not stop: that one is stopped by hand.
+ */
+accept_unverified_agents?: boolean, };
 
 export type LaunchDiscussionActionRequest = { variables?: Record<string, string>,
 /**
@@ -6189,7 +6226,11 @@ connection_id?: string,
  * Model capability selected by the shared agent picker. Missing values
  * keep the historical partial-audit behaviour (Reasoning).
  */
-tier?: ModelTier | null, steps: Array<number>, };
+tier?: ModelTier | null, steps: Array<number>,
+/**
+ * KT-1324 — see [`LaunchAuditRequest::accept_unverified_agents`].
+ */
+accept_unverified_agents?: boolean, };
 
 /**
  * A participant enriched with the honest-presence contract (0.9.2-G). Carries
@@ -7937,7 +7978,11 @@ export type RevalidateAuditRequest = { agent: AgentType,
  * Apply only deterministic citation repairs, even when agent work remains.
  * Omitted or false preserves the existing combined reverification flow.
  */
-deterministic_only?: boolean, connection_id?: string, tier?: ModelTier | null, };
+deterministic_only?: boolean,
+/**
+ * KT-1324 — see [`LaunchAuditRequest::accept_unverified_agents`].
+ */
+accept_unverified_agents?: boolean, connection_id?: string, tier?: ModelTier | null, };
 
 /**
  * What "Revalider l'audit" does with one section (KT-1168).
@@ -8112,9 +8157,13 @@ export type RevokeRequest = { authority: string, credential_id: string, reason: 
  */
 export type RevokeWorkflowScopeRequest = {
 /**
- * `None` withdraws every project.
+ * `None` (and `all` false) withdraws everything.
  */
-project_id?: string | null, };
+project_id?: string | null,
+/**
+ * Withdraw only the every-project entry.
+ */
+all?: boolean, };
 
 export type RotateAdminRequest = {
 /**
@@ -8378,7 +8427,7 @@ export type ScheduledCheck = { checked_at: string, sources_state: SourcesState, 
 
 export type ScopeAccess = "read" | "write";
 
-export type ScopeGrantSource = "link" | "request" | "all";
+export type ScopeGrantSource = "link" | "request" | "all" | "general";
 
 export type ScopeRequestStatus = "pending" | "approved" | "declined";
 
@@ -8899,7 +8948,19 @@ export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 /**
  * Validate a workflow's scope as it is now; an empty list clears it.
  */
-export type SetWorkflowScopeRequest = { entries: Array<WorkflowScopeItem>, };
+export type SetWorkflowScopeRequest = { entries: Array<WorkflowScopeItem>,
+/**
+ * Every project (KT-1336), read or write.
+ */
+all?: ScopeAccess | null,
+/**
+ * Required for every project in write: [`ALL_PROJECTS_WRITE_CONFIRMATION`].
+ */
+confirm?: string | null,
+/**
+ * The scope fingerprint the human's screen showed.
+ */
+expected_fingerprint?: string | null, };
 
 /**
  * A copy of an agent CLI that PATH order hides behind the one Kronn runs.
@@ -9990,7 +10051,29 @@ export type TemplateMergeView = { docs_dir: string, base: MergeBase, base_ref: s
 /**
  * Docs that only exist untracked in the checkout: a worktree cannot see them.
  */
-untracked_in_checkout: Array<string>, table_markdown: string, merge: TemplateMergeState, };
+untracked_in_checkout: Array<string>,
+/**
+ * Things the reviewer must know before trusting the plan, e.g. local docs
+ * a remote base cannot contain.
+ */
+warnings: Array<TemplateMergeWarning>, table_markdown: string, merge: TemplateMergeState, };
+
+/**
+ * A plan warning as data: the UI words it in the user's language from `code`.
+ */
+export type TemplateMergeWarning = {
+/**
+ * Stable identifier, e.g. `remote_base_misses_local_docs`.
+ */
+code: string,
+/**
+ * Paths the warning is about (capped), in a stable order.
+ */
+paths: Array<string>,
+/**
+ * How many more paths there are than `paths` lists.
+ */
+more: number, };
 
 export type TemplateReinstallPlan = { docs_dir: string, files: Array<ReinstallFile>,
 /**
@@ -11273,7 +11356,16 @@ export type WorkflowScope = { workflow_id: string,
 /**
  * False for a global or multi-project workflow, which cannot carry one.
  */
-supported: boolean, entries: Array<WorkflowScopeEntry>, valid: boolean, validated_by: string | null, validated_at: string | null, };
+supported: boolean, entries: Array<WorkflowScopeEntry>,
+/**
+ * Every project (KT-1336), besides the named entries.
+ */
+all: ScopeAccess | null,
+/**
+ * Digest of the scope as stored: every project in write names the one
+ * the human saw.
+ */
+fingerprint: string, valid: boolean, validated_by: string | null, validated_at: string | null, };
 
 /**
  * One project a workflow's runs reach.

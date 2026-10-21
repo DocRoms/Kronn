@@ -2953,7 +2953,7 @@ describe('DiscussionsPage', () => {
     vi.mocked(discussionsApi.questions).mockResolvedValue({
       questions: [{
         id: 'q-arb', discussion_id: 'd-arb', source_message_id: 'm3', fence_index: 0, key: 'k',
-        question: 'Which policy?', context: null,
+        question: 'Which policy?', context: null, td_errors: null,
         options: [{ id: 'a', label: 'A', description: null }], items: [], multiple: false,
         recommended_option_ids: [], task_ref: null, requester_workflow_step: null, resume: null,
         state: 'pending', answer: null,
