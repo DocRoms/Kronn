@@ -45,6 +45,11 @@ struct RunHeader {
     /// zones existed) means UTC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     timezone: Option<String>,
+    /// [`revision_fingerprint`] of the pinned closure without repository
+    /// profiles: what a human-validated workflow scope (KT-1270) is compared
+    /// with. `None` when inherited or pinned before scopes existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope_revision: Option<String>,
 }
 
 /// Pins `workflow` and its dependencies the first time `run` executes and
@@ -126,6 +131,7 @@ fn pin_fresh(
         _ => false,
     };
     let mut fingerprint = None;
+    let mut scope_revision = None;
     if !inherited {
         if let Some(reason) = changed_since(tx, &workflow.id, run.started_at)? {
             return Ok(Err(reason));
@@ -144,6 +150,7 @@ fn pin_fresh(
             )?;
         }
         fingerprint = Some(fingerprint_of(workflow, &deps, &covered)?);
+        scope_revision = Some(fingerprint_of(workflow, &deps, &ProfileSnapshots::new())?);
     } else {
         let owner = pin_owner(tx, run.parent_run_id.as_deref().unwrap_or_default())?;
         for (key, snapshot) in profiles {
@@ -168,6 +175,7 @@ fn pin_fresh(
         workflow: Some(workflow.clone()),
         fingerprint,
         timezone: Some(timezone.name().to_string()),
+        scope_revision,
     };
     rows::insert(
         tx,
@@ -314,6 +322,12 @@ pub fn profile_projects_to_resolve(
     Ok(wanted)
 }
 
+/// The revision a top-level run pinned, repository profiles left out: the
+/// definitions it executes, compared with a workflow scope's validation.
+pub fn pinned_scope_revision(conn: &Connection, run_id: &str) -> Result<Option<String>> {
+    Ok(header(conn, run_id)?.and_then(|header| header.scope_revision))
+}
+
 /// The [`revision_fingerprint`] a top-level run pinned when it started.
 pub fn pinned_fingerprint(conn: &Connection, run_id: &str) -> Result<Option<String>> {
     Ok(header(conn, run_id)?.and_then(|header| header.fingerprint))
@@ -351,6 +365,7 @@ pub fn inherit_for_batch(conn: &Connection, parent_run_id: &str, batch_run_id: &
         workflow: None,
         fingerprint: None,
         timezone: Some(inherited_timezone(conn, parent_run_id)?.name().to_string()),
+        scope_revision: None,
     };
     rows::insert(
         conn,

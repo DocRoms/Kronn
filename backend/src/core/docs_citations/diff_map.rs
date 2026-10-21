@@ -78,6 +78,33 @@ impl FileMap {
         let mapped = (self.line(old.0)?, self.line(old.1)?);
         (mapped.0 <= mapped.1).then_some(mapped)
     }
+
+    /// [`Self::line`], but a line a hunk changed or deleted lands where the
+    /// hunk starts on the new side instead of having no mapping: the closest
+    /// position that still says where the old line was.
+    fn line_nearest(&self, old_line: usize) -> Option<usize> {
+        if old_line == 0 {
+            return None;
+        }
+        let mut delta = 0isize;
+        for hunk in &self.hunks {
+            if hunk.old_len == 0 {
+                if old_line > hunk.old_start {
+                    delta += hunk.new_len as isize;
+                }
+                continue;
+            }
+            if old_line < hunk.old_start {
+                break;
+            }
+            let old_end = hunk.old_start.checked_add(hunk.old_len - 1)?;
+            if old_line <= old_end {
+                return hunk.old_start.checked_add_signed(delta);
+            }
+            delta += hunk.new_len as isize - hunk.old_len as isize;
+        }
+        old_line.checked_add_signed(delta)
+    }
 }
 
 fn parse_range(field: &str, header: &str) -> Result<(usize, usize), String> {
@@ -91,10 +118,12 @@ fn parse_range(field: &str, header: &str) -> Result<(usize, usize), String> {
     Ok((start, len))
 }
 
-/// Lazily loads one `git diff -U0 <base> HEAD -- <file>` per cited file.
+/// Lazily loads one `git diff -U0 <base> HEAD -- <file>` per cited file, or
+/// `git diff -U0 <base> -- <file>` (the working tree) for a merge in progress.
 pub(super) struct DiffMap<'a> {
     root: &'a Path,
     base: &'a str,
+    to_worktree: bool,
     files: HashMap<PathBuf, FileMap>,
 }
 
@@ -103,20 +132,30 @@ impl<'a> DiffMap<'a> {
         Self {
             root,
             base,
+            to_worktree: false,
             files: HashMap::new(),
         }
     }
 
-    pub(super) fn span(
-        &mut self,
-        file: &Path,
-        old: (usize, usize),
-    ) -> Result<Option<(usize, usize)>, String> {
+    /// Maps lines of `base` onto the working tree, which is where an
+    /// uncommitted merge result lives.
+    pub(super) fn to_worktree(root: &'a Path, base: &'a str) -> Self {
+        Self {
+            to_worktree: true,
+            ..Self::new(root, base)
+        }
+    }
+
+    fn file(&mut self, file: &Path) -> Result<&FileMap, String> {
         if !self.files.contains_key(file) {
-            let output = crate::core::cmd::git_cmd()
+            let mut command = crate::core::cmd::git_cmd();
+            command
                 .args(["diff", "--unified=0", "--no-ext-diff", "--no-color"])
-                .arg(self.base)
-                .arg("HEAD")
+                .arg(self.base);
+            if !self.to_worktree {
+                command.arg("HEAD");
+            }
+            let output = command
                 .arg("--")
                 .arg(file)
                 .current_dir(self.root)
@@ -124,16 +163,40 @@ impl<'a> DiffMap<'a> {
                 .map_err(|error| format!("cannot run git diff: {error}"))?;
             if !output.status.success() {
                 let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let target = if self.to_worktree { "" } else { " HEAD" };
                 return Err(if detail.is_empty() {
-                    format!("git diff {} HEAD failed", self.base)
+                    format!("git diff {}{target} failed", self.base)
                 } else {
-                    format!("git diff {} HEAD failed: {detail}", self.base)
+                    format!("git diff {}{target} failed: {detail}", self.base)
                 });
             }
             let parsed = FileMap::parse(&String::from_utf8_lossy(&output.stdout))?;
             self.files.insert(file.to_path_buf(), parsed);
         }
-        Ok(self.files.get(file).and_then(|map| map.span(old)))
+        Ok(&self.files[file])
+    }
+
+    pub(super) fn span(
+        &mut self,
+        file: &Path,
+        old: (usize, usize),
+    ) -> Result<Option<(usize, usize)>, String> {
+        Ok(self.file(file)?.span(old))
+    }
+
+    /// Where the old span starts on the new side, even when a hunk changed
+    /// that very line; `None` for a file the diff did not touch at all.
+    pub(super) fn nearest_start(
+        &mut self,
+        file: &Path,
+        old: (usize, usize),
+    ) -> Result<Option<usize>, String> {
+        let map = self.file(file)?;
+        Ok(if map.hunks.is_empty() {
+            None
+        } else {
+            map.line_nearest(old.0)
+        })
     }
 }
 
@@ -186,6 +249,18 @@ mod tests {
         assert_eq!(map.line(7), Some(7));
         assert_eq!(map.line(9), None);
         assert_eq!(map.line(10), Some(12));
+    }
+
+    #[test]
+    fn a_changed_line_lands_where_its_hunk_starts_on_the_new_side() {
+        let map = FileMap::parse("@@ -2,0 +3,2 @@\n+a\n+a\n@@ -6,2 +8,3 @@\n-o\n-o\n+n\n+n\n+n\n")
+            .unwrap();
+        assert_eq!(map.line_nearest(1), Some(1));
+        assert_eq!(map.line_nearest(5), Some(7));
+        assert_eq!(map.line_nearest(6), Some(8));
+        assert_eq!(map.line_nearest(7), Some(8));
+        assert_eq!(map.line_nearest(8), Some(11));
+        assert_eq!(map.line_nearest(0), None);
     }
 
     #[test]

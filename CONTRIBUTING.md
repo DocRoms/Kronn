@@ -138,10 +138,6 @@ and only builds the installers and the draft release.
 Which checks matter: `ci-quality-gates` and `ci-build-gates`. They report on
 every pull-request event, from whichever workflow ran last, and are the
 verdicts to read; the individual jobs are the details.
-A label event re-publishes both: the earlier CI Verdict check runs of the same
-head are then marked `neutral`, "Superseded by run <id>", so the latest verdict
-is the only success or failure listed (see
-[docs/operations/ci-labels-and-verdict.md](docs/operations/ci-labels-and-verdict.md)).
 
 `main` is protected by repository ruleset 13870406, whose required checks are
 job names. A job skipped by its `if` reports as passing, so the job names

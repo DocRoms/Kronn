@@ -26,6 +26,7 @@ const serverConfig = vi.hoisted((): ServerConfigPublic => ({
   agent_handoff_paid_unlimited: false, agent_handoff_blocked_agents: [],
   discussion_weight: { enabled: true, amber_bytes: 512 * 1024, red_bytes: 2 * 1024 * 1024 },
   execution_variable_retention_days: 30, run_payload_retention_days: 0, p2p_enabled: false, frontend_origins: [],
+  disk_launch_min_free_gib: 30, disk_sweep_idle_hours: 6,
 }));
 
 vi.mock('../../lib/api', async () => {

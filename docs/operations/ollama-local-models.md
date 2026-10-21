@@ -43,7 +43,7 @@ The discussion SSE path resolves this scope from the durable
 executor. If that lookup fails, the run is refused before provider inference;
 Kronn must never silently broaden a worker to the principal catalogue.
 `[src: file: backend/src/api/discussions/streaming.rs:92-146#native_http_tools_for_discussion]`
-`[src: file: backend/src/db/orchestration.rs:750-767#get_execution_for_sub_discussion]`
+`[src: file: backend/src/db/orchestration.rs:804-821#get_execution_for_sub_discussion]`
 
 ## Recommended subtask loop
 
@@ -169,7 +169,7 @@ or parent-milestone section: a bounded edit has neither.
 `[src: file: backend/src/api/agent_workspace_tools.rs:1693-1710#validate_range_indentation]`
 `[src: file: backend/src/agents/runner.rs:1391-1405#structural_refusal]`
 `[src: file: backend/src/agents/runner.rs:1407-1424#worker_repair_iteration_limit]`
-`[src: file: backend/src/api/orchestration.rs:8353-8454#worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:8454-8522#worker_scope]`
 
 For a pure insertion, do not make the worker reproduce a paragraph inside a
 replacement range. Use one verified anchor line:
@@ -212,8 +212,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:2518-2586#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:2637-2694#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:2556-2624#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:2675-2732#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -305,7 +305,7 @@ This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3348-3353#is_http_chat_agent]
 [src: file: backend/src/agents/runner.rs:4251-4272#start_ollama_http_with_idle]
 [src: file: backend/src/agents/runner.rs:4470-4483#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:13137-13146#Ollama]
+[src: file: backend/src/agents/runner.rs:13160-13169#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's
@@ -342,7 +342,7 @@ launch (`crud.rs` stamps `discussions.model` from the QP).
 
 ## "Stable output", NOT bit-exact determinism
 
-`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:7792-7852#build_ollama_chat_body] sends
+`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:7815-7875#build_ollama_chat_body] sends
 `temperature:0, top_k:1, seed:42` as INTERNAL constants (no per-step knob).
 On Apple Metal the float reduction order isn't guaranteed, so two logits within
 epsilon can flip the argmax (more so under Q4 quant) → output is *greedy-stable*,
@@ -456,8 +456,8 @@ gets depends on who runs the model, not only on the machine:
 
 | Rule | Window | Where |
 |---|---|---|
-| Memory band for 64 GiB, weights and cache cost not known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:6243-6268#ram_derived_ceiling] |
-| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` [src: file: backend/src/agents/runner.rs:6421-6461#resolve_ctx_cap_within] |
+| Memory band for 64 GiB, weights and cache cost not known | 65,536 | `ram_derived_ceiling` [src: file: backend/src/agents/runner.rs:6266-6291#ram_derived_ceiling] |
+| Trained window (262,144 in the test fixtures), held to the band | 65,536, origin `machine_ceiling` | `resolve_ctx_cap_within` [src: file: backend/src/agents/runner.rs:6444-6484#resolve_ctx_cap_within] |
 | Same window, weights and attention shape known (KT-943) | 262,144, the whole window, origin `model_window` | `ceiling_for_model` [src: file: backend/src/agents/ollama_memory.rs:268-313#ceiling_for_model] |
 | Discussion principal (`ToolRunMode::General`) | the ceiling above — 262,144 once the model's shape is known, else 65,536 — requested up front because tools are declared | `worker_effective_ctx_cap` [src: file: backend/src/agents/runner.rs:227-237#worker_effective_ctx_cap] |
 | Task worker (`ToolRunMode::Worker`) on native MLX | 32,768 | `MLX_WORKER_EFFECTIVE_CTX_CAP` [src: file: backend/src/agents/runner.rs:97-104#MLX_WORKER_EFFECTIVE_CTX_CAP] |
@@ -475,7 +475,7 @@ the model has been loaded at two different windows, the cache cost measured on
 the server replaces the computed one in the formula of KT-943 (and, off Apple
 Silicon, the 70 %-of-memory rule: what is left of 70 % of memory after the
 weights, over that cost)
-[src: file: backend/src/agents/runner.rs:6506-6526#kv_bytes_per_token_from_samples] [src: file: backend/src/agents/runner.rs:6528-6544#RAM_SHARE_FOR_MODEL].
+[src: file: backend/src/agents/runner.rs:6529-6549#kv_bytes_per_token_from_samples] [src: file: backend/src/agents/runner.rs:6551-6567#RAM_SHARE_FOR_MODEL].
 
 So the 32K ceiling is a worker's and not a discussion's, and a discussion on this
 Mac is at the ceiling resolved above — the model's whole 262,144 when its
@@ -637,7 +637,7 @@ policy is unchanged: `Fail` rejects output that remains invalid, while
 `Continue` may keep invalid raw output. Prompt-based output is not a guarantee
 of schema compliance. Repeated launches, including a repair launch, negotiate
 the capability independently; no persistent capability cache is written.
-`[src: file: backend/src/agents/runner.rs:8639-8673#rejects_structured_output]`
+`[src: file: backend/src/agents/runner.rs:8662-8696#rejects_structured_output]`
 `[src: file: backend/src/agents/runner.rs:9375-9439#format_fallback_notice]`
 `[src: file: backend/src/workflows/steps.rs:1074-1097#ollama_envelope_format]`
 
@@ -808,7 +808,7 @@ where Ollama runs. [src: file: backend/src/api/ollama.rs:62-84#fetch_server_vers
    9428 of 9500 prompt tokens on a second turn). Older MLX servers lack
    prompt-prefix reuse (ollama/ollama#17829), which is not what a suggestion
    should steer a user to.
-   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:6829-6833#mlx_prefix_cache_reused]
+   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:6852-6856#mlx_prefix_cache_reused]
 
 When it is, the `-mlx` builds are listed first with an "Optimized for Mac" mark,
 then the portable list. Everywhere else the list is exactly the portable one.

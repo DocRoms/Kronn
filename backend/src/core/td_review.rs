@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::core::audit_validation::TdDecision;
-use crate::core::td_index::is_td_id;
+use crate::core::td_index::{debt_entries, is_sheet_id, is_td_id, IndexRow, CENTRAL_INDEX};
 use crate::core::td_tasks::{body_lines, field_block, source_from, truncate};
 use crate::models::{
     TdPointer, TdReviewItem, TdReviewState, TdSeverityCount, TdStateCounts, TdValidationGate,
@@ -44,8 +44,13 @@ pub fn is_settled(state: TdReviewState) -> bool {
     !matches!(state, TdReviewState::Pending | TdReviewState::Deferred)
 }
 
-/// Every `TD-*.md` directly under `<docs>/tech-debt/`, sorted by id, without
-/// the task and talk links (the caller adds them from the DB).
+/// Every debt of the project, sorted by id, without the task and talk links
+/// (the caller adds them from the DB): the entries the project card counts
+/// from (`td_index::debt_entries`), settled ones included so a decision stays
+/// visible. That covers the `CQ-*` / `PERF-*` detail files of the dimension
+/// audits, which may carry no front matter, and the `TD-*` rows of the central
+/// index no file exists for yet: severity and status come from the index row
+/// when the file does not say, else they stay `Unknown`.
 pub fn read_items(docs_dir: &Path) -> Vec<TdReviewItem> {
     let docs_name = docs_dir
         .file_name()
@@ -58,28 +63,73 @@ pub fn read_items(docs_dir: &Path) -> Vec<TdReviewItem> {
 /// `read_items` with the sheets' paths under `docs_rel`, the docs root as the
 /// repository names it (`packages/x/docs`, KT-1192).
 pub fn read_items_rel(docs_dir: &Path, docs_name: &str) -> Vec<TdReviewItem> {
-    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
-        return Vec::new();
-    };
-    let mut items: Vec<TdReviewItem> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
-            let id = name.strip_suffix(".md")?;
-            if !is_td_id(id) {
-                return None;
+    debt_entries(docs_dir)
+        .into_iter()
+        .map(|entry| {
+            let mut item = match &entry.file_name {
+                Some(name) => item_from(
+                    &entry.id,
+                    entry.content.as_deref().unwrap_or_default(),
+                    format!("{docs_name}/tech-debt/{name}"),
+                ),
+                None => item_from_row(&entry.id, format!("{docs_name}/{CENTRAL_INDEX}")),
+            };
+            if let Some(row) = &entry.row {
+                fill_from_index(&mut item, row);
             }
-            let content = std::fs::read_to_string(e.path()).ok()?;
-            Some(item_from(
-                id,
-                &content,
-                format!("{docs_name}/tech-debt/{name}"),
-            ))
+            // The state is the one the card counts from.
+            item.state = state_of(entry.decision);
+            item
         })
-        .collect();
-    items.sort_by(|a, b| a.id.cmp(&b.id));
-    items
+        .collect()
+}
+
+/// A debt only the central index lists: its row (filled in by the caller) is
+/// all there is until a decision writes its sheet.
+fn item_from_row(id: &str, source_path: String) -> TdReviewItem {
+    TdReviewItem {
+        id: id.to_string(),
+        title: id.to_string(),
+        area: "Unknown".to_string(),
+        severity: "Unknown".to_string(),
+        status: "Unknown".to_string(),
+        effort: None,
+        blast_radius: None,
+        state: TdReviewState::Pending,
+        problem: None,
+        impact: None,
+        verification: None,
+        pointers: Vec::new(),
+        source_path,
+        task: None,
+        talk_count: 0,
+        talk_discussion_id: None,
+    }
+}
+
+/// What the sheet does not say, its index row does.
+fn fill_from_index(item: &mut TdReviewItem, row: &IndexRow) {
+    let unknown = |v: &str| v.trim().is_empty() || v.eq_ignore_ascii_case("unknown");
+    if item.title == item.id {
+        if let Some(title) = &row.title {
+            item.title = truncate(title, 160);
+        }
+    }
+    if unknown(&item.area) {
+        if let Some(area) = &row.area {
+            item.area = area.clone();
+        }
+    }
+    if item.severity == "Unknown" {
+        if let Some(severity) = &row.severity {
+            item.severity = severity_bucket(severity).to_string();
+        }
+    }
+    if unknown(&item.status) {
+        if let Some(status) = &row.status {
+            item.status = status.clone();
+        }
+    }
 }
 
 pub fn item_from(id: &str, content: &str, source_path: String) -> TdReviewItem {
@@ -100,7 +150,7 @@ pub fn item_from(id: &str, content: &str, source_path: String) -> TdReviewItem {
         blast_radius: short(&["blast radius"]),
         state: state_of(source.sheet.decision),
         problem: source.problem,
-        impact: field_block(&body, &["impact"]).map(|v| truncate(&v, IMPACT_MAX)),
+        impact: field_markdown(&body, &["impact"]).map(|v| truncate(&v, IMPACT_MAX)),
         verification: source.verification,
         pointers: pointers(&body),
         source_path: source.source_path,
@@ -108,6 +158,82 @@ pub fn item_from(id: &str, content: &str, source_path: String) -> TdReviewItem {
         talk_count: 0,
         talk_discussion_id: None,
     }
+}
+
+/// Lines with their common indentation removed, blank runs collapsed and the
+/// blank edges dropped; `None` when nothing is left.
+fn dedent(lines: &[&str]) -> Option<String> {
+    let indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut out: Vec<&str> = Vec::new();
+    for line in lines {
+        let text = line.get(indent..).unwrap_or("").trim_end();
+        if text.is_empty() && out.last().is_none_or(|last| last.is_empty()) {
+            continue;
+        }
+        out.push(text);
+    }
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    (!out.is_empty()).then(|| out.join("\n"))
+}
+
+/// Like `field_block`, but keeps the line structure: the text is Markdown
+/// (`**Critical**`, `- ` bullets) and the review renders it as such.
+fn field_markdown(body: &[&str], names: &[&str]) -> Option<String> {
+    let starts_with_name = |text: &str| {
+        let lower = text.to_lowercase();
+        names.iter().any(|name| lower.starts_with(name))
+    };
+    for (idx, line) in body.iter().enumerate() {
+        let t = line.trim();
+        if let Some(heading) = t.strip_prefix("## ") {
+            if starts_with_name(heading.trim()) {
+                let section: Vec<&str> = body[idx + 1..]
+                    .iter()
+                    .copied()
+                    .take_while(|l| !l.trim().starts_with('#'))
+                    .filter(|l| !l.trim().starts_with("<!--"))
+                    .collect();
+                return dedent(&section);
+            }
+            continue;
+        }
+        let item = t
+            .strip_prefix("- ")
+            .or_else(|| t.strip_prefix("* "))
+            .unwrap_or(t);
+        let Some(label) = item.strip_prefix("**") else {
+            continue;
+        };
+        if !starts_with_name(label) {
+            continue;
+        }
+        let Some(close) = label.find("**") else {
+            continue;
+        };
+        let rest = label[close + 2..].trim_start();
+        let first = rest.strip_prefix(':').unwrap_or(rest).trim();
+        let tail: Vec<&str> = body[idx + 1..]
+            .iter()
+            .copied()
+            .take_while(|n| {
+                !n.trim().is_empty() && !n.trim().starts_with('#') && n.starts_with(' ')
+            })
+            .collect();
+        let tail = dedent(&tail);
+        return match (first.is_empty(), tail) {
+            (true, tail) => tail,
+            (false, None) => Some(first.to_string()),
+            (false, Some(tail)) => Some(format!("{first}\n{tail}")),
+        };
+    }
+    None
 }
 
 /// `file[:line]` references of the `## Where` section: code spans first, bare
@@ -321,7 +447,7 @@ pub fn mention_excerpt(content: &str, td_id: &str, max: usize) -> (String, bool)
 pub fn talk_td_id(title: &str) -> Option<&str> {
     let rest = title.strip_prefix(TALK_TITLE_PREFIX)?;
     let id = rest.split_whitespace().next()?;
-    is_td_id(id).then_some(id)
+    is_sheet_id(id).then_some(id)
 }
 
 pub fn talk_title(item: &TdReviewItem) -> String {

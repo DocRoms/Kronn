@@ -13,6 +13,37 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A merge no longer bounces on doc citation line anchors (KT-1321). The
+  integration merge, and the merge a worker finishes through `task_exec_commit`,
+  stop before the merge commit: a doc conflict that differs only by the line
+  numbers of `[src: file: …]` markers is resolved to the target's text, then
+  every citation to a changed file the merged tree left broken is re-anchored
+  by mapping its lines from the side it was written against to the merged file
+  (the `#symbol` must lie in the new range; the nearest occurrence to the
+  mapped position, within 20 lines and with no tie, settles a changed range;
+  otherwise the merge bounces on the doc). Only `docs/` and `backend/docs/`
+  are touched, from the merged index: a doc to rewrite, or a cited file, with
+  unstaged work makes the merge bounce instead of sweeping that work into the
+  commit. Both land in the signed merge commit. Any other
+  conflict still bounces. `make docs-reanchor` also runs where no
+  target-branch merge-base exists (a worker worktree) and, during an unfinished
+  merge, maps from both sides of the merge without a `BASE`.
+- Kronn no longer fills the disk with per-lane build dirs (KT-1318). Every
+  parallel task lane builds in its own `target/wt-<lane>` (5-30 GB) and nothing
+  ever removed them: 195 of them took a 1.8 TB disk to 683 MB free. Now an
+  orphan sweeper (boot, then every 30 minutes) removes the build dirs Kronn
+  created, whose execution is finished, with no worktree, unwritten for
+  `server.disk_sweep_idle_hours` (default 6, minimum 1: `0` is read as 1, never
+  as "no idle check"); a dir Kronn did not create
+  (no ownership marker) and an active lane are never touched. Below
+  `server.disk_launch_min_free_gib` (default 30) a worker launch or a full
+  audit sweeps first, then is refused with the reason, the execution parked
+  `Blocked` and an alert in the principal room. **Settings → Disk**, the
+  `GET /api/maintenance/disk` report and the `disk_usage` MCP tool show free
+  space and Kronn's usage by kind and by task, with a Purge action that takes
+  orphans only (a named entry needs a confirmation). See
+  `docs/operations/disk-usage.md`.
+
 - « Revalider l'audit » now re-reads the docs whose sections are all
   unanchored (no citation, no repository path), once per change (KT-1292).
   Such a doc has no verdict, so nothing ever sent it to an agent. A review
@@ -65,6 +96,25 @@ Release notes for 0.9.3 and earlier are available in the
   the sentence holding the path, not to the whole line, and a proposal heading
   must be a proposal phrase (« Ideas », « Future work »), not a word inside a
   real title.
+- A room can reach other projects, decided by a human (KT-1270). A room keeps
+  its own project: its working directory, where what it creates lands, and the
+  only project whose credentials and API configs it may use. In the room
+  settings a human opens another project in read (its tasks, rooms, runs,
+  pages) or in write (planning only: create and edit its tasks), or every
+  project, the latter in write only after a typed confirmation sent with the
+  scope the screen showed. An agent asks with the MCP tool `room_scope`; the
+  request grants nothing until a human approves it, narrows it to read or
+  declines it. The header always shows what the room reaches (a red badge for
+  every project) and the requests waiting. Grants are re-read on every agent
+  call, so a revoke applies at once; they never open another project's
+  credentials, never run its workflows, never pass to worker rooms, and are
+  kept as a journal with a `[kronn-scope: …]` line in the room for each change.
+  Only the room's own agents reach its grants, never a workflow step or a
+  worker posting in it. A workflow's runs reach other projects through a scope a
+  human sets on the workflow page; any change to the workflow suspends it until
+  validated again, and the launch card shows it. Design and refused attacks:
+  `docs/design/discussion-project-scope.md`.
+
 - AI documentation template and audit v2 gap audit (KT-819). The project
   facts of the briefing gain « Documentation externe » (Confluence, Notion,
   wiki, other; https addresses only, no credentials, at most 6), rendered in
@@ -548,17 +598,127 @@ Release notes for 0.9.3 and earlier are available in the
 - An audit no longer lets a fabricated `deps:` or `url:` provenance reach the
   Stack table in the default (warn) mode (KT-1308). A `[src: deps: …]`
   citation the injected dependency watch does not hold, and a
-  `[src: url: …]` citation of a page the run's agent never fetched (read from
-  its `WebFetch` calls: direct stream-json or the ACP traces), are now blocking
-  in the always-on documentary check, whatever the anti-hallucination mode. The
-  step is retried with feedback telling the model to write
+  `[src: url: …]` citation of a page the run's agent never fetched, are now
+  blocking in the always-on documentary check, whatever the anti-hallucination
+  mode. The step is retried with feedback telling the model to write
   `not verified: no source` instead of a « latest stable » it did not read; held
-  and fetched citations, and `not verified`, pass. An agent that reports no
-  tool inputs (an HTTP model) leaves its `url:` citations unchecked.
+  and fetched citations, and `not verified`, pass. A page counts as fetched when
+  the agent sent it to a fetch tool, opened it in a browser (`browser_navigate`,
+  `navigate_page`), downloaded it with `curl` / `wget`, or was handed it by a
+  documentation tool (the URLs a Context7 result names, so the citation the
+  Context7 prompt asks for is not refused); a leading `www.` is ignored. An
+  agent that reports no tool inputs (an HTTP model), a run that used a
+  sub-agent, or an ACP run that called Context7 (its trace carries no output)
+  leaves its `url:` citations unchecked.
   The pre-step baseline and the blame ledger of the documentary gate (KT-1306)
   use the same run-aware analysis: an unbacked citation already there is in the
   baseline and does not block the step, one the step wrote blocks it and is
-  charged to it.
+  charged to it. The parenthesised-citation check of KT-1322 now reads a
+  document without Kronn's own partial-step banner, whose quoted gate reason
+  (`[src: file: path:line]` turned round and cut at its limit) was refused as a
+  `(src: file: …)` the step never wrote.
+- The tech-debt review keeps the sheet valid, keeps the "why" and counts the
+  debts the card counts (KT-1309). Saving a decision appends its
+  `audit_history` entry with the indentation of the list it joins, so a
+  standard YAML parser (Ruby, `serde_yaml`) still reads the header; the typed
+  reason is the entry's note for Confirm, Defer, Reject and Keep on purpose
+  (the fixed note only stands in for an empty one) and the field's label says
+  so. The review lists every sheet the card counts, including the `CQ-*` and
+  `PERF-*` detail files an audit wrote without front matter (severity and
+  status from their index row, else Unknown): a Critical or High one blocks
+  the validation gate until it is settled, and settling one gives it the
+  front matter and `Status` line it lacked. The generated tech-debt index
+  lists them too, so their severity survives a resync. The impact is rendered
+  as Markdown and a sheet with no verification criterion says so. Card and
+  review read one set of debts (`td_index::debt_entries`): settled ones
+  (rejected, kept on purpose, or marked resolved in the index of a sheet with
+  no status) drop out of the card's count and show as settled in the review,
+  the block header shows the same active count, and a `TD-*` row of the index
+  with no sheet file yet is listed and can be decided (the decision writes its
+  sheet from the row). The history writer also handles a trailing comment on
+  `audit_history:` / `metadata:` and a flow-style `metadata: {…}` without
+  duplicating the key (a flow mapping that already holds an empty
+  `audit_history` gets the entry in that key, written once), reads a `#` inside
+  quotes as text rather than a comment, refuses an `audit_history` that is a
+  non-empty flow list rather than corrupting it, and keeps a new reason typed
+  the same day for the same status instead of dropping it. A project with only
+  the central index (no `tech-debt/` folder yet) can decide a row that has no
+  sheet: the first decision creates the folder inside the docs root, and a
+  `tech-debt` link leaving it is still refused.
+- Revalidation after an interrupted audit (KT-1312). A refresh or a
+  revalidation is no longer refused once every failed step of the interrupted
+  run is accepted (`remaining_failed: []`): a resume would only finalize it.
+  A resume never runs an accepted step again, whatever blocker its document
+  still holds; only `redo_steps` does. The docs a step rewrote are
+  re-fingerprinted as soon as the step ends, so a chain of resumed runs leaves
+  none with the fingerprints of an earlier audit. A doc a failed step left
+  under its partial banner stays in the revalidation plan (its owning step, or
+  a manual line) and keeps the badge raised, though relevance sees nothing
+  wrong with its citations.
+- Kronn no longer cuts a text inside a `[src: …]` marker, and the detector
+  gate retries (KT-1323). The TD index cut a long title at 160 characters
+  inside a citation; the cut opener then swallowed the next `]` of the index,
+  the end-of-run gate blamed step 8, and the regenerated index failed again,
+  for ever. Every Kronn truncation that can hold a citation (index titles, TD
+  task text, banner and stored reasons, the briefing excerpt) now goes through
+  `truncate_outside_markers`, which stops before a marker the limit would
+  split. The detector disposition gate no longer fails step 8 outright: it
+  gets the bounded retry of the other gates, with feedback naming the signals
+  to dispose of. The hygiene detectors (`_blank`, zero-tests, template
+  checks) skip generated, vendored and framework scaffolding files
+  (`generated/` dirs, root-level `coverage/` / `Pods/`, minified bundles,
+  Symfony `web/config.php`, `.gitattributes` `linguist-generated` /
+  `linguist-vendored` with last-match-wins and negation), so they no longer
+  force TDs; the security detectors, the Docker/CI inventory and a team's own
+  bans still see every file, so a `.gitattributes` line can never hide them.
+- The documentary gate no longer refuses what Claude Code's Read tool shows
+  (KT-1322). A newline-terminated file of N lines is numbered up to N+1 there
+  (the last line is empty), and a range ending at N+1 was refused as outside
+  the file; it is now accepted by every range check (the gate, the
+  anti-hallucination verifier, citation drift and the bundle repair), through
+  one shared helper. The gate also stops suggesting what it refuses: a
+  comment after a non-numeric line (`docs/AGENTS.md:Focused on x`) is no
+  longer split into `[src: file: docs/AGENTS.md:Focused]`, an empty file gets
+  no `1-1` range, and a secret-looking file (`.ssh/…`, `.env`) is never
+  offered a range to cite. A parenthesised `(src: file: …)` citation, which
+  nothing verified, is refused with the bracketed form to write; a broken
+  relative link names the path it resolves to and the link that exists
+  (`../tech-debt/TD-1.md` from `docs/` → `tech-debt/TD-1.md`). Review
+  follow-up: citation drift hashes and evaluates a range ending at N+1 (it
+  reported it « removed » on the next re-audit), a range that starts on the
+  empty line N+1 is refused everywhere, the verifier no longer rounds an empty
+  file up to one line (`empty.txt:1` is refused), a text file given without a
+  line is offered `path:<line>` instead of a bare path, and the secret-looking
+  list now covers `id_ecdsa`, `id_dsa`, `*.p12`, `*.pfx`, `.netrc`, `.npmrc`
+  and `.pgpass`.
+
+- The dependency watch no longer reads only `node_modules` (KT-1325). Without
+  an install, the version in place comes from the lockfile — `package-lock.json`
+  / `npm-shrinkwrap.json` (v1, v2, v3), `yarn.lock` (classic and berry),
+  `pnpm-lock.yaml` — or `composer.lock` for Composer, so a checkout with a
+  lockfile no longer shows « declared only ». The source (lockfile vs
+  installed) is carried in the snapshot, the audit prompt's dependency table
+  and the `deps:` citation verdict, and the overview names the lockfile. Every
+  manifest the watch cannot settle (missing binary, network, parse error,
+  timeout, nothing installed) carries its reason in the snapshot, the audit
+  prompt block and the overview, instead of a bare « Error ». KT-1279's
+  workspace handling is unchanged. Review follow-up: a reason quotes what the
+  tool printed, so credentials are masked before it is stored, shown or put in
+  a prompt (URL userinfo and query, `_authToken=`, bearer headers, `ghp_` /
+  `npm_` tokens); a root lockfile resolves a nested project only when the
+  root's `workspaces` globs (or `pnpm-workspace.yaml`) list it; a Composer row
+  read from `composer.lock` is labelled « from composer.lock », no longer « not
+  installed ».
+- A project validated a minute ago no longer reads « Validé, modifié depuis »
+  with docs to re-check (KT-1319). Relevance judged Kronn's own TD sheets as
+  claims: a `Next step` section (and `Remedy` ones) is now a proposal, and a
+  path said missing right where it is cited (« the Jenkinsfile references the
+  missing `config/x.yml` », « `config/x.yml` is missing from the repo ») no
+  longer counts as a claim that the file exists. A « missing » elsewhere in
+  the sentence does not exempt it, and `Mitigation` / `Recommendation`
+  sections stay checked. The validation also stamps the docs
+  no citation anchors as re-read, so their steps are not queued again right
+  after it with no change to the code or the docs.
 - The audit's citation gate now says how to fix a citation (KT-1307). A path
   that only resolves under the docs root or next to the citing doc gets
   « paths are repository-root relative; did you mean `docs/AGENTS.md:94`? »,
@@ -662,6 +822,22 @@ Release notes for 0.9.3 and earlier are available in the
   a file and is fabricated when missing, so the enforce gate keeps blocking it. Line references written in
   backticked prose are not re-anchored; only markers are (documented in
   `docs/conventions/agents-md-format-v1.md`).
+- An ApiCall no longer masks a plugin's public config in the data it hands on
+  (KT-1249). The base URL (`https://acme.atlassian.net`) was scrubbed as a
+  secret since 0.14.3, so a Jira description reached the next steps with
+  `***/browse/EW-1` links, and a PUT would have written them back broken. A
+  config key declared `public` by a registry plugin (Jira's `JIRA_URL`) and a
+  plugin's base URL when it is a bare origin (scheme, host, optional port, no
+  path) are now left intact. Everything else stays masked, including any URL
+  with a path (webhook URLs hide their secret there), whatever its key name:
+  tokens, passwords, auth headers, the decoded Basic pair, every other config
+  value, in the data, summaries, errors and logs. An imported bundle or a
+  custom API cannot declare a value public. The URL decision is made on the
+  raw text: a secret hidden behind dot segments (`…/SECRET/..`,
+  `…/SECRET/%2e%2e`) no longer passes for a bare origin. A value declared
+  public is checked too, even with no `/`: user info, query, fragment, `;param`
+  and non-ASCII characters keep it masked (`https:user:SECRET@host`,
+  `host;SECRET`).
 - A review-wait timeout no longer locks the principal out of the review
   (KT-1293). The watchdog used to move the unreviewed delivery to `Escalated`
   while its alert told the principal to call `task_exec_review`, which only
@@ -791,6 +967,15 @@ Release notes for 0.9.3 and earlier are available in the
   `reviewed_head_sha`, `dod_verifications`, the string version `"1"`), and a
   spawned worker's `tests_executed` schema is declared in the measured `TOOLS`
   literal.
+- A project's `token_override` (a raw token) is no longer returned to a
+  Kronn-launched agent: credential fields are stripped from every bridge-token
+  response.
+
+- A task linked to rooms of several projects is visible from each of them
+  again (KT-1298, GitHub #248). One link to another project's room hid the
+  whole task, so `plan_get` answered 403 in every room and agents duplicated
+  the shared parent task. The links an agent cannot see are now left out of the
+  task instead.
 
 - The default-docs-root golden no longer depends on the day it runs: the
   compact date every step prompt opens with is masked like the dashed one.

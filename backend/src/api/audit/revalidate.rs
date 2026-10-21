@@ -76,6 +76,18 @@ pub(crate) fn stamp_rereads(
     citation_drift::record_reviews(project_path, &reviewed)
 }
 
+/// A validation vouches for the whole set the human just checked, so the docs
+/// no citation or path anchors count as re-read at the sources as they stand:
+/// without this stamp the plan sent them back to their steps right after the
+/// project was validated, with no change to the code or the docs (KT-1319).
+pub(crate) fn stamp_validated_rereads(project_path: &FsPath) -> Result<(), String> {
+    let planned = plan(project_path);
+    let rereads = RevalidationRun::of(&planned).rereads;
+    let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
+    let chain = super::steps_for(AuditKind::Full, &docs_root);
+    stamp_rereads(project_path, &chain, &rereads)
+}
+
 /// What "Revalider l'audit" would do, computed without writing anything.
 pub fn plan(project_path: &FsPath) -> RevalidationPlan {
     let report = citation_drift::check(project_path);
@@ -101,7 +113,10 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
     let docs_root = crate::core::docs_location::DocsRoot::of(project_path);
     let chain = super::steps_for(AuditKind::Full, &docs_root);
     let mut plan = RevalidationPlan {
-        sources_state: relevance.escalate(report.sources_state),
+        sources_state: citation_drift::escalate_partial(
+            project_path,
+            relevance.escalate(report.sources_state),
+        ),
         relevance: relevance.counts.clone(),
         unanchored: relevance.unanchored.clone(),
         ..Default::default()
@@ -189,6 +204,37 @@ pub fn plan(project_path: &FsPath) -> RevalidationPlan {
             reread: false,
             doc,
         });
+        if let Some(step) = step {
+            plan.agent_steps.push(step);
+        }
+    }
+    // KT-1312 — a doc a failed step left under its partial banner stays in the
+    // plan whatever its citations say: relevance does not read every reference
+    // the documentary gate blocks on, and the banner is the one sign left.
+    for doc in citation_drift::partial_docs(project_path) {
+        let step = owning_step(&chain, &doc, &docs_root);
+        match plan.sections.iter_mut().find(|s| s.doc == doc) {
+            Some(section) => {
+                if step.is_some() && !section.doc_missing {
+                    section.action = RevalidationAction::Agent;
+                }
+            }
+            None => plan.sections.push(RevalidationSection {
+                action: if step.is_some() {
+                    RevalidationAction::Agent
+                } else {
+                    RevalidationAction::Manual
+                },
+                step,
+                doc_missing: false,
+                reanchor: Vec::new(),
+                broken: Vec::new(),
+                human: Vec::new(),
+                relevance: Vec::new(),
+                reread: false,
+                doc,
+            }),
+        }
         if let Some(step) = step {
             plan.agent_steps.push(step);
         }

@@ -2,6 +2,46 @@ use super::*;
 use std::fs;
 use std::path::PathBuf;
 
+#[test]
+fn a_title_is_never_cut_inside_a_citation_marker() {
+    // The live case (KT-1323): the 160-char limit landed inside the marker, the
+    // end-of-run gate blamed step 8, and the regenerated index failed again.
+    let lead = "x".repeat(140);
+    let title = format!("{lead} [src: file: helpers/lib/body-fill.js:42] and more words after");
+    let make = |t: &str| {
+        parse_sheet(
+            "TD-20261001-cut",
+            &sheet("TD-20261001-cut", t, "Backend", "High", "Open", ""),
+        )
+    };
+    let parsed = make(&title);
+    assert!(parsed.title.chars().count() <= 160, "{}", parsed.title);
+    assert!(
+        !parsed.title.to_ascii_lowercase().contains("[src:"),
+        "no partial marker in {}",
+        parsed.title
+    );
+    assert!(parsed.title.ends_with('…'), "{}", parsed.title);
+
+    let (text, _) = resync_content(CENTRAL, &[make(&title)], &BTreeMap::new());
+    assert!(!text.contains("[src: file: helpers"), "{text}");
+    // What the end-of-run gate read: an opener cut open swallows the next `]`
+    // of the document as a bogus citation.
+    let following = format!("{text}\nSee [the guide](guide.md).\n");
+    assert!(
+        crate::core::anti_halluc::extract_source_markers(&following).is_empty(),
+        "{following}"
+    );
+    // Regenerating is stable: the same index again, no new failure.
+    let (again, outcome) = resync_content(&text, &[make(&title)], &BTreeMap::new());
+    assert_eq!(again, text);
+    assert!(!outcome.changed);
+
+    // A marker that fits whole is kept.
+    let short = "Short [src: file: a/b.rs:1] title";
+    assert_eq!(make(short).title, short);
+}
+
 const NO_ADR: crate::core::adr::Trust = crate::core::adr::Trust::RunBaseline {
     decisions: "",
     records: "",
@@ -460,4 +500,49 @@ fn an_adr_accepted_during_the_run_leaves_its_finding_in_the_index_for_validation
     assert!(scope.undecided.contains(&id.to_string()), "{scope:?}");
     let decisions = fs::read_to_string(docs.join("decisions.md")).unwrap();
     assert!(decisions.contains("- **Status**: proposed"), "{decisions}");
+}
+
+#[test]
+fn index_rows_are_read_through_their_header_for_any_sheet_id() {
+    let content = "# Index\n\n| ID | Problem | Area | Severity | Status | Sheet |\n|----|---------|------|----------|--------|-------|\n| [CQ-001](tech-debt/CQ-001.md) | Oversized | Backend | **High** | Open | x |\n| `PERF-2026-a` | Slow | — | medium | — | |\n| Not an id | ignored | | | | |\n\n| Ref | Severity | Title |\n|-----|----------|-------|\n| CQ-009 | Critical | Reordered columns |\n\n| TD-1-x | Headerless | Area | Low |\n";
+    let rows = index_rows(content);
+    let cq = &rows["CQ-001"];
+    assert_eq!(
+        (
+            cq.severity.as_deref(),
+            cq.status.as_deref(),
+            cq.area.as_deref()
+        ),
+        (Some("High"), Some("Open"), Some("Backend"))
+    );
+    let perf = &rows["PERF-2026-a"];
+    assert_eq!(perf.severity.as_deref(), Some("medium"));
+    assert_eq!(perf.area, None, "an empty cell says nothing");
+    assert_eq!(rows["CQ-009"].severity.as_deref(), Some("Critical"));
+    // A table without a header uses the central index layout.
+    assert_eq!(rows["TD-1-x"].severity.as_deref(), Some("Low"));
+    assert!(!rows.contains_key("ID"));
+}
+
+#[test]
+fn a_resync_keeps_the_severity_of_a_detail_file_the_index_row_gave() {
+    let fx = fixture();
+    fs::write(
+        fx.docs.join("tech-debt/CQ-001.md"),
+        "# CQ-001: Oversized controller\n",
+    )
+    .unwrap();
+    let index = fx.docs.join(CENTRAL_INDEX);
+    let mut content = fs::read_to_string(&index).unwrap();
+    content = content.replace(
+        "| TD-20261001-phantom |",
+        "| CQ-001 | Oversized controller | Backend | High |\n| TD-20261001-phantom |",
+    );
+    fs::write(&index, content).unwrap();
+    resync(&fx.docs, NO_ADR).unwrap();
+    let after = fs::read_to_string(&index).unwrap();
+    let rows = index_rows(&after);
+    assert_eq!(rows["CQ-001"].severity.as_deref(), Some("High"), "{after}");
+    // A second pass changes nothing.
+    assert!(!resync(&fx.docs, NO_ADR).unwrap().changed);
 }
