@@ -1893,7 +1893,7 @@ async fn a_final_blocker_is_charged_to_the_step_that_wrote_the_file() {
     );
 }
 
-/// KT-1306 + KT-1353 (africanews) — a blocker that was in a document before the
+/// KT-1306 + KT-1353 (PHP site) — a blocker that was in a document before the
 /// run, and that a step touches without fixing (a re-verification appends to the
 /// document and leaves the citation), is neither that step's nor the founding
 /// step's: the step is not retried, the final gate reports it, the run completes,
@@ -2350,7 +2350,7 @@ async fn the_documentary_notes_of_an_interrupted_full_run_survive_its_resume() {
 
 /// KT-1353 — a blocker the committed documents held before the run, in a
 /// document no step rewrote, is reported at the final gate and never charged to
-/// the founding step: the run completes (africanews: sheets citing vendor code).
+/// the founding step: the run completes (PHP site: sheets citing vendor code).
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]

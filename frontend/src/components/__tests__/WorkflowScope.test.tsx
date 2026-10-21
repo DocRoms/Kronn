@@ -62,12 +62,12 @@ describe('WorkflowScopeEditor — folded line (KT-1355)', () => {
     api.scope.mockResolvedValue(scope({
       entries: [
         { project_id: 'p2', project_name: 'front_api', access: 'write' },
-        { project_id: 'p3', project_name: 'front_apollo', access: 'read' },
+        { project_id: 'p3', project_name: 'front_node', access: 'read' },
       ],
     }));
     renderEditor();
     const items = await chips();
-    expect([...items].map(li => li.textContent)).toEqual(['front_api · write', 'front_apollo · read']);
+    expect([...items].map(li => li.textContent)).toEqual(['front_api · write', 'front_node · read']);
     expect(screen.getByRole('heading', { name: 'wf.scopeTitle' })).toBeTruthy();
     expect(screen.queryByRole('radiogroup')).toBeNull();
     expect(screen.queryByText('wf.scopeHint')).toBeNull();

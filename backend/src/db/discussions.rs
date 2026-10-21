@@ -4528,7 +4528,7 @@ pub fn get_context_files_for_prompt(
     discussion_id: &str,
 ) -> rusqlite::Result<Vec<crate::core::context_files::ContextEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT filename, extracted_text, disk_path FROM context_files WHERE discussion_id = ?1 ORDER BY created_at"
+        "SELECT filename, extracted_text, disk_path, id FROM context_files WHERE discussion_id = ?1 ORDER BY created_at"
     )?;
     let rows = stmt
         .query_map(rusqlite::params![discussion_id], |row| {
@@ -4536,6 +4536,7 @@ pub fn get_context_files_for_prompt(
                 filename: row.get(0)?,
                 text: row.get(1)?,
                 disk_path: row.get(2)?,
+                id: row.get(3)?,
             })
         })?
         .filter_map(|r| r.ok())

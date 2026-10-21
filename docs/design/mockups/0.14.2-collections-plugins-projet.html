@@ -358,7 +358,7 @@ svg { flex: none; }
 
   // Example data (not live values). Orgs follow getProjectGroup(): repo_url owner, else "Local".
   const PROJECTS = [
-    { id: 'front_euronews', org: 'euronews' }, { id: 'front-apollo', org: 'euronews' }, { id: 'front-africanews', org: 'euronews' },
+    { id: 'front_euronews', org: 'euronews' }, { id: 'front-backend', org: 'euronews' }, { id: 'front-acme', org: 'euronews' },
     { id: 'Kronn', org: 'kronn-ai' }, { id: 'docroms-web', org: 'Local' },
   ];
   const orgColor = org => org === 'Local' ? 'var(--kr-text-dim)' : `hsl(${[...org].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 0)}, 50%, 60%)`;
@@ -368,10 +368,10 @@ svg { flex: none; }
     { id: 'github', name: 'GitHub', desc: 'Issues, pull requests, dépôts', acc: ['mcp', 'api'], pref: 'api', scope: { mode: 'all', projects: [] }, host: true,
       cred: { mcp: 'stored', api: 'stored' }, keys: ['GITHUB_PERSONAL_ACCESS_TOKEN'],
       health: { mcp: ['ok', 'il y a 4 min', 'Serveur démarré · 38 outils'], api: ['ok', 'il y a 4 min', 'GET /user → 200'] } },
-    { id: 'atlassian', name: 'Atlassian', desc: 'Jira EW, Confluence SD', acc: ['mcp', 'api'], pref: 'mcp', scope: { mode: 'projects', projects: ['front_euronews', 'front-apollo', 'front-africanews'] }, host: true,
+    { id: 'atlassian', name: 'Atlassian', desc: 'Jira EW, Confluence SD', acc: ['mcp', 'api'], pref: 'mcp', scope: { mode: 'projects', projects: ['front_euronews', 'front-backend', 'front-acme'] }, host: true,
       cred: { mcp: 'stored', api: 'stored' }, keys: ['ATLASSIAN_EMAIL', 'ATLASSIAN_API_TOKEN'],
       health: { mcp: ['ok', 'il y a 12 min', 'Serveur démarré · 24 outils'], api: ['warn', 'jamais testé', 'Accès API jamais testé'] } },
-    { id: 'fastly', name: 'Fastly', desc: 'Services, purge, logs CDN', acc: ['api', 'mcp', 'cli'], pref: 'cli', scope: { mode: 'projects', projects: ['front_euronews', 'front-africanews'] }, host: false,
+    { id: 'fastly', name: 'Fastly', desc: 'Services, purge, logs CDN', acc: ['api', 'mcp', 'cli'], pref: 'cli', scope: { mode: 'projects', projects: ['front_euronews', 'front-acme'] }, host: false,
       cred: { api: 'cli_token', mcp: 'cli_token', cli: 'host' }, keys: [], cliBin: 'fastly ≥ 10.0', cliAuth: 'fastly whoami', tokenCmd: 'fastly profile token',
       health: { cli: ['err', 'il y a 1 h', 'Pas de profil actif : lancez « fastly profile create »'], api: ['ok', 'il y a 1 h', 'GET /service → 200'], mcp: ['warn', 'test > 7 j', 'Dernier test le 18/09'] } },
     { id: 'gitlab', name: 'GitLab', desc: 'Merge requests, pipelines', acc: ['cli'], pref: 'cli', scope: { mode: 'projects', projects: ['docroms-web'] }, host: false,
@@ -385,7 +385,7 @@ svg { flex: none; }
       health: { api: ['err', 'il y a 3 min', 'Secret manquant : CHARTBEAT_API_KEY'] } },
     { id: 'context7', name: 'context7', desc: 'Doc à jour des bibliothèques', acc: ['mcp'], pref: 'mcp', scope: { mode: 'all', projects: [] }, host: true,
       cred: { mcp: 'none' }, keys: [], health: { mcp: ['ok', 'il y a 1 h', 'Serveur démarré · 2 outils'] } },
-    { id: 'cloudwatch', name: 'AWS CloudWatch', desc: 'Logs et métriques', acc: ['mcp'], pref: 'mcp', scope: { mode: 'projects', projects: ['front_euronews', 'front-apollo'] }, host: false,
+    { id: 'cloudwatch', name: 'AWS CloudWatch', desc: 'Logs et métriques', acc: ['mcp'], pref: 'mcp', scope: { mode: 'projects', projects: ['front_euronews', 'front-backend'] }, host: false,
       cred: { mcp: 'stored' }, keys: ['AWS_PROFILE', 'AWS_REGION'], health: { mcp: ['warn', 'test > 7 j', 'Dernier test le 16/09'] } },
     { id: 'playwright', name: 'Playwright', desc: 'Navigateur piloté pour la recette', acc: ['mcp'], pref: 'mcp', scope: { mode: 'projects', projects: ['front_euronews', 'Kronn'] }, host: true,
       cred: { mcp: 'none' }, keys: [], health: { mcp: ['ok', 'il y a 35 min', 'Serveur démarré · 21 outils'] } },
@@ -505,7 +505,7 @@ svg { flex: none; }
         <div class="toolbar"><button class="btn" type="button" id="test-all">Tester ${proj === '__all__' ? 'tout' : 'ce projet'}</button><button class="btn" type="button" id="rescan-btn">Rescanner les .mcp.json…</button></div>
       </div>
       ${state.rescan ? `<div class="rescan" role="region" aria-label="Aperçu du rescan"><b>Aperçu du rescan des .mcp.json de 5 projets</b>
-        <ul><li>1 config créée : <span class="mono">sentry</span> trouvé dans front-apollo/.mcp.json (non exposé aux CLIs locaux)</li><li>2 configs fusionnées : GitHub (front-africanews), Playwright (Kronn)</li><li>4 fichiers .mcp.json réécrits</li></ul>
+        <ul><li>1 config créée : <span class="mono">sentry</span> trouvé dans front-backend/.mcp.json (non exposé aux CLIs locaux)</li><li>2 configs fusionnées : GitHub (front-acme), Playwright (Kronn)</li><li>4 fichiers .mcp.json réécrits</li></ul>
         <div class="confirm-row"><button class="btn primary" type="button" id="rescan-ok">Appliquer</button><button class="btn" type="button" id="rescan-cancel">Annuler</button></div></div>` : ''}
       <div class="${sel ? 'with-sheet' : ''}">
         <div class="lanes">
@@ -565,8 +565,8 @@ svg { flex: none; }
       ['Commande', 'make iso-lint', 'N1', 'ok'], ['Commande', 'make iso-test', 'N1', 'ok'],
       ['Appel API', 'Chartbeat · top pages', 'N2', 'none'],
       ['Artifact', 'Santé du dépôt', 'N2', 'none'], ['Artifact', 'Tableau autoCode', 'N2', 'conflict'] ] },
-    'front-apollo': { published: false, items: [['Workflow', 'autoCode · phase 1 (triage)', 'N2', 'none'], ['Commande', 'make lint', 'N1', 'none'], ['Artifact', 'Santé du dépôt', 'N2', 'none']] },
-    'front-africanews': { published: false, items: [['Workflow', 'Revue de PR v3', 'N2', 'none']] },
+    'front-backend': { published: false, items: [['Workflow', 'autoCode · phase 1 (triage)', 'N2', 'none'], ['Commande', 'make lint', 'N1', 'none'], ['Artifact', 'Santé du dépôt', 'N2', 'none']] },
+    'front-acme': { published: false, items: [['Workflow', 'Revue de PR v3', 'N2', 'none']] },
     Kronn: { published: false, items: [['Workflow', 'Nightly qualification', 'N2', 'none'], ['Commande', 'make check', 'N1', 'none']] },
     'docroms-web': { published: false, items: [] },
   };
@@ -619,14 +619,14 @@ ${lines.join('\n')}
   const WF = {
     __none__: [['Brief du matin', 'ok', '07:30'], ['Résumé Teams hebdo', 'idle', 'lun.']],
     front_euronews: [['autoCode · phase 1 (triage)', 'ok', 'il y a 12 min'], ['autoCode · phase 2 (implémentation)', 'warn', 'il y a 1 h'], ['autoCode · phase 3 (PR)', 'ok', 'il y a 2 h'], ['Revue de PR v3', 'ok', 'il y a 3 h'], ['Veille Dependabot', 'err', 'hier']],
-    'front-apollo': [['autoCode · phase 1 (triage)', 'ok', 'il y a 40 min'], ['Audit de doc hebdomadaire', 'idle', 'ven.']],
-    'front-africanews': [['Revue de PR v3', 'ok', 'hier']],
+    'front-backend': [['autoCode · phase 1 (triage)', 'ok', 'il y a 40 min'], ['Audit de doc hebdomadaire', 'idle', 'ven.']],
+    'front-acme': [['Revue de PR v3', 'ok', 'hier']],
     Kronn: [['Nightly qualification', 'ok', '03:00'], ['Veille des tickets KT', 'ok', 'il y a 5 min']],
   };
   const ART = {
     __none__: [['Brief du matin', 'ok', 'auj.']],
     front_euronews: [['Santé du dépôt', 'ok', 'il y a 1 h'], ['Tableau autoCode', 'ok', 'il y a 12 min'], ['Audience Chartbeat', 'warn', 'hier']],
-    'front-apollo': [['Santé du dépôt', 'idle', '—']],
+    'front-backend': [['Santé du dépôt', 'idle', '—']],
     Kronn: [['Campagne 0.14.2', 'ok', 'il y a 20 min']],
   };
   function groupedScreen(kind) {

@@ -1,6 +1,6 @@
 # Audit live — Autopilot décomposé (PR-C) sur EW-7247
 
-> Run réel `15cf080d` (workflow `a020a277`), projet front_euronews, ticket EW-7247 (Epic migration Africanews multi-brand). But : relever finement ce qui marche / cloche pour fiabiliser les prompts de l'autopilot avant les prochains tickets. Date : 2026-06-11.
+> Run réel `15cf080d` (workflow `a020a277`), projet front_euronews, ticket EW-7247 (Epic migration Acme News multi-brand). But : relever finement ce qui marche / cloche pour fiabiliser les prompts de l'autopilot avant les prochains tickets. Date : 2026-06-11.
 
 ## Étape `fetch_issue` (JsonData) — ✅
 - 0 token, instantané. Le corps EW-7247 seedé via l'endpoint `templates/feasibility-autopilot` est bien lu par le triage.
@@ -10,7 +10,7 @@
 **Ce qui marche :**
 - **Canal worktree** : `.kronn/triage-manifest.md` (12,6 Ko) écrit comme demandé → l'enfant pourra le lire. Markdown propre (sections CLEAR/DECIDED/MOCKED/BLOCKED, champs `Where`, `Evidence`).
 - **Audit-only respecté** : `git status` du worktree VIDE — aucun fichier code modifié. La règle « audit, don't code » tient.
-- **Cross-repo evidence-lift (feature killer) opérationnel** : couleurs SCSS liftées du linked repo, pas inventées — primary `#f9d713` (evidence `front_africanews/…/_layout-variables.scss:14`), orange `#ea5932` (`:22`), fonts Overpass (`:59-60`). DFP `africanews-new` confirmé depuis la source front_africanews.
+- **Cross-repo evidence-lift (feature killer) opérationnel** : couleurs SCSS liftées du linked repo, pas inventées — primary `#f9d713` (evidence `front_acme/…/_layout-variables.scss:14`), orange `#ea5932` (`:22`), fonts Overpass (`:59-60`). DFP `acme-new` confirmé depuis la source front_acme.
 - **Grounding code > ticket** : `channel_id` AN=6 confirmé via `ChannelEnum.php:15`. Refs concrètes partout (`LocaleRequestListener.php` pour le pattern listener, priorité 210 > 200, etc.).
 - **Classification juste** : 11 clear / 4 decided / 2 mocked / 5 blocked. Les 5 blocked correspondent EXACTEMENT aux bloqueurs que le ticket flagge (Adobe DTM URLs + visitor config → Data team) + scope correct Phase 0 = code, Phases 1-3 = hors-codebase (CMS/DevOps/Fastly).
 - **`agent_decisions` ingérés sur le run PARENT** (INV-2 préservé par la décompo) : 11 rows (decided+mocked+blocked ; clear non ingéré = correct).
@@ -35,10 +35,10 @@
 
 ## Étape `feasibility_impl` / enfant `1458b15a` — ✅ Success (599 s)
 - **Phase 2 confirmé au niveau git** : l'enfant a travaillé sur la branche du PARENT (`kronn/…/15cf080d`), worktree partagé.
-- **implement (593 s)** : a créé TOUS les fichiers Phase-0 (7 nouveaux dossiers brands + Enum/Brand + BrandRequestListener + Services/Brand) ET modifié 7 points d'intégration (Apollo ArticleApi/SearchApi/WireApi, AdobeAnalyticsBuilder, NavbarBlock, CommonContentService). Matche `files_touched`.
+- **implement (593 s)** : a créé TOUS les fichiers Phase-0 (7 nouveaux dossiers brands + Enum/Brand + BrandRequestListener + Services/Brand) ET modifié 7 points d'intégration (Backend ArticleApi/SearchApi/WireApi, AdobeAnalyticsBuilder, NavbarBlock, CommonContentService). Matche `files_touched`.
   - ✅ `.kronn/decisions.md` (2,2 Ko) — vrai raisonnement d'écart (BrandContext nullable pour ne pas casser les tests).
   - ✅ Marqueurs `KRONN-ASSUMED/MOCKED/TODO` partout, chacun référence le `decision_id` du manifeste.
-  - ✅ **Evidence-lift réelle** : `#f9d713 // :14`, `#ea5932 // :22` liftés de front_africanews (pas inventés).
+  - ✅ **Evidence-lift réelle** : `#f9d713 // :14`, `#ea5932 // :22` liftés de front_acme (pas inventés).
 - **run_tests (3 ms)** : skip propre `[SIGNAL: SKIPPED]` (node_modules absent) → exit 0, ne bloque pas. ⚠️ Aucune validation réelle des tests.
 - **drift_check (46 ms)** : a listé tous les marqueurs KRONN. 0 token.
 
@@ -136,7 +136,7 @@ Cible Phase 3 : sur N sous-tâches, l'agent ne tourne QUE pour la logique + la r
 
 ### Run 4 (DÉCOMPOSÉ, 13 items) — PARTIAL 12/13, 132 223 tokens, fan-out 1 825 s
 - ✅ **Le fan-out marche** : 13 enfants séquentiels, ~1,5-2 min/item, **12 commits per-task** sur la branche, `current_task.json` = tranche enrichie, envelope foreach exacte `{13, 12, 1}` + `[SIGNAL: PARTIAL]`.
-- ✅ **La boucle completeness→implement (exit_3) a fonctionné en live** : item `adobe-ts-africanews` re-implémenté 2× puis Failed proprement (l'agent écrivait un marqueur avec un id ≠ celui de la tâche — vrai catch).
+- ✅ **La boucle completeness→implement (exit_3) a fonctionné en live** : item `adobe-ts-acme` re-implémenté 2× puis Failed proprement (l'agent écrivait un marqueur avec un id ≠ celui de la tâche — vrai catch).
 - 🐛 **Trouvé : PARTIAL tuait le run** (12/13 ok → parent Failed, pr_draft jamais exécuté). **Fix : PARTIAL = step Success** (signal PARTIAL reste branchable) → pr_draft documente l'échec. + prompt per-task durci : marqueur = id EXACT + feedback `{{steps.completeness_check.output}}` au re-run.
 - 💸 **Limite découverte (l'objectif !) : 132k tokens vs 72k monolithe** — la taxe de contexte ×13 dépasse le gain de scoping en séquentiel naïf. MAIS : 7/13 items étaient `mechanical:true` → en les routant vers Exec/template (0 token) + tier economy sur les `low`, l'équation s'inverse. Le fan-out apporte déjà : commits granulaires, vérif per-task, retry scopé (1 seul item re-roulé), 12/13 prouvés complets.
 
@@ -230,10 +230,10 @@ Le run de validation du lot « critiques + git + quick wins » (demande user 202
 
 **Économie : 180 421 tk > run 6 (147 876)** — analyse de la distribution :
 - triage **41 415 tk** (le plus cher à date) : il paie maintenant la **planification des contenus** (`files[]` inline) — coût déplacé, pas créé, mais payé même pour ce qui reste agent.
-- 12 enfants agents = 134 525 tk dont **UN outlier à 45 523 tk** (`apollo-channel-dynamic` — l'item bundlait 4+ fichiers API ; en run 6 ce périmètre était éclaté en plusieurs items) ; les 11 autres ≈ 8-13 k.
+- 12 enfants agents = 134 525 tk dont **UN outlier à 45 523 tk** (`backend-channel-dynamic` — l'item bundlait 4+ fichiers API ; en run 6 ce périmètre était éclaté en plusieurs items) ; les 11 autres ≈ 8-13 k.
 - Seulement **3/15 items** éligibles engine-appliable sous la définition stricte (créations de petits fichiers) — l'économie (~24 k) a été absorbée par l'inflation triage + l'outlier.
 
-**Verdict honnête** : (1) les mécanismes du flip marchent et font gagner du **temps** ; (2) sur UN run, l'économie tokens est **dominée par la variance du triage** (13/16/19/15 items selon les runs, granularité fluctuante) ; (3) le vrai levier suivant = **discipline de granularité** (un item comme apollo-channel-dynamic devrait être éclaté — règle anti-outlier au triage) et **A/B sur manifeste identique** (re-run du même tasks.json gelé) pour mesurer proprement. Comparer des runs à manifestes différents = comparer des tickets différents.
+**Verdict honnête** : (1) les mécanismes du flip marchent et font gagner du **temps** ; (2) sur UN run, l'économie tokens est **dominée par la variance du triage** (13/16/19/15 items selon les runs, granularité fluctuante) ; (3) le vrai levier suivant = **discipline de granularité** (un item comme backend-channel-dynamic devrait être éclaté — règle anti-outlier au triage) et **A/B sur manifeste identique** (re-run du même tasks.json gelé) pour mesurer proprement. Comparer des runs à manifestes différents = comparer des tickets différents.
 
 | | Run 3 mono | Run 4 | Run 5 | Run 6 | **Run 7 (flip)** |
 |---|---|---|---|---|---|

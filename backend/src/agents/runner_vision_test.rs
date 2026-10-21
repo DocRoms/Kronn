@@ -23,6 +23,7 @@ fn one_image(dir: &tempfile::TempDir, bytes: Vec<u8>) -> (ContextImages, String)
     (
         ContextImages {
             items: vec![ContextImage {
+                id: "cf-image".into(),
                 filename: "image.png".into(),
                 path: Some(path.clone()),
             }],
@@ -159,6 +160,10 @@ async fn litellm_vision_model_receives_the_image_as_an_image_url_part() {
     let system = system_text(&body);
     assert!(system.contains("=== ATTACHED IMAGES ==="), "{system}");
     assert!(system.contains("`image.png`") && system.contains("you can see it"));
+    assert!(
+        system.contains("(context file id: `cf-image`)") && system.contains("reference_asset_ids"),
+        "an HTTP agent is told the id media_generate takes: {system}"
+    );
     assert!(
         !body.to_string().contains(&path),
         "the storage path must not reach the model"

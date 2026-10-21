@@ -360,9 +360,9 @@ fn the_stack_table_block_feeds_the_currency_cells_and_asks_for_no_td() {
     assert!(judged.contains("becomes a TD"));
 }
 
-/// A front-apollo-shaped tree (KT-1279): the reusable workflow's input is
+/// A front-node-shaped tree (KT-1279): the reusable workflow's input is
 /// `nodeversion`, Jenkins pins Node in an agent label, the Dockerfile in FROM.
-fn front_apollo_like(root: &Path) {
+fn front_node_like(root: &Path) {
     std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
     std::fs::write(
         root.join(".github/workflows/CI_Quality-test.yaml"),
@@ -384,7 +384,7 @@ fn front_apollo_like(root: &Path) {
 #[test]
 fn reusable_workflow_inputs_jenkinsfile_and_dockerfile_pins_are_found() {
     let dir = tempfile::tempdir().unwrap();
-    front_apollo_like(dir.path());
+    front_node_like(dir.path());
 
     let rows: Vec<(String, String, String, usize)> = ci_runtime_versions(dir.path())
         .into_iter()
@@ -570,7 +570,7 @@ fn a_declared_only_row_is_never_rendered_as_the_version_in_place() {
 #[test]
 fn ci_files_present_lists_what_exists_whether_parsed_or_not() {
     let dir = tempfile::tempdir().unwrap();
-    front_apollo_like(dir.path());
+    front_node_like(dir.path());
     std::fs::write(dir.path().join(".gitlab-ci.yml"), "stages: []\n").unwrap();
     assert_eq!(
         ci_files_present(dir.path()),

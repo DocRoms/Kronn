@@ -75,6 +75,15 @@ fn assembled_with_every_block(
         let facts = "## Stack facts (computed by Kronn from the manifests, lock files and runtime files)\nState every version from these facts.\n- PHP: declared ^8.4 (composer.json:3)\n";
         prompt.push_str(&format!("\n\n{facts}\n"));
     }
+    // KT-1404 — the computed repository facts: tests and CI, committed secrets.
+    if version_context::states_repo_facts(step.target_file) {
+        prompt.push_str("\n\n## Test facts — computed by Kronn from `git ls-files`\n- PHPUnit: 43 tracked test file(s)\n\n\n## CI facts — computed by Kronn from the workflow files\n- `.github/workflows/ci.yml:3` runs on: push\n\n");
+    }
+    if version_context::judges_secrets(step.target_file) {
+        prompt.push_str(
+            "\n\n## Secret facts — computed by Kronn from the tracked files\nDetected: none.\n\n",
+        );
+    }
     let rules = BriefingProjectRules {
         rules: vec![ProjectRule {
             kind: ProjectRuleKind::Ban,

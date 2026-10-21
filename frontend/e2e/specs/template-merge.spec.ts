@@ -60,13 +60,13 @@ const planView = {
 
 const resultView = {
   ...planView,
-  worktree_path: '/repos/front_apollo/.kronn/worktrees/template-v2-merge',
+  worktree_path: '/repos/front_node/.kronn/worktrees/template-v2-merge',
   branch: 'kronn/template-v2-merge',
   // Started: the worktree holds both proposed files, none accepted yet.
   merge: {
     ...planView.merge,
     worktree_exists: true,
-    worktree_path: '/repos/front_apollo/.kronn/worktrees/template-v2-merge',
+    worktree_path: '/repos/front_node/.kronn/worktrees/template-v2-merge',
     branch_exists: true,
     pending_files: 2,
   },
@@ -92,7 +92,7 @@ async function mockBackend(page: Page) {
     route.request().method() !== 'GET' ? route.fallback() : ok(route, [{
       id: PROJECT_ID,
       name: 'template-merge-fixture',
-      path: '/repos/front_apollo',
+      path: '/repos/front_node',
       repo_url: null,
       token_override: null,
       ai_config: { detected: true, configs: [] },
@@ -103,7 +103,7 @@ async function mockBackend(page: Page) {
       default_skill_ids: [],
       // KT-1192: no audit starts without a saved briefing, so the launch the
       // merge hooks into stays disabled on a project that has none.
-      briefing_notes: 'Documented front_apollo repo, merged from template v2.',
+      briefing_notes: 'Documented front_node repo, merged from template v2.',
       linked_repos: [],
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',

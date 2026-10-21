@@ -258,7 +258,7 @@ fn secret_line_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> 
 }
 
 /// A directory cannot be cited (`docs/tech-debt/`): the gate says to name it in
-/// backticks without a marker, which is all the claim can mean (africanews
+/// backticks without a marker, which is all the claim can mean (PHP site
 /// step 8). A line given to a directory (`tests:1`, docroms step 5) points at
 /// nothing, so it goes too.
 fn directory_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {

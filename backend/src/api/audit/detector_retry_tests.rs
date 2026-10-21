@@ -434,7 +434,7 @@ async fn refresh_the_tech_debt_index(state: &AppState, project: &std::path::Path
 
 /// KT-1357 — the partial refresh of the TD index gives a malformed coverage
 /// matrix back to the agent like the Full pipeline, instead of failing the step
-/// on its first attempt (apollo's revalidation lost step 8 so).
+/// on its first attempt (a Node service's revalidation lost step 8 so).
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]
@@ -487,7 +487,7 @@ async fn partial_refresh_gives_a_bad_coverage_matrix_back_within_the_attempt_bud
     }
 }
 
-/// KT-1364 — the partial refresh splits apollo's merged Outcome/Evidence rows
+/// KT-1364 — the partial refresh splits a Node service's merged Outcome/Evidence rows
 /// itself: the step passes on its first attempt, with no retry per row.
 #[tokio::test]
 #[serial_test::serial]

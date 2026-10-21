@@ -21,8 +21,8 @@ Normal resolution prefers explicit configuration and then available durable
 tier assignments. HTTP agents may use their explicit/durable default tier;
 they do not revive the old embedded model list. Frontend display fallback is
 also configuration/caller supplied, rather than a second embedded catalogue.
-[src: file: backend/src/agents/runner.rs:3388-3439#configured_model_flag]
-[src: file: backend/src/agents/runner.rs:3441-3460#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3403-3454#configured_model_flag]
+[src: file: backend/src/agents/runner.rs:3456-3475#resolve_model_flag]
 [src: file: frontend/src/lib/constants.ts:60-75#modelForAgentTier]
 
 The production-library migration tests cover file-backed reopen, deletion

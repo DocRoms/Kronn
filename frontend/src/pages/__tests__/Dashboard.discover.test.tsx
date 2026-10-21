@@ -91,7 +91,7 @@ const FOUR_REPOS = [
   { full_name: 'DocRoms/personal-1', name: 'personal-1', description: null, clone_url: 'https://github.com/DocRoms/personal-1.git', ssh_url: 'git@github.com:DocRoms/personal-1.git', language: null, stargazers_count: 0, updated_at: '2026-01-01', already_cloned: false },
   { full_name: 'DocRoms/personal-2', name: 'personal-2', description: null, clone_url: 'https://github.com/DocRoms/personal-2.git', ssh_url: 'git@github.com:DocRoms/personal-2.git', language: null, stargazers_count: 0, updated_at: '2026-01-02', already_cloned: false },
   { full_name: 'Euronews-tech/front_euronews', name: 'front_euronews', description: null, clone_url: 'https://github.com/Euronews-tech/front_euronews.git', ssh_url: 'git@github.com:Euronews-tech/front_euronews.git', language: null, stargazers_count: 0, updated_at: '2026-01-03', already_cloned: false },
-  { full_name: 'Euronews-tech/front_africanews', name: 'front_africanews', description: null, clone_url: 'https://github.com/Euronews-tech/front_africanews.git', ssh_url: 'git@github.com:Euronews-tech/front_africanews.git', language: null, stargazers_count: 0, updated_at: '2026-01-04', already_cloned: false },
+  { full_name: 'Euronews-tech/front_php', name: 'front_php', description: null, clone_url: 'https://github.com/Euronews-tech/front_php.git', ssh_url: 'git@github.com:Euronews-tech/front_php.git', language: null, stargazers_count: 0, updated_at: '2026-01-04', already_cloned: false },
 ];
 
 beforeEach(() => {

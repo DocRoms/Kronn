@@ -19,6 +19,7 @@ pub mod bridge_token;
 pub mod briefing_docs;
 pub mod checksums;
 pub mod child_env;
+pub mod ci_facts;
 pub mod citation_drift;
 pub mod cli_access_probe;
 pub mod cli_args;
@@ -98,6 +99,7 @@ pub mod quick_exec_templates;
 pub mod recovery;
 pub mod redact;
 pub mod registry;
+pub mod repo_facts;
 pub mod repository_resources;
 pub mod resolution_proof;
 pub mod resource_refs;
@@ -115,6 +117,7 @@ pub mod run_provenance;
 pub mod run_retention;
 pub mod safe_http;
 pub mod scanner;
+pub mod secret_facts;
 pub mod secret_scrub;
 pub mod session_budget;
 pub mod skill_guide;
@@ -140,6 +143,7 @@ pub mod versions;
 pub mod vibe_trust;
 pub mod worktree;
 pub mod ws_client;
+pub mod yaml_lite;
 
 // crypto_test.rs removed 2026-07-01 — it was a strict subset of crypto.rs's
 // richer inline `tests` module (roundtrip / wrong-key / base64 / parse / mask),

@@ -511,7 +511,7 @@ async fn full_and_partial_launches_record_who_opened_and_who_validated() {
     assert_eq!(shown.validated_by.as_deref(), Some("Validator-Partial"));
 }
 
-/// KT-1357 — apollo's second refresh of the glossary rewrote it again: a section
+/// KT-1357 — a Node service's second refresh of the glossary rewrote it again: a section
 /// built from the whole source tree is `unchanged` while that tree is the one its
 /// baseline recorded, with no agent launched, and an agent runs again as soon as
 /// the tree differs.

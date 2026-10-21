@@ -1030,7 +1030,7 @@ pub(crate) async fn run_partial_pipeline(
             // KT-1357 — the section is as its last baseline recorded it and its
             // document is filled: there is nothing to refresh, so the step is
             // verified `unchanged` without an agent (a second refresh right after a
-            // successful one used to rewrite the document again, apollo's glossary).
+            // successful one used to rewrite the document again, a Node service's glossary).
             if fresh_sections.contains(&format!("{}#step{}", analysis_step.target_file, step))
                 && super::step_guard::read_target(&project_path, analysis_step.target_file)
                     .ok()
@@ -1466,7 +1466,7 @@ pub(crate) async fn run_partial_pipeline(
                         );
                     // KT-1357 — Full parity: a model that finished normally with an
                     // incomplete coverage matrix gets that exact failure back within
-                    // the attempt budget (apollo's revalidation lost step 8 to its
+                    // the attempt budget (a Node service's revalidation lost step 8 to its
                     // first attempt). Never after a provider failure.
                     if cli_success && !success && attempt < max_attempts {
                         let repair = super::validation::coverage_repair_feedback(

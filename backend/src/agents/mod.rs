@@ -37,6 +37,7 @@ pub(crate) mod ollama_memory;
 pub mod provenance;
 pub(crate) mod read_only_repos;
 pub mod readiness;
+pub(crate) mod room_reach;
 pub mod run_progress;
 pub mod runner;
 pub mod tool_trace;

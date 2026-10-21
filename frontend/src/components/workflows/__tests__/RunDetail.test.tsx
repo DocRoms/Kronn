@@ -757,7 +757,7 @@ describe('RunDetail — Gate decision panel (0.7.0 Phase 4 — human-in-the-loop
         {
           id: 'adobe-dtm',
           what: 'Adobe DTM URLs',
-          placeholder: 'legacy values lifted from front_africanews',
+          placeholder: 'legacy values lifted from front_acme',
           strategy: 'Replace with Data team confirmation',
           revisit_when: 'Data team responds',
         },
@@ -765,7 +765,7 @@ describe('RunDetail — Gate decision panel (0.7.0 Phase 4 — human-in-the-loop
       blocked: [
         {
           id: 'visitor-ns',
-          what: 'Africanews visitorNamespace',
+          what: 'Acme News visitorNamespace',
           why: 'Not present in legacy codebase',
           needed_from: 'Data team',
           workaround: 'Empty-string KRONN-MOCKED placeholder',

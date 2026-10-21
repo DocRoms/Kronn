@@ -43,7 +43,7 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/mod.rs:140-260#migrate_hardcoded_catalog_once]
 [src: file: backend/src/api/model_catalog.rs:242-273#update_manual]
 [src: file: backend/src/api/model_catalog.rs:275-301#delete_manual]
-[src: file: backend/src/agents/runner.rs:3441-3460#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3456-3475#resolve_model_flag]
 
 ## Discovery boundaries
 
@@ -61,10 +61,10 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:95-121#discover]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:123-208#run_handshake_and_list]
 [src: file: backend/src/api/external_api_connections.rs:274-441#probe_models]
-[src: file: backend/src/api/external_api_connections.rs:1319-1349#fetch_capability_catalogue]
-[src: file: backend/src/api/external_api_connections.rs:1351-1363#catalog_declares_modality]
-[src: file: backend/src/api/external_api_connections.rs:1365-1419#catalog_models_from_body]
-[src: file: backend/src/api/external_api_connections.rs:1421-1436#merge_catalog]
+[src: file: backend/src/api/external_api_connections.rs:1376-1406#fetch_capability_catalogue]
+[src: file: backend/src/api/external_api_connections.rs:1408-1420#catalog_declares_modality]
+[src: file: backend/src/api/external_api_connections.rs:1426-1480#catalog_models_from_body]
+[src: file: backend/src/api/external_api_connections.rs:1478-1493#merge_catalog]
 [src: file: backend/src/core/model_catalog/mod.rs:705-720#reconcile_http_catalog]
 
 ## Where OpenCode's models come from (KT-928)
@@ -128,7 +128,7 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5455-5509#offers_model_catalogue]
+[src: file: backend/src/agents/runner.rs:5529-5583#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1875-1884#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1886-1917#select_model]
 
@@ -211,17 +211,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3479-3657#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3494-3672#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
 [src: file: backend/src/agents/runner.rs:12902-12919#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:12972-13003#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:12998-13029#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:4863-4891#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:4889-4917#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -259,7 +259,7 @@ when it was not. QPs with no effort or only whitespace keep the old behavior.
 [src: file: backend/src/db/sql/176_discussion_effort_snapshots.sql:1-8#discussion_effort_snapshots]
 [src: file: backend/src/api/discussions/crud.rs:616-638#capture]
 [src: file: backend/src/api/discussions/crud.rs:743-751#UnresolvedQuickPromptEffort]
-[src: file: backend/src/api/discussions/streaming.rs:4041-4094#for_run]
+[src: file: backend/src/api/discussions/streaming.rs:4106-4159#for_run]
 [src: file: backend/src/db/discussion_effort.rs:56-76#for_run]
 
 These snapshots are local execution state, not a portable QP setting. Exporting

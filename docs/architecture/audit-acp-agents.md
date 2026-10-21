@@ -5,7 +5,7 @@ native ACP agents — and on Claude Code and Codex through their adapters. All o
 them run inside Kronn's ACP host, and the audit pipelines (Full and partial)
 start them through one launcher
 [src: file: backend/src/api/audit/agent_launch.rs:121-141#AuditAgentLauncher]. Three things went wrong there
-on the first real bench (OpenCode on Ollama, `front_apollo`), and were one
+on the first real bench (OpenCode on Ollama, `front_backend`), and were one
 assumption each: that the process `start` returns is the agent, that a refused
 read is a failed tool, and that usage is something only Claude's stream-json
 carries. This page records what replaced them.
@@ -84,14 +84,14 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 2. `cancel_audit` trips the token. The ACP session writes `session/cancel`
    (bounded to five seconds, so a wedged agent cannot hold the stop hostage),
    drops the turn, and shuts the agent's process down
-   [src: file: backend/src/agents/runner.rs:5279-5281#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:5721-5740#task_cancel] [src: file: backend/src/agents/runner.rs:5805-5811#shutdown].
+   [src: file: backend/src/agents/runner.rs:5305-5307#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:5747-5766#task_cancel] [src: file: backend/src/agents/runner.rs:5831-5837#shutdown].
 3. The process is started as its own process group, and shutdown kills the
    group, so what the agent started — a shell command, an MCP server — stops
    with it [src: file: backend/src/acp.rs:994-998#process_group] [src: file: backend/src/acp.rs:780-793#kill_process_group] [src: file: backend/src/acp.rs:1795-1803#shutdown].
 4. The pipeline waits on the lifeline, which exits only after that shutdown, so
    the audit is finalised as `Cancelled` once the agent is really gone. This is
    also why the lifeline's PID is **not** killed: doing it ended the wait early
-   [src: file: backend/src/agents/runner.rs:5813-5816#lifeline_stdin].
+   [src: file: backend/src/agents/runner.rs:5839-5842#lifeline_stdin].
 
 The partial audit now checks the stop between two steps and after each step's
 agent, finalises the run as `Cancelled` and releases the project lease, like the
@@ -145,7 +145,7 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:14113-14119#total_cost_usd] [src: file: backend/src/agents/runner.rs:5706-5708#usd_micros] [src: file: backend/src/agents/runner.rs:9874-9880#cost_usd_micros].
+  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:14139-14145#total_cost_usd] [src: file: backend/src/agents/runner.rs:5732-5734#usd_micros] [src: file: backend/src/agents/runner.rs:9900-9906#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost

@@ -2980,6 +2980,15 @@ pub struct AgentStartConfig<'a> {
     /// as `read_only_repos` but without a Git checkout (KT-910: the run's
     /// artifacts directory). Kronn-owned paths only, never user input.
     pub read_only_dirs: &'a [String],
+    /// KT-1406 — the checkouts of the projects granted to a discussion, already
+    /// validated by the dispatcher (`room_reach::plan`) and re-checked here:
+    /// opened read-only under the room policy, which reads nothing beyond them
+    /// and the working directory.
+    pub room_checkouts: &'a [super::read_only_repos::VerifiedCheckout],
+    /// KT-1406 — the room's project-scope block (granted and requestable
+    /// projects), built by the discussion dispatcher from the grants read for
+    /// this turn. Empty for every other launch.
+    pub room_scope_prompt: &'a str,
     /// KT-908 — the tools a workflow Agent step declared; `None` = unchanged.
     pub step_tools: Option<&'a crate::models::StepTools>,
     pub prompt: &'a str,
@@ -3157,6 +3166,8 @@ impl<'a> AgentStartConfig<'a> {
             work_dir: None,
             read_only_repos: &[],
             read_only_dirs: &[],
+            room_checkouts: &[],
+            room_scope_prompt: "",
             step_tools: None,
             full_access: false,
             skill_ids: &[],
@@ -3775,12 +3786,24 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     }
     let has_read_only_paths =
         !config.read_only_repos.is_empty() || !config.read_only_dirs.is_empty();
-    if config.task_worker_context.is_some() && has_read_only_paths {
+    if config.task_worker_context.is_some()
+        && (has_read_only_paths || !config.room_checkouts.is_empty())
+    {
         return Err(
             "read_only_repos is a workflow Agent policy, not a task-worker override".into(),
         );
     }
-    let read_only_repos = if !has_read_only_paths {
+    let read_only_repos = if !config.room_checkouts.is_empty() {
+        if has_read_only_paths {
+            return Err("room checkouts and read_only_repos are separate read policies".into());
+        }
+        let work_dir = resolve_agent_work_dir(config.work_dir, config.project_path)?;
+        super::read_only_repos::ReadOnlyRepos::resolve_room(
+            config.agent_type,
+            &work_dir,
+            config.room_checkouts,
+        )?
+    } else if !has_read_only_paths {
         None
     } else {
         let work_dir = resolve_agent_work_dir(config.work_dir, config.project_path)?;
@@ -4058,6 +4081,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             "=== CONTEXT FILES ===\n\n{}",
             config.context_files_prompt
         ));
+    }
+    if !config.room_scope_prompt.is_empty() {
+        parts.push(config.room_scope_prompt.to_owned());
     }
     // Never describe tools in prose here. Doing so taught the model to
     // HALLUCINATE calls (2026-07-01: it presented `fastly_execute` as its own

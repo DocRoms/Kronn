@@ -121,7 +121,7 @@ fn real_agent_emits_valid_bundle_ready_for_fetch_summarize_notify() {
 /// Real-agent triage E2E for the Feasibility-Gated pattern.
 ///
 /// Spawns an agent with the `workflow-architect` + `[TRIAGE]` step
-/// prompt, feeds it a real big ticket (EW-7247 Africanews→Euronews
+/// prompt, feeds it a real big ticket (EW-7247 Acme News→Euronews
 /// migration text), and asserts the response is a valid
 /// `triage_manifest` JSON schema with non-empty `decided[]` +
 /// `mocked[]` + `blocked[]` arrays.

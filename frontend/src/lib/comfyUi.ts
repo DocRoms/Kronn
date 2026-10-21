@@ -20,4 +20,3 @@ export function comfyUiSlotOptions(
       disabled: !model.family,
     }));
 }
-

@@ -1631,9 +1631,9 @@ mod tests {
         }
     }
 
-    /// Apollo's step 8: the rows where the outcome and the evidence share one
+    /// A Node service's step 8: the rows where the outcome and the evidence share one
     /// cell, as the matrix came out of the bench.
-    fn apollo_matrix() -> String {
+    fn node_service_matrix() -> String {
         let mut s = valid_coverage_matrix();
         for (dim, merged) in [
             ("Security", "Findings: [TD-20261016-apache-root-user](tech-debt/TD-20261016-apache-root-user.md) (root user…) [src: file: docs/AGENTS.md:1] ; no hardcoded secrets found"),
@@ -1655,10 +1655,10 @@ mod tests {
     }
 
     /// KT-1364 — one feedback names every problem; one row per retry ran the
-    /// attempts out on apollo.
+    /// attempts out on Node service.
     #[test]
     fn coverage_matrix_reports_every_problem_at_once() {
-        let err = validate_dimension_coverage(&apollo_matrix()).unwrap_err();
+        let err = validate_dimension_coverage(&node_service_matrix()).unwrap_err();
         for dim in [
             "Security",
             "Code quality",
@@ -1690,10 +1690,10 @@ mod tests {
         assert!(err.contains("missing rows: Security"), "{err}");
     }
 
-    /// KT-1364 — apollo's 2-column rows are split on their canonical outcome.
+    /// KT-1364 — a Node service's 2-column rows are split on their canonical outcome.
     #[test]
     fn two_column_coverage_rows_are_split_on_their_canonical_outcome() {
-        let repaired = repaired_coverage_matrix(&apollo_matrix()).unwrap();
+        let repaired = repaired_coverage_matrix(&node_service_matrix()).unwrap();
         assert!(validate_dimension_coverage(&repaired).is_ok(), "{repaired}");
         assert!(repaired.contains("| Security | Findings | [TD-20261016-apache-root-user]"));
         assert!(repaired.contains(
@@ -1757,7 +1757,7 @@ mod tests {
     fn the_index_is_rewritten_with_its_two_column_rows_split() {
         let target = "docs/inconsistencies-tech-debt.md";
         let (_tmp, project) = fixture(target, 0, 512);
-        std::fs::write(project.join(target), apollo_matrix()).unwrap();
+        std::fs::write(project.join(target), node_service_matrix()).unwrap();
         assert!(repair_coverage_rows(&project, target));
         let (_, warning) = validate_step_output(true, &project, target);
         assert!(warning.is_none_or(|w| !w.reason.contains("coverage")));

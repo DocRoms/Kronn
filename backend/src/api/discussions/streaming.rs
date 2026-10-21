@@ -2771,6 +2771,7 @@ async fn http_context_images(
         items: entries
             .into_iter()
             .map(|entry| crate::agents::vision::ContextImage {
+                id: entry.id,
                 filename: entry.filename,
                 path: entry.disk_path,
             })
@@ -3866,6 +3867,44 @@ pub(super) async fn make_agent_stream_inner(
         context_files_prompt
     };
 
+    // KT-1406 — the projects a human granted to this room, read for this turn
+    // (a revoke applies at the next one): opened to a native Claude Code agent
+    // as read-only directories (Codex keeps its default sandbox), and named in
+    // the context of both with the way to ask for more. A task worker and a
+    // project-less room reach none, and a failed read opens nothing.
+    let room_reach_plan =
+        if tool_free_judge || cli_task_worker_context.is_some() || disc.project_id.is_none() {
+            crate::agents::room_reach::RoomReachPlan::default()
+        } else {
+            let did = discussion_id.clone();
+            match state
+                .db
+                .with_read_conn(move |conn| crate::db::discussion_scope::room_reach(conn, &did))
+                .await
+            {
+                Ok(reach) => {
+                    let work_dir =
+                        runner::resolve_agent_work_dir(workspace_path.as_deref(), &project_path)
+                            .ok();
+                    crate::agents::room_reach::plan(
+                        &agent_type,
+                        work_dir.as_deref(),
+                        full_access,
+                        reach,
+                    )
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        discussion_id,
+                        "Unable to read the room's project scope; no project opened: {error}"
+                    );
+                    crate::agents::room_reach::RoomReachPlan::default()
+                }
+            }
+        };
+    let room_scope_prompt = room_reach_plan.prompt();
+    let room_checkouts = room_reach_plan.checkouts();
+
     // Estimate extra_context size so build_agent_prompt can respect the agent's budget.
     // This mirrors what runner::start_agent_with_config will build.
     let extra_context_len = estimate_extra_context_len(
@@ -3876,6 +3915,7 @@ pub(super) async fn make_agent_stream_inner(
         global_mcp_context.as_deref(),
         &agent_type,
     ) + context_files_prompt.len()
+        + room_scope_prompt.len()
         + crate::core::skills::append_repository_skills_prompt(
             String::new(),
             &repository_skills.resolved,
@@ -4468,6 +4508,8 @@ pub(super) async fn make_agent_stream_inner(
             provenance: Some(provenance_capture.clone()),
             project_id: disc_project_id.as_deref(),
             work_dir: workspace_path.as_deref(),
+            room_checkouts: &room_checkouts,
+            room_scope_prompt: &room_scope_prompt,
             full_access,
             skill_ids: &skill_ids,
             repository_skills: &repository_skills.resolved,
@@ -5432,7 +5474,7 @@ pub(super) async fn make_agent_stream_inner(
                 // that lives in the unit-tested `finalize_lint_report` helper.
                 // 0.8.8 — also resolve citations against the project's declared
                 // linked_repos (filesystem locations only), so an agent citing a
-                // sibling repo (front_apollo, …) isn't flagged "couldn't verify".
+                // sibling repo (front_node, …) isn't flagged "couldn't verify".
                 let linked_repo_paths: Vec<String> = if let Some(ref pid) = disc.project_id {
                     let pid = pid.clone();
                     state

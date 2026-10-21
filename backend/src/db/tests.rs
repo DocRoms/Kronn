@@ -7417,7 +7417,7 @@ async fn a_dedicated_read_holds_neither_shared_connection() {
 
 // ─── KT-1122 — the validation repair runs when the backend boots ─────────
 
-/// front-africanews' shape, written into a database FILE, then reopened the
+/// a PHP site's shape, written into a database FILE, then reopened the
 /// way the backend boots (`open_path_for_backend_boot`): the repair must have
 /// run by itself — no caller invokes `audit_validation::repair`.
 #[tokio::test]

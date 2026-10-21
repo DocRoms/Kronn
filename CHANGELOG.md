@@ -67,7 +67,7 @@ Release notes for 0.9.3 and earlier are available in the
   `## Unaddressed detector signals` section to the tech-debt index and sends a
   `warning` instead of failing the run. The partial refresh of the TD index now
   gives a malformed coverage matrix back to the agent, as the Full audit does
-  (apollo's revalidation lost step 8 to its first attempt), and a refresh of a
+  (a Node service's revalidation lost step 8 to its first attempt), and a refresh of a
   section built from the whole source tree ends `unchanged`, with no agent, while
   that tree is the one its baseline recorded; the glossary joins them (its
   baseline now records the tree). An `unchanged` partial step is stored as done.
@@ -90,6 +90,31 @@ Release notes for 0.9.3 and earlier are available in the
   as each step ends and survive a resume, and the audit timeline lists them
   next to the unverified references. Repository files are read through the
   project-rooted reader only, and a secret file is never cited by line.
+- Testing a LiteLLM connection no longer calls a valid key rejected (KT-1412).
+  With no tier models, the test walks the catalogue; a model the proxy refuses
+  for this key (its allow-list or tag routing, answered 401/403 with a reason)
+  is a verdict on that model, so the next one is tried and the result says
+  "the key works, N listed models are not allowed for it". A refusal the
+  proxy does not attribute to a model still reports the key as rejected.
+- The audit no longer reports committed secrets as absent, and its documents
+  agree on the tests and the CI (KT-1404; A/B KT-1358 round 3). The security,
+  Docker, tech-debt and final-review steps are given Kronn's own scan of the
+  tracked files: private keys (by name and PEM body), Slack / Teams / Discord
+  webhook URLs, well-known vendor tokens and literal values assigned to
+  token / secret / password names, listed by path and kind, never a value. A
+  listed path is a finding to revoke and purge whatever the file is named, and
+  « no secrets » is never written while one is listed. The project index, the
+  testing and operations documents and the final review are given the tracked
+  test files per runner, each CI workflow's events, each job's condition and
+  the runtime version each job runs; a trigger or a gate is described only as
+  the workflow states it (a label-gated CI never « runs on every PR », no
+  purpose the repository does not write, « blocks merge » is a repository
+  setting), and the final review makes every document agree with these facts.
+  The stack facts also carry the application's version and the direct
+  dependencies the lock file shows old (deprecated, abandoned, or an old major
+  of a short list), which the Dependencies and tech-debt steps cite; a debt
+  that rests on an absence (« no response caching ») must first look for the
+  mechanism in the code. These are prevention only: no new check was added.
 - Arbitration cards are never lost (KT-1401). A `kronn-question` whose label,
   question or context is too long is recorded with the text shortened at a word
   (the full text kept in its description or context); a card still invalid is
@@ -97,6 +122,22 @@ Release notes for 0.9.3 and earlier are available in the
   `disc_append` result (`invalid_cards`). Answering the last pending card of a
   workflow step that has ended wakes the room's agent once with every answer;
   an earlier card says its answer will reach that agent.
+- A finished task execution gives its disk back (KT-1397). Its managed
+  checkout is removed once the execution is Done, Failed or Cancelled, nothing
+  uses it and it has been idle for `server.disk_sweep_idle_hours` (by finish
+  time and by the newest file written in it); the branch is kept and anything
+  uncommitted is saved first as two patches (staged, then working tree) under
+  the execution's evidence, so the exact state can be reapplied. A cancel with
+  « remove if clean » still removes only a clean checkout; a dirty or preserved
+  one waits for the sweep, which runs at start-up and every 30 minutes. Lane
+  build dirs (`target/wt-*`) whose checkout is gone are reclaimed when durable
+  lineage attributes them to a finished execution. A state over 256 MiB, with
+  unmerged paths or written recently is kept, with the reason recorded.
+- A Definition of Done edited during an execution is adopted (KT-1402): the
+  execution re-reads it and the worker is told the new requirements, instead of
+  every delivery being refused. A refused delivery is recorded and shown in
+  `task_exec_status` (`last_delivery_refusal`) and in the escalation, and an
+  accepted one clears it.
 - One guide for building automations, read the same way by every agent
   (KT-1341). The built-in workflow architect is served section by section
   through `tool_manual({tool: "workflow-architect", section})` to CLI agents
@@ -112,7 +153,7 @@ Release notes for 0.9.3 and earlier are available in the
   have yet are deferred to KT-1356. The MCP catalogue does not grow.
 
 - A full audit no longer ends Interrupted on what the audit could not fix
-  (KT-1353, audit matrix africanews/apollo). The documentary blockers the
+  (KT-1353, audit matrix: a PHP site and a Node service). The documentary blockers the
   committed documents held before the run are reported
   (`documentary_preexisting`, `phase: final_gate`) and never charged to the
   founding step, even when a step rewrites the document around them (a
@@ -723,6 +764,23 @@ Release notes for 0.9.3 and earlier are available in the
   Migration 259 adds `messages.session_continuity`.
 
 ### Fixed
+
+- A project granted to a discussion is now readable by its native Claude Code
+  agent (KT-1406). From the next turn the project's checkout is a read-only
+  directory of the agent (`--add-dir`; a write grant stays read-only on disk,
+  revoking, the last grant included, removes it at the next turn). The agent's
+  context, for Claude Code and Codex, names the granted projects with their path
+  and access, plus the projects it can ask for, with `room_scope` as the way to
+  ask the human. A refused read is explained by that context, not by `/add-dir`.
+  An agent in full access is unchanged. A checkout reached through a symbolic
+  link is never opened and a checkout swapped between the plan and the launch is
+  refused. Codex keeps its default sandbox (reads the disk as it is, writes only
+  in its working directory): no read isolation is claimed for it, that is
+  KT-1409.
+- TLS certificate checks use rustls-webpki 0.103.16 and webpki-roots /
+  webpki-root-certs 1.0.10 (RUSTSEC-2026-0381, -0382, -0383: distrusted
+  intermediates and emSign roots were accepted). The frontend tooling moves to
+  vite 8.3.4 (launch-editor advisories in vite 8.2.0-8.2.3, dev server only).
 
 - An Exec line awaiting a human's approval is visible before the run and can
   be approved where it is used (KT-1398). Since KT-1017 a run value handed to

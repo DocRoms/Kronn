@@ -1069,7 +1069,7 @@ pub fn rank_linked_repos_candidates(
 /// 0.8.6 (#27) — returns the list of OTHER Kronn-known projects the
 /// user could plausibly link to the current one as a companion. Sorted
 /// by proximity : same-parent dir first (the typical "monorepo of
-/// repos" pattern : `~/Repositories/front_apollo` linking to
+/// repos" pattern : `~/Repositories/front_node` linking to
 /// `~/Repositories/front_euronews`), then alphabetical fallback.
 ///
 /// The frontend's linked-repos drawer uses this for an autocomplete

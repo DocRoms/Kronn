@@ -8,6 +8,155 @@ pub(crate) struct ReadOnlyRepos {
     roots: Vec<PathBuf>,
 }
 
+/// A registered project's Git checkout that passed validation: the canonical
+/// root and the identity (device, inode) it had then. The launch opens this
+/// root, never the path the project was registered under, and refuses it if
+/// the directory behind it is no longer the one that was validated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCheckout {
+    root: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl VerifiedCheckout {
+    /// Validate a registered project path as an openable checkout: a path
+    /// that is, or passes through, a symbolic link is refused (it could lead
+    /// to another project's checkout), as is anything that is not the root of
+    /// a Git checkout or overlaps the working directory.
+    pub(crate) fn verify(
+        agent: &AgentType,
+        work_dir: &Path,
+        location: &str,
+    ) -> Result<Self, String> {
+        check_platform(agent)?;
+        let work_dir = canonical_directory(work_dir)?;
+        let path = crate::core::scanner::resolve_host_path(location);
+        if !path.is_absolute() || location.trim().is_empty() {
+            return Err(format!(
+                "a project checkout needs an absolute local path: {location:?}"
+            ));
+        }
+        refuse_redirection(&path)?;
+        let root = canonical_directory(&path)?;
+        refuse_overlap(&root, &work_dir)?;
+        let output = crate::core::cmd::git_cmd()
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "--path-format=absolute", "--show-toplevel"])
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .output()
+            .map_err(|error| format!("Cannot inspect the checkout's Git metadata: {error}"))?;
+        let toplevel = String::from_utf8(output.stdout)
+            .map_err(|_| "a project checkout's Git paths must be UTF-8".to_string())?;
+        if !output.status.success()
+            || canonical_directory(Path::new(toplevel.trim()))
+                .ok()
+                .as_ref()
+                != Some(&root)
+        {
+            return Err(format!(
+                "a project checkout must be the root of a Git checkout: {}",
+                root.display()
+            ));
+        }
+        let (device, inode) = identity(&root)?;
+        Ok(Self {
+            root,
+            device,
+            inode,
+        })
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The directory behind the validated root is still the validated one.
+    fn still_holds(&self) -> Result<(), String> {
+        refuse_redirection(&self.root)?;
+        let again = canonical_directory(&self.root)?;
+        if again != self.root || identity(&again)? != (self.device, self.inode) {
+            return Err(format!(
+                "the project checkout {} changed since it was validated; it is not opened",
+                self.root.display()
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn check_platform(agent: &AgentType) -> Result<(), String> {
+    if !matches!(agent, AgentType::ClaudeCode | AgentType::Codex) {
+        return Err("read_only_repos requires Claude Code or Codex".into());
+    }
+    if cfg!(windows) {
+        return Err("read_only_repos requires a native macOS or Linux runner".into());
+    }
+    Ok(())
+}
+
+fn refuse_overlap(root: &Path, work_dir: &Path) -> Result<(), String> {
+    // Denying writes on an ancestor would also deny the worktree.
+    if work_dir.starts_with(root) || root.starts_with(work_dir) {
+        return Err(format!(
+            "read_only_repos path {} overlaps the writable working directory {}",
+            root.display(),
+            work_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// No component of `path`, itself included, may be a symbolic link, nor a
+/// `.`/`..` step: resolving one of them is how a registered project path ends
+/// up naming another project's checkout.
+fn refuse_redirection(path: &Path) -> Result<(), String> {
+    let mut walked = PathBuf::new();
+    for component in path.components() {
+        if matches!(
+            component,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        ) {
+            return Err(format!(
+                "a project checkout path cannot contain `.` or `..`: {}",
+                path.display()
+            ));
+        }
+        walked.push(component);
+        let metadata = std::fs::symlink_metadata(&walked).map_err(|error| {
+            format!(
+                "Cannot inspect the project checkout path {}: {error}",
+                walked.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "the project checkout path {} goes through a symbolic link ({}); it is not opened",
+                path.display(),
+                walked.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn identity(path: &Path) -> Result<(u64, u64), String> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("Cannot inspect {}: {error}", path.display()))?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn identity(_path: &Path) -> Result<(u64, u64), String> {
+    Err("read_only_repos requires a native macOS or Linux runner".into())
+}
+
 impl ReadOnlyRepos {
     #[cfg(test)]
     pub(crate) fn resolve(
@@ -29,12 +178,7 @@ impl ReadOnlyRepos {
         if declared.is_empty() && dirs.is_empty() {
             return Ok(None);
         }
-        if !matches!(agent, AgentType::ClaudeCode | AgentType::Codex) {
-            return Err("read_only_repos requires Claude Code or Codex".into());
-        }
-        if cfg!(windows) {
-            return Err("read_only_repos requires a native macOS or Linux runner".into());
-        }
+        check_platform(agent)?;
         let work_dir = canonical_directory(work_dir)?;
         let mut roots = Vec::new();
         for location in dirs {
@@ -118,6 +262,34 @@ impl ReadOnlyRepos {
                     push_unique(&mut roots, path);
                 }
             }
+        }
+        Ok(Some(Self { roots }))
+    }
+
+    /// KT-1406 — the policy of a discussion's native Claude Code agent: the
+    /// granted projects' validated checkouts as read-only roots. Each
+    /// checkout is checked again here, at the launch: one whose directory is
+    /// no longer the validated one is refused. Codex keeps its default
+    /// sandbox (its read isolation is a separate work item), so it never gets
+    /// a room policy.
+    pub(crate) fn resolve_room(
+        agent: &AgentType,
+        work_dir: &Path,
+        checkouts: &[VerifiedCheckout],
+    ) -> Result<Option<Self>, String> {
+        if checkouts.is_empty() {
+            return Ok(None);
+        }
+        if !matches!(agent, AgentType::ClaudeCode) {
+            return Err("room checkouts are only opened for Claude Code".into());
+        }
+        check_platform(agent)?;
+        let work_dir = canonical_directory(work_dir)?;
+        let mut roots = Vec::new();
+        for checkout in checkouts {
+            checkout.still_holds()?;
+            refuse_overlap(&checkout.root, &work_dir)?;
+            push_unique(&mut roots, checkout.root.clone());
         }
         Ok(Some(Self { roots }))
     }
@@ -385,6 +557,9 @@ mod tests {
         .unwrap();
         let profile = &permissions["permissions"]["kronn_read_only_repos"];
         assert_eq!(profile["extends"].as_str(), Some(":workspace"));
+        // KT-1406: the Codex policy is the workflow one, unchanged.
+        assert_eq!(profile["filesystem"][":root"].as_str(), Some("read"));
+        assert_eq!(profile["filesystem"].as_table().unwrap().len(), 2);
         assert_eq!(
             profile["filesystem"][repo.to_str().unwrap()].as_str(),
             Some("read")

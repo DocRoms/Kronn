@@ -26,7 +26,7 @@ agent, regardless of which named connection backs it. It replaces an inline
 ternary that used to live inside `start_ollama_http`, mirroring
 `acp::resolve_acp_route` being the sole ACP route decision point.
 [src: file: backend/src/http_transport.rs:28-41]
-[src: file: backend/src/agents/runner.rs:9027-9030#resolve_chat_codec] (call site)
+[src: file: backend/src/agents/runner.rs:9053-9056#resolve_chat_codec] (call site)
 
 ### Pre-dispatch capability gate
 
@@ -49,7 +49,7 @@ named-connection model Custom connections use (`external_api_connections`,
 KT-339), but keep their own dedicated `AgentType` — so their fixed UI color
 (`AGENT_COLORS.LiteLlm` / `.Nvidia`) and their per-agent-type concurrency
 limit (`agent_concurrency_limits`'s `REMOTE` array) are untouched by this
-work. [src: file: backend/src/agents/runner.rs:3294-3346#agent_concurrency_limits]
+work. [src: file: backend/src/agents/runner.rs:3309-3361#agent_concurrency_limits]
 [src: file: frontend/src/lib/constants.ts:10-24#AGENT_COLORS] Their credential is resolved
 through `credential_slug` → `TokensConfig.active_key_for`, the same
 indirection every named connection already uses.

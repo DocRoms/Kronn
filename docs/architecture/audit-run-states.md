@@ -144,7 +144,7 @@ this degrades and continues.
   them to the founding step nor sets the run `Interrupted`; the recovery plan of
   a resume skips them. The exemption follows the blocker, not the document: a
   step that rewrites the document and leaves the citation as it was (a
-  re-verification appending to `audit_history`, the africanews shape) did not
+  re-verification appending to `audit_history`, the Acme News shape) did not
   bring it, so the blocker stays pre-existing. Only a step *handed* the blocker
   to fix is charged with it afterwards (`release`), and is then retried and
   redone like any other.
@@ -440,7 +440,7 @@ Historical runs without fingerprints require a new audit before signoff.
 [src: file: backend/src/core/audit_documents.rs:11-45#capture]
 [src: file: backend/src/core/audit_documents.rs:51-65#verify]
 [src: file: backend/src/db/discussions.rs:1877-1914#insert_native_agent_message_with_audit_documents]
-[src: file: backend/src/api/discussions/streaming.rs:5079-5101#validation_documents]
+[src: file: backend/src/api/discussions/streaming.rs:5120-5142#validation_documents]
 [src: file: backend/src/db/sql/260_audit_document_fingerprints.sql:1-3#final_doc_fingerprints_json]
 
 The explicit re-anchor action sends `deterministic_only: true`. It returns the

@@ -24,6 +24,7 @@ fn attached(dir: &tempfile::TempDir, files: &[(&str, Vec<u8>)]) -> ContextImages
             let path = storage.join(format!("817c89b9_{name}"));
             std::fs::write(&path, bytes).unwrap();
             ContextImage {
+                id: format!("cf-{name}"),
                 filename: (*name).to_string(),
                 path: Some(path.to_string_lossy().to_string()),
             }
@@ -137,6 +138,51 @@ async fn a_model_the_catalogue_says_can_see_gets_the_image_itself() {
     );
 }
 
+// KT-1418 — a filename is not a handle: `media_generate` takes the context file
+// id, so the model must be told it, for the images it sees and the ones it does not.
+#[tokio::test]
+async fn the_notice_gives_each_image_its_context_file_id_for_media_generate() {
+    let dir = tempfile::tempdir().unwrap();
+    let images = attached(
+        &dir,
+        &[
+            ("seen.png", png_bytes(8)),
+            ("huge.png", vec![0; 11 * 1024 * 1024]),
+        ],
+    );
+    let prepared = prepare(&images, "m", ImageSupport::Supported).await;
+    let notice = prepared.notice();
+    assert!(
+        notice.contains("`seen.png` (context file id: `cf-seen.png`)"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("`huge.png`") && notice.contains("(context file id: `cf-huge.png`)"),
+        "a withheld image keeps its id: {notice}"
+    );
+    assert!(
+        notice.contains("`reference_asset_ids`") && notice.contains("media_generate"),
+        "{notice}"
+    );
+
+    let blind = prepare(&images, "m", ImageSupport::Unknown).await.notice();
+    assert!(
+        blind.contains("(context file id: `cf-seen.png`)"),
+        "{blind}"
+    );
+
+    let mut french = images;
+    french.language = "fr".into();
+    let french = prepare(&french, "m", ImageSupport::Supported)
+        .await
+        .notice();
+    assert!(
+        french.contains("(id de fichier de contexte : `cf-seen.png`)")
+            && french.contains("reference_asset_ids"),
+        "{french}"
+    );
+}
+
 #[tokio::test]
 async fn the_provider_can_vouch_for_a_model_the_catalogue_is_silent_about() {
     let dir = tempfile::tempdir().unwrap();
@@ -216,10 +262,12 @@ async fn an_image_that_cannot_be_sent_is_accounted_for_not_dropped() {
     );
     let mut images = images;
     images.items.push(ContextImage {
+        id: "cf-legacy.png".into(),
         filename: "legacy.png".into(),
         path: None,
     });
     images.items.push(ContextImage {
+        id: "cf-gone.png".into(),
         filename: "gone.png".into(),
         path: Some(
             dir.path()
@@ -345,6 +393,7 @@ async fn a_large_valid_image_is_downscaled_without_rewriting_the_attachment() {
 
 fn sent(name: &str) -> SentImage {
     SentImage {
+        id: format!("cf-{name}"),
         filename: name.into(),
         mime: "image/png",
         base64: "QUJD".into(),

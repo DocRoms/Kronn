@@ -8,7 +8,7 @@ conclusions that do not hold.
 The flag decides whether the prompt DESCRIBES the MCP surface in prose. HTTP
 agents get their tools DECLARED on the request's `tools` field instead —
 deliberately, because describing them in prose taught the model to hallucinate
-calls it did not have. [src: file: backend/src/agents/runner.rs:4062-4066#is_http_chat_agent]
+calls it did not have. [src: file: backend/src/agents/runner.rs:4088-4092#is_http_chat_agent]
 
 So an HTTP agent that the flag excludes still has a catalogue, `disc_read`
 included, and can read a discussion back on its own.

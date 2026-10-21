@@ -3872,11 +3872,11 @@ mod tests {
                 serde_json::json!({
                     "key": "EW-7247",
                     "fields": {
-                        "summary": "Africanews → Euronews migration",
+                        "summary": "Acme News → Euronews migration",
                         "description": { "content": [], "type": "doc" },
                     },
                     "renderedFields": {
-                        "description": "<p>Port Africanews onto Euronews…</p>",
+                        "description": "<p>Port Acme News onto Euronews…</p>",
                     },
                 }),
                 "OK",
@@ -3900,18 +3900,18 @@ mod tests {
             assert_eq!(
                 ctx.render("{{steps.fetch_issue.data.fields.summary}}")
                     .unwrap(),
-                "Africanews → Euronews migration",
+                "Acme News → Euronews migration",
             );
             // `data.renderedFields.description` (Jira HTML body).
             assert_eq!(
                 ctx.render("{{steps.fetch_issue.data.renderedFields.description}}")
                     .unwrap(),
-                "<p>Port Africanews onto Euronews…</p>",
+                "<p>Port Acme News onto Euronews…</p>",
             );
             // Bare `.data` returns compact JSON (downstream agent can navigate).
             let bare = ctx.render("{{steps.fetch_issue.data}}").unwrap();
             assert!(bare.contains("EW-7247"));
-            assert!(bare.contains("Africanews"));
+            assert!(bare.contains("Acme News"));
         }
 
         // ── Notify ──────────────────────────────────────────────────────
@@ -4151,7 +4151,7 @@ mod tests {
             let agent_prompt = "Triage: {{steps.fetch_issue.data}}";
             let rendered = ctx.render(agent_prompt).unwrap();
             assert!(rendered.contains("EW-7247"));
-            assert!(rendered.contains("Africanews"));
+            assert!(rendered.contains("Acme News"));
         }
 
         #[test]

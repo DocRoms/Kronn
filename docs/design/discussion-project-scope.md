@@ -172,12 +172,65 @@ a human's decision, like every project in write:
 | Grants spreading to worker rooms or sibling rooms | Grants belong to one discussion; a token reaches the grants of its own discussions only. |
 | Flooding the human with requests | Five pending requests per room; duplicates collapse. |
 
+## The grant reaches the agent's filesystem (KT-1406)
+
+The grants above gate Kronn's own tools. A native CLI agent also reads files, so
+at every turn the dispatcher reads the room's active grants
+(`discussion_scope::room_reach`, from the `projects` table, never from a
+request) and builds a plan (`agents/room_reach.rs`):
+
+- **Directory**: each granted project's registered checkout (`read` or `write`;
+  an every-project grant covers every registered project but the room's own) is
+  validated once by the plan (`VerifiedCheckout::verify`) and handed to the
+  launch as a read-only root for Claude Code (`--add-dir`, edits denied). A write
+  grant stays read-only on disk; the room's own project is the only one it
+  writes. A grant and a revoke apply at the next turn because nothing is cached;
+  revoking the last grant leaves the launch without any room policy.
+  - **Which path is opened**: a registered path that is, or goes through, a
+    symbolic link (or contains `.`/`..`), that is not the root of a Git checkout
+    or that overlaps the working directory is not opened, and the agent is told
+    its files are not readable in that run. What reaches the launch is the
+    canonical root with the device and inode it had at validation, never the
+    registered string: the launch (`ReadOnlyRepos::resolve_room`) checks them
+    again and refuses the turn if the directory behind the root changed (a link
+    to another project, another checkout at the same path, gone). The Git
+    metadata of a linked worktree outside the checkout is not opened either, so
+    nothing but a registered checkout is ever readable through a grant.
+  - **Codex**: a Codex agent keeps its default sandbox: it reads the disk as it
+    is (the granted projects included, and every other one) and writes only in
+    its working directory. Nothing is opened for it, its launch arguments are
+    those it had before KT-1406, and no read isolation is claimed for it: a
+    revoke does not close a read for Codex. A profile that denies `:root` was
+    tried and dropped: it breaks `git` (the Command Line Tools and
+    `~/.gitconfig` become unreadable) and, once the last grant is revoked, the
+    room falls back to Codex's wide default, so a room with a grant would be more
+    closed than one without. Read isolation for Codex is KT-1409. A workflow's
+    `read_only_repos` is unchanged (Codex's `:root` read, only the repositories
+    are protected from writes).
+  - **Claude Code**: the grant adds exactly the granted checkouts as
+    `--add-dir`; with `blockReadsOutsideWorkingDirectories` the file tools read
+    nothing else, while shell commands run by Claude's sandbox are not narrowed
+    by this policy.
+  A task worker, a project-less room, a provider without the policy and a failed
+  read of the grants open nothing.
+- **Context**: a `ROOM PROJECT SCOPE` block lists the granted projects with
+  path and access, and the registered projects that are not granted by name only
+  (capped at 40), with the instruction to call `room_scope({project, access,
+  reason})` to ask the human. It also tells the agent what to say when a read
+  outside its working directories is refused (which project, granted or not, how
+  to ask) instead of CLI advice such as `/add-dir` or editing
+  `docs/linked-repos.md`. Kronn cannot rewrite the CLI's own refusal text, so
+  this explanation is part of the agent's instructions.
+
 ## What it does not change
 
-A discussion agent still runs with full filesystem access (`full_access`): it can
-read on disk whatever the operating system user can read. The room scope governs
-Kronn objects through the bridge, not files. Reading another repository's code
-from a workflow still goes through `read_only_repos` or a copy.
+A discussion agent in full access (`full_access`) still runs unrestricted: it can
+read on disk whatever the operating system user can read, so no directory is
+added for it (narrowing it to the read-only sandbox would be a regression); it
+is still told what the room reaches and how to ask. The room scope governs Kronn
+objects through the bridge, and, for an agent that is not in full access, which
+other checkouts it may read. Reading another repository's code from a workflow
+still goes through `read_only_repos` or a copy.
 
 ## Tests
 
@@ -189,4 +242,15 @@ from a workflow still goes through `read_only_repos` or a copy.
   workflow changes, tasks shared across projects, `token_override` stripped.
 - `backend/src/db/discussion_scope_tests.rs`: journal, replacement, narrowing,
   caps, cross-room decisions, unknown names, forged lines, journal kept on
-  deletion.
+  deletion; `room_reach` (granted, requestable, every project, revoke, deleted
+  project, project-less room).
+- `backend/src/agents/room_reach.rs`: grant then next turn has the directory,
+  revoke removes it, a write grant is a read-only directory, an ungranted project
+  is requestable by name only, no path but a registered Git checkout root is
+  opened, a symbolic-link path is never opened and a checkout swapped between
+  the plan and the launch is refused, Claude Code gets exactly the granted
+  directories as `--add-dir` and none once the last grant is revoked, Codex
+  opens nothing (its context block says it reads the disk as it is) and refuses a
+  room policy, full-access and unsupported providers open nothing.
+  `backend/src/agents/read_only_repos.rs` keeps the workflow Codex profile
+  (`:root` read plus the repository entries) under test.

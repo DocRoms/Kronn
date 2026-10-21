@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn fixed_as_an_adjective_is_not_a_closure() {
-        // africanews TD-20260828-inline-template-assets.
+        // PHP site TD-20260828-inline-template-assets.
         for text in [
             "Shared and feature Twig templates contain fixed CSS declarations and executable JavaScript bodies.",
             "The header uses a fixed position and a fixed width.",
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn a_closure_in_history_is_not_the_state_of_the_finding() {
         for text in [
-            // apollo resync row.
+            // Node service resync row.
             "Kronn resync: 5 active TDs on file (previous outcome: N/A: not applicable — library/API-only project)",
             "It was resolved last year, then reopened after the rewrite.",
             "Previously mitigated by a WAF rule; the rule was removed.",

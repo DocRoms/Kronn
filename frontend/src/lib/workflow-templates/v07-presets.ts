@@ -834,7 +834,7 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
   };
 
   // 0.8.3 — Feasibility-Gated AutoPilot. 7-step mixed-primitives
-  // pattern for big tickets. Designed against EW-7247 (Africanews→
+  // pattern for big tickets. Designed against EW-7247 (Acme News→
   // Euronews migration Epic) — see [[project_feasibility_gated_
   // implementation]] memory. Every "freedom" the agent takes is traced
   // via a manifest (decided / mocked / blocked categories) AND a

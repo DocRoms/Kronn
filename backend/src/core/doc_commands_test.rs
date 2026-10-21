@@ -212,20 +212,20 @@ fn dependency_and_build_directories_are_not_read() {
 
 // ─── KT-1387 review: measured on 11 real audit repositories ────────────────
 
-/// What the apollo repository declares: no `lint` script, `eslint` as a
+/// What the Node service repository declares: no `lint` script, `eslint` as a
 /// dev dependency, a Makefile whose only `.PHONY` entry is `test`.
-const APOLLO_PACKAGE: &str = r#"{
+const NODE_SERVICE_PACKAGE: &str = r#"{
   "scripts": {"build": "x", "dev": "x", "doc": "x", "start": "x", "restart": "x", "test": "x"},
   "dependencies": {"@hapi/hapi": "21"},
   "devDependencies": {"@euronews/eslint-config-js": "3", "eslint": "9", "jest": "29"}
 }"#;
-const APOLLO_MAKEFILE: &str =
+const NODE_SERVICE_MAKEFILE: &str =
     ".PHONY: test\ntest:\n\tjest\nlint:\n\tyarn run eslint . --fix\naws:\n\t./aws.sh\n";
 
-fn apollo() -> [(&'static str, &'static str); 2] {
+fn node_service() -> [(&'static str, &'static str); 2] {
     [
-        ("package.json", APOLLO_PACKAGE),
-        ("Makefile", APOLLO_MAKEFILE),
+        ("package.json", NODE_SERVICE_PACKAGE),
+        ("Makefile", NODE_SERVICE_MAKEFILE),
     ]
 }
 
@@ -239,14 +239,14 @@ fn yarn_run_of_a_declared_binary_is_not_a_problem() {
         "```bash\nyarn run eslint . --fix  # Auto-fix lint issues\n```\n",
         "Run: `yarn run eslint .` (check) or `yarn run eslint . --fix` (auto-fix)\n",
     ] {
-        assert!(problems(&apollo(), doc).is_empty(), "{doc}");
+        assert!(problems(&node_service(), doc).is_empty(), "{doc}");
     }
 }
 
 #[test]
 fn npx_and_npm_exec_are_never_judged() {
     let doc = "`npx eslint .`, `npx create-thing`, `npm exec eslint`, `npm exec -- tsc`\n";
-    assert!(problems(&apollo(), doc).is_empty());
+    assert!(problems(&node_service(), doc).is_empty());
     assert!(problems(&[("README.md", "x")], doc).is_empty());
 }
 
@@ -275,12 +275,12 @@ fn a_line_that_says_the_command_is_unavailable_claims_nothing() {
 #[test]
 fn yarn_add_remove_is_a_documentation_shorthand_for_two_built_ins() {
     let doc = "| `yarn.lock` | `yarn install` | Lock file | After any `yarn add/remove` |\n";
-    assert!(problems(&apollo(), doc).is_empty());
+    assert!(problems(&node_service(), doc).is_empty());
     // Still judged like `yarn add` when there is nothing to add to.
     let found = problems(&[("README.md", "x")], "`yarn add/remove`\n");
     assert_eq!(found.len(), 1, "{found:?}");
     // A slash that is not made of built-ins stays a script name.
-    let found = problems(&apollo(), "`yarn build/deploy`\n");
+    let found = problems(&node_service(), "`yarn build/deploy`\n");
     assert_eq!(found.len(), 1, "{found:?}");
 }
 
@@ -289,7 +289,7 @@ fn the_invented_commands_of_the_corpus_are_still_found() {
     // The 8 true positives: an invented target, invented scripts, and Yarn
     // advice for a repository with no manifest.
     let found = problems(
-        &apollo(),
+        &node_service(),
         "`make restart`, `make doc`, `yarn lint`, `yarn lint:fix`\n",
     );
     assert_eq!(found.len(), 4, "{found:?}");

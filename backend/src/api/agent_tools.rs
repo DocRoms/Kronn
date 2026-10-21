@@ -854,7 +854,7 @@ fn build_tool_catalogue() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "room_scope",
-                "description": "This room's project reach. Without `project`: what it reaches and the pending requests. With `project`: ask a human for that project. See tool_manual.",
+                "description": "This room's project reach. Without `project`: what it reaches, the pending requests and the requestable projects (by name). With `project`: ask a human for that project. See tool_manual.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -2619,8 +2619,18 @@ impl KronnToolExecutor {
                     }
                 }
 
+                // KT-1418 — a refused generation is a failed call. Reported as
+                // `ok`, it never fed the runner's error circuit: an agent that
+                // kept passing an unusable reference called this 13 times,
+                // each time getting the same refusal as if it had succeeded.
+                let succeeded = response.0.success;
                 match serde_json::to_value(response.0) {
-                    Ok(value) => ok(call, value),
+                    Ok(value) if succeeded => ok(call, value),
+                    Ok(value) => ToolOutcome {
+                        call: call.clone(),
+                        content: value,
+                        ok: false,
+                    },
                     Err(error) => fail(call, error.to_string()),
                 }
             }
@@ -4252,7 +4262,7 @@ fn merged_definition<T: serde::Serialize, R: serde::de::DeserializeOwned>(
 const ROOM_SCOPE_NOT_HERE: &str = "room_scope is for a room's own agent. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a worker reaches its task's project only.";
 
 /// Both reaches, as an agent needs them (KT-1341).
-pub(crate) const ROOM_SCOPE_MANUAL: &str = "A room has one primary project: its working directory, where what it creates lands, and the only project whose API configs and credentials it may use. A human may also grant the room other projects: read (tasks, rooms, runs, pages), write (planning only: create and edit tasks there, `project_ids` naming it), or every project. room_scope() returns the grants, the pending requests and the journal. When a call is refused as outside this room's project, ask with room_scope({project, access, reason}): it files a request the human approves, narrows or declines in the room, and grants nothing by itself; do not wait or retry, continue with what you can do. A grant never opens another project's credentials, never runs its workflows, and never reaches a workflow step or a worker posting in the room. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a room without a project writes general resources only once a human granted it « General · write ». Full doctrine: tool_manual({tool: \"workflow-architect\", section: \"Reach\"}).";
+pub(crate) const ROOM_SCOPE_MANUAL: &str = "A room has one primary project: its working directory, where what it creates lands, and the only project whose API configs and credentials it may use. A human may also grant the room other projects: read (tasks, rooms, runs, pages), write (planning only: create and edit tasks there, `project_ids` naming it), or every project. room_scope() returns the grants, the pending requests, the journal and `requestable`: the names of the registered projects not granted that you may ask for (the prompt never names them). When a call is refused as outside this room's project, ask with room_scope({project, access, reason}): it files a request the human approves, narrows or declines in the room, and grants nothing by itself; do not wait or retry, continue with what you can do. A grant never opens another project's credentials, never runs its workflows, and never reaches a workflow step or a worker posting in the room. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a room without a project writes general resources only once a human granted it « General · write ». Full doctrine: tool_manual({tool: \"workflow-architect\", section: \"Reach\"}).";
 
 fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
     const MANUALS: &[(&str, &str)] = &[

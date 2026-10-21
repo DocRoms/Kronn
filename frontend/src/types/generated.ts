@@ -3903,7 +3903,13 @@ requests: Array<DiscussionScopeRequest>,
 /**
  * Digest of the active grants: a human decision names the scope it saw.
  */
-fingerprint: string, };
+fingerprint: string,
+/**
+ * Names of the registered projects this room could ask for (KT-1417):
+ * none granted, never the primary, and none for a room without a project.
+ * The only place an agent learns them, on demand: the prompt names none.
+ */
+requestable: Array<string>, };
 
 export type DiscussionScopeRequest = { id: string, discussion_id: string,
 /**
