@@ -462,10 +462,18 @@ pub(crate) fn human_references_block(
 /// there is nothing of either.
 pub(crate) fn documentary_notes_block(
     preexisting: &[crate::core::document_optimization::Diagnostic],
+    advisories: &[crate::core::document_optimization::Diagnostic],
     autofixes: &[(u32, crate::core::document_optimization::AppliedFix)],
+    unverified: &[(u32, crate::core::document_optimization::DemotedReference)],
+    unverified_commands: &[(u32, crate::core::document_optimization::Diagnostic)],
     language: &str,
 ) -> String {
-    if preexisting.is_empty() && autofixes.is_empty() {
+    if preexisting.is_empty()
+        && advisories.is_empty()
+        && autofixes.is_empty()
+        && unverified.is_empty()
+        && unverified_commands.is_empty()
+    {
         return String::new();
     }
     const SHOWN: usize = 30;
@@ -499,6 +507,12 @@ pub(crate) fn documentary_notes_block(
             })
             .collect(),
     );
+    let demoted = lines(
+        unverified
+            .iter()
+            .map(|(step, r)| format!("- step {step}, `{}` — {}", r.doc, r.marker))
+            .collect(),
+    );
     let (title, held_title, held_rule, fixed_title) = match language {
         "en" => (
             "## DOCUMENTARY GATE — what it let through and what it repaired",
@@ -523,13 +537,59 @@ pub(crate) fn documentary_notes_block(
     if !preexisting.is_empty() {
         out.push_str(&format!("{held_title}\n{held}\n{held_rule}\n\n"));
     }
+    if !advisories.is_empty() {
+        // KT-1388 — feedback the audit gave without failing: not verified.
+        let listed = lines(
+            advisories
+                .iter()
+                .map(|d| format!("- `{}` — {}", d.path, d.message))
+                .collect(),
+        );
+        let (advisory_title, advisory_rule) = match language {
+            "en" => (
+                format!("{} point(s) the documents still hold that Kronn could not confirm (a stack version the manifests or another document contradict, a debt closed without the code that proves it); they did not fail the audit:", advisories.len()),
+                "Do not present these as verified: name them to the user as claims to check against the source.",
+            ),
+            "es" => (
+                format!("{} punto(s) que los documentos aún mantienen y que Kronn no pudo confirmar (una versión del stack que contradicen los manifiestos u otro documento, una deuda cerrada sin el código que la prueba); no hicieron fallar la auditoría:", advisories.len()),
+                "No los presentes como verificados: nómbralos al usuario como afirmaciones por comprobar contra el código.",
+            ),
+            _ => (
+                format!("{} point(s) que les documents maintiennent encore et que Kronn n'a pas pu confirmer (une version du stack que les manifestes ou un autre document contredisent, une dette close sans le code qui le prouve) ; ils n'ont pas fait échouer l'audit :", advisories.len()),
+                "Ne les présente pas comme vérifiés : nomme-les à l'utilisateur comme des affirmations à confronter au code.",
+            ),
+        };
+        out.push_str(&format!("{advisory_title}\n{listed}\n{advisory_rule}\n\n"));
+    }
     if !autofixes.is_empty() {
         out.push_str(&format!("{fixed_title}\n{fixed}\n\n"));
     }
+    if !unverified.is_empty() {
+        let demoted_title = match language {
+            "en" => format!("{} unverified reference(s): citation markers that no attempt could make valid, now written as backticked paths flagged (unverified reference) in the documents, so they are no longer citations:", unverified.len()),
+            "es" => format!("{} referencia(s) no verificada(s): marcadores de cita que ningún intento logró validar, ahora escritos como rutas entre comillas invertidas marcadas (unverified reference) en los documentos, por lo que ya no son citas:", unverified.len()),
+            _ => format!("{} référence(s) non vérifiée(s) : marqueurs de citation qu'aucune tentative n'a pu rendre valides, désormais écrits comme chemins entre accents graves marqués (unverified reference) dans les documents, ce ne sont plus des citations :", unverified.len()),
+        };
+        out.push_str(&format!("{demoted_title}\n{demoted}\n\n"));
+    }
+    if !unverified_commands.is_empty() {
+        let listed = lines(
+            unverified_commands
+                .iter()
+                .map(|(step, d)| format!("- step {step}, `{}` — {}", d.path, d.message))
+                .collect(),
+        );
+        let title = match language {
+            "en" => format!("{} command(s) the documents cite and no Makefile or manifest read by Kronn defines (the step was told and kept them; Kronn reads files and runs nothing, so check each one):", unverified_commands.len()),
+            "es" => format!("{} comando(s) que los documentos citan y que ningún Makefile o manifiesto leído por Kronn define (el paso fue advertido y los mantuvo; Kronn lee archivos y no ejecuta nada, verifica cada uno):", unverified_commands.len()),
+            _ => format!("{} commande(s) que les documents citent et qu'aucun Makefile ou manifeste lu par Kronn ne définit (l'étape en a été avertie et les a gardées ; Kronn lit des fichiers et n'exécute rien, vérifie chacune) :", unverified_commands.len()),
+        };
+        out.push_str(&format!("{title}\n{listed}\n\n"));
+    }
     let rule = match language {
-        "en" => "List both to the user in a separate section of your first message; they are not yours to hide.",
-        "es" => "Enumera ambos al usuario en una sección aparte de tu primer mensaje; no te corresponde ocultarlos.",
-        _ => "Liste les deux à l'utilisateur dans une section à part de ton premier message ; ce n'est pas à toi de les cacher.",
+        "en" => "List all of it to the user in a separate section of your first message; none of it is yours to hide.",
+        "es" => "Enumera todo al usuario en una sección aparte de tu primer mensaje; no te corresponde ocultar nada.",
+        _ => "Liste tout à l'utilisateur dans une section à part de ton premier message ; ce n'est pas à toi de le cacher.",
     };
     out.push_str(rule);
     out.push_str("\n\n");

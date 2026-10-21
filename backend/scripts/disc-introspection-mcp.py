@@ -679,7 +679,8 @@ TOOLS = [
         "name": "disc_append",
         "description": (
             "Post to the bound room. Human decision → `kronn-question` fence "
-            "(`tool_manual disc_question_list`). NEVER invent a pseudo: the human is `@user`; "
+            "(`tool_manual disc_question_list`); a refused one returns in `invalid_cards`: repost. "
+            "NEVER invent a pseudo: the human is `@user`; "
             "native aliases are `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
             "`@copilot`, `@ollama`; a joined CLI requires its exact `@…-cli[-N]` alias "
             "from `disc_meta`; ambiguous bare aliases are refused. POSTING ALSO LISTENS unless "
@@ -690,7 +691,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "Message text."},
+                "content": {"type": "string"},
                 "role": {"type": "string", "description": "Default Agent; User is for imports."},
                 "channel": {"type": "string", "enum": ["main", "note"], "description": "Default main; notes do not wake."},
                 "agent_type": {"type": "string", "description": "Normally inferred."},
@@ -715,7 +716,7 @@ TOOLS = [
                     "items": {"type": "string"},
                     "description": "Unique local files; atomic upload, max 8 × 10 MB.",
                 },
-                "wait_for_reply": {"type": "boolean", "description": "Default true."},
+                "wait_for_reply": {"type": "boolean"},
                 "source_msg_id": {"type": "string", "description": "Explicit dedup key."},
                 "wait_timeout_secs": {"type": "integer", "description": "Default 60 s."},
                 "disc_id": {"type": "string", "description": "Defaults to the bound discussion."},

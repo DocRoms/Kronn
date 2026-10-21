@@ -48,9 +48,9 @@ orientation, including plan-first ordering, parent-room milestones and exact
 CLI routing. It no longer promises that cursor reads can never be replayed or
 that quiet returns cost nothing. The bridge's runtime functions did not change.
 [src: file: backend/scripts/disc-introspection-mcp.py:9960-9996#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10257-10258#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10258-10259#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/disc-introspection-mcp.py:10606-10610#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:12005#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:12006#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:11970-12020#JoinedRoomWorkProtocolTests]
 
 ## Deaf windows in the bridge wait (KT-703)

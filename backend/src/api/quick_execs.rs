@@ -28,6 +28,49 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<QuickEx
     }
 }
 
+/// One saved Quick Exec whose line waits for a human's approval (KT-1398).
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct QuickExecPendingApproval {
+    pub id: String,
+    /// The program that receives run values, e.g. `aws`.
+    pub program: String,
+    pub message: String,
+}
+
+/// GET /api/quick-execs/pending-approvals — the Quick Execs a run would refuse
+/// until a human approves them, for the library badges and the workflow page.
+pub async fn pending_approvals(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<QuickExecPendingApproval>>> {
+    match state
+        .db
+        .with_read_conn(crate::db::quick_execs::list_quick_execs)
+        .await
+    {
+        Ok(items) => Json(ApiResponse::ok(
+            items
+                .into_iter()
+                .filter_map(|exec| {
+                    let (program, message) = crate::core::inline_code::quick_exec_approval_needed(
+                        &exec.name,
+                        &exec.command,
+                        &exec.args,
+                        exec.unmodelled_args_approved == Some(true),
+                        exec.agent_written == Some(true),
+                    )?;
+                    Some(QuickExecPendingApproval {
+                        id: exec.id,
+                        program,
+                        message,
+                    })
+                })
+                .collect(),
+        )),
+        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+    }
+}
+
 pub async fn create(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
@@ -456,6 +499,39 @@ pub async fn run(
     let mut context = TemplateContext::new();
     for (name, value) in resolved.values {
         context.set(name, value);
+    }
+    // Refused before the program starts, naming where to approve it (KT-1398).
+    if let Some((_, message)) = crate::core::inline_code::quick_exec_approval_needed(
+        &item.name,
+        &item.command,
+        &item.args,
+        item.unmodelled_args_approved == Some(true),
+        item.agent_written == Some(true),
+    ) {
+        let response = RunQuickExecResponse {
+            exit_code: None,
+            run_id: run_id.clone(),
+            success: false,
+            duration_ms: 0,
+            data: None,
+            stdout: None,
+            stderr: None,
+            error: Some(message),
+        };
+        if let Err(error) = persist_quick_exec_terminal(
+            &state,
+            &id,
+            project_id.clone(),
+            launch.discussion_id.clone(),
+            created_at,
+            &response,
+            crate::models::SharedRunStatus::PreflightFailed,
+        )
+        .await
+        {
+            return Json(ApiResponse::err(format!("DB error: {error}")));
+        }
+        return Json(ApiResponse::ok(response));
     }
     let step = WorkflowStep {
         name: item.name.clone(),

@@ -10,7 +10,7 @@ prompt style.
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]
 [src: file: backend/src/api/signal_catalog.rs:66-69#get]
 [src: file: backend/src/api/agent_tools.rs:4418-4420#signals]
-[src: file: backend/scripts/disc-introspection-mcp.py:10706-10707#signals]
+[src: file: backend/scripts/disc-introspection-mcp.py:10707-10708#signals]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:579#decision]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:275-339]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:24-72]
@@ -116,7 +116,7 @@ within its existing budget. No net workflow-token or latency improvement is clai
 [src: file: docs/research/signal-catalogue-2026-09-22.json:91#first_prompt_tokens]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:326#first_prompt_tokens]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:370#first_prompt_tokens]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:143#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:147#CATALOGUE_MAX_BYTES]
 
 ## Functional checks and limits
 
@@ -127,12 +127,12 @@ secret provenance, project inheritance and historical terminal-signal checks
 pass. The full schema survives production history clamping under a 32,768-token
 cap. Discovery covers Automation cards in version 1; historical Planning, audit
 and QP-improvement parsers remain separate.
-[src: file: backend/tests/api_tests.rs:1034-1152#discussion_action_ingests_all_four_target_families_through_the_real_message_transaction]
+[src: file: backend/tests/api_tests.rs:1048-1166#discussion_action_ingests_all_four_target_families_through_the_real_message_transaction]
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:67-94#native_signal_manual_reads_the_shared_registry_without_creating_an_action]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12757-12762#test_signal_catalogue_is_read_from_the_running_server_without_launching]
-[src: file: backend/tests/api_tests.rs:935-1029#discussion_action_http_contract_is_durable_and_idempotent]
-[src: file: backend/tests/api_tests.rs:1403-1458#discussion_action_invalid_proposals_are_actionable_through_the_real_message_transaction]
-[src: file: backend/tests/api_tests.rs:1303-1398#discussion_action_allow_manual_override_never_leaks_plaintext_through_the_api]
-[src: file: backend/tests/api_tests.rs:1157-1298#discussion_action_launch_context_resolves_project_env_for_a_global_target]
+[src: file: backend/tests/api_tests.rs:949-1043#discussion_action_http_contract_is_durable_and_idempotent]
+[src: file: backend/tests/api_tests.rs:1417-1472#discussion_action_invalid_proposals_are_actionable_through_the_real_message_transaction]
+[src: file: backend/tests/api_tests.rs:1317-1412#discussion_action_allow_manual_override_never_leaks_plaintext_through_the_api]
+[src: file: backend/tests/api_tests.rs:1171-1312#discussion_action_launch_context_resolves_project_env_for_a_global_target]
 [src: file: backend/src/agents/runner_test.rs:2274-2342#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]

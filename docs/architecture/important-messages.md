@@ -114,7 +114,7 @@ card is rendered beside the folded report, visible without opening its details.
 Only a matching row with `source_kind: orchestration` enables that path; an
 orchestrator display label or ordinary notification alone renders no card and
 no false refusal notice.
-[src: file: frontend/src/components/MessageBubble.tsx:2082-2089#ImportantMessageCard]
+[src: file: frontend/src/components/MessageBubble.tsx:2095-2102#ImportantMessageCard]
 [src: file: frontend/src/components/ImportantMessageCard.tsx:36-130#ImportantMessageCard]
 [src: file: frontend/src/components/MessageBubble.tsx:1109-1119#serverEventOnly]
 

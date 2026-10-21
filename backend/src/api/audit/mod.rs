@@ -23,6 +23,7 @@ pub(crate) mod briefing_load;
 #[cfg(test)]
 mod briefing_residuals_tests;
 pub(crate) mod briefing_rules;
+mod commit_context;
 pub mod cross_audit;
 pub(crate) mod docs_write;
 mod document_repair;
@@ -1771,6 +1772,31 @@ mod prompt_tests {
         }
     }
 
+    /// KT-1388 — the final review lists each cross-document contradiction as
+    /// the claim in doc A against the claim in doc B and resolves it against the
+    /// source; step 8 refuses to close a finding on a word.
+    #[test]
+    fn the_review_resolves_contradictions_against_the_source_and_step8_wants_proof() {
+        let step9 = ANALYSIS_STEPS.last().expect("at least one step").prompt;
+        for needle in [
+            "claim in doc A against the claim in doc B",
+            "against the SOURCE",
+            "Stack versions",
+            "Absence claims",
+            "Universal claims",
+            "Closed findings",
+        ] {
+            assert!(step9.contains(needle), "Step 9 must say `{needle}`");
+        }
+        let step8 = ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
+            .unwrap()
+            .prompt;
+        assert!(step8.contains("Never close a finding on a word"));
+        assert!(step8.contains("`[src: file: path:line]` on the code"));
+    }
+
     #[test]
     fn preamble_documents_marker_discipline_three_types() {
         // 0.8.3 FIX — DOCROMS_WEB audit had 26 `<!-- TODO: verify -->` on
@@ -2331,6 +2357,63 @@ mod prompt_tests {
     }
 
     #[test]
+    fn operations_and_testing_prompts_describe_only_commands_that_exist() {
+        // KT-1387 — the A/B showed `make yarn-install` in a repo with no
+        // package.json, a real OpenSearch as a test prerequisite where the
+        // test setup starts a mock, and an SSH key for what is an AWS token.
+        let prompt_of = |target: &str| {
+            ANALYSIS_STEPS
+                .iter()
+                .find(|s| s.target_file == target)
+                .unwrap_or_else(|| panic!("no step for {target}"))
+                .prompt
+        };
+        let ops = prompt_of("docs/operations/debug-operations.md");
+        assert!(ops.contains("ONLY COMMANDS THAT EXIST"));
+        assert!(ops.contains("a `make` target must be a target of a Makefile"));
+        assert!(ops.contains("with no `package.json` there is no `yarn install`"));
+        assert!(ops.contains("name the mechanism the repository's own target and script use"));
+        let testing = prompt_of("docs/testing-quality.md");
+        assert!(testing.contains("TEST PREREQUISITES COME FROM THE TEST SETUP"));
+        assert!(testing.contains("setupServer"));
+        assert!(testing.contains("do not list the real service as a prerequisite"));
+        assert!(testing.contains("ONLY COMMANDS THAT EXIST"));
+        assert!(prompt_of("docs/AGENTS.md").contains("must exist in this repository"));
+    }
+
+    #[test]
+    fn the_coding_rules_step_owns_the_commit_conventions_document() {
+        // KT-1387 — one A/B sample left workflow/commits.md as the template: a
+        // step owns it, is told to fill it from Kronn's computed commit facts,
+        // and every placeholder it must replace is in the shipped template.
+        let step = ANALYSIS_STEPS
+            .iter()
+            .find(|s| s.target_file == "docs/coding-rules.md")
+            .unwrap();
+        assert!(step.prompt.contains("docs/workflow/commits.md"));
+        assert!(step.prompt.contains("`Commit facts` block"));
+        assert!(step.prompt.contains("enforced ONLY"));
+        assert!(step.prompt.contains("fails this step"));
+        assert!(commit_context::writes_commits_doc(step.target_file));
+        let template = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("templates/docs/workflow/commits.md"),
+        )
+        .unwrap();
+        for token in [
+            "{{COMMIT_CONVENTION}}",
+            "{{COMMIT_ATTRIBUTION_POLICY}}",
+            "{{SIGNOFF_POLICY}}",
+            "**TEMPLATE FILE.**",
+            "<!-- Fill:",
+        ] {
+            assert!(template.contains(token), "template must carry {token}");
+        }
+    }
+
+    #[test]
     fn step8_does_not_duplicate_decisions_md_instruction() {
         // 0.8.3 FIX — before, Step 8 also had a `# E. ALSO FILL
         // docs/decisions.md` section that the agent routinely
@@ -2634,13 +2717,15 @@ mod prompt_tests {
         // keeps the baseline from growing back into the prompt. KT-1353 added
         // the accepted forms of a sheet citation (+158 B, measured 11,114): the
         // ceiling moved by 200 B for that one sentence, not for new baseline.
+        // KT-1388 added the proof rule for a closed finding (+250 B, measured
+        // 11,364): the ceiling moved by 200 B more for that one sentence.
         let prompt = ANALYSIS_STEPS
             .iter()
             .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
             .unwrap()
             .prompt;
         assert!(
-            prompt.len() <= 11_200,
+            prompt.len() <= 11_400,
             "Step 8 prompt is {} bytes",
             prompt.len()
         );

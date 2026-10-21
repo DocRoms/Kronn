@@ -810,6 +810,15 @@ pub(crate) async fn run_partial_pipeline(
         // the section was re-verified, so it is done too (KT-1207).
         let mut succeeded_steps: Vec<usize> = Vec::new();
         let mut unchanged_steps: Vec<usize> = Vec::new();
+        // KT-1388 — the advice the steps left in their documents: noted on the
+        // run and in the validation prompt, never counted as a failure.
+        let mut documentary_advisories: Vec<crate::core::document_optimization::Diagnostic> = Vec::new();
+        // KT-1389 — the commands the documents cite that the repository does not
+        // define, once a step's attempts are spent: told to the step, never a blocker.
+        let mut documentary_unverified_commands: Vec<(u32, crate::core::document_optimization::Diagnostic)> = Vec::new();
+        // KT-1370 — the markers demoted to flagged backticked paths once a
+        // step's attempts were spent, with the step that left each one.
+        let mut unverified_references: Vec<(u32, crate::core::document_optimization::DemotedReference)> = Vec::new();
         // KT-927 — unknown until an agent reports usage, never 0.
         let mut run_tokens = super::agent_launch::RunTokens::default();
         // The model last written on the run row, so a step writes it only when it changes.
@@ -899,6 +908,9 @@ pub(crate) async fn run_partial_pipeline(
             if let Some(block) = version_ctx.block_for(analysis_step.target_file) {
                 full_prompt.push_str(&block);
             }
+            if let Some(block) = super::commit_context::block_for(&project_path, analysis_step.target_file, &docs_root) {
+                full_prompt.push_str(&block);
+            }
             if let Some(block) = revalidation.as_ref().and_then(|r| r.blocks.get(&step)) {
                 full_prompt.push_str(block);
             }
@@ -958,6 +970,25 @@ pub(crate) async fn run_partial_pipeline(
             // before the agent runs; settled after every attempt.
             let step_remit = super::step_remit::StepRemit::capture(&project_path, &docs_root).await;
             let mut remit_notes: Vec<String> = Vec::new();
+            // KT-1388 — the documents as they stand before the agent runs: what
+            // the step then rewrites is what its advice (a stack conflict, an
+            // unproven closure) is read from. The pseudo-step `REVIEW` writes
+            // no document.
+            let documentary_before = if analysis_step.target_file == "REVIEW" {
+                None
+            } else {
+                match super::document_repair::snapshot(&project_path) {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(e) => {
+                        tracing::warn!("Partial audit step {step} ({file_label}): documents not read, no advice given: {e}");
+                        None
+                    }
+                }
+            };
+            // KT-1370 — what this step demoted after its last attempt.
+            let mut step_demotions: Vec<crate::core::document_optimization::DemotedReference> = Vec::new();
+            // KT-1389 — the commands this step left unverified once its attempts were spent.
+            let mut step_unverified_commands: Vec<(u32, crate::core::document_optimization::Diagnostic)> = Vec::new();
             let validated_docs_snapshot =
                 match super::helpers::capture_validated_docs(&project_path) {
                     Ok(snapshot) => snapshot,
@@ -1063,6 +1094,7 @@ pub(crate) async fn run_partial_pipeline(
             // back to the agent on a miss (KT-1357).
             let max_attempts = if enforce_mode
                 || revalidation.is_some()
+                || documentary_before.is_some()
                 || detector_gated
                 || analysis_step.target_file.ends_with("inconsistencies-tech-debt.md")
             {
@@ -1437,14 +1469,19 @@ pub(crate) async fn run_partial_pipeline(
                     // the attempt budget (apollo's revalidation lost step 8 to its
                     // first attempt). Never after a provider failure.
                     if cli_success && !success && attempt < max_attempts {
-                        if let Some(feedback) = super::validation::coverage_repair_feedback(
+                        let repair = super::validation::coverage_repair_feedback(
                             &project_path, analysis_step.target_file,
-                        ) {
+                        )
+                        .map(|feedback| ("dimension_coverage", feedback))
+                        .or_else(|| super::validation::companion_repair_feedback(
+                            &project_path, analysis_step.target_file,
+                        ).map(|feedback| ("unfilled_companion", feedback)));
+                        if let Some((reason, feedback)) = repair {
                             yield Event::default().event("step_retry").data(
                                 serde_json::json!({
                                     "step": step, "file": file_label,
                                     "attempt": attempt, "max_attempts": max_attempts,
-                                    "reason": "dimension_coverage",
+                                    "reason": reason,
                                     "diagnostic": validation_warning.as_ref().map(|w| &w.reason),
                                 }).to_string()
                             );
@@ -1535,13 +1572,41 @@ pub(crate) async fn run_partial_pipeline(
                                 continue 'attempts;
                             }
                             EnforceGateOutcome::Fail { reason } => {
-                                success = false;
-                                yield Event::default().event("step_warning").data(
-                                    serde_json::json!({
-                                        "step": step, "file": file_label,
-                                        "reason": reason, "repaired_from_template": false,
-                                    }).to_string()
+                                // KT-1370 — the last attempt is spent: when the
+                                // documentary gate sees only citation markers on the
+                                // target, they are demoted to flagged backticked paths
+                                // and the step goes on; anything else fails it as before.
+                                let target_holds = || matches!(
+                                    super::anti_hallu_enforce::evaluate_enforce_gate(
+                                        enforce_mode, true, analysis_step.target_file,
+                                        &project_path, attempt, max_attempts, version_ctx.snapshot.as_ref(),
+                                    ),
+                                    EnforceGateOutcome::NotApplicable | EnforceGateOutcome::Pass { .. }
                                 );
+                                let demoted = super::document_repair::with_stale_target(&project_path, analysis_step.target_file, Vec::new())
+                                    .and_then(|left| super::document_repair::demote_last_attempt(&project_path, &left, None, &target_holds))
+                                    .unwrap_or_else(|e| {
+                                        tracing::warn!("Partial audit step {step} ({file_label}): demotion failed: {e}");
+                                        Vec::new()
+                                    });
+                                if demoted.is_empty() {
+                                    success = false;
+                                    yield Event::default().event("step_warning").data(
+                                        serde_json::json!({
+                                            "step": step, "file": file_label,
+                                            "reason": reason, "repaired_from_template": false,
+                                        }).to_string()
+                                    );
+                                } else {
+                                    yield Event::default().event("documentary_demoted").data(
+                                        serde_json::json!({
+                                            "step": step, "file": file_label,
+                                            "attempt": attempt, "references": demoted,
+                                        }).to_string()
+                                    );
+                                    unverified_references.extend(demoted.iter().cloned().map(|r| (step as u32, r)));
+                                    step_demotions = demoted;
+                                }
                             }
                             EnforceGateOutcome::Pass { .. } => {
                                 // No mutation here (Codex msg 150): stamping
@@ -1566,6 +1631,30 @@ pub(crate) async fn run_partial_pipeline(
                                     citation_feedback = Some(super::document_repair::feedback(&left));
                                     continue 'attempts;
                                 }
+                                // KT-1370 — as above, once the attempts are spent.
+                                let target_holds = || matches!(
+                                    super::anti_hallu_enforce::evaluate_enforce_gate(
+                                        enforce_mode, true, analysis_step.target_file,
+                                        &project_path, attempt, max_attempts, version_ctx.snapshot.as_ref(),
+                                    ),
+                                    super::anti_hallu_enforce::EnforceGateOutcome::NotApplicable
+                                        | super::anti_hallu_enforce::EnforceGateOutcome::Pass { .. }
+                                );
+                                let demoted = super::document_repair::demote_last_attempt(&project_path, &left, None, &target_holds)
+                                    .unwrap_or_else(|e| {
+                                        tracing::warn!("Revalidation step {step} ({file_label}): demotion failed: {e}");
+                                        Vec::new()
+                                    });
+                                if !demoted.is_empty() {
+                                    yield Event::default().event("documentary_demoted").data(
+                                        serde_json::json!({
+                                            "step": step, "file": file_label,
+                                            "attempt": attempt, "references": demoted,
+                                        }).to_string()
+                                    );
+                                    unverified_references.extend(demoted.iter().cloned().map(|r| (step as u32, r)));
+                                    step_demotions = demoted;
+                                } else {
                                 success = false;
                                 yield Event::default().event("step_warning").data(
                                     serde_json::json!({
@@ -1574,9 +1663,89 @@ pub(crate) async fn run_partial_pipeline(
                                         "repaired_from_template": false,
                                     }).to_string()
                                 );
+                                }
                             }
                             Ok(_) => {}
                             Err(e) => tracing::warn!("Revalidation step {step} ({file_label}): stale check skipped: {e}"),
+                        }
+                    }
+
+                    // KT-1388 — Full parity: advice, not a blocker. A stack
+                    // conflict or an unproven closure in what the step wrote is
+                    // handed back while it can still correct; the last attempt
+                    // leaves it as a step warning and a documentary note, and
+                    // the step stays done.
+                    if success {
+                        if let Some(before) = &documentary_before {
+                            match super::document_repair::advice_since(&project_path, before, analysis_step.target_file) {
+                                // KT-1387 / KT-1389 — as the Full gate: feedback only,
+                                // handed back while the step can still correct.
+                                Ok(left) if !left.is_empty() && attempt < max_attempts => {
+                                    let (retry_reason, flagged) = if left.advisories.is_empty() {
+                                        citation_feedback = Some(super::document_repair::feedback(&left.unverified_commands));
+                                        ("documentary_unverified_commands", left.unverified_commands.clone())
+                                    } else {
+                                        let mut flagged = left.advisories.clone();
+                                        flagged.extend(left.unverified_commands.iter().cloned());
+                                        citation_feedback = Some(super::document_repair::advice(&flagged));
+                                        ("documentary_advisories", flagged)
+                                    };
+                                    yield Event::default().event("step_retry").data(
+                                        serde_json::json!({
+                                            "step": step, "file": file_label,
+                                            "attempt": attempt, "max_attempts": max_attempts,
+                                            "reason": retry_reason,
+                                            "advisory_count": left.advisories.len(),
+                                            "fabricated_count": left.unverified_commands.len(),
+                                            "diagnostics": flagged,
+                                        }).to_string()
+                                    );
+                                    continue 'attempts;
+                                }
+                                Ok(left) if !left.is_empty() => {
+                                    if !left.advisories.is_empty() {
+                                        remit_notes.extend(left.advisories.iter().map(|d| {
+                                            format!("Unverified: `{}` — {}", d.path, d.message)
+                                        }));
+                                        yield Event::default().event("documentary_advisory").data(
+                                            serde_json::json!({
+                                                "step": step, "file": file_label,
+                                                "diagnostics": left.advisories,
+                                            }).to_string()
+                                        );
+                                        for diagnostic in left.advisories {
+                                            if !documentary_advisories.contains(&diagnostic) {
+                                                documentary_advisories.push(diagnostic);
+                                            }
+                                        }
+                                    }
+                                    // The attempts are spent: the step stays done, the
+                                    // doubt is recorded and said to the human.
+                                    if !left.unverified_commands.is_empty() {
+                                        tracing::warn!(
+                                            "Partial audit step {step} ({file_label}): {} cited command(s) not defined by the repository, kept as a warning",
+                                            left.unverified_commands.len()
+                                        );
+                                        for diagnostic in &left.unverified_commands {
+                                            let entry = (step as u32, diagnostic.clone());
+                                            if !documentary_unverified_commands.contains(&entry) {
+                                                step_unverified_commands.push(entry.clone());
+                                                documentary_unverified_commands.push(entry);
+                                            }
+                                        }
+                                        yield Event::default().event("warning").data(serde_json::json!({
+                                            "message": format!(
+                                                "Step {step} ({file_label}): {} cited command(s) are not defined by the repository's Makefile or manifests; kept as a warning, listed in the run's documentary notes",
+                                                left.unverified_commands.len()
+                                            ),
+                                            "step": step, "file": file_label,
+                                            "diagnostics": left.unverified_commands,
+                                        }).to_string());
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(e) => tracing::warn!("Partial audit step {step} ({file_label}): documentary advice skipped: {e}"),
+                            }
                         }
                     }
 
@@ -1679,11 +1848,37 @@ pub(crate) async fn run_partial_pipeline(
                         // `null` — not 0 — when an attempt's agent reported no cost.
                         "cost_usd_micros": step_cost.usd_micros(),
                         "remit": remit_notes,
+                        "unverified_references": step_demotions.len(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
+                    if !step_demotions.is_empty() || !step_unverified_commands.is_empty() || !documentary_advisories.is_empty() {
+                        // KT-1370 / KT-1387 / KT-1388 — the timeline's notes block reads
+                        // them from the run, recorded step by step so an interrupted run
+                        // keeps what its done steps left.
+                        let run_id = audit_run_id.clone();
+                        let added: Vec<_> = step_demotions.iter().cloned().map(|r| (step as u32, r)).collect();
+                        let commands = step_unverified_commands.clone();
+                        let advisories = documentary_advisories.clone();
+                        if let Err(error) = state.db.with_conn(move |conn| {
+                            let existing = crate::db::audit_runs::get_by_id(conn, &run_id)?
+                                .and_then(|run| run.documentary_notes);
+                            let merged = super::document_repair::merge_unverified_notes(existing.as_deref(), &added);
+                            let merged = super::document_repair::merge_command_notes(merged.as_deref(), &commands);
+                            match super::document_repair::merge_advisory_notes(merged.as_deref(), &advisories) {
+                                Some(notes) => crate::db::audit_runs::set_documentary_notes(conn, &run_id, &notes),
+                                None => Ok(()),
+                            }
+                        }).await {
+                            tracing::warn!("Documentary notes of {audit_run_id} not recorded: {error}");
+                        }
+                    }
                     {
                         let run_id = audit_run_id.clone();
-                        let remit_warning = (!remit_notes.is_empty()).then(|| remit_notes.join("\n"));
+                        let remit_warning = {
+                            let mut lines = remit_notes.clone();
+                            lines.extend(super::document_repair::demotion_notes(&step_demotions));
+                            (!lines.is_empty()).then(|| lines.join("\n"))
+                        };
                         let recorded_usage = step_usage;
                         let recorded_total = run_tokens.total();
                         let step_unchanged = outcome == "unchanged";
@@ -1916,7 +2111,8 @@ pub(crate) async fn run_partial_pipeline(
                 steps.iter().map(|&n| (n as u32, chain[n - 1].target_file.to_string())).collect()
             };
             let prompt = format!(
-                "{}{}{}",
+                "{}{}{}{}",
+                super::helpers::documentary_notes_block(&[], &documentary_advisories, &[], &unverified_references, &documentary_unverified_commands, &language),
                 super::helpers::unchanged_steps_block(&listed(&unchanged_steps), total_chain, &language),
                 super::helpers::partial_refresh_failed_block(&listed(&failed_steps), total_chain, &language),
                 super::helpers::build_partial_validation_prompt(&scope_files, &run_td_ids, &language),
@@ -2141,6 +2337,7 @@ pub(crate) async fn run_partial_pipeline(
             "audit_run_id": audit_run_id,
             "revalidation": revalidation.is_some(),
             "cross_agent_skipped": cross_agent_skipped,
+            "unverified_references": unverified_references.len(),
         });
         drop_guard.disarm();
         yield Event::default().event("done").data(done.to_string());

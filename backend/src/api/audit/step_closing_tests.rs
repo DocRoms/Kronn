@@ -70,6 +70,11 @@ fn assembled_with_every_block(
     } else if version_context::applies_to(step.target_file) {
         prompt.push_str(&version_block(VersionPurpose::Judgement));
     }
+    // KT-1388 — the computed stack facts, on the three steps that state versions.
+    if version_context::states_versions(step.target_file) {
+        let facts = "## Stack facts (computed by Kronn from the manifests, lock files and runtime files)\nState every version from these facts.\n- PHP: declared ^8.4 (composer.json:3)\n";
+        prompt.push_str(&format!("\n\n{facts}\n"));
+    }
     let rules = BriefingProjectRules {
         rules: vec![ProjectRule {
             kind: ProjectRuleKind::Ban,

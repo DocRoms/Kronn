@@ -798,6 +798,20 @@ async fn an_approved_quick_exec_runs_and_an_unapproved_one_is_refused() {
     let unapproved = run(id).await;
     assert_ne!(unapproved["data"]["success"], true, "{unapproved}");
     assert!(unapproved.to_string().contains("expr"), "{unapproved}");
+    // The refused launch is settled, never left queued in the run history.
+    let run_id = unapproved["data"]["run_id"].as_str().unwrap().to_string();
+    let status: String = state
+        .db
+        .with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT status FROM shared_runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(status.to_lowercase().contains("preflight"), "{status}");
 }
 
 #[tokio::test]

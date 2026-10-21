@@ -323,6 +323,39 @@ pub fn unmodelled_message(subject: &str, program: &str, path: &str) -> String {
     )
 }
 
+/// A saved Quick Exec whose line hands a run value to a program Kronn does not
+/// check alone, and has no human approval (KT-1398): the program and what to
+/// tell the human, naming the Quick Exec and where to approve it. `None` when
+/// the line needs no approval (or is refused for another reason, which the
+/// run reports through [`runtime_refusal`]).
+pub fn quick_exec_approval_needed(
+    name: &str,
+    command: &str,
+    args: &[String],
+    approved: bool,
+    agent_written: bool,
+) -> Option<(String, String)> {
+    let trust = Trust {
+        approved,
+        agent_written,
+        declared_scripts: Vec::new(),
+    };
+    match first_unsafe_placeholder_with(command.trim(), args, trust)? {
+        InlineFinding::UnmodelledProgram(program, path) => {
+            let message = format!(
+                "Quick Exec « {name} » : `{{{{{path}}}}}` est passé à `{program}`, que Kronn ne \
+                 vérifie pas seul{}. Un humain doit approuver cette Quick Exec : depuis la page du \
+                 workflow (panneau « À valider ») ou dans Automatisations → Quick Execs → « {name} », \
+                 case « {program} reçoit des valeurs du run ; je confirme qu'il traite ses arguments \
+                 comme de simples données ».",
+                if agent_written { " (ligne écrite par un agent)" } else { "" }
+            );
+            Some((program, message))
+        }
+        _ => None,
+    }
+}
+
 /// The script of a line in a trusted script shape (`python3 tool.py …`).
 pub fn trusted_script(cmd: &str, args: &[String]) -> Option<String> {
     let tainted = tainted_templates(args);

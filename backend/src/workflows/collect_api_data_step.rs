@@ -177,6 +177,28 @@ pub async fn execute_collect_api_data_step(
                 } else {
                     None
                 };
+            // A saved Quick Exec awaiting a human's approval is refused here with
+            // its own name and where to approve it, not as an anonymous step (KT-1398).
+            if let Some(exec) = saved_exec.as_ref() {
+                if let Some((_, message)) = crate::core::inline_code::quick_exec_approval_needed(
+                    &exec.name,
+                    &exec.command,
+                    &exec.args,
+                    exec.unmodelled_args_approved == Some(true),
+                    exec.agent_written == Some(true),
+                ) {
+                    return SourceResult::failed(
+                        index,
+                        source.alias.clone(),
+                        source.required,
+                        format!(
+                            "Source `{}` refusée avant exécution — {message}",
+                            source.alias
+                        ),
+                    )
+                    .with_kind(source_kind);
+                }
+            }
             let inline_exec = source.quick_exec;
             let exec_config = inline_exec
                 .map(|exec| {
