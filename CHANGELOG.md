@@ -9,19 +9,7 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
-## [Unreleased]
-
-### Changed
-
-- The dark theme is now VS Code's Dark Modern palette: flat greys,
-  `#0078d4` filled controls and `#4daafc` accents, no glow, scanlines or
-  aurora. It applies to everyone on Dark or on System with a dark OS, with
-  no setting to change. It is held to the dark-theme contrast floors (4.5:1
-  for every text role) and covered by the dark-theme axe pass. The former
-  purple palette, with its neon effects, becomes the secret Arcade theme,
-  unlocked with a code in Settings like the other secret themes.
-
-## [0.15.1] - 2026-10-21
+## [0.15.1] - 2026-10-22
 
 ### Added
 
@@ -777,6 +765,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- The dark theme is now VS Code's Dark Modern palette: flat greys,
+  `#0078d4` filled controls and `#4daafc` accents, no glow, scanlines or
+  aurora. It applies to everyone on Dark or on System with a dark OS, with
+  no setting to change. It is held to the dark-theme contrast floors (4.5:1
+  for every text role) and covered by the dark-theme axe pass. The former
+  purple palette, with its neon effects, becomes the secret Arcade theme,
+  unlocked with a code in Settings like the other secret themes.
 - CI no longer reruns the whole suite on a tree a pull request already
   tested green (KT-1170, reshaped by main's shared-cache change): a push to
   `main` only builds and saves the caches pull requests read, and a release
@@ -839,6 +834,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A release body stays under GitHub's 125,000-character limit: a CHANGELOG
+  section too long for it is cut between two entries and links the full
+  notes.
 - An HTTP agent (Ollama, OpenRouter, LiteLLM…) can now use an image attached to
   the discussion as the source of an image generation (KT-1418). It was told
   only the filename while `media_generate` needs the context file id, so every

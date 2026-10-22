@@ -48,6 +48,8 @@
   lanes give their disk back, and orchestration messages can be hidden.
 - **Navigation:** every view has its own address; Back, Forward, reload and
   Ctrl/Cmd-click work as in any web page.
+- **A new dark theme:** Dark (and System on a dark OS) is now VS Code's Dark
+  Modern palette; the former purple theme becomes the secret Arcade theme.
 
 Earlier releases are described in the [CHANGELOG](CHANGELOG.md).
 

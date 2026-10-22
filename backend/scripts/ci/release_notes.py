@@ -22,6 +22,9 @@ MENTION_ALLOWLIST = frozenset({"docroms"})
 
 INSTALLER_SUFFIXES = (".exe", ".dmg", ".deb")
 
+# GitHub refuses a release body over 125,000 characters.
+MAX_BODY_CHARS = 125_000
+
 # (label, min version, file-name endings in display order); mirrors
 # RELEASE_PLATFORMS in backend/sidecars/docs/verify_artifacts.py (Tauri targets
 # deb, nsis, dmg).
@@ -156,9 +159,8 @@ def build_body(tag: str, changelog: str, assets: list[str], allow: frozenset[str
         raise SystemExit("No installer attached for: " + ", ".join(missing))
 
     linux = WEBKIT_NOTE + ", so upgrade."
-    return "\n".join(
+    install = "\n".join(
         [
-            neutralize_mentions(changelog_section(changelog, version), allow),
             "",
             "## Installation",
             "",
@@ -172,6 +174,28 @@ def build_body(tag: str, changelog: str, assets: list[str], allow: frozenset[str
             "",
         ]
     )
+    notes = fit_notes(neutralize_mentions(changelog_section(changelog, version), allow), tag, MAX_BODY_CHARS - len(install) - 1)
+    return notes + "\n" + install
+
+
+def fit_notes(notes: str, tag: str, budget: int) -> str:
+    """The notes whole, or cut before the first entry that does not fit, outside any code fence."""
+    if len(notes) <= budget:
+        return notes
+    more = f"\n\n…and more: the full notes are in [CHANGELOG.md]({REPO_URL}/blob/{tag}/CHANGELOG.md)."
+    limit = budget - len(more)
+    cut = 0
+    fenced = False
+    offset = 0
+    for line in notes.splitlines(keepends=True):
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        if not fenced and offset <= limit and (line.startswith("- ") or line.startswith("#")):
+            cut = offset
+        offset += len(line)
+    if cut == 0:
+        raise SystemExit(f"The CHANGELOG section of {tag} cannot be cut to fit a release body")
+    return notes[:cut].rstrip() + more
 
 
 def main() -> None:

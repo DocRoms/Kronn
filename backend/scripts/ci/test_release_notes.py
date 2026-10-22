@@ -97,6 +97,25 @@ class ReleaseNotesTest(unittest.TestCase):
         self.assertIn("xattr -cr", body)
         self.assertIn("libwebkit2gtk-4.1-0", body)
 
+    def test_an_oversized_section_is_cut_between_entries_and_links_the_changelog(self):
+        entry = "- " + "x" * 998 + "\n"
+        fenced = "- fenced:\n```\n" + "y" * 500 + "\n- not an entry\n```\n"
+        big = CHANGELOG.replace("- A thing (KT-1).\n", "- A thing (KT-1).\n" + fenced + entry * 200)
+        body = release_notes.build_body("1.2.3", big, FULL)
+        self.assertLessEqual(len(body), release_notes.MAX_BODY_CHARS)
+        self.assertIn("A thing (KT-1).", body)
+        self.assertIn("/blob/1.2.3/CHANGELOG.md", body)
+        self.assertIn("## Installation", body)
+        notes = body[: body.index("…and more")]
+        self.assertEqual(notes.count("```") % 2, 0)
+        self.assertTrue(notes.rstrip().endswith("x"))
+
+    def test_the_real_0151_section_fits_a_release_body(self):
+        changelog = (pathlib.Path(__file__).parents[3] / "CHANGELOG.md").read_text(encoding="utf-8")
+        body = release_notes.build_body("0.15.1", changelog, FULL)
+        self.assertLessEqual(len(body), release_notes.MAX_BODY_CHARS)
+        self.assertIn("ComfyUI", body)
+
     def test_cli_exit_codes(self):
         script = pathlib.Path(release_notes.__file__)
         with tempfile.TemporaryDirectory() as tmp:

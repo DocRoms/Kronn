@@ -52,6 +52,9 @@ locaux.
   messages d'orchestration peuvent être masqués.
 - **Navigation :** chaque vue a sa propre adresse ; Précédent, Suivant,
   recharger et Ctrl/Cmd-clic fonctionnent comme sur n'importe quelle page web.
+- **Un nouveau thème sombre :** Sombre (et Système sur un OS sombre) prend la
+  palette Dark Modern de VS Code ; l'ancien thème violet devient le thème
+  secret Arcade.
 
 Les versions précédentes sont décrites dans le [CHANGELOG](CHANGELOG.md).
 
