@@ -18,6 +18,7 @@ function TestConsumer() {
       <button data-testid="set-dark" onClick={() => setTheme('dark')}>Dark</button>
       <button data-testid="set-system" onClick={() => setTheme('system')}>System</button>
       <button data-testid="set-matrix" onClick={() => setTheme('matrix')}>Matrix</button>
+      <button data-testid="set-arcade" onClick={() => setTheme('arcade')}>Arcade</button>
       <button
         data-testid="unlock"
         onClick={async () => {
@@ -208,6 +209,40 @@ describe('ThemeContext', () => {
     // wiped on a different browser). The provider must not apply it.
     localStorage.setItem('kronn:theme', 'matrix');
     localStorage.setItem('kronn:unlockedThemes', JSON.stringify([]));
+
+    render(
+      <ThemeProvider>
+        <TestConsumer />
+      </ThemeProvider>
+    );
+
+    expect(screen.getByTestId('theme')).toHaveTextContent('system');
+  });
+
+  it('keeps the former purple default (arcade) behind an unlock', async () => {
+    const user = userEvent.setup();
+    vi.mocked(themesApi.unlock).mockResolvedValueOnce({
+      unlocks: [{ kind: 'theme', name: 'arcade' }],
+    });
+
+    render(
+      <ThemeProvider>
+        <TestConsumer />
+      </ThemeProvider>
+    );
+
+    await user.click(screen.getByTestId('set-arcade'));
+    expect(screen.getByTestId('theme')).toHaveTextContent('system');
+    expect(localStorage.getItem('kronn:theme')).toBeNull();
+
+    await user.click(screen.getByTestId('unlock'));
+    await user.click(screen.getByTestId('set-arcade'));
+    expect(screen.getByTestId('theme')).toHaveTextContent('arcade');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('arcade');
+  });
+
+  it('degrades a stored arcade theme to system without an unlock', () => {
+    localStorage.setItem('kronn:theme', 'arcade');
 
     render(
       <ThemeProvider>

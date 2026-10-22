@@ -9,6 +9,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- The dark theme is now VS Code's Dark Modern palette: flat greys,
+  `#0078d4` filled controls and `#4daafc` accents, no glow, scanlines or
+  aurora. It applies to everyone on Dark or on System with a dark OS, with
+  no setting to change. It is held to the dark-theme contrast floors (4.5:1
+  for every text role) and covered by the dark-theme axe pass. The former
+  purple palette, with its neon effects, becomes the secret Arcade theme,
+  unlocked with a code in Settings like the other secret themes.
+
 ## [0.15.1] - 2026-10-21
 
 ### Added

@@ -16,7 +16,7 @@ import {
   RefreshCw, X, Eye, EyeOff,
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
-  Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink,
+  Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink, Gamepad2,
   Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow, Gauge,
 } from 'lucide-react';
 import { userError } from '../lib/userError';
@@ -1359,6 +1359,7 @@ export function SettingsPage({
                         { mode: 'dark', label: t('config.themeDark'), icon: <Moon size={14} /> },
                       ];
                       const secretMeta: Record<string, { label: string; icon: React.ReactNode }> = {
+                        arcade: { label: t('config.themeArcade'), icon: <Gamepad2 size={14} /> },
                         matrix: { label: t('config.themeMatrix'), icon: <Terminal size={14} /> },
                         sakura: { label: t('config.themeSakura'), icon: <Heart size={14} /> },
                         gotham: { label: t('config.themeGotham'), icon: <span style={{ fontSize: 14, lineHeight: 1 }}>🦇</span> },

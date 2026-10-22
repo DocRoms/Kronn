@@ -22,13 +22,13 @@ const lines = (findings: Array<{ file: string; line: number; detail: string }>) 
 describe('theme contrast', () => {
   it('measures every role of every theme, so the floor check is not vacuous', () => {
     const themes = [...new Set(AUDIT.contrast.map(r => r.theme))].sort();
-    expect(themes).toEqual(['dark', 'euronews', 'gotham', 'light', 'matrix', 'sakura']);
+    expect(themes).toEqual(['arcade', 'dark', 'euronews', 'gotham', 'light', 'matrix', 'sakura']);
     for (const theme of themes) {
       for (const role of TEXT_TOKENS) {
         expect(AUDIT.contrast.some(r => r.theme === theme && r.text === role), `${theme} ${role}`).toBe(true);
       }
     }
-    for (const theme of ['dark', 'gotham', 'matrix']) {
+    for (const theme of ['dark', 'arcade', 'gotham', 'matrix']) {
       for (const role of STATUS_TOKENS) {
         expect(AUDIT.contrast.some(r => r.theme === theme && r.text === role), `${theme} ${role}`).toBe(true);
       }
@@ -64,7 +64,7 @@ describe('theme contrast', () => {
 
   it('holds the focus ring colour to 3:1 on every surface of every theme', () => {
     const rings = AUDIT.contrast.filter(r => r.text === '--kr-accent-ink');
-    expect(rings.length).toBeGreaterThanOrEqual(6 * 5);
+    expect(rings.length).toBeGreaterThanOrEqual(7 * 5);
     expect(rings.every(r => r.floor === 3 && r.ratio >= 3)).toBe(true);
   });
 });

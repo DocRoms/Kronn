@@ -3593,6 +3593,7 @@ const zh: TranslationDict = {
   "config.themeSystem": "系统",
   "config.themeLight": "浅色",
   "config.themeDark": "深色",
+  "config.themeArcade": "街机",
   "config.themeMatrix": "矩阵",
   "config.themeSakura": "樱花",
   "config.themeGotham": "哥谭",

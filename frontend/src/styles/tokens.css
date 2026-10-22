@@ -3,89 +3,88 @@
    Single source of truth for colors, spacing, radius, typography.
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ─── Dark (default) — VS Code Dark Modern ─────────────────────────────────
+   The palette of VS Code's default theme, for people who spend the day in
+   the editor and want Kronn to sit next to it without a colour jump: flat
+   neutral greys, #0078d4 for filled controls, #4daafc for links and accents,
+   no glow. Text on an accent fill is black, not the editor's white: Kronn
+   also fills with the lighter #4daafc, where white reads 2.5:1.
+   The former purple default lives on as the secret `arcade` theme below. */
 :root {
   /* ── Backgrounds ──────────────────────────────────────────────────────── */
-  --kr-bg-base: #140822;
-  --kr-bg-raised: #1a0c2c;
-  --kr-bg-surface: #1f1140;
-  --kr-bg-elevated: #2b1958;
-  --kr-bg-input: #321c66;
-  --kr-bg-hover: rgba(255, 255, 255, 0.03);
-  --kr-bg-hover-strong: rgba(255, 255, 255, 0.06);
-  --kr-bg-active: rgba(255, 255, 255, 0.08);
-  --kr-bg-selected: rgba(255, 255, 255, 0.10);
-  --kr-bg-subtle: rgba(255, 255, 255, 0.02);
+  --kr-bg-base: #181818;
+  --kr-bg-raised: #1f1f1f;
+  --kr-bg-surface: #252526;
+  --kr-bg-elevated: #2d2d2d;
+  --kr-bg-input: #313131;
+  --kr-bg-hover: rgba(255, 255, 255, 0.05);
+  --kr-bg-hover-strong: rgba(255, 255, 255, 0.08);
+  --kr-bg-active: rgba(0, 120, 212, 0.20);
+  --kr-bg-selected: rgba(0, 120, 212, 0.30);
+  --kr-bg-subtle: rgba(255, 255, 255, 0.025);
   --kr-bg-overlay: rgba(0, 0, 0, 0.6);
-  --kr-bg-code: rgba(0, 0, 0, 0.3);
-  --kr-bg-code-panel: #07031a;
-  --kr-bg-scrim: rgba(0, 0, 0, 0.25);
+  --kr-bg-code: rgba(0, 0, 0, 0.25);
+  --kr-bg-code-panel: #1e1e1e;
+  --kr-bg-scrim: rgba(0, 0, 0, 0.3);
 
-  /* ── Accent (lime) ────────────────────────────────────────────────────── */
-  --kr-accent: #c8ff00;
-  --kr-accent-rgb: 200, 255, 0;
-  --kr-accent-fill: #c8ff00;        /* alias — same lime in dark */
-  --kr-accent-fill-rgb: 200, 255, 0;
-  --kr-accent-bg: rgba(200, 255, 0, 0.03);
-  --kr-accent-bg-hover: rgba(200, 255, 0, 0.08);
-  --kr-accent-bg-strong: rgba(200, 255, 0, 0.15);
-  --kr-accent-border: rgba(200, 255, 0, 0.2);
-  --kr-accent-border-light: rgba(200, 255, 0, 0.1);
-  --kr-accent-text: rgba(200, 255, 0, 0.6);
+  /* ── Accent (blue) ────────────────────────────────────────────────────── */
+  --kr-accent: #4daafc;
+  --kr-accent-rgb: 77, 170, 252;
+  --kr-accent-fill: #0078d4;
+  --kr-accent-fill-rgb: 0, 120, 212;
+  --kr-accent-tint-rgb: 0, 120, 212;
+  --kr-accent-bg: rgba(0, 120, 212, 0.08);
+  --kr-accent-bg-hover: rgba(0, 120, 212, 0.14);
+  --kr-accent-bg-strong: rgba(0, 120, 212, 0.25);
+  --kr-accent-border: rgba(0, 120, 212, 0.55);
+  --kr-accent-border-light: rgba(0, 120, 212, 0.28);
+  --kr-accent-text: #75beff;
 
   /* ── Text hierarchy ───────────────────────────────────────────────────── */
-  /* Dark-theme alpha values were bumped 2026-05-10 from
-   *   tertiary 0.5 → 0.72  ·  muted 0.45 → 0.70
-   *   faint    0.4 → 0.66  ·  dim   0.45 → 0.68
-   *   ghost    0.35 → 0.55
-   * to clear the WCAG AA 4.5:1 contrast threshold on the default dark
-   * background (~#0d0f12). Pre-fix, axe flagged 100+ nodes across the
-   * five main pages (Projects/Discussions/Plugins/Workflows/Settings)
-   * because secondary-or-lower text (timestamps, hints, badges) all
-   * sat in the 3.0-4.0:1 band — readable to most sighted users but
-   * blocking for low-vision and AAA-target audits. Light-theme
-   * overrides further down keep their solid hex colours which already
-   * pass the threshold (verified in tokens.css line 195+).
-   * Visual side effect on dark theme: low-emphasis text reads slightly
-   * brighter; if the visual designer wants a softer feel, lower the
-   * alpha back per-class with explicit `rgba(...)` rather than via
-   * the global token. */
-  --kr-text-primary: #e8eaed;
-  --kr-text-secondary: rgba(255, 255, 255, 0.78);
-  --kr-text-tertiary: rgba(255, 255, 255, 0.72);
-  --kr-text-muted: rgba(255, 255, 255, 0.70);
-  --kr-text-faint: rgba(255, 255, 255, 0.66);
-  --kr-text-dim: rgba(255, 255, 255, 0.68);
-  --kr-text-ghost: rgba(255, 255, 255, 0.55);
+  /* Primary text is the editor foreground #d4d4d4 (not the workbench
+     #cccccc), which also lifts the color-mix agent badges above 4.5:1.
+     The editor's own greys and status colours are a step lighter where they
+     missed 4.5:1 on the input fill, a hover over elevated (text roles,
+     scripts/theme-audit.mjs) or the tinted Settings surfaces
+     (e2e/specs/a11y-dark-themes.spec.ts). The hues are VS Code's. */
+  --kr-text-primary: #d4d4d4;
+  --kr-text-secondary: #bbbbbb;
+  --kr-text-tertiary: #a9a9a9;
+  --kr-text-muted: #a8a8a8;
+  --kr-text-faint: #a8a8a8;
+  --kr-text-dim: #a8a8a8;
+  --kr-text-ghost: #a8a8a8;
 
   /* ── Semantic colors ──────────────────────────────────────────────────── */
-  --kr-success: #34d399;
-  --kr-success-rgb: 52, 211, 153;
-  /* Status colours are small text on every surface: each keeps its hue and is
-     lightened just enough for 4.5:1 on the whole ramp (scripts/theme-audit.mjs). */
-  --kr-error: #ff48b9;
-  --kr-error-rgb: 255, 72, 185;
-  --kr-error-soft: #ff5bbc;
-  --kr-warning: #ffc800;
-  --kr-warning-rgb: 255, 200, 0;
-  --kr-warning-soft: #fbbf24;
-  --kr-warning-amber: #f59e0b;
-  --kr-info: #60a5fa;
-  --kr-info-rgb: 96, 165, 250;
-  --kr-cyan: #00d4ff;
-  --kr-cyan-rgb: 0, 212, 255;
-  --kr-purple: #a37ef8;
-  --kr-purple-rgb: 163, 126, 248;
-  --kr-purple-soft: #c8a0ff;
-  --kr-purple-soft-rgb: 200, 160, 255;
-  --kr-pink: #ff5bbc;
-  --kr-pink-rgb: 255, 91, 188;
+  --kr-success: #73c991;
+  --kr-success-rgb: 115, 201, 145;
+  --kr-error: #ff7b72;
+  --kr-error-rgb: 255, 123, 114;
+  --kr-error-soft: #ff9a92;
+  --kr-warning: #d6b100;
+  --kr-warning-rgb: 214, 177, 0;
+  --kr-warning-soft: #e2c08d;
+  --kr-warning-amber: #e0952c;
+  --kr-warning-amber-rgb: 224, 149, 44;
+  --kr-info: #62b0ff;
+  --kr-info-rgb: 98, 176, 255;
+  --kr-cyan: #4ec9b0;
+  --kr-cyan-rgb: 78, 201, 176;
+  /* A step above VS Code's #c586c0 (4.2:1) so a purple badge on a hovered
+     chip over elevated holds 4.5:1: the audit only measures status colours
+     on the opaque ramp. */
+  --kr-purple: #cc8fc7;
+  --kr-purple-rgb: 204, 143, 199;
+  --kr-purple-soft: #bd92e0;
+  --kr-purple-soft-rgb: 189, 146, 224;
+  --kr-pink: #e07ee0;
+  --kr-pink-rgb: 224, 126, 224;
   /* NVIDIA #76B900 stays the brand/accent colour. This lighter companion is
      reserved for small text on dark surfaces (11:1 on --kr-bg-surface). */
   --kr-agent-nvidia-text: #a8df55;
-  --kr-warning-amber-rgb: 245, 158, 11;
-  --kr-cancelled: rgba(255, 255, 255, 0.51);
-  --kr-text-on-accent: #111;
-  --kr-text-on-dark: #fff;
+  --kr-cancelled: #a0a0a0;
+  --kr-text-on-accent: #000000;
+  --kr-text-on-dark: #ffffff;
 
   /* KT-252 — text ON a toast background, per type.
      Distinct from --kr-text-on-dark, which means "text on a DARK
@@ -102,12 +101,12 @@
 
   /* ── Borders ──────────────────────────────────────────────────────────── */
   --kr-border-ghost: rgba(255, 255, 255, 0.04);
-  --kr-border: rgba(255, 255, 255, 0.07);
+  --kr-border: #2b2b2b;
   --kr-border-light: rgba(255, 255, 255, 0.06);
-  --kr-border-medium: rgba(255, 255, 255, 0.1);
-  --kr-border-strong: rgba(255, 255, 255, 0.12);
-  --kr-border-heavy: rgba(255, 255, 255, 0.2);
-  --kr-border-emphasis: rgba(255, 255, 255, 0.25);
+  --kr-border-medium: rgba(255, 255, 255, 0.12);
+  --kr-border-strong: rgba(255, 255, 255, 0.18);
+  --kr-border-heavy: rgba(255, 255, 255, 0.28);
+  --kr-border-emphasis: #0078d4;
 
   /* ── Spacing scale ────────────────────────────────────────────────────── */
   --kr-sp-1: 2px;
@@ -152,12 +151,12 @@
   --kr-font-mono: 'JetBrains Mono', monospace;
 
   /* ── Shadows ──────────────────────────────────────────────────────────── */
-  --kr-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --kr-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --kr-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --kr-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
   --kr-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
-  --kr-shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.6);
-  --kr-shadow-popover: 0 10px 30px rgba(0, 0, 0, 0.4);
-  --kr-shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --kr-shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --kr-shadow-popover: 0 2px 8px rgba(0, 0, 0, 0.36);
+  --kr-shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.6);
 
   /* ── Z-index scale ────────────────────────────────────────────────────── */
   --kr-z-sticky: 50;
@@ -167,21 +166,20 @@
   --kr-z-tour-tooltip: 5001;
   --kr-z-tour-tooltip: 5001;
 
-  /* ── Neon glow tokens (dark default) ──────────────────────────────────
-     Double-stack recipe ported from the pitch site `site/index.html` :
-     inner punch + outer halo. Used selectively on accents — never on
-     body text (a11y) and never on light theme (overridden below).      */
-  --kr-glow-lime-sm: 0 0 6px rgba(200, 255, 0, 0.35), 0 0 14px rgba(200, 255, 0, 0.18);
-  --kr-glow-lime-md: 0 0 10px rgba(200, 255, 0, 0.45), 0 0 24px rgba(200, 255, 0, 0.22);
-  --kr-glow-lime-lg: 0 0 14px rgba(200, 255, 0, 0.55), 0 0 36px rgba(200, 255, 0, 0.28);
-  --kr-glow-magenta-sm: 0 0 6px rgba(255, 27, 168, 0.35), 0 0 14px rgba(255, 27, 168, 0.18);
-  --kr-glow-magenta-md: 0 0 10px rgba(255, 27, 168, 0.50), 0 0 24px rgba(255, 27, 168, 0.22);
-  --kr-glow-electric-sm: 0 0 6px rgba(139, 92, 246, 0.35), 0 0 14px rgba(139, 92, 246, 0.18);
-  --kr-glow-electric-md: 0 0 10px rgba(139, 92, 246, 0.50), 0 0 24px rgba(139, 92, 246, 0.22);
-  --kr-glow-lila-sm: 0 0 6px rgba(200, 160, 255, 0.30), 0 0 14px rgba(200, 160, 255, 0.16);
-  --kr-text-glow-lime: 0 0 8px rgba(200, 255, 0, 0.45), 0 0 18px rgba(200, 255, 0, 0.20);
-  --kr-text-glow-magenta: 0 0 8px rgba(255, 27, 168, 0.45), 0 0 18px rgba(255, 27, 168, 0.20);
-  --kr-bevel-top: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  /* ── Neon glow tokens ─────────────────────────────────────────────────
+     Only the arcade theme glows (it defines them below); every other
+     theme carries its own ambient, so the glow is off by default.      */
+  --kr-glow-lime-sm: none;
+  --kr-glow-lime-md: none;
+  --kr-glow-lime-lg: none;
+  --kr-glow-magenta-sm: none;
+  --kr-glow-magenta-md: none;
+  --kr-glow-electric-sm: none;
+  --kr-glow-electric-md: none;
+  --kr-glow-lila-sm: none;
+  --kr-text-glow-lime: none;
+  --kr-text-glow-magenta: none;
+  --kr-bevel-top: none;
 
   /* ── Compat aliases (0.8.11) ──────────────────────────────────────────────
      Tokens that call sites referenced without a definition (the "phantom vars"
@@ -371,13 +369,13 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    Focus ring — explicit, visible in both themes
    A11y rule: focus must always be visible, and must work on ANY background.
-   We use a 2px solid outline in the accent ink (dark green on light, full
-   lime on dark) with a 2px offset so it's unmistakable without being
+   We use a 2px solid outline in the accent ink (dark green on light, the
+   full accent on dark) with a 2px offset so it's unmistakable without being
    obnoxious. Only applies to keyboard focus (:focus-visible) to avoid the
    mouse-click outline that most designers grumble about.
    ═══════════════════════════════════════════════════════════════════════════ */
 :root {
-  --kr-accent-ink: var(--kr-accent); /* dark theme: lime is readable everywhere */
+  --kr-accent-ink: var(--kr-accent); /* dark themes: the accent is readable everywhere */
 }
 
 *:focus-visible {
@@ -598,6 +596,107 @@
   --kr-shadow-modal: 0 0 32px rgba(255, 212, 0, 0.18), 0 8px 32px rgba(0, 0, 0, 0.7);
 }
 
+/* ─── Arcade — Lila Arcade, the former dark default ────────────────────────
+   Deep purple surfaces, lime accent, magenta/electric neon glow, CRT
+   scanlines and aurora drift (neon.css, atmosphere.css, reset.css) — the
+   visual language of the pitch site `site/index.html`.
+   The low-emphasis alphas were bumped 2026-05-10 (tertiary 0.72, muted
+   0.70, faint 0.66, dim 0.68, ghost 0.55) to clear WCAG AA 4.5:1; status
+   colours keep their hue and are lightened just enough for 4.5:1 on the
+   whole ramp (scripts/theme-audit.mjs). */
+:root[data-theme="arcade"] {
+  --kr-bg-base: #140822;
+  --kr-bg-raised: #1a0c2c;
+  --kr-bg-surface: #1f1140;
+  --kr-bg-elevated: #2b1958;
+  --kr-bg-input: #321c66;
+  --kr-bg-hover: rgba(255, 255, 255, 0.03);
+  --kr-bg-hover-strong: rgba(255, 255, 255, 0.06);
+  --kr-bg-active: rgba(255, 255, 255, 0.08);
+  --kr-bg-selected: rgba(255, 255, 255, 0.10);
+  --kr-bg-subtle: rgba(255, 255, 255, 0.02);
+  --kr-bg-overlay: rgba(0, 0, 0, 0.6);
+  --kr-bg-code: rgba(0, 0, 0, 0.3);
+  --kr-bg-code-panel: #07031a;
+  --kr-bg-scrim: rgba(0, 0, 0, 0.25);
+
+  --kr-accent: #c8ff00;
+  --kr-accent-rgb: 200, 255, 0;
+  --kr-accent-fill: #c8ff00;
+  --kr-accent-fill-rgb: 200, 255, 0;
+  --kr-accent-tint-rgb: 200, 255, 0;
+  --kr-accent-bg: rgba(200, 255, 0, 0.03);
+  --kr-accent-bg-hover: rgba(200, 255, 0, 0.08);
+  --kr-accent-bg-strong: rgba(200, 255, 0, 0.15);
+  --kr-accent-border: rgba(200, 255, 0, 0.2);
+  --kr-accent-border-light: rgba(200, 255, 0, 0.1);
+  --kr-accent-text: rgba(200, 255, 0, 0.6);
+
+  --kr-text-primary: #e8eaed;
+  --kr-text-secondary: rgba(255, 255, 255, 0.78);
+  --kr-text-tertiary: rgba(255, 255, 255, 0.72);
+  --kr-text-muted: rgba(255, 255, 255, 0.70);
+  --kr-text-faint: rgba(255, 255, 255, 0.66);
+  --kr-text-dim: rgba(255, 255, 255, 0.68);
+  --kr-text-ghost: rgba(255, 255, 255, 0.55);
+
+  --kr-success: #34d399;
+  --kr-success-rgb: 52, 211, 153;
+  --kr-error: #ff48b9;
+  --kr-error-rgb: 255, 72, 185;
+  --kr-error-soft: #ff5bbc;
+  --kr-warning: #ffc800;
+  --kr-warning-rgb: 255, 200, 0;
+  --kr-warning-soft: #fbbf24;
+  --kr-warning-amber: #f59e0b;
+  --kr-warning-amber-rgb: 245, 158, 11;
+  --kr-info: #60a5fa;
+  --kr-info-rgb: 96, 165, 250;
+  --kr-cyan: #00d4ff;
+  --kr-cyan-rgb: 0, 212, 255;
+  --kr-purple: #a37ef8;
+  --kr-purple-rgb: 163, 126, 248;
+  --kr-purple-soft: #c8a0ff;
+  --kr-purple-soft-rgb: 200, 160, 255;
+  --kr-pink: #ff5bbc;
+  --kr-pink-rgb: 255, 91, 188;
+  --kr-cancelled: rgba(255, 255, 255, 0.51);
+  --kr-text-on-accent: #111;
+  --kr-text-on-dark: #fff;
+
+  --kr-on-warning: #000;
+  --kr-on-error: #000;
+  --kr-on-success: #000;
+  --kr-on-cyan: #000;
+
+  --kr-border: rgba(255, 255, 255, 0.07);
+  --kr-border-medium: rgba(255, 255, 255, 0.1);
+  --kr-border-strong: rgba(255, 255, 255, 0.12);
+  --kr-border-heavy: rgba(255, 255, 255, 0.2);
+  --kr-border-emphasis: rgba(255, 255, 255, 0.25);
+
+  --kr-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --kr-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --kr-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --kr-shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.6);
+  --kr-shadow-popover: 0 10px 30px rgba(0, 0, 0, 0.4);
+  --kr-shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.5);
+
+  /* Neon glow, double-stack recipe from the pitch site: inner punch +
+     outer halo. Used selectively on accents, never on body text (a11y). */
+  --kr-glow-lime-sm: 0 0 6px rgba(200, 255, 0, 0.35), 0 0 14px rgba(200, 255, 0, 0.18);
+  --kr-glow-lime-md: 0 0 10px rgba(200, 255, 0, 0.45), 0 0 24px rgba(200, 255, 0, 0.22);
+  --kr-glow-lime-lg: 0 0 14px rgba(200, 255, 0, 0.55), 0 0 36px rgba(200, 255, 0, 0.28);
+  --kr-glow-magenta-sm: 0 0 6px rgba(255, 27, 168, 0.35), 0 0 14px rgba(255, 27, 168, 0.18);
+  --kr-glow-magenta-md: 0 0 10px rgba(255, 27, 168, 0.50), 0 0 24px rgba(255, 27, 168, 0.22);
+  --kr-glow-electric-sm: 0 0 6px rgba(139, 92, 246, 0.35), 0 0 14px rgba(139, 92, 246, 0.18);
+  --kr-glow-electric-md: 0 0 10px rgba(139, 92, 246, 0.50), 0 0 24px rgba(139, 92, 246, 0.22);
+  --kr-glow-lila-sm: 0 0 6px rgba(200, 160, 255, 0.30), 0 0 14px rgba(200, 160, 255, 0.16);
+  --kr-text-glow-lime: 0 0 8px rgba(200, 255, 0, 0.45), 0 0 18px rgba(200, 255, 0, 0.20);
+  --kr-text-glow-magenta: 0 0 8px rgba(255, 27, 168, 0.45), 0 0 18px rgba(255, 27, 168, 0.20);
+  --kr-bevel-top: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
 /* ─── Sakura — pastel pink/purple blossom ──────────────────────────────────
    Soft pinks on cream, with hot-pink accent for CTAs and dark plum text for
    body copy. Named after cherry blossom — floral/poetic, gender-neutral.
@@ -794,29 +893,4 @@
   --kr-shadow-xl: 0 8px 16px rgba(10, 20, 32, 0.10), 0 30px 60px rgba(10, 20, 32, 0.18);
   --kr-shadow-popover: 0 4px 12px rgba(10, 20, 32, 0.10), 0 12px 28px rgba(10, 20, 32, 0.12);
   --kr-shadow-modal: 0 8px 20px rgba(10, 20, 32, 0.12), 0 20px 40px rgba(10, 20, 32, 0.18);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   Neon glow neutralization for non-arcade themes.
-   The lime/magenta/electric glow tokens belong to the Lila Arcade dark
-   default (matches `site/index.html`). Other themes carry their own
-   ambient via their own palette — overriding to `none` here prevents
-   color clashes (lime over Sakura pink, lime over Gotham yellow, etc.).
-   ═══════════════════════════════════════════════════════════════════════════ */
-:root[data-theme="light"],
-:root[data-theme="matrix"],
-:root[data-theme="gotham"],
-:root[data-theme="euronews"],
-:root[data-theme="sakura"] {
-  --kr-glow-lime-sm: none;
-  --kr-glow-lime-md: none;
-  --kr-glow-lime-lg: none;
-  --kr-glow-magenta-sm: none;
-  --kr-glow-magenta-md: none;
-  --kr-glow-electric-sm: none;
-  --kr-glow-electric-md: none;
-  --kr-glow-lila-sm: none;
-  --kr-text-glow-lime: none;
-  --kr-text-glow-magenta: none;
-  --kr-bevel-top: none;
 }

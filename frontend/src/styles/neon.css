@@ -1,40 +1,32 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   Kronn Neon — accent glow + utility classes for the dark default theme.
+   Kronn Neon — accent glow + utility classes for the arcade theme.
    Ports the visual language of the pitch site (`site/index.html`) into the
    desktop app without breaking the productivity-first layout.
 
-   Scope rule : every selector is conditional on the dark default theme
-   (`:root` with no `data-theme` attribute) via the `:where(...)` and
-   `:not(...)` guards. Light + secret themes are untouched — their own
-   palettes carry their own ambient.
+   Scope rule : every selector is conditional on the arcade theme
+   (`:root[data-theme="arcade"]`). Every other theme is untouched — its own
+   palette carries its own ambient, and a new theme has nothing to opt out of.
 
    Load order : after `tokens.css` and `reset.css`, before `components.css`
    so component-level CSS can still win on conflict.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Helper : matches the dark default theme only. Spelled out as a chain of
-   :not() because :where() doesn't support attribute-equality. */
-@supports (selector(:is(*))) {
-  /* Modern browsers — use :not() chain inside :is() for clarity */
-}
-
 /* ── Focus ring : add the neon halo on the existing 2px outline ────────────
    reset.css already sets `outline: 2px solid var(--kr-accent); offset 2px`.
-   We layer the double-stack lime glow on top. Light & secret themes get
-   `--kr-glow-lime-md: none`, so this rule is naturally inert there.    */
-:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]):not([data-theme="euronews"]) *:focus-visible {
+   We layer the double-stack lime glow on top.                          */
+:root[data-theme="arcade"] *:focus-visible {
   box-shadow: var(--kr-glow-lime-md);
 }
 
 /* ── Text selection : already lime-tinted via reset.css. Bump the alpha
    and add a faint text glow. Useful when copying QPs / prompts /code.  */
-:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]):not([data-theme="euronews"]) ::selection {
+:root[data-theme="arcade"] ::selection {
   background: rgba(200, 255, 0, 0.30);
   text-shadow: var(--kr-text-glow-lime);
 }
 
 /* ── Scrollbar thumb : faint lime halo so the scrolling lane feels active */
-:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]):not([data-theme="euronews"]) ::-webkit-scrollbar-thumb {
+:root[data-theme="arcade"] ::-webkit-scrollbar-thumb {
   box-shadow: var(--kr-glow-lime-sm);
 }
 
@@ -47,7 +39,7 @@
    "info"` picks up the matching neon ring. Existing components can opt
    in by setting that attribute (no class change needed).               */
 
-:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]):not([data-theme="euronews"]) {
+:root[data-theme="arcade"] {
   [data-state="running"],
   [data-state="active"],
   .kr-neon-lime {
@@ -71,10 +63,10 @@
 /* ── Hover lift : opt-in via `.kr-hover-lift` on card-like surfaces.
    Subtle 1px translate + lime halo on hover — site pattern for "this
    element responds to me". Transitions ≤ 200ms to stay snappy.        */
-:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]):not([data-theme="euronews"]) .kr-hover-lift {
+:root[data-theme="arcade"] .kr-hover-lift {
   transition: transform 180ms ease, box-shadow 180ms ease;
 }
-:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]):not([data-theme="euronews"]) .kr-hover-lift:hover {
+:root[data-theme="arcade"] .kr-hover-lift:hover {
   transform: translateY(-1px);
   box-shadow: var(--kr-glow-lime-sm);
 }
@@ -82,7 +74,7 @@
 /* ── Accent-glow utility classes : drop a lime / magenta / electric
    glow on any text via class. Use sparingly — only on display moments
    (page titles, prominent values, ✨ markers).                        */
-:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]):not([data-theme="euronews"]) {
+:root[data-theme="arcade"] {
   .kr-text-glow-lime { color: var(--kr-accent); text-shadow: var(--kr-text-glow-lime); }
   .kr-text-glow-magenta { color: var(--kr-error); text-shadow: var(--kr-text-glow-magenta); }
 }

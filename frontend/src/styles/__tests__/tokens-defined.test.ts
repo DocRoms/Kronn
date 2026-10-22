@@ -14,7 +14,7 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const THEMES = loadThemes(SRC);
 const BASE = new Set(THEMES.get('dark')?.keys() ?? []);
 const SOURCES = appSources(SRC);
-const THEME_NAMES = ['dark', 'light', 'matrix', 'gotham', 'sakura', 'euronews'];
+const THEME_NAMES = ['dark', 'arcade', 'light', 'matrix', 'gotham', 'sakura', 'euronews'];
 
 const list = (findings: Array<{ file: string; line: number; detail: string }>) =>
   findings.map(f => `  src/${f.file}:${f.line}  ${f.detail}`).join('\n');

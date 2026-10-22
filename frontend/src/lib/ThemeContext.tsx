@@ -5,17 +5,18 @@ import { safeSetItem } from './safeStorage';
 /** Theme modes.
  *
  *  `system` resolves to light/dark from `prefers-color-scheme`.
- *  `light` and `dark` are always available.
- *  `matrix`, `sakura`, `gotham`, `euronews` are secret themes — the
+ *  `light` and `dark` (VS Code Dark Modern) are always available.
+ *  `arcade` (the former purple default), `matrix`, `sakura`, `gotham`,
+ *  `euronews` are secret themes — the
  *  picker only shows them after the user has successfully submitted their
  *  unlock code via POST /api/themes/unlock. Codes are stored server-side
  *  (built-in hashes or config.toml) and never appear in this bundle.
  */
-export type ThemeMode = 'system' | 'light' | 'dark' | 'matrix' | 'sakura' | 'gotham' | 'euronews';
+export type ThemeMode = 'system' | 'light' | 'dark' | 'arcade' | 'matrix' | 'sakura' | 'gotham' | 'euronews';
 
 /** Themes that require unlock. Keep in sync with tokens.css. A theme
  *  name absent from this set is considered "always available". */
-const SECRET_THEMES: ReadonlySet<ThemeMode> = new Set<ThemeMode>(['matrix', 'sakura', 'gotham', 'euronews']);
+const SECRET_THEMES: ReadonlySet<ThemeMode> = new Set<ThemeMode>(['arcade', 'matrix', 'sakura', 'gotham', 'euronews']);
 
 interface ThemeContextValue {
   theme: ThemeMode;
@@ -42,7 +43,7 @@ const STORAGE_KEY = 'kronn:theme';
 const UNLOCKED_KEY = 'kronn:unlockedThemes';
 
 const isValidTheme = (s: unknown): s is ThemeMode =>
-  s === 'system' || s === 'light' || s === 'dark' ||
+  s === 'system' || s === 'light' || s === 'dark' || s === 'arcade' ||
   s === 'matrix' || s === 'sakura' || s === 'gotham' || s === 'euronews';
 
 function loadUnlocked(): ThemeMode[] {
