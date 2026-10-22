@@ -10,12 +10,12 @@
          paints before any stylesheet, so it carries its own styles, and the
          app keeps this element until nothing is loading any more. -->
     <style>
-      html, body { margin: 0; background: #140822; }
+      html, body { margin: 0; background: #181818; }
       html.kronn-boot-light, html.kronn-boot-light body { background: #f6f7f9; }
       .kronn-boot {
         position: fixed; inset: 0; z-index: 2147483000;
         display: flex; flex-direction: column; align-items: center; justify-content: center;
-        gap: 16px; padding: 0 16px; background: #140822; text-align: center;
+        gap: 16px; padding: 0 16px; background: #181818; text-align: center;
         font: 14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         color: rgba(255, 255, 255, 0.70);
         transition: opacity 200ms ease;
@@ -78,7 +78,7 @@
       // The saved theme's background and the UI language from the first frame.
       (function () {
         var light = { light: 1, sakura: 1, euronews: 1 };
-        var bg = { dark: '#140822', light: '#f6f7f9', matrix: '#050805', gotham: '#0a0d14', sakura: '#fff5fa', euronews: '#f5f8fd' };
+        var bg = { dark: '#181818', arcade: '#140822', light: '#f6f7f9', matrix: '#050805', gotham: '#0a0d14', sakura: '#fff5fa', euronews: '#f5f8fd' };
         var starting = { fr: 'Démarrage de Kronn…', en: 'Starting Kronn…', es: 'Iniciando Kronn…', zh: '正在启动 Kronn…' };
         var theme = null, locale = null;
         try {

@@ -1,6 +1,6 @@
 /**
  * Dark-theme contrast — axe `color-contrast` on the main screens in every dark
- * theme (default, gotham, matrix), with the native action card open.
+ * theme (dark, arcade, gotham, matrix), with the native action card open.
  *
  * `a11y-axe.spec.ts` scans the theme the browser happens to resolve; this one
  * pins each dark theme through the same localStorage keys the theme picker
@@ -14,8 +14,8 @@ import { test, expect, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import type { DiscussionAction } from '../../src/types/generated';
 
-const DARK_THEMES = ['dark', 'gotham', 'matrix'] as const;
-const SECRET_THEMES = ['matrix', 'sakura', 'gotham', 'euronews'];
+const DARK_THEMES = ['dark', 'arcade', 'gotham', 'matrix'] as const;
+const SECRET_THEMES = ['arcade', 'matrix', 'sakura', 'gotham', 'euronews'];
 
 interface Route {
   name: string;

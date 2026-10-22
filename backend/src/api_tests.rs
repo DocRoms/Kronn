@@ -5301,6 +5301,32 @@ mod tests {
         assert_eq!(unlocks[0]["name"], "euronews");
     }
 
+    /// The kronnArcade built-in code unlocks the former purple dark
+    /// default, now a secret `arcade` theme (no bundle).
+    #[tokio::test]
+    async fn theme_unlock_arcade_built_in_unlocks_theme() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/themes/unlock")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"code": "kronnArcade"}).to_string(),
+            ))
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true, "kronnArcade rejected: {body}");
+        let unlocks = body["data"]["unlocks"].as_array().expect("unlocks array");
+        assert_eq!(
+            unlocks.len(),
+            1,
+            "arcade is a single theme, not a bundle: {body}"
+        );
+        assert_eq!(unlocks[0]["kind"], "theme");
+        assert_eq!(unlocks[0]["name"], "arcade");
+    }
+
     /// Batman is hidden from GET /api/profiles until unlocked, and
     /// shows up afterwards. Verifies the secret-profile filter in
     /// both states from the caller perspective.

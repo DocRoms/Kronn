@@ -279,7 +279,7 @@
 .input::placeholder { color: var(--kr-text-dim); }
 
 /* Native <select> option items: browser-default = black-on-white on
- * most OS dropdowns, illegible on the Lila Arcade dark theme. Tokenize
+ * most OS dropdowns, illegible on the dark themes. Tokenize
  * them to match the input's own background + text colour so the dropdown
  * panel stays readable when expanded. Caught 2026-05-19 on the 0.8.6
  * Custom plugin auth picker. Applies globally to any `.input` select,

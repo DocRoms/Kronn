@@ -373,7 +373,7 @@ not excuse an undefined `--kr-*`; component-scoped properties drop the prefix.
 White or black text pinned on a `--kr-*` fill is refused in stylesheets and in
 inline `style={{ }}` objects alike.
 `a11y-dark-themes.spec.ts` renders the main screens and a native action card in
-`dark`, `gotham` and `matrix`, re-measures the text axe leaves undecided behind
+`dark`, `arcade`, `gotham` and `matrix`, re-measures the text axe leaves undecided behind
 gradients or pseudo-elements, and walks keyboard focus. It answers every non-GET
 with 503 and stubs the WebSocket, so it may run read-only against a live backend.
 `[src: file: frontend/src/styles/themeAudit.ts:40-45#textFloor]` `[src: file: frontend/src/styles/themeAudit.ts:176-191#measureTextContrast]` `[src: file: frontend/src/styles/themeAudit.ts:201-214#undefinedTokenUsages]`

@@ -3625,6 +3625,7 @@ const es: TranslationDict = {
   'config.themeSystem': 'Sistema',
   'config.themeLight': 'Claro',
   'config.themeDark': 'Oscuro',
+  'config.themeArcade': 'Arcade',
   'config.themeMatrix': 'Matrix',
   'config.themeSakura': 'Sakura',
   'config.themeGotham': 'Gotham',

@@ -50,6 +50,12 @@ use crate::AppState;
 /// matching row is unlocked in one go (e.g. `kronnBatman` below unlocks
 /// BOTH the "batman" profile AND the "gotham" theme).
 const BUILT_IN_UNLOCK_HASHES: &[(&str, &str, &str)] = &[
+    // ── kronnArcade (the former purple dark default) ──
+    (
+        "theme",
+        "arcade",
+        "78ef8889be4b29e98238a2eb723771eb4f743944cbb1ea340081d5144c0d666c",
+    ),
     // ── kronnMatrix ──
     (
         "theme",

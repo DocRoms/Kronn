@@ -226,7 +226,7 @@ Kronn/
 │       │       ├── ProfilesSection.tsx # Profile management
 │       │       └── OllamaCard.tsx     # Ollama setup wizard (0.4.0) — 4-state card (install/launch/pull/picker) with contextual OS hints
 │       ├── styles/
-│       │   ├── tokens.css        # CSS custom properties (--kr-bg-*, --kr-text-*, --kr-accent-*, --kr-sp-*, --kr-r-*, --kr-fs-*). Includes :root[data-theme="matrix"], :root[data-theme="sakura"], :root[data-theme="gotham"] secret-theme blocks gated via POST /api/themes/unlock
+│       │   ├── tokens.css        # CSS custom properties (--kr-bg-*, --kr-text-*, --kr-accent-*, --kr-sp-*, --kr-r-*, --kr-fs-*). `:root` is the default dark theme (VS Code Dark Modern); includes :root[data-theme="arcade"] (former purple default, the only theme with neon.css/atmosphere.css effects), :root[data-theme="matrix"], :root[data-theme="sakura"], :root[data-theme="gotham"] secret-theme blocks gated via POST /api/themes/unlock
 │       │   └── theme-effects.css # Decorative animations (sakura falling petals, gotham bat-signal + bats). pointer-events: none + aria-hidden — matrix decode is JS (useMatrixDecode hook)
 │       │   ├── reset.css         # Global reset + font-face (moved from index.html)
 │       │   ├── utilities.css     # Utility classes (.flex-row, .gap-*, .text-*, .rounded-*, .mb-*, etc.)
