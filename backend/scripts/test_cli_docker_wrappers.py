@@ -134,7 +134,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
                 "test-backend": 20,
                 "test-e2e": 45,
                 "build-release": 45,
-                "test-backend-portability": "${{ matrix.os == 'macos-latest' && 75 || 30 }}",
+                "test-backend-portability": "${{ matrix.os == 'macos-latest' && 100 || 45 }}",
             }.get(job, 60 if path == VERDICT_WORKFLOW else 30)
             self.assertIn(f"timeout-minutes: {expected_timeout}", section, job)
 

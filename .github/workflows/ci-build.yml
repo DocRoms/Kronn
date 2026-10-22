@@ -179,7 +179,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     # A cold macOS lib-test build outlived 45 min (runs 38620268259, 38595597764);
     # a cancelled job saves no cache, so every later run started cold again.
-    timeout-minutes: ${{ matrix.os == 'macos-latest' && 75 || 30 }}
+    # 0.15.1: the macOS compile alone took 73 min with a cache hit (run
+    # 39784513201) and Windows finished 17 s under 30 min (PR #238).
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 100 || 45 }}
     defaults:
       run:
         working-directory: backend
