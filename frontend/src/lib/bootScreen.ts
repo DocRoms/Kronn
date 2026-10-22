@@ -116,13 +116,15 @@ export function finishBootScreen(): void {
   if (settleTimer) clearTimeout(settleTimer);
   for (const listener of [...finishListeners]) listener();
   const root = overlay();
-  const html = document.documentElement;
+  // The settle timer may fire once a test environment has torn its document
+  // down; there is nothing left to fade out then.
+  const html = typeof document === 'undefined' ? null : document.documentElement;
   const cleanUp = () => {
     root?.remove();
     // index.html painted the saved theme's background before any stylesheet;
     // the theme tokens own the page from here on.
-    html.classList.remove('kronn-boot-light');
-    html.style.removeProperty('background');
+    html?.classList.remove('kronn-boot-light');
+    html?.style.removeProperty('background');
   };
   if (!root) {
     cleanUp();

@@ -118,6 +118,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  // The last render armed the boot screen's settle timer; dropped here, it
+  // cannot fire after vitest has torn the document down.
+  resetBootScreenForTests();
   router?.dispose();
   router = null;
   window.history.replaceState(null, '', '/');
