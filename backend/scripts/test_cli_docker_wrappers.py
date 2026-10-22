@@ -109,7 +109,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             CI_WORKFLOW: (
                 "require-ci-label", "test-backend-build", "test-backend-shard",
                 "test-backend", "test-backend-quality",
-                "duplication-check", "test-python", "test-frontend", "test-e2e",
+                "duplication-check", "test-python", "test-frontend",
+                "test-e2e-shard", "test-e2e",
                 "test-shell", "security-scan", "ci-quality-gates",
                 "backend-ci-performance",
             ),
@@ -132,7 +133,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             expected_timeout = {
                 "test-backend-build": 40,
                 "test-backend": 20,
-                "test-e2e": 45,
+                "test-e2e-shard": 45,
+                "test-e2e": 5,
                 "build-release": 45,
                 "test-backend-portability": "${{ matrix.os == 'macos-latest' && 100 || 45 }}",
             }.get(job, 60 if path == VERDICT_WORKFLOW else 30)
@@ -146,8 +148,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("ci-quality-gates:", workflow)
         for gate in (
             "test-backend", "test-backend-quality", "duplication-check",
-            "test-python", "test-frontend", "test-e2e", "test-shell",
-            "security-scan",
+            "test-python", "test-frontend", "test-e2e-shard", "test-e2e",
+            "test-shell", "security-scan",
         ):
             self.assertIn(f"      - {gate}", workflow)
         build = BUILD_WORKFLOW.read_text()
@@ -373,7 +375,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             "duplication-check", "diff-hygiene", "test-python", "test-frontend",
             "test-shell", "security-scan", "backend-ci-performance",
             "test-desktop-compile", "test-docs-sidecar-windows",
-            "test-backend-shard", "test-backend",
+            "test-backend-shard", "test-backend", "test-e2e",
         ):
             condition = re.search(r"^    if: (.*)$", jobs[name], re.MULTILINE).group(1)
             self.assertIn(no_push, condition, name)
@@ -392,7 +394,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             ("test-backend-build", "Lint — no raw Command::new in prod code"),
             ("test-backend-build", "Upload the instrumented test archive"),
             ("test-backend-quality", "cargo test --doc"),
-            ("test-e2e", "Run E2E tests"),
+            ("test-e2e-shard", "Run E2E tests"),
             ("test-backend-portability", "Worktree lifecycle and disk guards"),
             ("test-backend-portability", "Windows to WSL agent launches"),
         ):
@@ -463,9 +465,38 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         for name in ("ci-test.yml", "ci-build.yml"):
             self.assertNotIn(f"uses: ./.github/workflows/{name}", desktop)
 
+    def test_e2e_runs_in_shards_and_publishes_the_check_the_ruleset_requires(self):
+        # KT-20 — one worker per backend, three backends side by side. The
+        # matrix publishes `test-e2e-shard (1..3)` and no check called
+        # `test-e2e`, the name the main ruleset requires: the aggregate job
+        # keeps it, and `always()` turns a red shard into a red check rather
+        # than a skipped one.
+        jobs = job_sections(CI_WORKFLOW.read_text())
+        shard = jobs["test-e2e-shard"]
+        self.assertIn("fail-fast: false", shard)
+        self.assertIn(
+            "shard: ${{ fromJSON(github.event_name == 'push' && '[1]' || '[1, 2, 3]') }}",
+            shard,
+        )
+        # The shard count follows the matrix, never a second literal.
+        self.assertIn(
+            "pnpm exec playwright test --shard=${{ matrix.shard }}/${{ strategy.job-total }}",
+            shard,
+        )
+        self.assertNotIn("--shard=${{ matrix.shard }}/3", shard)
+        for artifact in ("playwright-report", "playwright-test-results", "backend-logs"):
+            self.assertIn(f"name: {artifact}-${{{{ matrix.shard }}}}", shard)
+        aggregate = jobs["test-e2e"]
+        self.assertIn("needs: [require-ci-label, test-e2e-shard]", aggregate)
+        self.assertIn("if: always() && needs.require-ci-label.outputs.run == 'true'", aggregate)
+        self.assertIn("needs.test-e2e-shard.result", aggregate)
+        self.assertIn('test "$SHARDS_RESULT" = success', aggregate)
+        gate = jobs["ci-quality-gates"]
+        self.assertIn("      - test-e2e-shard\n      - test-e2e\n", gate)
+
     def test_e2e_serves_the_dev_build_and_ci_build_the_release(self):
         e2e = re.search(
-            r"^  test-e2e:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            r"^  test-e2e-shard:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
             CI_WORKFLOW.read_text(),
             re.MULTILINE | re.DOTALL,
         ).group("section")
