@@ -114,9 +114,9 @@ card is rendered beside the folded report, visible without opening its details.
 Only a matching row with `source_kind: orchestration` enables that path; an
 orchestrator display label or ordinary notification alone renders no card and
 no false refusal notice.
-[src: file: frontend/src/components/MessageBubble.tsx:2095-2102#ImportantMessageCard]
+[src: file: frontend/src/components/MessageBubble.tsx:2102-2109#ImportantMessageCard]
 [src: file: frontend/src/components/ImportantMessageCard.tsx:36-130#ImportantMessageCard]
-[src: file: frontend/src/components/MessageBubble.tsx:1109-1119#serverEventOnly]
+[src: file: frontend/src/components/MessageBubble.tsx:1120-1130#serverEventOnly]
 
 The bar re-fetches when the transcript's newest durable message id changes
 (`messageRevision`, the same idiom `DiscussionQuestionBanner` uses) — one
@@ -166,7 +166,7 @@ identities, foreign keys, category checks and indexes.
 [src: file: frontend/src/lib/importantMessageDraft.ts:54-72#takeScalars]
 [src: file: backend/src/db/sql/175_important_message_information_category.sql:3-24#discussion_important_messages_next]
 [src: file: backend/src/db/sql/175_important_message_information_category.sql:25-33#idx_disc_important_message]
-[src: file: backend/src/db/migrations.rs:1781-1913#migration_175_preserves_populated_cards_and_closes_information_category]
+[src: file: backend/src/db/migrations.rs:1790-1922#migration_175_preserves_populated_cards_and_closes_information_category]
 
 ## Tests
 

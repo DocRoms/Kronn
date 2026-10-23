@@ -311,20 +311,21 @@ Ordinary jobs in the CI workflow have a 30-minute technical timeout; the
 on `main`, save its cache; verified hot runs stay subject to the independent
 10-minute SLO.
 The E2E job (a dev-profile backend build) and the release build have 45 minutes.
-The macOS portability job has 75 minutes: its lib-test rebuild took
+The macOS portability job has 100 minutes: its lib-test rebuild took
 29m13s in [run 36912793272](https://github.com/DocRoms/Kronn/actions/runs/36912793272/job/110539336655),
 then the first suite passed as the former 30-minute limit cancelled the job,
 leaving the maintenance and durable-cleanup suites unexecuted; a later cold
 macOS build then outlived the 45 minutes set after that (runs 38620268259 and
-38595597764). The budget covers every suite and the cache saving; Windows
-retains 30 minutes.
+38595597764), and in 0.15.1 the compile alone took 73 minutes with a cache hit
+(run 39784513201). The budget covers every suite and the cache saving; Windows
+has 45 minutes, after finishing 17 seconds under the former 30.
 The required aggregate always runs,
 includes `require-ci-label`, and fails when the label is removed or any other
 gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:377#timeout-minutes] [src: file: .github/workflows/ci-test.yml:736#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-182#timeout-minutes] [src: file: .github/workflows/ci-build.yml:263#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:377#timeout-minutes] [src: file: .github/workflows/ci-test.yml:736#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-184#timeout-minutes] [src: file: .github/workflows/ci-build.yml:265#timeout-minutes]
 [src: file: .github/workflows/ci-test.yml:968-1004#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
 
 ## Test placement

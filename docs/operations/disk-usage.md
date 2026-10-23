@@ -75,8 +75,8 @@ worktree's index is only copied, never written. If a patch cannot be written, ex
 holds unmerged paths, nothing is removed. Each distinct *kept* reason is recorded once as a
 `worktree_release_kept` event, a release as `worktree_released`. Evidence patches are not cleaned up by Kronn.
 
-[src: file: backend/src/api/orchestration.rs:3819-3831#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:11323-11334#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:3840-3852#cleanup_integrated_execution]
+[src: file: backend/src/api/orchestration.rs:11567-11578#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -118,7 +118,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:791-857#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:8322-8345#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:8566-8589#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.

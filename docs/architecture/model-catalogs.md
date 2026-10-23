@@ -287,7 +287,7 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:1952-1986#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/migrations.rs:1961-1995#model_catalog_upgrades_from_its_immediate_predecessor]
 [src: file: backend/src/db/sql/162_model_catalog.sql:32-42#model_catalog_refresh_log]
 [src: file: backend/src/db/model_catalog.rs:1088-1134#reconcile_live_promotes_manual_entry_preserving_overrides]
 [src: file: backend/src/db/model_catalog.rs:1136-1158#reconcile_live_is_idempotent]
