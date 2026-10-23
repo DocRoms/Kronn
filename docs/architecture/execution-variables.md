@@ -75,7 +75,7 @@ durable discussion/run and project scope. Reveals are audited without storing
 the returned value.
 
 [src: file: backend/src/db/execution_variable_snapshots.rs:151-222#insert_execution_context_message] [src: file: backend/src/db/execution_variable_snapshots.rs:33-41#has_live_owner]
-[src: file: frontend/src/components/MessageBubble.tsx:1047-1074#revealExecutionVariable]
+[src: file: frontend/src/components/MessageBubble.tsx:1052-1079#revealExecutionVariable]
 
 ## Retention
 

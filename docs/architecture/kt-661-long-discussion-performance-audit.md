@@ -67,11 +67,11 @@ alone does not establish a user-visible duration.
 4. A `MessageBubble` passes normal text through `MessageBody`, which splits
    injected context and sends the content to `ReactMarkdown` with
    `remark-gfm` and `remark-emoji`.
-   [src: file: frontend/src/components/MessageBubble.tsx:2265-2313#MessageBody]
+   [src: file: frontend/src/components/MessageBubble.tsx:2272-2320#MessageBody]
    [src: file: frontend/src/components/MessageBubble.tsx:2216-2229#ReactMarkdown]
    Each message first renders as plain text and upgrades to Markdown once it is
    near the viewport or the browser is idle, so every message is still parsed.
-   [src: file: frontend/src/components/MessageBubble.tsx:2166-2198#canDefer]
+   [src: file: frontend/src/components/MessageBubble.tsx:2173-2205#canDefer]
    There is a per-message
    200,000-character fallback that avoids this Markdown path for very large
    individual messages; it does not cap the count of ordinary messages.

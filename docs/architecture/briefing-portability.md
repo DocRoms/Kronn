@@ -5,7 +5,7 @@ the audit, the briefing editor and the project card. An empty or unreadable
 file does not revive older DB notes. DB notes remain the fallback before the
 file exists, so answers saved before template installation are usable.
 [src: file: backend/src/api/projects/mod.rs:188-201#resolve_briefing_notes]
-[src: file: backend/src/api/projects/mod.rs:226#resolve_briefing_notes]
+[src: file: backend/src/api/projects/mod.rs:227#resolve_briefing_notes]
 [src: file: backend/src/api/audit/briefing.rs:21-39#get_briefing]
 
 Removing a TD-to-tasks or cross-agent option from the file disables it even
