@@ -2537,8 +2537,11 @@ mod origin_and_admission_tests {
             assert!(*on);
             held_tx.send(()).unwrap();
             std::thread::sleep(Duration::from_millis(300));
+            // Stamped before the release: once the guard drops, `set(false)`
+            // may complete before this thread runs again.
+            let finished = std::time::Instant::now();
             drop(on);
-            std::time::Instant::now()
+            finished
         });
         held_rx.recv().unwrap();
         let gate = state.p2p.clone();
