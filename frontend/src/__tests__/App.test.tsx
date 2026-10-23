@@ -118,6 +118,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  // A settle timer armed by the last render must not fire once the test
+  // environment (and `document`) is gone.
+  resetBootScreenForTests();
   router?.dispose();
   router = null;
   window.history.replaceState(null, '', '/');
