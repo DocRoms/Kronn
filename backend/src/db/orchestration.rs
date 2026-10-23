@@ -2909,6 +2909,155 @@ fn announce_integration_refusal(
     Ok(())
 }
 
+/// The id prefix of a Docker elevation card: only Kronn posts a message under
+/// it, so an answer to its question is a human's decision on Kronn's request.
+pub const DOCKER_ELEVATION_PREFIX: &str = "orch-elevation:docker:";
+
+/// Ask the human, on a `kronn-question` card, whether this execution's
+/// validations may reach Docker: refuse, this discussion, or the project
+/// (KT-1433). One card per refusal; answering it is handled by
+/// `api::discussion_questions::apply_elevation`.
+pub fn post_docker_elevation_card(conn: &Connection, exec_id: &str) -> Result<()> {
+    let Some(execution) = get_task_execution(conn, exec_id)? else {
+        return Ok(());
+    };
+    let parent = execution.parent_discussion_id.as_str();
+    let Some(principal) = crate::db::discussions::get_discussion(conn, parent)? else {
+        return Ok(());
+    };
+    let occurrence: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1 AND id LIKE ?2",
+        params![parent, format!("{DOCKER_ELEVATION_PREFIX}{exec_id}:%")],
+        |row| row.get(0),
+    )?;
+    let lang = RoomLang::from_code(&principal.language);
+    let card = serde_json::json!({
+        "version": 1,
+        "key": "kronn-elevation-docker",
+        "question": lang.pick(
+            "Autoriser Docker pour les validations d'intégration ?",
+            "Allow Docker for the integration validations?",
+        ),
+        "context": lang.pick(
+            "Une validation passe par Docker, que le bac à sable des validations garde fermé. Le socket Docker donne les droits de l'hôte : n'accorde que si tu fais confiance aux validations de ce projet. Après un accord, l'intégration reprend seule.",
+            "A validation goes through Docker, which the validation sandbox keeps closed. The Docker socket carries the host's rights: grant it only if you trust this project's validations. Once granted, the integration resumes on its own.",
+        ),
+        "options": [
+            {"id": "deny", "label": lang.pick("Refuser", "Refuse")},
+            {"id": "discussion", "label": lang.pick("Autoriser pour cette discussion", "Allow for this discussion")},
+            {"id": "project", "label": lang.pick("Autoriser pour le projet", "Allow for the project")},
+        ],
+    });
+    let message = DiscussionMessage {
+        id: format!("{DOCKER_ELEVATION_PREFIX}{exec_id}:{occurrence}"),
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content: format!(
+            "**{}**\n\n```kronn-question\n{}\n```",
+            lang.pick(
+                "Élévation demandée — Docker",
+                "Elevation requested — Docker"
+            ),
+            serde_json::to_string(&card)?
+        ),
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+        session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
+    };
+    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+        conn,
+        parent,
+        &message,
+        &[],
+        &[],
+        None,
+    )?;
+    let invalid = crate::db::discussion_questions::ingest_message_questions(
+        conn,
+        parent,
+        &message.id,
+        &message.content,
+    )?;
+    anyhow::ensure!(invalid.is_empty(), "elevation card refused: {invalid:?}");
+    Ok(())
+}
+
+/// Record a human's answer to a Docker elevation card (KT-1433): `project`
+/// opens Docker to the run's project (never narrowing a full access),
+/// `discussion` to the run's discussion only. Returns the execution to resume,
+/// or `None` for a refusal, an unknown card, or a message Kronn did not post.
+pub fn record_docker_elevation(
+    conn: &Connection,
+    message_id: &str,
+    choice: &str,
+    human: &str,
+) -> Result<Option<String>> {
+    let Some(rest) = message_id.strip_prefix(DOCKER_ELEVATION_PREFIX) else {
+        return Ok(None);
+    };
+    let Some((exec_id, _occurrence)) = rest.rsplit_once(':') else {
+        return Ok(None);
+    };
+    if choice != "discussion" && choice != "project" {
+        return Ok(None);
+    }
+    // Kronn's own message, not an agent's look-alike.
+    let kind: Option<Option<String>> = conn
+        .query_row(
+            "SELECT kind FROM messages WHERE id = ?1",
+            [message_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if kind.flatten().as_deref() != Some("orchestration") {
+        return Ok(None);
+    }
+    let Some(execution) = get_task_execution(conn, exec_id)? else {
+        return Ok(None);
+    };
+    let Some(run) = get_orchestration_run(conn, &execution.orchestration_run_id)? else {
+        return Ok(None);
+    };
+    if choice == "project" {
+        let Some(project_id) = run.project_id.as_deref() else {
+            return Ok(None);
+        };
+        if crate::db::projects::validations_access(conn, project_id)?
+            == crate::models::ValidationsAccess::Sandbox
+        {
+            crate::db::projects::set_validations_access(
+                conn,
+                project_id,
+                crate::models::ValidationsAccess::Docker,
+            )?;
+        }
+    } else {
+        crate::db::projects::grant_discussion_capability(
+            conn,
+            &run.discussion_id,
+            "validations_docker",
+            human,
+        )?;
+    }
+    Ok(Some(exec_id.to_string()))
+}
+
 /// Inputs to [`commit_provisioning_checkpoint`] — the single atomic commit that
 /// makes an execution durably launchable (ADR §4bis; DoD-7/8).
 pub struct ProvisioningCheckpoint<'a> {

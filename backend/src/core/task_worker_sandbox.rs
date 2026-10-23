@@ -186,6 +186,10 @@ pub struct SandboxPolicy {
     /// The lane's own scratch directory, inside a write root. The confined
     /// command gets it as `TMPDIR`; no global temp directory is writable.
     pub temp_dir: PathBuf,
+    /// The Docker socket the command may connect to, and nothing else on the
+    /// network. Only a validation of a project whose human opened Docker to its
+    /// validations carries one (KT-1433): the socket is the host's root.
+    pub docker_socket: Option<PathBuf>,
 }
 
 impl SandboxPolicy {
@@ -195,6 +199,7 @@ impl SandboxPolicy {
         Self {
             write_roots: lane.write_roots(),
             temp_dir: lane.tmp_dir(),
+            docker_socket: None,
         }
     }
 
@@ -270,6 +275,12 @@ fn seatbelt_literal(path: &Path) -> String {
 ///   and `/dev/fd/N` (its own piped stdio, `/dev/stdout`) are what a build
 ///   writes to; `file-ioctl` stays open for them and for plain files.
 pub fn seatbelt_profile(writable: &[PathBuf]) -> String {
+    seatbelt_profile_with(writable, None)
+}
+
+/// [`seatbelt_profile`], plus outbound connections to `docker_socket` alone,
+/// by its path and by the real path behind it.
+pub fn seatbelt_profile_with(writable: &[PathBuf], docker_socket: Option<&Path>) -> String {
     let mut profile = String::from(
         "(version 1)\n\
          (deny default)\n\
@@ -298,6 +309,18 @@ pub fn seatbelt_profile(writable: &[PathBuf]) -> String {
         "(allow network-bind (local ip \"localhost:*\"))\n\
          (allow network-inbound (local ip \"localhost:*\"))\n",
     );
+    if let Some(socket) = docker_socket {
+        let mut paths = vec![socket.to_path_buf(), real_path(socket)];
+        paths.dedup();
+        profile.push_str("(allow network-outbound\n");
+        for path in paths {
+            profile.push_str(&format!(
+                "  (remote unix-socket (path-literal {}))\n",
+                seatbelt_literal(&path)
+            ));
+        }
+        profile.push_str(")\n");
+    }
     // Last rule wins, so this must stay the final rule: the terminals are out
     // of reach whatever the allowances above say. A pty the build would start
     // for itself is not reachable either — `pseudo-tty` is not granted, and a
@@ -317,6 +340,12 @@ pub fn seatbelt_profile(writable: &[PathBuf]) -> String {
 /// `/tmp` are emptied so the host's service sockets (the systemd user bus, the
 /// Docker socket, an SSH agent) cannot be reached by path.
 pub fn bubblewrap_args(writable: &[PathBuf]) -> Vec<String> {
+    bubblewrap_args_with(writable, None)
+}
+
+/// [`bubblewrap_args`], plus `docker_socket` bound back at its path: a Unix
+/// socket is reached by path, so the empty network namespace does not cut it.
+pub fn bubblewrap_args_with(writable: &[PathBuf], docker_socket: Option<&Path>) -> Vec<String> {
     let mut args: Vec<String> = [
         "--ro-bind",
         "/",
@@ -337,6 +366,11 @@ pub fn bubblewrap_args(writable: &[PathBuf]) -> Vec<String> {
     for root in writable {
         let root = root.to_string_lossy().into_owned();
         args.extend(["--bind".to_string(), root.clone(), root]);
+    }
+    if let Some(socket) = docker_socket {
+        let real = real_path(socket).to_string_lossy().into_owned();
+        let at = socket.to_string_lossy().into_owned();
+        args.extend(["--bind".to_string(), real, at]);
     }
     args.extend(
         [
@@ -360,9 +394,15 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
     let (program, mut args) = match mechanism {
         Mechanism::Seatbelt => (
             mechanism.launcher().to_string(),
-            vec!["-p".to_string(), seatbelt_profile(&writable)],
+            vec![
+                "-p".to_string(),
+                seatbelt_profile_with(&writable, policy.docker_socket.as_deref()),
+            ],
         ),
-        Mechanism::Bubblewrap => (mechanism.launcher().to_string(), bubblewrap_args(&writable)),
+        Mechanism::Bubblewrap => (
+            mechanism.launcher().to_string(),
+            bubblewrap_args_with(&writable, policy.docker_socket.as_deref()),
+        ),
     };
     args.push(probe.program.clone());
     args.extend(probe.args.iter().cloned());
@@ -376,6 +416,13 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
         TMPDIR_ENV.to_string(),
         real_path(&policy.temp_dir).into_os_string(),
     ));
+    if let Some(socket) = &policy.docker_socket {
+        env.retain(|(name, _)| name != "DOCKER_HOST");
+        env.push((
+            "DOCKER_HOST".to_string(),
+            format!("unix://{}", socket.display()).into(),
+        ));
+    }
     ProbeCommand {
         program,
         args,
@@ -383,6 +430,72 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
         env,
         timeout: probe.timeout,
     }
+}
+
+/// The Docker socket a validation of this host reaches: `DOCKER_HOST` when it
+/// names a Unix socket, else the current `docker context`, else the first
+/// existing socket of OrbStack, Docker Desktop, Colima or `/var/run`. A TCP
+/// endpoint is refused: the sandbox opens one socket path, never the network.
+pub fn host_docker_socket() -> Result<PathBuf, String> {
+    let from_env = crate::core::child_env::var("DOCKER_HOST").ok();
+    let from_context = || {
+        crate::core::cmd::sync_cmd("docker", ChildRoute::Docker)
+            .args([
+                "context",
+                "inspect",
+                "--format",
+                "{{.Endpoints.docker.Host}}",
+            ])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let home = crate::core::child_env::var_os("HOME").map(PathBuf::from);
+    docker_socket_from(from_env.as_deref(), from_context, home.as_deref(), |path| {
+        path.exists()
+    })
+}
+
+fn docker_socket_from(
+    docker_host: Option<&str>,
+    context_host: impl FnOnce() -> Option<String>,
+    home: Option<&Path>,
+    exists: impl Fn(&Path) -> bool,
+) -> Result<PathBuf, String> {
+    let unix = |host: &str| -> Result<Option<PathBuf>, String> {
+        match host.strip_prefix("unix://") {
+            Some(path) if !path.is_empty() => Ok(Some(PathBuf::from(path))),
+            _ if host.trim().is_empty() => Ok(None),
+            _ => Err(format!(
+                "Docker is configured on {host}, not a local Unix socket: validations can only reach a socket"
+            )),
+        }
+    };
+    if let Some(host) = docker_host.filter(|host| !host.trim().is_empty()) {
+        if let Some(path) = unix(host)? {
+            return Ok(path);
+        }
+    }
+    if let Some(host) = context_host() {
+        if let Some(path) = unix(&host)? {
+            return Ok(path);
+        }
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(home) = home {
+        candidates.push(home.join(".orbstack/run/docker.sock"));
+        candidates.push(home.join(".docker/run/docker.sock"));
+        candidates.push(home.join(".colima/default/docker.sock"));
+    }
+    candidates.push(PathBuf::from("/var/run/docker.sock"));
+    candidates
+        .into_iter()
+        .find(|path| exists(path))
+        .ok_or_else(|| {
+            "no Docker socket found on this host: start Docker (OrbStack, Docker Desktop or Colima)"
+                .to_string()
+        })
 }
 
 /// Why nothing can be confined on this host. `subject` is what would have run.
@@ -466,6 +579,13 @@ impl Confinement {
 
     pub fn mechanism(&self) -> Mechanism {
         self.mechanism
+    }
+
+    /// This confinement with `socket` reachable, for a project whose human
+    /// opened Docker to its validations (KT-1433).
+    pub fn with_docker_socket(mut self, socket: PathBuf) -> Self {
+        self.policy.docker_socket = Some(socket);
+        self
     }
 
     pub fn policy(&self) -> &SandboxPolicy {

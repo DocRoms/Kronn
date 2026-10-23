@@ -52,6 +52,7 @@ import { ProjectDependenciesBlock } from './project/ProjectDependenciesBlock';
 import { ProjectGithubRow } from './project/ProjectGithubRow';
 import { invalidateCachedResource, projectGitCacheKey } from '../hooks/useCachedResource';
 import { ProjectAgentFilesSetting } from './ProjectAgentFilesSetting';
+import { ProjectValidationsAccessSetting } from './ProjectValidationsAccessSetting';
 import { ProjectDocsLocationSetting } from './ProjectDocsLocationSetting';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
 import { rememberProjectRepositoryResourcesTab } from '../lib/projectRepositoryResourcesTab';
@@ -2349,6 +2350,7 @@ export function ProjectCard({
                 />
               </section>
               <ProjectAgentFilesSetting projectId={proj.id} t={t} />
+              <ProjectValidationsAccessSetting projectId={proj.id} t={t} />
               <ProjectDocsLocationSetting projectId={proj.id} t={t} />
               <div className="dash-delete-zone" data-testid="project-overview-delete-zone">
                 {deleteConfirmId === proj.id ? (

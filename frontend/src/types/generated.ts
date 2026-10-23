@@ -357,9 +357,6 @@ export type AgentEffectiveAccess = { agent: AgentType, full_access: boolean,
  */
 reason?: string, };
 
-/**
- * Where Kronn writes a project's agent files (KT-971).
- */
 export type AgentFilesPolicy = "repo" | "outside";
 
 export type AgentProfile = { id: string, name: string, persona_name: string, role: string, avatar: string, color: string, category: ProfileCategory, persona_prompt: string, default_engine?: string | null, is_builtin: boolean,
@@ -7259,6 +7256,16 @@ published: boolean,
  */
 sync_status?: ProjectRepositoryResourceStatus, };
 
+export type ProjectValidationsAccess = { access: ValidationsAccess,
+/**
+ * The Docker socket a validation would reach on this host.
+ */
+docker_socket?: string,
+/**
+ * Why no Docker socket is usable on this host.
+ */
+docker_error?: string, };
+
 /**
  * Project defaults for worktree preparation hooks. Workflow hooks override them
  * field by field; omitted fields inherit the project value.
@@ -9164,6 +9171,8 @@ dir?: string | null, };
  */
 export type SetProjectGithubConnectionRequest = { mode: GithubConnectionMode, token?: string, };
 
+export type SetProjectValidationsAccess = { access: ValidationsAccess, };
+
 export type SetRecoveryResponse = {
 /**
  * The off-machine copy the user must save. With it + the passphrase, the
@@ -10913,6 +10922,14 @@ export type UsageTotals = { input_tokens: number, output_tokens: number, cache_c
 export type ValidationBlock = "no_local_run" | "audit_running" | "run_not_completed" | "no_linked_discussion" | "discussion_missing" | "foreign_discussion" | "not_finished" | "repo_run_not_committed" | "repo_steps_to_recheck" | "repo_td_open";
 
 export type ValidationReason = "audit_validation" | "validation_card" | "acknowledged" | "revalidation" | "confirmed" | "human_owned";
+
+/**
+ * Where Kronn writes a project's agent files (KT-971).
+ * How far a project's integration validations reach beyond the lane sandbox
+ * (KT-1433). Only a human sets it: the Docker socket is the host's root, and
+ * `Full` runs the worker's tree with the backend's own rights.
+ */
+export type ValidationsAccess = "sandbox" | "docker" | "full";
 
 /**
  * Where a validation state comes from (KT-1199): the run this instance

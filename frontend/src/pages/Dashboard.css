@@ -1068,6 +1068,30 @@ button.dash-badge-tech-debt {
   color: rgb(var(--kr-error-rgb));
 }
 
+/* KT-1433 — full access to a project's validations needs a confirmed warning */
+.project-validations-access-warning {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-3);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.5);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-primary);
+}
+
+.project-validations-access-warning p {
+  margin: 0;
+  color: var(--kr-text-faint);
+}
+
+.project-validations-access-warning-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--kr-sp-2);
+}
+
 /* KT-263 — project AI doc folder */
 .project-docs-location {
   margin-top: var(--kr-sp-6);

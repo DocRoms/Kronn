@@ -107,6 +107,69 @@ pub fn set_agent_files_policy(
     Ok(changed > 0)
 }
 
+/// How far this project's integration validations reach (KT-1433). An unknown
+/// project reads as the default, the sandbox alone.
+pub fn validations_access(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<crate::models::ValidationsAccess> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT validations_access FROM projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value
+        .as_deref()
+        .map(crate::models::ValidationsAccess::parse)
+        .unwrap_or_default())
+}
+
+/// Returns false when the project does not exist.
+pub fn set_validations_access(
+    conn: &Connection,
+    project_id: &str,
+    access: crate::models::ValidationsAccess,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE projects SET validations_access = ?2 WHERE id = ?1",
+        params![project_id, access.as_str()],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Whether a human granted `capability` to this discussion's runs (KT-1433).
+pub fn discussion_capability_granted(
+    conn: &Connection,
+    discussion_id: &str,
+    capability: &str,
+) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM discussion_capability_grants WHERE discussion_id = ?1 AND capability = ?2",
+            params![discussion_id, capability],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+pub fn grant_discussion_capability(
+    conn: &Connection,
+    discussion_id: &str,
+    capability: &str,
+    granted_by: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO discussion_capability_grants (discussion_id, capability, granted_by, granted_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (discussion_id, capability) DO NOTHING",
+        params![discussion_id, capability, granted_by, chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 /// The project's AI doc folder override (KT-263); `None` for an unknown
 /// project or no override.
 pub fn project_docs_dir(conn: &Connection, project_id: &str) -> Result<Option<String>> {

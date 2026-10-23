@@ -22,6 +22,7 @@ import { MatrixText } from './MatrixText';
 import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
 import { PlanningActionCard } from './PlanningActionCard';
+import { requiresUserAction } from '../lib/orchestrationFold';
 import { DiscussionQuestionCard } from './DiscussionQuestionCard';
 import { ImportantMessageCard } from './ImportantMessageCard';
 import { SourceCitationChip } from './SourceCitationChip';
@@ -466,6 +467,10 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   const isFragment = msg.recovered_partial === true;
   const [fragmentOpen, setFragmentOpen] = useState(false);
   const [orchestratorDetailsOpen, setOrchestratorDetailsOpen] = useState(false);
+  // A notice that asks the human to decide (a card Kronn posted) is never
+  // folded behind "details": the decision would stay out of sight.
+  const orchestratorAsks = isOrchestrator && requiresUserAction(msg);
+  const orchestratorOpen = orchestratorDetailsOpen || orchestratorAsks;
 
   const orchestratorPreview = useMemo(() => {
     if (!isOrchestrator) return '';
@@ -959,7 +964,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             )}
           </div>
           <div className="disc-msg-header-actions">
-            {isOrchestrator && (
+            {isOrchestrator && !orchestratorAsks && (
               <button
                 type="button"
                 className="disc-msg-orchestrator-toggle"
@@ -1114,14 +1119,16 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                     sourceMessageId={msg.id}
                     serverEventOnly
                   />
-                  {!orchestratorDetailsOpen && (
+                  {!orchestratorOpen && (
                     <p className="disc-msg-orchestrator-preview">{orchestratorPreview}</p>
                   )}
-                  {orchestratorDetailsOpen && (
+                  {orchestratorOpen && (
                     <MentionDiscussionAgentContext.Provider value={defaultAgent}>
                       <MentionAwareMessageBody
                         content={cleaned}
                         discussionId={discussionId}
+                        // A card finds its durable row by this message's id.
+                        sourceMessageId={msg.id}
                       />
                     </MentionDiscussionAgentContext.Provider>
                   )}
