@@ -305,7 +305,7 @@ import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
 import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
-import type { AgentFilesPolicy, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
+import type { AgentFilesPolicy, ProjectValidationsAccess, ValidationsAccess, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -1017,6 +1017,10 @@ export const projects = {
   /** Where Kronn writes this project's agent files (KT-971). */
   agentFiles: (id: string) =>
     api<ProjectAgentFiles>('GET', `/projects/${encodeURIComponent(id)}/agent-files`),
+  validationsAccess: (id: string) =>
+    api<ProjectValidationsAccess>('GET', `/projects/${encodeURIComponent(id)}/validations-access`),
+  setValidationsAccess: (id: string, access: ValidationsAccess) =>
+    api<ProjectValidationsAccess>('PUT', `/projects/${encodeURIComponent(id)}/validations-access`, { access }),
   setAgentFiles: (id: string, policy: AgentFilesPolicy) =>
     api<ProjectAgentFiles>('PUT', `/projects/${encodeURIComponent(id)}/agent-files`, { policy }),
   /** Where the project keeps its AI doc, and its own override (KT-263). */

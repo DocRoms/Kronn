@@ -219,20 +219,34 @@ pub async fn answer(
         Err(refusal) => return *refusal,
     };
     let resolution_discussion_id = discussion_id.clone();
+    let pseudo_for_grant = pseudo.clone();
     let result = state
         .db
         .with_conn(move |conn| {
             let _lease = lease;
-            Ok(discussion_questions::answer(
+            let answered = discussion_questions::answer(
                 conn,
                 &resolution_discussion_id,
                 &question_id,
                 &request,
                 &pseudo,
                 email.as_deref(),
-            ))
+            );
+            // KT-1433: an elevation is recorded with its answer, on the same
+            // connection, so an answered card never leaves the grant unwritten.
+            let elevated = match &answered {
+                Ok(question) => record_elevation(conn, question, &pseudo_for_grant),
+                Err(_) => None,
+            };
+            Ok((answered, elevated))
         })
         .await;
+    let result = result.map(|(answered, elevated)| {
+        if let Some(exec_id) = elevated {
+            resume_after_elevation(&state, exec_id);
+        }
+        answered
+    });
     match result {
         Ok(Ok(question)) => {
             // Wake the durable queue promptly; replay never enqueues a second job.
@@ -583,4 +597,54 @@ mod tests {
             .await
             .unwrap();
     }
+}
+
+/// A human answered a Docker elevation card Kronn posted (KT-1433): record the
+/// grant at the scope chosen and return the execution to resume. Any other
+/// card, or one not posted by Kronn, is left alone.
+fn record_elevation(
+    conn: &rusqlite::Connection,
+    question: &DiscussionQuestion,
+    human: &str,
+) -> Option<String> {
+    if !question
+        .source_message_id
+        .starts_with(crate::db::orchestration::DOCKER_ELEVATION_PREFIX)
+    {
+        return None;
+    }
+    let choice = question
+        .answer
+        .as_ref()
+        .and_then(|answer| answer.selected_option_ids.first().cloned())?;
+    match crate::db::orchestration::record_docker_elevation(
+        conn,
+        &question.source_message_id,
+        &choice,
+        human,
+    ) {
+        Ok(Some(exec_id)) => Some(exec_id),
+        Ok(None) => {
+            if choice != "deny" {
+                tracing::warn!(question = %question.id, %choice, "Docker elevation answer granted nothing");
+            }
+            None
+        }
+        Err(error) => {
+            tracing::warn!(question = %question.id, %error, "Docker elevation not recorded");
+            None
+        }
+    }
+}
+
+/// Resume the integration a Docker elevation was granted for.
+fn resume_after_elevation(state: &AppState, exec_id: String) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let resumed =
+            crate::api::orchestration::resume_execution(State(state), Path(exec_id.clone())).await;
+        if !resumed.0.success {
+            tracing::warn!(execution_id = %exec_id, error = ?resumed.0.error, "integration not resumed after a Docker elevation");
+        }
+    });
 }

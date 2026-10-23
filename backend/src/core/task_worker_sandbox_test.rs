@@ -1418,3 +1418,160 @@ fn vitest_loads_the_worker_config_under_the_os_sandbox() {
         capability.reason
     );
 }
+
+// ── KT-1433: a project's validations may reach the Docker socket ─────────
+
+#[test]
+fn the_seatbelt_profile_opens_the_docker_socket_alone_and_only_when_given() {
+    assert!(!seatbelt_profile(&[PathBuf::from("/lane/worktree")]).contains("network-outbound"));
+    let profile = seatbelt_profile_with(
+        &[PathBuf::from("/lane/worktree")],
+        Some(Path::new("/Users/me/.orbstack/run/docker.sock")),
+    );
+    let outbound: Vec<&str> = profile
+        .lines()
+        .skip_while(|line| !line.starts_with("(allow network-outbound"))
+        .take_while(|line| *line != ")")
+        .collect();
+    assert_eq!(
+        outbound,
+        [
+            "(allow network-outbound",
+            "  (remote unix-socket (path-literal \"/Users/me/.orbstack/run/docker.sock\"))",
+        ],
+        "{profile}"
+    );
+    assert!(
+        !profile.contains("(remote ip"),
+        "no TCP endpoint is opened: {profile}"
+    );
+    assert!(
+        profile.trim_end().ends_with("(regex #\"^/dev/pty\"))"),
+        "the terminal denial stays the last rule: {profile}"
+    );
+}
+
+#[test]
+fn bubblewrap_binds_the_docker_socket_back_after_emptying_run() {
+    let args = bubblewrap_args_with(
+        &[PathBuf::from("/lane/worktree")],
+        Some(Path::new("/run/docker.sock")),
+    );
+    let run = args.iter().position(|arg| arg == "/run").unwrap();
+    let bind = args
+        .windows(3)
+        .position(|w| w == ["--bind", "/run/docker.sock", "/run/docker.sock"])
+        .expect("the socket is bound");
+    assert!(bind > run, "bound after /run is emptied: {args:?}");
+    assert!(args.contains(&"--unshare-net".to_string()), "{args:?}");
+    assert!(!bubblewrap_args(&[PathBuf::from("/lane/worktree")])
+        .contains(&"/run/docker.sock".to_string()));
+}
+
+#[test]
+fn a_confined_command_with_the_docker_socket_gets_it_as_docker_host() {
+    let layout = layout();
+    let mut policy = policy_of(&layout);
+    policy.docker_socket = Some(PathBuf::from("/tmp/x/docker.sock"));
+    let confined = confine(
+        Mechanism::Seatbelt,
+        &policy,
+        &probe("make", &["iso-deps"], &layout.worktree),
+    );
+    let host: Vec<_> = confined
+        .env
+        .iter()
+        .filter(|(name, _)| name == "DOCKER_HOST")
+        .collect();
+    assert_eq!(host.len(), 1, "{:?}", confined.env);
+    assert_eq!(host[0].1, OsString::from("unix:///tmp/x/docker.sock"));
+}
+
+#[test]
+fn the_docker_socket_comes_from_docker_host_then_the_context_then_known_paths() {
+    let home = Path::new("/Users/me");
+    let none = || None;
+    let exists = |_: &Path| false;
+    assert_eq!(
+        docker_socket_from(Some("unix:///custom/d.sock"), none, Some(home), exists).unwrap(),
+        PathBuf::from("/custom/d.sock")
+    );
+    assert!(
+        docker_socket_from(Some("tcp://10.0.0.2:2376"), none, Some(home), exists)
+            .unwrap_err()
+            .contains("not a local Unix socket")
+    );
+    assert_eq!(
+        docker_socket_from(
+            None,
+            || Some("unix:///Users/me/.orbstack/run/docker.sock".into()),
+            Some(home),
+            exists
+        )
+        .unwrap(),
+        PathBuf::from("/Users/me/.orbstack/run/docker.sock")
+    );
+    assert_eq!(
+        docker_socket_from(None, none, Some(home), |p: &Path| p
+            .ends_with(".colima/default/docker.sock"))
+        .unwrap(),
+        PathBuf::from("/Users/me/.colima/default/docker.sock")
+    );
+    assert!(docker_socket_from(None, none, Some(home), exists)
+        .unwrap_err()
+        .contains("no Docker socket"));
+}
+
+/// The live proof: under the real OS sandbox a Unix socket stands for Docker's.
+/// Refused without the allowance, reached with it.
+#[cfg(unix)]
+#[test]
+fn the_os_sandbox_reaches_the_docker_socket_only_when_the_policy_opens_it() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    if !Path::new("/usr/bin/python3").exists() {
+        eprintln!("skipped: /usr/bin/python3 is not installed");
+        return;
+    }
+    let dir = tempfile::Builder::new()
+        .prefix("kt1433")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let socket = dir.path().join("d.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let layout = layout();
+    let connect = probe(
+        "/usr/bin/python3",
+        &[
+            "-c",
+            "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])",
+            socket.to_str().unwrap(),
+        ],
+        &layout.worktree,
+    );
+    let run = |docker_socket: Option<PathBuf>| {
+        let mut policy = policy_of(&layout);
+        policy.docker_socket = docker_socket;
+        SandboxedProbeRunner::new(Ok(policy), Some(mechanism), Arc::new(ProcessProbeRunner))
+            .run(&connect)
+    };
+
+    let closed = run(None);
+    assert!(
+        !closed.success,
+        "the socket must stay closed by default: {closed:?}"
+    );
+    assert!(
+        listener.accept().is_err(),
+        "the default policy reached the socket"
+    );
+
+    let open = run(Some(socket.clone()));
+    assert!(
+        open.success,
+        "the opened socket must be reachable: {open:?}"
+    );
+    assert!(listener.accept().is_ok(), "the connection never arrived");
+}

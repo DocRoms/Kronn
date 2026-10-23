@@ -215,6 +215,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       get: resolve(null),
       agentFiles: resolve({ policy: 'repo' }),
       setAgentFiles: resolve({ policy: 'repo' }),
+  validationsAccess: resolve({ access: 'sandbox' }),
+  setValidationsAccess: resolve({ access: 'sandbox' }),
       docsLocation: resolve({ override_dir: null, default_dir: null, effective_dir: 'docs', source: 'detected', refused: null }),
       setDocsLocation: resolve({ override_dir: null, default_dir: null, effective_dir: 'docs', source: 'detected', refused: null }),
       scan: resolve([]),

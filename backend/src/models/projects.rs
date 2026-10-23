@@ -24,6 +24,38 @@ pub struct ProjectWorkspace {
 }
 
 /// Where Kronn writes a project's agent files (KT-971).
+/// How far a project's integration validations reach beyond the lane sandbox
+/// (KT-1433). Only a human sets it: the Docker socket is the host's root, and
+/// `Full` runs the worker's tree with the backend's own rights.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ValidationsAccess {
+    #[default]
+    Sandbox,
+    Docker,
+    Full,
+}
+
+impl ValidationsAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sandbox => "sandbox",
+            Self::Docker => "docker",
+            Self::Full => "full",
+        }
+    }
+
+    /// An unknown stored value reads as the sandbox: never wider than asked.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "docker" => Self::Docker,
+            "full" => Self::Full,
+            _ => Self::Sandbox,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "snake_case")]

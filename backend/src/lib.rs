@@ -1137,6 +1137,8 @@ fn is_destructive(method: &axum::http::Method, path: &str) -> bool {
         || path.ends_with("/cleanup-orphan-env")
         || path.ends_with("/context-audit/baseline")
         || path.ends_with("/audit-attestation")
+        // KT-1433: opening the host (Docker, or everything) to a project's validations.
+        || (method != axum::http::Method::GET && path.ends_with("/validations-access"))
 }
 
 /// Pure auth decision for a request that already cleared the always-open
@@ -1652,6 +1654,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/agent-files",
             get(api::projects::agent_files::get).put(api::projects::agent_files::set),
+        )
+        .route(
+            "/api/projects/{id}/validations-access",
+            get(api::projects::validations_access::get).put(api::projects::validations_access::set),
         )
         .route(
             "/api/projects/{id}/repository-resources",
@@ -3536,6 +3542,42 @@ mod auth_tests {
     const RESET: &str = "/api/setup/reset";
     const IMPORT: &str = "/api/config/import";
     const NORMAL: &str = "/api/projects";
+
+    /// KT-1433: widening a project's validations (Docker socket, or no sandbox)
+    /// is a human's decision: gated like a destructive request, and absent from
+    /// every bridge token's routes.
+    #[test]
+    fn widening_validations_access_is_human_only() {
+        const ACCESS: &str = "/api/projects/p1/validations-access";
+        assert!(super::is_destructive(&Method::PUT, ACCESS));
+        assert!(!super::is_destructive(&Method::GET, ACCESS));
+        assert!(!auth_allows(
+            &Method::PUT,
+            ACCESS,
+            false,
+            true,
+            false,
+            false
+        ));
+        for method in ["GET", "PUT", "POST"] {
+            assert!(
+                crate::core::bridge_token::route_for(
+                    method,
+                    "/api/projects/{id}/validations-access"
+                )
+                .is_none(),
+                "{method} must not be a bridge route"
+            );
+        }
+        assert!(
+            crate::core::bridge_token::route_for(
+                "POST",
+                "/api/discussions/{id}/questions/{question_id}/answer"
+            )
+            .is_none(),
+            "an agent token cannot answer the elevation card"
+        );
+    }
 
     #[test]
     fn destructive_from_remote_is_denied_even_when_auth_off() {

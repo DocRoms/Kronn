@@ -3151,12 +3151,33 @@ async fn validate_and_apply(
         .as_deref()
         .ok_or_else(|| ProvisionError::Internal("run has no pinned target branch".into()))?;
     let generic = BlockedReasonCode::IntegrationRefused;
+    let reach = ValidationReach::of_run(db, run.project_id.as_deref(), &run.discussion_id).await;
     let mut rebuilds = 0;
     loop {
-        if let Some(failure) =
-            run_pending_validations(db, exec_id, &run.validations, child, &candidate.merge_sha)
-                .await?
+        if let Some(failure) = run_pending_validations(
+            db,
+            exec_id,
+            &run.validations,
+            child,
+            &candidate.merge_sha,
+            reach.launch(),
+        )
+        .await?
         {
+            // The command never reached the worker's code: the worker cannot fix
+            // it, so the delivery stays approved and a human gets the fix.
+            if let Some(cause) = reach.environment_cause(&failure) {
+                let reason = format!(
+                    "validation environment: `{}` could not run ({})",
+                    failure.command,
+                    first_line(&failure.output)
+                );
+                let outcome = hold_integration(db, exec_id, generic, reason, &cause.fix).await;
+                if cause.docker_elevation && outcome.is_ok() {
+                    post_docker_elevation(db, exec_id).await;
+                }
+                return outcome;
+            }
             let report = ReworkReport::validation(failure);
             send_back(db, exec_id, &report).await?;
             return Ok(IntegrationOutcome::SentBack {
@@ -4771,6 +4792,202 @@ async fn send_back(
     }
 }
 
+/// How far one run's validations reach beyond the lane sandbox (KT-1433): the
+/// project's setting, widened to Docker by a grant on the run's discussion.
+struct ValidationReach {
+    access: crate::models::ValidationsAccess,
+    /// Resolved only when the access includes Docker.
+    socket: Option<Result<std::path::PathBuf, String>>,
+}
+
+/// The project's access, widened to Docker by a grant on the discussion; a grant
+/// never narrows what the project already has.
+fn widened_access(
+    project: crate::models::ValidationsAccess,
+    discussion_docker: bool,
+) -> crate::models::ValidationsAccess {
+    use crate::models::ValidationsAccess;
+    match project {
+        ValidationsAccess::Sandbox if discussion_docker => ValidationsAccess::Docker,
+        access => access,
+    }
+}
+
+/// What a validation is launched with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ValidationReachLaunch {
+    Sandbox,
+    Docker(std::path::PathBuf),
+    /// No sandbox: a human chose full access for the project.
+    Host,
+}
+
+/// Why a validation could not run, as the human fixes it.
+struct EnvironmentCause {
+    fix: String,
+    /// The sandbox kept Docker closed: an elevation card can open it.
+    docker_elevation: bool,
+}
+
+/// The capability an elevation card grants a discussion's runs.
+const DOCKER_CAPABILITY: &str = "validations_docker";
+
+impl ValidationReach {
+    async fn of_run(db: &Database, project_id: Option<&str>, discussion_id: &str) -> Self {
+        use crate::models::ValidationsAccess;
+        let project = project_id.map(str::to_string);
+        let discussion = discussion_id.to_string();
+        let access = db
+            .with_read_conn(move |conn| {
+                let access = match &project {
+                    Some(id) => crate::db::projects::validations_access(conn, id)?,
+                    None => ValidationsAccess::Sandbox,
+                };
+                let granted = crate::db::projects::discussion_capability_granted(
+                    conn,
+                    &discussion,
+                    DOCKER_CAPABILITY,
+                )?;
+                Ok(widened_access(access, granted))
+            })
+            .await
+            .unwrap_or(ValidationsAccess::Sandbox);
+        let socket = if access == ValidationsAccess::Docker {
+            Some(
+                tokio::task::spawn_blocking(crate::core::task_worker_sandbox::host_docker_socket)
+                    .await
+                    .unwrap_or_else(|error| Err(error.to_string())),
+            )
+        } else {
+            None
+        };
+        Self { access, socket }
+    }
+
+    fn launch(&self) -> ValidationReachLaunch {
+        use crate::models::ValidationsAccess;
+        match (self.access, &self.socket) {
+            (ValidationsAccess::Full, _) => ValidationReachLaunch::Host,
+            (ValidationsAccess::Docker, Some(Ok(path))) => {
+                ValidationReachLaunch::Docker(path.clone())
+            }
+            _ => ValidationReachLaunch::Sandbox,
+        }
+    }
+
+    fn environment_cause(&self, failure: &ValidationFailure) -> Option<EnvironmentCause> {
+        environment_cause(self.access, self.socket.as_ref(), failure)
+    }
+}
+
+/// How many of the last non-empty output lines may carry Docker's refusal.
+const DOCKER_REFUSAL_TAIL_LINES: usize = 6;
+
+/// How the Docker CLI says it could not reach its daemon (lower-cased).
+const DOCKER_REFUSALS: &[&str] = &[
+    "permission denied while trying to connect to the docker api",
+    "permission denied while trying to connect to the docker daemon",
+    "failed to connect to the docker api",
+    "cannot connect to the docker daemon",
+];
+
+/// Output of a test runner that ran and failed: the worker's to fix, even when
+/// its log also mentions Docker (lower-cased).
+const TEST_FAILURE_MARKERS: &[&str] = &[
+    "test result: failed",
+    "assertionerror",
+    "tests failed",
+    "failures:",
+    "--- fail:",
+];
+
+/// `Some` when `failure` comes from the host rather than the worker's code:
+/// Docker unreachable, or a launch the sandbox refused. `None` means the
+/// command ran and failed: the worker's to fix.
+fn environment_cause(
+    access: crate::models::ValidationsAccess,
+    socket: Option<&Result<std::path::PathBuf, String>>,
+    failure: &ValidationFailure,
+) -> Option<EnvironmentCause> {
+    use crate::models::ValidationsAccess;
+    let output = failure.output.to_ascii_lowercase();
+    if failure.exit_code.is_none() && output.trim_start().starts_with("refused:") {
+        return Some(EnvironmentCause {
+            fix: format!(
+                "Kronn n'a pas pu lancer la validation : {}. Corrige ce point sur cette machine, puis reprends l'intégration.",
+                first_line(&failure.output)
+            ),
+            docker_elevation: false,
+        });
+    }
+    // The Docker CLI's own refusal, as the last thing the command printed: a
+    // test log that merely quotes it, then fails on an assertion, stays red.
+    let tail: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .rev()
+        .take(DOCKER_REFUSAL_TAIL_LINES)
+        .collect();
+    let refusal = tail
+        .iter()
+        .find(|line| DOCKER_REFUSALS.iter().any(|refusal| line.contains(refusal)))?;
+    if TEST_FAILURE_MARKERS
+        .iter()
+        .any(|marker| output.contains(marker))
+    {
+        return None;
+    }
+    let denied =
+        refusal.contains("permission denied") || refusal.contains("operation not permitted");
+    Some(match (access, socket) {
+        (ValidationsAccess::Sandbox, _) if denied => EnvironmentCause {
+            fix: "Le bac à sable des validations garde Docker fermé pour ce projet. Autorise Docker sur la carte d'élévation (pour cette discussion ou pour le projet) : l'intégration reprend seule.".to_string(),
+            docker_elevation: true,
+        },
+        (ValidationsAccess::Docker, Some(Ok(socket))) if denied => EnvironmentCause {
+            fix: format!(
+                "Docker est ouvert aux validations, mais le socket {} a refusé la connexion. Vérifie qu'il appartient à ton utilisateur (redémarre Docker au besoin), puis reprends l'intégration.",
+                socket.display()
+            ),
+            docker_elevation: false,
+        },
+        (ValidationsAccess::Docker, Some(Err(reason))) => EnvironmentCause {
+            fix: format!(
+                "Docker est ouvert aux validations, mais aucun socket n'est utilisable : {reason}. Démarre Docker, puis reprends l'intégration."
+            ),
+            docker_elevation: false,
+        },
+        _ => EnvironmentCause {
+            fix: "Docker ne répond pas. Démarre-le (OrbStack, Docker Desktop ou Colima), vérifie `docker info`, puis reprends l'intégration.".to_string(),
+            docker_elevation: false,
+        },
+    })
+}
+
+/// Ask the human, on a card Kronn posts, to open Docker to the validations of
+/// this execution's discussion or project. Best effort: the refusal message
+/// already names the fix.
+async fn post_docker_elevation(db: &Database, exec_id: &str) {
+    let id = exec_id.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| crate::db::orchestration::post_docker_elevation_card(conn, &id))
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, %error, "Docker elevation card not posted");
+    }
+}
+
+/// The first non-empty line of `text`, bounded.
+fn first_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    line.chars().take(240).collect()
+}
+
 /// The validation that went red on a candidate, as the worker and the principal
 /// need it: the command, how it ended and what it printed.
 #[derive(Debug, PartialEq, Eq)]
@@ -4789,6 +5006,7 @@ async fn run_pending_validations(
     validations: &[crate::models::ValidationSpec],
     child: &std::path::Path,
     merge_sha: &str,
+    reach: ValidationReachLaunch,
 ) -> Result<Option<ValidationFailure>, ProvisionError> {
     for spec in validations {
         let id = exec_id.to_string();
@@ -4813,7 +5031,8 @@ async fn run_pending_validations(
         // is (a Codex or a joined CLI worker never got the Claude launch's
         // stamp): the lane it creates here is Kronn's, so it is marked first.
         mark_lane_target_for_worker(exec_id, child).await;
-        let (code, duration, summary) = run_one_validation(spec, child).await;
+        let (code, duration, summary) =
+            run_one_validation_reaching(spec, child, reach.clone()).await;
         let id = exec_id.to_string();
         let spec = spec.clone();
         let command = spec.command.clone();
@@ -4851,16 +5070,34 @@ async fn run_pending_validations(
 /// `.cargo/config.toml` are code. Every command of the validation — Cargo's
 /// target resolution included — therefore runs under the lane's sandbox
 /// profile (KT-1268), and a host that has none refuses the validation.
+#[cfg(test)]
 async fn run_one_validation(
     spec: &crate::models::ValidationSpec,
     cwd: &std::path::Path,
 ) -> (Option<i32>, i64, String) {
+    run_one_validation_reaching(spec, cwd, ValidationReachLaunch::Sandbox).await
+}
+
+/// [`run_one_validation`] at the reach a human gave the run's project or
+/// discussion (KT-1433): the sandbox, the sandbox plus the Docker socket, or
+/// the backend's own rights.
+async fn run_one_validation_reaching(
+    spec: &crate::models::ValidationSpec,
+    cwd: &std::path::Path,
+    reach: ValidationReachLaunch,
+) -> (Option<i32>, i64, String) {
     // Probing the launcher and provisioning the lane start a process and touch
     // the disk: off the async worker.
     let launch_cwd = cwd.to_path_buf();
-    let launch = tokio::task::spawn_blocking(move || validation_launch(&launch_cwd))
-        .await
-        .unwrap_or_else(|error| Err(format!("the sandbox check did not complete: {error}")));
+    let launch = tokio::task::spawn_blocking(move || match reach {
+        ValidationReachLaunch::Host => Ok(ValidationLaunch::Unconfined),
+        ValidationReachLaunch::Docker(socket) => {
+            validation_launch(&launch_cwd).map(|launch| launch.reaching(socket))
+        }
+        ValidationReachLaunch::Sandbox => validation_launch(&launch_cwd),
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("the sandbox check did not complete: {error}")));
     match launch {
         Ok(launch) => run_one_validation_with(spec, cwd, &launch).await,
         // Recorded like any failed validation: recovery cannot advance the
@@ -4890,19 +5127,26 @@ async fn run_one_validation_with(
 
 /// How the commands of one validation are started (KT-1268).
 enum ValidationLaunch {
-    /// Under the lane's sandbox: the only variant a shipped build has.
+    /// Under the lane's sandbox.
     Confined(crate::core::task_worker_sandbox::Confinement),
-    /// With the backend's rights. Tests only: most of them validate a scripted
-    /// command in a temporary directory that is not a lane.
-    #[cfg(test)]
+    /// With the backend's rights: a project whose human chose full access
+    /// (KT-1433), and tests that validate a scripted command in a temporary
+    /// directory that is not a lane.
     Unconfined,
 }
 
 impl ValidationLaunch {
+    /// This launch with the Docker socket reachable, when one is given.
+    fn reaching(self, socket: std::path::PathBuf) -> Self {
+        match self {
+            Self::Confined(confinement) => Self::Confined(confinement.with_docker_socket(socket)),
+            launch => launch,
+        }
+    }
+
     fn confinement(&self) -> Option<&crate::core::task_worker_sandbox::Confinement> {
         match self {
             Self::Confined(confinement) => Some(confinement),
-            #[cfg(test)]
             Self::Unconfined => None,
         }
     }
@@ -20515,6 +20759,100 @@ pub(crate) mod tests {
         assert!(!marker.exists(), "worker-written code ran unconfined");
     }
 
+    fn failure(exit_code: Option<i32>, output: &str) -> ValidationFailure {
+        ValidationFailure {
+            command: "make iso-deps".into(),
+            exit_code,
+            output: output.into(),
+        }
+    }
+
+    /// KT-1433: a discussion grant widens a sandboxed project to Docker and
+    /// never narrows a project a human opened further.
+    #[test]
+    fn a_discussion_grant_only_widens_the_projects_access() {
+        use crate::models::ValidationsAccess::{Docker, Full, Sandbox};
+        assert_eq!(widened_access(Sandbox, false), Sandbox);
+        assert_eq!(widened_access(Sandbox, true), Docker);
+        assert_eq!(widened_access(Docker, false), Docker);
+        assert_eq!(widened_access(Docker, true), Docker);
+        assert_eq!(widened_access(Full, false), Full);
+        assert_eq!(widened_access(Full, true), Full);
+    }
+
+    /// KT-1433: a validation that never reached the worker's code is the
+    /// host's to fix, never a reason to send the delivery back.
+    #[test]
+    fn a_validation_blocked_by_its_environment_is_not_the_workers_to_fix() {
+        use crate::models::ValidationsAccess::{Docker, Sandbox};
+        let denied = failure(
+            Some(2),
+            "permission denied while trying to connect to the docker API at unix:///Users/me/.orbstack/run/docker.sock",
+        );
+        let cause = environment_cause(Sandbox, None, &denied).expect("the sandbox closed Docker");
+        assert!(cause.docker_elevation, "{}", cause.fix);
+
+        let down = failure(
+            Some(2),
+            "failed to connect to the docker API at unix:///Users/me/.orbstack/run/docker.sock; check if the path is correct and if the daemon is running: dial unix ... connect: no such file or directory",
+        );
+        let cause = environment_cause(Sandbox, None, &down).expect("Docker is down");
+        assert!(
+            !cause.docker_elevation,
+            "starting Docker is the fix, not an elevation"
+        );
+        assert!(cause.fix.contains("Démarre"), "{}", cause.fix);
+
+        let missing: Result<std::path::PathBuf, String> = Err("no Docker socket found".into());
+        let cause = environment_cause(Docker, Some(&missing), &denied).expect("no socket");
+        assert!(!cause.docker_elevation);
+        assert!(
+            cause.fix.contains("no Docker socket found"),
+            "{}",
+            cause.fix
+        );
+
+        let refused = failure(None, "refused: this host has no sandbox Kronn can run");
+        assert!(environment_cause(Sandbox, None, &refused).is_some());
+
+        // Romu's real outputs: `make` prefixes the Docker CLI's refusal.
+        let real = failure(
+            Some(2),
+            "Failed permission denied while trying to connect to the docker API at unix:///Users/priol/.orbstack/run/docker.sock\nmake: *** [iso-deps] Error 1",
+        );
+        assert!(
+            environment_cause(Sandbox, None, &real)
+                .unwrap()
+                .docker_elevation
+        );
+        let opened: Result<std::path::PathBuf, String> =
+            Ok("/Users/me/.orbstack/run/docker.sock".into());
+        let cause = environment_cause(Docker, Some(&opened), &denied).unwrap();
+        assert!(cause.fix.contains("a refusé la connexion"), "{}", cause.fix);
+
+        for red in [
+            // A test that quotes Docker's refusal, then fails on an assertion.
+            failure(
+                Some(1),
+                "permission denied while trying to connect to the docker API at unix:///x/docker.sock\nexpected the error above\nAssertionError: wrong message\n1 tests failed",
+            ),
+            // Docker's refusal early in a long log, then the real failure.
+            failure(
+                Some(2),
+                "permission denied while trying to connect to the docker API at unix:///x/docker.sock\nretrying with the local php\nstep 1\nstep 2\nstep 3\nstep 4\nstep 5\nstep 6\nsyntax error, unexpected token",
+            ),
+            failure(Some(1), "FAILED tests/Unit/MediaObjectImageLinkTest.php"),
+            failure(Some(101), "error[E0308]: mismatched types"),
+            failure(None, "timed out after 600s"),
+        ] {
+            assert!(
+                environment_cause(Sandbox, None, &red).is_none(),
+                "a real red validation stays the worker's: {}",
+                red.output
+            );
+        }
+    }
+
     /// The launch of a directory no test registered stays the plain one, and a
     /// registered mechanism is the one the confinement is built from.
     #[test]
@@ -23732,6 +24070,110 @@ pub(crate) mod tests {
         );
     }
 
+    /// KT-1433 — the whole elevation path, as Romu's autoCode runs lived it: an
+    /// approved delivery whose validation hits the Docker refusal is held, not
+    /// sent back; Kronn posts its elevation card; a human grant on the
+    /// discussion lets the resumed integration re-run the validation and land.
+    #[tokio::test]
+    async fn a_docker_refusal_is_held_with_an_elevation_card_and_a_grant_lands_the_delivery() {
+        let repo = init_repo();
+        let control = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let marker = format!("{:?}", control.path().join("ran").to_str().unwrap());
+        let validation = scripted_validation(
+            control.path(),
+            &[
+                "import os, sys",
+                &format!("marker = {marker}"),
+                "if not os.path.exists(marker):",
+                "    open(marker, 'w').close()",
+                "    print('docker compose run --rm php composer install')",
+                "    print('Failed permission denied while trying to connect to the docker API at unix:///Users/me/.orbstack/run/docker.sock')",
+                "    print('make: *** [iso-deps] Error 1')",
+                "    sys.exit(2)",
+            ],
+        );
+        let (execution, _, _) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "elevation",
+            "worker.txt",
+            "done",
+            vec![validation],
+        )
+        .await;
+        let before = exec_of(&db, &execution.id).await;
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+        assert!(
+            matches!(outcome, IntegrationOutcome::Refused { .. }),
+            "an environment failure is held, not sent back: {outcome:?}"
+        );
+        let held = exec_of(&db, &execution.id).await;
+        assert_eq!(held.status, TaskExecutionStatus::Interrupted);
+        assert_eq!(
+            held.attempt_no, before.attempt_no,
+            "the worker is not relaunched"
+        );
+        assert_eq!(held.dispatch_job_id, before.dispatch_job_id);
+        assert!(
+            message_row(
+                &db,
+                &format!(
+                    "orch-integration-rework:{}:{}",
+                    execution.id,
+                    before.attempt_no + 1
+                )
+            )
+            .await
+            .is_none(),
+            "no rework brief reaches the worker"
+        );
+
+        let card = format!("orch-elevation:docker:{}:0", execution.id);
+        let (room, content) = message_row(&db, &card).await.expect("the elevation card");
+        assert_eq!(room, held.parent_discussion_id);
+        assert!(content.contains("```kronn-question"), "{content}");
+        let card_id = card.clone();
+        let question: (String, String) = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT question_key, state FROM discussion_questions WHERE source_message_id = ?1",
+                    [card_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(question.0, "kronn-elevation-docker");
+        assert_eq!(question.1, "pending");
+
+        let card_id = card.clone();
+        let granted = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::record_docker_elevation(
+                    conn,
+                    &card_id,
+                    "discussion",
+                    "Romu",
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(granted.as_deref(), Some(execution.id.as_str()));
+
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(resumed.success, "{:?}", resumed.error);
+        let landed = exec_of(&db, &execution.id).await;
+        assert_eq!(landed.status, TaskExecutionStatus::Done, "{landed:?}");
+        assert!(landed.integrated_sha.is_some());
+        assert_eq!(
+            landed.attempt_no, before.attempt_no,
+            "the same delivery landed"
+        );
+    }
+
     /// DoD-1 — a joined CLI worker is re-offered the next attempt exactly as after a
     /// `request_changes`: parked `Blocked(awaiting_worker_acceptance)` until it
     /// accepts, and the instructions it receives on accepting carry the output.
@@ -24579,9 +25021,16 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
-        let result = run_pending_validations(&db, &execution.id, &[validation], &child, &merge_sha)
-            .await
-            .unwrap();
+        let result = run_pending_validations(
+            &db,
+            &execution.id,
+            &[validation],
+            &child,
+            &merge_sha,
+            ValidationReachLaunch::Sandbox,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             result, None,
             "the recorded checkpoint satisfies the command"
@@ -24642,10 +25091,16 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let failure =
-            run_pending_validations(&db, &execution.id, &[validation], &child, &merge_sha)
-                .await
-                .unwrap();
+        let failure = run_pending_validations(
+            &db,
+            &execution.id,
+            &[validation],
+            &child,
+            &merge_sha,
+            ValidationReachLaunch::Sandbox,
+        )
+        .await
+        .unwrap();
 
         assert!(failure.is_some(), "`false` is a red validation");
         let owners = worktree::lane_target_owners(repo.path());

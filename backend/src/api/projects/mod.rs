@@ -27,6 +27,7 @@ pub mod template_merge;
 mod template_provenance_tests;
 pub mod template_reinstall;
 pub mod used_skills;
+pub mod validations_access;
 
 pub use anti_hallu_inject::*;
 pub use bootstrap::*;

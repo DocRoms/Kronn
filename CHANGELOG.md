@@ -834,6 +834,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Integration validations that need Docker work again, on a human's
+  decision (KT-1433). Since 0.15.1 they run in the lane sandbox, which keeps
+  Docker closed, so `make iso-deps` and the like always failed and the
+  delivery was sent back to the worker as if its code were wrong. A
+  validation that fails because of its environment now holds the execution
+  with the fix instead, and when the sandbox closed Docker, Kronn asks on a
+  card: refuse, allow for this discussion, or allow for the project; an
+  answer that allows resumes the integration on its own. Project settings
+  gain « Accès des validations d'intégration »: sandbox only, Docker allowed
+  (the Docker socket alone is opened), or full access behind a warning.
+- DOMPurify 3.4.17 (GHSA-cg2g-xh64-v4q7, critical: a split template bypassed
+  `SAFE_FOR_TEMPLATES`; GHSA-mrv2-3pqr-j5jr, high: an `IN_PLACE` hook removing
+  a parent).
 - A release body stays under GitHub's 125,000-character limit: a CHANGELOG
   section too long for it is cut between two entries and links the full
   notes.
