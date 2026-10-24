@@ -16,7 +16,7 @@ use chrono_tz::Tz;
 use std::collections::HashMap;
 
 /// Whether `name` belongs to Kronn's built-ins (`run.*`, `time.*`, `now*`,
-/// and the repository profile's `project.*`).
+/// the repository profile's `project.*` and the workflow's `refs.*`).
 /// No declared variable, trigger field or launch value may use it, since a
 /// built-in is trusted for what produced it, not for its name.
 pub fn is_reserved_name(name: &str) -> bool {
@@ -27,13 +27,15 @@ pub fn is_reserved_name(name: &str) -> bool {
         || base.starts_with("time.")
         || base.starts_with("now")
         || base.starts_with("project.")
+        || base == "refs"
+        || base.starts_with("refs.")
 }
 
 /// The first reserved name among `names`, as a user-facing refusal.
 pub fn refuse_reserved_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
     match names.into_iter().find(|name| is_reserved_name(name)) {
         Some(name) => Err(format!(
-            "Le nom de variable `{}` est réservé à Kronn (`run.*`, `time.*`, `now*`, `project.*`) ; choisis un autre nom.",
+            "Le nom de variable `{}` est réservé à Kronn (`run.*`, `time.*`, `now*`, `project.*`, `refs.*`) ; choisis un autre nom.",
             name.trim()
         )),
         None => Ok(()),
@@ -105,6 +107,33 @@ impl TemplateContext {
     /// Set a value Kronn produces itself (`run.id`, `run.artifacts_dir`).
     pub fn set_builtin(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.builtins.insert(key.into(), value.into());
+    }
+
+    /// The workflow's refs (KT-1448) as `refs.<name>`; an id outside the safe
+    /// charset is left out, so a step rendering it fails instead.
+    pub fn set_refs(&mut self, refs: &crate::models::WorkflowRefs) {
+        for (name, reference) in refs {
+            if crate::workflows::refs::is_valid_name(name)
+                && crate::workflows::refs::is_safe_id(&reference.id)
+            {
+                self.builtins
+                    .insert(format!("refs.{name}"), reference.id.clone());
+            }
+        }
+    }
+
+    /// `KRONN_REF_<NAME>` → id for every ref set by [`Self::set_refs`].
+    pub fn refs_env(&self) -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> = self
+            .builtins
+            .iter()
+            .filter_map(|(key, id)| {
+                crate::workflows::refs::ref_name_of_path(key)
+                    .map(|name| (crate::workflows::refs::env_name(name), id.clone()))
+            })
+            .collect();
+        env.sort();
+        env
     }
 
     /// Set an issue context (from tracker trigger).
@@ -2128,6 +2157,42 @@ mod tests {
         ] {
             assert!(!is_reserved_name(name), "{name}");
         }
+    }
+
+    /// KT-1448 — `refs.*` is Kronn's: only the workflow's refs set it, an id
+    /// outside the safe charset is never rendered, and Exec gets the env form.
+    #[test]
+    fn refs_render_only_from_the_workflow_and_only_safe_ids() {
+        use crate::models::{ResourceRef, ResourceRefKind};
+        assert!(is_reserved_name("refs.board"));
+        assert!(is_reserved_name("refs"));
+        assert!(!is_reserved_name("refsheet"));
+        let mut ctx = TemplateContext::new();
+        ctx.set("refs.board", "from-a-launch-value");
+        let refs = [
+            ("board", "page-1"),
+            ("unsafe", "a;rm -rf /"),
+            ("Bad", "page-2"),
+        ]
+        .into_iter()
+        .map(|(name, id)| {
+            (
+                name.to_string(),
+                ResourceRef {
+                    kind: ResourceRefKind::Page,
+                    id: id.to_string(),
+                },
+            )
+        })
+        .collect();
+        ctx.set_refs(&refs);
+        assert_eq!(ctx.render_strict("{{refs.board}}").unwrap(), "page-1");
+        assert!(ctx.render_strict("{{refs.unsafe}}").is_err());
+        assert!(ctx.render_strict("{{refs.missing}}").is_err());
+        assert_eq!(
+            ctx.refs_env(),
+            vec![("KRONN_REF_BOARD".to_string(), "page-1".to_string())]
+        );
     }
 
     #[test]

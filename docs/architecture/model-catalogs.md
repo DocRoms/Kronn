@@ -267,7 +267,7 @@ or importing a QP preserves its editable `agent_settings`, while it does not
 reconstruct historic discussion launch overrides.
 [src: file: backend/src/db/discussion_effort.rs:1#Immutable]
 [src: file: backend/src/models/quick.rs:794-804#QuickPromptExportEnvelope]
-[src: file: backend/src/api/quick_prompts.rs:359-430#export_qp]
+[src: file: backend/src/api/quick_prompts.rs:365-436#export_qp]
 
 Settings → Agents exposes an effort selector per tier for Claude and Codex.
 It derives choices from the selected model's catalog entry, retains an invalid saved value only as an
@@ -287,7 +287,7 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:1961-1995#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/migrations.rs:1969-2003#model_catalog_upgrades_from_its_immediate_predecessor]
 [src: file: backend/src/db/sql/162_model_catalog.sql:32-42#model_catalog_refresh_log]
 [src: file: backend/src/db/model_catalog.rs:1088-1134#reconcile_live_promotes_manual_entry_preserving_overrides]
 [src: file: backend/src/db/model_catalog.rs:1136-1158#reconcile_live_is_idempotent]

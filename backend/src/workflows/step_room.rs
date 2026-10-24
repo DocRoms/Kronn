@@ -910,6 +910,7 @@ mod tests {
 
     fn workflow_of(steps: Vec<WorkflowStep>) -> Workflow {
         Workflow {
+            refs: Default::default(),
             retention: None,
             shadow: None,
             project_scope: None,

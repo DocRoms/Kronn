@@ -463,7 +463,7 @@ and/or a `kronn-delivery` fence):
 ```
 
 **ReviewDecision v1** (principal → backend, via a new `task_exec_review` MCP tool; reuses the
-`GateDecision` enum semantics `[src: file: backend/src/workflows/runner.rs:4084-4107#GateDecision]`):
+`GateDecision` enum semantics `[src: file: backend/src/workflows/runner.rs:4100-4123#GateDecision]`):
 ```json
 { "version":"1", "task_ref":"KT-142", "decision":"approve|request_changes",
   "comment":"<required when request_changes>",

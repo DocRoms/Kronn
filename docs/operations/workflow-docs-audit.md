@@ -2,7 +2,7 @@
 
 Before launching an Agent step, Kronn records content fingerprints of regular
 files in the project's detected documentation directory (`docs/`, `doc/` or
-legacy `ai/`). [src: file: backend/src/core/docs_write_filter.rs:507-529#snapshot_docs] [src: file: backend/src/workflows/runner.rs:2465-2476#docs_before] The scope is Git-tracked files and non-ignored untracked files,
+legacy `ai/`). [src: file: backend/src/core/docs_write_filter.rs:507-529#snapshot_docs] [src: file: backend/src/workflows/runner.rs:2481-2492#docs_before] The scope is Git-tracked files and non-ignored untracked files,
 enumerated with `git ls-files --cached --others --exclude-standard`; tracked
 files remain included even if an ignore pattern matches them. Non-Git projects
 remain outside this audit, as in earlier releases. [src: file: backend/src/core/docs_write_filter.rs:430-505#document_paths]
@@ -28,7 +28,7 @@ the step, clear its condition action and stop normal workflow continuation.
 The persisted step output names the paths and detection reasons without
 copying suspected credentials. Files and index entries remain available for
 inspection. An incomplete snapshot prevents the agent launch; an incomplete
-post-step audit also fails the step. [src: file: backend/src/workflows/runner.rs:18-27#fail_document_audit] [src: file: backend/src/workflows/runner.rs:2491-2498#preparation_error] [src: file: backend/src/workflows/runner.rs:2639-2665#audit_docs_writes]
+post-step audit also fails the step. [src: file: backend/src/workflows/runner.rs:18-27#fail_document_audit] [src: file: backend/src/workflows/runner.rs:2507-2514#preparation_error] [src: file: backend/src/workflows/runner.rs:2639-2665#audit_docs_writes]
 
 Explicit failure compensation and workspace hooks keep their existing
 behavior. This audit is a post-step check, not a sandbox: it cannot undo an

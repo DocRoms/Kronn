@@ -2042,6 +2042,31 @@ async fn validate_project_scope_db(
         .map_err(|error| format!("DB error: {error}"))?
 }
 
+/// KT-1448 — a workflow's refs: valid names and ids, every `{{refs.<name>}}`
+/// declared and, when `check_objects`, each object present and in scope.
+async fn validate_refs(
+    state: &AppState,
+    wf_refs: &WorkflowRefs,
+    steps: &[WorkflowStep],
+    on_failure: &[WorkflowStep],
+    project_id: Option<String>,
+    check_objects: bool,
+) -> Result<(), String> {
+    crate::workflows::refs::validate_syntax(wf_refs)?;
+    crate::workflows::refs::validate_usage(steps, on_failure, wf_refs)?;
+    if !check_objects || wf_refs.is_empty() {
+        return Ok(());
+    }
+    let wf_refs = wf_refs.clone();
+    state
+        .db
+        .with_read_conn(move |conn| {
+            crate::workflows::refs::validate_in_db(conn, &wf_refs, project_id.as_deref())
+        })
+        .await
+        .map_err(|error| format!("DB error: {error}"))?
+}
+
 /// Save-time half of KT-917: a structured field written as `ref:<kind>:<slug>`
 /// is stored as the local id it names, so graph validation reads literal ids.
 async fn resolve_saved_references(
@@ -2509,6 +2534,7 @@ fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
         "concurrency_key": wf.concurrency_key,
         "project_id": wf.project_id,
         "project_scope": wf.project_scope,
+        "refs": wf.refs,
     })
 }
 
@@ -2627,6 +2653,18 @@ async fn create_written(
         &mut req.steps,
         &mut req.on_failure,
         keep_resource_refs,
+    )
+    .await
+    {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_refs(
+        &state,
+        &req.refs,
+        &req.steps,
+        &req.on_failure,
+        req.project_id.clone(),
+        true,
     )
     .await
     {
@@ -2806,6 +2844,7 @@ async fn create_written(
         // [[project_mcp_draft_creation_0_8_5]].
         enabled: req.enabled.unwrap_or(true),
         project_scope: req.project_scope,
+        refs: req.refs,
         created_at: now,
         updated_at: now,
     };
@@ -3349,7 +3388,9 @@ async fn update_written(
         }
     }
 
+    let refs_changed = req.refs.is_some() || req.project_id.is_some();
     let mut updated = Workflow {
+        refs: req.refs.unwrap_or(existing.refs),
         retention: req.retention.unwrap_or(existing.retention),
         shadow: req.shadow.unwrap_or(existing.shadow),
         id: existing.id,
@@ -3423,6 +3464,18 @@ async fn update_written(
         return Json(ApiResponse::err(e));
     }
     if let Err(e) = validate_workspace_config(updated.workspace_config.as_ref()) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_refs(
+        &state,
+        &updated.refs,
+        &updated.steps,
+        &updated.on_failure,
+        updated.project_id.clone(),
+        refs_changed,
+    )
+    .await
+    {
         return Json(ApiResponse::err(e));
     }
     if let Err(e) = validate_saved_quick_exec_refs(
@@ -3580,7 +3633,7 @@ pub async fn delete(
 /// 0.7.0 UX pass — current export envelope schema version. Bumped on
 /// incompatible changes; the importer reads this to decide whether to
 /// run a migration or refuse the file.
-const EXPORT_VERSION: u32 = 3;
+const EXPORT_VERSION: u32 = 4;
 const WORKFLOW_EXPORT_KIND: &str = "kronn.workflow";
 
 /// GET /api/workflows/:id/export
@@ -3613,12 +3666,23 @@ pub(crate) fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String
         .collect()
 }
 
+/// The workflows an export carries with `workflow`: its sub-workflows and
+/// the workflows its refs name (KT-1448).
+pub(crate) fn workflow_bundled_child_ids(workflow: &Workflow) -> Vec<String> {
+    workflow_sub_workflow_child_ids(workflow)
+        .into_iter()
+        .chain(crate::workflows::refs::ids_of(&workflow.refs, ResourceRefKind::Workflow).cloned())
+        .collect()
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct WorkflowDependencyIds {
     pub(crate) quick_prompts: std::collections::BTreeSet<String>,
     pub(crate) quick_apis: std::collections::BTreeSet<String>,
     pub(crate) quick_execs: std::collections::BTreeSet<String>,
     pub(crate) pages: std::collections::BTreeSet<String>,
+    /// Every skill a step or a ref names (KT-1446); only custom ones travel.
+    pub(crate) skills: std::collections::BTreeSet<String>,
 }
 
 /// Collect every saved resource referenced by the complete workflow graph.
@@ -3629,6 +3693,23 @@ pub(crate) fn workflow_dependency_ids<'a>(
 ) -> WorkflowDependencyIds {
     let mut dependencies = WorkflowDependencyIds::default();
     for workflow in workflows {
+        use crate::workflows::refs::ids_of;
+        let refs = &workflow.refs;
+        dependencies
+            .pages
+            .extend(ids_of(refs, ResourceRefKind::Page).cloned());
+        dependencies
+            .quick_prompts
+            .extend(ids_of(refs, ResourceRefKind::QuickPrompt).cloned());
+        dependencies
+            .quick_apis
+            .extend(ids_of(refs, ResourceRefKind::QuickApi).cloned());
+        dependencies
+            .quick_execs
+            .extend(ids_of(refs, ResourceRefKind::QuickExec).cloned());
+        dependencies
+            .skills
+            .extend(ids_of(refs, ResourceRefKind::Skill).cloned());
         if let WorkflowTrigger::Watch(watch) = &workflow.trigger {
             if let Some(id) = watch
                 .quick_api_id
@@ -3638,7 +3719,12 @@ pub(crate) fn workflow_dependency_ids<'a>(
                 dependencies.quick_apis.insert(id.to_string());
             }
         }
+        if let Some(shadow) = &workflow.shadow {
+            dependencies.skills.extend(shadow.skills.keys().cloned());
+            dependencies.skills.extend(shadow.skills.values().cloned());
+        }
         for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
+            dependencies.skills.extend(step.skill_ids.iter().cloned());
             if let Some(id) = step
                 .quick_prompt_id
                 .as_deref()
@@ -3739,6 +3825,7 @@ pub async fn export_workflow(
         referenced_quick_apis,
         referenced_quick_execs,
         referenced_pages,
+        skill_ids,
     ) = match state
         .db
         .with_conn(move |conn| {
@@ -3751,13 +3838,13 @@ pub async fn export_workflow(
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             seen.insert(root.id.clone());
             let mut queue: std::collections::VecDeque<String> =
-                workflow_sub_workflow_child_ids(&root).into_iter().collect();
+                workflow_bundled_child_ids(&root).into_iter().collect();
             while let Some(cid) = queue.pop_front() {
                 if !seen.insert(cid.clone()) {
                     continue;
                 }
                 if let Some(child) = by_id.get(&cid) {
-                    for gc in workflow_sub_workflow_child_ids(child) {
+                    for gc in workflow_bundled_child_ids(child) {
                         if !seen.contains(&gc) {
                             queue.push_back(gc);
                         }
@@ -3813,7 +3900,11 @@ pub async fn export_workflow(
                     });
                 }
             }
-            Ok((bundled, qps, qas, qes, pages))
+            let mut skills = dependencies.skills;
+            for qp in &qps {
+                skills.extend(qp.skill_ids.iter().cloned());
+            }
+            Ok((bundled, qps, qas, qes, pages, skills))
         })
         .await
     {
@@ -3855,6 +3946,7 @@ pub async fn export_workflow(
         referenced_quick_execs,
         referenced_pages,
         referenced_workflows,
+        referenced_skills: crate::core::skill_bundle::bundle_skills(&skill_ids),
         redacted_fields,
     };
 
@@ -3968,6 +4060,8 @@ pub(crate) fn validate_workflow_for_import_keeping(
         wf.workspace_config.as_ref(),
     )?;
     validate_workspace_config(wf.workspace_config.as_ref())?;
+    crate::workflows::refs::validate_syntax(&wf.refs)?;
+    crate::workflows::refs::validate_usage(&wf.steps, &wf.on_failure, &wf.refs)?;
     Ok(())
 }
 
@@ -4134,8 +4228,97 @@ pub async fn import_workflow(
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<ImportWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
-    let Json(response) = import_workflow_written(state.clone(), bridge, req).await;
-    Json(with_awaiting_notice(&state, response).await)
+    let Json(mut response) = import_workflow_written(state.clone(), bridge, req).await;
+    let missing = response.notice.take();
+    let mut response = with_awaiting_notice(&state, response).await;
+    response.notice = match (missing, response.notice.take()) {
+        (Some(missing), Some(awaiting)) => Some(format!("{missing}\n{awaiting}")),
+        (missing, awaiting) => missing.or(awaiting),
+    };
+    Json(response)
+}
+
+/// Skills the steps of `workflows`, their refs and `prompts` name that this
+/// Kronn does not have, `bundled` ones aside (the import brings them).
+/// Repository skills resolve from the project's checkout at run time.
+fn missing_skills<'a>(
+    workflows: impl IntoIterator<Item = &'a Workflow>,
+    prompts: &[QuickPrompt],
+    bundled: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    let mut named = workflow_dependency_ids(workflows).skills;
+    for prompt in prompts {
+        named.extend(prompt.skill_ids.iter().cloned());
+    }
+    let known: std::collections::HashSet<String> = crate::core::skills::list_all_skills()
+        .into_iter()
+        .map(|skill| skill.id)
+        .collect();
+    named
+        .into_iter()
+        .filter(|id| !id.starts_with("repository:") && !bundled.contains(id) && !known.contains(id))
+        .collect()
+}
+
+fn missing_skills_notice(missing: &[String]) -> Option<String> {
+    (!missing.is_empty()).then(|| {
+        format!(
+            "Skills not found on this Kronn and not in the file: {}. The steps keep these ids \
+             and load nothing for them until the skills exist; add them or edit the steps.",
+            missing.join(", ")
+        )
+    })
+}
+
+fn parse_import_envelope(content: &str) -> Result<WorkflowExportEnvelope, String> {
+    let envelope: WorkflowExportEnvelope =
+        serde_json::from_str(content).map_err(|e| format!("JSON invalide : {}", e))?;
+    if envelope.kind != WORKFLOW_EXPORT_KIND {
+        return Err(format!(
+            "Type incorrect : attendu `{}`, reçu `{}`. Vérifie que tu importes bien un workflow exporté depuis Kronn.",
+            WORKFLOW_EXPORT_KIND, envelope.kind
+        ));
+    }
+    if envelope.version > EXPORT_VERSION {
+        return Err(format!(
+            "Version d'export non supportée ({} > {} max). Mets à jour Kronn pour importer ce fichier.",
+            envelope.version, EXPORT_VERSION
+        ));
+    }
+    Ok(envelope)
+}
+
+/// POST /api/workflows/import/preview — what an import of this file would do
+/// with its custom skills, and which skills it would leave unresolved (KT-1446).
+pub async fn import_workflow_preview(
+    Json(req): Json<ImportWorkflowRequest>,
+) -> Json<ApiResponse<WorkflowImportPreview>> {
+    let envelope = match parse_import_envelope(&req.content) {
+        Ok(envelope) => envelope,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let skills = match crate::core::skill_bundle::plan(
+        &envelope.referenced_skills,
+        &req.skill_choices,
+        req.project_id.as_deref(),
+    ) {
+        Ok(skills) => skills,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let bundled = envelope
+        .referenced_skills
+        .iter()
+        .map(|skill| skill.id.clone())
+        .collect();
+    let missing_skills = missing_skills(
+        std::iter::once(&envelope.workflow).chain(envelope.referenced_workflows.iter()),
+        &envelope.referenced_quick_prompts,
+        &bundled,
+    );
+    Json(ApiResponse::ok(WorkflowImportPreview {
+        skills,
+        missing_skills,
+    }))
 }
 
 async fn import_workflow_written(
@@ -4143,24 +4326,26 @@ async fn import_workflow_written(
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     req: ImportWorkflowRequest,
 ) -> Json<ApiResponse<Workflow>> {
-    let envelope: WorkflowExportEnvelope = match serde_json::from_str(&req.content) {
-        Ok(env) => env,
-        Err(e) => return Json(ApiResponse::err(format!("JSON invalide : {}", e))),
+    let envelope = match parse_import_envelope(&req.content) {
+        Ok(envelope) => envelope,
+        Err(error) => return Json(ApiResponse::err(error)),
     };
-
-    if envelope.kind != WORKFLOW_EXPORT_KIND {
-        return Json(ApiResponse::err(format!(
-            "Type incorrect : attendu `{}`, reçu `{}`. Vérifie que tu importes bien un workflow exporté depuis Kronn.",
-            WORKFLOW_EXPORT_KIND, envelope.kind
-        )));
-    }
-    if envelope.version > EXPORT_VERSION {
-        return Json(ApiResponse::err(format!(
-            "Version d'export non supportée ({} > {} max). Mets à jour Kronn pour importer ce fichier.",
-            envelope.version, EXPORT_VERSION
-        )));
-    }
     let source_version = envelope.version;
+    // KT-1446 — each bundled custom skill is reused, created or settled as
+    // the importer chose; written only once every check below has passed.
+    let bundled_skills = envelope.referenced_skills;
+    let skill_decisions = match crate::core::skill_bundle::plan(
+        &bundled_skills,
+        &req.skill_choices,
+        req.project_id.as_deref(),
+    ) {
+        Ok(decisions) => decisions,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let bundled_skill_ids: std::collections::BTreeSet<String> = bundled_skills
+        .iter()
+        .map(|skill| skill.id.clone())
+        .collect();
 
     // #10 — the import BUNDLE = the root workflow + its (transitive) sub-workflow
     // children (`referenced_workflows`, empty on legacy single-workflow exports).
@@ -4335,6 +4520,20 @@ async fn import_workflow_written(
                 s.gate_notify_url = None;
             }
         }
+        // KT-1448 — skill refs are checked here and rewritten once the
+        // skills exist.
+        let ref_maps = crate::workflows::refs::RefRemaps {
+            pages: &page_id_remap,
+            workflows: &wf_id_remap,
+            quick_prompts: &qp_id_remap,
+            quick_apis: &qa_id_remap,
+            quick_execs: &qe_id_remap,
+            bundled_skills: &bundled_skill_ids,
+            skills: None,
+        };
+        if let Err(error) = crate::workflows::refs::remap(&w.name, &mut w.refs, &ref_maps) {
+            return Json(ApiResponse::err(error));
+        }
         if let WorkflowTrigger::Watch(watch) = &mut w.trigger {
             if let Some(nid) = watch
                 .quick_api_id
@@ -4406,6 +4605,36 @@ async fn import_workflow_written(
             }
         }
     }
+
+    let skill_ids = match crate::core::skill_bundle::apply(
+        &bundled_skills,
+        &skill_decisions,
+        req.project_id.as_deref(),
+    ) {
+        Ok(ids) => ids,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    for w in &mut prepared {
+        for step in w.steps.iter_mut().chain(w.on_failure.iter_mut()) {
+            crate::core::skill_bundle::remap_ids(&mut step.skill_ids, &skill_ids);
+        }
+        crate::workflows::shadow::remap_imported(w, &skill_ids, &qp_id_remap);
+        for reference in w.refs.values_mut() {
+            if reference.kind == ResourceRefKind::Skill {
+                if let Some(target) = skill_ids.get(&reference.id) {
+                    reference.id = target.clone();
+                }
+            }
+        }
+    }
+    for qp in &mut qps_to_insert {
+        crate::core::skill_bundle::remap_ids(&mut qp.skill_ids, &skill_ids);
+    }
+    let missing_notice = missing_skills_notice(&missing_skills(
+        prepared.iter(),
+        &qps_to_insert,
+        &Default::default(),
+    ));
 
     // Insert every bundled dependency before the workflows that reference it.
     let qps = qps_to_insert;
@@ -4493,7 +4722,7 @@ async fn import_workflow_written(
         })
         .await
     {
-        Ok(w) => Json(ApiResponse::ok(w)),
+        Ok(w) => Json(ApiResponse::ok(w).with_notice(missing_notice)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -9183,6 +9412,7 @@ mod tests {
 
     fn mk_workflow_for_export(name: &str) -> Workflow {
         Workflow {
+            refs: Default::default(),
             retention: None,
             shadow: None,
             project_scope: None,
@@ -9411,6 +9641,7 @@ mod tests {
         let mut child = mk_workflow_for_export("child");
         child.id = "child-id".into();
         let env = WorkflowExportEnvelope {
+            referenced_skills: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -9432,6 +9663,7 @@ mod tests {
     fn export_envelope_omits_empty_referenced_workflows_from_wire() {
         // Legacy single-workflow exports stay byte-compatible (field skipped).
         let env = WorkflowExportEnvelope {
+            referenced_skills: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -9453,6 +9685,7 @@ mod tests {
     #[test]
     fn export_envelope_serializes_with_kind_and_version() {
         let env = WorkflowExportEnvelope {
+            referenced_skills: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -9466,7 +9699,7 @@ mod tests {
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains("\"kind\":\"kronn.workflow\""));
-        assert!(json.contains("\"version\":3"));
+        assert!(json.contains("\"version\":4"));
         // Roundtrip: parse back, fields preserved.
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.kind, WORKFLOW_EXPORT_KIND);
@@ -9479,6 +9712,7 @@ mod tests {
         // `skip_serializing_if = "Vec::is_empty"` keeps the JSON tight
         // when no QPs are bundled — common case for solo dev workflows.
         let env = WorkflowExportEnvelope {
+            referenced_skills: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10010,6 +10244,7 @@ mod tests {
         emit.json_data_payload = Some(serde_json::json!({"a": 1}));
         wf.steps = vec![emit];
         let content = serde_json::to_string(&WorkflowExportEnvelope {
+            referenced_skills: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10026,6 +10261,7 @@ mod tests {
             State(state.clone()),
             None,
             Json(ImportWorkflowRequest {
+                skill_choices: vec![],
                 content,
                 project_id: None,
             }),
@@ -10441,6 +10677,7 @@ mod tests {
         emit.json_data_payload = Some(serde_json::json!({"a": 1}));
         wf.steps = vec![emit];
         let content = serde_json::to_string(&WorkflowExportEnvelope {
+            referenced_skills: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10457,6 +10694,7 @@ mod tests {
             State(state.clone()),
             None,
             Json(ImportWorkflowRequest {
+                skill_choices: vec![],
                 content,
                 project_id: None,
             }),
@@ -10508,6 +10746,7 @@ mod tests {
         plan.exec_unmodelled_args_approved = Some(true);
         wf.steps = vec![plan];
         let envelope = |wf: Workflow| WorkflowExportEnvelope {
+            referenced_skills: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10536,6 +10775,7 @@ mod tests {
                     State(state),
                     bridge,
                     Json(ImportWorkflowRequest {
+                        skill_choices: vec![],
                         content,
                         project_id: None,
                     }),
@@ -10630,6 +10870,7 @@ mod tests {
         // be silently accepted by today's importer (would skip fields
         // it doesn't know about).
         let env = WorkflowExportEnvelope {
+            referenced_skills: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION + 1,
             exported_at: chrono::Utc::now(),

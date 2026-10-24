@@ -180,6 +180,17 @@ pub fn pinned_skill(id: &str) -> Option<crate::models::Skill> {
     super::skills::parse_skill_markdown(id, &raw, false)
 }
 
+/// The raw file version N saved, for a pinned id `custom-x@N`.
+pub fn pinned_file(id: &str) -> Option<String> {
+    let (base, Some(index)) = split_pin(id).ok()? else {
+        return None;
+    };
+    let slug = slug_of(base).ok()?;
+    let skills_dir = super::skills::skills_dir().ok()?;
+    baseline(&skills_dir, slug).ok()?;
+    std::fs::read_to_string(version_path(&history_dir(&skills_dir, slug), index)).ok()
+}
+
 /// Refuses a pinned skill id whose version does not exist; unpinned ids are
 /// left to the launch, which already skips an unknown one.
 pub fn validate_pins(ids: &[String]) -> Result<(), String> {
@@ -191,8 +202,8 @@ pub fn validate_pins(ids: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The newest version of a custom skill; `None` for a built-in skill.
-pub fn latest_index(id: &str) -> Option<u32> {
+/// The newest version of custom skill `id`; `None` for a builtin.
+pub fn newest_index(id: &str) -> Option<u32> {
     let slug = slug_of(id).ok()?;
     let skills_dir = super::skills::skills_dir().ok()?;
     baseline(&skills_dir, slug).ok()?;
@@ -357,11 +368,11 @@ mod tests {
         let data = DataDir::new("skill-versions-baseline-readers");
         let id = create("rule one");
         std::fs::remove_dir_all(data.dir.join("skills").join(VERSIONS_DIR)).unwrap();
-        assert_eq!(latest_index(&id), Some(1));
+        assert_eq!(newest_index(&id), Some(1));
         std::fs::remove_dir_all(data.dir.join("skills").join(VERSIONS_DIR)).unwrap();
         assert!(validate_pins(&[format!("{id}@1")]).is_ok());
         std::fs::remove_dir_all(data.dir.join("skills").join(VERSIONS_DIR)).unwrap();
-        assert!(pinned_skill(&format!("{id}@1")).is_some_and(|skill| skill.content.contains("rule one")));
+        assert!(pinned_file(&format!("{id}@1")).is_some_and(|raw| raw.contains("rule one")));
     }
 
     #[test]

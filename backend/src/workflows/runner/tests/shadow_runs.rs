@@ -238,6 +238,27 @@ async fn a_shadow_swaps_the_skills_a_step_inherits_from_its_quick_prompt() {
     assert_eq!(wf.steps[2].skill_ids, vec!["custom-review@2", "rust"]);
 }
 
+#[test]
+fn an_imported_shadow_names_the_imported_skills_and_drops_qp_versions() {
+    let mut wf = shadowed_workflow();
+    let shadow = wf.shadow.as_mut().unwrap();
+    shadow.skills = [("custom-a".to_string(), "custom-a@2".to_string())].into();
+    shadow.quick_prompt_versions = [("qp-old".to_string(), 3), ("qp-local".to_string(), 2)].into();
+    let skills = [
+        ("custom-a".to_string(), "custom-b".to_string()),
+        ("custom-a@2".to_string(), "custom-c@1".to_string()),
+    ]
+    .into();
+    let qps = [("qp-old".to_string(), "qp-new".to_string())].into();
+    crate::workflows::shadow::remap_imported(&mut wf, &skills, &qps);
+    let shadow = wf.shadow.unwrap();
+    assert_eq!(
+        shadow.skills.get("custom-b").map(String::as_str),
+        Some("custom-c@1")
+    );
+    assert_eq!(shadow.quick_prompt_versions.len(), 1);
+    assert!(shadow.quick_prompt_versions.contains_key("qp-local"));
+}
 
 #[test]
 fn a_shadow_gets_its_own_worktree_unless_the_workflow_never_writes_the_checkout() {

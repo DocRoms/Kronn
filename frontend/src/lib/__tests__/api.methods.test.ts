@@ -470,6 +470,7 @@ describe('api.workflows (rest)', () => {
     await expect(workflows.exportWorkflow('wf-1')).rejects.toThrow(/Export failed \(404\)/);
   });
   it('importWorkflow', async () => { await exec(workflows.importWorkflow({} as never), 'POST', '/workflows/import'); });
+  it('previewImport', async () => { await exec(workflows.previewImport({} as never), 'POST', '/workflows/import/preview'); });
   it('testBatchStep', async () => { await exec(workflows.testBatchStep({ step: {} as never }), 'POST', '/workflows/test-batch-step'); });
   it('testExtract', async () => { await exec(workflows.testExtract({ sample: {}, path: '$.x' }), 'POST', '/workflow-steps/test-extract'); });
   it('testApiCall', async () => { await exec(workflows.testApiCall({ step: {} as never, project_id: 'p-1' }), 'POST', '/workflow-steps/test-api-call'); });

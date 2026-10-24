@@ -142,6 +142,7 @@ pub fn build_feasibility_workflow(params: FeasibilityWorkflowParams) -> CreateWo
     });
 
     CreateWorkflowRequest {
+        refs: Default::default(),
         retention: None,
         shadow: None,
         project_scope: None,
@@ -193,6 +194,7 @@ pub fn build_feasibility_child(
         build_implement_step(agent, ticket_ref)
     };
     CreateWorkflowRequest {
+        refs: Default::default(),
         retention: None,
         shadow: None,
         project_scope: None,

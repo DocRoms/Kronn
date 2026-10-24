@@ -1959,6 +1959,7 @@ mod tests {
         fixture(&conn);
         let now = Utc::now();
         let workflow = crate::models::Workflow {
+            refs: Default::default(),
             retention: None,
             shadow: None,
             project_scope: None,
@@ -2129,7 +2130,7 @@ pub fn list_live_page_resources(
                             .cloned()
                     }),
                 };
-                let latest = crate::core::skill_versions::latest_index(&base);
+                let latest = crate::core::skill_versions::newest_index(&base);
                 add("skill", &base, skill_name(&base), latest, Some(used));
             }
         }

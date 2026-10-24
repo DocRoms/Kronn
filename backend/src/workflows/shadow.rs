@@ -223,6 +223,27 @@ pub async fn apply_versions(state: &AppState, workflow: &mut Workflow) -> anyhow
     Ok(())
 }
 
+/// After an import, the shadow names the imported skills; a Quick Prompt
+/// comes over without its history, so a chosen version of it is dropped.
+pub fn remap_imported(
+    workflow: &mut Workflow,
+    skills: &std::collections::HashMap<String, String>,
+    quick_prompts: &std::collections::HashMap<String, String>,
+) {
+    let Some(shadow) = workflow.shadow.as_mut() else {
+        return;
+    };
+    let swap = |id: &String| skills.get(id).cloned().unwrap_or_else(|| id.clone());
+    shadow.skills = shadow
+        .skills
+        .iter()
+        .map(|(k, v)| (swap(k), swap(v)))
+        .collect();
+    shadow
+        .quick_prompt_versions
+        .retain(|id, _| !quick_prompts.contains_key(id));
+}
+
 /// What a skipped `external_effect` step records in a shadow run. The run
 /// goes on with the next step: nothing was produced to branch on.
 pub fn skipped(step: &WorkflowStep) -> StepOutcome {

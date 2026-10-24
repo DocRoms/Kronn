@@ -31,12 +31,14 @@ import type {
   CreateWorkflowRequest, Skill, ProjectUsedSkill, AgentProfile, Directive,
   WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards, WorkflowRetention, WorkflowShadow,
   PromptVariable, WorkflowSummary, LivePage, JsonValue, TestApiCallResponse, QuickExec,
-  TransformDataField, WorkflowProjectScope,
+  TransformDataField, WorkflowProjectScope, ResourceRef,
 } from '../../types/generated';
 import { SafetyWarnings } from './SafetyWarnings';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import { RunRetentionCard } from './RunRetentionCard';
 import { ShadowRunsCard } from './ShadowRunsCard';
+import { WorkflowRefsCard } from './WorkflowRefsCard';
+import type { RefOptions } from '../../lib/workflowRefs';
 import type { AgentsConfig } from '../../types/generated';
 import { promptNeedsUnboundWorkspace } from '../../lib/ollamaHints';
 import {
@@ -417,6 +419,11 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [guards, setGuards] = useState<WorkflowGuards | null>(editWorkflow?.guards ?? null);
   const [retention, setRetention] = useState<WorkflowRetention | null>(editWorkflow?.retention ?? null);
   const [shadow, setShadow] = useState<WorkflowShadow | null>(editWorkflow?.shadow ?? null);
+  // KT-1448 — named refs; the whole map is sent on every save.
+  const [refs, setRefs] = useState<Record<string, ResourceRef>>(
+    () => Object.fromEntries(Object.entries(editWorkflow?.refs ?? {})
+      .filter((entry): entry is [string, ResourceRef] => Boolean(entry[1]))),
+  );
 
   // Build cron expression from visual inputs (or raw if complex)
   const buildCronExpr = (): string => {
@@ -663,6 +670,20 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // 2026-06-11 (Phase 1c) — other workflows, for the SubWorkflow step picker.
   const [availableWorkflows, setAvailableWorkflows] = useState<WorkflowSummary[]>([]);
   const [availablePages, setAvailablePages] = useState<LivePage[]>([]);
+  // A ref may name an object that is global or in this workflow's project.
+  const refOptions = useMemo<RefOptions>(() => {
+    const inScope = (owner: string | null | undefined) => !owner || owner === (projectId || null);
+    const of = <T extends { id: string; project_id?: string | null }>(items: T[], label: (item: T) => string) =>
+      items.filter(item => inScope(item.project_id)).map(item => ({ id: item.id, label: label(item) }));
+    return {
+      page: of(availablePages, page => page.title),
+      workflow: of(availableWorkflows, workflow => workflow.name),
+      quick_prompt: of(availableQuickPrompts, prompt => prompt.name),
+      quick_api: of(availableQuickApis, api => api.name),
+      quick_exec: of(availableQuickExecs, exec => exec.name),
+      skill: of(availableSkills, skill => skill.name),
+    };
+  }, [availablePages, availableWorkflows, availableQuickPrompts, availableQuickApis, availableQuickExecs, availableSkills, projectId]);
   const [pageDraftTitles, setPageDraftTitles] = useState<Record<number, string>>({});
   const [pageCreatingIndex, setPageCreatingIndex] = useState<number | null>(null);
   const [pageImportIndex, setPageImportIndex] = useState<number | null>(null);
@@ -1290,6 +1311,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           exec_allowlist: execAllowlist,
           variables: wfVariables,
           project_scope: projectScope,
+          refs,
         });
       } else {
         const req: CreateWorkflowRequest = {
@@ -1309,6 +1331,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           exec_allowlist: execAllowlist,
           variables: wfVariables,
           project_scope: projectScope ?? undefined,
+          refs,
         };
         let created: Workflow | null = null;
         let createdId: string;
@@ -5029,6 +5052,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           <ExecutionLimitsCard value={guards} onChange={setGuards} t={t} />
           <RunRetentionCard value={retention} onChange={setRetention} t={t} />
           <ShadowRunsCard value={shadow} onChange={setShadow} steps={steps} projects={projects} skills={availableSkills} quickPrompts={availableQuickPrompts} t={t} />
+          <WorkflowRefsCard value={refs} onChange={setRefs} options={refOptions} t={t} />
 
           {/* 0.7.0 Phase 5 — Exec allowlist. Visible by default; the
               prominent placement is intentional because Exec is a

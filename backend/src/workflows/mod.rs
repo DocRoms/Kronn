@@ -28,6 +28,7 @@ pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
 pub mod quota_wait;
 pub mod readiness;
+pub mod refs;
 pub mod run_artifacts;
 pub mod run_effect;
 pub mod run_pins;
@@ -660,6 +661,7 @@ mod tests {
     fn scheduled_workflow(id: &str, trigger: WorkflowTrigger, age_minutes: i64) -> Workflow {
         let at = Utc::now() - chrono::Duration::minutes(age_minutes);
         Workflow {
+            refs: Default::default(),
             retention: None,
             shadow: None,
             project_scope: None,

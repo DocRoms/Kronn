@@ -850,6 +850,54 @@ pub fn save_custom_skill(
     Ok(id)
 }
 
+/// Create a custom skill from a complete skill file (an import, KT-1446):
+/// written as given, so its content hash matches the bundle's.
+pub fn create_custom_skill_from_file(raw: &str) -> Result<String, String> {
+    let parsed = parse_skill_markdown("custom-import", raw, false)
+        .ok_or("The skill file has no valid frontmatter or no name")?;
+    validate_skill_fields(&parsed.name, &parsed.description)?;
+    let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create skills dir: {}", e))?;
+    let slug = unique_skill_slug(&dir, &parsed.name)?;
+    let path = dir.join(format!("{}.md", slug));
+    crate::core::mcp_scanner::atomic_write(&path, raw)
+        .map_err(|e| format!("Cannot write skill: {}", e))?;
+    record_version(&dir, &slug, raw);
+    Ok(format!("custom-{}", slug))
+}
+
+/// Every custom skill file as stored: `(id, raw)`.
+pub fn custom_skill_files() -> Vec<(String, String)> {
+    let Some(dir) = custom_skills_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<(String, String)> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter_map(|path| {
+            let stem = path.file_stem()?.to_string_lossy().to_string();
+            let raw = std::fs::read_to_string(&path).ok()?;
+            Some((format!("custom-{stem}"), raw))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// The stored file of custom skill `id`, if any.
+pub fn custom_skill_file(id: &str) -> Option<String> {
+    let slug = id.strip_prefix("custom-")?;
+    if !super::native_files::is_valid_slug(slug) {
+        return None;
+    }
+    std::fs::read_to_string(custom_skills_dir()?.join(format!("{slug}.md"))).ok()
+}
+
 /// Update a custom skill IN PLACE and atomically: same file, same id, even
 /// when `name` changes. Unlike `save_custom_skill`, the file is located
 /// from the EXISTING id — the slug is never recomputed from the new name,

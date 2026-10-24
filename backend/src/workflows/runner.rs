@@ -1709,6 +1709,7 @@ async fn execute_run_body(
     // After trigger fields and variables, so neither can stand in for the run.
     ctx.set_builtin("run.id", run.id.clone());
     ctx.set_builtin("run.variant", super::shadow::variant(run).to_string());
+    ctx.set_refs(&workflow.refs);
     // KT-910 — Exec steps write here, Agent steps that name it read it.
     match super::run_artifacts::ensure(&run.id) {
         Ok(dir) => ctx.set_builtin("run.artifacts_dir", dir.to_string_lossy().to_string()),
@@ -6050,6 +6051,7 @@ mod tests {
         artifacts: ::std::collections::HashMap<String, ArtifactSpec>,
     ) -> Workflow {
         Workflow {
+            refs: Default::default(),
             retention: None,
             shadow: None,
             project_scope: None,

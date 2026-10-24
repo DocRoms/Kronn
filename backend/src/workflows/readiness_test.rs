@@ -3,6 +3,7 @@ use crate::models::{ExecScriptFile, WorkflowSafety, WorkflowTrigger};
 
 fn workflow(id: &str, steps: Vec<WorkflowStep>, on_failure: Vec<WorkflowStep>) -> Workflow {
     Workflow {
+        refs: Default::default(),
         project_scope: None,
         pinned: false,
         id: id.into(),

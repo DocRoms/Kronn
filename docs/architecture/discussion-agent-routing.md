@@ -166,7 +166,7 @@ on the root turn, or no marker), computed from `message_targets`.
 [src: file: backend/src/db/discussions.rs:1760-1804#native_agents_scheduled_for_root_turn]
 [src: file: backend/src/api/discussions/crud.rs:545-553#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/api/discussions/crud.rs:905-909#attach_discussion_participants]
+[src: file: backend/src/api/discussions/crud.rs:916-920#attach_discussion_participants]
 [src: file: backend/src/api/discussions/streaming.rs:2236-2348#independent_sibling_notice]
 [src: file: backend/src/api/discussions/streaming.rs:2129-2184#discussion_at_dispatch_trigger]
 [src: file: backend/src/api/discussions/streaming.rs:2191-2226#thread_under_trigger]

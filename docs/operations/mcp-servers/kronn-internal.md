@@ -100,7 +100,7 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
-`[src: file: backend/src/lib.rs:2658-2706#decline]`
+`[src: file: backend/src/lib.rs:2667-2715#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:655-770#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
@@ -1036,7 +1036,7 @@ atomic save.
 Reads are bounded on the server: `workflow_runs` returns at most 500 lean
 summaries, and `workflow_run_get` truncates step outputs. `task_list`,
 `disc_list` and `disc_search` take `limit` (and `cursor` where offered).
-[src: file: backend/src/db/workflows.rs:1274-1277#MAX_RUNS_UNPAGINATED]
+[src: file: backend/src/db/workflows.rs:1285-1288#MAX_RUNS_UNPAGINATED]
 [src: file: backend/scripts/disc-introspection-mcp.py:8455-8489#call_workflow_runs]
 [src: file: backend/scripts/disc-introspection-mcp.py:4766-4779#call_task_list]
 

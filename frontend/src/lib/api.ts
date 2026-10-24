@@ -229,6 +229,7 @@ import type {
   DecideRunResponse,
   ResumeInterruptedRequest,
   ImportWorkflowRequest,
+  WorkflowImportPreview,
   ImportQuickPromptRequest,
   VersionCheck,
   DbBackupResponse,
@@ -2946,6 +2947,9 @@ export const workflows = {
   /** 0.7.0 UX pass — import a workflow from a previously-exported JSON. */
   importWorkflow: (payload: ImportWorkflowRequest) =>
     api<Workflow>('POST', '/workflows/import', payload),
+  /** KT-1446 — what importing this file does with its custom skills. Read-only. */
+  previewImport: (payload: ImportWorkflowRequest) =>
+    api<WorkflowImportPreview>('POST', '/workflows/import/preview', payload),
   /** Dry-run preview of a BatchQuickPrompt step: returns parsed items, sample
    *  rendered prompt, QP info, errors. NO discussion is created. */
   testBatchStep: (req: { step: WorkflowStep; mock_previous_output?: string | null; previous_step_name?: string | null }) =>
