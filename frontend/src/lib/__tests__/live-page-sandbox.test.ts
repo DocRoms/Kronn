@@ -677,9 +677,11 @@ describe('Live Page sandbox', () => {
   it('accepts only the matching rendered document from the opaque frame', async () => {
     const frame = document.createElement('iframe');
     document.body.append(frame);
-    const target = frame.contentWindow;
-    expect(target).not.toBeNull();
-    const postMessage = vi.spyOn(target!, 'postMessage').mockImplementation(() => undefined);
+    // happy-dom 21 no longer loads iframe pages: the frame's window is a stand-in
+    // with the one method the relay calls.
+    const target = { postMessage: (_message: unknown, _origin: string) => undefined } as unknown as Window;
+    Object.defineProperty(frame, 'contentWindow', { configurable: true, value: target });
+    const postMessage = vi.spyOn(target, 'postMessage').mockImplementation(() => undefined);
 
     const capture = vi.fn().mockResolvedValue(['data:image/png;base64,cGFnZQ==']);
     const result = requestRenderedPageHtml(frame, 'channel-1', 500, capture);
