@@ -169,9 +169,42 @@ jobs:
   # Deliberately NOT the whole backend suite duplicated three times: only the
   # modules whose behaviour actually differs per platform. Linux stays covered by
   # `test-backend`; this adds the two hosts nothing else runs on.
-  test-backend-portability:
+  # A pull request runs the macOS/Windows job only when it changes what that
+  # job tests: its compile alone takes an hour. A push to main always runs it.
+  portability-scope:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: Does this change touch what the portability job tests?
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$BASE" "$HEAD")
+          echo "$changed"
+          if echo "$changed" | grep -Eq '^backend/src/(core/worktree|api/maintenance|db/orchestration|agents/wsl|acp/secret_files)|^backend/Cargo\.(toml|lock)$|^rust-toolchain'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test-backend-portability:
+    needs: [require-ci-build-label, portability-scope]
+    if: needs.require-ci-build-label.outputs.run == 'true' && needs.portability-scope.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -305,6 +338,7 @@ jobs:
       - build-release
       - test-desktop-compile
       - test-docs-sidecar-windows
+      - portability-scope
       - test-backend-portability
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -318,10 +352,17 @@ jobs:
       - name: "Gate verdict for ${{ github.event_name }} #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }}"
         if: needs.require-ci-build-label.outputs.run == 'true'
         env:
-          RESULTS: ${{ toJson(needs.*.result) }}
+          RESULTS: ${{ toJson(needs) }}
           EVENT_NAME: ${{ github.event_name }}
         # A push to main only refreshes caches: its skipped checks are by design.
+        # The portability job is skipped by design when the change does not
+        # touch what it tests (`portability-scope`).
         run: |
           echo "Gate results: $RESULTS"
-          echo "$RESULTS" | jq -e --arg event "$EVENT_NAME" \
-            'all(.[]; . == "success" or ($event == "push" and . == "skipped"))'
+          echo "$RESULTS" | jq -e --arg event "$EVENT_NAME" '
+            (.["portability-scope"].outputs.run // "true") as $portability
+            | to_entries
+            | all(.[];
+                .value.result == "success"
+                or ($event == "push" and .value.result == "skipped")
+                or (.key == "test-backend-portability" and .value.result == "skipped" and $portability == "false"))'

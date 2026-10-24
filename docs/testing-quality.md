@@ -218,7 +218,7 @@ aggregates accept those skips only for a push. A save runs only on
 as a hit, and never replaced, until the next `Cargo.lock` change. The
 backend save keeps its own verified `ready` marker instead.
 [src: file: .github/workflows/ci-test.yml:225-235#archive] [src: file: .github/workflows/ci-test.yml:458-491#cache-clippy] [src: file: .github/workflows/ci-test.yml:759-786#cache-e2e-dev]
-[src: file: .github/workflows/ci-build.yml:194-235#cache-portability] [src: file: .github/workflows/ci-build.yml:251-276#cache-release]
+[src: file: .github/workflows/ci-build.yml:227-268#cache-portability] [src: file: .github/workflows/ci-build.yml:284-309#cache-release]
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when a hot
@@ -325,7 +325,7 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:377#timeout-minutes] [src: file: .github/workflows/ci-test.yml:736#timeout-minutes] [src: file: .github/workflows/ci-build.yml:180-184#timeout-minutes] [src: file: .github/workflows/ci-build.yml:265#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:377#timeout-minutes] [src: file: .github/workflows/ci-test.yml:736#timeout-minutes] [src: file: .github/workflows/ci-build.yml:213-217#timeout-minutes] [src: file: .github/workflows/ci-build.yml:298#timeout-minutes]
 [src: file: .github/workflows/ci-test.yml:968-1004#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
 
 ## Test placement
