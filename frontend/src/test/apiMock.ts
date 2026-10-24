@@ -647,6 +647,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       create: resolve({}),
       update: resolve({}),
       delete: resolve(true),
+      history: resolve([]),
+      restoreVersion: resolve({}),
     },
 
     profiles: {

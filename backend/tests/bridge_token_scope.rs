@@ -591,6 +591,32 @@ async fn a_bridge_token_cannot_read_the_pending_quick_exec_approvals() {
     assert_eq!(json["success"], true, "{json}");
 }
 
+/// KT-1434 — a skill's history is the human's: no bridge tool reads it, so a
+/// bridge token neither reads nor restores a version.
+#[tokio::test]
+async fn a_bridge_token_never_reads_nor_restores_a_skill_version() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let (status, json) = call(
+        &app,
+        "GET",
+        "/api/skills/rust/history",
+        Some(guard.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "{json}");
+    let (status, json) = call(
+        &app,
+        "POST",
+        "/api/skills/custom-anything/versions/1/restore",
+        Some(guard.value()),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, 403, "{json}");
+}
+
 /// A shared workflow triggered from a project-bound room runs for that
 /// project; one that does not serve it stays refused.
 #[tokio::test]

@@ -13,6 +13,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Custom skills keep a version history, like Quick Prompts. Every change
+  is saved as a full copy of the skill; a save that changes nothing adds
+  no version, and a skill written before this release gets its current
+  state as v1 at its next save. The skill page has a 🕒 history button:
+  the timeline of versions, a line diff with the previous version, and a
+  restore that asks first and records the restored content as a new
+  version, so nothing is lost. The history is for people: agents can
+  neither read it nor restore a version. Built-in skills have no history
+  (KT-1434).
 - Local image and video generation through ComfyUI (KT-1381). Config ›
   Agents › Local gains a ComfyUI card next to Ollama: server state and
   version, the one-command install on macOS (`brew install --cask comfy`), and

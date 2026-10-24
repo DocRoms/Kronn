@@ -116,6 +116,8 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **find_common_parent** — Internal function in `projects.rs` that computes the common parent directory of all existing projects in DB. Used by bootstrap to determine where to create new project directories. E.g., `/home/user/Repos/A` + `/home/user/Repos/B` → `/home/user/Repos`.
 
+**Skill version history** — Every change to a custom skill adds a full copy of its file under `skills/.versions/<slug>/<n>.md`. The catalog scan reads only `skills/*.md`, so these copies are never listed as skills. A save that changes nothing adds no version, and a skill saved before histories existed gets its current file as v1. The skill page shows the timeline, a diff between neighbouring versions, and a restore, which is recorded as a new version. The history routes are human-only: they are not in the bridge allowlist, so an agent token can neither read nor restore a version. Built-in skills have no history (KT-1434, `core/skill_versions.rs`).
+
 **Skill auto-detection** — During AI audit (between Phase 2 and Phase 3), `detect_project_skills()` scans project filesystem for config files (Cargo.toml → rust, tsconfig.json → typescript, go.mod → go, etc.) and saves detected skills to DB. Covers languages (rust, typescript, python, go, php), domain (devops, database, security), and business (web-performance, seo).
 
 **Validation discussion** — Discussion with title "Validation audit AI" created from the project page. Uses a locked (read-only) prompt. The AI asks questions about ambiguities, updates `docs/` files after each answer. Detected by matching `title === 'Validation audit AI'` + `project_id`.

@@ -122,6 +122,7 @@ pub mod secret_scrub;
 pub mod session_budget;
 pub mod skill_guide;
 pub mod skill_migration;
+pub mod skill_versions;
 pub mod skills;
 pub mod sse_limits;
 pub mod stack_consistency;
