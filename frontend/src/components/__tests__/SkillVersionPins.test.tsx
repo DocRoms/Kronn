@@ -55,5 +55,16 @@ describe('skill pins (KT-1447)', () => {
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
     expect(onChange).toHaveBeenLastCalledWith(['rust', 'custom-review']);
   });
-});
 
+  it('says a pin is behind the latest version, and keeps one row per skill', async () => {
+    const onChange = vi.fn();
+    const catalog = [skill('custom-review', 'Review')];
+    render(
+      <I18nProvider><SkillVersionPins ids={['custom-review', 'custom-review@1']} catalog={catalog} onChange={onChange} /></I18nProvider>,
+    );
+    expect(await screen.findByTestId('skill-version-pin-behind-custom-review')).toHaveTextContent('v1');
+    expect(screen.getAllByRole('combobox')).toHaveLength(1);
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: '2' } });
+    expect(onChange).toHaveBeenLastCalledWith(['custom-review@2']);
+  });
+});

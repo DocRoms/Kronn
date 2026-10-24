@@ -1960,6 +1960,7 @@ mod tests {
         let now = Utc::now();
         let workflow = crate::models::Workflow {
             retention: None,
+            shadow: None,
             project_scope: None,
             id: "wf-old-slug".into(),
             name: "Feeder".into(),
@@ -2002,4 +2003,141 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].id, "wf-old-slug");
     }
+}
+
+/// The Quick Prompts and skills behind a Page (KT-1450): those its publishing
+/// workflows, the workflows its actions launch, and their sub-workflows use,
+/// with what each lane (normal, shadow) loads.
+pub fn list_live_page_resources(
+    conn: &Connection,
+    page_id_or_slug: &str,
+) -> Result<Option<Vec<crate::models::LivePageResource>>> {
+    use crate::db::discussion_actions::DiscussionActionKind;
+    use crate::models::{LivePageResource, LivePageResourceUse, Workflow};
+    let Some(detail) = get_live_page(conn, page_id_or_slug)? else {
+        return Ok(None);
+    };
+    let Some(links) = list_live_page_workflows(conn, &detail.page.id)? else {
+        return Ok(None);
+    };
+    let all: HashMap<String, Workflow> = crate::db::workflows::list_workflows(conn)?
+        .into_iter()
+        .map(|workflow| (workflow.id.clone(), workflow))
+        .collect();
+    let mut queue: Vec<String> = links.into_iter().map(|link| link.id).collect();
+    let mut direct_prompts = Vec::new();
+    let html = &detail.revision.html;
+    for (_, range) in crate::db::live_page_actions::page_action_block_ranges(html) {
+        let Ok(action) =
+            serde_json::from_str::<crate::db::discussion_actions::ActionFence>(&html[range])
+        else {
+            continue;
+        };
+        match action.kind {
+            DiscussionActionKind::Workflow => queue.push(action.target_id),
+            DiscussionActionKind::QuickPrompt => direct_prompts.push(action.target_id),
+            _ => {}
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut found: Vec<LivePageResource> = Vec::new();
+    let mut add = |kind: &str,
+                   id: &str,
+                   name: String,
+                   latest: Option<u32>,
+                   used: Option<LivePageResourceUse>| {
+        let index = match found.iter().position(|r| r.kind == kind && r.id == id) {
+            Some(index) => index,
+            None => {
+                found.push(LivePageResource {
+                    kind: kind.into(),
+                    id: id.into(),
+                    name,
+                    latest_version: latest,
+                    uses: Vec::new(),
+                });
+                found.len() - 1
+            }
+        };
+        if let Some(used) = used {
+            found[index].uses.push(used);
+        }
+    };
+    let prompt_name = |id: &str| -> Result<(String, Option<u32>, Vec<String>)> {
+        let qp = crate::db::quick_prompts::get_quick_prompt(conn, id)?;
+        let latest = crate::db::quick_prompts::current_version_index(conn, id)?;
+        Ok(match qp {
+            Some(qp) => (qp.name, latest, qp.skill_ids),
+            None => (id.to_string(), latest, Vec::new()),
+        })
+    };
+    let skill_name = |base: &str| {
+        crate::core::skills::get_skill(base)
+            .map(|skill| skill.name)
+            .unwrap_or_else(|| base.to_string())
+    };
+    for id in &direct_prompts {
+        let (name, latest, _) = prompt_name(id)?;
+        add("quick_prompt", id, name, latest, None);
+    }
+    while let Some(workflow_id) = queue.pop() {
+        if !seen.insert(workflow_id.clone()) {
+            continue;
+        }
+        let Some(workflow) = all.get(&workflow_id) else {
+            continue;
+        };
+        let shadow = workflow.shadow.as_ref().filter(|s| s.enabled);
+        for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
+            if let Some(child) = &step.sub_workflow_id {
+                queue.push(child.clone());
+            }
+            let mut skills = step.skill_ids.clone();
+            for qp_id in step
+                .quick_prompt_id
+                .iter()
+                .chain(step.batch_quick_prompt_id.iter())
+            {
+                let (name, latest, qp_skills) = prompt_name(qp_id)?;
+                if skills.is_empty() {
+                    skills = qp_skills;
+                }
+                let used = LivePageResourceUse {
+                    workflow_id: workflow.id.clone(),
+                    workflow_name: workflow.name.clone(),
+                    step_name: step.name.clone(),
+                    normal: None,
+                    shadow: shadow
+                        .and_then(|s| s.quick_prompt_versions.get(qp_id))
+                        .map(|n| format!("v{n}")),
+                };
+                add("quick_prompt", qp_id, name, latest, Some(used));
+            }
+            for skill_id in skills {
+                let base = crate::core::skill_versions::split_pin(&skill_id)
+                    .map(|(base, _)| base.to_string())
+                    .unwrap_or_else(|_| skill_id.clone());
+                let used = LivePageResourceUse {
+                    workflow_id: workflow.id.clone(),
+                    workflow_name: workflow.name.clone(),
+                    step_name: step.name.clone(),
+                    normal: Some(skill_id.clone()),
+                    shadow: shadow.and_then(|s| {
+                        s.skills
+                            .get(&skill_id)
+                            .or_else(|| s.skills.get(&base))
+                            .cloned()
+                    }),
+                };
+                let latest = crate::core::skill_versions::latest_index(&base);
+                add("skill", &base, skill_name(&base), latest, Some(used));
+            }
+        }
+    }
+    found.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(Some(found))
 }

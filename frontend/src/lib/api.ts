@@ -263,7 +263,7 @@ import type {
   LivePageDiscussionLink,
   LivePagePublication,
   LivePageRevision,
-  LivePageWorkflowLink,
+  LivePageWorkflowLink, LivePageResource, PromoteShadowRequest,
   LivePagesCapability,
   PublishLivePageRequest,
   PublishLivePageResult,
@@ -2797,6 +2797,7 @@ export const workflows = {
   reenable: (ids: string[]) => api<Workflow[]>('POST', '/workflows/reenable', { ids }),
   delete: (id: string) => api<void>('DELETE', `/workflows/${id}`),
   trigger: (id: string) => api<WorkflowRun>('POST', `/workflows/${id}/trigger`),
+  promoteShadow: (id: string, req: PromoteShadowRequest) => api<Workflow>('POST', `/workflows/${id}/shadow/promote`, req),
 
   /** Trigger with SSE streaming for real-time progress.
    *  0.6.0 UX pass — accepts optional `variables` payload for workflows
@@ -3087,6 +3088,7 @@ export const pages = {
   get: (id: string) => api<LivePageDetail>('GET', `/pages/${encodeURIComponent(id)}`),
   revisions: (id: string) => api<LivePageRevision[]>('GET', `/pages/${encodeURIComponent(id)}/revisions`),
   workflows: (id: string) => api<LivePageWorkflowLink[]>('GET', `/pages/${encodeURIComponent(id)}/workflows`),
+  resources: (id: string) => api<LivePageResource[]>('GET', `/pages/${encodeURIComponent(id)}/resources`),
   publications: (id: string) => api<LivePagePublication[]>('GET', `/pages/${encodeURIComponent(id)}/publications`),
   discussions: (id: string) => api<LivePageDiscussionLink[]>('GET', `/pages/${encodeURIComponent(id)}/discussions`),
   create: (request: CreateLivePageRequest) => api<LivePageDetail>('POST', '/pages', request),

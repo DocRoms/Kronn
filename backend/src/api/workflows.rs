@@ -2514,6 +2514,47 @@ fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
 
 /// Why an agent cannot change a workflow's retention (KT-1100): the purge
 /// applies it at once, enabled or not, so only a human may set what it deletes.
+/// POST /api/workflows/:id/shadow/promote — the normal lane takes over the
+/// version the shadow tested (KT-1450). Human-only: no bridge route.
+pub async fn promote_shadow(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::workflows::shadow::PromoteShadowRequest>,
+) -> Json<ApiResponse<Workflow>> {
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let mut workflow = crate::db::workflows::get_workflow(conn, &id)?
+                .ok_or_else(|| anyhow::anyhow!("Workflow not found"))?;
+            crate::workflows::shadow::promote(conn, &mut workflow, &req)?;
+            crate::db::workflows::update_workflow(conn, &workflow)?;
+            Ok(workflow)
+        })
+        .await;
+    match result {
+        Ok(workflow) => Json(ApiResponse::ok(workflow)),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
+    }
+}
+
+pub(crate) const AGENT_SHADOW_REFUSAL: &str = "A shadow variant starts extra runs: an \
+     agent cannot set or change it. Ask the user to set it in Kronn (workflow editor, \
+     \"Shadow runs\").";
+
+/// A shadow variant names skills that exist in that version and QP versions
+/// from 1 (KT-1449).
+fn validate_shadow(shadow: &WorkflowShadow) -> Result<(), String> {
+    let replacements: Vec<String> = shadow.skills.values().cloned().collect();
+    crate::core::skill_versions::validate_pins(&replacements)
+        .map_err(|e| format!("Shadow: {e}"))?;
+    if let Some((id, _)) = shadow.quick_prompt_versions.iter().find(|(_, n)| **n == 0) {
+        return Err(format!(
+            "Shadow: Quick Prompt {id} has no version 0, versions start at 1"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) const AGENT_RETENTION_REFUSAL: &str = "Run retention is a human decision: an \
      agent cannot change it on an existing workflow. Ask the user to set it in Kronn \
      (workflow editor, \"Run retention\").";
@@ -2626,6 +2667,14 @@ async fn create_written(
             return Json(ApiResponse::err(e));
         }
     }
+    if let Some(ref shadow) = req.shadow {
+        if writer == WorkflowWriter::Agent {
+            return Json(ApiResponse::err(AGENT_SHADOW_REFUSAL));
+        }
+        if let Err(e) = validate_shadow(shadow) {
+            return Json(ApiResponse::err(e));
+        }
+    }
 
     if let Err(e) = validate_artifact_specs(&req.artifacts) {
         return Json(ApiResponse::err(e));
@@ -2729,6 +2778,7 @@ async fn create_written(
     }
     let wf = Workflow {
         retention: req.retention,
+        shadow: req.shadow,
         pinned: false,
         id: Uuid::new_v4().to_string(),
         name: req.name,
@@ -3088,6 +3138,14 @@ async fn update_written(
     {
         return Json(ApiResponse::err(AGENT_RETENTION_REFUSAL));
     }
+    if writer == WorkflowWriter::Agent
+        && req
+            .shadow
+            .as_ref()
+            .is_some_and(|shadow| *shadow != existing.shadow)
+    {
+        return Json(ApiResponse::err(AGENT_SHADOW_REFUSAL));
+    }
     // An agent's change to what an enabled workflow executes would run under
     // the human's earlier activation: compared below, it disables the workflow.
     let agent_guard = (writer == WorkflowWriter::Agent && existing.enabled)
@@ -3198,6 +3256,11 @@ async fn update_written(
             return Json(ApiResponse::err(e));
         }
     }
+    if let Some(Some(ref shadow)) = req.shadow {
+        if let Err(e) = validate_shadow(shadow) {
+            return Json(ApiResponse::err(e));
+        }
+    }
 
     if let Some(ref new_artifacts) = req.artifacts {
         if let Err(e) = validate_artifact_specs(new_artifacts) {
@@ -3288,6 +3351,7 @@ async fn update_written(
 
     let mut updated = Workflow {
         retention: req.retention.unwrap_or(existing.retention),
+        shadow: req.shadow.unwrap_or(existing.shadow),
         id: existing.id,
         name: req.name.unwrap_or(existing.name),
         project_id: req.project_id.unwrap_or(existing.project_id),
@@ -3431,6 +3495,7 @@ async fn update_written(
                 {
                     updated.enabled = stored.enabled;
                     updated.retention = stored.retention;
+                    updated.shadow = stored.shadow;
                 }
             }
             if let (true, Some((by, summary))) = (was_enabled, auto_disable_summary) {
@@ -6829,6 +6894,7 @@ pub async fn suggestions(
                     delay_after_secs: None,
                     mcp_config_ids: vec![],
                     skill_ids: vec![],
+                    external_effect: false,
                     profile_ids: vec![],
                     directive_ids: vec![],
                     batch_quick_prompt_id: None,
@@ -7801,6 +7867,7 @@ mod tests {
             delay_after_secs: None,
             mcp_config_ids: vec![],
             skill_ids: vec![],
+            external_effect: false,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -9117,6 +9184,7 @@ mod tests {
     fn mk_workflow_for_export(name: &str) -> Workflow {
         Workflow {
             retention: None,
+            shadow: None,
             project_scope: None,
             pinned: false,
             id: "src-id-original".into(),

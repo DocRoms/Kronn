@@ -1748,7 +1748,7 @@ export type BundleChildWorkflow = { bundle_id: string, name: string, project_id:
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, shadow?: WorkflowShadow, };
 
 /**
  * One artifact that was created by the bundle endpoint. The
@@ -2583,7 +2583,7 @@ export type CreateWorkflowRequest = { name: string, project_id?: string | null, 
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, shadow?: WorkflowShadow, };
 
 /**
  * Where a plugin's outbound API credential actually comes from, computed
@@ -5384,6 +5384,30 @@ export type LivePageDiscussionRelation = "created_from" | "attached";
  */
 export type LivePagePublication = { id: string, page_id: string, data_revision: number, workflow_id: string | null, workflow_name: string | null, workflow_run_id: string | null, datasets_updated: Array<string>, content_changed: boolean, changed_datasets: Array<string>, unchanged_datasets: Array<string>, points_added: number, points_removed: number, published_at: string, };
 
+/**
+ * A Quick Prompt or a skill one of the Page's workflows uses (KT-1450).
+ */
+export type LivePageResource = {
+/**
+ * `quick_prompt` or `skill`.
+ */
+kind: string, id: string, name: string, latest_version: number | null, uses: Array<LivePageResourceUse>, };
+
+/**
+ * One step that loads a Page resource, with the version each lane loads.
+ */
+export type LivePageResourceUse = { workflow_id: string, workflow_name: string, step_name: string,
+/**
+ * What the normal run loads: a skill id (`custom-x@3` when pinned) or,
+ * for a Quick Prompt, `None` (its current version).
+ */
+normal: string | null,
+/**
+ * What the workflow's shadow run loads instead, when its shadow is on
+ * and names this resource.
+ */
+shadow: string | null, };
+
 export type LivePageRevision = { id: string, page_id: string, revision: number, html: string, created_by_agent: string | null, created_at: string, };
 
 export type LivePagesCapability = { activated: boolean, activated_at: string | null, };
@@ -7275,6 +7299,17 @@ export type ProjectWorkspace = { hooks: WorkspaceHooks, };
 export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
 
 export type ProjectWriteAccessStatus = "Writable" | "ReadOnly" | "Missing" | "Unknown";
+
+/**
+ * What the normal lane takes over from the shadow (KT-1450): the tested
+ * version of a skill in every step that loads it, or the tested version of a
+ * Quick Prompt made its current one. The shadow's override goes away.
+ */
+export type PromoteShadowRequest = {
+/**
+ * `skill` or `quick_prompt`.
+ */
+kind: string, id: string, };
 
 export type PromptVariable = { name: string, label: string, placeholder: string,
 /**
@@ -10844,7 +10879,11 @@ project_scope?: WorkflowProjectScope | null,
 /**
  * `null` returns to the global retention; omitted keeps it.
  */
-retention?: WorkflowRetention | null, };
+retention?: WorkflowRetention | null,
+/**
+ * `null` removes the shadow variant; omitted keeps it.
+ */
+shadow?: WorkflowShadow | null, };
 
 /**
  * Response after uploading a context file.
@@ -11285,7 +11324,12 @@ project_scope?: WorkflowProjectScope,
  * KT-1100 — how long this workflow's finished runs are kept, overriding
  * the global retention. `None` inherits it.
  */
-retention?: WorkflowRetention, created_at: string, updated_at: string, };
+retention?: WorkflowRetention,
+/**
+ * KT-1449 — a shadow run started alongside each normal one, with other
+ * skill/QP versions and its external effects skipped. Human-only.
+ */
+shadow?: WorkflowShadow, created_at: string, updated_at: string, };
 
 export type WorkflowAction = { "type": "CreatePr", title_template: string, body_template: string, branch_template: string, } | { "type": "CommentIssue", body_template: string, } | { "type": "UpdateTrackerStatus", status: string, } | { "type": "CreateIssue", title_template: string, body_template: string, };
 
@@ -11649,6 +11693,26 @@ export type WorkflowScopeEntry = { project_id: string, project_name: string | nu
 
 export type WorkflowScopeItem = { project_id: string, access: ScopeAccess, };
 
+/**
+ * The shadow variant of a workflow (KT-1449). Each normal run of a matching
+ * project also starts a shadow run on the same inputs; steps flagged
+ * `external_effect` are skipped there, so it can be compared without acting.
+ */
+export type WorkflowShadow = { enabled: boolean,
+/**
+ * Only runs of these projects get a shadow; empty means every run.
+ */
+project_ids?: Array<string>,
+/**
+ * Skill replaced in the shadow run: `custom-x` → `custom-x@3`, or any
+ * other skill id. Matched on the base id of what the step loads.
+ */
+skills?: Record<string, string>,
+/**
+ * Quick Prompt version the shadow run loads instead of the current one.
+ */
+quick_prompt_versions?: Record<string, number>, };
+
 export type WorkflowStep = {
 /**
  * Durable opaque identity of this step. `name` remains the editable
@@ -11664,7 +11728,12 @@ id?: string | null, name: string, step_type: StepType, description?: string | nu
  * fails the step and tips into the rollback chain). Stored in `steps_json`
  * alongside `on_result` — no migration; absent on older workflows.
  */
-on_timeout?: ConditionAction | null, stall_timeout_secs?: number | null, retry?: RetryConfig | null, delay_after_secs?: number | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>,
+on_timeout?: ConditionAction | null, stall_timeout_secs?: number | null, retry?: RetryConfig | null, delay_after_secs?: number | null, skill_ids?: Array<string>,
+/**
+ * KT-1449 — the step acts outside Kronn (posts, writes, sends): a shadow
+ * run skips it.
+ */
+external_effect?: boolean, profile_ids?: Array<string>, directive_ids?: Array<string>,
 /**
  * Id of the Quick Prompt to fan out. Required for BatchQuickPrompt steps.
  */

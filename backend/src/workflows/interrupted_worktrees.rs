@@ -238,6 +238,7 @@ mod tests {
         .unwrap();
         let workflow = crate::models::Workflow {
             retention: None,
+            shadow: None,
             project_scope: None,
             pinned: false,
             id: "wf-reclaim".into(),

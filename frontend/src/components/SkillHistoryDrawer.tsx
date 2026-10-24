@@ -5,11 +5,14 @@
  * which records it as the newest version.
  */
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useAsyncGuard } from '../hooks/useAsyncGuard';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 import { useT } from '../lib/I18nContext';
 import { skills as skillsApi } from '../lib/api';
 import type { SkillVersion } from '../types/generated';
 import { diffLines } from '../lib/qp-history-diff';
-import { History, X, ChevronRight, ChevronDown, RotateCcw } from 'lucide-react';
+import { History, X, ChevronRight, ChevronDown, RotateCcw, CheckCircle2 } from 'lucide-react';
 import './QPHistoryDrawer.css';
 
 interface Props {
@@ -48,7 +51,10 @@ export default function SkillHistoryDrawer({ skillId, skillName, refreshKey, onR
   const [diffOpen, setDiffOpen] = useState<number | null>(null);
   const [restoring, setRestoring] = useState<number | null>(null);
   const [count, setCount] = useState<number | null>(null);
-  const key = `${skillId}:${refreshKey}`;
+  const [restored, setRestored] = useState<string | null>(null);
+  const [reloads, setReloads] = useState(0);
+  const key = `${skillId}:${refreshKey}:${reloads}`;
+  const dialogRef = useDialogFocus<HTMLElement>({ active: open, onEscape: () => setOpen(false) });
   const current = open && load?.key === key;
   const history = current ? load.history : EMPTY;
   const loading = open && !current;
@@ -71,29 +77,25 @@ export default function SkillHistoryDrawer({ skillId, skillName, refreshKey, onR
     return () => { cancelled = true; };
   }, [skillId, key]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open]);
-
-  const restore = async (index: number) => {
-    if (restoring != null) return;
+  const restore = useAsyncGuard(async (index: number) => {
     if (!window.confirm(t('skills.history.restoreConfirm', index))) return;
     setRestoring(index);
     setActionError(null);
+    setRestored(null);
     try {
-      await skillsApi.restoreVersion(skillId, index);
+      const created = await skillsApi.restoreVersion(skillId, index);
       setExpanded(null);
       setDiffOpen(null);
+      setRestored(t('skills.history.restored', index, created?.version_index ?? '?'));
+      // The drawer reads its own history again; the page reloads the skill.
+      setReloads(n => n + 1);
       onRestored?.();
     } catch (e) {
       setActionError(String((e as Error).message ?? e));
     } finally {
       setRestoring(null);
     }
-  };
+  });
 
   return (
     <>
@@ -101,20 +103,23 @@ export default function SkillHistoryDrawer({ skillId, skillName, refreshKey, onR
         type="button"
         className="qph-cta"
         data-testid="skill-history-toggle"
-        onClick={() => { setActionError(null); setOpen(true); }}
+        onClick={() => { setActionError(null); setRestored(null); setOpen(true); }}
         title={t('skills.history.openTitle', skillName)}
       >
         <History size={12} />
         {t('skills.history.openLabel', count ?? '…')}
       </button>
 
-      {open && (
+      {/* Portaled: a transformed ancestor (sheet header) would clip a fixed drawer. */}
+      {open && createPortal(
         <>
           <div className="qph-overlay" onClick={() => setOpen(false)} />
           <aside
+            ref={dialogRef}
             className="qph-drawer"
             data-testid="skill-history-drawer"
             role="dialog"
+            aria-modal="true"
             aria-label={t('skills.history.drawerTitle', skillName)}
           >
             <header className="qph-drawer-header">
@@ -135,6 +140,11 @@ export default function SkillHistoryDrawer({ skillId, skillName, refreshKey, onR
             <div className="qph-drawer-body">
               {loading && <p>{t('common.loading')}</p>}
               {error && <p className="qph-error" role="alert">{error}</p>}
+              {restored && (
+                <p className="qph-restored" role="status" data-testid="skill-history-restored">
+                  <CheckCircle2 size={12} aria-hidden /> {restored}
+                </p>
+              )}
               {!loading && !error && history.length === 0 && (
                 <p className="qph-empty">{t('skills.history.empty')}</p>
               )}
@@ -169,14 +179,14 @@ export default function SkillHistoryDrawer({ skillId, skillName, refreshKey, onR
                           {!v.current && (
                             <button
                               type="button"
-                              className="qph-version-delete"
+                              className="qph-version-restore"
                               data-testid={`skill-history-restore-${v.version_index}`}
                               onClick={(e) => { e.stopPropagation(); void restore(v.version_index); }}
                               disabled={restoring != null}
                               aria-label={t('skills.history.restoreAria', v.version_index)}
                               title={t('skills.history.restoreAria', v.version_index)}
                             >
-                              <RotateCcw size={11} />
+                              <RotateCcw size={11} aria-hidden /> {t('skills.history.restore')}
                             </button>
                           )}
                         </div>
@@ -227,7 +237,8 @@ export default function SkillHistoryDrawer({ skillId, skillName, refreshKey, onR
               )}
             </div>
           </aside>
-        </>
+        </>,
+        document.body,
       )}
     </>
   );

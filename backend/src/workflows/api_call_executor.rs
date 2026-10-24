@@ -2833,6 +2833,7 @@ mod tests {
             retry: None,
             delay_after_secs: None,
             skill_ids: vec![],
+            external_effect: false,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,

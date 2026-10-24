@@ -998,6 +998,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "274_validations_access",
         include_str!("sql/274_validations_access.sql"),
     ),
+    (
+        "276_workflow_shadow",
+        include_str!("sql/276_workflow_shadow.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

@@ -385,6 +385,12 @@ pub async fn execute_sub_workflow_step(
     let child_run_id = Uuid::new_v4().to_string();
     let mut trigger = serde_json::Map::new();
     trigger.insert("__subwf_depth__".into(), json!(child_depth));
+    if super::shadow::parent_is_shadow(state, parent_run_id).await {
+        trigger.insert(
+            super::shadow::VARIANT_KEY.into(),
+            json!(super::shadow::SHADOW),
+        );
+    }
     let prepared = match prepare_child_snapshot(
         state,
         &child_wf,
@@ -843,6 +849,7 @@ async fn execute_foreach(
     start: Instant,
     launch: ChildLaunch<'_>,
 ) -> StepOutcome {
+    let parent_shadow = super::shadow::parent_is_shadow(state, parent_run_id).await;
     // The fan-out is defined around the SHARED worktree (the items file +
     // current_task.json + the children's commits all live there).
     let ws = match parent_workspace {
@@ -1166,6 +1173,12 @@ async fn execute_foreach(
         tctx.insert("__subwf_depth__".into(), json!(child_depth));
         tctx.insert("__subwf_item__".into(), json!(idx));
         tctx.insert("__subwf_item_id__".into(), json!(item_id));
+        if parent_shadow {
+            tctx.insert(
+                super::shadow::VARIANT_KEY.into(),
+                json!(super::shadow::SHADOW),
+            );
+        }
         for (k, v) in current_task_template_vars(item) {
             tctx.insert(k, serde_json::Value::String(v));
         }
@@ -1582,6 +1595,7 @@ mod tests {
         // Child workflow: deterministic JsonData steps — no LLM, no project.
         let child_wf = crate::models::Workflow {
             retention: None,
+            shadow: None,
             project_scope: None,
             pinned: false,
             id: "child-wf".into(),

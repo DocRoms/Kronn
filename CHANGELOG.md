@@ -29,6 +29,24 @@ Release notes for 0.9.3 and earlier are available in the
   custom skill picked, « latest version » or a version to pin. A version
   that does not exist is refused at save, never silently replaced by the
   latest (KT-1447).
+- Shadow runs: a workflow can start, alongside each normal run, a shadow run
+  on the same inputs that loads other versions of its skills and Quick
+  Prompts. Steps marked « acts outside Kronn » (posting, sending, writing
+  elsewhere) and Gates are skipped in the shadow run, so nothing happens
+  twice; it never counts against the concurrency limit, never pages on
+  failure, and its sub-runs are shadow runs too. It works in its own git
+  worktree, unless the workflow declares it never writes the checkout. Set it in the workflow
+  editor (« Shadow runs »: on/off, the projects it covers, the version of each
+  skill and Quick Prompt). The run list marks shadow runs, and a normal run
+  shows its shadow side by side, step by step. Steps read the variant as
+  `{{run.variant}}` (`normal` or `shadow`). Agents cannot set it (KT-1449).
+- A Page shows the resources behind it: the Quick Prompts and skills its
+  workflows use (those that publish to it, those its buttons launch, and
+  their sub-workflows), with their latest version, their history, a link to
+  edit them and, step by step, what the normal run and the shadow run load.
+  « Promote » hands a version tested in shadow to the normal runs: a skill in
+  every step that loads it, a Quick Prompt as its current version, saved as
+  a new version (KT-1450).
 - Local image and video generation through ComfyUI (KT-1381). Config ›
   Agents › Local gains a ComfyUI card next to Ollama: server state and
   version, the one-command install on macOS (`brew install --cask comfy`), and

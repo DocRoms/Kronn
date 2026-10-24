@@ -515,6 +515,21 @@ describe('WorkflowWizard — step list handlers', () => {
     });
   });
 
+  it('explains « acts outside Kronn » next to its checkbox and saves it (KT-1449)', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({ steps: [mkStep(), mkStep({ name: 'post', external_effect: true })] }) });
+    fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+    fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+    fireEvent.click(screen.getAllByText('wiz.advanced *').at(-1)!);
+    const box = await screen.findByTestId('wiz-external-effect-1') as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    expect(document.getElementById(box.getAttribute('aria-describedby')!)).toHaveTextContent('wiz.externalEffectHint');
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].steps[1].external_effect).toBe(true);
+  });
+
   it('hides the starting point while the run is not isolated and never sends it', async () => {
     renderWizard({ editWorkflow: mkWorkflow({
       steps: [mkStep(), mkStep({ name: 'review' })],

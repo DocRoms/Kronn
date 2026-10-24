@@ -34,6 +34,7 @@ pub mod run_pins;
 pub mod run_scope;
 pub mod runner;
 pub mod safety;
+pub mod shadow;
 pub mod step_agents;
 pub mod step_output_format;
 pub mod step_room;
@@ -660,6 +661,7 @@ mod tests {
         let at = Utc::now() - chrono::Duration::minutes(age_minutes);
         Workflow {
             retention: None,
+            shadow: None,
             project_scope: None,
             id: id.into(),
             name: id.into(),
@@ -1001,6 +1003,7 @@ mod tests {
             stall_timeout_secs: None,
             retry: None,
             skill_ids: vec![],
+            external_effect: false,
             directive_ids: vec![],
             profile_ids: vec![],
             delay_after_secs: None,
