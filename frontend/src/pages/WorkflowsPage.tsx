@@ -4305,6 +4305,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                 onOpenSettings={onNavigateSettings}
                 onEdit={selectedSkill.is_builtin ? undefined : () => setEditingSkill(selectedSkill)}
                 onError={message => toastProp?.(message, 'error')}
+                onRestored={() => { refetchSkills(); }}
                 onDelete={selectedSkill.is_builtin ? undefined : async () => {
                   await skillsApi.delete(selectedSkill.id);
                   setSelectedSkillId(null);

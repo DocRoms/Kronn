@@ -73,6 +73,22 @@ pub struct Skill {
     pub project_id: Option<String>,
 }
 
+/// One saved state of a custom skill (KT-1434): every save that changes the
+/// file adds the next version; the newest one is what agents load.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillVersion {
+    pub skill_id: String,
+    pub version_index: u32,
+    pub name: String,
+    pub description: String,
+    pub icon: String,
+    pub category: SkillCategory,
+    pub content: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub current: bool,
+}
+
 /// Kronn's description of one skill argument. Stored as JSON under the flat
 /// `kronn-variables` metadata key: the Agent Skills `metadata` is a string map.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

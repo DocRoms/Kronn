@@ -15655,6 +15655,53 @@ async fn skills_crud_create_and_delete_custom() {
     assert_eq!(status, StatusCode::OK);
 }
 
+/// KT-1434 — every change of a custom skill is a version; an old one can be
+/// read and restored, which records it as the newest version.
+#[tokio::test]
+async fn a_custom_skill_keeps_its_versions_and_restores_one() {
+    let state = test_state();
+    let app = || build_router_with_auth(state.clone(), false);
+    let body = |content: &str| {
+        serde_json::json!({
+            "name": "Versioned review", "description": "", "icon": "🔎",
+            "category": "Domain", "content": content,
+        })
+    };
+    let (_, created) = post_json(app(), "/api/skills", body("rule one")).await;
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+    let (_, updated) = put_json_root(app(), &format!("/api/skills/{id}"), body("rule two")).await;
+    assert_eq!(updated["success"], true, "{updated}");
+
+    let (_, history) = get_json(app(), &format!("/api/skills/{id}/history")).await;
+    let versions = history["data"].as_array().unwrap();
+    assert_eq!(versions.len(), 2, "{history}");
+    assert_eq!(versions[0]["version_index"], 2);
+    assert_eq!(versions[0]["current"], true);
+    let (_, first) = get_json(app(), &format!("/api/skills/{id}/versions/1")).await;
+    assert_eq!(first["data"]["content"], "rule one", "{first}");
+
+    let (_, restored) = post_json(
+        app(),
+        &format!("/api/skills/{id}/versions/1/restore"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(restored["data"]["version_index"], 3, "{restored}");
+    let (_, list) = get_json(app(), "/api/skills").await;
+    let skill = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(skill["content"], "rule one");
+
+    let (_, builtin) = get_json(app(), "/api/skills/rust/history").await;
+    assert_eq!(builtin["data"], serde_json::json!([]), "{builtin}");
+    delete_json(app(), &format!("/api/skills/{id}")).await;
+}
+
 #[tokio::test]
 async fn directives_list_returns_builtins() {
     let app = test_app();

@@ -49,7 +49,7 @@ Kronn/
 │       │   ├── agents.rs       # Agent detection + install + uninstall + toggle (enable/disable)
 │       │   ├── model_catalog.rs # Dynamic catalog snapshot, refresh and manual model CRUD
 │       │   ├── stats.rs        # Token usage & cost stats (by provider, project, daily history, top discussions/workflows)
-│       │   ├── skills.rs       # Skills API: list, create, update, delete
+│       │   ├── skills.rs       # Skills API: list, create, update, delete, version history and restore (KT-1434)
 │       │   ├── profiles.rs     # Profiles API: list, create, update, delete, persona-name override
 │       │   ├── directives.rs   # Directives API: list, create, update, delete
 │       │   ├── docs.rs         # Kronn Docs proxy (post-0.5.0) — 5 endpoints POST /api/docs/{pdf,docx,xlsx,csv,pptx} + GET /api/docs/file/:disc/:filename. All POSTs go through proxy_to_sidecar() helper. Filename sanitization (alphanumerics + -_ space, UUID suffix, extension forced) + canonicalize check against path traversal. Output dir: ~/.kronn/generated/<discussion_id>/. Graceful update/reinstall error when no sidecar runtime is available.
@@ -122,6 +122,7 @@ Kronn/
 │       │   ├── ws_client.rs   # WebSocket client manager: outbound connections to contacts with exponential backoff. Auto-reconnects.
 │       │   ├── crypto.rs       # AES-256-GCM encryption for MCP secrets
 │       │   ├── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()
+│       │   ├── skill_versions.rs # Custom skill version history (KT-1434): a full copy per change under skills/.versions/<slug>/<n>.md, read, restore
 │       │   ├── profiles.rs   # Profiles loader: builtin (embedded .md) + custom (~/.config/kronn/profiles/). Persona override system, build_profiles_prompt()
 │       │   ├── directives.rs # Directives loader: builtin (embedded .md) + custom (~/.config/kronn/directives/). build_directives_prompt()
 │       │   ├── cmd.rs        # Cross-platform command helpers: async_cmd()/sync_cmd() apply CREATE_NO_WINDOW on Windows + (0.6.0) resolve bare program names (npx, npm, git…) via which::which on Windows so .cmd/.bat wrappers are spawnable. they take a ChildRoute that builds the child's environment; ALL processes MUST use these helpers (clippy.toml)

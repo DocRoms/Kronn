@@ -135,7 +135,7 @@ read-only sheet (`SkillSheet`) whose `SKILL.md` reuses the safe Markdown of the
 repository resources, and editing stays in Config › Skills. A skill has no
 server-side pin or modification date, so its favorites are kept in the browser
 and it ranks after every dated automation when sorted by last modification.
-[src: file: frontend/src/lib/automationSkills.ts:9-13#SKILL_UPDATED_AT] [src: file: frontend/src/lib/automationSkills.ts:23-33#readSkillFavorites] [src: file: frontend/src/components/SkillSheet.tsx:133-136#SkillSheet] [src: file: frontend/src/components/SkillSheet.tsx:206-208#FileText]
+[src: file: frontend/src/lib/automationSkills.ts:9-13#SKILL_UPDATED_AT] [src: file: frontend/src/lib/automationSkills.ts:23-33#readSkillFavorites] [src: file: frontend/src/components/SkillSheet.tsx:136-139#SkillSheet] [src: file: frontend/src/components/SkillSheet.tsx:217-219#FileText]
 
 At 400 px, where the sidebar is the usual drawer, nothing scrolls sideways: the
 chips wrap onto new lines, "Group by" takes the full width, and a list opens over

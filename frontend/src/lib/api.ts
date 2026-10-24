@@ -155,6 +155,7 @@ import type {
   BundleResponse,
   AgentUsageSummary,
   Skill,
+  SkillVersion,
   CreateSkillRequest,
   AgentProfile,
   CreateProfileRequest,
@@ -3305,6 +3306,9 @@ export const skills = {
   create: (req: CreateSkillRequest) => api<Skill>('POST', '/skills', req),
   update: (id: string, req: CreateSkillRequest) => api<Skill>('PUT', `/skills/${id}`, req),
   delete: (id: string) => api<boolean>('DELETE', `/skills/${id}`),
+  history: (id: string) => api<SkillVersion[]>('GET', `/skills/${id}/history`),
+  restoreVersion: (id: string, versionIndex: number) =>
+    api<SkillVersion>('POST', `/skills/${id}/versions/${versionIndex}/restore`, {}),
 };
 
 // ─── Profiles ────────────────────────────────────────────────────────────────

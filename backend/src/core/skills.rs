@@ -451,6 +451,18 @@ fn custom_skills_dir() -> Option<PathBuf> {
     Some(config_dir.join("skills"))
 }
 
+pub(crate) fn skills_dir() -> Result<PathBuf, String> {
+    custom_skills_dir().ok_or_else(|| "Cannot determine config directory".into())
+}
+
+/// A skill saved without its history entry stays saved: losing the edit
+/// would be worse than a missing version, which the next save records.
+fn record_version(dir: &std::path::Path, slug: &str, raw: &str) {
+    if let Err(e) = super::skill_versions::record(dir, slug, raw) {
+        tracing::warn!("skill '{slug}': version not recorded: {e}");
+    }
+}
+
 /// When a custom skill's file last changed: the Kronn-side date of a skill,
 /// which carries no `updated_at` of its own. `None` for builtin skills.
 pub fn custom_skill_modified_at(id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -824,6 +836,7 @@ pub fn save_custom_skill(
     let path = dir.join(format!("{}.md", slug));
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
         .map_err(|e| format!("Cannot write skill: {}", e))?;
+    record_version(&dir, &slug, &file_content);
 
     Ok(id)
 }
@@ -865,6 +878,9 @@ pub fn update_custom_skill(
 
     let raw =
         std::fs::read_to_string(&path).map_err(|e| format!("Cannot read skill '{}': {}", id, e))?;
+    if let Err(e) = super::skill_versions::record_baseline(&dir, slug, &raw) {
+        tracing::warn!("skill '{slug}': previous state not recorded: {e}");
+    }
     let preserved = preserved_header(&raw);
     let project = match project_id {
         Some(next) => next,
@@ -887,6 +903,7 @@ pub fn update_custom_skill(
     );
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
         .map_err(|e| format!("Cannot write skill: {}", e))?;
+    record_version(&dir, slug, &file_content);
 
     Ok(id.to_string())
 }
@@ -909,6 +926,7 @@ pub fn delete_custom_skill(id: &str) -> Result<bool, String> {
 
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("Cannot delete skill: {}", e))?;
+        super::skill_versions::forget(&dir, slug)?;
         Ok(true)
     } else {
         Ok(false)
@@ -978,6 +996,7 @@ mod tests {
         let files: Vec<_> = std::fs::read_dir(dir.join("skills"))
             .unwrap()
             .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(files.len(), 1, "expected exactly one file, got {:?}", files);

@@ -9404,6 +9404,12 @@ name: string, label?: string, description?: string | null, required: boolean, de
 control?: PromptVariableControl | null, };
 
 /**
+ * One saved state of a custom skill (KT-1434): every save that changes the
+ * file adds the next version; the newest one is what agents load.
+ */
+export type SkillVersion = { skill_id: string, version_index: number, name: string, description: string, icon: string, category: SkillCategory, content: string, created_at: string, current: boolean, };
+
+/**
  * One extracted `[src: …]` marker plus its mechanical verdict.
  */
 export type SourceCheck = {
