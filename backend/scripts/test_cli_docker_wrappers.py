@@ -443,10 +443,20 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             self.assertIn(f"        if: {live}\n", aggregate)
             self.assertIn(IDENTITY_STEP, aggregate)
             # Only a push to main may count a skipped job: it refreshes caches.
-            self.assertIn(
-                """'all(.[]; . == "success" or ($event == "push" and . == "skipped"))'""",
-                aggregate,
-            )
+            # The build gate also counts the portability job skipped because
+            # the change does not touch what it tests, and only that one.
+            if path == BUILD_WORKFLOW:
+                self.assertIn('or ($event == "push" and .value.result == "skipped")', aggregate)
+                self.assertIn(
+                    '(.key == "test-backend-portability" and .value.result == "skipped" and $portability == "false")',
+                    aggregate,
+                )
+                self.assertIn('.value.result == "success"', aggregate)
+            else:
+                self.assertIn(
+                    """'all(.[]; . == "success" or ($event == "push" and . == "skipped"))'""",
+                    aggregate,
+                )
             for name, section in jobs.items():
                 if name in (route, gate):
                     continue

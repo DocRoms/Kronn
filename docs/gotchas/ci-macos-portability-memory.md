@@ -8,7 +8,7 @@ single `Compiling kronn` line: 52m 48s of pure rustc on one crate for 98 tests
 in [job 116332790208](https://github.com/DocRoms/Kronn/actions/runs/38707823085/job/116332790208).
 The log is silent between the ts-rs warnings of the first seconds and the
 linker warning `__eh_frame section too large (max 16MB)` at the end.
-[src: file: .github/workflows/ci-build.yml:211-225]
+[src: file: .github/workflows/ci-build.yml:244-258]
 
 ## Cause: memory, not CPU
 
