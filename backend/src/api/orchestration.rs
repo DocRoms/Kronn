@@ -7148,6 +7148,32 @@ pub(crate) async fn decide_native_review(
     .await
 }
 
+/// Review entry point for the room's own native agent (the identity that
+/// `task_exec_launch` accepts as principal). It is authorized only during its
+/// running turn in the execution's parent room, and a dispatch that belongs to
+/// an execution is refused there, so this caller is never the worker.
+pub(crate) async fn decide_room_agent_review(
+    db: &Database,
+    task_execution_id: &str,
+    decision_json: &str,
+    room: SpawnedAgentCaller,
+) -> Result<ReviewOutcome, ProvisionError> {
+    let caller = PrincipalCaller::RoomAgent(room.clone());
+    let Some(execution) = authorize_execution_principal(db, task_execution_id, &caller).await
+    else {
+        return Ok(ReviewOutcome::NotAddressed);
+    };
+    decide_authorized_review(
+        db,
+        execution,
+        room.agent_type.trim(),
+        Some(room.source_message_id.trim().to_string()),
+        true,
+        decision_json,
+    )
+    .await
+}
+
 /// Review entry point for a `DelegateSubtasks` workflow step (KT-909). The step
 /// owns its principal room, so it decides as that room's principal, with no session.
 pub(crate) async fn decide_review_as_delegation_step(
@@ -12358,12 +12384,26 @@ pub struct TaskExecCallerRequest {
     pub source_session_id: String,
     #[serde(default)]
     pub spawned_agent: Option<SpawnedAgentCaller>,
+    /// The room's own native agent, injected by the bridge from the runner's
+    /// environment. Exclusive with `source_agent`/`source_session_id`; it is the
+    /// same principal identity `task_exec_launch` accepts, so the agent that
+    /// launched an execution can also follow, decide and stop it.
+    #[serde(default)]
+    pub room_agent: Option<SpawnedAgentCaller>,
 }
 
 #[derive(Deserialize)]
 pub struct TaskExecCancelRequest {
+    #[serde(default)]
     pub source_agent: String,
+    #[serde(default)]
     pub source_session_id: String,
+    /// The room's own native agent, injected by the bridge from the runner's
+    /// environment. Exclusive with `source_agent`/`source_session_id`; it is the
+    /// same principal identity `task_exec_launch` accepts, so the agent that
+    /// launched an execution can also follow, decide and stop it.
+    #[serde(default)]
+    pub room_agent: Option<SpawnedAgentCaller>,
     #[serde(default = "default_cancel_reason")]
     pub reason: String,
     #[serde(default)]
@@ -12372,8 +12412,16 @@ pub struct TaskExecCancelRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct TaskExecReassignRequest {
+    #[serde(default)]
     pub source_agent: String,
+    #[serde(default)]
     pub source_session_id: String,
+    /// The room's own native agent, injected by the bridge from the runner's
+    /// environment. Exclusive with `source_agent`/`source_session_id`; it is the
+    /// same principal identity `task_exec_launch` accepts, so the agent that
+    /// launched an execution can also follow, decide and stop it.
+    #[serde(default)]
+    pub room_agent: Option<SpawnedAgentCaller>,
     /// The same typed `MessageTarget` shape `agent_list` hands back verbatim
     /// and `task_exec_prepare`/`task_exec_launch` accept as `worker` — not
     /// the internal `CampaignWorkerSelection` envelope. `model`/`profile_id`
@@ -12470,6 +12518,7 @@ async fn pin_cli_principal(
 }
 
 /// Who is asking to prepare or launch a task execution from a room.
+#[derive(Clone)]
 enum PrincipalCaller {
     Cli { agent: String, session_id: String },
     RoomAgent(SpawnedAgentCaller),
@@ -12501,6 +12550,50 @@ fn principal_is_authorized(
         }
         PrincipalCaller::RoomAgent(room) => {
             room_agent_is_authorized(conn, parent_discussion_id, room)
+        }
+    }
+}
+
+/// Authorize a principal-only call on an EXISTING execution (status, review,
+/// cancel, resume, reassign) with the same identities `task_exec_launch`
+/// accepts. Before this, those calls took only a joined CLI session, so a
+/// room's native agent could launch an execution and then never follow, decide
+/// or stop it. An unknown execution and a stranger fuse into `None`.
+async fn authorize_execution_principal(
+    db: &Database,
+    exec_id: &str,
+    caller: &PrincipalCaller,
+) -> Option<TaskExecution> {
+    let (id, caller) = (exec_id.to_string(), caller.clone());
+    db.with_conn(move |conn| {
+        let Some(execution) = crate::db::orchestration::get_task_execution(conn, &id)? else {
+            return Ok(None);
+        };
+        Ok(
+            principal_is_authorized(conn, &execution.parent_discussion_id, &caller)?
+                .then_some(execution),
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Make a CLI principal the one this execution's notices address. A room's
+/// native agent has no durable session to pin: its room already receives them.
+async fn pin_principal_caller(db: &Database, exec_id: &str, caller: &PrincipalCaller) {
+    if let PrincipalCaller::Cli { agent, session_id } = caller {
+        pin_cli_principal(db, exec_id, agent, session_id).await;
+    }
+}
+
+/// The journal actor of a principal call: the CLI alias + session, or the room
+/// agent's provider alias + the trigger of the turn that made the call.
+fn principal_actor(caller: &PrincipalCaller) -> OrchestrationActor {
+    match caller {
+        PrincipalCaller::Cli { agent, session_id } => agent_actor(agent, Some(session_id)),
+        PrincipalCaller::RoomAgent(room) => {
+            agent_actor(room.agent_type.trim(), Some(room.source_message_id.trim()))
         }
     }
 }
@@ -14008,7 +14101,10 @@ pub async fn task_exec_status(
         timeout_secs,
     } = request;
     let execution_id = if let Some(caller) = request.spawned_agent {
-        if !request.source_agent.trim().is_empty() || !request.source_session_id.trim().is_empty() {
+        if !request.source_agent.trim().is_empty()
+            || !request.source_session_id.trim().is_empty()
+            || request.room_agent.is_some()
+        {
             return Json(ApiResponse::err_coded(
                 ApiErrorCode::Validation,
                 "choose exactly one status identity mode",
@@ -14049,6 +14145,37 @@ pub async fn task_exec_status(
             Err(error) => {
                 let (code, message) = provision_error_parts(&error);
                 return Json(ApiResponse::err_coded(code, message));
+            }
+        }
+    } else if let Some(room) = request.room_agent {
+        // The room's native agent follows the executions it launched as their
+        // principal, exactly like a joined CLI session in the parent room.
+        let caller = match principal_caller(
+            &request.source_agent,
+            &request.source_session_id,
+            Some(room),
+        ) {
+            Ok(caller) => caller,
+            Err(message) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
+        };
+        let authorized = state
+            .db
+            .with_conn(move |conn| {
+                let execution = resolve_task_execution_reference(conn, &exec_id)?
+                    .context("execution not found or caller is not a party")?;
+                if !principal_is_authorized(conn, &execution.parent_discussion_id, &caller)? {
+                    bail!("execution not found or caller is not a party");
+                }
+                Ok(execution.id)
+            })
+            .await;
+        match authorized {
+            Ok(id) => id,
+            Err(error) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::NotFound,
+                    error.to_string(),
+                ))
             }
         }
     } else {
@@ -14139,39 +14266,22 @@ pub async fn task_exec_resume(
             "task execution resume is available only to its principal",
         ));
     }
-    let Some((agent, session_id)) =
-        caller_fields(&request.source_agent, &request.source_session_id)
-    else {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "durable source_agent and source_session_id are required",
-        ));
+    let caller = match principal_caller(
+        &request.source_agent,
+        &request.source_session_id,
+        request.room_agent,
+    ) {
+        Ok(caller) => caller,
+        Err(message) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
     };
-    let (agent_pin, session_pin) = (agent.clone(), session_id.clone());
-    let authorized = {
-        let id = exec_id.clone();
-        state
-            .db
-            .with_conn(move |conn| {
-                let execution = crate::db::orchestration::get_task_execution(conn, &id)?
-                    .context("execution not found or caller is not its principal")?;
-                principal_cli_is_authorized(
-                    conn,
-                    &execution.parent_discussion_id,
-                    &agent,
-                    &session_id,
-                )
-            })
-            .await
-    };
-    if !matches!(authorized, Ok(true)) {
+    let Some(execution) = authorize_execution_principal(&state.db, &exec_id, &caller).await else {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "execution not found or caller is not its principal",
         ));
-    }
-    pin_cli_principal(&state.db, &exec_id, &agent_pin, &session_pin).await;
-    resume_execution(State(state), Path(exec_id)).await
+    };
+    pin_principal_caller(&state.db, &execution.id, &caller).await;
+    resume_execution(State(state), Path(execution.id)).await
 }
 
 pub async fn task_exec_cancel(
@@ -14179,39 +14289,23 @@ pub async fn task_exec_cancel(
     Path(exec_id): Path<String>,
     Json(request): Json<TaskExecCancelRequest>,
 ) -> Json<ApiResponse<ExecutionRecoveryView>> {
-    let Some((agent, session_id)) =
-        caller_fields(&request.source_agent, &request.source_session_id)
-    else {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "durable source_agent and source_session_id are required",
-        ));
+    let caller = match principal_caller(
+        &request.source_agent,
+        &request.source_session_id,
+        request.room_agent,
+    ) {
+        Ok(caller) => caller,
+        Err(message) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
     };
-    let authorized = {
-        let id = exec_id.clone();
-        state
-            .db
-            .with_conn(move |conn| {
-                let execution = crate::db::orchestration::get_task_execution(conn, &id)?
-                    .context("execution not found or caller is not its principal")?;
-                principal_cli_is_authorized(
-                    conn,
-                    &execution.parent_discussion_id,
-                    &agent,
-                    &session_id,
-                )
-            })
-            .await
-    };
-    if !matches!(authorized, Ok(true)) {
+    let Some(execution) = authorize_execution_principal(&state.db, &exec_id, &caller).await else {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "execution not found or caller is not its principal",
         ));
-    }
+    };
     cancel_execution(
         State(state),
-        Path(exec_id),
+        Path(execution.id),
         Json(CancelExecutionRequest {
             reason: request.reason,
             cleanup_policy: request.cleanup_policy,
@@ -14225,44 +14319,28 @@ pub async fn task_exec_reassign(
     Path(exec_id): Path<String>,
     Json(request): Json<TaskExecReassignRequest>,
 ) -> Json<ApiResponse<serde_json::Value>> {
-    let Some((agent, session_id)) =
-        caller_fields(&request.source_agent, &request.source_session_id)
-    else {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "durable source_agent and source_session_id are required",
-        ));
+    let caller = match principal_caller(
+        &request.source_agent,
+        &request.source_session_id,
+        request.room_agent,
+    ) {
+        Ok(caller) => caller,
+        Err(message) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
     };
-    let (agent_pin, session_pin) = (agent.clone(), session_id.clone());
-    let authorized = {
-        let id = exec_id.clone();
-        state
-            .db
-            .with_conn(move |conn| {
-                let execution = crate::db::orchestration::get_task_execution(conn, &id)?
-                    .context("execution not found or caller is not its principal")?;
-                principal_cli_is_authorized(
-                    conn,
-                    &execution.parent_discussion_id,
-                    &agent,
-                    &session_id,
-                )
-            })
-            .await
-    };
-    if !matches!(authorized, Ok(true)) {
+    let Some(execution) = authorize_execution_principal(&state.db, &exec_id, &caller).await else {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "execution not found or caller is not its principal",
         ));
-    }
+    };
+    let exec_id = execution.id;
     let amendment = match execution_amendment(request.worker, request.validations) {
         Ok(amendment) => amendment,
         Err(refusal) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, refusal)),
     };
     match amendment {
         ExecutionAmendment::Reassign(target) => {
-            pin_cli_principal(&state.db, &exec_id, &agent_pin, &session_pin).await;
+            pin_principal_caller(&state.db, &exec_id, &caller).await;
             let Json(response) = reassign_execution(
                 State(state),
                 Path(exec_id),
@@ -14292,7 +14370,7 @@ pub async fn task_exec_reassign(
             &exec_id,
             validations,
             &request.reason,
-            agent_actor(&agent_pin, Some(&session_pin)),
+            principal_actor(&caller),
         )
         .await
         {
@@ -14524,7 +14602,7 @@ pub async fn accept_offer(
 /// Out-of-band runner identity shared by the spawned-worker commit and delivery
 /// boundaries. The bridge injects it from `KRONN_TASK_WORKER_CONTEXT`; it is
 /// deliberately absent from both model-visible MCP schemas.
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SpawnedAgentCaller {
     pub discussion_id: String,
     pub agent_type: String,
@@ -15118,6 +15196,12 @@ pub struct ReviewRequest {
     pub source_agent: Option<String>,
     #[serde(default)]
     pub source_session_id: Option<String>,
+    /// The room's own native agent, injected by the bridge from the runner's
+    /// environment. Exclusive with `source_agent`/`source_session_id`; it is the
+    /// same principal identity `task_exec_launch` accepts, so the agent that
+    /// launched an execution can also follow, decide and stop it.
+    #[serde(default)]
+    pub room_agent: Option<SpawnedAgentCaller>,
 }
 
 #[derive(Deserialize)]
@@ -15228,6 +15312,39 @@ pub async fn review(
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     };
+    if let Some(room) = request.room_agent {
+        if clean(&request.source_agent).is_some() || clean(&request.source_session_id).is_some() {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Validation,
+                "choose exactly one principal identity mode".to_string(),
+            ));
+        }
+        let decision_json = match serde_json::to_string(&request.decision) {
+            Ok(s) => s,
+            Err(e) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::Validation,
+                    format!("decision is not serializable JSON: {e}"),
+                ))
+            }
+        };
+        return match decide_room_agent_review(
+            &state.db,
+            request.task_execution_id.trim(),
+            &decision_json,
+            room,
+        )
+        .await
+        {
+            Ok(outcome) => Json(review_outcome_to_response(enqueue_approved_integration(
+                &state, outcome,
+            ))),
+            Err(error) => {
+                let (code, message) = provision_error_parts(&error);
+                Json(ApiResponse::err_coded(code, message))
+            }
+        };
+    }
     let (source_agent, source_session_id) = match (
         clean(&request.source_agent),
         clean(&request.source_session_id),
@@ -15504,6 +15621,449 @@ pub(crate) mod tests {
         assert!(
             !authorized,
             "a CLI session that is not a member stays refused"
+        );
+    }
+
+    /// A parent room `d-parent` whose Codex turn `job-1` is running and launched
+    /// `t-1`'s execution (returned), plus every room-agent identity that must NOT
+    /// be its principal: a running turn of another room (`job-2`), finished and
+    /// cancelled turns of the parent room, and the dispatch of another
+    /// execution's worker in the parent room (`job-worker`, still pending).
+    async fn room_agent_lifecycle_fixture(db: &std::sync::Arc<Database>) -> String {
+        db.with_conn(|conn| {
+            let now = "2026-10-14T00:00:00Z";
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, created_at, updated_at)
+                 VALUES ('d-parent', 'Parent', 'Codex', ?1, ?1),
+                        ('d-other', 'Other', 'Codex', ?1, ?1)",
+                [now],
+            )?;
+            for (id, disc, job, status) in [
+                ("msg-1", "d-parent", "job-1", "Running"),
+                ("msg-2", "d-other", "job-2", "Running"),
+                ("msg-3", "d-parent", "job-done", "Completed"),
+                ("msg-4", "d-parent", "job-cancelled", "Cancelled"),
+                // A room runs one turn at a time: the worker's dispatch becomes
+                // `Running` only in the case that presents it.
+                ("msg-w", "d-parent", "job-worker", "Pending"),
+            ] {
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order)
+                     VALUES (?1, ?2, 'User', 'go', ?3, (SELECT COUNT(*) FROM messages))",
+                    rusqlite::params![id, disc, now],
+                )?;
+                crate::db::agent_dispatch::enqueue(
+                    conn,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id: job,
+                        discussion_id: disc,
+                        trigger_message_id: id,
+                        trigger_sort_order: 1,
+                        dedupe_key: job,
+                        agent_override: None,
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                conn.execute(
+                    "UPDATE agent_dispatch_jobs SET status = ?1 WHERE id = ?2",
+                    rusqlite::params![status, job],
+                )?;
+            }
+            // Messages written by the code under test (the terminal notice a
+            // cancellation posts in the parent room) take their order from the
+            // discussion's sequence: move it past the rows inserted above.
+            conn.execute(
+                "UPDATE discussions SET next_message_seq = (
+                     SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages
+                     WHERE discussion_id = discussions.id)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO planning_tasks (id, task_number, title, created_at, updated_at)
+                 VALUES ('t-1', 1, 'CI task', ?1, ?1), ('t-2', 2, 'Other task', ?1, ?1)",
+                [now],
+            )?;
+            let actor = crate::models::OrchestrationActor {
+                kind: crate::models::PlanningActorKind::Backend,
+                id: Some("room-agent-lifecycle-test".into()),
+                session_id: None,
+                source_message_id: None,
+            };
+            let launched = crate::db::orchestration::launch_single_task(
+                conn,
+                &crate::models::LaunchSingleTaskInput::new("t-1", "d-parent"),
+                &actor,
+            )?
+            .execution
+            .id;
+            let other = crate::db::orchestration::launch_single_task(
+                conn,
+                &crate::models::LaunchSingleTaskInput::new("t-2", "d-parent"),
+                &actor,
+            )?
+            .execution
+            .id;
+            crate::db::orchestration::attach_execution_dispatch(conn, &other, "job-worker")?;
+            Ok(launched)
+        })
+        .await
+        .unwrap()
+    }
+
+    fn lifecycle_room(disc: &str, job: &str, msg: &str) -> SpawnedAgentCaller {
+        SpawnedAgentCaller {
+            discussion_id: disc.into(),
+            agent_type: "Codex".into(),
+            dispatch_job_id: job.into(),
+            source_message_id: msg.into(),
+        }
+    }
+
+    /// Regression: a room's native agent launched an execution as its principal,
+    /// then every follow-up (status, review, cancel) was refused as "not
+    /// addressed to this session" because those paths accepted only a CLI
+    /// session. The launching identity must be able to see and decide it.
+    #[tokio::test]
+    async fn a_room_native_agent_can_review_and_stop_the_execution_it_launched() {
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution_id = room_agent_lifecycle_fixture(&db).await;
+        let room = lifecycle_room;
+
+        let own = PrincipalCaller::RoomAgent(room("d-parent", "job-1", "msg-1"));
+        let found = authorize_execution_principal(&db, &execution_id, &own).await;
+        assert_eq!(found.map(|e| e.id), Some(execution_id.clone()));
+        for (caller, label) in [
+            (
+                room("d-other", "job-2", "msg-2"),
+                "native agent of another room",
+            ),
+            (room("d-parent", "job-done", "msg-3"), "finished turn"),
+        ] {
+            let caller = PrincipalCaller::RoomAgent(caller);
+            assert!(
+                authorize_execution_principal(&db, &execution_id, &caller)
+                    .await
+                    .is_none(),
+                "{label}"
+            );
+        }
+        assert!(
+            authorize_execution_principal(&db, "missing-exec", &own)
+                .await
+                .is_none(),
+            "unknown execution"
+        );
+
+        let decision = r#"{"version":"1","task_ref":"KT-1","decision":"approve"}"#;
+        // Authorized: the refusal is now about the execution's state, not the caller.
+        let outcome = decide_room_agent_review(
+            &db,
+            &execution_id,
+            decision,
+            room("d-parent", "job-1", "msg-1"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !matches!(outcome, ReviewOutcome::NotAddressed),
+            "the launching room agent is addressed"
+        );
+        let outcome = decide_room_agent_review(
+            &db,
+            &execution_id,
+            decision,
+            room("d-other", "job-2", "msg-2"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(outcome, ReviewOutcome::NotAddressed),
+            "a stranger stays opaque"
+        );
+    }
+
+    /// `(endpoint, success, error, error_code)` of one principal lifecycle call.
+    type LifecycleAnswer = (&'static str, bool, Option<String>, Option<String>);
+
+    /// Call status, review, cancel, resume and reassign on `exec_id` with one
+    /// room-agent identity, optionally ALSO naming a CLI session (`mixed`).
+    async fn every_principal_call(
+        state: &AppState,
+        exec_id: &str,
+        room: SpawnedAgentCaller,
+        mixed: bool,
+    ) -> Vec<LifecycleAnswer> {
+        let (agent, session) = if mixed {
+            ("Codex".to_string(), "cli-session".to_string())
+        } else {
+            (String::new(), String::new())
+        };
+        let caller = || TaskExecCallerRequest {
+            source_agent: agent.clone(),
+            source_session_id: session.clone(),
+            spawned_agent: None,
+            room_agent: Some(room.clone()),
+        };
+        fn answer<T: Serialize>(name: &'static str, r: ApiResponse<T>) -> LifecycleAnswer {
+            (name, r.success, r.error, r.error_code)
+        }
+        let Json(status) = task_exec_status(
+            State(state.clone()),
+            Path(exec_id.to_string()),
+            Json(TaskExecStatusRequest {
+                caller: caller(),
+                ..Default::default()
+            }),
+        )
+        .await;
+        let Json(review) = review(
+            State(state.clone()),
+            Json(ReviewRequest {
+                task_execution_id: exec_id.to_string(),
+                decision: serde_json::json!({
+                    "version": "1", "task_ref": "KT-1", "decision": "approve"
+                }),
+                source_agent: mixed.then(|| agent.clone()),
+                source_session_id: mixed.then(|| session.clone()),
+                room_agent: Some(room.clone()),
+            }),
+        )
+        .await;
+        let Json(cancel) = task_exec_cancel(
+            State(state.clone()),
+            Path(exec_id.to_string()),
+            Json(TaskExecCancelRequest {
+                source_agent: agent.clone(),
+                source_session_id: session.clone(),
+                room_agent: Some(room.clone()),
+                reason: "stop".into(),
+                cleanup_policy: None,
+            }),
+        )
+        .await;
+        let Json(resume) = task_exec_resume(
+            State(state.clone()),
+            Path(exec_id.to_string()),
+            Json(caller()),
+        )
+        .await;
+        let Json(reassign) = task_exec_reassign(
+            State(state.clone()),
+            Path(exec_id.to_string()),
+            Json(TaskExecReassignRequest {
+                source_agent: agent.clone(),
+                source_session_id: session.clone(),
+                room_agent: Some(room.clone()),
+                worker: None,
+                validations: Some(Vec::new()),
+                reason: "retry".into(),
+            }),
+        )
+        .await;
+        vec![
+            answer("status", status),
+            answer("review", review),
+            answer("cancel", cancel),
+            answer("resume", resume),
+            answer("reassign", reassign),
+        ]
+    }
+
+    /// The execution row plus its event and review journals: a refused call
+    /// must leave all three exactly as they were.
+    async fn execution_state(db: &std::sync::Arc<Database>, exec_id: &str) -> serde_json::Value {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?;
+            let count = |table: &str| -> anyhow::Result<i64> {
+                Ok(conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE task_execution_id = ?1"),
+                    [&id],
+                    |row| row.get(0),
+                )?)
+            };
+            Ok(serde_json::json!({
+                "execution": execution,
+                "events": count("task_execution_events")?,
+                "reviews": count("task_execution_reviews")?,
+            }))
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Every room-agent identity that is not the launching turn is refused on
+    /// every principal call, with the SAME opaque answer as an unknown
+    /// execution (no existence oracle), and nothing changes state.
+    #[tokio::test]
+    async fn a_room_native_agent_outside_its_own_turn_is_refused_on_every_principal_call() {
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution_id = room_agent_lifecycle_fixture(&db).await;
+        let state = recovery_test_state(&db);
+        let before = execution_state(&db, &execution_id).await;
+
+        // The opaque refusal an unknown execution gets, per endpoint.
+        let unknown = every_principal_call(
+            &state,
+            "missing-exec",
+            lifecycle_room("d-parent", "job-1", "msg-1"),
+            false,
+        )
+        .await;
+        for (name, success, error, _) in &unknown {
+            assert!(!success, "{name}: an unknown execution is refused");
+            assert!(error.is_some(), "{name}: the refusal names a reason");
+        }
+
+        for (room, label) in [
+            (
+                lifecycle_room("d-other", "job-2", "msg-2"),
+                "native agent of another room",
+            ),
+            (
+                lifecycle_room("d-parent", "job-done", "msg-3"),
+                "finished turn",
+            ),
+            (
+                lifecycle_room("d-parent", "job-cancelled", "msg-4"),
+                "cancelled turn",
+            ),
+        ] {
+            let answers = every_principal_call(&state, &execution_id, room, false).await;
+            assert_eq!(
+                answers, unknown,
+                "{label}: same opaque refusal as an unknown execution"
+            );
+            assert_eq!(
+                execution_state(&db, &execution_id).await,
+                before,
+                "{label}: no state change"
+            );
+        }
+
+        // A worker's dispatch running in the parent room is never its principal,
+        // even while it is the room's only running turn.
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET status = 'Completed' WHERE id = 'job-1'",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET status = 'Running' WHERE id = 'job-worker'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let worker = every_principal_call(
+            &state,
+            &execution_id,
+            lifecycle_room("d-parent", "job-worker", "msg-w"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            worker, unknown,
+            "a worker's dispatch presented as the room agent: same opaque refusal"
+        );
+        assert_eq!(
+            execution_state(&db, &execution_id).await,
+            before,
+            "worker dispatch: no state change"
+        );
+
+        // Both identity modes at once are refused before any lookup, even for the
+        // launching turn, so the answer cannot reveal the execution either.
+        let mixed = every_principal_call(
+            &state,
+            &execution_id,
+            lifecycle_room("d-parent", "job-1", "msg-1"),
+            true,
+        )
+        .await;
+        let mixed_unknown = every_principal_call(
+            &state,
+            "missing-exec",
+            lifecycle_room("d-parent", "job-1", "msg-1"),
+            true,
+        )
+        .await;
+        for (name, success, _, code) in &mixed {
+            assert!(!success, "{name}: room_agent with a CLI session is refused");
+            assert_eq!(
+                code.as_deref(),
+                Some("validation"),
+                "{name}: identity-mode refusal"
+            );
+        }
+        assert_eq!(
+            mixed, mixed_unknown,
+            "the mixed refusal is no existence oracle"
+        );
+        assert_eq!(
+            execution_state(&db, &execution_id).await,
+            before,
+            "mixed identity: no state change"
+        );
+    }
+
+    /// Handler level, the symptom of #241: the room agent whose turn launched
+    /// the execution calls the endpoints with the identity launch accepted.
+    /// Status and cancel succeed; the others may refuse on the execution's
+    /// state, but none with the opaque answer an unknown execution gets.
+    #[tokio::test]
+    async fn the_launching_room_agent_is_accepted_by_every_principal_handler() {
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution_id = room_agent_lifecycle_fixture(&db).await;
+        let state = recovery_test_state(&db);
+        let own = || lifecycle_room("d-parent", "job-1", "msg-1");
+
+        let unknown = every_principal_call(&state, "missing-exec", own(), false).await;
+        let answers = every_principal_call(&state, &execution_id, own(), false).await;
+
+        for ((name, _, error, code), (_, _, unknown_error, unknown_code)) in
+            answers.iter().zip(&unknown)
+        {
+            assert_ne!(
+                (error, code),
+                (unknown_error, unknown_code),
+                "{name}: the launching turn never gets the unknown-execution refusal"
+            );
+        }
+        let answer = |endpoint: &str| {
+            answers
+                .iter()
+                .find(|(name, ..)| *name == endpoint)
+                .unwrap_or_else(|| panic!("{endpoint} was called"))
+        };
+        let (_, success, error, _) = answer("status");
+        assert!(success, "status is accepted: {error:?}");
+        // Pending, nothing delivered: the caller is a party, so the refusal is
+        // a state conflict (DoD-5 guard), never the not-found of a stranger.
+        let (_, success, error, code) = answer("review");
+        assert!(!success, "a pending execution has nothing to approve");
+        assert_eq!(
+            code.as_deref(),
+            Some("conflict"),
+            "review refuses on state, not on identity: {error:?}"
+        );
+        let (_, success, error, _) = answer("cancel");
+        assert!(success, "cancel is accepted: {error:?}");
+        let id = execution_id.clone();
+        let status = db
+            .with_conn(move |conn| {
+                Ok(crate::db::orchestration::get_task_execution(conn, &id)?.map(|e| e.status))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            Some(TaskExecutionStatus::Cancelled),
+            "the room agent stopped what it launched"
         );
     }
 
@@ -18458,6 +19018,7 @@ pub(crate) mod tests {
                         dispatch_job_id: replacement_dispatch.clone(),
                         source_message_id: current_trigger.clone(),
                     }),
+                    room_agent: None,
                 },
                 ..Default::default()
             }),
@@ -18480,6 +19041,7 @@ pub(crate) mod tests {
                         dispatch_job_id: current_dispatch.clone(),
                         source_message_id: current_trigger.clone(),
                     }),
+                    room_agent: None,
                 },
                 ..Default::default()
             }),
@@ -18581,6 +19143,7 @@ pub(crate) mod tests {
                             dispatch_job_id: previous_dispatch.clone(),
                             source_message_id: trigger.clone(),
                         }),
+                        room_agent: None,
                     },
                     ..Default::default()
                 }),
@@ -20344,6 +20907,7 @@ pub(crate) mod tests {
                 timeout_secs: None,
             }]),
             reason: "the first set could never run".into(),
+            room_agent: None,
         };
         let gates = |db: std::sync::Arc<Database>, exec_id: String| async move {
             db.with_conn(move |conn| {
@@ -23421,6 +23985,7 @@ pub(crate) mod tests {
                 source_agent: "Codex".into(),
                 source_session_id: "another-session".into(),
                 spawned_agent: None,
+                room_agent: None,
             }),
         )
         .await;
@@ -23433,6 +23998,7 @@ pub(crate) mod tests {
                 source_agent: "Codex".into(),
                 source_session_id: "principal-session".into(),
                 spawned_agent: None,
+                room_agent: None,
             }),
         )
         .await;
@@ -23534,6 +24100,7 @@ pub(crate) mod tests {
                 source_agent: "Codex".into(),
                 source_session_id: "principal-session".into(),
                 spawned_agent: None,
+                room_agent: None,
             }),
         )
         .await;
@@ -23569,6 +24136,7 @@ pub(crate) mod tests {
                 source_agent: "Codex".into(),
                 source_session_id: "principal-session".into(),
                 spawned_agent: None,
+                room_agent: None,
             }),
         )
         .await;
@@ -23626,6 +24194,7 @@ pub(crate) mod tests {
                 source_agent: "Codex".into(),
                 source_session_id: "principal-session".into(),
                 spawned_agent: None,
+                room_agent: None,
             }),
         )
         .await;
@@ -28282,6 +28851,7 @@ pub(crate) mod tests {
             worker: Some(MessageTarget::cli(AgentType::ClaudeCode, session)),
             validations: None,
             reason: "explicitly recover this exact worker in its existing child".into(),
+            room_agent: None,
         };
         let Json(foreign) = task_exec_reassign(
             State(state.clone()),
@@ -30676,6 +31246,7 @@ pub(crate) mod tests {
                 source_agent: "ClaudeCode".into(),
                 source_session_id: "principal-sess".into(),
                 spawned_agent: None,
+                room_agent: None,
             },
             view: TaskExecStatusView::Full,
             wait_for,
@@ -31132,6 +31703,7 @@ pub(crate) mod tests {
                 worker: Some(MessageTarget::discussion_agent(AgentType::Ollama)),
                 validations: None,
                 reason: "the delivery misread the DoD; try a native worker".into(),
+                room_agent: None,
             }),
         )
         .await;
@@ -31215,6 +31787,7 @@ pub(crate) mod tests {
                 worker: Some(MessageTarget::cli(AgentType::ClaudeCode, 102)),
                 validations: None,
                 reason: "hand the rework to another CLI".into(),
+                room_agent: None,
             }),
         )
         .await;
@@ -33223,6 +33796,7 @@ pub(crate) mod tests {
             decision: serde_json::from_str(decision).expect("review decision JSON"),
             source_agent: Some("ClaudeCode".to_string()),
             source_session_id: Some("sess-b".to_string()),
+            room_agent: None,
         }
     }
 
@@ -37229,6 +37803,7 @@ pub(crate) mod tests {
                 worker: Some(MessageTarget::cli(AgentType::ClaudeCode, 102)),
                 validations: None,
                 reason: "redirect to a fresh CLI since the first never accepted".into(),
+                room_agent: None,
             }),
         )
         .await;
