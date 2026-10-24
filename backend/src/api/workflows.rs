@@ -711,6 +711,8 @@ pub(crate) fn validate_imported_sub_workflow_graph(
 /// intentionally no-ops here — they have dedicated validators
 /// (`validate_exec_steps`, `validate_json_data_steps`).
 pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
+    crate::core::skill_versions::validate_pins(&s.skill_ids)
+        .map_err(|e| format!("Step « {} »: {e}", s.name))?;
     if let Some(tools) = s.agent_settings.as_ref().and_then(|a| a.tools.as_ref()) {
         if !matches!(s.step_type, StepType::Agent) {
             return Err(format!(

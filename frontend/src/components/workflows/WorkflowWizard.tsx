@@ -6,7 +6,8 @@ import { ArtifactImportDialog } from '../ArtifactImportDialog';
 import { buildBlankStep, isDelegateSubtasksIncomplete, jsonPathToTarget, splitToolList, withStepTools } from '../../lib/workflowUiUtils';
 import { DelegateSubtasksSummary } from './DelegateSubtasksSummary';
 import { useT } from '../../lib/I18nContext';
-import { offeredToProject, pickedButNotOffered, repositorySkillsOf } from '../../lib/automationSkills';
+import { offeredToProject, pickedButNotOffered, repositorySkillsOf, skillBaseId } from '../../lib/automationSkills';
+import SkillVersionPins from '../SkillVersionPins';
 import { workflows as workflowsApi, projects as projectsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
 import { ApiCallStepCard, JsonTreeViewer, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
@@ -4187,14 +4188,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         ...pickedButNotOffered(step.skill_ids ?? [], offeredSkills, availableSkills, usedSkills),
                       ].map(skill => {
                         const ids = step.skill_ids ?? [];
-                        const selected = ids.includes(skill.id);
+                        const selected = ids.some(id => skillBaseId(id) === skill.id);
                         const foreign = !offeredSkills.some(offered => offered.id === skill.id);
                         return (
                           <button
                             key={skill.id}
                             type="button"
                             onClick={() => {
-                              const newIds = selected ? ids.filter(id => id !== skill.id) : [...ids, skill.id];
+                              const newIds = selected ? ids.filter(id => skillBaseId(id) !== skill.id) : [...ids, skill.id];
                               updateStep(i, { skill_ids: newIds.length > 0 ? newIds : undefined });
                             }}
                             className="wf-chip wf-chip-skill"
@@ -4209,6 +4210,11 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         );
                       })}
                     </div>
+                    <SkillVersionPins
+                      ids={step.skill_ids ?? []}
+                      catalog={availableSkills}
+                      onChange={ids => updateStep(i, { skill_ids: ids })}
+                    />
                   </details>
                 )}
 

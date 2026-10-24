@@ -1,0 +1,21 @@
+.skill-version-pins {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--kr-border-subtle);
+}
+.skill-version-pins small { color: var(--kr-text-muted); font-size: 11px; }
+.skill-version-pin { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--kr-text-primary); }
+.skill-version-pin select {
+  min-width: 140px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--kr-border);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-size: 12px;
+}

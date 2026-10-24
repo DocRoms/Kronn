@@ -323,6 +323,9 @@ pub async fn create(
     State(state): State<AppState>,
     Json(mut req): Json<CreateDiscussionRequest>,
 ) -> Json<ApiResponse<Discussion>> {
+    if let Err(error) = crate::core::skill_versions::validate_pins(&req.skill_ids) {
+        return Json(ApiResponse::err(error));
+    }
     let discussion_id = Uuid::new_v4().to_string();
     let mut launch_qp = None;
     if let Some(qp_id) = req.originating_qp_id.clone() {
@@ -764,6 +767,11 @@ pub async fn update(
     let archived = req.archived;
     let pinned = req.pinned;
     let skill_ids = req.skill_ids;
+    if let Some(ids) = &skill_ids {
+        if let Err(error) = crate::core::skill_versions::validate_pins(ids) {
+            return Json(ApiResponse::err(error));
+        }
+    }
     let profile_ids = req.profile_ids;
     let directive_ids = req.directive_ids;
     let project_id = req.project_id;
