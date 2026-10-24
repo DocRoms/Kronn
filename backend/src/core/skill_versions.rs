@@ -138,6 +138,52 @@ pub fn history(id: &str) -> Result<Vec<SkillVersion>, String> {
         .collect())
 }
 
+/// `custom-x@N` names version N of `custom-x` (KT-1447); any other id is
+/// not pinned. A malformed pin is an error, never silently the latest.
+pub fn split_pin(id: &str) -> Result<(&str, Option<u32>), String> {
+    let Some((base, version)) = id.split_once('@') else {
+        return Ok((id, None));
+    };
+    let index = version
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n >= 1)
+        .ok_or_else(|| {
+            format!("Skill '{id}': a pinned version is `@` followed by a number from 1")
+        })?;
+    if !base.starts_with("custom-") {
+        return Err(format!(
+            "Skill '{id}': only custom skills have versions to pin"
+        ));
+    }
+    Ok((base, Some(index)))
+}
+
+/// The skill as version N saved it, under its pinned id `custom-x@N`.
+pub fn pinned_skill(id: &str) -> Option<crate::models::Skill> {
+    let (base, Some(index)) = split_pin(id).ok()? else {
+        return None;
+    };
+    let slug = slug_of(base).ok()?;
+    let path = version_path(
+        &history_dir(&super::skills::skills_dir().ok()?, slug),
+        index,
+    );
+    let raw = std::fs::read_to_string(path).ok()?;
+    super::skills::parse_skill_markdown(id, &raw, false)
+}
+
+/// Refuses a pinned skill id whose version does not exist; unpinned ids are
+/// left to the launch, which already skips an unknown one.
+pub fn validate_pins(ids: &[String]) -> Result<(), String> {
+    for id in ids {
+        if split_pin(id)?.1.is_some() && pinned_skill(id).is_none() {
+            return Err(format!("Skill '{id}': this version does not exist"));
+        }
+    }
+    Ok(())
+}
+
 /// Version `index` of skill `id`.
 pub fn version(id: &str, index: u32) -> Result<SkillVersion, String> {
     history(id)?
@@ -311,6 +357,38 @@ mod tests {
             .join(slug)
             .exists());
         assert!(history(&id).is_err());
+    }
+
+    #[test]
+    fn a_pin_names_a_version_and_a_bad_pin_is_an_error() {
+        assert_eq!(split_pin("custom-review").unwrap(), ("custom-review", None));
+        assert_eq!(
+            split_pin("custom-review@3").unwrap(),
+            ("custom-review", Some(3))
+        );
+        assert!(split_pin("custom-review@0").is_err());
+        assert!(split_pin("custom-review@latest").is_err());
+        assert!(split_pin("rust@1").is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn a_pinned_id_loads_that_version_even_after_later_changes() {
+        let _data = DataDir::new("skill-versions-pin");
+        let id = create("rule one");
+        update(&id, "rule two");
+        let pinned = format!("{id}@1");
+        let skill = crate::core::skills::get_skill(&pinned).unwrap();
+        assert_eq!(
+            (skill.id.as_str(), skill.content.as_str()),
+            (pinned.as_str(), "rule one")
+        );
+        let both = crate::core::skills::get_skills_by_ids(&[pinned.clone(), id.clone()]);
+        let contents: Vec<_> = both.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(contents, vec!["rule one", "rule two"]);
+        assert!(validate_pins(&[pinned, id.clone()]).is_ok());
+        assert!(validate_pins(&[format!("{id}@9")]).is_err());
+        assert!(crate::core::skills::get_skill(&format!("{id}@9")).is_none());
     }
 
     #[test]

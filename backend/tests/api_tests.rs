@@ -15702,6 +15702,40 @@ async fn a_custom_skill_keeps_its_versions_and_restores_one() {
     delete_json(app(), &format!("/api/skills/{id}")).await;
 }
 
+/// KT-1447 — a step or a QP may load a precise skill version; a version
+/// that does not exist is refused at save, never replaced by the latest.
+#[tokio::test]
+async fn a_pinned_skill_version_is_checked_at_save() {
+    let state = test_state();
+    let app = || build_router_with_auth(state.clone(), false);
+    let (_, created) = post_json(
+        app(),
+        "/api/skills",
+        serde_json::json!({"name": "Pinned review", "description": "", "icon": "🔎",
+                           "category": "Domain", "content": "rule one"}),
+    )
+    .await;
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+    let qp = |skill: String| serde_json::json!({"name": "Pinned QP", "prompt_template": "Review.", "skill_ids": [skill]});
+    let (_, refused) = post_json(app(), "/api/quick-prompts", qp(format!("{id}@7"))).await;
+    assert_eq!(refused["success"], false, "{refused}");
+    let (_, accepted) = post_json(app(), "/api/quick-prompts", qp(format!("{id}@1"))).await;
+    assert_eq!(accepted["success"], true, "{accepted}");
+    let workflow = |skill: String| {
+        serde_json::json!({
+            "name": "Pinned workflow", "trigger": {"type": "Manual"},
+            "steps": [{"name": "review", "step_type": {"type": "Agent"}, "agent": "ClaudeCode",
+                       "prompt_template": "Review.", "skill_ids": [skill]}]
+        })
+    };
+    let (_, refused) = post_json(app(), "/api/workflows", workflow(format!("{id}@7"))).await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(refused.to_string().contains("version"), "{refused}");
+    let (_, accepted) = post_json(app(), "/api/workflows", workflow(format!("{id}@1"))).await;
+    assert_eq!(accepted["success"], true, "{accepted}");
+    delete_json(app(), &format!("/api/skills/{id}")).await;
+}
+
 #[tokio::test]
 async fn directives_list_returns_builtins() {
     let app = test_app();

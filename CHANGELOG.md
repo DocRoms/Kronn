@@ -22,6 +22,13 @@ Release notes for 0.9.3 and earlier are available in the
   version, so nothing is lost. The history is for people: agents can
   neither read it nor restore a version. Built-in skills have no history
   (KT-1434).
+- A workflow step, a Quick Prompt or a discussion can load a precise version
+  of a custom skill instead of the latest: `custom-x@3` loads version 3, and
+  later edits of the skill no longer change what that step runs. The skill
+  pickers of the workflow editor and of the Quick Prompt form show, for each
+  custom skill picked, « latest version » or a version to pin. A version
+  that does not exist is refused at save, never silently replaced by the
+  latest (KT-1447).
 - Local image and video generation through ComfyUI (KT-1381). Config ›
   Agents › Local gains a ComfyUI card next to Ollama: server state and
   version, the one-command install on macOS (`brew install --cask comfy`), and

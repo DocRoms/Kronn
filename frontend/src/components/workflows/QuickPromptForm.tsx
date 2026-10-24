@@ -21,6 +21,8 @@ import type {
 } from '../../types/generated';
 import { Plus, Save, X, Check, Zap, UserCircle, FileText, ChevronRight } from 'lucide-react';
 import { SkillVariablesBadge } from '../SkillVariablesBadge';
+import SkillVersionPins from '../SkillVersionPins';
+import { skillBaseId } from '../../lib/automationSkills';
 
 /** Extract {{variable}} names from a template string (includes {{var}} and {{#var}}) */
 function extractVars(template: string): string[] {
@@ -356,7 +358,7 @@ export function QuickPromptForm({
               {expandedBinding === 'skills' && (
                 <div className="disc-advanced-chips" data-testid="qp-bindings-skills-chips">
                   {skills.map(skill => {
-                    const selected = skillIds.includes(skill.id);
+                    const selected = skillIds.some(id => skillBaseId(id) === skill.id);
                     return (
                       <button
                         key={skill.id}
@@ -364,7 +366,7 @@ export function QuickPromptForm({
                         className="disc-chip"
                         data-active={selected}
                         data-color="accent"
-                        onClick={() => setSkillIds(prev => selected ? prev.filter(id => id !== skill.id) : [...prev, skill.id])}
+                        onClick={() => setSkillIds(prev => selected ? prev.filter(id => skillBaseId(id) !== skill.id) : [...prev, skill.id])}
                         title={skill.description || skill.name}
                       >
                         {selected && <Check size={9} />} {skill.name}
@@ -372,6 +374,7 @@ export function QuickPromptForm({
                       </button>
                     );
                   })}
+                  <SkillVersionPins ids={skillIds} catalog={skills} onChange={setSkillIds} />
                 </div>
               )}
             </div>

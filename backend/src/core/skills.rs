@@ -509,8 +509,11 @@ pub fn list_all_skills() -> Vec<Skill> {
     skills
 }
 
-/// Get a single skill by ID.
+/// Get a single skill by ID. `custom-x@N` is version N of `custom-x` (KT-1447).
 pub fn get_skill(id: &str) -> Option<Skill> {
+    if id.contains('@') {
+        return super::skill_versions::pinned_skill(id);
+    }
     list_all_skills().into_iter().find(|s| s.id == id)
 }
 
@@ -518,7 +521,13 @@ pub fn get_skill(id: &str) -> Option<Skill> {
 pub fn get_skills_by_ids(ids: &[String]) -> Vec<Skill> {
     let all = list_all_skills();
     ids.iter()
-        .filter_map(|id| all.iter().find(|s| s.id == *id).cloned())
+        .filter_map(|id| {
+            if id.contains('@') {
+                super::skill_versions::pinned_skill(id)
+            } else {
+                all.iter().find(|s| s.id == *id).cloned()
+            }
+        })
         .collect()
 }
 
