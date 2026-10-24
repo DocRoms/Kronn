@@ -2511,6 +2511,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::workflows::import_workflow),
         )
         .route(
+            "/api/workflows/import/preview",
+            post(api::workflows::import_workflow_preview),
+        )
+        .route(
             "/api/workflow-runs/batch-summaries",
             get(api::workflows::list_batch_run_summaries),
         )

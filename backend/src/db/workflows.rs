@@ -145,7 +145,7 @@ pub const BATCH_WORKFLOW_PREFIX: &str = "qp:";
 const WORKFLOW_COLUMNS: &str = "id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
                 created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned, concurrency_key, project_scope_json, retention_json, shadow_json";
+                pinned, concurrency_key, project_scope_json, retention_json, refs_json, shadow_json";
 
 /// Records why Kronn disabled `id` on its own; no-op if it is enabled.
 pub fn mark_auto_disabled(
@@ -1049,8 +1049,8 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     let on_failure = steps_with_durable_ids(&wf.on_failure, None, &mut used_step_ids);
     conn.execute(
         "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
-         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned, concurrency_key, project_scope_json, retention_json, shadow_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned, concurrency_key, project_scope_json, retention_json, refs_json, shadow_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         params![
             wf.id,
             wf.name,
@@ -1077,6 +1077,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             wf.concurrency_key,
             wf.project_scope.as_ref().map(serde_json::to_string).transpose()?,
             wf.retention.as_ref().map(serde_json::to_string).transpose()?,
+            refs_column(&wf.refs)?,
             wf.shadow.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
@@ -1108,7 +1109,8 @@ pub(crate) const UPDATE_WORKFLOW_SQL: &str =
          on_failure = ?14, exec_allowlist = ?15, variables = ?16, pinned = ?17,
          concurrency_key = ?18, project_scope_json = ?19,
          retention_json = CASE WHEN ?20 THEN retention_json ELSE ?21 END,
-         shadow_json = CASE WHEN ?20 THEN shadow_json ELSE ?22 END
+         refs_json = ?22,
+         shadow_json = CASE WHEN ?20 THEN shadow_json ELSE ?23 END
          WHERE id = ?1";
 
 /// Every column `UPDATE_WORKFLOW_SQL` writes (a test keeps the two in sync).
@@ -1132,6 +1134,7 @@ pub(crate) const WRITTEN_COLUMNS: &[&str] = &[
     "concurrency_key",
     "project_scope_json",
     "retention_json",
+    "refs_json",
     "shadow_json",
 ];
 
@@ -1218,6 +1221,7 @@ fn write_workflow(conn: &Connection, wf: &Workflow, keep_disabled: bool) -> Resu
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
+            refs_column(&wf.refs)?,
             wf.shadow.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
@@ -2718,6 +2722,27 @@ pub fn mark_issue_processed(conn: &Connection, workflow_id: &str, issue_id: &str
 
 // ─── Row mappers ────────────────────────────────────────────────────────────
 
+/// NULL for no refs, like the other empty collections.
+fn refs_column(refs: &crate::models::WorkflowRefs) -> Result<Option<String>> {
+    Ok(if refs.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(refs)?)
+    })
+}
+
+/// A ref map that does not parse is dropped, loudly: steps rendering one of
+/// its names then fail instead of running against a guessed object.
+fn refs_from_column(id: &str, raw: Option<String>) -> crate::models::WorkflowRefs {
+    let Some(raw) = raw else {
+        return Default::default();
+    };
+    serde_json::from_str(&raw).unwrap_or_else(|error| {
+        tracing::error!(workflow_id = %id, %error, "corrupt refs_json — no refs");
+        Default::default()
+    })
+}
+
 /// A retention that does not parse keeps every run: an unreadable setting must
 /// never widen what the purge deletes.
 pub(crate) fn retention_from_column(id: &str, raw: Option<String>) -> Option<WorkflowRetention> {
@@ -2745,9 +2770,10 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
     let exec_allowlist_str: Option<String> = row.get(15).unwrap_or(None);
     let variables_str: Option<String> = row.get(16).unwrap_or(None);
     let retention = retention_from_column(&id, row.get(20).unwrap_or(None));
+    let refs = refs_from_column(&id, row.get(21).unwrap_or(None));
     // An unreadable shadow is no shadow: it never starts extra runs.
     let shadow = row
-        .get::<_, Option<String>>(21)
+        .get::<_, Option<String>>(22)
         .unwrap_or(None)
         .and_then(|raw| serde_json::from_str::<WorkflowShadow>(&raw).ok());
 
@@ -2794,6 +2820,7 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
             .unwrap_or(None)
             .and_then(|s| serde_json::from_str(&s).ok()),
         retention,
+        refs,
         shadow,
         // Defensive: a corrupt JSON blob in `guards` should NOT silently
         // disable the safety net — fall back to the column being absent

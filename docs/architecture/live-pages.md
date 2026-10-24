@@ -8,12 +8,13 @@ workflow steps, stored IDs and sandbox event names keep their established
 contracts. An Artifact is the same persisted resource; renaming its product
 label does not migrate or duplicate it. Historical code and documentation use
 “Page” for that domain model.
-[src: file: frontend/src/lib/i18n/locales/en.ts:154-155#nav.pages]
+[src: file: frontend/src/lib/i18n/locales/en.ts:179-180#nav.pages]
 [src: file: frontend/src/lib/live-page-navigation.ts:50-55#standaloneLivePageUrl]
 
 ## Portable JSON bundles
 
-The Artifact export action downloads a `kronn.artifact` version-1 JSON bundle.
+The Artifact export action downloads a `kronn.artifact` version-2 JSON bundle
+(version 1, without bundled skills, still imports).
 It contains the current HTML, named dataset values (including JSON `null`
 distinct from an unpopulated snapshot), schemas, retention settings and every
 retained time-series point with its observation time and deduplication key.
@@ -27,8 +28,8 @@ truncated. Historical HTML revisions, run/publication history and discussion
 links are not included.
 [src: file: backend/src/models/artifact_portability.rs:9-52#ArtifactBundlePoint]
 [src: file: backend/src/models/artifact_portability.rs:54-74#ArtifactBundle]
-[src: file: backend/src/api/artifact_portability.rs:20-23#MAX_BUNDLE_ITEMS]
-[src: file: backend/src/api/artifact_portability.rs:287-296#export_bundle]
+[src: file: backend/src/api/artifact_portability.rs:26-29#MAX_BUNDLE_ITEMS]
+[src: file: backend/src/api/artifact_portability.rs:294-303#export_bundle]
 
 Import is available in the library and in a workflow's publishing step before
 the library is activated. The user selects a project and reviews each planned
@@ -48,9 +49,15 @@ and bundle content, so changing either invalidates the previous review.
 Reused local Quick Execs require no new approval. Choosing another file clears
 all approvals. New Quick APIs show their saved method, endpoint and plugin;
 an unspecified method is shown as unknown, not inferred.
-[src: file: backend/src/api/artifact_portability/import.rs:497-503#approved_quick_exec_ids]
-[src: file: backend/src/api/artifact_portability/import.rs:712-714#digest]
-[src: file: frontend/src/components/ArtifactImportDialog.tsx:67-70#setApprovedExecIds]
+The custom skills of bundled workflows and Quick Prompts travel as
+`referenced_skills` (file, name, version, sha256). The preview shows each one as
+reused (same content here), created, or in conflict (same name, other content),
+where the user picks a copy (default) or the local skill (`skill_choices`, part
+of the reviewed digest). Steps and Quick Prompts are remapped to the resulting
+ids; see the glossary's "Bundled skill".
+[src: file: backend/src/api/artifact_portability/import.rs:552-558#approved_quick_exec_ids]
+[src: file: backend/src/api/artifact_portability/import.rs:777-779#digest]
+[src: file: frontend/src/components/ArtifactImportDialog.tsx:71-74#setApprovedExecIds]
 
 Imported snapshots retain the publisher's values, including any identity a
 workflow previously collected from an API's current-user endpoint. They are
@@ -75,7 +82,7 @@ import preview shows that list. `{{…}}` references are kept.
 [src: file: backend/src/core/export_secrets.rs:15-16#REDACTED]
 The selected project applies to newly created automation definitions and
 Artifact action scopes. A deliberately reused local definition is unchanged.
-[src: file: backend/src/api/artifact_portability/import.rs:366-370#remap_value]
+[src: file: backend/src/api/artifact_portability/import.rs:379-383#remap_value]
 
 `GET /api/pages/{id}/export`, `POST /api/pages/import/preview` and
 `POST /api/pages/import` retain the established Page API naming. Import requires
@@ -85,7 +92,7 @@ datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
 [src: file: backend/src/lib.rs:1297-1318#artifact_portability]
-[src: file: backend/src/api/artifact_portability/import.rs:1029-1047#preview_digest]
+[src: file: backend/src/api/artifact_portability/import.rs:1119-1137#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
 ## Status
@@ -168,7 +175,7 @@ The library's source link opens the discussion at that exact message. Removing
 the message clears only its source anchor and preserves the Artifact and its
 discussion link. Streamed previews without a persisted message id do not offer
 this action.
-[src: file: backend/src/api/live_pages.rs:408-420#source_message_id]
+[src: file: backend/src/api/live_pages.rs:431-443#source_message_id]
 [src: file: frontend/src/components/DocPreviewArtifact.tsx:22-33#create]
 [src: file: frontend/src/components/DocPreview.tsx:153#DocPreviewArtifact]
 
@@ -240,8 +247,8 @@ caller.
 None of these touch what a trusted button's approval fingerprint covers (the
 block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
-`[src: file: backend/src/api/live_pages.rs:563-573#delete_dataset]`
-`[src: file: backend/src/api/live_pages.rs:598-609#update_dataset]`
+`[src: file: backend/src/api/live_pages.rs:584-594#delete_dataset]`
+`[src: file: backend/src/api/live_pages.rs:619-630#update_dataset]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:7985-7992#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
@@ -269,7 +276,7 @@ A publish that changes a Page (API `POST /api/pages/{id}/publish` or a
 `live_page_data_changed { page_id, data_revision }`. The Pages view and the
 standalone tab re-read that Page at once and post `kronn:page-data` to the
 open frame without rebuilding it; their 30 s poll stays as a fallback.
-`[src: file: backend/src/api/live_pages.rs:767-779#announce_page_data_changed]`
+`[src: file: backend/src/api/live_pages.rs:790-802#announce_page_data_changed]`
 `[src: file: frontend/src/hooks/useLivePageDataPush.ts:9-13#useLivePageDataPush]`
 
 ## « Ma Todo », the default board (KT-1030)
@@ -405,7 +412,7 @@ stored as the JSON value; if it does not parse, the step fails the same way.
 Other text is published as a string. The Exec output is scrubbed of the
 project's GitHub token before it reaches the run record or a Page.
 `[src: file: backend/src/workflows/exec_step.rs:59-61#MAX_PUBLISH_OUTPUT_BYTES]`
-`[src: file: backend/src/workflows/exec_step.rs:386-391#secrets]`
+`[src: file: backend/src/workflows/exec_step.rs:395-400#secrets]`
 `[src: file: backend/src/workflows/publish_page_step.rs:152-165#from_exec]`
 `[src: file: backend/src/workflows/publish_page_step.rs:180-226#exec_value]`
 
@@ -655,7 +662,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:4353-4361#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:4655-4663#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:127-129#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -703,7 +710,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:4513-4523#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:4811-4821#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
@@ -745,7 +752,7 @@ normalized (lowercase host, default port dropped, IDN as punycode) and a
 malformed one rejects the whole change.
 [src: file: backend/src/models/setup.rs:73-79#embed_allowed_origins]
 [src: file: backend/src/core/embed_origins.rs:52-55#normalize_origin]
-[src: file: backend/src/api/live_pages.rs:866-868#change_embed_origins]
+[src: file: backend/src/api/live_pages.rs:889-891#change_embed_origins]
 The UI is Configuration → Artifacts → External content (Allowed sites): type an
 origin, see the exact value that will be saved, add it, or remove a
 permission. Every Page view, the import dialog and that section share one
@@ -755,7 +762,7 @@ the local WebSocket, with no origin in it (never relayed to a P2P peer); every
 open tab, a visible wall screen included, re-reads the list at once and a
 revoked site's players are unmounted. A tab also re-reads on WebSocket
 reconnect (for an event sent while it was disconnected) and on focus.
-[src: file: backend/src/api/live_pages.rs:783-787#announce_embed_origins_changed]
+[src: file: backend/src/api/live_pages.rs:806-810#announce_embed_origins_changed]
 Changes are sent one after the
 other, and a read that started before a change landed (or while one is in
 flight) is discarded, so a slow read can never bring back a revoked site or
@@ -829,8 +836,8 @@ governed by that site's document, not by Kronn's CSP, so an allowed site can
 itself embed other origins; Kronn controls only what the Page frames directly,
 redirects included.
 [src: file: backend/src/core/embed_origins.rs:254#frame_src_sources]
-[src: file: backend/src/api/live_pages.rs:742-743#embed_frame_src]
-[src: file: backend/src/api/live_pages.rs:796-800#document_frame_policy]
+[src: file: backend/src/api/live_pages.rs:765-766#embed_frame_src]
+[src: file: backend/src/api/live_pages.rs:819-823#document_frame_policy]
 [src: file: frontend/vite-frame-policy.ts:72#framePolicyMiddleware]
 [src: file: frontend/src/lib/served-frame-policy.ts:9#parseServedFrameSources]
 [src: file: .docker/nginx.conf:131-132#auth_request]
@@ -900,7 +907,7 @@ it was itself imported with. That last part is stored with the Page
 declaration through a chain of imports. It is information for the importer,
 never an authorization, and the creator's allowed sites are not exported.
 [src: file: backend/src/core/embed_origins.rs:149-172#declared_origins]
-[src: file: backend/src/api/artifact_portability.rs:126#export_embed_origins]
+[src: file: backend/src/api/artifact_portability.rs:129#export_embed_origins]
 The import preview lists one row per distinct origin (from the HTML and the
 declaration): already allowed ("in the Artifact and already in your
 configuration"), or Add / Refuse. Answers are not part of the reviewed digest
@@ -914,11 +921,11 @@ for the final update. If that update fails once the import committed (the list
 changed meanwhile, the configuration cannot be saved), the result lists those
 sites in `not_allowed_embed_origins` with `embed_origins_error`, and the dialog
 says so before opening the Artifact.
-[src: file: frontend/src/components/ArtifactImportDialog.tsx:164#embed_origins]
+[src: file: frontend/src/components/ArtifactImportDialog.tsx:171#embed_origins]
 [src: file: backend/src/api/artifact_portability/import.rs:88-101#origins_to_allow]
-[src: file: backend/src/api/artifact_portability/import.rs:1038-1043#apply_changes]
+[src: file: backend/src/api/artifact_portability/import.rs:1153-1158#apply_changes]
 [src: file: backend/src/core/embed_origins.rs:217-218#MAX_EMBED_ORIGINS]
-[src: file: backend/src/api/artifact_portability/import.rs:1076-1080#not_allowed_embed_origins]
+[src: file: backend/src/api/artifact_portability/import.rs:1173-1177#not_allowed_embed_origins]
 
 Security reasoning, in short: the destination Kronn alone decides which sites
 may be framed, and checks every URL at render time, including ones added by
@@ -977,7 +984,7 @@ the full run even when the compact list already contains its id.
 [src: file: backend/src/workflows/collect_api_data_step.rs:578-599#source_id]
 [src: file: backend/src/workflows/collect_api_data_step.rs:922-965#missing_required_api_keeps_its_alias_id_and_cause]
 [src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:18-40#needsDetail]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1012-1022#focusedRun]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1031-1041#focusedRun]
 
 Rolling windows use the common run-anchored time grammar in source variables,
 for example

@@ -124,6 +124,8 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Page resources** — `GET /api/pages/{id}/resources` (`db::live_pages::list_live_page_resources`) lists the Quick Prompts and skills of the workflows behind a Page: those publishing to it, those its `kronn-action` blocks launch, and their sub-workflows. Each use carries what the normal lane loads and what the workflow's shadow loads instead. `POST /api/workflows/{id}/shadow/promote` (`workflows::shadow::promote`, human-only) hands the tested version to the normal lane and drops the override. Shown as the Page's « Resources » panel (KT-1450).
 
+**Bundled skill** — A custom skill carried by a workflow export (v4) or a Page bundle (v2): its file without the project scope, its name, newest version and sha256. On import each one is reused when a visible local custom skill has the same hash, created when absent, or shown as a conflict when a local skill has the same name and other content; the importer then picks `create_copy` (default, named `<name> (2)`) or `use_existing`. Created skills belong to the import's project, or to none. Built-in and repository skills stay references (KT-1446, `core/skill_bundle.rs`).
+
 **Skill auto-detection** — During AI audit (between Phase 2 and Phase 3), `detect_project_skills()` scans project filesystem for config files (Cargo.toml → rust, tsconfig.json → typescript, go.mod → go, etc.) and saves detected skills to DB. Covers languages (rust, typescript, python, go, php), domain (devops, database, security), and business (web-performance, seo).
 
 **Validation discussion** — Discussion with title "Validation audit AI" created from the project page. Uses a locked (read-only) prompt. The AI asks questions about ambiguities, updates `docs/` files after each answer. Detected by matching `title === 'Validation audit AI'` + `project_id`.
@@ -133,6 +135,8 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 ## Workflows
 
 **Workflow** — Unified automation unit: `Trigger → Steps`. Replaces the old scheduled tasks concept. Created via the dashboard wizard and portable through Kronn's versioned JSON export/import envelope. `WORKFLOW.md` import is not implemented. Post-step operations (create PR, comment issue, etc.) are handled by agents using the tools available within steps.
+
+**Workflow ref** — A name a workflow gives to one Kronn object (`refs.<name>` → `{kind, id}`, kind page, workflow, quick_prompt, quick_api, quick_exec or skill). Steps render it as `{{refs.<name>}}`, accepted even in an interpreter's inline code since the id is checked against `[A-Za-z0-9][A-Za-z0-9_-]*` at save and again before rendering; Exec steps also get `KRONN_REF_<NAME>`. Saving checks that the object exists and is global or in the workflow's project; exports carry the objects and imports remap each ref, refusing a file that lacks one (KT-1448, `workflows/refs.rs`).
 
 **WorkflowTrigger** — What starts a workflow run. Four types:
 - **Cron** — time-based schedule. 1 tick = 1 run, always same prompt.

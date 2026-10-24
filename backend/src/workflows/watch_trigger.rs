@@ -771,6 +771,7 @@ mod tests {
     async fn watch_workflow(engine: &WorkflowEngine, detection: WatchDetection) -> Workflow {
         let now = Utc::now();
         let wf = Workflow {
+            refs: Default::default(),
             id: WF.into(),
             name: WF.into(),
             project_id: None,

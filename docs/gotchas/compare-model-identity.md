@@ -23,7 +23,7 @@ response-attested historical fact. Both panels now derive the displayed model
 only from `answer.model` (normalized, the response that actually produced the
 compared answer) or, failing that, the last message in history that recorded
 a concrete `model` — never from `discussion.model`.
-[src: file: frontend/src/types/generated.ts:3273-3278#model]
+[src: file: frontend/src/types/generated.ts:3307-3312#model]
 [src: file: frontend/src/components/BatchComparePanel.tsx:194-198]
 [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:455-457]
 
@@ -90,7 +90,7 @@ suffix bypassed entirely. The judge/improver pickers in
 The fix removes the manual `suffix` override so the Compare selector reuses
 the same catalogue+identity resolution as every other `AgentSwitchPicker`
 caller.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3518-3532#AgentCompareSelector]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3539-3553#AgentCompareSelector]
 [src: file: frontend/src/components/AgentCompareSelector.tsx:85-111#AgentSwitchPicker]
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:130-142#resolvedTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:13-26#resolveCatalogTier]

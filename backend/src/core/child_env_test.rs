@@ -1006,3 +1006,34 @@ fn the_design_note_states_the_environment_block_residual() {
     let residual = section("relaunch re-creates", "Kronn warns");
     assert!(residual.contains("KRONN_AUTH_TOKEN"));
 }
+
+/// KT-1448 — a workflow's ref ids reach its Exec step whatever the ref is
+/// called; nothing else named `KRONN_REF_*` comes from the parent.
+#[test]
+fn an_exec_step_gets_its_ref_ids_even_under_a_secret_looking_name() {
+    with_parent_env(PARENT, || {
+        let mut command = std::process::Command::new("sh");
+        isolate_with_github_values_and_refs(
+            &mut command,
+            ChildRoute::WorkflowExec,
+            &[],
+            &[],
+            &[
+                ("KRONN_REF_BOARD".into(), "page-1".into()),
+                ("KRONN_REF_API_KEY".into(), "qa-1".into()),
+                ("NOT_A_REF".into(), "x".into()),
+            ],
+        );
+        let set = env_of(&command);
+        assert_eq!(
+            set.get("KRONN_REF_BOARD").map(String::as_str),
+            Some("page-1")
+        );
+        assert_eq!(
+            set.get("KRONN_REF_API_KEY").map(String::as_str),
+            Some("qa-1")
+        );
+        assert!(!set.contains_key("NOT_A_REF"));
+        assert!(!set.contains_key("KRONN_AUTH_TOKEN"));
+    });
+}

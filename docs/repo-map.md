@@ -123,6 +123,7 @@ Kronn/
 │       │   ├── crypto.rs       # AES-256-GCM encryption for MCP secrets
 │       │   ├── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()
 │       │   ├── skill_versions.rs # Custom skill version history (KT-1434): a full copy per change under skills/.versions/<slug>/<n>.md, read, restore
+│       │   ├── skill_bundle.rs # Custom skills in workflow/Page exports (KT-1446): bundle the file + sha256, plan reuse/create/conflict on import, write and remap ids
 │       │   ├── profiles.rs   # Profiles loader: builtin (embedded .md) + custom (~/.config/kronn/profiles/). Persona override system, build_profiles_prompt()
 │       │   ├── directives.rs # Directives loader: builtin (embedded .md) + custom (~/.config/kronn/directives/). build_directives_prompt()
 │       │   ├── cmd.rs        # Cross-platform command helpers: async_cmd()/sync_cmd() apply CREATE_NO_WINDOW on Windows + (0.6.0) resolve bare program names (npx, npm, git…) via which::which on Windows so .cmd/.bat wrappers are spawnable. they take a ChildRoute that builds the child's environment; ALL processes MUST use these helpers (clippy.toml)
@@ -155,6 +156,7 @@ Kronn/
 │           ├── collect_api_data_step.rs # StepType::CollectApiData: bounded concurrent saved Quick APIs + saved/inline shell-free Quick Exec sources, JSON/CSV/text/lines normalization
 │           ├── transform_data_step.rs # StepType::TransformData: deterministic JSONPath mapping, aggregation and scalar coercion
 │           ├── template.rs     # Purpose-built {{variable}} renderer: permissive preview, strict runtime, no Liquid filters
+│           ├── refs.rs         # Named workflow refs (KT-1448): name/id rules, save checks, `{{refs.<name>}}` usage, import remap
 │           ├── workspace.rs    # Git worktree create/cleanup with lifecycle hooks
 │           ├── interrupted_worktrees.rs # Boot reclamation of the clean worktree of an Interrupted run past server.interrupted_worktree_ttl_days (KT-798)
 │           ├── concurrency.rs  # Per-key concurrency limit: concurrency_key rendered from user inputs, checked at run insertion (KT-796)
@@ -195,6 +197,8 @@ Kronn/
 │       │   ├── AgentSwitchPicker.tsx # Shared compact agent × reasoning-tier picker used by discussion, Quick Prompt and workflow surfaces
 │       │   ├── MarkdownComposerTools.tsx # Shared edit/preview tabs, Markdown help, insertable examples and emoji guidance
 │       │   ├── workflows/WorkflowWizard.tsx # Full workflow editor (~4170L): progressive modes, direct stage/step navigation, reusable prompt editor, save/cancel from each stage
+│       │   ├── workflows/WorkflowRefsCard.tsx # Editor section for named refs (KT-1448); rules shared with lib/workflowRefs.ts
+│       │   ├── SkillImportDecisions.tsx # Import preview of bundled custom skills (KT-1446): reuse / create / conflict choice, used by the workflow and Artifact imports
 │       │   ├── workflows/LoadedRunDetail.tsx # Load omitted step outputs when a run panel opens; stale-response guard and explicit read retry
 │       │   ├── workflows/ChildWorkflowVariablesEditor.tsx # Maps a SubWorkflow/TriggerWorkflow target's launch variables to parent templates
 │       │   ├── DiscussionMosaicComposer.tsx # Picks 2–12 discussions to open side by side in a mosaic tab

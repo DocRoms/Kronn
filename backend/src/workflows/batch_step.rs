@@ -1875,6 +1875,7 @@ mod tests {
         use chrono::Utc;
         let wf_id = "wf-e2e".to_string();
         let workflow = Workflow {
+            refs: Default::default(),
             retention: None,
             shadow: None,
             project_scope: None,

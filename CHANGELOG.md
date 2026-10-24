@@ -47,6 +47,21 @@ Release notes for 0.9.3 and earlier are available in the
   « Promote » hands a version tested in shadow to the normal runs: a skill in
   every step that loads it, a Quick Prompt as its current version, saved as
   a new version (KT-1450).
+- Workflow and Page exports carry the custom skills their steps and Quick
+  Prompts use: each skill's file, name, version and a content hash. On
+  import, a skill identical to one already here is reused, a missing one is
+  created, and a skill with the same name but other content is shown in the
+  import preview, where you choose to create a copy (the default) or use the
+  local skill. Built-in skills stay plain references. A skill neither here
+  nor in the file is listed before the import and reported after it, never
+  dropped silently. Older export files still import (KT-1446).
+- Workflows can name the objects they use: a Page, workflow, Quick Prompt,
+  Quick API, Quick Exec or skill gets a name in the editor's new "Named
+  references" section, and steps write `{{refs.<name>}}` instead of pasting
+  its id; Exec steps also get it as `KRONN_REF_<NAME>`. Saving checks the
+  object exists and belongs to the workflow's project or to none. Exports
+  carry the named objects and imports point each name at the imported copy;
+  a file missing one of them is refused with the name it lacks (KT-1448).
 - Local image and video generation through ComfyUI (KT-1381). Config ›
   Agents › Local gains a ComfyUI card next to Ollama: server state and
   version, the one-command install on macOS (`brew install --cask comfy`), and

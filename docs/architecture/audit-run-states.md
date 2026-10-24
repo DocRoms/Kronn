@@ -365,7 +365,7 @@ sections.
   no agent and writes no doc. It is a human action only: the route is not on
   the bridge list, and the handler refuses any bridge caller. It takes the
   audit lease.
-  [src: file: backend/src/lib.rs:1769-1772#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:770-801#acknowledge_sections]
+  [src: file: backend/src/lib.rs:1774-1777#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:770-801#acknowledge_sections]
 
 ## The action offered in each state
 

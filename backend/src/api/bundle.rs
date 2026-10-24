@@ -272,6 +272,7 @@ async fn create_bundle_as(
     mark_bundle_lines(&mut req.workflow.on_failure, writer);
     let wf_id = Uuid::new_v4().to_string();
     let wf_to_insert = Workflow {
+        refs: req.workflow.refs.clone(),
         retention: req.workflow.retention,
         shadow: None,
         project_scope: req.workflow.project_scope.clone(),
@@ -334,6 +335,7 @@ async fn create_bundle_as(
             }
         };
         prepared_children.push(Workflow {
+            refs: creq.refs.clone(),
             retention: creq.retention,
             shadow: None,
             project_scope: creq.project_scope.clone(),
@@ -378,6 +380,14 @@ async fn create_bundle_as(
     for workflow in std::iter::once(&wf_to_insert).chain(prepared_children.iter()) {
         if let Err(error) = crate::api::workflows::validate_exec_definition(workflow)
             .and_then(|()| crate::api::workflows::validate_foreach_files(workflow))
+            .and_then(|()| crate::workflows::refs::validate_syntax(&workflow.refs))
+            .and_then(|()| {
+                crate::workflows::refs::validate_usage(
+                    &workflow.steps,
+                    &workflow.on_failure,
+                    &workflow.refs,
+                )
+            })
         {
             return Json(ApiResponse::err(error));
         }

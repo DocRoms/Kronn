@@ -1893,6 +1893,7 @@ fn mcp_config_hash_changes_on_args_override() {
 pub(crate) fn sample_workflow(id: &str) -> Workflow {
     let now = Utc::now();
     Workflow {
+        refs: Default::default(),
         retention: None,
         shadow: None,
         project_scope: None,
@@ -5488,6 +5489,7 @@ fn workflow_multi_step_roundtrip() {
     let conn = test_db();
     let now = Utc::now();
     let wf = Workflow {
+        refs: Default::default(),
         retention: None,
         shadow: None,
         project_scope: None,

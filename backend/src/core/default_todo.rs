@@ -166,6 +166,7 @@ fn workflow(
     let now = Utc::now();
     Workflow {
         project_scope: None,
+        refs: Default::default(),
         id: id.into(),
         name,
         project_id: None,
@@ -336,6 +337,7 @@ pub fn bundle(conn: &Connection, language: &str) -> Result<String> {
         referenced_quick_prompts: vec![],
         referenced_quick_apis: vec![],
         referenced_quick_execs: vec![],
+        referenced_skills: vec![],
         redacted_fields: vec![],
     };
     Ok(serde_json::to_string(&bundle)?)

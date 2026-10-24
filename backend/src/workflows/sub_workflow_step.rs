@@ -1594,6 +1594,7 @@ mod tests {
 
         // Child workflow: deterministic JsonData steps — no LLM, no project.
         let child_wf = crate::models::Workflow {
+            refs: Default::default(),
             retention: None,
             shadow: None,
             project_scope: None,

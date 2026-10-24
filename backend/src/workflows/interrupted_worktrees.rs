@@ -237,6 +237,7 @@ mod tests {
         }))
         .unwrap();
         let workflow = crate::models::Workflow {
+            refs: Default::default(),
             retention: None,
             shadow: None,
             project_scope: None,

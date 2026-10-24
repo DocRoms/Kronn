@@ -23,12 +23,12 @@ const preview: ArtifactImportPreview = {
   title: 'Équipe 🦀', entries: [
     { kind: 'artifact', source_id: 'a', name: 'Équipe 🦀', disposition: 'create', existing_id: 'a', reason: 'root' },
     { kind: 'quick_api', source_id: 'qa', name: 'Metrics', disposition: 'reuse', existing_id: 'qa', reason: 'identical' },
-  ], issues: [], warnings: [], digest: 'digest-1', can_import: true, embed_origins: [],
+  ], issues: [], warnings: [], digest: 'digest-1', can_import: true, embed_origins: [], skills: [],
 };
 const result: ArtifactImportResult = { artifact: {
   id: 'new-a', title: 'Équipe 🦀', slug: 'new-a', project_id: null, current_revision_id: 'new-r', data_revision: 0,
   created_at: '2026-09-23T00:00:00Z', updated_at: '2026-09-23T00:00:00Z', last_published_at: null, pinned: false, archived: false,
-}, entries: preview.entries, allowed_embed_origins: [], not_allowed_embed_origins: [], embed_origins_error: null };
+}, entries: preview.entries, skills: [], allowed_embed_origins: [], not_allowed_embed_origins: [], embed_origins_error: null };
 const content = JSON.stringify({ kind: 'kronn.artifact', version: 1 });
 const chooseFile = async (text = content, size?: number) => {
   const file = new File([text], 'team.kronn-artifact.json', { type: 'application/json' });
@@ -227,7 +227,7 @@ describe('ArtifactImportDialog', () => {
     act(() => { button.click(); button.click(); });
     await waitFor(() => expect(imported).toHaveBeenCalledWith(result.artifact));
     expect(mocks.commit).toHaveBeenCalledTimes(1);
-    expect(mocks.commit).toHaveBeenCalledWith({ content, project_id: null, choices: [], approved_quick_exec_ids: [], preview_digest: 'digest-1', allow_embed_origins: [] });
+    expect(mocks.commit).toHaveBeenCalledWith({ content, project_id: null, choices: [], approved_quick_exec_ids: [], preview_digest: 'digest-1', allow_embed_origins: [], skill_choices: [] });
   });
 
   it('requires a new preview after changing a dependency choice', async () => {
@@ -252,7 +252,7 @@ describe('ArtifactImportDialog', () => {
 
   it.each([
     ['wrong kind', JSON.stringify({ kind: 'kronn.workflow', version: 1 }), undefined, 'pages.import.invalidFile'],
-    ['future version', JSON.stringify({ kind: 'kronn.artifact', version: 2 }), undefined, 'pages.import.invalidFile'],
+    ['future version', JSON.stringify({ kind: 'kronn.artifact', version: 3 }), undefined, 'pages.import.invalidFile'],
     ['oversized file', content, 16 * 1024 * 1024 + 1, 'pages.import.tooLarge'],
   ])('rejects %s before a backend preview', async (_case, text, size, error) => {
     render(<ArtifactImportDialog onClose={vi.fn()} onImported={vi.fn()} />);
@@ -271,6 +271,30 @@ describe('ArtifactImportDialog', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('stale preview');
     expect(screen.getByRole('button', { name: 'pages.import.confirm' })).toBeDisabled();
     expect(imported).not.toHaveBeenCalled();
+  });
+
+  it('shows what happens to each bundled skill and sends the conflict choice for review', async () => {
+    mocks.preview.mockResolvedValue({ ...preview, skills: [
+      { source_id: 'custom-a', name: 'Review', action: 'reuse', existing_id: 'custom-a' },
+      { source_id: 'custom-b', name: 'Style', action: 'create', existing_id: null },
+      { source_id: 'custom-c', name: 'Docs', action: 'conflict', existing_id: 'custom-docs', resolution: 'create_copy' },
+    ] });
+    render(<ArtifactImportDialog onClose={vi.fn()} onImported={vi.fn()} />);
+    await chooseFile(JSON.stringify({ kind: 'kronn.artifact', version: 2 }));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.import.preview' }));
+    await screen.findByRole('button', { name: 'pages.import.confirm' });
+    for (const status of ['reuse', 'create', 'conflict']) {
+      expect(screen.getByText(`imp.skills.action.${status}`)).toBeInTheDocument();
+    }
+    const choice = screen.getByRole('combobox', { name: 'imp.skills.choice:Docs' });
+    expect(choice).toHaveValue('create_copy');
+    fireEvent.change(choice, { target: { value: 'use_existing' } });
+    expect(screen.getByRole('button', { name: 'pages.import.confirm' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'pages.import.preview' }));
+    await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(2));
+    expect(mocks.preview).toHaveBeenLastCalledWith(expect.objectContaining({
+      skill_choices: [{ source_id: 'custom-c', resolution: 'use_existing' }],
+    }));
   });
 
   it('keeps conflicting definitions blocked until an explicit choice is reviewed', async () => {

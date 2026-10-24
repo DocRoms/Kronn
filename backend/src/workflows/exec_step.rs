@@ -71,12 +71,19 @@ const TRUNCATION_MARKER: &str = "\n\n[... output tronqué — limite 100 KB ...]
 /// An Exec step child (setup or main command): the program with its built
 /// environment (KT-1006) and the project's GitHub variables only when the
 /// project is connected (D2); callers only add argv, cwd and stdio.
-fn exec_child(program: &str, github_env: &[(String, String)]) -> tokio::process::Command {
+/// `refs` are the workflow's `KRONN_REF_<NAME>` ids (KT-1448).
+fn exec_child(
+    program: &str,
+    github_env: &[(String, String)],
+    refs: &[(String, String)],
+) -> tokio::process::Command {
     let mut command = async_cmd(program, crate::core::child_env::ChildRoute::WorkflowExec);
-    crate::core::child_env::isolate_with_github(
+    crate::core::child_env::isolate_with_github_values_and_refs(
         command.as_std_mut(),
         crate::core::child_env::ChildRoute::WorkflowExec,
         github_env,
+        &[],
+        refs,
     );
     command
 }
@@ -86,12 +93,13 @@ fn exec_child(program: &str, github_env: &[(String, String)]) -> tokio::process:
 fn approved_script_child(
     program: &str,
     github_env: &[(String, String)],
+    refs: &[(String, String)],
     work_dir: &str,
     copy_dir: &Path,
 ) -> tokio::process::Command {
     use crate::core::approved_scripts::{SCRIPTS_DIR_ENV, WORKTREE_ENV};
     let mut command = async_cmd(program, crate::core::child_env::ChildRoute::WorkflowExec);
-    crate::core::child_env::isolate_with_github_and_values(
+    crate::core::child_env::isolate_with_github_values_and_refs(
         command.as_std_mut(),
         crate::core::child_env::ChildRoute::WorkflowExec,
         github_env,
@@ -99,6 +107,7 @@ fn approved_script_child(
             (WORKTREE_ENV, std::ffi::OsStr::new(work_dir)),
             (SCRIPTS_DIR_ENV, copy_dir.as_os_str()),
         ],
+        refs,
     );
     command
 }
@@ -565,7 +574,7 @@ async fn execute_exec_step_inner(
             setup_argc = setup_args.len(),
             "executing setup phase"
         );
-        let mut sc = exec_child(setup_cmd, github_env);
+        let mut sc = exec_child(setup_cmd, github_env, &ctx.refs_env());
         sc.args(&setup_args)
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
@@ -695,8 +704,10 @@ async fn execute_exec_step_inner(
         }
     }
     let mut cmd = match approved_copy.as_deref() {
-        Some(copy) => approved_script_child(raw_command, github_env, work_dir, copy),
-        None => exec_child(raw_command, github_env),
+        Some(copy) => {
+            approved_script_child(raw_command, github_env, &ctx.refs_env(), work_dir, copy)
+        }
+        None => exec_child(raw_command, github_env, &ctx.refs_env()),
     };
     cmd.args(&rendered_args)
         .current_dir(approved_copy.as_deref().unwrap_or(Path::new(work_dir)))
@@ -1061,7 +1072,7 @@ mod tests {
                 ("ANTHROPIC_API_KEY", "sk-ant"),
                 ("GH_TOKEN", "ghp"),
             ],
-            || exec_child("cargo", &[]),
+            || exec_child("cargo", &[], &[]),
         );
         let env: Vec<String> = command
             .as_std()
@@ -1076,7 +1087,7 @@ mod tests {
             !env.iter().any(|name| name == "GH_TOKEN"),
             "an unconnected project's step never inherits the backend's GitHub token"
         );
-        let connected = exec_child("gh", &[("GH_TOKEN".into(), "project-token".into())]);
+        let connected = exec_child("gh", &[("GH_TOKEN".into(), "project-token".into())], &[]);
         assert!(
             connected
                 .as_std()

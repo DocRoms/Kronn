@@ -7,7 +7,7 @@ shared collection shell, while retaining their domain data and detail actions.
 [src: file: frontend/src/components/plugins/PluginCollectionView.tsx:31-53]
 [src: file: frontend/src/pages/PagesPage.tsx:819-831#CollectionShell]
 [src: file: frontend/src/pages/PlanningPage.tsx:336-375#CollectionShell]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2358-2378#CollectionShell]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2379-2399#CollectionShell]
 
 ## Shared interaction contract
 
@@ -26,9 +26,9 @@ shared collection shell, while retaining their domain data and detail actions.
 | Projects | Multi-select project rows use checkbox semantics and names. [src: file: frontend/src/components/ProjectList.tsx:530-538#toggleMultiSelection] | Shared menu/sidebar dismissal. [src: file: frontend/src/components/CollectionShell.tsx:335-351#closeMenu] | Favorites wait for `projectsLoaded`; collapsed sections are stored locally. [src: file: frontend/src/pages/Dashboard.tsx:116] [src: file: frontend/src/routes/ProjectsRoute.tsx:38] [src: file: frontend/src/components/ProjectList.tsx:127-138] | Local state; shell-pruned. [src: file: frontend/src/components/ProjectList.tsx:126-129] |
 | Discussions | The shell receives selected identifiers and global keyboard search. [src: file: frontend/src/components/DiscussionSidebar.tsx:1157-1165#globalSearchShortcut] | Header and batch menus close on Escape and restore their triggers. [src: file: frontend/src/components/DiscussionSidebar.tsx:237-255#openBatchMenuRunId] | Search and grouping are domain-owned; favorites are not supplied to the shell. [src: file: frontend/src/components/DiscussionSidebar.tsx:1150-1156#persistence] | Local state; shell-pruned. [src: file: frontend/src/components/DiscussionSidebar.tsx:229#selectedIds] [src: file: frontend/src/components/DiscussionSidebar.tsx:1159-1160#onSelectedIdsChange] |
 | Plugins | The add-plugin panel is a modal dialog. [src: file: frontend/src/components/plugins/AddPluginModal.tsx:116-123] | Its close button/backdrop invoke the page reset path; shared menu/sidebar dismissal also applies. [src: file: frontend/src/components/plugins/AddPluginModal.tsx:108-131] [src: file: frontend/src/components/CollectionShell.tsx:335-351#closeMenu] | Favorites wait for a non-null MCP overview; sort and collapsed groups are local. [src: file: frontend/src/pages/Dashboard.tsx:644] [src: file: frontend/src/routes/PluginsRoute.tsx:28#overviewLoaded] [src: file: frontend/src/components/plugins/usePluginListState.ts:47-73] | Local state; shell-pruned. [src: file: frontend/src/components/plugins/usePluginListState.ts:65#selectedConfigIds] |
-| Pages | In selection mode, custom rows are named checkboxes using the select action, not the open action. [src: file: frontend/src/pages/PagesPage.tsx:948-954#toggleMultiSelection] | Shared mobile/sidebar dismissal; page-specific dialogs own their closure. [src: file: frontend/src/components/CollectionShell.tsx:365-379#closeMobileSidebar] | Search and validated collapsed sections are local. [src: file: frontend/src/pages/PagesPage.tsx:97-105#readCollapsedPageSections] [src: file: frontend/src/pages/PagesPage.tsx:282-288#PAGE_COLLAPSED_STORAGE_KEY] | Local state; shell-pruned. [src: file: frontend/src/pages/PagesPage.tsx:204#selectedIds] [src: file: frontend/src/pages/PagesPage.tsx:831-832#onSelectedIdsChange] |
+| Pages | In selection mode, custom rows are named checkboxes using the select action, not the open action. [src: file: frontend/src/pages/PagesPage.tsx:948-954#toggleMultiSelection] | Shared mobile/sidebar dismissal; page-specific dialogs own their closure. [src: file: frontend/src/components/CollectionShell.tsx:365-379#closeMobileSidebar] | Search and validated collapsed sections are local. [src: file: frontend/src/pages/PagesPage.tsx:97-105#readCollapsedPageSections] [src: file: frontend/src/pages/PagesPage.tsx:282-288#PAGE_COLLAPSED_STORAGE_KEY] | Local state; shell-pruned. [src: file: frontend/src/pages/PagesPage.tsx:205#selectedIds] [src: file: frontend/src/pages/PagesPage.tsx:831-832#onSelectedIdsChange] |
 | Planning | The shell receives task labels, selection and selection callbacks. [src: file: frontend/src/pages/PlanningPage.tsx:363-375#getLabel] | The create panel is modal and routes keyboard events to its handler. [src: file: frontend/src/pages/PlanningPage.tsx:699-707#handleCreateModalKeyDown] | Favorites wait for the first successful list response, but are never pruned from a filtered or paginated response; collapsed sections are local. [src: file: frontend/src/pages/PlanningPage.tsx:142-149#usePersistentIdSet] [src: file: frontend/src/pages/PlanningPage.tsx:175-195#fetchTasks] [src: file: frontend/src/pages/PlanningPage.tsx:153-159#PLANNING_COLLAPSED_STORAGE_KEY] | Local state; shell-pruned. [src: file: frontend/src/pages/PlanningPage.tsx:135#selectedIds] [src: file: frontend/src/pages/PlanningPage.tsx:374-375#onSelectedIdsChange] |
-| Automations | The shell receives its active resource selection. [src: file: frontend/src/pages/WorkflowsPage.tsx:2415-2423#selectedId] | The actions panel closes on Escape and is a modal dialog. [src: file: frontend/src/pages/WorkflowsPage.tsx:645-652#closeOnEscape] [src: file: frontend/src/pages/WorkflowsPage.tsx:2643-2649#aria-modal] | Navigation and valid collapsed-section state are restored locally. [src: file: frontend/src/pages/WorkflowsPage.tsx:257-267#readCollapsedAutomationSections] [src: file: frontend/src/lib/automationNavigation.ts:20-33#readAutomationLastVisit] | Local `automationSelection` state, shell-pruned; the bulk delete keeps the selection when a deletion fails. [src: file: frontend/src/pages/WorkflowsPage.tsx:1574#automationSelection] [src: file: frontend/src/pages/WorkflowsPage.tsx:2387-2388#onSelectedIdsChange] [src: file: frontend/src/pages/WorkflowsPage.tsx:2379-2411#deleteAutomationResource] |
+| Automations | The shell receives its active resource selection. [src: file: frontend/src/pages/WorkflowsPage.tsx:2436-2444#selectedId] | The actions panel closes on Escape and is a modal dialog. [src: file: frontend/src/pages/WorkflowsPage.tsx:652-659#closeOnEscape] [src: file: frontend/src/pages/WorkflowsPage.tsx:2667-2673#aria-modal] | Navigation and valid collapsed-section state are restored locally. [src: file: frontend/src/pages/WorkflowsPage.tsx:257-267#readCollapsedAutomationSections] [src: file: frontend/src/lib/automationNavigation.ts:20-33#readAutomationLastVisit] | Local `automationSelection` state, shell-pruned; the bulk delete keeps the selection when a deletion fails. [src: file: frontend/src/pages/WorkflowsPage.tsx:1595#automationSelection] [src: file: frontend/src/pages/WorkflowsPage.tsx:2408-2409#onSelectedIdsChange] [src: file: frontend/src/pages/WorkflowsPage.tsx:2400-2432#deleteAutomationResource] |
 
 ## Visual review matrix
 
@@ -78,14 +78,14 @@ the sort, and `renderList` for the groups. The search has the row to itself: the
 old Filter and Sort icons, the panel of three `<select>` (KT-912) and
 `AutomationToolbar` are gone, as `AutomationFilterBar` was before them. Nothing
 sits above the list: the main column is the viewer only.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2430-2431#globalSearchShortcut]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2462-2474#afterSidebarHeader]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2451-2452#globalSearchShortcut]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2494-2506#afterSidebarHeader]
 [src: file: frontend/src/components/AutomationSidebarControls.tsx:43-47#AutomationSidebarControls]
 
 One filter set narrows the list (`itemFilter`, the search being applied by the
 shell). `/` focuses the search from anywhere on the page, sidebar included. The
 pure rules stay in `lib/automationFilters.ts`.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2376-2377#itemFilter]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2397-2398#itemFilter]
 [src: file: frontend/src/lib/automationFilters.ts:97-108#matchesAutomationFilters]
 
 "Group by" is a segmented control, **Type / Project / None**, Type by default,
@@ -100,7 +100,7 @@ others.
 [src: file: frontend/src/lib/automationFilters.ts:170-210#groupAutomations]
 [src: file: frontend/src/lib/automationSidebarPrefs.ts:12-32#AUTOMATION_GROUP_BY_STORAGE_KEY]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:257-267#readCollapsedAutomationSections]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2561-2566#isGroupCollapsed]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2582-2587#isGroupCollapsed]
 
 | Grouping | Rule |
 | --- | --- |
@@ -112,11 +112,11 @@ The filters are chips on a line that wraps:
 
 | Chip | Rule |
 | --- | --- |
-| Type | Reads "All" until a type is picked. A click opens the list of types (All, then the five types), each with its count; choosing one also opens its list in the main column, "All" lifts the filter. It carries the tour anchor `automation-filter-type` (and `data-value`, the chosen type), which the four automation type steps of the tour target: they open the list and pick their type. [src: file: frontend/src/components/AutomationSidebarControls.tsx:143-157#kindChipRef] [src: file: frontend/src/pages/WorkflowsPage.tsx:2333-2336#selectAutomationKindFilter] [src: file: frontend/src/components/tour/tourSteps.ts:256-271#openAutomationKind] |
+| Type | Reads "All" until a type is picked. A click opens the list of types (All, then the five types), each with its count; choosing one also opens its list in the main column, "All" lifts the filter. It carries the tour anchor `automation-filter-type` (and `data-value`, the chosen type), which the four automation type steps of the tour target: they open the list and pick their type. [src: file: frontend/src/components/AutomationSidebarControls.tsx:143-157#kindChipRef] [src: file: frontend/src/pages/WorkflowsPage.tsx:2354-2357#selectAutomationKindFilter] [src: file: frontend/src/components/tour/tourSteps.ts:256-271#openAutomationKind] |
 | Pinned, Active, Recent | Independent toggles that stack. "Active" leaves out only a disabled workflow: a Quick Prompt, API, Exec or Skill has no off switch, so it always counts as active. "Recent" keeps what was opened lately and orders it by last opening, favorites not pulled up. [src: file: frontend/src/lib/automationFilters.ts:74-76#matchesAutomationActive] [src: file: frontend/src/lib/automationSort.ts:66-95#sortAutomationResources] |
 | Project | "+ Project" opens the list of the projects that hold something (and "No project"), each with its count; the choice shows as a removable chip `name ×`, whose name reopens the list. [src: file: frontend/src/lib/automationFilters.ts:138-156#countAutomationProjects] |
 | Counts | Every count reads what choosing it would show given the other filters and the search. [src: file: frontend/src/lib/automationFilters.ts:123-136#countAutomationKinds] |
-| Clear | "Clear filters" shows only while a chip is set (a type other than "All" counts), resets every chip and leaves the search alone (it has its own ✕). The empty list offers it too. [src: file: frontend/src/lib/automationFilters.ts:110-121#activeAutomationFilterCount] [src: file: frontend/src/pages/WorkflowsPage.tsx:2337-2343#clearAutomationFilters] |
+| Clear | "Clear filters" shows only while a chip is set (a type other than "All" counts), resets every chip and leaves the search alone (it has its own ✕). The empty list offers it too. [src: file: frontend/src/lib/automationFilters.ts:110-121#activeAutomationFilterCount] [src: file: frontend/src/pages/WorkflowsPage.tsx:2358-2364#clearAutomationFilters] |
 
 The "Recent" history is this browser's (`kronn:automationLastOpened`): opening
 an automation from the sidebar stamps it, and only the latest 20 are kept.

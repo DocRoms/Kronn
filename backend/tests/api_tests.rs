@@ -1650,6 +1650,7 @@ async fn live_page_workflows_returns_configured_publishers() {
                 [&now],
             )?;
             let workflow = kronn::models::Workflow {
+                refs: Default::default(),
                 retention: None,
                 shadow: None,
                 project_scope: None,
@@ -1715,6 +1716,7 @@ async fn live_page_resources_list_what_its_workflows_load_per_lane() {
         kronn::models::Workflow {
             retention: None,
             shadow,
+            refs: Default::default(),
             project_scope: None,
             id: id.into(),
             name: id.into(),
@@ -2109,6 +2111,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
             )?;
 
             let workflow = kronn::models::Workflow {
+                refs: Default::default(),
                 retention: None,
                 shadow: None,
                 project_scope: None,
@@ -2198,7 +2201,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
     let (export_status, exported) =
         get_json(app.clone(), "/api/workflows/workflow-portable/export").await;
     assert_eq!(export_status, StatusCode::OK);
-    assert_eq!(exported["version"], 3);
+    assert_eq!(exported["version"], 4);
     assert_eq!(exported["referenced_quick_prompts"][0]["id"], "qp-portable");
     assert_eq!(exported["referenced_quick_apis"][0]["id"], "qa-portable");
     assert_eq!(exported["referenced_quick_execs"][0]["id"], "qe-portable");
@@ -2557,7 +2560,7 @@ async fn artifact_export_bundles_saved_publishers_and_preserves_retained_values_
     assert_eq!(exported["success"], true, "{exported}");
     let bundle = &exported["data"];
     assert_eq!(bundle["kind"], "kronn.artifact");
-    assert_eq!(bundle["version"], 1);
+    assert_eq!(bundle["version"], 2);
     assert_eq!(bundle["artifact"]["html"], "<h1>Portable</h1>");
     assert_eq!(bundle["artifact"]["datasets"][0]["has_current"], true);
     assert_eq!(
@@ -5775,6 +5778,7 @@ async fn optional_variable_http_run(
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        refs: Default::default(),
         retention: None,
         shadow: None,
         project_scope: None,
@@ -5966,6 +5970,7 @@ async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        refs: Default::default(),
         retention: None,
         shadow: None,
         project_scope: None,
@@ -6103,6 +6108,7 @@ async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
     state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        refs: Default::default(),
         retention: None,
         shadow: None,
         project_scope: None,
@@ -6720,6 +6726,7 @@ async fn mcp_workflow_trigger_runs_a_workflow_with_required_variables_like_the_u
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        refs: Default::default(),
         retention: None,
         shadow: None,
         project_scope: None,
@@ -6882,6 +6889,7 @@ async fn launch_agent_choice_state(workflow_id: &str) -> AppState {
     }
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        refs: Default::default(),
         retention: None,
         shadow: None,
         project_scope: None,
@@ -25449,6 +25457,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-disabled-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            refs: Default::default(),
             retention: None,
             shadow: None,
             project_scope: None,
@@ -25511,6 +25520,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-vars-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            refs: Default::default(),
             retention: None,
             shadow: None,
             project_scope: None,
@@ -26051,6 +26061,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         // Seed workflow first to satisfy FK on workflow_runs.workflow_id.
         let workflow_id = format!("wf-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            refs: Default::default(),
             retention: None,
             shadow: None,
             project_scope: None,
@@ -29330,6 +29341,7 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                refs: Default::default(),
                 retention: None,
                 shadow: None,
                 project_scope: None,
@@ -29552,6 +29564,7 @@ async fn inline_quick_exec_sources_are_flagged_and_fixable() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                refs: Default::default(),
                 retention: None,
                 shadow: None,
                 project_scope: None,
@@ -30183,6 +30196,7 @@ async fn the_unchanged_line_exception_keys_on_the_exact_stored_line() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                refs: Default::default(),
                 retention: None,
                 shadow: None,
                 project_scope: None,
@@ -30393,4 +30407,536 @@ async fn the_default_todo_board_installs_on_request_once_and_pushes_its_publishe
         pushed |= matches!(event, WsMessage::LivePageDataChanged { ref page_id, .. } if *page_id == published["data"]["page_id"]);
     }
     assert!(pushed, "an open page hears about the publish at once");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// KT-1446 bundled custom skills, KT-1448 named workflow refs
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Points this process's skills at an empty data directory (call after the
+/// first `test_state()`, which sets its own once).
+fn fresh_skill_dir(root: &tempfile::TempDir, name: &str) {
+    let dir = root.path().join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    kronn::core::child_env::set_var("KRONN_DATA_DIR", dir);
+}
+
+async fn create_skill(app: Router, name: &str, content: &str) -> String {
+    let (_, created) = post_json(
+        app,
+        "/api/skills",
+        serde_json::json!({
+            "name": name, "description": "", "icon": "🔎",
+            "category": "Domain", "content": content,
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    created["data"]["id"].as_str().unwrap().to_string()
+}
+
+async fn skill_workflow(app: Router, skill_ids: Value) -> String {
+    let (_, created) = post_json(
+        app,
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Reviewed", "project_id": null, "trigger": {"type": "Manual"},
+            "steps": [{"name": "review", "step_type": {"type": "Agent"},
+                       "prompt_template": "Review", "skill_ids": skill_ids}],
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    created["data"]["id"].as_str().unwrap().to_string()
+}
+
+fn with_skill_content(envelope: &Value, content: &str) -> String {
+    let mut changed = envelope.clone();
+    let skill = &mut changed["referenced_skills"][0];
+    skill["content"] = Value::String(content.to_string());
+    skill["sha256"] = Value::String(sha256_lower_hex(content.as_bytes()));
+    serde_json::to_string(&changed).unwrap()
+}
+
+/// KT-1446 — a workflow export carries its custom skills; an import into
+/// another data directory creates them, reuses an identical one, surfaces a
+/// same-name conflict and honours both choices; a v3 file still imports and
+/// warns about the skill it cannot resolve.
+#[tokio::test]
+async fn workflow_export_carries_custom_skills_and_import_reuses_creates_or_settles_them() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_export_carries_custom_skills_and_import_reuses_creates_or_settles_them",
+    ) {
+        return;
+    }
+    let source = test_state();
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(source.clone(), false);
+    let skill = create_skill(app.clone(), "Portable review", "Check the tests.").await;
+    let workflow = skill_workflow(app.clone(), serde_json::json!([skill, "rust"])).await;
+    let (_, exported) = get_json(app, &format!("/api/workflows/{workflow}/export")).await;
+    assert_eq!(exported["version"], 4);
+    let bundled = exported["referenced_skills"].as_array().unwrap();
+    assert_eq!(bundled.len(), 1, "builtins stay references: {exported}");
+    assert_eq!(bundled[0]["id"], skill.as_str());
+    assert_eq!(bundled[0]["name"], "Portable review");
+    assert_eq!(bundled[0]["version"], 1);
+    let content = bundled[0]["content"].as_str().unwrap();
+    assert!(content.contains("Check the tests."));
+    assert_eq!(bundled[0]["sha256"], sha256_lower_hex(content.as_bytes()));
+    let file = serde_json::to_string(&exported).unwrap();
+
+    // A fresh Kronn: the skill is created and the step points at it.
+    fresh_skill_dir(&root, "target");
+    let target = build_router_with_auth(test_state(), false);
+    let request = |content: &str, choices: Value| serde_json::json!({"content": content, "project_id": null, "skill_choices": choices});
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/workflows/import/preview",
+        request(&file, serde_json::json!([])),
+    )
+    .await;
+    assert_eq!(
+        preview["data"]["skills"][0]["action"], "create",
+        "{preview}"
+    );
+    assert_eq!(preview["data"]["missing_skills"], serde_json::json!([]));
+    let (_, imported) = post_json(
+        target.clone(),
+        "/api/workflows/import",
+        request(&file, serde_json::json!([])),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    assert!(imported["notice"].is_null(), "{imported}");
+    let step_skills = imported["data"]["steps"][0]["skill_ids"].clone();
+    let created = step_skills[0].as_str().unwrap().to_string();
+    assert_eq!(step_skills[1], "rust");
+    let (_, listed) = get_json(target.clone(), "/api/skills").await;
+    let local = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == created.as_str())
+        .unwrap_or_else(|| panic!("{created} missing: {listed}"));
+    assert_eq!(local["content"], "Check the tests.");
+
+    // The same file again: the identical skill is reused, nothing is added.
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/workflows/import/preview",
+        request(&file, serde_json::json!([])),
+    )
+    .await;
+    assert_eq!(preview["data"]["skills"][0]["action"], "reuse", "{preview}");
+    assert_eq!(
+        preview["data"]["skills"][0]["existing_id"],
+        created.as_str()
+    );
+    let (_, again) = post_json(
+        target.clone(),
+        "/api/workflows/import",
+        request(&file, serde_json::json!([])),
+    )
+    .await;
+    assert_eq!(again["data"]["steps"][0]["skill_ids"][0], created.as_str());
+    let custom_count = |listed: &Value| {
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["is_builtin"] == false)
+            .count()
+    };
+    let (_, listed) = get_json(target.clone(), "/api/skills").await;
+    assert_eq!(custom_count(&listed), 1);
+
+    // Same name, other content: a conflict, settled by a copy by default…
+    let changed = with_skill_content(
+        &exported,
+        &exported["referenced_skills"][0]["content"]
+            .as_str()
+            .unwrap()
+            .replace("Check the tests.", "Check the docs."),
+    );
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/workflows/import/preview",
+        request(&changed, serde_json::json!([])),
+    )
+    .await;
+    let decision = &preview["data"]["skills"][0];
+    assert_eq!(decision["action"], "conflict", "{preview}");
+    assert_eq!(decision["existing_id"], created.as_str());
+    assert_eq!(decision["resolution"], "create_copy");
+    let (_, copied) = post_json(
+        target.clone(),
+        "/api/workflows/import",
+        request(&changed, serde_json::json!([])),
+    )
+    .await;
+    let copy = copied["data"]["steps"][0]["skill_ids"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(copy, created);
+    let (_, listed) = get_json(target.clone(), "/api/skills").await;
+    let copy_skill = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == copy.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(copy_skill["name"], "Portable review (2)");
+    assert_eq!(copy_skill["content"], "Check the docs.");
+    // …or by the local skill when the importer says so.
+    let use_existing = serde_json::json!([{"source_id": skill, "resolution": "use_existing"}]);
+    let (_, kept) = post_json(
+        target.clone(),
+        "/api/workflows/import",
+        request(&changed, use_existing),
+    )
+    .await;
+    assert_eq!(kept["data"]["steps"][0]["skill_ids"][0], created.as_str());
+
+    // A v3 file has no skills: it imports, keeps the id and says so.
+    fresh_skill_dir(&root, "legacy");
+    let mut legacy = exported.clone();
+    legacy["version"] = serde_json::json!(3);
+    legacy.as_object_mut().unwrap().remove("referenced_skills");
+    let legacy = serde_json::to_string(&legacy).unwrap();
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/workflows/import/preview",
+        request(&legacy, serde_json::json!([])),
+    )
+    .await;
+    assert_eq!(
+        preview["data"]["missing_skills"],
+        serde_json::json!([skill])
+    );
+    let (_, old) = post_json(
+        target,
+        "/api/workflows/import",
+        request(&legacy, serde_json::json!([])),
+    )
+    .await;
+    assert_eq!(old["success"], true, "{old}");
+    assert_eq!(old["data"]["steps"][0]["skill_ids"][0], skill.as_str());
+    assert!(
+        old["notice"].as_str().unwrap_or_default().contains(&skill),
+        "the unresolved skill is reported: {old}"
+    );
+}
+
+/// KT-1446 — a Page bundle carries the custom skills of its workflows and
+/// Quick Prompts; importing it elsewhere creates them and points both at them.
+#[tokio::test]
+async fn artifact_bundle_carries_custom_skills_and_import_creates_them() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "artifact_bundle_carries_custom_skills_and_import_creates_them",
+    ) {
+        return;
+    }
+    let (state, _) = workflow_portability_fixture().await;
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(state.clone(), false);
+    let skill = create_skill(app.clone(), "Page review", "Read the page.").await;
+    let attached = skill.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            let mut workflow =
+                kronn::db::workflows::get_workflow(conn, "workflow-portable")?.unwrap();
+            workflow.steps[0].skill_ids = vec![attached.clone()];
+            kronn::db::workflows::update_workflow(conn, &workflow)?;
+            conn.execute(
+                "UPDATE quick_prompts SET skill_ids_json = ?1 WHERE id = 'qp-portable'",
+                [serde_json::to_string(&vec![attached]).unwrap()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, exported) = get_json(app, "/api/pages/page-portable/export").await;
+    let bundle = &exported["data"];
+    assert_eq!(bundle["version"], 2);
+    assert_eq!(
+        bundle["referenced_skills"][0]["id"],
+        skill.as_str(),
+        "{bundle}"
+    );
+    let content = serde_json::to_string(bundle).unwrap();
+
+    fresh_skill_dir(&root, "target");
+    let target_state = test_state();
+    let target = build_router_with_auth(target_state.clone(), false);
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/pages/import/preview",
+        serde_json::json!({"content": content, "project_id": null, "choices": [],
+                           "approved_quick_exec_ids": ["qe-portable"]}),
+    )
+    .await;
+    assert_eq!(
+        preview["data"]["skills"][0]["action"], "create",
+        "{preview}"
+    );
+    assert!(
+        !preview["data"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["kind"] == "skill"),
+        "a bundled skill is not a missing one: {preview}"
+    );
+    let (_, imported) = post_json(
+        target.clone(),
+        "/api/pages/import",
+        serde_json::json!({"content": content, "project_id": null, "choices": [],
+                           "approved_quick_exec_ids": ["qe-portable"],
+                           "preview_digest": preview["data"]["digest"]}),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let (workflow_skills, prompt_skills) = target_state
+        .db
+        .with_read_conn(|conn| {
+            let workflow = kronn::db::workflows::list_workflows(conn)?.remove(0);
+            let prompt = kronn::db::quick_prompts::list_quick_prompts(conn)?.remove(0);
+            Ok((workflow.steps[0].skill_ids.clone(), prompt.skill_ids))
+        })
+        .await
+        .unwrap();
+    assert_eq!(workflow_skills, prompt_skills);
+    let local = kronn::core::skills::get_skill(&workflow_skills[0]).expect("created");
+    assert_eq!(local.content, "Read the page.");
+}
+
+async fn refs_fixture(state: &AppState, project_path: &str) {
+    let now = chrono::Utc::now();
+    let project_path = project_path.to_string();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('refs-project','Refs',?1,?2,?2)",
+                rusqlite::params![project_path, now.to_rfc3339()],
+            )?;
+            let page = kronn::models::LivePage {
+                id: "page-refs".into(),
+                project_id: None,
+                title: "Board".into(),
+                slug: "refs-board".into(),
+                current_revision_id: "rev-refs".into(),
+                data_revision: 0,
+                created_at: now,
+                updated_at: now,
+                last_published_at: None,
+                pinned: false,
+                archived: false,
+            };
+            let revision = kronn::models::LivePageRevision {
+                id: "rev-refs".into(),
+                page_id: "page-refs".into(),
+                revision: 1,
+                html: "<p>board</p>".into(),
+                created_by_agent: None,
+                created_at: now,
+            };
+            kronn::db::live_pages::create_live_page(conn, &page, &revision, &[], None)?;
+            conn.execute(
+                "INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('other-project','Other','/nowhere',?1,?1)",
+                [now.to_rfc3339()],
+            )?;
+            let foreign = kronn::models::LivePage {
+                id: "page-foreign".into(),
+                project_id: Some("other-project".into()),
+                slug: "foreign".into(),
+                current_revision_id: "rev-foreign".into(),
+                ..page
+            };
+            let revision = kronn::models::LivePageRevision {
+                id: "rev-foreign".into(),
+                page_id: "page-foreign".into(),
+                ..revision
+            };
+            kronn::db::live_pages::create_live_page(conn, &foreign, &revision, &[], None)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+fn refs_workflow(refs: Value) -> Value {
+    serde_json::json!({
+        "name": "Uses refs", "project_id": "refs-project", "trigger": {"type": "Manual"},
+        "exec_allowlist": ["sh"],
+        "refs": refs,
+        "steps": [{"name": "show", "step_type": {"type": "Exec"}, "exec_command": "sh",
+                   "exec_args": ["-c", "printf '%s|%s' {{refs.board}} \"$KRONN_REF_BOARD\""]}],
+    })
+}
+
+async fn run_exec_output(state: &AppState, workflow_id: &str) -> String {
+    let response = build_router_with_auth(state.clone(), false)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/workflows/{workflow_id}/trigger"))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("workflow SSE must terminate")
+    .unwrap()
+    .to_bytes();
+    let events = String::from_utf8(bytes.to_vec()).unwrap();
+    let run_id = events
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find_map(|event| event["run_id"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("missing run_start: {events}"));
+    let run = state
+        .db
+        .with_read_conn(move |conn| kronn::db::workflows::get_run(conn, &run_id))
+        .await
+        .unwrap()
+        .expect("persisted run");
+    assert_eq!(
+        run.status,
+        kronn::models::RunStatus::Success,
+        "{:?}",
+        run.step_results
+    );
+    run.step_results[0].output.clone()
+}
+
+/// KT-1448 — refs are checked at save, render into inline code and the
+/// environment of an Exec step, travel with the export and are remapped by
+/// the import; a ref the file does not carry fails the import.
+#[cfg(unix)]
+#[tokio::test]
+async fn workflow_refs_are_validated_rendered_exported_and_remapped() {
+    let state = test_state();
+    let directory = tempfile::tempdir().unwrap();
+    refs_fixture(&state, &directory.path().to_string_lossy()).await;
+    let app = build_router_with_auth(state.clone(), false);
+
+    for (refs, expected) in [
+        (
+            serde_json::json!({"Board": {"kind": "page", "id": "page-refs"}}),
+            "invalid",
+        ),
+        (
+            serde_json::json!({"board": {"kind": "page", "id": "page refs"}}),
+            "not a Kronn id",
+        ),
+        (
+            serde_json::json!({"board": {"kind": "page", "id": "page-gone"}}),
+            "not found",
+        ),
+        (
+            serde_json::json!({"board": {"kind": "page", "id": "page-foreign"}}),
+            "another project",
+        ),
+        (
+            serde_json::json!({"other": {"kind": "page", "id": "page-refs"}}),
+            "refs.board",
+        ),
+    ] {
+        let (_, refused) = post_json(app.clone(), "/api/workflows", refs_workflow(refs)).await;
+        assert_eq!(refused["success"], false, "{refused}");
+        let error = refused["error"].as_str().unwrap();
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        refs_workflow(serde_json::json!({"board": {"kind": "page", "id": "page-refs"}})),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+    assert_eq!(created["data"]["refs"]["board"]["id"], "page-refs");
+    let output = run_exec_output(&state, &id).await;
+    assert!(
+        output.contains(r#""stdout":"page-refs|page-refs""#),
+        "{output}"
+    );
+
+    // An update replacing the refs is checked the same way.
+    let (_, refused) = put_json_root(
+        app.clone(),
+        &format!("/api/workflows/{id}"),
+        serde_json::json!({"refs": {"board": {"kind": "workflow", "id": "missing"}}}),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+
+    let (_, exported) = get_json(app.clone(), &format!("/api/workflows/{id}/export")).await;
+    assert_eq!(exported["workflow"]["refs"]["board"]["id"], "page-refs");
+    assert_eq!(exported["referenced_pages"][0]["id"], "page-refs");
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/workflows/import",
+        serde_json::json!({"content": serde_json::to_string(&exported).unwrap(),
+                           "project_id": "refs-project"}),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let new_page = imported["data"]["refs"]["board"]["id"].as_str().unwrap();
+    assert_ne!(new_page, "page-refs");
+    let imported_id = imported["data"]["id"].as_str().unwrap().to_string();
+    let (_, enabled) = put_json_root(
+        app.clone(),
+        &format!("/api/workflows/{imported_id}"),
+        serde_json::json!({"enabled": true}),
+    )
+    .await;
+    assert_eq!(enabled["success"], true, "{enabled}");
+    let (_, page) = get_json(app.clone(), &format!("/api/pages/{new_page}")).await;
+    assert_eq!(
+        page["success"], true,
+        "the ref names the imported page: {page}"
+    );
+    let output = run_exec_output(&state, &imported_id).await;
+    assert!(
+        output.contains(&format!(r#""stdout":"{new_page}|{new_page}""#)),
+        "{output}"
+    );
+
+    // A ref to an object the file does not carry fails, and says which.
+    let mut broken = exported.clone();
+    broken["referenced_pages"] = serde_json::json!([]);
+    broken["workflow"]["steps"] = serde_json::json!([{"name": "show",
+        "step_type": {"type": "Exec"}, "exec_command": "sh",
+        "exec_args": ["-c", "printf '%s' {{refs.board}}"]}]);
+    let (_, refused) = post_json(
+        app,
+        "/api/workflows/import",
+        serde_json::json!({"content": serde_json::to_string(&broken).unwrap(),
+                           "project_id": "refs-project"}),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    let error = refused["error"].as_str().unwrap();
+    assert!(
+        error.contains("`board`") && error.contains("page-refs"),
+        "{error}"
+    );
 }

@@ -56,6 +56,9 @@ struct PlannedResource {
 
 struct ImportPlan {
     resources: Vec<PlannedResource>,
+    /// The bundle's custom skills and what the import does with each.
+    bundled_skills: Vec<BundledSkill>,
+    skills: Vec<SkillImportDecision>,
     preview: ArtifactImportPreview,
     /// Distinct origins the bundle's Pages embed from, sorted.
     embed_origins: Vec<String>,
@@ -101,6 +104,13 @@ fn origins_to_allow(plan: &ImportPlan, request: &ArtifactImportRequest) -> Resul
 }
 
 type Remap = BTreeMap<ResourceKind, HashMap<String, String>>;
+
+/// The bundle's custom skills by source id, and the local id each gets
+/// (predicted for a preview, real once written).
+struct SkillRemap<'a> {
+    bundled: &'a BTreeSet<String>,
+    ids: &'a HashMap<String, String>,
+}
 
 fn kind_key(kind: ResourceKind) -> String {
     serde_json::to_value(kind)
@@ -226,15 +236,18 @@ fn validate_page(page: &ArtifactBundlePage) -> Result<()> {
     Ok(())
 }
 
-fn parse_resources(request: &ArtifactImportRequest) -> Result<Vec<Resource>> {
+fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Vec<BundledSkill>)> {
     if request.content.len() > MAX_BUNDLE_BYTES {
         bail!("Artifact bundle exceeds 16 MiB");
     }
     let bundle: ArtifactBundle =
         serde_json::from_str(&request.content).context("Invalid Artifact JSON")?;
-    if bundle.kind != BUNDLE_KIND || bundle.version != BUNDLE_VERSION {
+    if bundle.kind != BUNDLE_KIND
+        || !(MIN_BUNDLE_VERSION..=BUNDLE_VERSION).contains(&bundle.version)
+    {
         bail!("Unsupported Artifact bundle kind or version");
     }
+    let skills = bundle.referenced_skills;
     let mut resources = Vec::new();
     for page in std::iter::once(bundle.artifact).chain(bundle.referenced_artifacts) {
         validate_page(&page)?;
@@ -295,7 +308,7 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<Vec<Resource>> {
             }
         }
     }
-    Ok(resources)
+    Ok((resources, skills))
 }
 
 fn remap_for(resources: &[PlannedResource]) -> Remap {
@@ -363,7 +376,12 @@ fn remap_html(html: &str, map: &Remap, project_id: Option<&str>) -> Result<Strin
     Ok(output)
 }
 
-fn remap_value(resource: &Resource, map: &Remap, project_id: Option<&str>) -> Result<Value> {
+fn remap_value(
+    resource: &Resource,
+    map: &Remap,
+    skills: &SkillRemap<'_>,
+    project_id: Option<&str>,
+) -> Result<Value> {
     let mut value = resource.value.clone();
     if resource.kind != ResourceKind::Artifact {
         value["project_id"] = json!(project_id);
@@ -398,8 +416,30 @@ fn remap_value(resource: &Resource, map: &Remap, project_id: Option<&str>) -> Re
                         .ok_or_else(|| anyhow!("Missing sub-workflow dependency: {id}"))?
                         .clone();
                 }
+                crate::core::skill_bundle::remap_ids(&mut step.skill_ids, skills.ids);
             }
+            let maps = crate::workflows::refs::RefRemaps {
+                pages: &map[&ResourceKind::Artifact],
+                workflows: &map[&ResourceKind::Workflow],
+                quick_prompts: &map[&ResourceKind::QuickPrompt],
+                quick_apis: &map[&ResourceKind::QuickApi],
+                quick_execs: &map[&ResourceKind::QuickExec],
+                bundled_skills: skills.bundled,
+                skills: Some(skills.ids),
+            };
+            crate::workflows::refs::remap(&workflow.name, &mut workflow.refs, &maps)
+                .map_err(anyhow::Error::msg)?;
+            crate::workflows::shadow::remap_imported(
+                &mut workflow,
+                skills.ids,
+                &map[&ResourceKind::QuickPrompt],
+            );
             value = serde_json::to_value(workflow)?;
+        }
+        ResourceKind::QuickPrompt => {
+            let mut prompt: QuickPrompt = serde_json::from_value(value)?;
+            crate::core::skill_bundle::remap_ids(&mut prompt.skill_ids, skills.ids);
+            value = serde_json::to_value(prompt)?;
         }
         _ => {}
     }
@@ -409,6 +449,7 @@ fn remap_value(resource: &Resource, map: &Remap, project_id: Option<&str>) -> Re
 fn execution_requirements(
     conn: &Connection,
     resources: &[PlannedResource],
+    bundled_skills: &BTreeSet<String>,
 ) -> Result<Vec<ArtifactImportWarning>> {
     let mut references = BTreeSet::new();
     let mut collect = |value: &Value| {
@@ -458,7 +499,11 @@ fn execution_requirements(
     let mut warnings = Vec::new();
     for (kind, id) in references {
         let (available, warning_kind) = match kind.as_str() {
-            "skill_ids" => (crate::core::skills::get_skill(&id).is_some(), "skill"),
+            // A bundled skill is reused or created by the import itself.
+            "skill_ids" => (
+                bundled_skills.contains(&id) || crate::core::skills::get_skill(&id).is_some(),
+                "skill",
+            ),
             "profile_ids" => (crate::core::profiles::get_profile(&id).is_some(), "profile"),
             "directive_ids" => (
                 crate::core::directives::get_directive(&id).is_some(),
@@ -485,7 +530,22 @@ fn execution_requirements(
 }
 
 fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<ImportPlan> {
-    let resources = parse_resources(request)?;
+    let (resources, bundled_skills) = parse_resources(request)?;
+    let skills = crate::core::skill_bundle::plan(
+        &bundled_skills,
+        &request.skill_choices,
+        request.project_id.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let bundled_skill_ids: BTreeSet<String> = bundled_skills
+        .iter()
+        .map(|skill| skill.id.clone())
+        .collect();
+    let predicted_skill_ids = crate::core::skill_bundle::predicted_ids(&skills);
+    let skill_remap = SkillRemap {
+        bundled: &bundled_skill_ids,
+        ids: &predicted_skill_ids,
+    };
     let embed_origins = bundle_embed_origins(&resources);
     if let Some(project) = &request.project_id {
         if crate::db::projects::get_project(conn, project)?.is_none() {
@@ -646,7 +706,12 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
         let map = remap_for(&planned);
         let mut changed = false;
         for item in &mut planned {
-            let remapped = remap_value(&item.source, &map, request.project_id.as_deref())?;
+            let remapped = remap_value(
+                &item.source,
+                &map,
+                &skill_remap,
+                request.project_id.as_deref(),
+            )?;
             if item.entry.disposition == ArtifactImportDisposition::Create {
                 continue;
             }
@@ -708,9 +773,9 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
             _ => {}
         }
     }
-    let warnings = execution_requirements(conn, &planned)?;
+    let warnings = execution_requirements(conn, &planned, &bundled_skill_ids)?;
     let digest = Sha256::digest(serde_json::to_vec(&json!({
-        "content":request.content,"project_id":request.project_id,"choices":request.choices,"approved_quick_exec_ids":approved_execs,"observations":observations,"warnings":warnings
+        "content":request.content,"project_id":request.project_id,"choices":request.choices,"approved_quick_exec_ids":approved_execs,"observations":observations,"warnings":warnings,"skills":skills
     }))?).iter().fold(String::with_capacity(64), |mut result, byte| {
         write!(&mut result, "{byte:02x}").expect("writing to String"); result
     });
@@ -727,9 +792,12 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
         digest,
         // Filled by the caller, which knows this Kronn's allowed sites.
         embed_origins: Vec::new(),
+        skills: skills.clone(),
     };
     Ok(ImportPlan {
         resources: planned,
+        bundled_skills,
+        skills,
         preview,
         embed_origins,
     })
@@ -791,10 +859,11 @@ fn create_imported_page(
     tx: &rusqlite::Transaction<'_>,
     item: &PlannedResource,
     map: &Remap,
+    skills: &SkillRemap<'_>,
     project_id: Option<&str>,
 ) -> Result<LivePage> {
     let exported: ArtifactBundlePage =
-        serde_json::from_value(remap_value(&item.source, map, project_id)?)?;
+        serde_json::from_value(remap_value(&item.source, map, skills, project_id)?)?;
     let now = Utc::now();
     let mut slug = exported.slug;
     while crate::db::live_pages::slug_is_taken(tx, &slug)? {
@@ -874,13 +943,35 @@ fn commit_plan(
     let now = Utc::now();
     let project_key =
         crate::db::resource_identities::project_key(tx, request.project_id.as_deref())?;
+    // Skills are files, written first: a later failure leaves them, and the
+    // next import of this bundle reuses them.
+    let skill_ids = crate::core::skill_bundle::apply(
+        &plan.bundled_skills,
+        &plan.skills,
+        request.project_id.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let bundled_skill_ids: BTreeSet<String> = plan
+        .bundled_skills
+        .iter()
+        .map(|skill| skill.id.clone())
+        .collect();
+    let skill_remap = SkillRemap {
+        bundled: &bundled_skill_ids,
+        ids: &skill_ids,
+    };
     // Create action targets first, so Page action ingestion can resolve all of
     // them. Workflows contain JSON references and remain disabled throughout.
     for item in plan.resources.iter().filter(|item| {
         item.source.kind != ResourceKind::Artifact
             && item.entry.disposition == ArtifactImportDisposition::Create
     }) {
-        let mut value = remap_value(&item.source, &map, request.project_id.as_deref())?;
+        let mut value = remap_value(
+            &item.source,
+            &map,
+            &skill_remap,
+            request.project_id.as_deref(),
+        )?;
         value["id"] = json!(item.target_id);
         value["created_at"] = json!(now);
         value["updated_at"] = json!(now);
@@ -962,7 +1053,8 @@ fn commit_plan(
         {
             continue;
         }
-        let page = create_imported_page(tx, item, &map, request.project_id.as_deref())?;
+        let page =
+            create_imported_page(tx, item, &map, &skill_remap, request.project_id.as_deref())?;
         record_origin(tx, &project_key, item)?;
         if index == 0 {
             root = Some(page);
@@ -971,6 +1063,7 @@ fn commit_plan(
     Ok(ArtifactImportResult {
         artifact: root.context("Imported root Artifact missing")?,
         entries: plan.preview.entries,
+        skills: plan.skills,
         allowed_embed_origins: Vec::new(),
         not_allowed_embed_origins: Vec::new(),
         embed_origins_error: None,
@@ -991,8 +1084,10 @@ pub(crate) fn import_shipped_in_transaction(
         approved_quick_exec_ids: Vec::new(),
         preview_digest: None,
         allow_embed_origins: Vec::new(),
+        skill_choices: Vec::new(),
     };
     request.choices = parse_resources(&request)?
+        .0
         .into_iter()
         .skip(1)
         .map(|resource| ArtifactImportChoice {

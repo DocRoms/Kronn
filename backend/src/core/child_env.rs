@@ -1004,6 +1004,24 @@ pub fn isolate_with_github_and_values(
     seal(command, route, GITHUB_ENV);
 }
 
+/// [`isolate_with_github_and_values`] plus a workflow's `KRONN_REF_<NAME>`
+/// ids (KT-1448), set after the seal: an id is never a secret, whatever its
+/// ref is called (`KRONN_REF_API_KEY`).
+pub fn isolate_with_github_values_and_refs(
+    command: &mut std::process::Command,
+    route: ChildRoute,
+    github_env: &[(String, String)],
+    values: &[(&str, &OsStr)],
+    refs: &[(String, String)],
+) {
+    isolate_with_github_and_values(command, route, github_env, values);
+    for (name, id) in refs {
+        if name.starts_with("KRONN_REF_") && !name_in(name, FORBIDDEN) {
+            command.env(name, id);
+        }
+    }
+}
+
 /// Reset + seal for a child that adds nothing of its own (exec routes, Quick
 /// Exec, credential CLIs).
 pub fn isolate(command: &mut std::process::Command, route: ChildRoute) {
