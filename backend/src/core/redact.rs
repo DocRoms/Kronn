@@ -533,8 +533,10 @@ pub fn redact_for_audit_artifact(input: &str) -> (String, usize) {
     }
 }
 
+// A backslash ends the URL: in JSON nested in a string it escapes the closing
+// quote, and the URL parser would rewrite it into a `/`.
 static URL_IN_TEXT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?i)\bhttps?://[^\s"'<>`]+"#).expect("static URL regex"));
+    LazyLock::new(|| Regex::new(r#"(?i)\bhttps?://[^\s"'<>`\\]+"#).expect("static URL regex"));
 
 /// Drops the query string and userinfo of every URL in `text`: both may
 /// carry a credential, and a diagnostic only needs the endpoint.
@@ -566,6 +568,15 @@ pub fn redact_stored_text(text: &str) -> String {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_url_in_escaped_json_keeps_its_closing_quote() {
+        let nested = r#"{\"avatar_url\": \"https://avatars.example.com/u/1\", \"next\": \"https://api.example.com/x?token=s3cr3t\"}"#;
+        assert_eq!(
+            strip_url_secrets(nested),
+            r#"{\"avatar_url\": \"https://avatars.example.com/u/1\", \"next\": \"https://api.example.com/x\"}"#
+        );
+    }
 
     // ── Per-pattern positive tests (each MUST match + redact) ─────────
 
