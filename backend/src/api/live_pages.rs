@@ -123,6 +123,29 @@ pub async fn workflows(
     }
 }
 
+/// GET /api/pages/:id/resources — the Quick Prompts and skills behind the
+/// Page, with each lane's version (KT-1450).
+pub async fn resources(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<crate::models::LivePageResource>>> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::live_pages::list_live_page_resources(conn, &id))
+        .await
+    {
+        Ok(Some(resources)) => Json(ApiResponse::ok(resources)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Page not found",
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to load Page resources: {error}"),
+        )),
+    }
+}
+
 pub async fn publications(
     State(state): State<AppState>,
     Path(id): Path<String>,

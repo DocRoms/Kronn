@@ -130,9 +130,13 @@ pub fn inline_code_args(cmd: &str, args: &[String]) -> Vec<InlineCode> {
 }
 
 /// Values Kronn produces itself; every other placeholder may carry text an
-/// outsider controls (tracker fields, step outputs, launch inputs).
+/// outsider controls (tracker fields, step outputs, launch inputs). A ref id
+/// is checked against `[A-Za-z0-9_-]` at save and again before it renders.
 pub fn is_trusted_template_path(path: &str) -> bool {
-    path == "run.id" || path.starts_with("time.now")
+    path == "run.id"
+        || path == "run.variant"
+        || path.starts_with("time.now")
+        || crate::workflows::refs::ref_name_of_path(path).is_some()
 }
 
 /// Values Kronn sets itself for the run (`run.id`, `run.artifacts_dir`,
@@ -161,7 +165,7 @@ pub enum InlineFinding {
 }
 
 /// The first unsafe placeholder of `cmd args`, if any: in the program name,
-/// in program text (only `{{run.id}}` and `{{time.now…}}` are accepted
+/// in program text (only `{{run.id}}`, `{{time.now…}}` and `{{refs.<name>}}` are accepted
 /// there, whatever filter a value went through), where the program still
 /// reads options, or where it names a program to run.
 pub fn first_unsafe_placeholder(cmd: &str, args: &[String]) -> Option<InlineFinding> {
@@ -3222,6 +3226,9 @@ mod tests {
                 .is_some()
         );
         assert!(stdin_validation_error("s", "bash", &[], "echo {{run.id}}", false).is_none());
+        // KT-1448 — a ref renders a checked id: program text may hold it.
+        assert!(first_unsafe_placeholder("sh", &args(&["-c", "echo {{refs.board}}"])).is_none());
+        assert!(first_unsafe_placeholder("sh", &args(&["-c", "echo {{refs.Board}}"])).is_some());
         assert!(stdin_validation_error(
             "s",
             "python3",

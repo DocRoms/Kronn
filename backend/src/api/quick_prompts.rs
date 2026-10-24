@@ -73,6 +73,9 @@ pub(crate) async fn create_as(
     if let Err(error) = validate_prompt_variables(&req.variables) {
         return Json(ApiResponse::err(error));
     }
+    if let Err(error) = crate::core::skill_versions::validate_pins(&req.skill_ids) {
+        return Json(ApiResponse::err(error));
+    }
 
     let agent = req.agent.unwrap_or(AgentType::ClaudeCode);
     let connection_id = match validate_connection_target(&state, &agent, req.connection_id).await {
@@ -165,6 +168,9 @@ pub(crate) async fn update_as(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
     if let Err(error) = validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(error));
+    }
+    if let Err(error) = crate::core::skill_versions::validate_pins(&req.skill_ids) {
         return Json(ApiResponse::err(error));
     }
     let before = quick_prompt_execution(&existing);

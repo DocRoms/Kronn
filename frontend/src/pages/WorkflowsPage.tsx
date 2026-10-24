@@ -19,6 +19,8 @@ import type {
   QuickApi, CreateQuickApiRequest, QuickExec, CreateQuickExecRequest,
   JsonValue, Skill, CreateSkillRequest, UnsafeExecStep, WorkflowStep,
 } from '../types/generated';
+import type { SkillImportChoice, WorkflowImportPreview } from '../types/generated';
+import { SkillImportDecisions } from '../components/SkillImportDecisions';
 import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
 import {
   Plus, Play, Loader2, ChevronLeft, ChevronRight, ChevronDown,
@@ -762,6 +764,23 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
     targetProjectId: string;
   } | null>(null);
   const [importingSubmit, setImportingSubmit] = useState(false);
+  // KT-1446 — the server's view of the file's custom skills, for its project.
+  const [importSkillPreview, setImportSkillPreview] = useState<{ key: string; preview: WorkflowImportPreview } | null>(null);
+  const [importSkillChoices, setImportSkillChoices] = useState<SkillImportChoice[]>([]);
+  const importWorkflowContent = importing?.kind === 'workflow' ? importing.content : '';
+  const importTargetProject = importing?.targetProjectId ?? '';
+  // A preview answers one file for one project: an older one is never shown.
+  const importSkillKey = `${importTargetProject}\n${importWorkflowContent}`;
+  const importSkills = importSkillPreview?.key === importSkillKey ? importSkillPreview.preview : null;
+  useEffect(() => {
+    if (!importWorkflowContent) return;
+    let active = true;
+    const key = `${importTargetProject}\n${importWorkflowContent}`;
+    workflowsApi.previewImport({ content: importWorkflowContent, project_id: importTargetProject || null })
+      .then(preview => { if (active) setImportSkillPreview({ key, preview }); })
+      .catch(e => console.warn('Workflow import preview failed:', e));
+    return () => { active = false; };
+  }, [importWorkflowContent, importTargetProject]);
   // 0.6.0 UX pass — Launch modal state for workflows declaring variables.
   // null = no modal open. submitting=true = trigger in flight, fields disabled.
   const [launchingWorkflow, setLaunchingWorkflow] = useState<{
@@ -1049,7 +1068,9 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
     try {
       const projectId = current.targetProjectId || null;
       if (current.kind === 'workflow') {
-        const imported = await workflowsApi.importWorkflow({ content: current.content, project_id: projectId });
+        const imported = await workflowsApi.importWorkflow({
+          content: current.content, project_id: projectId, skill_choices: importSkillChoices,
+        });
         if (toastProp) toastProp(t('imp.workflowDone').replace('{name}', current.preview.name), 'success');
         refetch();
         setTab('workflows');
@@ -4305,6 +4326,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                 onOpenSettings={onNavigateSettings}
                 onEdit={selectedSkill.is_builtin ? undefined : () => setEditingSkill(selectedSkill)}
                 onError={message => toastProp?.(message, 'error')}
+                onRestored={() => { refetchSkills(); }}
                 onDelete={selectedSkill.is_builtin ? undefined : async () => {
                   await skillsApi.delete(selectedSkill.id);
                   setSelectedSkillId(null);
@@ -4549,6 +4571,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                       referenced_quick_prompts?: unknown[];
                     };
                     const trigger = env.workflow?.trigger;
+                    setImportSkillChoices([]);
                     setImporting({
                       ...importing,
                       kind: detection.kind,
@@ -4633,6 +4656,16 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                             <> — <code>{importing.preview.execAllowlist?.join(', ')}</code></>
                           )}
                         </div>
+                      )}
+                      {importSkills && (
+                        <SkillImportDecisions
+                          decisions={importSkills.skills}
+                          missing={importSkills.missing_skills}
+                          choices={importSkillChoices}
+                          onChoose={setImportSkillChoices}
+                          disabled={importingSubmit}
+                          t={t}
+                        />
                       )}
                       <p className="text-sm text-muted mt-4" role="note" data-testid="import-disabled-note">
                         {t('imp.workflowDisabledNote')}

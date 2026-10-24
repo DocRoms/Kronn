@@ -227,6 +227,6 @@ only on an actual target/tier change, distinguishes an absent connection from
 explicit null, and preserves historical message models. Isolated API tests
 cover this path, not provider inference or a new browser qualification.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
-[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1363-1371#currentConnectionId]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1163-1180#agentSettingsForSelection]
+[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1372-1380#currentConnectionId]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1184-1201#agentSettingsForSelection]
 [src: file: backend/tests/discussion_target_model.rs:98-219#changing_agent_clears_the_previous_explicit_model]

@@ -127,8 +127,8 @@ caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
 [src: file: frontend/src/components/ChatHeader.tsx:430-431#currentModel]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1612-1643#changeQuickPromptAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3230-3231#currentModel]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1636-1667#changeQuickPromptAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3251-3252#currentModel]
 
 KT-627 separately removed the HTTP runner's embedded fallback and qualified
 production-library resolution/preflight. The final migration and cross-surface
@@ -252,7 +252,7 @@ Unavailable known entries remain disabled. Clearing an override is explicit
 and leaves tier resolution to the caller/backend.
 [src: file: frontend/src/components/ModelCatalogPicker.tsx:21-71#ModelCatalogPicker]
 [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:309-315#ModelCatalogPicker]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4366-4381#ModelCatalogPicker]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4399-4414#ModelCatalogPicker]
 
 Reasoning choices come from the effective model's `reasoning_modes`, not a
 fixed low/medium/high list. An existing value absent from that list is retained
@@ -284,8 +284,8 @@ same agent family and tier is still a real target change, not a no-op. Merely
 opening, editing or rereading the catalogue preserves the saved overrides.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:297-326#renderAgentTierPicker]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1159-1191#changeStepAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1612-1643#changeQuickPromptAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1183-1215#changeStepAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1636-1667#changeQuickPromptAgent]
 
 The creation wizard, full editor, inline inspector, pipeline and QP card receive
 the configured named targets. Their selectors display the saved explicit model
@@ -306,8 +306,8 @@ configuration. The callback updates only the compensation step, not the main
 pipeline. Search, exact connection namespaces, provenance and unavailable tiers
 therefore share the existing picker behavior.
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:297-326#renderAgentTierPicker]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4802-4805#updateRb]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4881-4885#renderAgentTierPicker]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4874-4877#updateRb]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:299-303#renderAgentTierPicker]
 [src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.coverage.test.tsx:984-1048#recover]
 
 Five picker controls failed against the previous compensation form; the
@@ -332,8 +332,8 @@ Resending the same agent no longer clears an existing connection or invalidates
 the summary cache. A lightweight agent lookup avoids loading the transcript
 merely to compare targets.
 [src: file: backend/src/models/discussions.rs:609-618#connection_id]
-[src: file: backend/src/api/discussions/crud.rs:788-818#validate_connection_target]
-[src: file: backend/src/api/discussions/crud.rs:859-883#invalidate_summary_cache]
+[src: file: backend/src/api/discussions/crud.rs:796-826#validate_connection_target]
+[src: file: backend/src/api/discussions/crud.rs:867-891#invalidate_summary_cache]
 [src: file: backend/src/db/discussions.rs:1094-1103#get_discussion_agent]
 
 Seven isolated Router/SQLite regressions cover changed and unchanged targets,

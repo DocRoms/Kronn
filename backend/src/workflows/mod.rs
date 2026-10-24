@@ -28,12 +28,14 @@ pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
 pub mod quota_wait;
 pub mod readiness;
+pub mod refs;
 pub mod run_artifacts;
 pub mod run_effect;
 pub mod run_pins;
 pub mod run_scope;
 pub mod runner;
 pub mod safety;
+pub mod shadow;
 pub mod step_agents;
 pub mod step_output_format;
 pub mod step_room;
@@ -659,7 +661,9 @@ mod tests {
     fn scheduled_workflow(id: &str, trigger: WorkflowTrigger, age_minutes: i64) -> Workflow {
         let at = Utc::now() - chrono::Duration::minutes(age_minutes);
         Workflow {
+            refs: Default::default(),
             retention: None,
+            shadow: None,
             project_scope: None,
             id: id.into(),
             name: id.into(),
@@ -1001,6 +1005,7 @@ mod tests {
             stall_timeout_secs: None,
             retry: None,
             skill_ids: vec![],
+            external_effect: false,
             directive_ids: vec![],
             profile_ids: vec![],
             delay_after_secs: None,

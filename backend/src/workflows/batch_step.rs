@@ -1875,7 +1875,9 @@ mod tests {
         use chrono::Utc;
         let wf_id = "wf-e2e".to_string();
         let workflow = Workflow {
+            refs: Default::default(),
             retention: None,
+            shadow: None,
             project_scope: None,
             pinned: false,
             id: wf_id.clone(),
@@ -2004,6 +2006,7 @@ mod tests {
             retry: None,
             delay_after_secs: None,
             skill_ids: vec![],
+            external_effect: false,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: Some(qp_id.into()),

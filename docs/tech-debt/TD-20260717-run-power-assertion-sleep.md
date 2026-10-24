@@ -36,7 +36,7 @@
   [src: file: backend/src/core/power_guard.rs:127-141#Caffeinate]
   [src: file: backend/src/core/power_guard.rs:148-181#PowerLease]
   [src: file: backend/src/api/audit/full.rs:35-96#AuditDropGuard]
-  [src: file: backend/src/workflows/runner.rs:1197-1204#_power_lease]
+  [src: file: backend/src/workflows/runner.rs:1212-1219#_power_lease]
   [src: file: backend/src/api/discussions/runtime.rs:506#power_lease]
   [src: file: backend/src/api/discussions/runtime.rs:549-550#power_lease]
 - **Residual fix** (macOS : livré, voir *Shipped scope* ; reste Linux/Windows) :

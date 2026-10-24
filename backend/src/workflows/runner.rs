@@ -862,6 +862,8 @@ async fn execute_run_with_notify_policy(
         }
     };
     let workflow = &pinned;
+    // KT-1449 — once pinned, a normal run starts its shadow alongside.
+    super::shadow::spawn_if_wanted(&state, workflow, run).await;
     let is_inherited_workspace = inherited_workspace.is_some();
     // Boxed: the run body's state machine is too large for a caller's stack.
     let result = Box::pin(execute_run_body(
@@ -1064,6 +1066,13 @@ async fn execute_run_body(
         let mut chosen = workflow_in_project.into_owned();
         super::step_agents::apply_from_run(&mut chosen, run);
         workflow_in_project = std::borrow::Cow::Owned(chosen);
+    }
+    // KT-1449 — a shadow run loads the versions its variant names.
+    if super::shadow::is_shadow(run) {
+        let mut variant = workflow_in_project.into_owned();
+        super::shadow::apply_versions(&state, &mut variant).await?;
+        super::shadow::isolate(&mut variant);
+        workflow_in_project = std::borrow::Cow::Owned(variant);
     }
     // KT-851 — a multi-project workflow keeps Quick Prompt/API references
     // symbolic; they resolve in this run's project.
@@ -1699,6 +1708,8 @@ async fn execute_run_body(
     }
     // After trigger fields and variables, so neither can stand in for the run.
     ctx.set_builtin("run.id", run.id.clone());
+    ctx.set_builtin("run.variant", super::shadow::variant(run).to_string());
+    ctx.set_refs(&workflow.refs);
     // KT-910 — Exec steps write here, Agent steps that name it read it.
     match super::run_artifacts::ensure(&run.id) {
         Ok(dir) => ctx.set_builtin("run.artifacts_dir", dir.to_string_lossy().to_string()),
@@ -2400,7 +2411,13 @@ async fn execute_run_body(
         // to the parent's branch (a later parent step like `create_pr` then
         // sees the child's work). `None` when the parent runs in the main tree.
         let sub_parent_workspace = run.workspace_path.clone();
+        // A Gate waits for a person: a trial run must never wait for one.
+        let skip_in_shadow = (step.external_effect || matches!(step.step_type, StepType::Gate))
+            && super::shadow::is_shadow(run);
         let step_future = async {
+            if skip_in_shadow {
+                return super::shadow::skipped(step);
+            }
             match step.step_type {
                 StepType::BatchQuickPrompt => {
                     // Phase 2 batch workflows — fan out a Quick Prompt over items
@@ -5199,6 +5216,7 @@ mod tests {
             delay_after_secs: None,
             mcp_config_ids: vec![],
             skill_ids: vec![],
+            external_effect: false,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -5552,6 +5570,7 @@ mod tests {
             retry: None,
             delay_after_secs: None,
             skill_ids: vec![],
+            external_effect: false,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -6032,7 +6051,9 @@ mod tests {
         artifacts: ::std::collections::HashMap<String, ArtifactSpec>,
     ) -> Workflow {
         Workflow {
+            refs: Default::default(),
             retention: None,
+            shadow: None,
             project_scope: None,
             pinned: false,
             id: "test".into(),
@@ -10754,6 +10775,7 @@ mod tests {
     mod quota_wait_runs;
     mod run_effect_runs;
     mod run_pin_runs;
+    mod shadow_runs;
     mod task_board_runs;
     mod workflow_safety_runs;
 }

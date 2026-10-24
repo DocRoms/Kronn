@@ -1335,6 +1335,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/pages/{id}/revisions", get(api::live_pages::revisions))
         .route("/api/pages/{id}/workflows", get(api::live_pages::workflows))
+        .route("/api/pages/{id}/resources", get(api::live_pages::resources))
+        .route(
+            "/api/workflows/{id}/shadow/promote",
+            post(api::workflows::promote_shadow),
+        )
         .route(
             "/api/pages/{id}/publications",
             get(api::live_pages::publications),
@@ -2506,6 +2511,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::workflows::import_workflow),
         )
         .route(
+            "/api/workflows/import/preview",
+            post(api::workflows::import_workflow_preview),
+        )
+        .route(
             "/api/workflow-runs/batch-summaries",
             get(api::workflows::list_batch_run_summaries),
         )
@@ -3238,6 +3247,15 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             put(api::skills::update).delete(api::skills::delete),
         )
         .route("/api/skills/{id}/guide", get(api::skills::guide))
+        .route("/api/skills/{id}/history", get(api::skills::history))
+        .route(
+            "/api/skills/{id}/versions/{version}",
+            get(api::skills::version),
+        )
+        .route(
+            "/api/skills/{id}/versions/{version}/restore",
+            post(api::skills::restore),
+        )
         .route(
             "/api/skills/auto-triggers/disabled",
             get(api::skills::list_disabled_auto),

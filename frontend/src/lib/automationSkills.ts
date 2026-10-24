@@ -76,6 +76,19 @@ export function repositorySkillsOf(usedSkills: readonly ProjectUsedSkill[], proj
 
 /** The ids already picked that `offered` does not list, as skills a picker can
  *  show to remove them: another project's, or one that no longer exists. */
+/** `custom-x@N` loads version N of `custom-x` (KT-1447): pickers compare the base id. */
+export function skillBaseId(id: string): string {
+  const at = id.indexOf('@');
+  return at > 0 && id.startsWith('custom-') ? id.slice(0, at) : id;
+}
+
+export function skillPinnedVersion(id: string): number | null {
+  const base = skillBaseId(id);
+  if (base === id) return null;
+  const n = Number(id.slice(base.length + 1));
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
 export function pickedButNotOffered(
   pickedIds: readonly string[],
   offered: readonly Skill[],
@@ -91,6 +104,7 @@ export function pickedButNotOffered(
     ...catalog.map(skill => [skill.id, skill] as const),
   ]);
   return pickedIds
+    .map(skillBaseId)
     .filter(id => !listed.has(id))
     .map(id => known.get(id) ?? {
       id,

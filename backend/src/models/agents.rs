@@ -73,6 +73,88 @@ pub struct Skill {
     pub project_id: Option<String>,
 }
 
+/// One saved state of a custom skill (KT-1434): every save that changes the
+/// file adds the next version; the newest one is what agents load.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillVersion {
+    pub skill_id: String,
+    pub version_index: u32,
+    pub name: String,
+    pub description: String,
+    pub icon: String,
+    pub category: SkillCategory,
+    pub content: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub current: bool,
+}
+
+/// A custom skill carried by a workflow or Page export (KT-1446): the file as
+/// stored, so the importer recreates it byte for byte.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BundledSkill {
+    /// The id on the exporting Kronn (`custom-<slug>`).
+    pub id: String,
+    pub name: String,
+    /// The newest version index on the exporting Kronn, when it has a history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version: Option<u32>,
+    /// Hex sha256 of `content`.
+    pub sha256: String,
+    /// The skill file (frontmatter + body), without any project scope.
+    pub content: String,
+}
+
+/// What an import does with one bundled skill (KT-1446).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SkillImportAction {
+    /// A local custom skill has the same content: steps use it.
+    Reuse,
+    /// No local skill matches: a new custom skill is created.
+    Create,
+    /// A local skill has the same name but other content.
+    Conflict,
+}
+
+/// The importer's answer to a conflict (KT-1446).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SkillConflictResolution {
+    /// Steps use the local skill of the same name.
+    UseExisting,
+    /// A copy of the bundled skill is created under a free name.
+    #[default]
+    CreateCopy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillImportChoice {
+    /// The bundled skill's id on the exporting Kronn.
+    pub source_id: String,
+    pub resolution: SkillConflictResolution,
+}
+
+/// One bundled skill as an import preview shows it (KT-1446).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillImportDecision {
+    pub source_id: String,
+    pub name: String,
+    pub action: SkillImportAction,
+    /// The local skill reused, or in conflict.
+    pub existing_id: Option<String>,
+    /// How a conflict is settled: the request's choice, else `create_copy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resolution: Option<SkillConflictResolution>,
+}
+
 /// Kronn's description of one skill argument. Stored as JSON under the flat
 /// `kronn-variables` metadata key: the Agent Skills `metadata` is a string map.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

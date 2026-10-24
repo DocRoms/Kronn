@@ -728,6 +728,10 @@ export type ApproveProjectRepositoryResourceRequest = { kind: ProjectRepositoryR
 
 export type ArtifactBundle = { kind: string, version: number, exported_at: string, artifact: ArtifactBundlePage, referenced_artifacts: Array<ArtifactBundlePage>, referenced_workflows: Array<Workflow>, referenced_quick_prompts: Array<QuickPrompt>, referenced_quick_apis: Array<QuickApi>, referenced_quick_execs: Array<QuickExec>,
 /**
+ * KT-1446 — custom skills the bundled workflows and Quick Prompts name.
+ */
+referenced_skills?: Array<BundledSkill>,
+/**
  * Literal credentials replaced before export; locations only, never values.
  */
 redacted_fields?: Array<RedactedField>, };
@@ -776,7 +780,11 @@ export type ArtifactImportPreview = { title: string, entries: Array<ArtifactImpo
 /**
  * One row per distinct origin the Artifact embeds content from.
  */
-embed_origins: Array<ArtifactImportEmbedOrigin>, };
+embed_origins: Array<ArtifactImportEmbedOrigin>,
+/**
+ * What the import does with each bundled custom skill (KT-1446).
+ */
+skills: Array<SkillImportDecision>, };
 
 export type ArtifactImportRequest = { content: string, project_id?: string | null, choices?: Array<ArtifactImportChoice>,
 /**
@@ -791,9 +799,13 @@ preview_digest?: string | null,
  * Origins the Artifact declares that the user chose to allow on this
  * Kronn. Added to the global list only once the import commits.
  */
-allow_embed_origins?: Array<string>, };
+allow_embed_origins?: Array<string>,
+/**
+ * How each bundled skill in conflict is settled (KT-1446).
+ */
+skill_choices?: Array<SkillImportChoice>, };
 
-export type ArtifactImportResult = { artifact: LivePage, entries: Array<ArtifactImportEntry>,
+export type ArtifactImportResult = { artifact: LivePage, entries: Array<ArtifactImportEntry>, skills: Array<SkillImportDecision>,
 /**
  * Origins this import added to the allowed sites.
  */
@@ -1748,7 +1760,7 @@ export type BundleChildWorkflow = { bundle_id: string, name: string, project_id:
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, shadow?: WorkflowShadow, refs?: { [key in string]: ResourceRef }, };
 
 /**
  * One artifact that was created by the bundle endpoint. The
@@ -1797,6 +1809,28 @@ default_headers?: Array<ApiDefaultHeader>,
  * Endpoint the "Test" button calls (see `ApiSpec::test_endpoint`).
  */
 test_endpoint?: string, };
+
+/**
+ * A custom skill carried by a workflow or Page export (KT-1446): the file as
+ * stored, so the importer recreates it byte for byte.
+ */
+export type BundledSkill = {
+/**
+ * The id on the exporting Kronn (`custom-<slug>`).
+ */
+id: string, name: string,
+/**
+ * The newest version index on the exporting Kronn, when it has a history.
+ */
+version?: number,
+/**
+ * Hex sha256 of `content`.
+ */
+sha256: string,
+/**
+ * The skill file (frontmatter + body), without any project scope.
+ */
+content: string, };
 
 /**
  * One Quick API declared inside a bundle.
@@ -2583,7 +2617,7 @@ export type CreateWorkflowRequest = { name: string, project_id?: string | null, 
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, shadow?: WorkflowShadow, refs?: { [key in string]: ResourceRef }, };
 
 /**
  * Where a plugin's outbound API credential actually comes from, computed
@@ -4857,7 +4891,12 @@ export type ImportResult = { warnings: Array<string>, invalid_paths: Array<strin
  * importer's project to attach the workflow to — `None` keeps it
  * unattached (the user picks a project later via the wizard).
  */
-export type ImportWorkflowRequest = { content: string, project_id?: string | null, };
+export type ImportWorkflowRequest = { content: string, project_id?: string | null,
+/**
+ * How each bundled skill in conflict is settled (KT-1446); a conflict
+ * without a choice gets a copy.
+ */
+skill_choices?: Array<SkillImportChoice>, };
 
 /**
  * A discussion's in-app tokens with the cache told apart from the real input.
@@ -5383,6 +5422,30 @@ export type LivePageDiscussionRelation = "created_from" | "attached";
  * directly and workflow deletion preserves the historical publication.
  */
 export type LivePagePublication = { id: string, page_id: string, data_revision: number, workflow_id: string | null, workflow_name: string | null, workflow_run_id: string | null, datasets_updated: Array<string>, content_changed: boolean, changed_datasets: Array<string>, unchanged_datasets: Array<string>, points_added: number, points_removed: number, published_at: string, };
+
+/**
+ * A Quick Prompt or a skill one of the Page's workflows uses (KT-1450).
+ */
+export type LivePageResource = {
+/**
+ * `quick_prompt` or `skill`.
+ */
+kind: string, id: string, name: string, latest_version: number | null, uses: Array<LivePageResourceUse>, };
+
+/**
+ * One step that loads a Page resource, with the version each lane loads.
+ */
+export type LivePageResourceUse = { workflow_id: string, workflow_name: string, step_name: string,
+/**
+ * What the normal run loads: a skill id (`custom-x@3` when pinned) or,
+ * for a Quick Prompt, `None` (its current version).
+ */
+normal: string | null,
+/**
+ * What the workflow's shadow run loads instead, when its shadow is on
+ * and names this resource.
+ */
+shadow: string | null, };
 
 export type LivePageRevision = { id: string, page_id: string, revision: number, html: string, created_by_agent: string | null, created_at: string, };
 
@@ -7276,6 +7339,17 @@ export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: st
 
 export type ProjectWriteAccessStatus = "Writable" | "ReadOnly" | "Missing" | "Unknown";
 
+/**
+ * What the normal lane takes over from the shadow (KT-1450): the tested
+ * version of a skill in every step that loads it, or the tested version of a
+ * Quick Prompt made its current one. The shadow's override goes away.
+ */
+export type PromoteShadowRequest = {
+/**
+ * `skill` or `quick_prompt`.
+ */
+kind: string, id: string, };
+
 export type PromptVariable = { name: string, label: string, placeholder: string,
 /**
  * Optional human description of what this variable means. Shown in
@@ -8128,6 +8202,16 @@ export type ResolvedGenSettings = { steps: number, cfg: number, sampler: string,
  * `snake_case`, so the API value matches the vocabulary humans read.
  */
 export type ResourceAdrLevel = "N0" | "N1" | "N2";
+
+/**
+ * One named reference of a workflow (KT-1448): which object, by id.
+ */
+export type ResourceRef = { kind: ResourceRefKind, id: string, };
+
+/**
+ * The kind of object a workflow ref names (KT-1448).
+ */
+export type ResourceRefKind = "page" | "workflow" | "quick_prompt" | "quick_api" | "quick_exec" | "skill";
 
 /**
  * One timestamped response from a vendor transcript, as the bridge reports it.
@@ -9288,6 +9372,35 @@ project_id?: string, };
 
 export type SkillCategory = "Language" | "Domain" | "Business";
 
+/**
+ * The importer's answer to a conflict (KT-1446).
+ */
+export type SkillConflictResolution = "use_existing" | "create_copy";
+
+/**
+ * What an import does with one bundled skill (KT-1446).
+ */
+export type SkillImportAction = "reuse" | "create" | "conflict";
+
+export type SkillImportChoice = {
+/**
+ * The bundled skill's id on the exporting Kronn.
+ */
+source_id: string, resolution: SkillConflictResolution, };
+
+/**
+ * One bundled skill as an import preview shows it (KT-1446).
+ */
+export type SkillImportDecision = { source_id: string, name: string, action: SkillImportAction,
+/**
+ * The local skill reused, or in conflict.
+ */
+existing_id: string | null,
+/**
+ * How a conflict is settled: the request's choice, else `create_copy`.
+ */
+resolution?: SkillConflictResolution, };
+
 export type SkillMigrationAction = "move" | "duplicate";
 
 export type SkillMigrationBlocked = { path: string, reason: SkillMigrationBlockReason, };
@@ -9402,6 +9515,12 @@ name: string, label?: string, description?: string | null, required: boolean, de
  * How Kronn asks for the value; a plain text field when absent.
  */
 control?: PromptVariableControl | null, };
+
+/**
+ * One saved state of a custom skill (KT-1434): every save that changes the
+ * file adds the next version; the newest one is what agents load.
+ */
+export type SkillVersion = { skill_id: string, version_index: number, name: string, description: string, icon: string, category: SkillCategory, content: string, created_at: string, current: boolean, };
 
 /**
  * One extracted `[src: …]` marker plus its mechanical verdict.
@@ -10838,7 +10957,15 @@ project_scope?: WorkflowProjectScope | null,
 /**
  * `null` returns to the global retention; omitted keeps it.
  */
-retention?: WorkflowRetention | null, };
+retention?: WorkflowRetention | null,
+/**
+ * `null` removes the shadow variant; omitted keeps it.
+ */
+shadow?: WorkflowShadow | null,
+/**
+ * Replaces every named ref when present; omitted keeps them.
+ */
+refs?: { [key in string]: ResourceRef }, };
 
 /**
  * Response after uploading a context file.
@@ -11279,7 +11406,17 @@ project_scope?: WorkflowProjectScope,
  * KT-1100 — how long this workflow's finished runs are kept, overriding
  * the global retention. `None` inherits it.
  */
-retention?: WorkflowRetention, created_at: string, updated_at: string, };
+retention?: WorkflowRetention,
+/**
+ * KT-1449 — a shadow run started alongside each normal one, with other
+ * skill/QP versions and its external effects skipped. Human-only.
+ */
+shadow?: WorkflowShadow,
+/**
+ * KT-1448 — named references to Kronn objects, rendered by steps as
+ * `{{refs.<name>}}` and remapped by export/import like other dependencies.
+ */
+refs?: { [key in string]: ResourceRef }, created_at: string, updated_at: string, };
 
 export type WorkflowAction = { "type": "CreatePr", title_template: string, body_template: string, branch_template: string, } | { "type": "CommentIssue", body_template: string, } | { "type": "UpdateTrackerStatus", status: string, } | { "type": "CreateIssue", title_template: string, body_template: string, };
 
@@ -11396,8 +11533,8 @@ export type WorkflowBlockerKind = "validation_error" | "misconfigured_step" | "h
 /**
  * Self-contained envelope produced by `GET /api/workflows/:id/export`.
  * Designed to be saved to disk, mailed, attached to a Github issue, etc.
- * `version: 3` is the current shape; future incompatible changes bump
- * the version and add a migration path at import time.
+ * `version: 4` is the current shape (bundled custom skills, named refs);
+ * older versions still import.
  */
 export type WorkflowExportEnvelope = {
 /**
@@ -11445,6 +11582,10 @@ referenced_pages?: Array<WorkflowExportPage>,
  */
 referenced_workflows?: Array<Workflow>,
 /**
+ * KT-1446 — custom skills the steps, bundled Quick Prompts and refs name.
+ */
+referenced_skills?: Array<BundledSkill>,
+/**
  * Fields whose literal secret was replaced before export (never the
  * value). An importer shows them so nothing silently runs without them.
  */
@@ -11481,6 +11622,16 @@ max_llm_calls?: number | null,
  * Defaults to 10. Triggers `RunStatus::StoppedByGuard`.
  */
 loop_detection_max_revisits?: number | null, };
+
+/**
+ * What `POST /api/workflows/import` would do with the file's skills
+ * (KT-1446), for the import dialog.
+ */
+export type WorkflowImportPreview = { skills: Array<SkillImportDecision>,
+/**
+ * Skills the steps name that neither this Kronn nor the file has.
+ */
+missing_skills: Array<string>, };
 
 /**
  * Which projects a multi-project workflow serves (KT-851).
@@ -11643,6 +11794,26 @@ export type WorkflowScopeEntry = { project_id: string, project_name: string | nu
 
 export type WorkflowScopeItem = { project_id: string, access: ScopeAccess, };
 
+/**
+ * The shadow variant of a workflow (KT-1449). Each normal run of a matching
+ * project also starts a shadow run on the same inputs; steps flagged
+ * `external_effect` are skipped there, so it can be compared without acting.
+ */
+export type WorkflowShadow = { enabled: boolean,
+/**
+ * Only runs of these projects get a shadow; empty means every run.
+ */
+project_ids?: Array<string>,
+/**
+ * Skill replaced in the shadow run: `custom-x` → `custom-x@3`, or any
+ * other skill id. Matched on the base id of what the step loads.
+ */
+skills?: Record<string, string>,
+/**
+ * Quick Prompt version the shadow run loads instead of the current one.
+ */
+quick_prompt_versions?: Record<string, number>, };
+
 export type WorkflowStep = {
 /**
  * Durable opaque identity of this step. `name` remains the editable
@@ -11658,7 +11829,12 @@ id?: string | null, name: string, step_type: StepType, description?: string | nu
  * fails the step and tips into the rollback chain). Stored in `steps_json`
  * alongside `on_result` — no migration; absent on older workflows.
  */
-on_timeout?: ConditionAction | null, stall_timeout_secs?: number | null, retry?: RetryConfig | null, delay_after_secs?: number | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>,
+on_timeout?: ConditionAction | null, stall_timeout_secs?: number | null, retry?: RetryConfig | null, delay_after_secs?: number | null, skill_ids?: Array<string>,
+/**
+ * KT-1449 — the step acts outside Kronn (posts, writes, sends): a shadow
+ * run skips it.
+ */
+external_effect?: boolean, profile_ids?: Array<string>, directive_ids?: Array<string>,
 /**
  * Id of the Quick Prompt to fan out. Required for BatchQuickPrompt steps.
  */

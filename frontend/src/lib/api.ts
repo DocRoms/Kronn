@@ -155,6 +155,7 @@ import type {
   BundleResponse,
   AgentUsageSummary,
   Skill,
+  SkillVersion,
   CreateSkillRequest,
   AgentProfile,
   CreateProfileRequest,
@@ -228,6 +229,7 @@ import type {
   DecideRunResponse,
   ResumeInterruptedRequest,
   ImportWorkflowRequest,
+  WorkflowImportPreview,
   ImportQuickPromptRequest,
   VersionCheck,
   DbBackupResponse,
@@ -262,7 +264,7 @@ import type {
   LivePageDiscussionLink,
   LivePagePublication,
   LivePageRevision,
-  LivePageWorkflowLink,
+  LivePageWorkflowLink, LivePageResource, PromoteShadowRequest,
   LivePagesCapability,
   PublishLivePageRequest,
   PublishLivePageResult,
@@ -2796,6 +2798,7 @@ export const workflows = {
   reenable: (ids: string[]) => api<Workflow[]>('POST', '/workflows/reenable', { ids }),
   delete: (id: string) => api<void>('DELETE', `/workflows/${id}`),
   trigger: (id: string) => api<WorkflowRun>('POST', `/workflows/${id}/trigger`),
+  promoteShadow: (id: string, req: PromoteShadowRequest) => api<Workflow>('POST', `/workflows/${id}/shadow/promote`, req),
 
   /** Trigger with SSE streaming for real-time progress.
    *  0.6.0 UX pass — accepts optional `variables` payload for workflows
@@ -2944,6 +2947,9 @@ export const workflows = {
   /** 0.7.0 UX pass — import a workflow from a previously-exported JSON. */
   importWorkflow: (payload: ImportWorkflowRequest) =>
     api<Workflow>('POST', '/workflows/import', payload),
+  /** KT-1446 — what importing this file does with its custom skills. Read-only. */
+  previewImport: (payload: ImportWorkflowRequest) =>
+    api<WorkflowImportPreview>('POST', '/workflows/import/preview', payload),
   /** Dry-run preview of a BatchQuickPrompt step: returns parsed items, sample
    *  rendered prompt, QP info, errors. NO discussion is created. */
   testBatchStep: (req: { step: WorkflowStep; mock_previous_output?: string | null; previous_step_name?: string | null }) =>
@@ -3086,6 +3092,7 @@ export const pages = {
   get: (id: string) => api<LivePageDetail>('GET', `/pages/${encodeURIComponent(id)}`),
   revisions: (id: string) => api<LivePageRevision[]>('GET', `/pages/${encodeURIComponent(id)}/revisions`),
   workflows: (id: string) => api<LivePageWorkflowLink[]>('GET', `/pages/${encodeURIComponent(id)}/workflows`),
+  resources: (id: string) => api<LivePageResource[]>('GET', `/pages/${encodeURIComponent(id)}/resources`),
   publications: (id: string) => api<LivePagePublication[]>('GET', `/pages/${encodeURIComponent(id)}/publications`),
   discussions: (id: string) => api<LivePageDiscussionLink[]>('GET', `/pages/${encodeURIComponent(id)}/discussions`),
   create: (request: CreateLivePageRequest) => api<LivePageDetail>('POST', '/pages', request),
@@ -3305,6 +3312,9 @@ export const skills = {
   create: (req: CreateSkillRequest) => api<Skill>('POST', '/skills', req),
   update: (id: string, req: CreateSkillRequest) => api<Skill>('PUT', `/skills/${id}`, req),
   delete: (id: string) => api<boolean>('DELETE', `/skills/${id}`),
+  history: (id: string) => api<SkillVersion[]>('GET', `/skills/${id}/history`),
+  restoreVersion: (id: string, versionIndex: number) =>
+    api<SkillVersion>('POST', `/skills/${id}/versions/${versionIndex}/restore`, {}),
 };
 
 // ─── Profiles ────────────────────────────────────────────────────────────────

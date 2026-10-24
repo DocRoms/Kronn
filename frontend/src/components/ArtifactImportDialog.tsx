@@ -5,10 +5,13 @@ import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import { describeRedacted, redactedFieldsIn } from '../lib/redactedFields';
 import { invalidateEmbedAllowedOrigins } from '../hooks/useEmbedAllowedOrigins';
-import type { ArtifactImportChoice, ArtifactImportPreview, ArtifactImportRequest, ArtifactImportResult, LivePage, Project } from '../types/generated';
+import { SkillImportDecisions } from './SkillImportDecisions';
+import type { ArtifactImportChoice, ArtifactImportPreview, ArtifactImportRequest, ArtifactImportResult, LivePage, Project, SkillImportChoice } from '../types/generated';
 import './ArtifactImportDialog.css';
 
 const MAX_BYTES = 16 * 1024 * 1024;
+// Version 2 adds bundled custom skills and workflow refs; 1 still imports.
+const BUNDLE_VERSIONS = [1, 2];
 
 /** The user's answer for one site the Artifact embeds; unanswered means refused. */
 type EmbedDecision = 'add' | 'refuse';
@@ -24,6 +27,7 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
   const [projectId, setProjectId] = useState(initialProjectId ?? '');
   const [projects, setProjects] = useState<Project[]>([]);
   const [choices, setChoices] = useState<ArtifactImportChoice[]>([]);
+  const [skillChoices, setSkillChoices] = useState<SkillImportChoice[]>([]);
   const [approvedExecIds, setApprovedExecIds] = useState<string[]>([]);
   const [embedDecisions, setEmbedDecisions] = useState<Record<string, EmbedDecision>>({});
   // Imported, but some chosen sites could not be allowed: said before closing.
@@ -66,13 +70,13 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
 
   const readFile = async (file?: File) => {
     if (!file || inFlight.current) return;
-    inFlight.current = true; setBusy(true); setError(null); setPreview(null); setContent(''); setChoices([]);
+    inFlight.current = true; setBusy(true); setError(null); setPreview(null); setContent(''); setChoices([]); setSkillChoices([]);
     setApprovedExecIds([]); setEmbedDecisions({});
     try {
       if (file.size > MAX_BYTES) throw new Error(t('pages.import.tooLarge'));
       const text = await file.text();
       const bundle = JSON.parse(text) as { kind?: unknown; version?: unknown };
-      if (bundle?.kind !== 'kronn.artifact' || bundle.version !== 1) throw new Error(t('pages.import.invalidFile'));
+      if (bundle?.kind !== 'kronn.artifact' || !BUNDLE_VERSIONS.includes(bundle.version as number)) throw new Error(t('pages.import.invalidFile'));
       setContent(text); setFilename(file.name); setDirty(true);
     } catch (cause) { setError(userError(cause)); }
     finally { inFlight.current = false; setBusy(false); }
@@ -86,6 +90,7 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
   const request = (): ArtifactImportRequest => ({
     content, project_id: projectId || null, choices, approved_quick_exec_ids: approvedExecIds,
     preview_digest: preview?.digest ?? null, allow_embed_origins: allowEmbedOrigins,
+    skill_choices: skillChoices,
   });
   const inspect = async () => {
     if (!content || inFlight.current) return;
@@ -159,6 +164,8 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
             </div>;
           })}
         </div>
+        <SkillImportDecisions decisions={preview.skills} choices={skillChoices} disabled={busy} t={t}
+          onChoose={next => { setSkillChoices(next); setDirty(true); }} />
         {preview.entries.some(entry => entry.quick_exec && !entry.quick_exec.approved)
           && <p className="artifact-import-note">{t('pages.import.execApprovalRequired')}</p>}
         {preview.embed_origins.length > 0 && <div className="artifact-import-embeds" data-testid="import-embed-origins">

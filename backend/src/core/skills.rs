@@ -451,6 +451,18 @@ fn custom_skills_dir() -> Option<PathBuf> {
     Some(config_dir.join("skills"))
 }
 
+pub(crate) fn skills_dir() -> Result<PathBuf, String> {
+    custom_skills_dir().ok_or_else(|| "Cannot determine config directory".into())
+}
+
+/// A skill saved without its history entry stays saved: losing the edit
+/// would be worse than a missing version, which the next save records.
+fn record_version(dir: &std::path::Path, slug: &str, raw: &str) {
+    if let Err(e) = super::skill_versions::record(dir, slug, raw) {
+        tracing::warn!("skill '{slug}': version not recorded: {e}");
+    }
+}
+
 /// When a custom skill's file last changed: the Kronn-side date of a skill,
 /// which carries no `updated_at` of its own. `None` for builtin skills.
 pub fn custom_skill_modified_at(id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -497,8 +509,11 @@ pub fn list_all_skills() -> Vec<Skill> {
     skills
 }
 
-/// Get a single skill by ID.
+/// Get a single skill by ID. `custom-x@N` is version N of `custom-x` (KT-1447).
 pub fn get_skill(id: &str) -> Option<Skill> {
+    if id.contains('@') {
+        return super::skill_versions::pinned_skill(id);
+    }
     list_all_skills().into_iter().find(|s| s.id == id)
 }
 
@@ -506,7 +521,13 @@ pub fn get_skill(id: &str) -> Option<Skill> {
 pub fn get_skills_by_ids(ids: &[String]) -> Vec<Skill> {
     let all = list_all_skills();
     ids.iter()
-        .filter_map(|id| all.iter().find(|s| s.id == *id).cloned())
+        .filter_map(|id| {
+            if id.contains('@') {
+                super::skill_versions::pinned_skill(id)
+            } else {
+                all.iter().find(|s| s.id == *id).cloned()
+            }
+        })
         .collect()
 }
 
@@ -824,8 +845,57 @@ pub fn save_custom_skill(
     let path = dir.join(format!("{}.md", slug));
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
         .map_err(|e| format!("Cannot write skill: {}", e))?;
+    record_version(&dir, &slug, &file_content);
 
     Ok(id)
+}
+
+/// Create a custom skill from a complete skill file (an import, KT-1446):
+/// written as given, so its content hash matches the bundle's.
+pub fn create_custom_skill_from_file(raw: &str) -> Result<String, String> {
+    let parsed = parse_skill_markdown("custom-import", raw, false)
+        .ok_or("The skill file has no valid frontmatter or no name")?;
+    validate_skill_fields(&parsed.name, &parsed.description)?;
+    let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create skills dir: {}", e))?;
+    let slug = unique_skill_slug(&dir, &parsed.name)?;
+    let path = dir.join(format!("{}.md", slug));
+    crate::core::mcp_scanner::atomic_write(&path, raw)
+        .map_err(|e| format!("Cannot write skill: {}", e))?;
+    record_version(&dir, &slug, raw);
+    Ok(format!("custom-{}", slug))
+}
+
+/// Every custom skill file as stored: `(id, raw)`.
+pub fn custom_skill_files() -> Vec<(String, String)> {
+    let Some(dir) = custom_skills_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<(String, String)> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .filter_map(|path| {
+            let stem = path.file_stem()?.to_string_lossy().to_string();
+            let raw = std::fs::read_to_string(&path).ok()?;
+            Some((format!("custom-{stem}"), raw))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// The stored file of custom skill `id`, if any.
+pub fn custom_skill_file(id: &str) -> Option<String> {
+    let slug = id.strip_prefix("custom-")?;
+    if !super::native_files::is_valid_slug(slug) {
+        return None;
+    }
+    std::fs::read_to_string(custom_skills_dir()?.join(format!("{slug}.md"))).ok()
 }
 
 /// Update a custom skill IN PLACE and atomically: same file, same id, even
@@ -865,6 +935,9 @@ pub fn update_custom_skill(
 
     let raw =
         std::fs::read_to_string(&path).map_err(|e| format!("Cannot read skill '{}': {}", id, e))?;
+    if let Err(e) = super::skill_versions::record_baseline(&dir, slug, &raw) {
+        tracing::warn!("skill '{slug}': previous state not recorded: {e}");
+    }
     let preserved = preserved_header(&raw);
     let project = match project_id {
         Some(next) => next,
@@ -887,6 +960,7 @@ pub fn update_custom_skill(
     );
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
         .map_err(|e| format!("Cannot write skill: {}", e))?;
+    record_version(&dir, slug, &file_content);
 
     Ok(id.to_string())
 }
@@ -909,6 +983,7 @@ pub fn delete_custom_skill(id: &str) -> Result<bool, String> {
 
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("Cannot delete skill: {}", e))?;
+        super::skill_versions::forget(&dir, slug)?;
         Ok(true)
     } else {
         Ok(false)
@@ -978,6 +1053,7 @@ mod tests {
         let files: Vec<_> = std::fs::read_dir(dir.join("skills"))
             .unwrap()
             .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(files.len(), 1, "expected exactly one file, got {:?}", files);

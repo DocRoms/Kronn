@@ -537,6 +537,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     workflows: {
+      promoteShadow: resolve({}),
       list: resolve([]),
       get: resolve(null),
       unsafeSteps: resolve([]),
@@ -566,6 +567,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     pages: {
+      resources: resolve([]),
       capability: resolve({ activated: false, activated_at: null }),
       list: resolve([]),
       get: resolve(null),
@@ -647,6 +649,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       create: resolve({}),
       update: resolve({}),
       delete: resolve(true),
+      history: resolve([]),
+      restoreVersion: resolve({}),
     },
 
     profiles: {

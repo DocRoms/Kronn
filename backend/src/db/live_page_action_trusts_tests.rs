@@ -882,7 +882,10 @@ fn the_write_triggers_compare_every_content_column() {
         for column in columns {
             let exempt = column == "pinned"
                 || column == "updated_at"
-                || (table == "workflows" && column == "retention_json");
+                || (table == "workflows" && column == "retention_json")
+                // The shadow never changes what the normal run an action
+                // launches does: it only adds a run whose effects are skipped.
+                || (table == "workflows" && column == "shadow_json");
             let compared = sql.contains(&format!("OLD.{column} IS NEW.{column}"));
             assert_eq!(compared, !exempt, "{table}.{column} in {trigger}");
         }

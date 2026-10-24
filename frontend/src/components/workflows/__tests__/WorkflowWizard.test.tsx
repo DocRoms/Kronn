@@ -125,8 +125,8 @@ const renderWizard = (over: Partial<ComponentProps<typeof WorkflowWizard>> = {})
 it('imports the first Artifact from the publisher step and preserves its writes', async () => {
   const imported = { id: 'imported-artifact', title: 'Imported team', slug: 'imported-team' };
   // Exercise the real import dialog and the wizard callback together.
-  pagesApi.previewImport = vi.fn().mockResolvedValue({ title: 'Imported team', entries: [], issues: [], warnings: [], digest: 'review', can_import: true, embed_origins: [] });
-  pagesApi.importArtifact = vi.fn().mockResolvedValue({ artifact: imported, entries: [], allowed_embed_origins: [], not_allowed_embed_origins: [], embed_origins_error: null });
+  pagesApi.previewImport = vi.fn().mockResolvedValue({ title: 'Imported team', entries: [], issues: [], warnings: [], digest: 'review', can_import: true, embed_origins: [], skills: [] });
+  pagesApi.importArtifact = vi.fn().mockResolvedValue({ artifact: imported, entries: [], skills: [], allowed_embed_origins: [], not_allowed_embed_origins: [], embed_origins_error: null });
   vi.mocked(projectsApi.list).mockResolvedValue([mkProject()]);
   renderWizard({ focusedStepOnly: true, initialStepId: 'publish-step', editWorkflow: mkWorkflow({ steps: [mkStep({
     id: 'publish-step', name: 'publish', step_type: { type: 'PublishPageData' },
@@ -513,6 +513,21 @@ describe('WorkflowWizard — step list handlers', () => {
       require_isolation: true,
       base_ref: 'origin/main',
     });
+  });
+
+  it('explains « acts outside Kronn » next to its checkbox and saves it (KT-1449)', async () => {
+    renderWizard({ editWorkflow: mkWorkflow({ steps: [mkStep(), mkStep({ name: 'post', external_effect: true })] }) });
+    fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+    fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+    fireEvent.click(screen.getAllByText('wiz.advanced *').at(-1)!);
+    const box = await screen.findByTestId('wiz-external-effect-1') as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    expect(document.getElementById(box.getAttribute('aria-describedby')!)).toHaveTextContent('wiz.externalEffectHint');
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].steps[1].external_effect).toBe(true);
   });
 
   it('hides the starting point while the run is not isolated and never sends it', async () => {

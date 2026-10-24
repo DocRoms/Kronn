@@ -68,6 +68,10 @@ pub struct ArtifactBundle {
     pub referenced_quick_apis: Vec<QuickApi>,
     #[serde(default)]
     pub referenced_quick_execs: Vec<QuickExec>,
+    /// KT-1446 — custom skills the bundled workflows and Quick Prompts name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<super::BundledSkill>>")]
+    pub referenced_skills: Vec<super::BundledSkill>,
     /// Literal credentials replaced before export; locations only, never values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redacted_fields: Vec<crate::core::export_secrets::RedactedField>,
@@ -117,6 +121,10 @@ pub struct ArtifactImportRequest {
     /// Kronn. Added to the global list only once the import commits.
     #[serde(default)]
     pub allow_embed_origins: Vec<String>,
+    /// How each bundled skill in conflict is settled (KT-1446).
+    #[serde(default)]
+    #[ts(optional, as = "Option<Vec<super::SkillImportChoice>>")]
+    pub skill_choices: Vec<super::SkillImportChoice>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -173,6 +181,8 @@ pub struct ArtifactImportPreview {
     pub can_import: bool,
     /// One row per distinct origin the Artifact embeds content from.
     pub embed_origins: Vec<ArtifactImportEmbedOrigin>,
+    /// What the import does with each bundled custom skill (KT-1446).
+    pub skills: Vec<super::SkillImportDecision>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -188,6 +198,7 @@ pub struct ArtifactImportEmbedOrigin {
 pub struct ArtifactImportResult {
     pub artifact: super::LivePage,
     pub entries: Vec<ArtifactImportEntry>,
+    pub skills: Vec<super::SkillImportDecision>,
     /// Origins this import added to the allowed sites.
     pub allowed_embed_origins: Vec<String>,
     /// Origins the user chose to add that are NOT allowed although the

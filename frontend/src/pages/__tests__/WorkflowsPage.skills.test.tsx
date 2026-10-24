@@ -35,6 +35,7 @@ const mockWorkflowsApi = vi.hoisted(() => ({
   triggerStream: vi.fn(),
   exportWorkflow: vi.fn(),
   importWorkflow: vi.fn(),
+  previewImport: vi.fn().mockResolvedValue({ skills: [], missing_skills: [] }),
   autoDisabled: vi.fn().mockResolvedValue([]),
   reenable: vi.fn().mockResolvedValue([]),
 }));

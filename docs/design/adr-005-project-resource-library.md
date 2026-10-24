@@ -36,7 +36,7 @@ What the code does today:
   atomically, so renaming keeps its id and a run that resolves it later still
   finds it
   [src: file: backend/src/api/skills.rs:85-116#update]
-  [src: file: backend/src/core/skills.rs:831-892#update_custom_skill]
+  [src: file: backend/src/core/skills.rs:901-962#update_custom_skill]
   [src: file: backend/src/core/directives.rs:345-380#update_custom_directive]
   [src: file: backend/src/core/profiles.rs:521-547#update_custom_profile].
 - Exports exist per type (workflow bundle v3, `kronn.artifact`,
@@ -150,7 +150,7 @@ isolates the run in that project's worktree (KT-851):
 - `project_scope` declares it: `{"type":"All"}` or
   `{"type":"Projects","project_ids":[…]}`; the home project (`project_id`)
   is always served. Without it, nothing changes
-  [src: file: backend/src/models/workflows.rs:217-238#WorkflowProjectScope].
+  [src: file: backend/src/models/workflows.rs:290-311#WorkflowProjectScope].
 - Manual launch: the request's `project_id`, refused when not served; else
   the launching discussion's or page's project when served; else the home
   project. Cron: one run per served project. Tracker: the served project
@@ -212,7 +212,7 @@ parent `node_modules`, Python's site-packages) are not covered
 [src: file: backend/src/core/approved_scripts.rs:181-231#prepare_copy]
 [src: file: backend/src/api/workflows.rs:1600-1672#pin_exec_script_files]
 [src: file: backend/src/workflows/runner.rs:1251-1288#carrying_repository]
-[src: file: backend/src/workflows/exec_step.rs:84-130#approved_script_child].
+[src: file: backend/src/workflows/exec_step.rs:91-137#approved_script_child].
 
 **Implementation note (KT-920, 0.15.0).** Templated step fields read the
 target project's profile as `{{project.<path>}}` (`project.*` is reserved).
@@ -307,7 +307,7 @@ offered only in its project, listed on its AI & automation tab as a project
 skill without being a default of its discussions, and refused by name when an
 agent launch of another project names it.
 `[src: file: backend/src/core/skills.rs:202#KRONN_PROJECT_KEY]`
-`[src: file: backend/src/core/skills.rs:632-655#refuse_foreign_project_skills]`
+`[src: file: backend/src/core/skills.rs:653-676#refuse_foreign_project_skills]`
 A workflow Agent step also loads the project's repository skills: the run pin
 reads each one as committed on the default branch and pins it, so neither the
 checkout's branch nor the run's worktree changes it; one the pin lacks stops
@@ -331,9 +331,9 @@ the step by name. A discussion still reads the checkout as it is.
   `workflow:triage`, `skill:block-migration`, `plugin:github`.
 - Instance-bound references (API config, MCP config, connection, agent or
   model) are requirements resolved locally on import, as `rebind_api_configs`
-  already does for API configs [src: file: backend/src/api/workflows.rs:3907-3940#rebind_api_configs].
+  already does for API configs [src: file: backend/src/api/workflows.rs:4074-4107#rebind_api_configs].
 - Ids embedded in artifact HTML are rewritten on import, as `remap_html`
-  already does [src: file: backend/src/api/artifact_portability/import.rs:325-364#remap_html].
+  already does [src: file: backend/src/api/artifact_portability/import.rs:338-377#remap_html].
 - Workflows (KT-917). One resolver serves every kind (`workflow`, `qe`, `qa`,
   `prompt`, `skill`, `plugin`, `artifact`): the run's project first, then the
   global scope; in each scope the identity table, then the slug publication

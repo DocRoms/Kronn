@@ -101,6 +101,33 @@ pub struct LivePageDetail {
     pub slug_aliases: Vec<String>,
 }
 
+/// One step that loads a Page resource, with the version each lane loads.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LivePageResourceUse {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub step_name: String,
+    /// What the normal run loads: a skill id (`custom-x@3` when pinned) or,
+    /// for a Quick Prompt, `None` (its current version).
+    pub normal: Option<String>,
+    /// What the workflow's shadow run loads instead, when its shadow is on
+    /// and names this resource.
+    pub shadow: Option<String>,
+}
+
+/// A Quick Prompt or a skill one of the Page's workflows uses (KT-1450).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LivePageResource {
+    /// `quick_prompt` or `skill`.
+    pub kind: String,
+    pub id: String,
+    pub name: String,
+    pub latest_version: Option<u32>,
+    pub uses: Vec<LivePageResourceUse>,
+}
+
 /// Live workflow configurations that publish into this Page. A Page is not
 /// owned by one workflow: several workflows may feed the same destination.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -154,9 +154,78 @@ pub struct Workflow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub retention: Option<WorkflowRetention>,
+    /// KT-1449 — a shadow run started alongside each normal one, with other
+    /// skill/QP versions and its external effects skipped. Human-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub shadow: Option<WorkflowShadow>,
+    /// KT-1448 — named references to Kronn objects, rendered by steps as
+    /// `{{refs.<name>}}` and remapped by export/import like other dependencies.
+    #[serde(default, skip_serializing_if = "WorkflowRefs::is_empty")]
+    #[ts(optional, as = "Option<WorkflowRefs>")]
+    pub refs: WorkflowRefs,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+/// The shadow variant of a workflow (KT-1449). Each normal run of a matching
+/// project also starts a shadow run on the same inputs; steps flagged
+/// `external_effect` are skipped there, so it can be compared without acting.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowShadow {
+    pub enabled: bool,
+    /// Only runs of these projects get a shadow; empty means every run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_ids: Vec<String>,
+    /// Skill replaced in the shadow run: `custom-x` → `custom-x@3`, or any
+    /// other skill id. Matched on the base id of what the step loads.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[ts(type = "Record<string, string>")]
+    pub skills: std::collections::BTreeMap<String, String>,
+    /// Quick Prompt version the shadow run loads instead of the current one.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[ts(type = "Record<string, number>")]
+    pub quick_prompt_versions: std::collections::BTreeMap<String, u32>,
+}
+
+/// The kind of object a workflow ref names (KT-1448).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ResourceRefKind {
+    Page,
+    Workflow,
+    QuickPrompt,
+    QuickApi,
+    QuickExec,
+    Skill,
+}
+
+impl ResourceRefKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::Workflow => "workflow",
+            Self::QuickPrompt => "quick_prompt",
+            Self::QuickApi => "quick_api",
+            Self::QuickExec => "quick_exec",
+            Self::Skill => "skill",
+        }
+    }
+}
+
+/// One named reference of a workflow (KT-1448): which object, by id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+#[ts(export)]
+pub struct ResourceRef {
+    pub kind: ResourceRefKind,
+    pub id: String,
+}
+
+/// Ref name → object, ordered so a definition serializes the same way twice.
+pub type WorkflowRefs = ::std::collections::BTreeMap<String, ResourceRef>;
 
 /// Per-workflow run retention (KT-1100). Each window overrides the global one
 /// for its class of run; `None` inherits it and `0` keeps those runs forever.
@@ -556,6 +625,10 @@ pub struct WorkflowStep {
     pub delay_after_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_ids: Vec<String>,
+    /// KT-1449 — the step acts outside Kronn (posts, writes, sends): a shadow
+    /// run skips it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external_effect: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profile_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2238,6 +2311,12 @@ pub struct CreateWorkflowRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub retention: Option<WorkflowRetention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub shadow: Option<WorkflowShadow>,
+    #[serde(default, skip_serializing_if = "WorkflowRefs::is_empty")]
+    #[ts(optional, as = "Option<WorkflowRefs>")]
+    pub refs: WorkflowRefs,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -2286,6 +2365,14 @@ pub struct UpdateWorkflowRequest {
     #[serde(default, deserialize_with = "super::deserialize_optional_field")]
     #[ts(optional)]
     pub retention: Option<Option<WorkflowRetention>>,
+    /// `null` removes the shadow variant; omitted keeps it.
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    #[ts(optional)]
+    pub shadow: Option<Option<WorkflowShadow>>,
+    /// Replaces every named ref when present; omitted keeps them.
+    #[serde(default)]
+    #[ts(optional)]
+    pub refs: Option<WorkflowRefs>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -2558,6 +2645,21 @@ pub struct WorkflowSuggestion {
 pub struct ImportWorkflowRequest {
     pub content: String,
     pub project_id: Option<String>,
+    /// How each bundled skill in conflict is settled (KT-1446); a conflict
+    /// without a choice gets a copy.
+    #[serde(default)]
+    #[ts(optional, as = "Option<Vec<super::SkillImportChoice>>")]
+    pub skill_choices: Vec<super::SkillImportChoice>,
+}
+
+/// What `POST /api/workflows/import` would do with the file's skills
+/// (KT-1446), for the import dialog.
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowImportPreview {
+    pub skills: Vec<super::SkillImportDecision>,
+    /// Skills the steps name that neither this Kronn nor the file has.
+    pub missing_skills: Vec<String>,
 }
 
 /// 0.6.0 UX pass — optional payload for `POST /api/workflows/:id/trigger`.
@@ -2610,8 +2712,8 @@ pub type StepAgents = ::std::collections::HashMap<String, StepAgentOverride>;
 
 /// Self-contained envelope produced by `GET /api/workflows/:id/export`.
 /// Designed to be saved to disk, mailed, attached to a Github issue, etc.
-/// `version: 3` is the current shape; future incompatible changes bump
-/// the version and add a migration path at import time.
+/// `version: 4` is the current shape (bundled custom skills, named refs);
+/// older versions still import.
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct WorkflowExportEnvelope {
@@ -2646,6 +2748,10 @@ pub struct WorkflowExportEnvelope {
     /// Empty when the workflow has no SubWorkflow steps. Excludes the root.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub referenced_workflows: Vec<Workflow>,
+    /// KT-1446 — custom skills the steps, bundled Quick Prompts and refs name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<super::BundledSkill>>")]
+    pub referenced_skills: Vec<super::BundledSkill>,
     /// Fields whose literal secret was replaced before export (never the
     /// value). An importer shows them so nothing silently runs without them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -6,7 +6,8 @@ import { ArtifactImportDialog } from '../ArtifactImportDialog';
 import { buildBlankStep, isDelegateSubtasksIncomplete, jsonPathToTarget, splitToolList, withStepTools } from '../../lib/workflowUiUtils';
 import { DelegateSubtasksSummary } from './DelegateSubtasksSummary';
 import { useT } from '../../lib/I18nContext';
-import { offeredToProject, pickedButNotOffered, repositorySkillsOf } from '../../lib/automationSkills';
+import { offeredToProject, pickedButNotOffered, repositorySkillsOf, skillBaseId } from '../../lib/automationSkills';
+import SkillVersionPins from '../SkillVersionPins';
 import { workflows as workflowsApi, projects as projectsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
 import { ApiCallStepCard, JsonTreeViewer, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
@@ -28,13 +29,16 @@ import type {
   WorkflowStep, AgentType, WorkflowSafety,
   WorkspaceConfig, StepConditionRule,
   CreateWorkflowRequest, Skill, ProjectUsedSkill, AgentProfile, Directive,
-  WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards, WorkflowRetention,
+  WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards, WorkflowRetention, WorkflowShadow,
   PromptVariable, WorkflowSummary, LivePage, JsonValue, TestApiCallResponse, QuickExec,
-  TransformDataField, WorkflowProjectScope,
+  TransformDataField, WorkflowProjectScope, ResourceRef,
 } from '../../types/generated';
 import { SafetyWarnings } from './SafetyWarnings';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import { RunRetentionCard } from './RunRetentionCard';
+import { ShadowRunsCard } from './ShadowRunsCard';
+import { WorkflowRefsCard } from './WorkflowRefsCard';
+import type { RefOptions } from '../../lib/workflowRefs';
 import type { AgentsConfig } from '../../types/generated';
 import { promptNeedsUnboundWorkspace } from '../../lib/ollamaHints';
 import {
@@ -414,6 +418,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // 0.7.0 — Execution limits (timeout / max LLM calls / loop detection)
   const [guards, setGuards] = useState<WorkflowGuards | null>(editWorkflow?.guards ?? null);
   const [retention, setRetention] = useState<WorkflowRetention | null>(editWorkflow?.retention ?? null);
+  const [shadow, setShadow] = useState<WorkflowShadow | null>(editWorkflow?.shadow ?? null);
+  // KT-1448 — named refs; the whole map is sent on every save.
+  const [refs, setRefs] = useState<Record<string, ResourceRef>>(
+    () => Object.fromEntries(Object.entries(editWorkflow?.refs ?? {})
+      .filter((entry): entry is [string, ResourceRef] => Boolean(entry[1]))),
+  );
 
   // Build cron expression from visual inputs (or raw if complex)
   const buildCronExpr = (): string => {
@@ -660,6 +670,20 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // 2026-06-11 (Phase 1c) — other workflows, for the SubWorkflow step picker.
   const [availableWorkflows, setAvailableWorkflows] = useState<WorkflowSummary[]>([]);
   const [availablePages, setAvailablePages] = useState<LivePage[]>([]);
+  // A ref may name an object that is global or in this workflow's project.
+  const refOptions = useMemo<RefOptions>(() => {
+    const inScope = (owner: string | null | undefined) => !owner || owner === (projectId || null);
+    const of = <T extends { id: string; project_id?: string | null }>(items: T[], label: (item: T) => string) =>
+      items.filter(item => inScope(item.project_id)).map(item => ({ id: item.id, label: label(item) }));
+    return {
+      page: of(availablePages, page => page.title),
+      workflow: of(availableWorkflows, workflow => workflow.name),
+      quick_prompt: of(availableQuickPrompts, prompt => prompt.name),
+      quick_api: of(availableQuickApis, api => api.name),
+      quick_exec: of(availableQuickExecs, exec => exec.name),
+      skill: of(availableSkills, skill => skill.name),
+    };
+  }, [availablePages, availableWorkflows, availableQuickPrompts, availableQuickApis, availableQuickExecs, availableSkills, projectId]);
   const [pageDraftTitles, setPageDraftTitles] = useState<Record<number, string>>({});
   const [pageCreatingIndex, setPageCreatingIndex] = useState<number | null>(null);
   const [pageImportIndex, setPageImportIndex] = useState<number | null>(null);
@@ -1128,6 +1152,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         retry: s.retry,
         stall_timeout_secs: s.stall_timeout_secs,
         delay_after_secs: s.delay_after_secs,
+        external_effect: s.external_effect,
         mode: s.mode,
         step_type: { type: newType } as WorkflowStep['step_type'],
       };
@@ -1286,6 +1311,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           exec_allowlist: execAllowlist,
           variables: wfVariables,
           project_scope: projectScope,
+          refs,
         });
       } else {
         const req: CreateWorkflowRequest = {
@@ -1300,10 +1326,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           concurrency_key: trimmedConcurrencyKey || undefined,
           guards: guards ?? undefined,
           retention: retention ?? undefined,
+          shadow: shadow ?? undefined,
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
           variables: wfVariables,
           project_scope: projectScope ?? undefined,
+          refs,
         };
         let created: Workflow | null = null;
         let createdId: string;
@@ -2095,7 +2123,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             const isAdvOpen = expandedStepAdvanced === i;
             const hasAdvanced = (step.on_result && step.on_result.length > 0) ||
               step.agent_settings ||
-              step.stall_timeout_secs || step.retry || step.delay_after_secs || step.room_id || step.read_only_repos?.length;
+              step.stall_timeout_secs || step.retry || step.delay_after_secs || step.external_effect || step.room_id || step.read_only_repos?.length;
             const multiAgentReview = step.multi_agent_review;
             const activeStepType = step.step_type?.type ?? 'Agent';
             const activeTypeOption = [...STEP_TYPE_GROUPS.flatMap(group => group.options), DELEGATE_SUBTASKS_OPTION]
@@ -4187,14 +4215,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         ...pickedButNotOffered(step.skill_ids ?? [], offeredSkills, availableSkills, usedSkills),
                       ].map(skill => {
                         const ids = step.skill_ids ?? [];
-                        const selected = ids.includes(skill.id);
+                        const selected = ids.some(id => skillBaseId(id) === skill.id);
                         const foreign = !offeredSkills.some(offered => offered.id === skill.id);
                         return (
                           <button
                             key={skill.id}
                             type="button"
                             onClick={() => {
-                              const newIds = selected ? ids.filter(id => id !== skill.id) : [...ids, skill.id];
+                              const newIds = selected ? ids.filter(id => skillBaseId(id) !== skill.id) : [...ids, skill.id];
                               updateStep(i, { skill_ids: newIds.length > 0 ? newIds : undefined });
                             }}
                             className="wf-chip wf-chip-skill"
@@ -4209,6 +4237,11 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         );
                       })}
                     </div>
+                    <SkillVersionPins
+                      ids={step.skill_ids ?? []}
+                      catalog={availableSkills}
+                      onChange={ids => updateStep(i, { skill_ids: ids })}
+                    />
                   </details>
                 )}
 
@@ -4613,6 +4646,22 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         />
                       </div>
 
+                      <div>
+                        <label className="wf-label">
+                          <input
+                            type="checkbox"
+                            data-testid={`wiz-external-effect-${i}`}
+                            checked={step.external_effect ?? false}
+                            aria-describedby={`wiz-external-effect-hint-${i}`}
+                            onChange={e => updateStep(i, { external_effect: e.target.checked || undefined })}
+                          />{' '}
+                          {t('wiz.externalEffect')}
+                        </label>
+                        <p id={`wiz-external-effect-hint-${i}`} className="text-xs text-muted mb-1">
+                          {t('wiz.externalEffectHint')}
+                        </p>
+                      </div>
+
                       {/* Retry */}
                       <div className="flex-1">
                         <label className="wf-label">{t('wiz.retry')}</label>
@@ -5002,6 +5051,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               not hidden, not advanced — first-class safety control). */}
           <ExecutionLimitsCard value={guards} onChange={setGuards} t={t} />
           <RunRetentionCard value={retention} onChange={setRetention} t={t} />
+          <ShadowRunsCard value={shadow} onChange={setShadow} steps={steps} projects={projects} skills={availableSkills} quickPrompts={availableQuickPrompts} t={t} />
+          <WorkflowRefsCard value={refs} onChange={setRefs} options={refOptions} t={t} />
 
           {/* 0.7.0 Phase 5 — Exec allowlist. Visible by default; the
               prominent placement is intentional because Exec is a

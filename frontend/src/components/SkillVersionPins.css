@@ -1,0 +1,26 @@
+.skill-version-pins {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px 12px 2px;
+  border-top: 1px solid var(--kr-border-subtle);
+  box-sizing: border-box;
+}
+.skill-version-pins small { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); }
+.skill-version-pin { display: flex; flex-direction: column; gap: 2px; }
+.skill-version-pin label { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 10px; font-size: var(--kr-fs-sm); color: var(--kr-text-primary); }
+.skill-version-pin-name { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.skill-version-pin select {
+  min-width: 170px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: var(--kr-r-sm);
+  border: 1px solid var(--kr-border);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-size: var(--kr-fs-sm);
+}
+.skill-version-pin .skill-version-pin-note { color: var(--kr-warning); }

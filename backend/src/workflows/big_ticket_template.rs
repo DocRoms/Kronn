@@ -142,7 +142,9 @@ pub fn build_feasibility_workflow(params: FeasibilityWorkflowParams) -> CreateWo
     });
 
     CreateWorkflowRequest {
+        refs: Default::default(),
         retention: None,
+        shadow: None,
         project_scope: None,
         name: workflow_name,
         project_id: params.project_id,
@@ -192,7 +194,9 @@ pub fn build_feasibility_child(
         build_implement_step(agent, ticket_ref)
     };
     CreateWorkflowRequest {
+        refs: Default::default(),
         retention: None,
+        shadow: None,
         project_scope: None,
         name: if decomposed {
             format!("{parent_name} — implement & verify (per-task)")
@@ -308,6 +312,7 @@ fn blank_step(name: &str, kind: StepType, agent: AgentType) -> WorkflowStep {
         retry: None,
         delay_after_secs: None,
         skill_ids: vec![],
+        external_effect: false,
         profile_ids: vec![],
         directive_ids: vec![],
         batch_quick_prompt_id: None,

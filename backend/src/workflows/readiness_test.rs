@@ -3,6 +3,7 @@ use crate::models::{ExecScriptFile, WorkflowSafety, WorkflowTrigger};
 
 fn workflow(id: &str, steps: Vec<WorkflowStep>, on_failure: Vec<WorkflowStep>) -> Workflow {
     Workflow {
+        refs: Default::default(),
         project_scope: None,
         pinned: false,
         id: id.into(),
@@ -27,6 +28,7 @@ fn workflow(id: &str, steps: Vec<WorkflowStep>, on_failure: Vec<WorkflowStep>) -
         variables: vec![],
         enabled: true,
         retention: None,
+        shadow: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }

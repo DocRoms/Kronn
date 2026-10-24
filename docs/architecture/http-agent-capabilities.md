@@ -455,7 +455,7 @@ Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
 [src: file: backend/src/api/agent_workflow_tools.rs:65-122#draft_patch]
 [src: file: backend/src/api/agent_workflow_tools.rs:209-211#enabled]
-[src: file: backend/src/api/workflows.rs:2580-2640#validate_step_references]
+[src: file: backend/src/api/workflows.rs:2648-2708#validate_step_references]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete
 contract from `GET /api/workflows/step-schema`; native agents receive the same

@@ -764,7 +764,9 @@ mod broker_tests {
     async fn insert_workflow_run(state: &crate::AppState, steps: Vec<WorkflowStep>) {
         let now = chrono::Utc::now();
         let workflow = Workflow {
+            refs: Default::default(),
             retention: None,
+            shadow: None,
             project_scope: None,
             id: "wf-team".into(),
             name: "Team board thumbnails".into(),

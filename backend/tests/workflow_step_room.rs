@@ -161,7 +161,9 @@ fn workflow() -> Workflow {
     .unwrap();
     assert!(matches!(steps[1].step_type, StepType::Agent));
     Workflow {
+        refs: Default::default(),
         retention: None,
+        shadow: None,
         project_scope: None,
         pinned: false,
         id: "wf-793".into(),

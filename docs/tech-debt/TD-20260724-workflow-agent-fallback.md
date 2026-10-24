@@ -15,7 +15,7 @@ fails when that provider is rate-limited, unavailable, or unhealthy. A quota or
 session-limit refusal is not retried: the run waits for the announced reset on
 the same provider (KT-811), or is parked for a human. The user then has to
 notice the failed run, edit Claude to Codex (for example), and replay it by hand.
-[src: file: backend/src/models/workflows.rs:1617-1623#RetryConfig]
+[src: file: backend/src/models/workflows.rs:1692-1698#RetryConfig]
 [src: file: backend/src/workflows/steps.rs:465-481#RETRY_BACKOFF_UNIT]
 [src: file: backend/src/workflows/steps.rs:964-971#classify]
 [src: user: 2026-08-10: unattended workflow steps should continue on an
@@ -190,7 +190,7 @@ the fallback router should reuse the same principle. Agent and Batch Quick
 Prompt steps are currently outside that uncertain-effect journal, so they need
 an equivalent durable attempt intent before automatic fallback can be
 restart-safe. [src: file: backend/src/workflows/runner.rs:257-279#uncertain_side_effect_type]
-[src: file: backend/src/workflows/runner.rs:4642-4651#retry_uncertain_effect]
+[src: file: backend/src/workflows/runner.rs:4658-4667#retry_uncertain_effect]
 
 Additional workflow invariants:
 
@@ -232,7 +232,7 @@ project/run-scoped catalogue without Planning mutations, and no per-model
 capability gate checks that the model can call tools. A local Ollama
 model therefore cannot safely replace every CLI step merely because the model
 is pulled. [src: file: backend/src/api/agent_tools.rs:184-205#workflow_arc]
-[src: file: backend/src/workflows/runner.rs:2542-2547#workflow_arc]
+[src: file: backend/src/workflows/runner.rs:2558-2563#workflow_arc]
 [src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:51-53#capability]
 
 No-capability declaration should mean “unknown/ineligible”, not “probably
@@ -280,7 +280,7 @@ property of each surface, not of an agent being installed. [src: file: backend/s
 `DiscussionMessage` already persists the actual `agent_type`, `model_tier`, and
 concrete `model`. `StepResult` already has `step_agent` and `step_model`, and
 Run Detail renders them. [src: file: backend/src/models/discussions.rs:324-372#DiscussionMessage]
-[src: file: backend/src/models/workflows.rs:2121-2134#step_agent]
+[src: file: backend/src/models/workflows.rs:2199-2212#step_agent]
 [src: file: frontend/src/components/workflows/RunDetail.tsx:1099-1106#StepModelBadge]
 
 Workflow Agent steps also keep a per-attempt trail (`StepResult.agent_provenance`:
@@ -289,7 +289,7 @@ resolved model, success, duration and `cost_usd`), and `step_agent`/`step_model`
 are stamped from the selected attempt, else the last one. That trail has no
 fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
-[src: file: backend/src/models/workflows.rs:1933-2012#WorkflowAgentProvenance]
+[src: file: backend/src/models/workflows.rs:2006-2085#WorkflowAgentProvenance]
 [src: file: backend/src/workflows/steps.rs:1405-1429#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/runner.rs:4854-4876#selected_attempt]
 
@@ -327,11 +327,11 @@ Required UI:
 Workflow runs persist token totals (`WorkflowRun.tokens_used`) and each Agent
 attempt carries its own `cost_usd`, but there is no run-level cost total. Exact
 cross-provider cost display therefore needs additive persistence of that total,
-not only a frontend estimate. [src: file: backend/src/models/workflows.rs:1729-1738#tokens_used] [src: file: backend/src/models/workflows.rs:2003-2011#cost_usd]
+not only a frontend estimate. [src: file: backend/src/models/workflows.rs:1811-1820#tokens_used] [src: file: backend/src/models/workflows.rs:2081-2089#cost_usd]
 
 The current workflow budget also increments once per logical Agent step, even
 though retry, repair, escalation, or debate can perform more model invocations.
-Fallback must fix this accounting at the physical-attempt boundary. [src: file: backend/src/workflows/runner.rs:3034-3046#add_llm_calls]
+Fallback must fix this accounting at the physical-attempt boundary. [src: file: backend/src/workflows/runner.rs:3050-3062#add_llm_calls]
 
 Do not reuse the existing `native_fallback` name: that field describes the
 separate discussion-routing case where an untargeted user turn goes to the

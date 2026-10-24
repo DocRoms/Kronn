@@ -33,6 +33,7 @@ import { LivePageDatasetControls, LivePageDatasetUsageLine } from '../components
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
 import { LivePageTrustedActions } from '../components/LivePageTrustedActions';
+import { LivePageResources } from '../components/LivePageResources';
 import { DefaultTodoOffer } from '../components/DefaultTodoOffer';
 import { LivePageEmbedOverlay } from '../components/LivePageEmbedOverlay';
 import type { RunStatusCardModel } from '../lib/runStatusCardModel';
@@ -1188,6 +1189,7 @@ export function PagesPage({
             </header>
             <div className="live-pages-relations">
               <LivePageTrustedActions trusts={pageActionTrusts} onChanged={reloadPageActionTrusts} />
+              <LivePageResources pageId={detail.id} onNavigateWorkflow={onNavigateWorkflow ? workflowId => onNavigateWorkflow(workflowId) : undefined} />
               {linkedDiscussions.length > 0 && (
                 <div className="live-pages-workflows">
                   <div><MessageSquare size={13} /><strong>{t('pages.linkedDiscussions')}</strong></div>

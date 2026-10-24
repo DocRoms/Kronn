@@ -21,7 +21,7 @@ The editor lists only the names available to the selected project and inserts
 the recommended form; it never receives or displays their values.
 
 [src: file: backend/src/models/quick.rs:235-242#declarations_with_template_environment_variables]
-[src: file: backend/src/api/quick_prompts.rs:1001-1013#declarations_with_template_environment_variables]
+[src: file: backend/src/api/quick_prompts.rs:1007-1019#declarations_with_template_environment_variables]
 [src: file: backend/src/api/mcps.rs:189-210#project_environment_names]
 [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:162-166#insertEnvironmentVariable]
 
@@ -100,5 +100,5 @@ value-free errors.
 
 [src: file: backend/src/core/execution_variables.rs:326-1013#tests]
 [src: file: backend/src/db/execution_variable_snapshots.rs:319-597#tests]
-[src: file: backend/tests/api_tests.rs:11215-11425#execution_context_http_routes_keep_values_masked_reveal_on_demand_and_audit_extension]
+[src: file: backend/tests/api_tests.rs:11438-11648#execution_context_http_routes_keep_values_masked_reveal_on_demand_and_audit_extension]
 [src: file: frontend/src/components/workflows/__tests__/ProvidedVariablesPreview.test.tsx:71-120#ProvidedVariablesPreview]

@@ -238,10 +238,10 @@ long-lived right pane so their internal scroll areas remain stable.
 Automation has no additional page-title band: the selected workflow, Quick
 Prompt, Quick API or Quick Exec header is the single visible content header.
 `[src: file: frontend/src/components/CollectionShell.css:2-5#collection-detail-header]`
-`[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1845#collection-detail-header]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3200#selectedQuickPromptId]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3680#selectedQuickApiId]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:4103#selectedQuickExecId]`
+`[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1855#collection-detail-header]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3221#selectedQuickPromptId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3701#selectedQuickApiId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:4124#selectedQuickExecId]`
 
 The Projects initial loading state keeps the complete master/detail shell
 mounted. Its indicators render inside the sidebar and detail slots rather than
@@ -267,10 +267,10 @@ categories only temporarily.
 `[src: file: frontend/src/lib/automationNavigation.ts:35-41#writeAutomationLastVisit]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:257-267#readCollapsedAutomationSections]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:582-591#AUTOMATION_COLLAPSED_STORAGE_KEY]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:2561-2566#isGroupCollapsed]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:2582-2587#isGroupCollapsed]`
 Pages follows the same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed.
-`[src: file: frontend/src/pages/PagesPage.tsx:68-69#PAGE_NAVIGATION_STORAGE_KEY]`
+`[src: file: frontend/src/pages/PagesPage.tsx:69-70#PAGE_NAVIGATION_STORAGE_KEY]`
 `[src: file: frontend/src/pages/PagesPage.tsx:86-105#readPageNavigation]`
 `[src: file: frontend/src/pages/PagesPage.tsx:282-288#PAGE_COLLAPSED_STORAGE_KEY]`
 `[src: file: frontend/src/pages/PagesPage.tsx:313-338#refresh]`
@@ -503,9 +503,9 @@ run list and never encrypted, so it holds plain labels such as the ticket a run
 is about, never a secret. `GET /api/workflows/{id}/runs?state_key=ticketKey&state_value=EW-7791&limit=1`
 returns the newest run carrying that entry, whether it was seeded or written by
 a step, without reading any step output.
-`[src: file: backend/src/api/workflows.rs:4786-4818#validate_initial_run_state]`
-`[src: file: backend/src/api/workflows.rs:5422-5436#list_runs_by_state_visible]`
-`[src: file: backend/src/db/workflows.rs:1617-1653#list_runs_by_state_visible]`
+`[src: file: backend/src/api/workflows.rs:5087-5119#validate_initial_run_state]`
+`[src: file: backend/src/api/workflows.rs:5723-5737#list_runs_by_state_visible]`
+`[src: file: backend/src/db/workflows.rs:1627-1663#list_runs_by_state_visible]`
 
 **6. Rollback / `on_failure`.** `Workflow.on_failure: Vec<WorkflowStep>` — a separate step list that fires **only** when the run terminates with `RunStatus::Failed`. Skipped on `Cancelled`, `StoppedByGuard`, and Gate `reject`. Templates `{{failed_step.name}}` and `{{failed_step.output}}` are exposed inside on_failure prompts. Migration `041_workflow_on_failure.sql`. The wizard rejects `Gate` inside the rollback list (Notify + Agent + ApiCall accepted).
 

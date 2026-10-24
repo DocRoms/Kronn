@@ -18,7 +18,10 @@ use crate::db::discussion_actions::{ActionFence, DiscussionActionKind};
 use crate::{models::*, AppState};
 
 pub(crate) const BUNDLE_KIND: &str = "kronn.artifact";
-pub(crate) const BUNDLE_VERSION: u32 = 1;
+/// 2 adds bundled custom skills and workflow refs (KT-1446, KT-1448);
+/// version 1 bundles still import.
+pub(crate) const BUNDLE_VERSION: u32 = 2;
+pub(crate) const MIN_BUNDLE_VERSION: u32 = 1;
 pub(crate) const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BUNDLE_ITEMS: usize = 512;
 
@@ -144,6 +147,7 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
     let mut quick_prompts = BTreeMap::new();
     let mut quick_apis = BTreeMap::new();
     let mut quick_execs = BTreeMap::new();
+    let mut skill_ids = BTreeSet::new();
     let mut queue: VecDeque<_> = action_dependencies(&artifact.html)?.into();
     let mut seen = BTreeSet::from([
         (ResourceKind::Artifact, root_id.clone()),
@@ -198,11 +202,12 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
                     std::slice::from_mut(&mut workflow),
                 )?;
                 queue.extend(
-                    super::workflows::workflow_sub_workflow_child_ids(&workflow)
+                    super::workflows::workflow_bundled_child_ids(&workflow)
                         .into_iter()
                         .map(|id| (ResourceKind::Workflow, id)),
                 );
                 let deps = super::workflows::workflow_dependency_ids([&workflow]);
+                skill_ids.extend(deps.skills);
                 for (kind, ids) in [
                     (ResourceKind::Artifact, deps.pages),
                     (ResourceKind::QuickPrompt, deps.quick_prompts),
@@ -218,6 +223,7 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
             ResourceKind::QuickPrompt => {
                 let value = crate::db::quick_prompts::get_quick_prompt(conn, &id)?
                     .ok_or_else(|| anyhow!("Missing Quick Prompt dependency: {id}"))?;
+                skill_ids.extend(value.skill_ids.iter().cloned());
                 let size = serde_json::to_vec(&value)?.len();
                 quick_prompts.insert(id, value);
                 size
@@ -276,6 +282,7 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
         referenced_quick_prompts: quick_prompts.into_values().collect(),
         referenced_quick_apis: quick_apis,
         referenced_quick_execs: quick_execs,
+        referenced_skills: crate::core::skill_bundle::bundle_skills(&skill_ids),
         redacted_fields,
     };
     if serde_json::to_vec(&bundle)?.len() > MAX_BUNDLE_BYTES {
@@ -398,6 +405,7 @@ mod tests {
             approved_quick_exec_ids: vec![],
             preview_digest: digest,
             allow_embed_origins: vec![],
+            skill_choices: vec![],
         };
         let axum::Json(preview) = import::preview(
             axum::extract::State(target.clone()),
@@ -531,6 +539,7 @@ mod tests {
             approved_quick_exec_ids: vec![],
             preview_digest: digest,
             allow_embed_origins: vec![],
+            skill_choices: vec![],
         };
         let axum::Json(preview) = import::preview(
             axum::extract::State(target.clone()),

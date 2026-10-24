@@ -128,6 +128,7 @@ mod tests {
             delay_after_secs: None,
             mcp_config_ids: vec![],
             skill_ids: vec![],
+            external_effect: false,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,

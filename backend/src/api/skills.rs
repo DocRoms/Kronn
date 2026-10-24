@@ -115,6 +115,32 @@ pub async fn update(
     }
 }
 
+/// GET /api/skills/:id/history — every version of a custom skill, newest
+/// first (KT-1434). Builtin skills have none.
+pub async fn history(Path(id): Path<String>) -> Json<ApiResponse<Vec<SkillVersion>>> {
+    match crate::core::skill_versions::history(&id) {
+        Ok(versions) => Json(ApiResponse::ok(versions)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// GET /api/skills/:id/versions/:version — one version of a custom skill.
+pub async fn version(Path((id, index)): Path<(String, u32)>) -> Json<ApiResponse<SkillVersion>> {
+    match crate::core::skill_versions::version(&id, index) {
+        Ok(version) => Json(ApiResponse::ok(version)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// POST /api/skills/:id/versions/:version/restore — that version becomes the
+/// skill's content again, recorded as a new version. Human only.
+pub async fn restore(Path((id, index)): Path<(String, u32)>) -> Json<ApiResponse<SkillVersion>> {
+    match crate::core::skill_versions::restore(&id, index) {
+        Ok(version) => Json(ApiResponse::ok(version)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
 /// DELETE /api/skills/:id — delete a custom skill
 pub async fn delete(Path(id): Path<String>, _state: State<AppState>) -> Json<ApiResponse<bool>> {
     match skills::delete_custom_skill(&id) {

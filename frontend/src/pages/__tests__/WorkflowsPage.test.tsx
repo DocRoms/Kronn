@@ -29,6 +29,7 @@ const mockWorkflowsApi = vi.hoisted(() => ({
   cancelRun: vi.fn().mockResolvedValue({ run_cancelled: true, child_discs_cancelled: 0 }),
   triggerStream: vi.fn(),
   importWorkflow: vi.fn(),
+  previewImport: vi.fn().mockResolvedValue({ skills: [], missing_skills: [] }),
   autoDisabled: vi.fn().mockResolvedValue([]),
   reenable: vi.fn().mockResolvedValue([]),
 }));
@@ -2746,8 +2747,52 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     });
 
     await waitFor(() => expect(activated).toHaveBeenCalledOnce());
-    expect(mockWorkflowsApi.importWorkflow).toHaveBeenCalledWith({ content, project_id: null });
+    expect(mockWorkflowsApi.importWorkflow).toHaveBeenCalledWith({ content, project_id: null, skill_choices: [] });
     window.removeEventListener('kronn:pages-activated', activated);
+  });
+
+  it('shows the file\'s custom skills and imports with the conflict choice', async () => {
+    mockWorkflowsApi.previewImport.mockResolvedValue({
+      skills: [
+        { source_id: 'custom-review', name: 'Review', action: 'conflict', existing_id: 'custom-review', resolution: 'create_copy' },
+        { source_id: 'custom-style', name: 'Style', action: 'create', existing_id: null },
+      ],
+      missing_skills: ['custom-gone'],
+    });
+    mockWorkflowsApi.importWorkflow.mockResolvedValueOnce({ id: 'wf-skills' });
+    mockWorkflowsApi.get.mockResolvedValueOnce({
+      id: 'wf-skills', name: 'Skilled', project_id: null,
+      trigger: { type: 'Manual' }, steps: [], actions: [], variables: [], enabled: false,
+      pinned: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    });
+    const { container } = await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />,
+    );
+    chooseAutomationAction('Importer');
+    const content = JSON.stringify({ kind: 'kronn.workflow', version: 4, workflow: { name: 'Skilled', steps: [] } });
+    const file = new File([content], 'workflow.json', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: vi.fn().mockResolvedValue(content) });
+    await act(async () => {
+      fireEvent.change(container.querySelector<HTMLInputElement>('input[type="file"]')!, {
+        target: { files: [file] },
+      });
+    });
+    const skills = await screen.findByTestId('import-skills');
+    expect(mockWorkflowsApi.previewImport).toHaveBeenCalledWith({ content, project_id: null });
+    expect(within(skills).getByText('Style')).toBeInTheDocument();
+    expect(screen.getByTestId('import-missing-skills')).toHaveTextContent('custom-gone');
+    const choice = within(skills).getByRole('combobox');
+    expect(choice).toHaveValue('create_copy');
+    fireEvent.change(choice, { target: { value: 'use_existing' } });
+    const modal = screen.getByRole('heading', { name: 'Importer un workflow' }).closest('.wf-import-modal');
+    await act(async () => {
+      fireEvent.click(within(modal as HTMLElement).getByRole('button', { name: 'Importer' }));
+    });
+    await waitFor(() => expect(mockWorkflowsApi.importWorkflow).toHaveBeenCalledWith({
+      content, project_id: null,
+      skill_choices: [{ source_id: 'custom-review', resolution: 'use_existing' }],
+    }));
+    mockWorkflowsApi.previewImport.mockResolvedValue({ skills: [], missing_skills: [] });
   });
 
   it('imports once when Confirm is clicked twice in the same task', async () => {

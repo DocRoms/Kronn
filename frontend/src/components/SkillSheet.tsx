@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ExternalLink, Pencil, Settings, Star } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
+import SkillHistoryDrawer from './SkillHistoryDrawer';
 import { newTabClickProps } from '../lib/newTabNavigation';
 import { PAGE_PATHS } from '../lib/routes';
 import { projectsUsingSkill, skillOrigin, type RepositorySkillOrigin } from '../lib/automationSkills';
@@ -128,12 +129,14 @@ interface SheetProps extends FavoriteProps {
   /** Edits a custom skill in place. */
   onEdit?: () => void;
   onError?: (message: string) => void;
+  /** Present for a skill the user wrote: its version history can restore one. */
+  onRestored?: () => void;
 }
 
 /** The sheet of a skill, read in place: what it is, who uses it, and its
  *  SKILL.md rendered as safe Markdown (never raw HTML) or as source. There is
  *  no launch and no variable here — a skill is read, not run. */
-export function SkillSheet({ skill, projects, usedBy, repository, contentStatus, pinned, onTogglePinned, onDelete, onOpenSettings, onEdit, onError }: SheetProps) {
+export function SkillSheet({ skill, projects, usedBy, repository, contentStatus, pinned, onTogglePinned, onDelete, onOpenSettings, onEdit, onError, onRestored }: SheetProps) {
   const { t } = useT();
   const [view, setView] = useState<TextView>('rendered');
   const users = usedBy ?? projectsUsingSkill(skill.id, projects);
@@ -150,6 +153,14 @@ export function SkillSheet({ skill, projects, usedBy, repository, contentStatus,
             <h2 className="qp-card-name">{skill.name}</h2>
           </div>
           <div className="qp-card-head-controls">
+            {!skill.is_builtin && !repository && (
+              <SkillHistoryDrawer
+                skillId={skill.id}
+                skillName={skill.name}
+                refreshKey={`${skill.name}\n${skill.description}\n${skill.content}`}
+                onRestored={onRestored}
+              />
+            )}
             <SkillFavorite skill={skill} pinned={pinned} onTogglePinned={onTogglePinned} />
             <CopyIdPill id={skill.id} title={t('automation.copyId', skill.name)} />
           </div>

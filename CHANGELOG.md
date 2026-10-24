@@ -13,6 +13,55 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Custom skills keep a version history, like Quick Prompts. Every change
+  is saved as a full copy of the skill; a save that changes nothing adds
+  no version, and a skill written before this release gets its current
+  state as v1 at its next save. The skill page has a 🕒 history button:
+  the timeline of versions, a line diff with the previous version, and a
+  restore that asks first and records the restored content as a new
+  version, so nothing is lost. The history is for people: agents can
+  neither read it nor restore a version. Built-in skills have no history
+  (KT-1434).
+- A workflow step, a Quick Prompt or a discussion can load a precise version
+  of a custom skill instead of the latest: `custom-x@3` loads version 3, and
+  later edits of the skill no longer change what that step runs. The skill
+  pickers of the workflow editor and of the Quick Prompt form show, for each
+  custom skill picked, « latest version » or a version to pin. A version
+  that does not exist is refused at save, never silently replaced by the
+  latest (KT-1447).
+- Shadow runs: a workflow can start, alongside each normal run, a shadow run
+  on the same inputs that loads other versions of its skills and Quick
+  Prompts. Steps marked « acts outside Kronn » (posting, sending, writing
+  elsewhere) and Gates are skipped in the shadow run, so nothing happens
+  twice; it never counts against the concurrency limit, never pages on
+  failure, and its sub-runs are shadow runs too. It works in its own git
+  worktree, unless the workflow declares it never writes the checkout. Set it in the workflow
+  editor (« Shadow runs »: on/off, the projects it covers, the version of each
+  skill and Quick Prompt). The run list marks shadow runs, and a normal run
+  shows its shadow side by side, step by step. Steps read the variant as
+  `{{run.variant}}` (`normal` or `shadow`). Agents cannot set it (KT-1449).
+- A Page shows the resources behind it: the Quick Prompts and skills its
+  workflows use (those that publish to it, those its buttons launch, and
+  their sub-workflows), with their latest version, their history, a link to
+  edit them and, step by step, what the normal run and the shadow run load.
+  « Promote » hands a version tested in shadow to the normal runs: a skill in
+  every step that loads it, a Quick Prompt as its current version, saved as
+  a new version (KT-1450).
+- Workflow and Page exports carry the custom skills their steps and Quick
+  Prompts use: each skill's file, name, version and a content hash. On
+  import, a skill identical to one already here is reused, a missing one is
+  created, and a skill with the same name but other content is shown in the
+  import preview, where you choose to create a copy (the default) or use the
+  local skill. Built-in skills stay plain references. A skill neither here
+  nor in the file is listed before the import and reported after it, never
+  dropped silently. Older export files still import (KT-1446).
+- Workflows can name the objects they use: a Page, workflow, Quick Prompt,
+  Quick API, Quick Exec or skill gets a name in the editor's new "Named
+  references" section, and steps write `{{refs.<name>}}` instead of pasting
+  its id; Exec steps also get it as `KRONN_REF_<NAME>`. Saving checks the
+  object exists and belongs to the workflow's project or to none. Exports
+  carry the named objects and imports point each name at the imported copy;
+  a file missing one of them is refused with the name it lacks (KT-1448).
 - Local image and video generation through ComfyUI (KT-1381). Config ›
   Agents › Local gains a ComfyUI card next to Ollama: server state and
   version, the one-command install on macOS (`brew install --cask comfy`), and
