@@ -15,15 +15,24 @@
  * and the signal-parsing logic is locked in
  * `frontend/src/lib/__tests__/qp-improver-signal.test.ts`.
  *
- * The spec auto-skips when no QP is present in the dev DB (devs without
- * Workflows pre-seeded shouldn't get red CI runs locally).
+ * The spec seeds the Quick Prompt whose card it drives (a fresh CI
+ * database has none) and deletes it afterwards.
  */
 
 import { test, expect } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
 import { WorkflowsPage } from '../pages/WorkflowsPage';
+import { seedQuickPrompt, deleteQuickPrompt } from '../fixtures/quick-prompt-seed';
 
 test.describe('0.8.5 — QP AI Improver + bindings (frontend wiring)', () => {
+  let qpId = '';
+  test.beforeAll(async ({ request }) => {
+    qpId = await seedQuickPrompt(request, `Improver PW ${Date.now()}`);
+  });
+  test.afterAll(async ({ request }) => {
+    await deleteQuickPrompt(request, qpId);
+  });
+
   test('QP card exposes ✨ Improve button + clicking it POSTs /api/discussions with the qp-improver skill', async ({ page }) => {
     // Stub the discussion-create endpoint so the test is hermetic.
     let lastCreatePayload: Record<string, unknown> | null = null;
@@ -70,8 +79,7 @@ test.describe('0.8.5 — QP AI Improver + bindings (frontend wiring)', () => {
     await workflows.selectKind('quickPrompts');
 
     const improveBtns = page.locator('[data-testid="qp-improve-btn"]');
-    const count = await improveBtns.count();
-    test.skip(count === 0, 'No Quick Prompts in dev DB — skipping 0.8.5 improver E2E');
+    await expect(improveBtns.first(), 'the seeded Quick Prompt must list an Improve button').toBeVisible();
 
     // Click the ✨ button on the first QP card.
     await improveBtns.first().click();

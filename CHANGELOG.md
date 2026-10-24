@@ -9,6 +9,39 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- The backend can run as a background service. With `KRONN_SERVICE=1` it
+  resolves the login-shell PATH at startup, before agent detection, and merges
+  it into its own, so agent CLIs are found under launchd or systemd. With
+  `KRONN_UI_DIST=<dir>` (holding an `index.html`) it serves the built web UI on
+  the API port; API routes keep precedence. Both are off by default. The
+  login-shell discovery moved from the desktop app into the shared backend
+  library (`core::shell_path`), with no change for the desktop.
+- `kronn service` runs Kronn as a per-user background service (macOS
+  LaunchAgent, Linux `systemd --user`) serving the API and the web UI on
+  `:3140` with no terminal and no prompt at login: `install`, `start`, `stop`,
+  `restart`, `status`, `logs`, `uninstall`. The service runs a release built
+  from source and staged under `~/.kronn/service` (reached through an
+  atomically switched `current` symlink), never your checkout, so a `git pull`
+  or `cargo clean` there cannot affect it; `install --from-checkout` builds
+  the current checkout for testing. Once installed, `kronn stop`, `restart`,
+  `logs` and `status` follow the service, and `kronn start-dev`, `start` and
+  `web` offer to stop it first (`start-dev` brings it back on exit). See
+  [docs/operations/service.md](docs/operations/service.md).
+- `kronn service update` moves the background service to the latest release
+  (or `--to <X.Y.Z>`): it fetches the service clone, builds and stages the new
+  release next to the running one, waits for running workflows and agents to
+  finish (`KRONN_SERVICE_DRAIN_TIMEOUT`, default 30 minutes; `--force` skips
+  it), switches `current`, restarts and checks health. A release that does not
+  come up healthy is rolled back automatically, restoring the pre-migration
+  database backup when the new version migrated it. `--check` only reports
+  (exit 10 when an update exists). `kronn service rollback` goes back to the
+  previous release by hand. Old releases are pruned, keeping the 3 most recent
+  plus the current and previous ones.
+
 ## [0.15.1] - 2026-10-22
 
 ### Added

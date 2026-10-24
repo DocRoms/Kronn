@@ -863,6 +863,22 @@ pub fn serve_app_documents(dist_dir: &std::path::Path, state: AppState) -> axum:
         ))
 }
 
+/// Serve the built frontend from `dist_dir` for everything the API router does
+/// not handle (SPA style). API routes keep precedence. This is what the
+/// backend run as a service does with `KRONN_UI_DIST`.
+pub fn with_ui_fallback(
+    router: axum::Router,
+    dist_dir: &std::path::Path,
+    state: AppState,
+) -> axum::Router {
+    router.fallback_service(serve_app_documents(dist_dir, state))
+}
+
+/// The directory named by `KRONN_UI_DIST`, when it holds a built frontend.
+pub fn valid_ui_dist(dist_dir: &std::path::Path) -> bool {
+    dist_dir.join("index.html").is_file()
+}
+
 /// POST /api/config/embed-origins: allow and revoke origins, then persist.
 /// Returns the new list.
 pub async fn change_embed_origins(
