@@ -145,7 +145,7 @@ pub const BATCH_WORKFLOW_PREFIX: &str = "qp:";
 const WORKFLOW_COLUMNS: &str = "id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
                 created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned, concurrency_key, project_scope_json, retention_json";
+                pinned, concurrency_key, project_scope_json, retention_json, shadow_json";
 
 /// Records why Kronn disabled `id` on its own; no-op if it is enabled.
 pub fn mark_auto_disabled(
@@ -1049,8 +1049,8 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     let on_failure = steps_with_durable_ids(&wf.on_failure, None, &mut used_step_ids);
     conn.execute(
         "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
-         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned, concurrency_key, project_scope_json, retention_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned, concurrency_key, project_scope_json, retention_json, shadow_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             wf.id,
             wf.name,
@@ -1077,6 +1077,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             wf.concurrency_key,
             wf.project_scope.as_ref().map(serde_json::to_string).transpose()?,
             wf.retention.as_ref().map(serde_json::to_string).transpose()?,
+            wf.shadow.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     Ok(())
@@ -1092,7 +1093,8 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
 /// An agent's write: whatever `wf.enabled` says, a stored `false` stays
 /// `false`, decided in the UPDATE itself so a concurrent disable (a
 /// dependency edited meanwhile) cannot be undone by a stale read (KT-1037).
-/// The stored retention stays as well: it is human-only (KT-1100).
+/// The stored retention and shadow stay as well: they are human-only
+/// (KT-1100, KT-1449).
 pub fn update_workflow_as_agent(conn: &Connection, wf: &Workflow) -> Result<bool> {
     write_workflow(conn, wf, true)
 }
@@ -1105,7 +1107,8 @@ pub(crate) const UPDATE_WORKFLOW_SQL: &str =
          updated_at = ?11, guards = ?12, artifacts = ?13,
          on_failure = ?14, exec_allowlist = ?15, variables = ?16, pinned = ?17,
          concurrency_key = ?18, project_scope_json = ?19,
-         retention_json = CASE WHEN ?20 THEN retention_json ELSE ?21 END
+         retention_json = CASE WHEN ?20 THEN retention_json ELSE ?21 END,
+         shadow_json = CASE WHEN ?20 THEN shadow_json ELSE ?22 END
          WHERE id = ?1";
 
 /// Every column `UPDATE_WORKFLOW_SQL` writes (a test keeps the two in sync).
@@ -1129,6 +1132,7 @@ pub(crate) const WRITTEN_COLUMNS: &[&str] = &[
     "concurrency_key",
     "project_scope_json",
     "retention_json",
+    "shadow_json",
 ];
 
 /// The raw stored values of every written column, unparsed, so any change to
@@ -1214,6 +1218,7 @@ fn write_workflow(conn: &Connection, wf: &Workflow, keep_disabled: bool) -> Resu
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
+            wf.shadow.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     Ok(n > 0)
@@ -1945,6 +1950,19 @@ pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<WorkflowRun>> {
     Ok(run)
 }
 
+/// The shadow run started alongside run `normal_id` (KT-1449), if any.
+pub fn shadow_run_of(conn: &Connection, normal_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM workflow_runs
+             WHERE json_valid(trigger_context)
+               AND json_extract(trigger_context, '$.__shadow_of__') = ?1 LIMIT 1",
+            params![normal_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
     conn.execute(
         "INSERT INTO workflow_runs (id, workflow_id, status, trigger_context,
@@ -2662,7 +2680,9 @@ pub fn count_admitted_runs(
             AND status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')
             AND (?2 = 0 OR concurrency_key IS ?3)
             AND id IS NOT ?4
-            AND (?5 = 0 OR project_id IS ?6)",
+            AND (?5 = 0 OR project_id IS ?6)
+            AND COALESCE(CASE WHEN json_valid(trigger_context)
+                THEN json_extract(trigger_context, '$.__variant__') END, '') <> 'shadow'",
         params![
             workflow_id,
             key.is_some() as i64,
@@ -2725,6 +2745,11 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
     let exec_allowlist_str: Option<String> = row.get(15).unwrap_or(None);
     let variables_str: Option<String> = row.get(16).unwrap_or(None);
     let retention = retention_from_column(&id, row.get(20).unwrap_or(None));
+    // An unreadable shadow is no shadow: it never starts extra runs.
+    let shadow = row
+        .get::<_, Option<String>>(21)
+        .unwrap_or(None)
+        .and_then(|raw| serde_json::from_str::<WorkflowShadow>(&raw).ok());
 
     // These two fallbacks keep a workflow with corrupt JSON loadable (booting
     // matters), but they MUST be loud: a silently-Manual trigger kills a cron
@@ -2769,6 +2794,7 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
             .unwrap_or(None)
             .and_then(|s| serde_json::from_str(&s).ok()),
         retention,
+        shadow,
         // Defensive: a corrupt JSON blob in `guards` should NOT silently
         // disable the safety net — fall back to the column being absent
         // (= backend defaults applied) so the runner still kills runaway

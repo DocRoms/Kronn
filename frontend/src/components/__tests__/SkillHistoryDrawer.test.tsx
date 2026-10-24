@@ -1,7 +1,7 @@
 // KT-1434 — SkillHistoryDrawer: the version count, the timeline, the diff of
 // two neighbours, and a restore that asks first and reloads the skill.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import type { ReactElement } from 'react';
 import type { SkillVersion } from '../../types/generated';
@@ -60,10 +60,31 @@ describe('SkillHistoryDrawer (KT-1434)', () => {
     fireEvent.click(restore);
     expect(skillsApi.restoreVersion).not.toHaveBeenCalled();
 
-    confirm.mockReturnValueOnce(true);
+    await act(async () => {});
+    confirm.mockReturnValue(true);
+    vi.mocked(skillsApi.restoreVersion).mockResolvedValue(version(3, 'rule one', true));
+    const before = vi.mocked(skillsApi.history).mock.calls.length;
+    fireEvent.click(restore);
     fireEvent.click(restore);
     await waitFor(() => expect(skillsApi.restoreVersion).toHaveBeenCalledWith('custom-review', 1));
+    expect(skillsApi.restoreVersion).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(onRestored).toHaveBeenCalled());
+    // It says what happened, and reads its own history again.
+    expect(await screen.findByTestId('skill-history-restored')).toHaveTextContent('v1 restaurée');
+    expect(screen.getByTestId('skill-history-restored')).toHaveTextContent('v3');
+    await waitFor(() => expect(vi.mocked(skillsApi.history).mock.calls.length).toBeGreaterThan(before));
     vi.unstubAllGlobals();
+  });
+});
+
+describe('SkillHistoryDrawer dialog (KT-1434)', () => {
+  it('renders in the document body as a modal dialog, closed by Escape', async () => {
+    const { container } = wrap(<div style={{ transform: 'scale(1)' }}><SkillHistoryDrawer skillId="custom-review" skillName="Review" refreshKey="a" /></div>);
+    fireEvent.click(screen.getByTestId('skill-history-toggle'));
+    const drawer = await screen.findByTestId('skill-history-drawer');
+    expect(container.contains(drawer)).toBe(false);
+    expect(drawer).toHaveAttribute('aria-modal', 'true');
+    fireEvent.keyDown(drawer, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('skill-history-drawer')).toBeNull());
   });
 });

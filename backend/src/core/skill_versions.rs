@@ -103,6 +103,19 @@ fn to_version(id: &str, index: u32, path: &Path, current: bool) -> Option<SkillV
     })
 }
 
+/// A custom skill saved before histories existed gets its current file as
+/// v1, so every reader (history, pins, Page resources) sees the same v1.
+fn baseline(skills_dir: &Path, slug: &str) -> Result<(), String> {
+    let current = skills_dir.join(format!("{slug}.md"));
+    if !current.exists() || !indexes(&history_dir(skills_dir, slug)).is_empty() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&current)
+        .map_err(|e| format!("Cannot read skill '{slug}': {e}"))?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
+    record_baseline(skills_dir, slug, &raw)
+}
+
 /// Every version of skill `id`, newest first. A custom skill saved before
 /// histories existed shows its current file as v1. Builtin skills: none.
 pub fn history(id: &str) -> Result<Vec<SkillVersion>, String> {
@@ -116,12 +129,7 @@ pub fn history(id: &str) -> Result<Vec<SkillVersion>, String> {
         return Err(format!("Skill '{id}' not found"));
     }
     let dir = history_dir(&skills_dir, slug);
-    if indexes(&dir).is_empty() {
-        let raw = std::fs::read_to_string(&current)
-            .map_err(|e| format!("Cannot read skill '{id}': {e}"))?;
-        crate::core::config::refuse_real_data_dir_in_tests()?;
-        record(&skills_dir, slug, &raw)?;
-    }
+    baseline(&skills_dir, slug)?;
     let all = indexes(&dir);
     let newest = all.last().copied();
     Ok(all
@@ -165,10 +173,9 @@ pub fn pinned_skill(id: &str) -> Option<crate::models::Skill> {
         return None;
     };
     let slug = slug_of(base).ok()?;
-    let path = version_path(
-        &history_dir(&super::skills::skills_dir().ok()?, slug),
-        index,
-    );
+    let skills_dir = super::skills::skills_dir().ok()?;
+    baseline(&skills_dir, slug).ok()?;
+    let path = version_path(&history_dir(&skills_dir, slug), index);
     let raw = std::fs::read_to_string(path).ok()?;
     super::skills::parse_skill_markdown(id, &raw, false)
 }
@@ -182,6 +189,14 @@ pub fn validate_pins(ids: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The newest version of a custom skill; `None` for a built-in skill.
+pub fn latest_index(id: &str) -> Option<u32> {
+    let slug = slug_of(id).ok()?;
+    let skills_dir = super::skills::skills_dir().ok()?;
+    baseline(&skills_dir, slug).ok()?;
+    indexes(&history_dir(&skills_dir, slug)).last().copied()
 }
 
 /// Version `index` of skill `id`.
@@ -334,6 +349,19 @@ mod tests {
         );
         std::fs::remove_dir_all(data.dir.join("skills").join(VERSIONS_DIR)).unwrap();
         assert_eq!(contents(&id), vec![(1, "rule two".into(), true)]);
+    }
+
+    #[test]
+    #[serial]
+    fn pins_and_the_newest_version_see_the_first_state_before_any_history_read() {
+        let data = DataDir::new("skill-versions-baseline-readers");
+        let id = create("rule one");
+        std::fs::remove_dir_all(data.dir.join("skills").join(VERSIONS_DIR)).unwrap();
+        assert_eq!(latest_index(&id), Some(1));
+        std::fs::remove_dir_all(data.dir.join("skills").join(VERSIONS_DIR)).unwrap();
+        assert!(validate_pins(&[format!("{id}@1")]).is_ok());
+        std::fs::remove_dir_all(data.dir.join("skills").join(VERSIONS_DIR)).unwrap();
+        assert!(pinned_skill(&format!("{id}@1")).is_some_and(|skill| skill.content.contains("rule one")));
     }
 
     #[test]

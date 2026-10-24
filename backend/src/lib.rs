@@ -1335,6 +1335,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/pages/{id}/revisions", get(api::live_pages::revisions))
         .route("/api/pages/{id}/workflows", get(api::live_pages::workflows))
+        .route("/api/pages/{id}/resources", get(api::live_pages::resources))
+        .route(
+            "/api/workflows/{id}/shadow/promote",
+            post(api::workflows::promote_shadow),
+        )
         .route(
             "/api/pages/{id}/publications",
             get(api::live_pages::publications),

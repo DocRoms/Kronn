@@ -273,6 +273,7 @@ async fn create_bundle_as(
     let wf_id = Uuid::new_v4().to_string();
     let wf_to_insert = Workflow {
         retention: req.workflow.retention,
+        shadow: None,
         project_scope: req.workflow.project_scope.clone(),
         pinned: false,
         id: wf_id.clone(),
@@ -334,6 +335,7 @@ async fn create_bundle_as(
         };
         prepared_children.push(Workflow {
             retention: creq.retention,
+            shadow: None,
             project_scope: creq.project_scope.clone(),
             pinned: false,
             id: real_id,

@@ -58,7 +58,8 @@ fn resolve_url(cfg_url: Option<String>) -> Option<String> {
 
 /// Fire the failure webhook if the run failed and a URL is configured.
 pub async fn notify_if_failed(state: &AppState, workflow: &Workflow, run: &WorkflowRun) {
-    if !should_notify(&run.status) {
+    // A shadow run is a trial: its failure is read in Kronn, never paged.
+    if !should_notify(&run.status) || crate::workflows::shadow::is_shadow(run) {
         return;
     }
     notify_terminal(

@@ -1894,6 +1894,7 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
     let now = Utc::now();
     Workflow {
         retention: None,
+        shadow: None,
         project_scope: None,
         pinned: false,
         id: id.into(),
@@ -1917,6 +1918,7 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
             retry: None,
             delay_after_secs: None,
             skill_ids: vec![],
+            external_effect: false,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -5487,6 +5489,7 @@ fn workflow_multi_step_roundtrip() {
     let now = Utc::now();
     let wf = Workflow {
         retention: None,
+        shadow: None,
         project_scope: None,
         pinned: false,
         id: "wm1".into(),
@@ -5511,6 +5514,7 @@ fn workflow_multi_step_roundtrip() {
                 retry: None,
                 delay_after_secs: None,
                 skill_ids: vec![],
+                external_effect: false,
                 profile_ids: vec![],
                 directive_ids: vec![],
                 batch_quick_prompt_id: None,
@@ -5586,6 +5590,7 @@ fn workflow_multi_step_roundtrip() {
                 retry: None,
                 delay_after_secs: None,
                 skill_ids: vec!["token-saver".into()],
+                external_effect: false,
                 profile_ids: vec![],
                 directive_ids: vec![],
                 batch_quick_prompt_id: None,
@@ -5658,6 +5663,7 @@ fn workflow_multi_step_roundtrip() {
                 retry: None,
                 delay_after_secs: Some(5),
                 skill_ids: vec![],
+                external_effect: false,
                 profile_ids: vec![],
                 directive_ids: vec![],
                 batch_quick_prompt_id: None,
@@ -5785,6 +5791,7 @@ fn workflow_update_steps_count() {
         retry: None,
         delay_after_secs: None,
         skill_ids: vec![],
+        external_effect: false,
         profile_ids: vec![],
         directive_ids: vec![],
         batch_quick_prompt_id: None,

@@ -852,6 +852,7 @@ mod tests {
     fn workflow(id: &str, steps: Vec<WorkflowStep>) -> Workflow {
         Workflow {
             retention: None,
+            shadow: None,
             project_scope: None,
             pinned: false,
             id: id.into(),

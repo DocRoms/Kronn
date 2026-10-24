@@ -1,4 +1,7 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
+import { ShadowCompare } from './ShadowCompare';
+import { RunPairTabs } from './RunPairTabs';
+import { isShadowRun, pairedShadows, pairPanelId, pairTabId, runListRows, runStatusKey, shadowOf, type PairView } from '../../lib/shadowRuns';
 import { newTabClickProps } from '../../lib/newTabNavigation';
 import { livePagePath, workflowPath } from '../../lib/routes';
 import { useT } from '../../lib/I18nContext';
@@ -1642,6 +1645,9 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
+  // KT-1449 — a normal run and its shadow share one row; its view defaults to
+  // the comparison unless the normal run awaits a decision.
+  const [pairViews, setPairViews] = useState<Record<string, PairView>>({});
   // #14 — sub-runs of one parent tick collapse under a group accordion.
   // Default open when the group holds a run still needing attention; a user
   // click records an explicit override that wins over the default.
@@ -1666,14 +1672,18 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
   // run + its group, then scroll it into view.
   useEffect(() => {
     if (!focusRunId) return;
-    const target = runs.find(r => r.id === focusRunId);
-    if (!target) return;
+    const focused = runs.find(r => r.id === focusRunId);
+    if (!focused) return;
+    // A paired shadow lives in its normal run's row, opened on the shadow view.
+    const normalId = shadowOf(focused);
+    const target = (normalId && runs.find(r => r.id === normalId)) || focused;
+    if (target !== focused) setPairViews(prev => ({ ...prev, [target.id]: 'shadow' }));
     setRunFilter('all');
     setRunSearch('');
-    setExpandedRunIds(prev => new Set(prev).add(focusRunId));
-    setGroupOverride(prev => ({ ...prev, [target.parent_run_id ?? focusRunId]: true }));
+    setExpandedRunIds(prev => new Set(prev).add(target.id));
+    setGroupOverride(prev => ({ ...prev, [target.parent_run_id ?? target.id]: true }));
     const raf = requestAnimationFrame(() => {
-      const el = document.querySelector(`[data-run-id="${focusRunId}"]`);
+      const el = document.querySelector(`[data-run-id="${target.id}"]`);
       // jsdom doesn't implement scrollIntoView; guard so tests don't throw.
       if (el && typeof (el as HTMLElement).scrollIntoView === 'function') {
         try { (el as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch { /* no-op */ }
@@ -2489,42 +2499,17 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
 
       {(() => {
         if (!showRuns) return null;
-        const visible = filterRuns(runs, runFilter, runSearch);
+        const pairs = pairedShadows(runs);
+        const visible = runListRows(runs, filterRuns(runs, runFilter, runSearch), pairs);
         const groups = groupRunsByParent(visible);
-        const renderRunItem = (run: WorkflowRun) => {
+        const runDuration = (run: WorkflowRun) => (run.finished_at
+          ? new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()
+          : null);
+        const renderRunBody = (run: WorkflowRun) => {
         // If this linear run spawned a batch (BatchQuickPrompt step), show a
         // "📋 N conversations" chip pointing to the discussions tab.
         const childBatch = batchByParentRunId.get(run.id);
-        const expanded = isRunExpanded(run);
-        const statusTimeline = runStatusTimeline(run);
-        const durMs = run.finished_at
-          ? new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()
-          : null;
-        return (
-          <div key={run.id} className="wf-run-item" data-testid="wf-run-item" data-run-id={run.id}>
-            {/* #6 — compact row = the always-visible accordion header. */}
-            <button
-              type="button"
-              className="wf-run-compact"
-              data-status={run.status}
-              data-outcome={isNoOpRun(run) ? 'no_op' : undefined}
-              aria-expanded={expanded}
-              {...newTabClickProps(workflowPath(workflow.id, run.id))}
-              onClick={() => toggleRunExpanded(run.id)}
-            >
-              <span className="wf-step-dot wf-run-compact-dot" style={{ width: 8, height: 8 }} />
-              <RunStatusTrail run={run} timeline={statusTimeline} />
-              {run.parent_workflow_name && (
-                <span className="wf-run-compact-parent" title={run.parent_workflow_name}>↳ {run.parent_workflow_name}</span>
-              )}
-              <span className="wf-run-compact-time">{new Date(run.started_at).toLocaleString()}</span>
-              <span className="wf-run-compact-meta">
-                {durMs != null && formatDurationCompact(durMs)}
-                {run.tokens_used > 0 && ` · ${run.tokens_used} tk`}
-              </span>
-              <ChevronRight size={12} className={expanded ? 'wf-chevron-rotated' : 'wf-chevron'} />
-            </button>
-            {expanded && (<>
+        return (<>
             <RunStatusCard runId={run.id} model={workflowRunStatusCardModel(run)} />
             <LoadedRunDetail
               run={run}
@@ -2590,7 +2575,74 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                 <ChevronRight size={10} />
               </button>
             )}
-            </>)}
+        </>);
+        };
+        const renderRunItem = (run: WorkflowRun) => {
+        const shadow = pairs.get(run.id);
+        const expanded = isRunExpanded(run) || (!!shadow && isRunExpanded(shadow));
+        const statusTimeline = runStatusTimeline(run);
+        const durMs = runDuration(run);
+        const view: PairView = pairViews[run.id] ?? (run.status === 'WaitingApproval' ? 'normal' : 'compare');
+        const shadowDurMs = shadow ? runDuration(shadow) : null;
+        return (
+          <div key={run.id} className="wf-run-item" data-testid="wf-run-item" data-run-id={run.id} data-shadow-run-id={shadow?.id}>
+            {/* #6 — compact row = the always-visible accordion header. */}
+            <button
+              type="button"
+              className="wf-run-compact"
+              data-status={run.status}
+              data-outcome={isNoOpRun(run) ? 'no_op' : undefined}
+              aria-expanded={expanded}
+              {...newTabClickProps(workflowPath(workflow.id, run.id))}
+              onClick={() => toggleRunExpanded(run.id)}
+            >
+              <span className="wf-step-dot wf-run-compact-dot" style={{ width: 8, height: 8 }} />
+              <RunStatusTrail run={run} timeline={statusTimeline} />
+              {run.parent_workflow_name && (
+                <span className="wf-run-compact-parent" title={run.parent_workflow_name}>↳ {run.parent_workflow_name}</span>
+              )}
+              {isShadowRun(run) && (
+                <span className="wf-run-compact-shadow" title={t('wf.shadow.badgeTitle')} data-testid="wf-run-shadow-badge">
+                  <FlaskConical size={10} aria-hidden /> {t('wf.shadow.badge')}
+                </span>
+              )}
+              <span className="wf-run-compact-time">{new Date(run.started_at).toLocaleString()}</span>
+              <span className="wf-run-compact-meta">
+                {durMs != null && formatDurationCompact(durMs)}
+                {run.tokens_used > 0 && ` · ${run.tokens_used} tk`}
+              </span>
+              {shadow && (
+                <span
+                  className="wf-run-compact-shadow wf-run-compact-pair"
+                  data-variant="paired"
+                  data-status={shadow.status}
+                  title={t('wf.shadow.pairedTitle')}
+                  data-testid="wf-run-shadow-paired"
+                >
+                  <FlaskConical size={10} aria-hidden /> {t('wf.shadow.badge')}
+                  <span className="wf-run-compact-pair-dot" aria-hidden />
+                  <span>{t(runStatusKey(shadow.status))}</span>
+                  {(shadowDurMs != null || shadow.tokens_used > 0) && (
+                    <span className="wf-run-compact-pair-meta">
+                      {shadowDurMs != null && formatDurationCompact(shadowDurMs)}
+                      {shadow.tokens_used > 0 && `${shadowDurMs != null ? ' · ' : ''}${shadow.tokens_used} tk`}
+                    </span>
+                  )}
+                </span>
+              )}
+              <ChevronRight size={12} className={expanded ? 'wf-chevron-rotated' : 'wf-chevron'} />
+            </button>
+            {expanded && !shadow && renderRunBody(run)}
+            {expanded && shadow && (
+              <div className="wf-run-pair">
+                <RunPairTabs runId={run.id} view={view} onChange={next => setPairViews(prev => ({ ...prev, [run.id]: next }))} />
+                <div role="tabpanel" id={pairPanelId(run.id)} aria-labelledby={pairTabId(run.id, view)} data-testid={`wf-run-pair-panel-${view}`}>
+                  {view === 'compare' && <ShadowCompare normal={run} shadow={shadow} onOpenRun={onNavigateToRun} />}
+                  {view === 'normal' && renderRunBody(run)}
+                  {view === 'shadow' && renderRunBody(shadow)}
+                </div>
+              </div>
+            )}
           </div>
         );
         };

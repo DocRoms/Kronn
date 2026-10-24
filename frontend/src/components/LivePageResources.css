@@ -1,0 +1,35 @@
+.live-pages-resources { border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-r-md); padding: 8px 12px; background: var(--kr-bg-raised); font-size: var(--kr-fs-sm); min-width: 0; }
+.live-pages-resources > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; cursor: pointer; }
+.live-pages-resources-count { padding: 0 6px; border-radius: var(--kr-r-pill); background: var(--kr-bg-surface); border: 1px solid var(--kr-border-subtle); color: var(--kr-text-muted); font-size: var(--kr-fs-xs); }
+.live-pages-resources-shadow { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: var(--kr-r-sm); background: var(--kr-accent-bg); color: var(--kr-accent-ink); font-size: var(--kr-fs-xs); font-weight: 600; }
+.live-pages-resources-error { color: var(--kr-error); margin: 8px 0 0; }
+.live-pages-resources-error-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--kr-text-secondary); }
+.live-pages-resources-done { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; padding: 6px 8px; border-radius: var(--kr-r-sm); background: var(--kr-success-bg); color: var(--kr-text-primary); font-size: var(--kr-fs-xs); }
+.live-pages-resources-done svg { flex-shrink: 0; color: var(--kr-success); }
+.live-pages-resources-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.live-pages-resource { padding: 8px 10px; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-r-sm); background: var(--kr-bg-surface); min-width: 0; }
+.live-pages-resource-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
+.live-pages-resource-kind { font-size: var(--kr-fs-2xs); font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--kr-text-muted); }
+.live-pages-resource-name { font-weight: 650; color: var(--kr-text-primary); text-decoration: none; }
+.live-pages-resource-name:hover, .live-pages-resource-workflow:hover { text-decoration: underline; }
+.live-pages-resource-version { font-size: var(--kr-fs-xs); color: var(--kr-text-muted); }
+.live-pages-resource-history { margin-left: auto; }
+.live-pages-resource-use { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.6fr) auto; align-items: center; gap: 4px 12px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--kr-border-subtle); font-size: var(--kr-fs-xs); }
+.live-pages-resource-where { display: flex; flex-direction: column; min-width: 0; }
+.live-pages-resource-workflow { font-weight: 600; color: var(--kr-accent-ink); text-decoration: none; overflow-wrap: anywhere; }
+.live-pages-resource-lanes { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+.live-pages-resource-lane { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; color: var(--kr-text-primary); }
+.live-pages-resource-lane > .live-pages-resource-muted { display: inline-flex; align-items: center; gap: 3px; font-weight: 400; }
+.live-pages-resource-lane[data-lane="shadow"] { color: var(--kr-accent-ink); }
+.live-pages-resource-muted { color: var(--kr-text-muted); }
+.live-pages-resource-action { justify-self: end; }
+.live-pages-resource-promote, .live-pages-resource-retry { display: inline-flex; align-items: center; gap: 4px; font: inherit; font-size: var(--kr-fs-xs); font-weight: 600; padding: 3px 9px; border-radius: var(--kr-r-sm); border: 1px solid var(--kr-accent-border); background: var(--kr-accent-bg); color: var(--kr-accent-ink); cursor: pointer; white-space: nowrap; }
+.live-pages-resource-promote:hover:not(:disabled), .live-pages-resource-retry:hover { background: var(--kr-accent-bg-hover); }
+.live-pages-resource-promote:focus-visible, .live-pages-resource-retry:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 1px; }
+.live-pages-resource-promote:disabled { opacity: .6; cursor: progress; }
+.live-pages-resources-hint { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin: 8px 0 0; font-size: var(--kr-fs-xs); color: var(--kr-text-muted); }
+.live-pages-resources-hint a { color: var(--kr-accent-ink); }
+@media (max-width: 640px) {
+  .live-pages-resource-use { grid-template-columns: minmax(0, 1fr); }
+  .live-pages-resource-action { justify-self: start; }
+}

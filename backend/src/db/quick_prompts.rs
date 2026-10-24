@@ -315,6 +315,17 @@ pub fn list_quick_prompt_versions(
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// Version `index` of Quick Prompt `qp_id`, as its history recorded it.
+pub fn get_quick_prompt_version(
+    conn: &Connection,
+    qp_id: &str,
+    index: u32,
+) -> Result<Option<QuickPromptVersion>> {
+    Ok(list_quick_prompt_versions(conn, qp_id)?
+        .into_iter()
+        .find(|v| v.version_index == index))
+}
+
 /// Aggregate per-version metrics across all discussions whose
 /// `originating_qp_id` matches and that have at least one Agent
 /// message. Only the FIRST Agent message per discussion is counted

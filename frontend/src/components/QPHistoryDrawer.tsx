@@ -22,6 +22,8 @@
  * correct for the typical "tighten wording" refactor.
  */
 import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import { useT } from '../lib/I18nContext';
 import { quickPrompts as quickPromptsApi } from '../lib/api';
 import type { QuickPromptVersion, QuickPromptVersionMetrics } from '../types/generated';
@@ -121,8 +123,7 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
    * both lists so the card disappears + Δ% chips on other versions
    * recompute against the new "previous" sibling.
    */
-  const handleDeleteVersion = async (version_index: number) => {
-    if (deletingVersion != null) return;
+  const handleDeleteVersion = useAsyncGuard(async (version_index: number) => {
     const ok = window.confirm(t('qp.history.deleteConfirm', version_index));
     if (!ok) return;
     setDeletingVersion(version_index);
@@ -146,7 +147,7 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
     } finally {
       setDeletingVersion(null);
     }
-  };
+  });
 
   // Fetch history + metrics on open AND whenever the parent bumps the trigger.
   useEffect(() => {
@@ -229,7 +230,8 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
         {t('qp.history.openLabel', versionCount ?? '…')}
       </button>
 
-      {drawerOpen && (
+      {/* Portaled: a transformed ancestor (sheet header) would clip a fixed drawer. */}
+      {drawerOpen && createPortal(
         <>
           <div
             className="qph-overlay"
@@ -313,7 +315,7 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
                               type="button"
                               className="qph-version-delete"
                               data-testid={`qp-history-delete-${v.version_index}`}
-                              onClick={(e) => { e.stopPropagation(); handleDeleteVersion(v.version_index); }}
+                              onClick={(e) => { e.stopPropagation(); void handleDeleteVersion(v.version_index); }}
                               disabled={deletingVersion != null}
                               aria-label={t('qp.history.deleteAria', v.version_index)}
                               title={t('qp.history.deleteAria', v.version_index)}
@@ -409,7 +411,8 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
               )}
             </div>
           </aside>
-        </>
+        </>,
+        document.body,
       )}
     </>
   );

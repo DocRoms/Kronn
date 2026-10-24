@@ -1651,6 +1651,7 @@ async fn live_page_workflows_returns_configured_publishers() {
             )?;
             let workflow = kronn::models::Workflow {
                 retention: None,
+                shadow: None,
                 project_scope: None,
                 id: "wf-linked".into(),
                 name: "Page producer".into(),
@@ -1693,6 +1694,213 @@ async fn live_page_workflows_returns_configured_publishers() {
     assert_eq!(missing_status, StatusCode::OK);
     assert_eq!(missing["success"], false);
     assert_eq!(missing["error_code"], "not_found");
+}
+
+/// KT-1450 — a Page lists the Quick Prompts and skills of the workflows behind
+/// it (publishers, action targets, their sub-workflows), each lane's version.
+#[tokio::test]
+async fn live_page_resources_list_what_its_workflows_load_per_lane() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, qp) = post_json(
+        app.clone(),
+        "/api/quick-prompts",
+        serde_json::json!({"name": "Review prompt", "prompt_template": "Review.", "skill_ids": ["typescript"]}),
+    )
+    .await;
+    let qp_id = qp["data"]["id"].as_str().unwrap().to_string();
+    let workflow = |id: &str,
+                    steps: Vec<kronn::models::WorkflowStep>,
+                    shadow: Option<kronn::models::WorkflowShadow>| {
+        kronn::models::Workflow {
+            retention: None,
+            shadow,
+            project_scope: None,
+            id: id.into(),
+            name: id.into(),
+            project_id: None,
+            trigger: kronn::models::WorkflowTrigger::Manual,
+            steps,
+            actions: vec![],
+            safety: kronn::models::WorkflowSafety {
+                sandbox: false,
+                max_files: None,
+                max_lines: None,
+                require_approval: false,
+            },
+            workspace_config: None,
+            concurrency_limit: None,
+            concurrency_key: None,
+            guards: None,
+            artifacts: std::collections::HashMap::new(),
+            on_failure: vec![],
+            exec_allowlist: vec![],
+            variables: vec![],
+            enabled: true,
+            pinned: false,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    };
+    let publisher = workflow(
+        "wf-res-publisher",
+        vec![
+            kronn::models::WorkflowStep {
+                name: "review".into(),
+                step_type: kronn::models::StepType::Agent,
+                skill_ids: vec!["rust".into()],
+                ..Default::default()
+            },
+            kronn::models::WorkflowStep {
+                name: "child".into(),
+                step_type: kronn::models::StepType::SubWorkflow,
+                sub_workflow_id: Some("wf-res-child".into()),
+                ..Default::default()
+            },
+            kronn::models::WorkflowStep {
+                name: "publish".into(),
+                step_type: kronn::models::StepType::PublishPageData,
+                page_publish: Some(kronn::models::PublishPageDataConfig {
+                    page_id: "page-res".into(),
+                    writes: vec![],
+                }),
+                ..Default::default()
+            },
+        ],
+        Some(kronn::models::WorkflowShadow {
+            enabled: true,
+            skills: [("rust".to_string(), "custom-candidate@2".to_string())].into(),
+            ..Default::default()
+        }),
+    );
+    let child = workflow(
+        "wf-res-child",
+        vec![kronn::models::WorkflowStep {
+            name: "ask".into(),
+            step_type: kronn::models::StepType::Agent,
+            quick_prompt_id: Some(qp_id.clone()),
+            ..Default::default()
+        }],
+        None,
+    );
+    let action_target = workflow(
+        "wf-res-action",
+        vec![kronn::models::WorkflowStep {
+            name: "send".into(),
+            step_type: kronn::models::StepType::Agent,
+            skill_ids: vec!["security".into()],
+            ..Default::default()
+        }],
+        None,
+    );
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            let html = r#"<button data-kronn-action="go">Go</button><script type="application/kronn-action" data-action-id="go">{"kind": "workflow", "target_id": "wf-res-action", "values": []}</script>"#;
+            connection.execute(
+                "INSERT INTO live_pages (id, project_id, title, slug, current_revision_id, data_revision, created_at, updated_at)
+                 VALUES ('page-res', NULL, 'Resources', 'resources', 'rev-res', 0, ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO live_page_revisions (id, page_id, revision, html, created_at) VALUES ('rev-res', 'page-res', 1, ?2, ?1)",
+                [&now, &html.to_string()],
+            )?;
+            for wf in [&publisher, &child, &action_target] {
+                kronn::db::workflows::insert_workflow(connection, wf)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, body) = get_json(app.clone(), "/api/pages/page-res/resources").await;
+    let resources = body["data"].as_array().unwrap_or_else(|| panic!("{body}"));
+    let find = |kind: &str, id: &str| {
+        resources
+            .iter()
+            .find(|r| r["kind"] == kind && r["id"] == id)
+            .unwrap_or_else(|| panic!("{kind} {id} missing: {body}"))
+            .clone()
+    };
+    let rust = find("skill", "rust");
+    assert_eq!(rust["uses"][0]["normal"], "rust");
+    assert_eq!(rust["uses"][0]["shadow"], "custom-candidate@2");
+    let prompt = find("quick_prompt", &qp_id);
+    assert_eq!(prompt["name"], "Review prompt");
+    assert_eq!(prompt["latest_version"], 1);
+    assert_eq!(find("skill", "typescript")["uses"][0]["step_name"], "ask");
+    assert_eq!(
+        find("skill", "security")["uses"][0]["workflow_id"],
+        "wf-res-action"
+    );
+    let (_, missing) = get_json(app, "/api/pages/missing/resources").await;
+    assert_eq!(missing["error_code"], "not_found");
+}
+
+/// KT-1450 — promoting the shadow hands the tested version to the normal lane:
+/// a skill in every step that loads it, a Quick Prompt as its current version.
+#[tokio::test]
+async fn promoting_the_shadow_hands_the_tested_version_to_the_normal_lane() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, qp) = post_json(
+        app.clone(),
+        "/api/quick-prompts",
+        serde_json::json!({"name": "Prompt", "prompt_template": "Old wording."}),
+    )
+    .await;
+    let qp_id = qp["data"]["id"].as_str().unwrap().to_string();
+    let (_, edited) = put_json_root(
+        app.clone(),
+        &format!("/api/quick-prompts/{qp_id}"),
+        serde_json::json!({"name": "Prompt", "prompt_template": "New wording."}),
+    )
+    .await;
+    assert_eq!(edited["success"], true, "{edited}");
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Promoted", "trigger": {"type": "Manual"},
+            "steps": [
+                {"name": "a", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "A.", "skill_ids": ["rust"]},
+                {"name": "b", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "B.", "skill_ids": ["rust", "typescript"]},
+                {"name": "c", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "quick_prompt_id": qp_id}
+            ],
+            "shadow": {"enabled": true, "skills": {"rust": "security"}, "quick_prompt_versions": {(qp_id.clone()): 1}}
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+    let promote = |kind: &str, resource: &str| {
+        let app = app.clone();
+        let path = format!("/api/workflows/{id}/shadow/promote");
+        let body = serde_json::json!({"kind": kind, "id": resource});
+        async move { post_json(app, &path, body).await.1 }
+    };
+    let promoted = promote("skill", "rust").await;
+    assert_eq!(promoted["success"], true, "{promoted}");
+    assert_eq!(
+        promoted["data"]["steps"][0]["skill_ids"],
+        serde_json::json!(["security"])
+    );
+    assert_eq!(
+        promoted["data"]["steps"][1]["skill_ids"],
+        serde_json::json!(["security", "typescript"])
+    );
+    assert!(promoted["data"]["shadow"]["skills"].is_null(), "{promoted}");
+    assert_eq!(promote("skill", "rust").await["success"], false);
+
+    let promoted = promote("quick_prompt", &qp_id).await;
+    assert_eq!(promoted["success"], true, "{promoted}");
+    let (_, history) = get_json(app.clone(), &format!("/api/quick-prompts/{qp_id}/history")).await;
+    assert_eq!(
+        history["data"][0]["prompt_template"], "Old wording.",
+        "{history}"
+    );
+    assert_eq!(history["data"][0]["version_index"], 3, "{history}");
 }
 
 /// KT-1098 — a slug is renamed under the creation rules, and the old one keeps
@@ -1902,6 +2110,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
 
             let workflow = kronn::models::Workflow {
                 retention: None,
+                shadow: None,
                 project_scope: None,
                 id: "workflow-portable".into(),
                 name: "Portable workflow".into(),
@@ -5567,6 +5776,7 @@ async fn optional_variable_http_run(
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
         retention: None,
+        shadow: None,
         project_scope: None,
         id: "optional-input-workflow".into(),
         name: "Optional input".into(),
@@ -5757,6 +5967,7 @@ async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
         retention: None,
+        shadow: None,
         project_scope: None,
         id: "goto-fallback-workflow".into(),
         name: "Goto fallback".into(),
@@ -5893,6 +6104,7 @@ async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
         retention: None,
+        shadow: None,
         project_scope: None,
         id: "labelled-workflow".into(),
         name: "Labelled".into(),
@@ -6509,6 +6721,7 @@ async fn mcp_workflow_trigger_runs_a_workflow_with_required_variables_like_the_u
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
         retention: None,
+        shadow: None,
         project_scope: None,
         id: "required-input-workflow".into(),
         name: "Required input".into(),
@@ -6670,6 +6883,7 @@ async fn launch_agent_choice_state(workflow_id: &str) -> AppState {
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
         retention: None,
+        shadow: None,
         project_scope: None,
         id: workflow_id.into(),
         name: "Launch agent choice".into(),
@@ -25236,6 +25450,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let workflow_id = format!("wf-disabled-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
             retention: None,
+            shadow: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -25297,6 +25512,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let workflow_id = format!("wf-vars-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
             retention: None,
+            shadow: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -25836,6 +26052,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let workflow_id = format!("wf-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
             retention: None,
+            shadow: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -29114,6 +29331,7 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
                 retention: None,
+                shadow: None,
                 project_scope: None,
                 id: "workflow-unsafe".into(),
                 name: "Unsafe".into(),
@@ -29335,6 +29553,7 @@ async fn inline_quick_exec_sources_are_flagged_and_fixable() {
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
                 retention: None,
+                shadow: None,
                 project_scope: None,
                 id: "workflow-collect-unsafe".into(),
                 name: "Collect".into(),
@@ -29965,6 +30184,7 @@ async fn the_unchanged_line_exception_keys_on_the_exact_stored_line() {
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
                 retention: None,
+                shadow: None,
                 project_scope: None,
                 id: "workflow-identity".into(),
                 name: "Identity".into(),

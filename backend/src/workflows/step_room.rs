@@ -911,6 +911,7 @@ mod tests {
     fn workflow_of(steps: Vec<WorkflowStep>) -> Workflow {
         Workflow {
             retention: None,
+            shadow: None,
             project_scope: None,
             pinned: false,
             id: "workflow-1".into(),

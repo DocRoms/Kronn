@@ -345,3 +345,23 @@
 @media (max-width: 720px) {
   .qph-diff { grid-template-columns: 1fr; }
 }
+/* KT-1434 — restore is not destructive: neutral, labelled, unlike delete. */
+.qph-version-restore {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+.qph-version-restore:hover:not(:disabled) { border-color: var(--kr-accent-border); color: var(--kr-accent-ink); }
+.qph-version-restore:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 1px; }
+.qph-version-restore:disabled { opacity: .5; cursor: progress; }
+.qph-restored { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; padding: 6px 8px; border-radius: var(--kr-r-sm); background: var(--kr-success-bg); color: var(--kr-text-primary); font-size: var(--kr-fs-xs); }
+.qph-restored svg { flex-shrink: 0; color: var(--kr-success); }

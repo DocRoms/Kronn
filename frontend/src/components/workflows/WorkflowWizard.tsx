@@ -29,13 +29,14 @@ import type {
   WorkflowStep, AgentType, WorkflowSafety,
   WorkspaceConfig, StepConditionRule,
   CreateWorkflowRequest, Skill, ProjectUsedSkill, AgentProfile, Directive,
-  WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards, WorkflowRetention,
+  WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards, WorkflowRetention, WorkflowShadow,
   PromptVariable, WorkflowSummary, LivePage, JsonValue, TestApiCallResponse, QuickExec,
   TransformDataField, WorkflowProjectScope,
 } from '../../types/generated';
 import { SafetyWarnings } from './SafetyWarnings';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import { RunRetentionCard } from './RunRetentionCard';
+import { ShadowRunsCard } from './ShadowRunsCard';
 import type { AgentsConfig } from '../../types/generated';
 import { promptNeedsUnboundWorkspace } from '../../lib/ollamaHints';
 import {
@@ -415,6 +416,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // 0.7.0 — Execution limits (timeout / max LLM calls / loop detection)
   const [guards, setGuards] = useState<WorkflowGuards | null>(editWorkflow?.guards ?? null);
   const [retention, setRetention] = useState<WorkflowRetention | null>(editWorkflow?.retention ?? null);
+  const [shadow, setShadow] = useState<WorkflowShadow | null>(editWorkflow?.shadow ?? null);
 
   // Build cron expression from visual inputs (or raw if complex)
   const buildCronExpr = (): string => {
@@ -1129,6 +1131,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         retry: s.retry,
         stall_timeout_secs: s.stall_timeout_secs,
         delay_after_secs: s.delay_after_secs,
+        external_effect: s.external_effect,
         mode: s.mode,
         step_type: { type: newType } as WorkflowStep['step_type'],
       };
@@ -1301,6 +1304,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           concurrency_key: trimmedConcurrencyKey || undefined,
           guards: guards ?? undefined,
           retention: retention ?? undefined,
+          shadow: shadow ?? undefined,
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
           variables: wfVariables,
@@ -2096,7 +2100,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             const isAdvOpen = expandedStepAdvanced === i;
             const hasAdvanced = (step.on_result && step.on_result.length > 0) ||
               step.agent_settings ||
-              step.stall_timeout_secs || step.retry || step.delay_after_secs || step.room_id || step.read_only_repos?.length;
+              step.stall_timeout_secs || step.retry || step.delay_after_secs || step.external_effect || step.room_id || step.read_only_repos?.length;
             const multiAgentReview = step.multi_agent_review;
             const activeStepType = step.step_type?.type ?? 'Agent';
             const activeTypeOption = [...STEP_TYPE_GROUPS.flatMap(group => group.options), DELEGATE_SUBTASKS_OPTION]
@@ -4619,6 +4623,22 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         />
                       </div>
 
+                      <div>
+                        <label className="wf-label">
+                          <input
+                            type="checkbox"
+                            data-testid={`wiz-external-effect-${i}`}
+                            checked={step.external_effect ?? false}
+                            aria-describedby={`wiz-external-effect-hint-${i}`}
+                            onChange={e => updateStep(i, { external_effect: e.target.checked || undefined })}
+                          />{' '}
+                          {t('wiz.externalEffect')}
+                        </label>
+                        <p id={`wiz-external-effect-hint-${i}`} className="text-xs text-muted mb-1">
+                          {t('wiz.externalEffectHint')}
+                        </p>
+                      </div>
+
                       {/* Retry */}
                       <div className="flex-1">
                         <label className="wf-label">{t('wiz.retry')}</label>
@@ -5008,6 +5028,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               not hidden, not advanced — first-class safety control). */}
           <ExecutionLimitsCard value={guards} onChange={setGuards} t={t} />
           <RunRetentionCard value={retention} onChange={setRetention} t={t} />
+          <ShadowRunsCard value={shadow} onChange={setShadow} steps={steps} projects={projects} skills={availableSkills} quickPrompts={availableQuickPrompts} t={t} />
 
           {/* 0.7.0 Phase 5 — Exec allowlist. Visible by default; the
               prominent placement is intentional because Exec is a

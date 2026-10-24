@@ -2627,6 +2627,7 @@ mod tests {
             stall_timeout_secs: None,
             retry: None,
             skill_ids: vec![],
+            external_effect: false,
             directive_ids: vec![],
             profile_ids: vec![],
             delay_after_secs: None,

@@ -132,7 +132,7 @@ pub fn inline_code_args(cmd: &str, args: &[String]) -> Vec<InlineCode> {
 /// Values Kronn produces itself; every other placeholder may carry text an
 /// outsider controls (tracker fields, step outputs, launch inputs).
 pub fn is_trusted_template_path(path: &str) -> bool {
-    path == "run.id" || path.starts_with("time.now")
+    path == "run.id" || path == "run.variant" || path.starts_with("time.now")
 }
 
 /// Values Kronn sets itself for the run (`run.id`, `run.artifacts_dir`,
