@@ -705,15 +705,30 @@ jobs:
         # with any future coverage push.
         run: pnpm test:coverage
 
-  test-e2e:
+  test-e2e-shard:
     # Playwright E2E tests — drive a real Chromium against Vite + a live
     # backend. Catches UI regressions that vitest unit tests miss (the
     # 0.6.0 "Create button silent", "JsonData ghost agent", "Quick APIs
     # tab buttons leak" were all UI-only bugs that pure-JS tests can't
     # see).
+    #
+    # The suite runs in three shards (KT-20). One job ran the 202 tests in
+    # 12 min 48 s on one worker (run 38747093853): `workers: 1` in
+    # frontend/playwright.config.ts is deliberate, three workers against the
+    # single-process backend hang it. Each shard is its own runner with its
+    # own backend, so the single-worker rule holds inside a shard while the
+    # shards run side by side. Playwright deals whole spec files to shards
+    # (file-level granularity): `playwright test --list --shard=N/3` prints the split.
+    # A push to main only builds the backend and saves the cache: one shard
+    # is enough for that. The `test-e2e` job below aggregates the shards
+    # under the check name the main ruleset requires.
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'push' && '[1]' || '[1, 2, 3]') }}
     # ── Playwright official container ─────────────────────────────────
     # Chromium + chromium_headless_shell + ffmpeg + all OS deps are BAKED
     # INTO this image. That eliminates the `pnpm exec playwright install`
@@ -731,8 +746,10 @@ jobs:
     container:
       image: mcr.microsoft.com/playwright:v1.62.1-noble
       options: --user root
-    # A cold release build took ~17 min and the suite ~8-12 min on the runner:
-    # 30 min cancelled a green suite partway through.
+    # A cold release build took ~17 min and the whole suite ~8-12 min on the
+    # runner: 30 min cancelled a green suite partway through. A shard runs a
+    # third of the suite after the same build, so 45 min keeps a cold build
+    # safe.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -871,10 +888,18 @@ jobs:
         # runner `~/Repositories` is absent — point `KRONN_REPOS_DIR` at
         # a tmp path we create inline. `RUNNER_TEMP` is auto-cleaned by
         # the runner after the job, no manual cleanup needed.
+        #
+        # `pnpm test:e2e` is `ensure-browser.mjs && playwright test`; the
+        # guard exits at once under CI (browsers are baked in), so call the
+        # CLI directly rather than rely on pnpm forwarding `--shard`. The
+        # shard count comes from the matrix (`strategy.job-total`), so the
+        # list above is the only place to change it. The `github` reporter
+        # ends each shard's log with its own count: the counts must add up
+        # to the whole suite (`playwright test --list` prints it).
         run: |
           mkdir -p "$RUNNER_TEMP/kronn-repos"
           export KRONN_REPOS_DIR="$RUNNER_TEMP/kronn-repos"
-          pnpm test:e2e
+          pnpm exec playwright test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
         env:
           CI: "true"
 
@@ -885,11 +910,13 @@ jobs:
             kill "$(cat /tmp/backend.pid)" 2>/dev/null || true
           fi
 
+      # Artifact names carry the shard number: upload-artifact@v4 refuses a
+      # second upload under a name that already exists in the run.
       - name: Upload Playwright report on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.shard }}
           path: frontend/playwright-report/
           retention-days: 7
 
@@ -897,7 +924,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-test-results
+          name: playwright-test-results-${{ matrix.shard }}
           path: frontend/test-results/
           retention-days: 7
 
@@ -905,9 +932,28 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: backend-logs
+          name: backend-logs-${{ matrix.shard }}
           path: /tmp/backend.log
           retention-days: 7
+
+  test-e2e:
+    # The check name the main ruleset (13870406) requires. The matrix
+    # publishes `test-e2e-shard (1)`, `(2)` and `(3)`, never a check called
+    # `test-e2e`, and a pull request would wait for it forever. `always()`
+    # so that a red shard becomes a red check here rather than a skipped
+    # one, which a ruleset counts as passing. Same pattern as test-backend
+    # after test-backend-shard.
+    needs: [require-ci-label, test-e2e-shard]
+    if: always() && needs.require-ci-label.outputs.run == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every shard succeeded
+        env:
+          SHARDS_RESULT: ${{ needs.test-e2e-shard.result }}
+        run: |
+          echo "test-e2e-shard: $SHARDS_RESULT"
+          test "$SHARDS_RESULT" = success
 
   test-shell:
     needs: require-ci-label
@@ -999,6 +1045,7 @@ jobs:
       - diff-hygiene
       - test-python
       - test-frontend
+      - test-e2e-shard
       - test-e2e
       - test-shell
       - security-scan
