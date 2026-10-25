@@ -1237,14 +1237,25 @@ pub fn delete_workflow(conn: &Connection, id: &str) -> Result<()> {
 /// row, so a live, paused or resumable run would lose its row while its runner
 /// or worktree is still there (WF-9).
 pub fn runs_blocking_workflow_delete(conn: &Connection, workflow_id: &str) -> Result<u32> {
-    Ok(conn.query_row(
+    let live: u32 = conn.query_row(
         "SELECT COUNT(*) FROM workflow_runs
           WHERE workflow_id = ?1
-            AND (status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')
-                 OR (status = 'Interrupted' AND workspace_path IS NOT NULL))",
+            AND status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')",
         params![workflow_id],
         |row| row.get(0),
-    )?)
+    )?;
+    // An interruption blocks only while its worktree is still on disk: one
+    // removed since can be neither resumed nor discarded.
+    let mut stmt = conn.prepare(
+        "SELECT workspace_path FROM workflow_runs
+          WHERE workflow_id = ?1 AND status = 'Interrupted' AND workspace_path IS NOT NULL",
+    )?;
+    let resumable = stmt
+        .query_map(params![workflow_id], |row| row.get::<_, String>(0))?
+        .filter_map(|path| path.ok())
+        .filter(|path| std::path::Path::new(path).exists())
+        .count() as u32;
+    Ok(live + resumable)
 }
 
 // ─── Workflow Runs CRUD ─────────────────────────────────────────────────────

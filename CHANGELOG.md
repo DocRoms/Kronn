@@ -921,6 +921,9 @@ Release notes for 0.9.3 and earlier are available in the
 - A worker's HTTP agent can no longer run a tool its catalogue leaves out
   (backlog tools, `qp_update`, `skill_update`…) by naming it: the call is
   refused before any access check.
+- Deleting a workflow is no longer blocked by interrupted runs whose
+  worktree was removed since: only a worktree still on disk, which could be
+  resumed or discarded, holds the deletion.
 - Integration validations that need Docker work again, on a human's
   decision (KT-1433). Since 0.15.1 they run in the lane sandbox, which keeps
   Docker closed, so `make iso-deps` and the like always failed and the
