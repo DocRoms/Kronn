@@ -304,6 +304,9 @@ pub enum Kind {
     Proposal,
     MediaJob,
     AuditRun,
+    /// A skill, global or of one project (`project_id`); `custom-x@N` is
+    /// checked as `custom-x`.
+    Skill,
 }
 
 impl Kind {
@@ -593,6 +596,12 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     ),
     r("POST", "/api/mcp/workflow-wait-for-completion", Read, &[]),
     r("GET", "/api/quick-prompts", Read, &[]),
+    r(
+        "GET",
+        "/api/quick-prompts/{id}/history",
+        Read,
+        &[("id", QP)],
+    ),
     r("POST", "/api/quick-prompts", Write, &[]),
     r("PUT", "/api/quick-prompts/{id}", Write, &[("id", QP)]),
     r("DELETE", "/api/quick-prompts/{id}", Write, &[("id", QP)]),
@@ -667,8 +676,23 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     r("GET", "/api/maintenance/disk", Read, &[]),
     r("GET", "/api/skills", Read, &[]),
     r("GET", "/api/skills/{id}/guide", Read, &[]),
-    r("POST", "/api/skills", Denied, &[]),
-    r("PUT", "/api/skills/{id}", Denied, &[]),
+    // A version reads like the skill: a project's skill stays in its project.
+    r(
+        "GET",
+        "/api/skills/{id}/history",
+        Read,
+        &[("id", Kind::Skill)],
+    ),
+    r(
+        "GET",
+        "/api/skills/{id}/versions/{version}",
+        Read,
+        &[("id", Kind::Skill)],
+    ),
+    // Each save is a new version and a pinned step keeps its own, so a skill
+    // is written like a Quick Prompt; deleting (and restoring, unlisted) stays human.
+    r("POST", "/api/skills", Write, &[]),
+    r("PUT", "/api/skills/{id}", Write, &[("id", Kind::Skill)]),
     r("DELETE", "/api/skills/{id}", Denied, &[]),
     r("GET", "/api/profiles", Read, &[]),
     r("POST", "/api/profiles", Denied, &[]),
@@ -697,6 +721,8 @@ const UNBOUND_ROUTES: &[&str] = &[
     "/api/signals/catalog",
     "/api/skills",
     "/api/skills/{id}/guide",
+    "/api/skills/{id}/history",
+    "/api/skills/{id}/versions/{version}",
     "/api/profiles",
     "/api/directives",
 ];
@@ -734,6 +760,7 @@ const CREATE_ROUTES: &[(&str, &str)] = &[
     ("/api/workflows", "project_id"),
     ("/api/workflows/import", "project_id"),
     ("/api/quick-prompts", "project_id"),
+    ("/api/skills", "project_id"),
     ("/api/quick-apis", "project_id"),
     ("/api/quick-execs", "project_id"),
     ("/api/pages", "project_id"),
@@ -746,6 +773,7 @@ const CREATE_ROUTES: &[(&str, &str)] = &[
 /// room « General · write »: the resource is general, seen by every project (KT-1346).
 const GENERAL_WHEN_UNBOUND: &[&str] = &[
     "/api/quick-prompts",
+    "/api/skills",
     "/api/quick-apis",
     "/api/pages",
     "/api/workflows",
@@ -780,6 +808,7 @@ pub const GENERAL_WRITE_NEEDS_GRANT: &str = "writing a general resource (seen by
 /// The resources a token without a project may create and edit as general.
 const GENERAL_KINDS: &[Kind] = &[
     Kind::QuickPrompt,
+    Kind::Skill,
     Kind::QuickApi,
     Kind::Page,
     Kind::Workflow,
@@ -789,6 +818,7 @@ const GENERAL_KINDS: &[Kind] = &[
 pub fn general_kind(kind: Kind) -> &'static str {
     match kind {
         Kind::QuickPrompt => "quick_prompt",
+        Kind::Skill => "skill",
         Kind::QuickApi => "quick_api",
         Kind::Page => "page",
         Kind::Workflow => "workflow",
@@ -803,6 +833,7 @@ pub fn general_created_kind(route: &BridgeRoute) -> Option<Kind> {
     }
     match route.pattern {
         "/api/quick-prompts" => Some(Kind::QuickPrompt),
+        "/api/skills" => Some(Kind::Skill),
         "/api/quick-apis" => Some(Kind::QuickApi),
         "/api/pages" => Some(Kind::Page),
         "/api/workflows" => Some(Kind::Workflow),
@@ -815,6 +846,7 @@ pub fn general_created_kind(route: &BridgeRoute) -> Option<Kind> {
 const KEEPS_PROJECT_ON_UPDATE: &[&str] = &[
     "/api/workflows/{id}",
     "/api/quick-prompts/{id}",
+    "/api/skills/{id}",
     "/api/quick-apis/{id}",
     "/api/quick-execs/{id}",
 ];
@@ -1152,7 +1184,8 @@ const PLAIN_ID_KEYS: &[&str] = &[
     // MCP server catalogue entries (global).
     "server_id",
     "replacement_server_id",
-    // The shared agent library: read-only for a bridge token.
+    // Agent library references: a skill is checked where it is loaded
+    // (`refuse_foreign_project_skills`); profiles and directives are read-only.
     "skill_id",
     "skill_ids",
     "default_skill_ids",
@@ -1677,6 +1710,10 @@ fn mcp_config_visible(place: &Residence, bound: Option<&str>) -> bool {
 }
 
 fn writable(grant: &BridgeGrant, kind: Kind, id: &str, place: &Residence, reach: &Reach) -> bool {
+    // A builtin skill, or a pinned version, is never what a write changes.
+    if kind == Kind::Skill && (!id.starts_with("custom-") || id.contains('@')) {
+        return false;
+    }
     if owns(grant, kind, id) || reach.bound().is_some_and(|project| place.only(project)) {
         return true;
     }
@@ -1892,6 +1929,13 @@ pub fn residence(
         Kind::QuickApi => project_of("SELECT project_id FROM quick_apis WHERE id = ?1"),
         Kind::QuickExec => project_of("SELECT project_id FROM quick_execs WHERE id = ?1"),
         Kind::Page => project_of("SELECT project_id FROM live_pages WHERE id = ?1"),
+        Kind::Skill => {
+            let base = crate::core::skill_versions::split_pin(id).map_or(id, |(base, _)| base);
+            Ok(
+                crate::core::skills::get_skill(base)
+                    .map(|skill| single_or_global(skill.project_id)),
+            )
+        }
         Kind::Execution => execution_residence(id),
         // Checked as the discussion or project they live in: see `canonical`.
         Kind::Message

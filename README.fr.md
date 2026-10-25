@@ -28,9 +28,18 @@
 
 ## Nouveautés de la 0.15.1
 
-La 0.15.1 rend l'audit de la doc IA fiable et donne aux agents des médias
-locaux.
+La 0.15.1 rend l'audit de la doc IA fiable, permet de tester des versions de
+prompts et de skills sur de vrais runs avant de les mettre en production, et
+donne aux agents des médias locaux.
 
+- **Versions et runs shadow :** les skills personnalisés gardent l'historique
+  de leurs versions comme les Quick Prompts, et une étape peut épingler la
+  version de skill ou de Quick Prompt qu'elle charge. Un workflow peut lancer
+  un run shadow à côté de chaque run normal, sur les mêmes entrées avec
+  d'autres versions, sans rien de ce qui agit hors de Kronn ; la liste des
+  runs compare les deux et une Page promeut la meilleure version en un clic.
+  Les agents lisent et écrivent les versions ; les exports emportent les
+  skills.
 - **Un audit fiable :** l'audit vérifie ce que ses documents affirment contre
   le dépôt, ne déclare plus absents des secrets commités, répare davantage de
   ce sur quoi il échouait et confie le reste à un humain. « Revalider l'audit »

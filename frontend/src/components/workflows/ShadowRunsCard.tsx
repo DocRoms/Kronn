@@ -3,10 +3,11 @@
  * projects also starts a shadow run on the same inputs, with other skill and
  * Quick Prompt versions; steps acting outside Kronn and Gates are skipped.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ChevronDown, ChevronRight, FlaskConical, Info } from 'lucide-react';
 import { skills as skillsApi, quickPrompts as quickPromptsApi } from '../../lib/api';
 import { skillBaseId, skillPinnedVersion } from '../../lib/automationSkills';
+import { shadowTestedCount } from '../../lib/shadowRuns';
 import type { Project, QuickPrompt, Skill, WorkflowShadow, WorkflowStep } from '../../types/generated';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
@@ -19,6 +20,12 @@ interface Props {
   skills: readonly Skill[];
   quickPrompts: readonly QuickPrompt[];
   t: Translate;
+  /** Opened from a link to the shadow settings: start expanded, scrolled into view. */
+  focusOnOpen?: boolean;
+  /** Called once the card has been brought into view. */
+  onFocused?: () => void;
+  /** Where to mark a step « Acts outside Kronn », when no step is marked. */
+  nothingSkippedHint?: string;
 }
 
 type Versions = { state: 'loading' | 'error' | 'ready'; list: number[] };
@@ -118,13 +125,13 @@ function SkillRow({ base, name, normalRefs, shadow, update, t }: { base: string;
   );
 }
 
-function QuickPromptRow({ id, name, shadow, update, t }: { id: string; name: string; shadow: WorkflowShadow; update: (s: WorkflowShadow) => void; t: Translate }) {
+function QuickPromptRow({ id, name, normalRefs, shadow, update, t }: { id: string; name: string; normalRefs: (number | null)[]; shadow: WorkflowShadow; update: (s: WorkflowShadow) => void; t: Translate }) {
   const versions = useVersions(() => quickPromptsApi.history(id), id);
   return (
     <VersionRow
       kind={t('pages.resources.quickPrompt')}
       name={name}
-      normalRefs={[null]}
+      normalRefs={normalRefs}
       current={shadow.quick_prompt_versions?.[id] ?? null}
       versions={versions}
       testId={`wf-shadow-qp-${id}`}
@@ -138,9 +145,18 @@ function QuickPromptRow({ id, name, shadow, update, t }: { id: string; name: str
   );
 }
 
-export function ShadowRunsCard({ value, onChange, steps, projects, skills, quickPrompts, t }: Props) {
+export function ShadowRunsCard({ value, onChange, steps, projects, skills, quickPrompts, t, focusOnOpen = false, onFocused, nothingSkippedHint }: Props) {
   const shadow: WorkflowShadow = value ?? { enabled: false };
-  const [expanded, setExpanded] = useState(Boolean(value?.enabled));
+  const [expanded, setExpanded] = useState(Boolean(value?.enabled) || focusOnOpen);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!focusOnOpen) return;
+    toggleRef.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+    toggleRef.current?.focus({ preventScroll: true });
+    onFocused?.();
+    // `onFocused` is rebuilt each render; the focus request is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusOnOpen]);
   /** Per step, the skills it loads: its own, else its Quick Prompt's. */
   const stepSkills = useMemo(() => steps.map(step => (step.skill_ids?.length
     ? step.skill_ids
@@ -155,16 +171,23 @@ export function ShadowRunsCard({ value, onChange, steps, projects, skills, quick
     return map;
   }, [stepSkills]);
   const unversioned = useMemo(() => [...new Set(stepSkills.flat().filter(id => !skillBaseId(id).startsWith('custom-')))], [stepSkills]);
-  const usedQuickPrompts = useMemo(() => [...new Set(steps.map(step => step.quick_prompt_id).filter((id): id is string => !!id))], [steps]);
+  /** Each Quick Prompt the steps load → what each step pins (null = latest). */
+  const usedQuickPrompts = useMemo(() => {
+    const map = new Map<string, (number | null)[]>();
+    for (const step of steps) {
+      if (step.quick_prompt_id) map.set(step.quick_prompt_id, [...(map.get(step.quick_prompt_id) ?? []), step.quick_prompt_version ?? null]);
+    }
+    return map;
+  }, [steps]);
   const skipped = steps.filter(step => step.external_effect || step.step_type?.type === 'Gate').map(step => step.name);
   const update = (next: WorkflowShadow) => onChange(next);
   const projectIds = shadow.project_ids ?? [];
-  const tested = Object.keys(shadow.skills ?? {}).length + Object.keys(shadow.quick_prompt_versions ?? {}).length;
-  const hasVersions = usedSkills.size > 0 || usedQuickPrompts.length > 0;
+  const tested = shadowTestedCount(shadow);
+  const hasVersions = usedSkills.size > 0 || usedQuickPrompts.size > 0;
 
   return (
     <div className="wf-section wf-retention-card wf-shadow-card" data-testid="wf-shadow-card">
-      <button type="button" className="wf-retention-toggle" aria-expanded={expanded} onClick={() => setExpanded(e => !e)}>
+      <button ref={toggleRef} type="button" className="wf-retention-toggle" aria-expanded={expanded} onClick={() => setExpanded(e => !e)}>
         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <FlaskConical size={14} />
         <span>{t('wf.shadow.title')}</span>
@@ -187,7 +210,7 @@ export function ShadowRunsCard({ value, onChange, steps, projects, skills, quick
           {shadow.enabled && (
             skipped.length > 0
               ? <p className="text-muted wf-retention-help" data-testid="wf-shadow-skipped"><Info size={11} /> {t('wf.shadow.skippedSteps', skipped.join(', '))}</p>
-              : <p className="wf-shadow-warning" role="note" data-testid="wf-shadow-nothing-skipped"><AlertTriangle size={12} /> {t('wf.shadow.nothingSkipped')}</p>
+              : <p className="wf-shadow-warning" role="note" data-testid="wf-shadow-nothing-skipped"><AlertTriangle size={12} /> {nothingSkippedHint ?? t('wf.shadow.nothingSkipped')}</p>
           )}
           {projects.length > 0 && (
             <div className="wf-shadow-projects">
@@ -213,8 +236,8 @@ export function ShadowRunsCard({ value, onChange, steps, projects, skills, quick
           )}
           <p className="wf-shadow-subtitle">{t('wf.shadow.versionsTitle')}</p>
           {!hasVersions && <p className="text-muted wf-retention-help">{t('wf.shadow.noVersions')}</p>}
-          {usedQuickPrompts.map(id => (
-            <QuickPromptRow key={id} id={id} name={quickPrompts.find(qp => qp.id === id)?.name ?? id} shadow={shadow} update={update} t={t} />
+          {[...usedQuickPrompts].map(([id, refs]) => (
+            <QuickPromptRow key={id} id={id} name={quickPrompts.find(qp => qp.id === id)?.name ?? id} normalRefs={refs} shadow={shadow} update={update} t={t} />
           ))}
           {[...usedSkills].map(([base, refs]) => (
             <SkillRow key={base} base={base} name={skills.find(skill => skill.id === base)?.name ?? base} normalRefs={refs} shadow={shadow} update={update} t={t} />
@@ -227,5 +250,38 @@ export function ShadowRunsCard({ value, onChange, steps, projects, skills, quick
         </div>
       )}
     </div>
+  );
+}
+
+/** The shadow's state on the workflow page, and the way to its settings. */
+export function ShadowStatusButton({ shadow, projects, onOpen, t }: {
+  shadow: WorkflowShadow | null | undefined;
+  projects: readonly Project[];
+  onOpen: () => void;
+  t: Translate;
+}) {
+  const active = Boolean(shadow?.enabled);
+  const projectIds = shadow?.project_ids ?? [];
+  const projectNames = projectIds.map(id => projects.find(p => p.id === id)?.name ?? id).join(', ');
+  const label = active
+    ? t('wf.shadow.entryOn', shadowTestedCount(shadow), projectIds.length === 0
+      ? t('wf.shadow.entryAllProjects')
+      : t('wf.shadow.entrySomeProjects', projectIds.length))
+    : t('wf.shadow.entryOff');
+  const title = active
+    ? t('wf.shadow.entryTitleOn', projectIds.length === 0 ? t('wf.shadow.entryAllProjects') : projectNames)
+    : t('wf.shadow.entryTitleOff');
+  return (
+    <button
+      type="button"
+      className="wf-small-btn wf-shadow-entry"
+      data-active={active}
+      data-testid="wf-shadow-entry"
+      title={title}
+      aria-label={`${label}. ${title}`}
+      onClick={onOpen}
+    >
+      <FlaskConical size={10} aria-hidden /> {label}
+    </button>
   );
 }

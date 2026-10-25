@@ -393,6 +393,42 @@ impl KronnToolExecutor {
                 json!({}),
             ),
             "qp_list" => get("/api/quick-prompts", Vec::new(), None),
+            // Decided as the version list it reads: the Quick Prompt's own scope.
+            "qp_get" => get(
+                "/api/quick-prompts/{id}/history",
+                vec![("id".into(), id("qp_id"))],
+                None,
+            ),
+            "skill_get" => {
+                let skill = id("skill_id");
+                let pinned = skill.contains('@');
+                let base = skill.split('@').next().unwrap_or_default().to_owned();
+                get(
+                    if pinned {
+                        "/api/skills/{id}/versions/{version}"
+                    } else {
+                        "/api/skills/{id}/history"
+                    },
+                    vec![("id".into(), base)],
+                    None,
+                )
+            }
+            "skill_create" => send(
+                "POST",
+                "/api/skills",
+                Vec::new(),
+                only(args, super::version_tools::SKILL_FIELDS),
+            ),
+            "skill_update" => send(
+                "PUT",
+                "/api/skills/{id}",
+                vec![("id".into(), id("skill_id"))],
+                only(
+                    args,
+                    &super::version_tools::SKILL_FIELDS
+                        [..super::version_tools::SKILL_FIELDS.len() - 1],
+                ),
+            ),
             // Only what `quick_prompt_write_request` keeps: a template, never
             // its model or bindings, and no project change on update.
             "qp_create_draft" => send(

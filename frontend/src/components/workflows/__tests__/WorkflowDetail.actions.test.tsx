@@ -229,6 +229,26 @@ describe('WorkflowDetail — header actions', () => {
     expect(props.onEdit).toHaveBeenCalledTimes(1);
   });
 
+  it('invites to set up the shadow when it is off, and opens the wizard on it', () => {
+    const { props } = renderDetail();
+    const entry = screen.getByTestId('wf-shadow-entry');
+    expect(entry).toHaveAttribute('data-active', 'false');
+    expect(entry).toHaveTextContent('wf.shadow.entryOff');
+    fireEvent.click(entry);
+    expect(props.onEdit).toHaveBeenCalledWith('shadow');
+  });
+
+  it('summarises an active shadow: versions tested and projects covered', () => {
+    renderDetail({
+      workflow: mkWorkflow({ shadow: { enabled: true, project_ids: ['p1'], skills: { 'custom-a': 'custom-a@2' }, quick_prompt_versions: { qp1: 3 } } }),
+      projects: [{ id: 'p1', name: 'Alpha' }] as unknown as Props['projects'],
+    });
+    const entry = screen.getByTestId('wf-shadow-entry');
+    expect(entry).toHaveAttribute('data-active', 'true');
+    expect(entry.textContent).toMatch(/wf\.shadow\.entryOn/);
+    expect(entry).toHaveAccessibleName(expect.stringContaining('wf.shadow.entryTitleOn'));
+  });
+
   it('fires onRefresh when the refresh button is clicked', () => {
     const { props } = renderDetail();
     fireEvent.click(screen.getByText('wf.refresh'));

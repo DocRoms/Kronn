@@ -64,12 +64,13 @@ describe('LivePageResources (KT-1450)', () => {
     await waitFor(() => expect(pagesApi.resources).toHaveBeenCalledTimes(2));
   });
 
-  it('warns that a Quick Prompt promotion changes it everywhere', async () => {
+  it('says a Quick Prompt promotion pins this workflow\'s steps and leaves the Quick Prompt as it is', async () => {
     const confirm = vi.fn().mockReturnValue(false);
     vi.stubGlobal('confirm', confirm);
     renderPanel();
     fireEvent.click(await screen.findByTestId('live-page-resource-promote-qp-1'));
-    expect(confirm.mock.calls[0][0]).toContain('pas seulement « PR review »');
+    expect(confirm.mock.calls[0][0]).toContain('Les steps de « PR review » qui le chargent épinglent');
+    expect(confirm.mock.calls[0][0]).toContain('Le Quick Prompt lui-même ne change pas');
   });
 
   it('offers no promotion when the shadow tests the version the normal run already loads', async () => {
@@ -86,7 +87,7 @@ describe('LivePageResources (KT-1450)', () => {
     vi.mocked(pagesApi.resources).mockResolvedValue([resources[2]]);
     renderPanel();
     await screen.findByTestId('live-page-resources');
-    expect(screen.getByText('configurer « PR review »')).toHaveAttribute('href', '/workflows/wf-1/edit');
+    expect(screen.getByText('configurer « PR review »')).toHaveAttribute('href', '/workflows/wf-1/edit#shadow');
   });
 
   it('shows nothing for a page without resources', async () => {

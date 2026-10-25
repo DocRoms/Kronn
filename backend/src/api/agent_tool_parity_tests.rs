@@ -6,7 +6,7 @@ use super::*;
 use std::collections::BTreeSet;
 
 const SESSION: &str = "CLI session plumbing: an HTTP agent's turn is its own message, with no joined session, lease or peer";
-const HUMAN_ONLY: &str = "skills, profiles and directives are written by a human; the bridge refuses these routes to every agent";
+const HUMAN_ONLY: &str = "deleting a skill (it drops the history) and writing profiles or directives stay human; the bridge refuses these routes to every agent";
 const DEFERRED: &str = "deferred to KT-1356: HTTP agents do not have it yet";
 
 /// MCP tools an HTTP agent does not get, and why.
@@ -43,8 +43,6 @@ const MCP_ONLY: &[(&str, &str)] = &[
         "resumes a CLI worker's session; a native worker is relaunched",
     ),
     ("disc_load_other", "HTTP equivalent: disc_read"),
-    ("skill_create", HUMAN_ONLY),
-    ("skill_update", HUMAN_ONLY),
     ("skill_delete", HUMAN_ONLY),
     ("profile_create", HUMAN_ONLY),
     ("profile_update", HUMAN_ONLY),
@@ -62,7 +60,6 @@ const MCP_ONLY: &[(&str, &str)] = &[
     ("profiles_list", DEFERRED),
     ("profile_get", DEFERRED),
     ("skills_list", DEFERRED),
-    ("skill_get", DEFERRED),
     ("disc_create", DEFERRED),
     ("disc_create_room", DEFERRED),
     ("disc_get_message", DEFERRED),
@@ -79,7 +76,6 @@ const MCP_ONLY: &[(&str, &str)] = &[
     ("proposal_list", DEFERRED),
     ("qp_batch_run", DEFERRED),
     ("qp_delete", DEFERRED),
-    ("qp_get", DEFERRED),
     ("resolve_id", DEFERRED),
     ("task_assign", DEFERRED),
     ("task_changes", DEFERRED),
@@ -246,4 +242,63 @@ fn both_audiences_load_the_workflow_guide_through_tool_manual() {
     assert!(script.contains("WORKFLOW_GUIDE = \"workflow-architect\""));
     assert!(script.contains("/api/skills/{WORKFLOW_GUIDE}/guide"));
     assert!(crate::core::bridge_token::route_for("GET", "/api/skills/{id}/guide").is_some());
+}
+
+/// Versions, shadow runs and refs (KT-1434/1447/1448/1449): both audiences
+/// read the same manuals, word for word, and the same guide section.
+#[test]
+fn version_and_shadow_knowledge_is_the_same_on_both_sides() {
+    let script = include_str!("../../scripts/disc-introspection-mcp.py");
+    for manual in [
+        SKILL_GET_MANUAL,
+        SKILL_CREATE_MANUAL,
+        SKILL_UPDATE_MANUAL,
+        QP_GET_MANUAL,
+        WORKFLOW_VARIANTS_MANUAL,
+    ] {
+        for sentence in manual.split(". ") {
+            let sentence = sentence.trim_end_matches('.');
+            assert!(
+                script.contains(sentence),
+                "the bridge's manual lacks: {sentence}"
+            );
+        }
+    }
+    assert_eq!(
+        tool_manual(Some("skill_get"), None)["manual"],
+        SKILL_GET_MANUAL
+    );
+    assert_eq!(tool_manual(Some("qp_get"), None)["manual"], QP_GET_MANUAL);
+    for (tool, manual) in [
+        ("skill_create", SKILL_CREATE_MANUAL),
+        ("skill_update", SKILL_UPDATE_MANUAL),
+    ] {
+        assert_eq!(tool_manual(Some(tool), None)["manual"], manual);
+    }
+    for tool in ["workflow_create_draft", "workflow_update"] {
+        let manual = tool_manual(Some(tool), None)["manual"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(manual.ends_with(WORKFLOW_VARIANTS_MANUAL), "{tool}");
+    }
+    let section = tool_manual(Some(WORKFLOW_GUIDE), Some("Versions and shadow runs"));
+    let content = section["content"].as_str().unwrap();
+    for fact in [
+        "external_effect: true",
+        "{{run.variant}}",
+        "custom-x@N",
+        "qp_get({qp_id, version: N})",
+        "**human-only**",
+        "KRONN_REF_<NAME>",
+    ] {
+        assert!(content.contains(fact), "the guide section lacks {fact}");
+    }
+    let schema = crate::api::workflows::canonical_step_schema();
+    assert!(schema["shape"]
+        .as_str()
+        .unwrap()
+        .contains("external_effect"));
+    let namespaces = &schema["template_vars"]["namespaces"];
+    assert!(namespaces["run.variant"].is_string() && namespaces["refs.<name>"].is_string());
 }

@@ -19,9 +19,31 @@ Release notes for 0.9.3 and earlier are available in the
   state as v1 at its next save. The skill page has a 🕒 history button:
   the timeline of versions, a line diff with the previous version, and a
   restore that asks first and records the restored content as a new
-  version, so nothing is lost. The history is for people: agents can
-  neither read it nor restore a version. Built-in skills have no history
-  (KT-1434).
+  version, so nothing is lost. Agents can read the history (`skill_get`
+  lists the versions, `custom-x@N` reads one) but never restore a version.
+  Built-in skills have no history (KT-1434).
+- Agents can create and edit custom skills, CLI agents (MCP bridge) and
+  HTTP/local agents alike, with the rules of Quick Prompts: `skill_create`
+  saves a skill in the room's or workflow's project, `skill_update` changes
+  a skill of a project in reach, never a builtin one. Each change is a new
+  version, so a step pinned to `custom-x@N` keeps what it was validated on,
+  while an enabled workflow loading the bare skill is disabled by an agent's
+  edit until a human enables it again. A human tries the new version on real
+  runs from the workflow's shadow settings. An agent never sets a skill's
+  `allowed_tools`; restoring a version and deleting a skill stay human.
+- Agents know and can read what these versions and shadow runs need. CLI
+  agents (MCP bridge) and HTTP/local agents get the same tools and the same
+  guidance: `skill_get` lists a custom skill's versions and reads one with
+  `custom-x@N`, `qp_get` lists a Quick Prompt's versions and reads one with
+  `version`, `workflow_get` shows the shadow config. Both are read only and
+  scoped like the object itself: a project's skill or Quick Prompt, and its
+  versions, stay in that project. The step schema and the workflow guide's
+  new « Versions and shadow runs » section explain `external_effect` (mark
+  every step that acts outside Kronn), `{{run.variant}}` (keep the two runs'
+  branches and paths apart), `{{refs.<name>}}` / `KRONN_REF_<NAME>` and
+  pins; configuring or promoting a shadow stays human-only, and the agent
+  points the user to the workflow editor and the Page's Resources panel. HTTP
+  agents can now also author a workflow's `refs`.
 - A workflow step, a Quick Prompt or a discussion can load a precise version
   of a custom skill instead of the latest: `custom-x@3` loads version 3, and
   later edits of the skill no longer change what that step runs. The skill
@@ -29,13 +51,21 @@ Release notes for 0.9.3 and earlier are available in the
   custom skill picked, « latest version » or a version to pin. A version
   that does not exist is refused at save, never silently replaced by the
   latest (KT-1447).
+- An Agent step can also pin the version of its Quick Prompt (« Quick Prompt
+  version » under the Quick Prompt picker). Left unset, the step loads the
+  latest version, as before; pinned, an edit of the Quick Prompt reaches
+  the step only when someone picks the new version. A repository Quick
+  Prompt's pinned content is checked against its approval too, and an
+  imported workflow drops the pin, since its Quick Prompt comes without
+  history.
 - Shadow runs: a workflow can start, alongside each normal run, a shadow run
   on the same inputs that loads other versions of its skills and Quick
   Prompts. Steps marked « acts outside Kronn » (posting, sending, writing
   elsewhere) and Gates are skipped in the shadow run, so nothing happens
   twice; it never counts against the concurrency limit, never pages on
   failure, and its sub-runs are shadow runs too. It works in its own git
-  worktree, unless the workflow declares it never writes the checkout. Set it in the workflow
+  worktree, unless the workflow declares it never writes the checkout. Set
+  it from the « Shadow » button of the workflow page or in the workflow
   editor (« Shadow runs »: on/off, the projects it covers, the version of each
   skill and Quick Prompt). The run list marks shadow runs, and a normal run
   shows its shadow side by side, step by step. Steps read the variant as
@@ -44,9 +74,10 @@ Release notes for 0.9.3 and earlier are available in the
   workflows use (those that publish to it, those its buttons launch, and
   their sub-workflows), with their latest version, their history, a link to
   edit them and, step by step, what the normal run and the shadow run load.
-  « Promote » hands a version tested in shadow to the normal runs: a skill in
-  every step that loads it, a Quick Prompt as its current version, saved as
-  a new version (KT-1450).
+  « Promote » hands a version tested in shadow to the normal runs of that
+  workflow: a skill in every step that loads it, a Quick Prompt pinned on
+  the steps that load it. The Quick Prompt itself, which other workflows
+  may use, is left as it is (KT-1450).
 - Workflow and Page exports carry the custom skills their steps and Quick
   Prompts use: each skill's file, name, version and a content hash. On
   import, a skill identical to one already here is reused, a missing one is
@@ -883,6 +914,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A skill imported with a workflow or a Page never pre-approves tools: its
+  `allowed-tools` is dropped on import, whoever imports it, and an import
+  whose skill still declares tools after that is refused. A human sets it
+  again in the skill editor if wanted.
+- A worker's HTTP agent can no longer run a tool its catalogue leaves out
+  (backlog tools, `qp_update`, `skill_update`…) by naming it: the call is
+  refused before any access check.
 - Integration validations that need Docker work again, on a human's
   decision (KT-1433). Since 0.15.1 they run in the lane sandbox, which keeps
   Docker closed, so `make iso-deps` and the like always failed and the

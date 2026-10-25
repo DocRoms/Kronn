@@ -32,11 +32,11 @@ references for the lifecycle actions they steer. A worker is still offered
 `task_exec_status`, but it accepts a task reference as well as an execution id,
 so a local model never has to reconstruct an opaque UUID, and it answers only
 the execution's principal or its own native worker.
-`[src: file: backend/src/api/agent_tools.rs:1430-1562#worker_room_catalogue]`
-`[src: file: backend/src/api/agent_tools.rs:2809-2833#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:3959-3981#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:2763-2792#task_exec_status]`
-`[src: file: backend/src/api/agent_tools.rs:3921-3957#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:1612-1755#worker_room_catalogue]`
+`[src: file: backend/src/api/agent_tools.rs:2910-2934#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4060-4082#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:2864-2893#task_exec_status]`
+`[src: file: backend/src/api/agent_tools.rs:4022-4058#native_execution_for_caller]`
 
 The discussion SSE path resolves this scope from the durable
 `task_executions.sub_discussion_id` lineage before it constructs the HTTP tool
@@ -595,7 +595,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:3983-4011#count_arg] [src: file: backend/src/api/agent_tools.rs:3678-3721#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:4084-4112#count_arg] [src: file: backend/src/api/agent_tools.rs:3779-3822#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes

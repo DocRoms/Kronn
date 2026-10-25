@@ -591,27 +591,340 @@ async fn a_bridge_token_cannot_read_the_pending_quick_exec_approvals() {
     assert_eq!(json["success"], true, "{json}");
 }
 
-/// KT-1434 — a skill's history is the human's: no bridge tool reads it, so a
-/// bridge token neither reads nor restores a version.
+fn custom_skill(name: &str, project: Option<&str>) -> String {
+    kronn::core::skills::save_custom_skill(
+        name,
+        "desc",
+        "🔎",
+        &kronn::models::SkillCategory::Domain,
+        "rule one",
+        None,
+        None,
+        project,
+    )
+    .unwrap()
+}
+
+/// KT-1434 — a skill's or a Quick Prompt's versions read like the object: a
+/// project's stays in its project; restoring stays human.
 #[tokio::test]
-async fn a_bridge_token_never_reads_nor_restores_a_skill_version() {
+async fn versions_read_like_their_skill_or_quick_prompt() {
+    // Custom skills live in the data dir: this process's own, never the real one.
+    if crate::own_process::delegated(
+        module_path!(),
+        "versions_read_like_their_skill_or_quick_prompt",
+    ) {
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    kronn::core::child_env::set_var("KRONN_DATA_DIR", data.path());
     let (app, _repos) = fixture().await;
+    let own = custom_skill("Scope versions own", Some("p1"));
+    let other = custom_skill("Scope versions other", Some("p2"));
+    let shared = custom_skill("Scope versions shared", None);
     let guard = bridge_for("room-a");
-    let (status, json) = call(
+    let token = guard.value().to_owned();
+    for path in [
+        format!("/api/skills/{own}/history"),
+        format!("/api/skills/{own}/versions/1"),
+        format!("/api/skills/{shared}/history"),
+        "/api/skills/rust/history".to_owned(),
+        "/api/quick-prompts/qp-a/history".to_owned(),
+        "/api/quick-prompts/qp-global/history".to_owned(),
+    ] {
+        let (status, json) = call(&app, "GET", &path, Some(&token), None).await;
+        assert_eq!(status, 200, "{path}: {json}");
+        assert_eq!(json["success"], true, "{path}: {json}");
+    }
+    let (_, json) = call(
         &app,
         "GET",
-        "/api/skills/rust/history",
-        Some(guard.value()),
+        &format!("/api/skills/{own}/versions/1"),
+        Some(&token),
         None,
+    )
+    .await;
+    assert_eq!(json["data"]["content"], "rule one", "{json}");
+    for path in [
+        format!("/api/skills/{other}/history"),
+        format!("/api/skills/{other}/versions/1"),
+        format!("/api/skills/{other}@1/history"),
+        "/api/skills/custom-no-such-skill/history".to_owned(),
+        "/api/quick-prompts/qp-b/history".to_owned(),
+    ] {
+        let (status, json) = call(&app, "GET", &path, Some(&token), None).await;
+        assert_eq!(status, 403, "{path}: {json}");
+    }
+    let (status, json) = call(
+        &app,
+        "POST",
+        &format!("/api/skills/{own}/versions/1/restore"),
+        Some(&token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, 403, "{json}");
+
+    // A launch that owns nothing reads a shared skill's versions, never a project's.
+    let unbound = mint(BridgeScope::default()).unwrap();
+    let path = format!("/api/skills/{shared}/history");
+    let (status, json) = call(&app, "GET", &path, Some(unbound.value()), None).await;
+    assert_eq!(status, 200, "{json}");
+    let path = format!("/api/skills/{own}/history");
+    let (status, json) = call(&app, "GET", &path, Some(unbound.value()), None).await;
+    assert_eq!(status, 403, "{json}");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/quick-prompts/qp-global/history",
+        Some(unbound.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "a Quick Prompt list is not a catalogue");
+}
+
+/// A skill is written like a Quick Prompt: created in the token's project,
+/// updated (a new version) only when it is that project's custom skill;
+/// another project's, a shared or builtin one, a pinned id, a deletion or a
+/// restore stays refused, even through a room's write grant.
+#[tokio::test]
+async fn skills_are_written_like_quick_prompts_within_the_token_s_project() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "skills_are_written_like_quick_prompts_within_the_token_s_project",
+    ) {
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    kronn::core::child_env::set_var("KRONN_DATA_DIR", data.path());
+    let (app, _repos) = fixture().await;
+    let other = custom_skill("Write scope other", Some("p2"));
+    let shared = custom_skill("Write scope shared", None);
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let draft = json!({
+        "name": "Write scope own", "description": "d", "icon": "🔎",
+        "category": "Domain", "content": "rule one",
+    });
+
+    let (status, json) = call(
+        &app,
+        "POST",
+        "/api/skills",
+        Some(&token),
+        Some(draft.clone()),
+    )
+    .await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["data"]["project_id"], "p1", "{json}");
+    let own = json["data"]["id"].as_str().unwrap().to_owned();
+    let mut named = draft.clone();
+    named["name"] = json!("Write scope named");
+    named["project_id"] = json!("p1");
+    let (status, json) = call(&app, "POST", "/api/skills", Some(&token), Some(named)).await;
+    assert_eq!(status, 200, "{json}");
+
+    let path = format!("/api/skills/{own}");
+    let mut edit = draft.clone();
+    edit["content"] = json!("rule two");
+    let (status, json) = call(&app, "PUT", &path, Some(&token), Some(edit.clone())).await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["data"]["content"], "rule two", "{json}");
+    assert_eq!(json["data"]["project_id"], "p1", "{json}");
+    let (_, history) = call(&app, "GET", &format!("{path}/history"), Some(&token), None).await;
+    assert_eq!(history["data"].as_array().unwrap().len(), 2, "{history}");
+    let (status, _) = call(&app, "PUT", &path, Some(&token), Some(edit.clone())).await;
+    assert_eq!(status, 200);
+    let (_, history) = call(&app, "GET", &format!("{path}/history"), Some(&token), None).await;
+    assert_eq!(
+        history["data"].as_array().unwrap().len(),
+        2,
+        "unchanged: {history}"
+    );
+
+    // A human's allowed_tools: an agent neither sets nor changes them.
+    let mut tools = draft.clone();
+    tools["name"] = json!("Write scope tools");
+    tools["allowed_tools"] = json!("Bash");
+    let (_, json) = call(&app, "POST", "/api/skills", Some(&token), Some(tools)).await;
+    assert_eq!(json["success"], false, "{json}");
+    let mut widen = edit.clone();
+    widen["allowed_tools"] = json!("Bash(*)");
+    let (_, json) = call(&app, "PUT", &path, Some(&token), Some(widen)).await;
+    assert_eq!(json["success"], false, "{json}");
+
+    let mut elsewhere = draft.clone();
+    elsewhere["project_id"] = json!("p2");
+    let mut global = draft.clone();
+    global["project_id"] = Value::Null;
+    let mut moved = edit.clone();
+    moved["project_id"] = json!("p2");
+    let mut made_global = edit.clone();
+    made_global["project_id"] = json!("");
+    for (method, target, body) in [
+        ("POST", "/api/skills".to_owned(), elsewhere.clone()),
+        ("PUT", format!("/api/skills/{other}"), edit.clone()),
+        ("PUT", format!("/api/skills/{shared}"), edit.clone()),
+        ("PUT", "/api/skills/rust".to_owned(), edit.clone()),
+        ("PUT", format!("/api/skills/{own}@1"), edit.clone()),
+        ("PUT", path.clone(), moved),
+        ("PUT", path.clone(), made_global),
+        ("DELETE", path.clone(), json!({})),
+        ("POST", format!("{path}/versions/1/restore"), json!({})),
+    ] {
+        let (status, json) = call(&app, method, &target, Some(&token), Some(body)).await;
+        assert_eq!(status, 403, "{method} {target}: {json}");
+    }
+    let (status, json) = call(&app, "POST", "/api/skills", Some(&token), Some(global)).await;
+    assert_eq!(status, 200, "a null project is the token's: {json}");
+    assert_eq!(json["data"]["project_id"], "p1", "{json}");
+
+    // A room's write grant opens planning only, never another project's skills.
+    let (status, granted) = grant_scope(
+        &app,
+        "room-a",
+        json!({"project_id": "p2", "access": "write"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{granted}");
+    let (status, _) = call(
+        &app,
+        "PUT",
+        &format!("/api/skills/{other}"),
+        Some(&token),
+        Some(edit.clone()),
+    )
+    .await;
+    assert_eq!(status, 403);
+    let (status, _) = call(&app, "POST", "/api/skills", Some(&token), Some(elsewhere)).await;
+    assert_eq!(status, 403);
+
+    // A launch with no project and no grant writes no skill at all.
+    let unbound = mint(BridgeScope::default()).unwrap();
+    let (status, json) = call(
+        &app,
+        "PUT",
+        &path,
+        Some(unbound.value()),
+        Some(edit.clone()),
     )
     .await;
     assert_eq!(status, 403, "{json}");
     let (status, json) = call(
         &app,
         "POST",
-        "/api/skills/custom-anything/versions/1/restore",
-        Some(guard.value()),
-        Some(json!({})),
+        "/api/skills",
+        Some(unbound.value()),
+        Some(draft),
+    )
+    .await;
+    assert_eq!(status, 403, "{json}");
+    assert_eq!(
+        kronn::core::skills::get_skill(&other).unwrap().content,
+        "rule one",
+        "nothing refused was written"
+    );
+}
+
+/// A project-less room writes a global skill once granted « General · write »
+/// and edits only those it created; a human recreating a deleted slug takes
+/// it back from the room.
+#[tokio::test]
+async fn a_room_without_a_project_writes_only_the_global_skills_it_created() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_room_without_a_project_writes_only_the_global_skills_it_created",
+    ) {
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    kronn::core::child_env::set_var("KRONN_DATA_DIR", data.path());
+    let (app, _repos) = fixture().await;
+    let human = custom_skill("General human", None);
+    let guard = bridge_for("room-g");
+    let token = guard.value().to_owned();
+    let draft = json!({
+        "name": "General agent", "description": "d", "icon": "🔎",
+        "category": "Domain", "content": "body",
+    });
+    let (status, json) = call(
+        &app,
+        "POST",
+        "/api/skills",
+        Some(&token),
+        Some(draft.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{json}");
+    let (_, scope) = call(&app, "GET", "/api/discussions/room-g/scope", None, None).await;
+    let seen = scope["data"]["fingerprint"].as_str().unwrap().to_owned();
+    let (status, granted) = grant_scope(
+        &app,
+        "room-g",
+        json!({"general": true, "access": "write", "confirm": "GENERAL-WRITE", "expected_fingerprint": seen}),
+    )
+    .await;
+    assert_eq!(status, 200, "{granted}");
+    let (status, json) = call(
+        &app,
+        "POST",
+        "/api/skills",
+        Some(&token),
+        Some(draft.clone()),
+    )
+    .await;
+    assert_eq!(status, 200, "{json}");
+    assert!(json["data"]["project_id"].is_null(), "{json}");
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/skills/{id}");
+    let mut edit = draft.clone();
+    edit["content"] = json!("edited");
+    let (status, json) = call(&app, "PUT", &path, Some(&token), Some(edit.clone())).await;
+    assert_eq!(status, 200, "{json}");
+    let (status, json) = call(
+        &app,
+        "PUT",
+        &format!("/api/skills/{human}"),
+        Some(&token),
+        Some(edit.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{json}");
+
+    // Deleted by a human then recreated under the same slug: no longer the room's.
+    let (status, _) = call(&app, "DELETE", &path, None, None).await;
+    assert_eq!(status, 200);
+    let (status, json) = call(&app, "POST", "/api/skills", None, Some(draft)).await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["data"]["id"], id.as_str(), "the slug is reused");
+    let (status, json) = call(&app, "PUT", &path, Some(&token), Some(edit.clone())).await;
+    assert_eq!(status, 403, "{json}");
+
+    // Removed outside the API (its file gone): a human's new skill on that
+    // slug is still not the room's.
+    let mut second = edit.clone();
+    second["name"] = json!("General agent two");
+    let (status, json) = call(
+        &app,
+        "POST",
+        "/api/skills",
+        Some(&token),
+        Some(second.clone()),
+    )
+    .await;
+    assert_eq!(status, 200, "{json}");
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
+    assert!(kronn::core::skills::delete_custom_skill(&id).unwrap());
+    let (status, json) = call(&app, "POST", "/api/skills", None, Some(second.clone())).await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["data"]["id"], id.as_str(), "the slug is reused");
+    let (status, json) = call(
+        &app,
+        "PUT",
+        &format!("/api/skills/{id}"),
+        Some(&token),
+        Some(second),
     )
     .await;
     assert_eq!(status, 403, "{json}");
@@ -1343,7 +1656,8 @@ async fn a_task_parent_in_another_project_is_refused() {
     assert_eq!(status, 403);
 }
 
-/// B-09 — the shared agent library is read only for a token.
+/// B-09 — profiles and directives are read only for a token; a skill is
+/// deleted by a human only (its writes: see the Quick Prompt rule above).
 #[tokio::test]
 async fn the_agent_library_is_read_only_for_a_token() {
     let (app, _repos) = fixture().await;

@@ -709,6 +709,11 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quick_prompt_id: Option<String>,
 
+    /// Version of `quick_prompt_id` the step loads; unset follows its latest
+    /// version. A shadow run may still test another one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_prompt_version: Option<u32>,
+
     /// Optional bindings from Quick Prompt variable names to workflow
     /// template expressions. This keeps the QP reusable from the library
     /// (`{{production_errors}}`) while an Agent step can feed it from an

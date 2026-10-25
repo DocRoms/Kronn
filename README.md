@@ -28,8 +28,15 @@
 
 ## What's new in 0.15.1
 
-0.15.1 makes the AI-doc audit trustworthy and gives agents local media.
+0.15.1 makes the AI-doc audit trustworthy, lets you test prompt and skill
+versions on real runs before shipping them, and gives agents local media.
 
+- **Versions and shadow runs:** custom skills keep a version history like
+  Quick Prompts, and a step can pin the skill or Quick Prompt version it
+  loads. A workflow can run a shadow alongside each normal run, on the same
+  inputs with other versions, skipping everything that acts outside Kronn;
+  the run list compares both and a Page promotes the better version in one
+  click. Agents read and write versions; exports carry the skills.
 - **An audit you can trust:** the audit checks what its documents claim
   against the repository, no longer reports committed secrets as absent,
   repairs more of what it used to fail on and hands a human the rest.

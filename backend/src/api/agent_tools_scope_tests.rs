@@ -701,3 +701,342 @@ async fn the_step_test_button_is_told_about_the_workflow_scope() {
         "{text}"
     );
 }
+
+/// KT-1434 — an HTTP agent reads versions as a CLI agent does: its project's
+/// skill or Quick Prompt and the shared ones, never another project's.
+#[tokio::test]
+#[serial_test::serial]
+async fn versions_are_read_within_the_room_s_reach() {
+    let _data = crate::core::config::TestDataDir::new();
+    let World { state, .. } = two_projects().await;
+    let skill = |name: &str, project: Option<&str>, content: &str| {
+        crate::core::skills::save_custom_skill(
+            name,
+            "desc",
+            "🔎",
+            &crate::models::SkillCategory::Domain,
+            content,
+            None,
+            None,
+            project,
+        )
+        .unwrap()
+    };
+    let own = skill("Own review", Some("a"), "rule one");
+    crate::core::skills::update_custom_skill(
+        &own,
+        "Own review",
+        "desc",
+        "🔎",
+        &crate::models::SkillCategory::Domain,
+        "rule two",
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let other = skill("Other review", Some("b"), "secret rule");
+    state
+        .db
+        .with_conn(|conn| {
+            for (id, project) in [("qp-own", Some("a")), ("qp-other", Some("b"))] {
+                conn.execute(
+                    "INSERT INTO quick_prompts(id, name, prompt_template, project_id, created_at, updated_at) \
+                     VALUES (?1, ?1, 'v1', ?2, '2026-10-25T00:00:00Z', '2026-10-25T00:00:00Z')",
+                    rusqlite::params![id, project],
+                )?;
+                let saved = crate::db::quick_prompts::get_quick_prompt(conn, id)?
+                    .ok_or_else(|| anyhow::anyhow!("no {id}"))?;
+                crate::db::quick_prompts::snapshot_quick_prompt_version(conn, &saved)?;
+                conn.execute(
+                    "UPDATE quick_prompts SET prompt_template = 'v2' WHERE id = ?1",
+                    [id],
+                )?;
+                let saved = crate::db::quick_prompts::get_quick_prompt(conn, id)?
+                    .ok_or_else(|| anyhow::anyhow!("no {id}"))?;
+                crate::db::quick_prompts::snapshot_quick_prompt_version(conn, &saved)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let agent = room_agent(&state, "room-a");
+
+    let read = call(agent.as_ref(), "skill_get", json!({"skill_id": own})).await;
+    assert!(read.ok, "{}", read.content);
+    assert_eq!(read.content["content"], "rule two");
+    let versions = read.content["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2, "{}", read.content);
+    assert_eq!(versions[0]["current"], true);
+    assert!(
+        versions[0].get("content").is_none(),
+        "a list carries no body"
+    );
+    let first = call(
+        agent.as_ref(),
+        "skill_get",
+        json!({"skill_id": format!("{own}@1")}),
+    )
+    .await;
+    assert!(first.ok, "{}", first.content);
+    assert_eq!(first.content["content"], "rule one");
+
+    let read = call(agent.as_ref(), "qp_get", json!({"qp_id": "qp-own"})).await;
+    assert!(read.ok, "{}", read.content);
+    assert_eq!(read.content["prompt_template"], "v2");
+    assert_eq!(read.content["versions"].as_array().unwrap().len(), 2);
+    let first = call(
+        agent.as_ref(),
+        "qp_get",
+        json!({"qp_id": "qp-own", "version": 1}),
+    )
+    .await;
+    assert!(first.ok, "{}", first.content);
+    assert_eq!(first.content["prompt_template"], "v1");
+    let missing = call(
+        agent.as_ref(),
+        "qp_get",
+        json!({"qp_id": "qp-own", "version": 9}),
+    )
+    .await;
+    assert!(!missing.ok, "{}", missing.content);
+
+    for (tool, arguments) in [
+        ("skill_get", json!({"skill_id": other.clone()})),
+        ("skill_get", json!({"skill_id": format!("{other}@1")})),
+        ("qp_get", json!({"qp_id": "qp-other"})),
+        ("qp_get", json!({"qp_id": "qp-other", "version": 1})),
+    ] {
+        let outcome = call(agent.as_ref(), tool, arguments.clone()).await;
+        assert!(refused(&outcome), "{tool} {arguments}: {}", outcome.content);
+        assert!(!outcome.content.to_string().contains("secret rule"));
+    }
+}
+
+fn workflow_loading(id: &str, skill: &str) -> crate::models::Workflow {
+    use crate::models::*;
+    Workflow {
+        refs: Default::default(),
+        retention: None,
+        shadow: None,
+        project_scope: None,
+        pinned: false,
+        id: id.into(),
+        name: id.into(),
+        project_id: Some("a".into()),
+        trigger: WorkflowTrigger::Manual,
+        steps: vec![WorkflowStep {
+            name: "agent".into(),
+            skill_ids: vec![skill.into()],
+            ..WorkflowStep::default()
+        }],
+        actions: vec![],
+        safety: WorkflowSafety {
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
+        },
+        workspace_config: None,
+        concurrency_limit: None,
+        concurrency_key: None,
+        guards: None,
+        artifacts: Default::default(),
+        on_failure: vec![],
+        exec_allowlist: vec![],
+        variables: vec![],
+        enabled: true,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+/// An HTTP agent writes skills as a CLI agent does: in its project, a new
+/// version per change, never a builtin, another project's or a human's
+/// `allowed_tools`; an unpinned workflow user is disabled, a pinned one is not.
+#[tokio::test]
+#[serial_test::serial]
+async fn skills_are_written_like_quick_prompts() {
+    let _data = crate::core::config::TestDataDir::new();
+    let World { state, .. } = two_projects().await;
+    let agent = room_agent(&state, "room-a");
+    let fields = json!({
+        "name": "Agent review", "description": "d", "icon": "🔎",
+        "category": "Domain", "content": "rule one", "allowed_tools": "Bash",
+    });
+    let created = call(agent.as_ref(), "skill_create", fields.clone()).await;
+    assert!(created.ok, "{}", created.content);
+    assert_eq!(created.content["project_id"], "a", "{}", created.content);
+    assert!(created.content.get("allowed_tools").is_none());
+    let own = created.content["id"].as_str().unwrap().to_owned();
+    let mut elsewhere = fields.clone();
+    elsewhere["project_id"] = json!("b");
+    let refused_create = call(agent.as_ref(), "skill_create", elsewhere).await;
+    assert!(refused(&refused_create), "{}", refused_create.content);
+
+    let human = crate::core::skills::save_custom_skill(
+        "Human tools",
+        "d",
+        "🔎",
+        &crate::models::SkillCategory::Domain,
+        "body",
+        None,
+        Some("Read"),
+        Some("a"),
+    )
+    .unwrap();
+    let other = crate::core::skills::save_custom_skill(
+        "Other review",
+        "d",
+        "🔎",
+        &crate::models::SkillCategory::Domain,
+        "secret",
+        None,
+        None,
+        Some("b"),
+    )
+    .unwrap();
+    let shared = crate::core::skills::save_custom_skill(
+        "Shared review",
+        "d",
+        "🔎",
+        &crate::models::SkillCategory::Domain,
+        "shared",
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let workflows = [
+        ("wf-follows", own.clone()),
+        ("wf-pinned", format!("{own}@1")),
+    ];
+    state
+        .db
+        .with_conn(move |conn| {
+            for (id, skill) in &workflows {
+                crate::db::workflows::insert_workflow(conn, &workflow_loading(id, skill))?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let edit = json!({"skill_id": own, "content": "rule two"});
+    let edited = call(agent.as_ref(), "skill_update", edit.clone()).await;
+    assert!(edited.ok, "{}", edited.content);
+    assert_eq!(edited.content["content"], "rule two");
+    assert_eq!(
+        edited.content["name"], "Agent review",
+        "untouched fields stay"
+    );
+    let again = call(agent.as_ref(), "skill_update", edit).await;
+    assert!(again.ok, "{}", again.content);
+    let versions = crate::core::skill_versions::history(&own).unwrap();
+    assert_eq!(versions.len(), 2, "an unchanged save adds no version");
+    let enabled = state
+        .db
+        .with_conn(|conn| {
+            Ok([
+                crate::db::workflows::get_workflow(conn, "wf-follows")?,
+                crate::db::workflows::get_workflow(conn, "wf-pinned")?,
+            ])
+        })
+        .await
+        .unwrap()
+        .map(|workflow| workflow.is_some_and(|workflow| workflow.enabled));
+    assert!(!enabled[0], "the bare id follows the agent's edit");
+    assert!(enabled[1], "a pinned version is not affected");
+
+    let kept = call(
+        agent.as_ref(),
+        "skill_update",
+        json!({"skill_id": human, "content": "new body", "allowed_tools": "Bash(*)"}),
+    )
+    .await;
+    assert!(kept.ok, "{}", kept.content);
+    assert_eq!(kept.content["allowed_tools"], "Read", "{}", kept.content);
+
+    for target in [other.as_str(), shared.as_str(), "rust", &format!("{own}@1")] {
+        let outcome = call(
+            agent.as_ref(),
+            "skill_update",
+            json!({"skill_id": target, "content": "taken"}),
+        )
+        .await;
+        assert!(refused(&outcome), "{target}: {}", outcome.content);
+    }
+    assert_eq!(
+        crate::core::skills::get_skill(&other).unwrap().content,
+        "secret"
+    );
+
+    // A worker is not offered skill writes, like Quick Prompt writes.
+    let worker = KronnToolExecutor::arc_for_worker_room(
+        state.clone(),
+        Some("room-a".into()),
+        AgentType::Ollama,
+        None,
+        None,
+        None,
+    );
+    let offered: Vec<String> = worker
+        .catalogue()
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+        .collect();
+    assert!(!offered
+        .iter()
+        .any(|name| name == "skill_create" || name == "skill_update"));
+    assert!(!offered.iter().any(|name| name == "qp_update"));
+}
+
+/// A room without a project creates a global skill only once a human granted
+/// « General · write », then edits only the ones it created.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_room_without_a_project_writes_only_its_own_global_skills() {
+    let _data = crate::core::config::TestDataDir::new();
+    let World { state, .. } = two_projects().await;
+    let agent = room_agent(&state, "general");
+    let fields = json!({
+        "name": "General skill", "description": "d", "icon": "🔎",
+        "category": "Domain", "content": "body",
+    });
+    let before = call(agent.as_ref(), "skill_create", fields.clone()).await;
+    assert!(refused(&before), "{}", before.content);
+    grant_general(&state).await;
+    let created = call(agent.as_ref(), "skill_create", fields).await;
+    assert!(created.ok, "{}", created.content);
+    assert!(
+        created.content.get("project_id").is_none(),
+        "{}",
+        created.content
+    );
+    let id = created.content["id"].as_str().unwrap().to_owned();
+    let edited = call(
+        agent.as_ref(),
+        "skill_update",
+        json!({"skill_id": id, "content": "edited"}),
+    )
+    .await;
+    assert!(edited.ok, "{}", edited.content);
+    let human = crate::core::skills::save_custom_skill(
+        "Human global",
+        "d",
+        "🔎",
+        &crate::models::SkillCategory::Domain,
+        "body",
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let foreign = call(
+        agent.as_ref(),
+        "skill_update",
+        json!({"skill_id": human, "content": "taken"}),
+    )
+    .await;
+    assert!(refused(&foreign), "{}", foreign.content);
+}

@@ -1862,6 +1862,37 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     }
   });
 
+  it('opens the edit wizard on the shadow settings when the address carries #shadow', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.countRuns.mockResolvedValue(0);
+    window.history.replaceState(null, '', '#shadow');
+    try {
+      await wrap(
+        <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig}
+          selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: null, editor: 'edit' }} />,
+      );
+      // Expanded on arrival: its toggle is in view without a click.
+      expect(await screen.findByTestId('wf-shadow-enabled')).toBeInTheDocument();
+    } finally {
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  });
+
+  it('opens the wizard on the shadow settings from the workflow page entry', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.countRuns.mockResolvedValue(0);
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig}
+        selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: null }} />,
+    );
+    fireEvent.click(await screen.findByTestId('wf-shadow-entry'));
+    expect(await screen.findByTestId('wf-shadow-enabled')).toBeInTheDocument();
+  });
+
   it('applies the address again under a new token, even when its fields did not change', async () => {
     // Back after a click: the address goes A → B → A. The page may have moved
     // to B on its own (the click) while the B render never committed; the

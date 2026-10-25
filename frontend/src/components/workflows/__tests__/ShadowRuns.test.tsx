@@ -10,7 +10,7 @@ vi.mock('../../../lib/api', async () => {
   return buildApiMock();
 });
 
-import { ShadowRunsCard } from '../ShadowRunsCard';
+import { ShadowRunsCard, ShadowStatusButton } from '../ShadowRunsCard';
 import { ShadowCompare } from '../ShadowCompare';
 import { clip, compareRuns, isShadowRun, pairedShadows, readableOutput, runListRows, shadowsByNormalRun } from '../../../lib/shadowRuns';
 import { skills as skillsApi, workflows as workflowsApi } from '../../../lib/api';
@@ -45,6 +45,26 @@ describe('shadow runs (KT-1449)', () => {
     // Only the shadow matches: its normal row is still listed.
     expect(runListRows(runs, [shadow], pairs).map(r => r.id)).toEqual(['n1']);
     expect(runListRows(runs, [], pairs)).toEqual([]);
+  });
+
+  it('states the shadow on the workflow page and opens its settings', () => {
+    const fmt = (key: string, ...args: (string | number)[]) => (args.length ? `${key}(${args.join('|')})` : key);
+    const projects = [{ id: 'p1', name: 'Alpha' }, { id: 'p2', name: 'Beta' }] as Project[];
+    const onOpen = vi.fn();
+    const { rerender } = render(<ShadowStatusButton shadow={null} projects={projects} onOpen={onOpen} t={fmt} />);
+    const entry = screen.getByTestId('wf-shadow-entry');
+    expect(entry).toHaveTextContent('wf.shadow.entryOff');
+    expect(entry).toHaveAttribute('data-active', 'false');
+    fireEvent.click(entry);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    rerender(<ShadowStatusButton shadow={{ enabled: true, skills: { 'custom-a': 'custom-a@1' }, quick_prompt_versions: { qp: 2 } }} projects={projects} onOpen={onOpen} t={fmt} />);
+    expect(entry).toHaveTextContent('wf.shadow.entryOn(2|wf.shadow.entryAllProjects)');
+    expect(entry).toHaveAttribute('title', 'wf.shadow.entryTitleOn(wf.shadow.entryAllProjects)');
+
+    rerender(<ShadowStatusButton shadow={{ enabled: true, project_ids: ['p2', 'gone'] }} projects={projects} onOpen={onOpen} t={fmt} />);
+    expect(entry).toHaveTextContent('wf.shadow.entryOn(0|wf.shadow.entrySomeProjects(2))');
+    expect(entry).toHaveAttribute('title', 'wf.shadow.entryTitleOn(Beta, gone)');
   });
 
   it('enables the shadow and pins the version of a custom skill the steps use', async () => {

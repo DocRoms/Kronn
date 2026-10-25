@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_PAGE, PAGE_PATHS, STANDALONE_PATHS, automationEditorFromPath, automationPath, automationTabFromPath, discussionPath, isAppPath, pathToPage,
-  livePagePath, planningTaskPath, pluginPath, projectLocation, projectPath, sameAutomationSelection, settingsSectionPath, standalonePagePath, workflowPath, type AutomationSelection, type DashboardPage,
+  livePagePath, planningTaskPath, pluginPath, projectLocation, projectPath, sameAutomationSelection, settingsSectionPath, standalonePagePath, workflowPath, workflowShadowSettingsPath, type AutomationSelection, type DashboardPage,
 } from '../routes';
 
 describe('routes', () => {
@@ -185,6 +185,11 @@ describe('workflow wizard addresses', () => {
     // Editing needs a workflow; without one it is the list.
     expect(automationPath({ tab: 'workflows', resourceId: null, editor: 'edit' })).toBe('/workflows');
     expect(automationTabFromPath('/workflows/new')).toBe('workflows');
+  });
+
+  it('names the wizard opened on the shadow settings', () => {
+    expect(workflowShadowSettingsPath('wf 1')).toBe('/workflows/wf%201/edit#shadow');
+    expect(automationEditorFromPath('/workflows/wf%201/edit')).toBe('edit');
   });
 
   it('reads the wizard back from the address, and nothing else as one', () => {

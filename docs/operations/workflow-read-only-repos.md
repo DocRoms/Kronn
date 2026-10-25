@@ -5,8 +5,8 @@ repository paths. The wizard exposes one path per line in the step's advanced
 settings. An empty or absent list retains the existing launch policy. This is
 an explicit per-step declaration; listing a companion project in documentation
 does not automatically grant access.
-[src: file: backend/src/models/workflows.rs:1039-1043#read_only_repos]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4525-4539#read_only_repos]
+[src: file: backend/src/models/workflows.rs:1044-1048#read_only_repos]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4577-4591#read_only_repos]
 
 ```json
 {
@@ -25,7 +25,7 @@ agents and native Windows launches are rejected before dispatch. The list does
 not accept workflow template expressions.
 [src: file: backend/src/agents/read_only_repos.rs:176-273#resolve_with_dirs]
 [src: file: backend/src/agents/read_only_repos.rs:205-235#canonical_directory]
-[src: file: backend/src/api/workflow_step_schema.json:31#read_only_repos]
+[src: file: backend/src/api/workflow_step_schema.json:32#read_only_repos]
 
 Claude receives `--add-dir` together with `Edit` deny rules and sandbox
 `denyWrite` entries. Its read block remains enabled, the OS sandbox is

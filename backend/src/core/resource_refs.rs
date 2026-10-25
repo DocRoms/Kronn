@@ -411,6 +411,49 @@ pub fn disable_workflows_naming(
     Ok(disabled)
 }
 
+/// Disables (and records) every enabled workflow that loads skill `id`
+/// unpinned: from a step's `skill_ids`, or through a Quick Prompt it runs. A
+/// step pinned to `id@N` keeps its version, so it is not affected.
+pub fn disable_workflows_loading_skill(
+    conn: &Connection,
+    id: &str,
+    by: &str,
+    summary: &str,
+) -> anyhow::Result<usize> {
+    let loads = |ids: &[String]| ids.iter().any(|skill| skill.trim() == id);
+    let reason = crate::models::AutoDisableReason::DependencyEditedByAgent;
+    let users: Vec<String> = crate::db::workflows::list_workflows(conn)?
+        .into_iter()
+        .filter(|workflow| {
+            workflow.enabled
+                && workflow
+                    .steps
+                    .iter()
+                    .chain(workflow.on_failure.iter())
+                    .any(|step| loads(&step.skill_ids))
+        })
+        .map(|workflow| workflow.id)
+        .collect();
+    let mut disabled = disable_workflows(conn, &users)?;
+    for user in &users {
+        crate::db::workflows::mark_auto_disabled(conn, user, reason, by, summary)?;
+    }
+    for prompt in crate::db::quick_prompts::list_quick_prompts(conn)? {
+        if loads(&prompt.skill_ids) {
+            disabled += disable_workflows_naming(
+                conn,
+                "prompt",
+                &prompt.id,
+                &[crate::core::repository_resources::ascii_slug(&prompt.name)],
+                reason,
+                by,
+                summary,
+            )?;
+        }
+    }
+    Ok(disabled)
+}
+
 /// Disables the given workflows; returns how many were still enabled.
 pub fn disable_workflows(conn: &Connection, ids: &[String]) -> anyhow::Result<usize> {
     let mut disabled = 0;

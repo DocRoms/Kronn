@@ -88,7 +88,7 @@ Runs a binary listed in `Workflow.exec_allowlist` directly from the Rust engine,
 - Allowlist is per-workflow (not global). Empty list = Exec disabled. Match is exact on the bare binary name.
 - **Never** invokes a shell. `Command::new(binary).args(args)` directly. No pipes, no redirection, no glob.
 - Args are templated (`{{steps.X.summary}}`) but rendered values are **literal argv strings** — even `; rm -rf /` becomes a benign argument.
-- **Except inside an interpreter's inline code** (`bash -c`, `python3 -c…`, `node -e` / `--eval=…`, `perl -e`, attached or clustered forms included): that code is parsed, so a templated tracker title or step output could run (heredoc, eval, quotes). It accepts no template value except `{{run.id}}`, `{{time.now…}}` and `{{refs.<name>}}` (a checked Kronn id), not even through `|sh`. Pass the value as a later argument the interpreter never parses (`"exec_command": "bash", "exec_args": ["-c", "echo \"$1\"", "_", "{{issue.title}}"]`, or `sys.argv[1]` in Python, or `["-e", "console.log(process.argv[1])", "--", "{{issue.title}}"]` in Node — the `--` is required there, Node/Perl/Ruby/PHP keep reading options after their code), or via `exec_stdin`. A value never goes where the interpreter still reads options (`["{{mode}}", …]` is refused). Saving refuses anything else; an older saved step that still does it is flagged ("unsafe interpolation"), refused at run time, and the workflow view offers "Suggest a fix".
+- **Except inside an interpreter's inline code** (`bash -c`, `python3 -c…`, `node -e` / `--eval=…`, `perl -e`, attached or clustered forms included): that code is parsed, so a templated tracker title or step output could run (heredoc, eval, quotes). It accepts no template value except `{{run.id}}`, `{{run.variant}}`, `{{time.now…}}` and `{{refs.<name>}}` (a checked Kronn id), not even through `|sh`. Pass the value as a later argument the interpreter never parses (`"exec_command": "bash", "exec_args": ["-c", "echo \"$1\"", "_", "{{issue.title}}"]`, or `sys.argv[1]` in Python, or `["-e", "console.log(process.argv[1])", "--", "{{issue.title}}"]` in Node — the `--` is required there, Node/Perl/Ruby/PHP keep reading options after their code), or via `exec_stdin`. A value never goes where the interpreter still reads options (`["{{mode}}", …]` is refused). Saving refuses anything else; an older saved step that still does it is flagged ("unsafe interpolation"), refused at run time, and the workflow view offers "Suggest a fix".
 - Workdir locked to the workspace, timeout-bounded.
 - **Nested interpreter** (a `python3 -c` inside a `bash -c`): never write a value into the inner code either. Pass it to bash as a later argument, then hand it on through an environment variable: `["-c", "ME=\"$1\" python3 -c \"import os; me=os.environ['ME']\"", "_", "{{steps.whoami.data.login}}"]`. Kronn cannot rewrite this shape automatically, so get it right when you create the step.
 - **Exec lines you write that take run values are saved but wait for the user's approval in the editor before they run. Tell the user which steps** (the save result lists them in `kronn_notice` and, structured, as `human_only` blockers in `kronn_readiness`). This holds for args, stdin, setup and sources, whatever the shape, and for workflows created from your `KRONN:WORKFLOW_READY`/`BUNDLE_READY` proposals or from `kronn/` files; you cannot set the approval or a script hash. Lines a human writes take values without approval only in five exact shapes, `bash|sh -c SCRIPT NAME ARGS…`, `python3 -c CODE ARGS…`, `node -e CODE -- ARGS…`, and `python3|node SCRIPT ARGS…` with the script pinned in `exec_script_files` (no other option, no value in `SCRIPT`/`CODE`; shells not on Windows), plus `echo`, `printf FORMAT`, `test`, `basename`, `dirname`, `seq`, `date`. Never rewrite a line to dodge the approval.
@@ -611,6 +611,7 @@ A workflow is created via `POST /api/workflows` with this JSON structure:
 | `prompt_template` | string | Required by schema. For non-Agent steps, set to `""` — the engine doesn't read it. |
 | `mode` | object | Always `{ "type": "Normal" }` |
 | `mcp_config_ids` | array | MCP config IDs to inject (usually `[]` — project MCPs are auto-injected) |
+| `external_effect` | bool | `true` on every step that acts outside Kronn: posts, comments, sends a message or a mail, deploys, pushes, moves a ticket, writes to a third-party API. A shadow run skips it. Default `false`; see Versions and shadow runs |
 
 ### Fields specific to `Agent`
 
@@ -619,7 +620,7 @@ A workflow is created via `POST /api/workflows` with this JSON structure:
 | `output_format` | object | `{ "type": "FreeText" }` (default) or `{ "type": "Structured" }` |
 | `on_result` | array | `[{ "contains": "NO_RESULTS", "action": { "type": "Stop" } }]` etc. |
 | `agent_settings` | object | `{ "tier": "economy" }`, `"default"`, or `"reasoning"` |
-| `skill_ids` | array | Skill IDs to inject into the agent's context |
+| `skill_ids` | array | Skill IDs to inject into the agent's context. `custom-x@N` loads saved version N of a custom skill (see Versions and shadow runs) |
 | `profile_ids` | array | Profile IDs for agent persona |
 | `directive_ids` | array | Directive IDs for output constraints |
 
@@ -818,6 +819,7 @@ The optional `control` is `{ "type": "text" }`, `{ "type": "textarea" }`, or
 - `{{issue.title}}` / `{{issue.body}}` / `{{issue.number}}` / `{{issue.url}}` / `{{issue.labels}}` — populated only when trigger is Tracker
 - `{{trigger.body}}` / `{{trigger.status}}` / `{{trigger.fingerprint}}` / `{{trigger.body_truncated}}`, plus `{{trigger.etag}}` / `{{trigger.last_modified}}` when the server sent them and `{{trigger.extract}}` in JsonPath mode — populated only when trigger is Watch (the response that changed, credentials removed, body cut at 64 KiB)
 - `{{run.id}}` — id of the current workflow run (a SubWorkflow child run has its own)
+- `{{run.variant}}` — `normal`, or `shadow` in a shadow run and its sub-runs. Put it in every name or path both runs would otherwise share (see Versions and shadow runs)
 - `{{refs.<name>}}` — the id of the object the workflow's `refs.<name>` names (see Workflow-level fields)
 - `{{project.<path>}}` — the run's repository profile `kronn/project.toml`, read once at run start at the commit of the main checkout's default-branch ref (never the worktree) and pinned with the run, so resumes and child runs see the same values. Use it instead of hard-coding what is specific to a repository: `{{project.validation.targets.lint.command}}`, `{{project.forge.base_branch}}`, `{{project.forge.labels.<name>.name}}`, `{{project.tracker.statuses.<name>}}`, `{{project.tracker.transitions.<name>.to}}`, `{{project.delivery.workflows.<name>.workflow}}`. Tables and arrays render as JSON. Without `??` a missing profile or key fails the run before its first step; schema: `docs/guides/project-profile.md`
 - `{{<path> ?? "text"}}` — the one explicit fallback (`'text'` also works, no escapes). Renders the literal when the path is absent or JSON null; a present empty string stays empty. Use it when a step may not have run on every path, e.g. `{{steps.porte_check.data.stdout ?? ""}}` after a `Goto` that skips `porte_check`, or `{{artifacts.review ?? ""}}` on round 1. Without `??`, an absent reference fails the step before it runs. A guarded reference may name a later step, never an unknown one, and never hides an unsupported filter
@@ -1219,6 +1221,50 @@ After the signal line, on the very next paragraph, ALWAYS write the following di
 
 Do not paraphrase, do not move the disclaimer above the signal line, do not omit it. It transfers explicit responsibility for verification to the user.
 
+## Versions and shadow runs
+
+Kronn keeps every saved version of a custom skill and of a Quick Prompt. A workflow can run a **shadow**: a second run on the same inputs that loads other versions, so a human compares it with the normal run before switching. Read this before choosing `skill_ids`, before writing a step that acts outside Kronn, and when the user asks to test a new prompt or skill version on real runs.
+
+### Reading versions
+
+- `skill_get({skill_id})` returns a custom skill with its `versions` (`version_index`, `created_at`, `current`; newest first, no body). `skill_get({skill_id: "custom-x@N"})` returns version N whole. Builtin skills have no versions.
+- `qp_get({qp_id})` returns a Quick Prompt with its `versions`; `qp_get({qp_id, version: N})` returns version N whole (template, variables, bindings as saved then). Each save of a Quick Prompt adds a version; v1 is its creation.
+- `workflow_get` returns the workflow's `shadow` config when it has one.
+- A project's skill or Quick Prompt, and its versions, are read only where that project is in reach (the room's or workflow's project, or a project a human granted). Restoring a skill version or deleting a Quick Prompt version is a human action in its version history; no agent tool does it.
+
+### Writing a skill
+
+Agents create and edit custom skills like Quick Prompts: `skill_create` saves one as version 1 in the room's or workflow's project (`project_id` may name that project only), and `skill_update` changes only the fields passed, keeping the project and `allowed_tools`. Each save that changes a skill adds a version; one that changes nothing adds none. A step, Quick Prompt or discussion pinned to `custom-x@N` keeps version N; an enabled workflow loading the bare `custom-x` is disabled by an agent's edit until a human enables it again. Only a custom skill of a project in reach is writable (a room without a project: the global skills it created, once a human granted « General · write »); builtin skills never. `allowed_tools` pre-approve agent tools, so only a human sets them. To try a new version on real runs, a human picks it in the workflow's **Shadow runs** settings. Restoring a version and deleting a skill stay human.
+
+### Pinning a skill version
+
+`custom-x@N` in a step's, a Quick Prompt's or a discussion's `skill_ids` loads version N, frozen: later edits of `custom-x` do not reach it. The bare `custom-x` follows every edit. Saving refuses a version that does not exist, and only custom skills have versions. Pin when a run must stay reproducible (a production workflow validated on that text); leave the bare id when the step should follow the skill's improvements. Read the version with `skill_get` before pinning it.
+
+### Pinning a Quick Prompt version
+
+An Agent step with `quick_prompt_id` may set `quick_prompt_version: N`: it loads version N of that Quick Prompt (template, variables, skills, profiles, directives, agent and tier as saved then), frozen; unset, the step follows every edit of the Quick Prompt. Pin a production step before anyone edits its Quick Prompt, so an edit reaches it only when a human picks the new version. Read it with `qp_get({qp_id, version: N})` first; a version that does not exist fails the run. An imported workflow loses the pin (its Quick Prompt comes without history).
+
+### Shadow runs
+
+When a human enables `shadow` on a workflow, each normal run of a covered project (`shadow.project_ids`, empty = every run) also starts one shadow run on the same inputs. The shadow loads `shadow.skills` (a skill id → its replacement, e.g. `custom-x` → `custom-x@3`) and `shadow.quick_prompt_versions` (a Quick Prompt id → a version index), and differs from the normal run in four ways:
+
+- it **skips every step marked `external_effect: true` and every Gate** (recorded as success, signal `SKIPPED_SHADOW`); a step left unmarked runs twice, once per run;
+- it gets **its own worktree** unless `workspace_config.main_tree_read_only` is set; its sub-runs are shadows too;
+- it sends no failure notification and does not count against the concurrency limit;
+- `{{run.variant}}` renders `shadow` (`normal` in the normal run).
+
+What this asks of a workflow you author or edit, shadow enabled or not:
+
+- **Mark each step that acts outside Kronn** with `external_effect: true`: an ApiCall or Notify that posts, comments, sends or moves a ticket, an Exec that pushes, deploys or writes to a remote service, an Agent step whose job is to post. A step writing inside Kronn (PublishPageData to a Page people read, a task, a launch) runs in the shadow too: mark it as well when the shadow must not do it. When unsure, mark it: a skipped step costs the shadow one comparison, an unmarked one acts twice.
+- **Never let both runs share a name or a path.** Worktrees share the repository's branches, and a path outside the run's worktree is the same for both runs: write `fix/{{issue.number}}-{{run.variant}}`, `/srv/reports/{{run.variant}}/…`. `{{run.artifacts_dir}}` is already per run.
+- **A step after a skipped one** reads, in the shadow, the skip notice as its `output` and no `data`: guard its `data` reads with `{{path ?? ""}}`.
+
+Enabling, configuring or promoting a shadow is **human-only**: an agent cannot set or change `shadow` through `workflow_create_draft` or `workflow_update`, because a shadow starts extra runs. When the user asks for one, explain it and point them to the workflow editor's **Shadow runs** settings (enable, projects, the skill and Quick Prompt versions to try), then to the **Resources** panel of a Page the workflow feeds, where a human promotes the tested version to the normal runs. You can read the config (`workflow_get`), compare runs (`workflow_runs`, `workflow_run_get`) and prepare the version to test.
+
+### Named refs
+
+`refs: {name: {kind, id}}` at the workflow level names a Page, workflow, Quick Prompt, Quick API, Quick Exec or skill once; steps write `{{refs.<name>}}` instead of a pasted id (accepted even in Exec inline code) and Exec steps also read `KRONN_REF_<NAME>` from their environment. Saving checks that each object exists and is global or in the workflow's project, and that every `{{refs.<name>}}` is declared. Exports carry the objects and imports remap each ref, so prefer a ref to an id written into a step.
+
 ## Reach — the projects a workflow and its agents touch
 
 A workflow runs in **its project**. Everything else is closed unless a human opened it; an agent never widens its own reach.
@@ -1228,7 +1274,7 @@ A workflow runs in **its project**. Everything else is closed unless a human ope
 - **A room's own agents** reach the room's grants. They ask a human for one with `room_scope({project, access, reason})`; `room_scope()` reads what the room reaches. A human decides in the room's Scope settings.
 - **A workflow without a project, or spanning several, cannot carry a scope.** Give it one project when its steps must reach others through a scope.
 - **Parent task over several repositories.** A planning parent that spans the repositories is written through the scope (write on each repository's project); each work subtask names exactly one project, the repository it changes.
-- **General resources** (Quick Prompts, Quick APIs, Pages and workflows without a project) are seen and run by every project. A room without a project reads them; its agents create some only once a human granted the room « General · write », and then edit only what the room created.
+- **General resources** (Quick Prompts, skills, Quick APIs, Pages and workflows without a project) are seen and run by every project. A room without a project reads them; its agents create some only once a human granted the room « General · write », and then edit only what the room created.
 - Design doc: `docs/design/discussion-project-scope.md`.
 
 ## Gotchas

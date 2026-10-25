@@ -1,5 +1,5 @@
 {
-  "shape": "Each step's type-specific fields sit at the TOP LEVEL (never under a sub-object); `name` is required on every step. BUT `step_type` is a TAGGED OBJECT `{\"type\":\"Agent\"}`, NOT a bare string (serde internally-tagged); same for `output_format` (`{\"type\":\"Structured\"}`) and the workflow `trigger` (`{\"type\":\"Manual\"}`). `workflow_create_draft`/`workflow_update` also accept a bare-string `step_type` and wrap it, but the canonical form `workflow_get` returns is the tagged object.",
+  "shape": "Each step's type-specific fields sit at the TOP LEVEL (never under a sub-object); `name` is required on every step. BUT `step_type` is a TAGGED OBJECT `{\"type\":\"Agent\"}`, NOT a bare string (serde internally-tagged); same for `output_format` (`{\"type\":\"Structured\"}`) and the workflow `trigger` (`{\"type\":\"Manual\"}`). `workflow_create_draft`/`workflow_update` also accept a bare-string `step_type` and wrap it, but the canonical form `workflow_get` returns is the tagged object. Every step also takes `external_effect` (bool, default false): set it to true on each step that acts outside Kronn (posts a comment, sends a message or a mail, deploys, pushes, moves a ticket, writes to a third-party API); a shadow run skips those steps (and every Gate), so an unmarked one acts twice. A step that writes inside Kronn (PublishPageData to a Page people read, a launch, a task) runs in the shadow too: mark it when the shadow must not do it.",
   "step_types_closed_set": [
     "Agent",
     "ApiCall",
@@ -25,7 +25,8 @@
       ],
       "optional": [
         "output_format (FreeText | {type:Structured} | {type:TypedSchema, schema:{...}})",
-        "skill_ids",
+        "skill_ids (a custom skill as `custom-x@N` loads its saved version N, frozen; the bare id follows its edits; a missing version is refused at save)",
+        "quick_prompt_version (with quick_prompt_id: load that saved version of the Quick Prompt, frozen; unset follows its edits)",
         "profile_ids",
         "directive_ids",
         "read_only_repos (array of absolute local Git repository paths; Claude Code/Codex on macOS/Linux only; grants reads including Git history and denies writes, even with full_access; no templates; missing paths or overlap with the working directory fail before launch)",
@@ -432,6 +433,8 @@
       "artifacts.<name>": "content a step emitted via a `---ARTIFACT:<name>---` block.",
       "run.id": "id of the current workflow run (a SubWorkflow child run has its own).",
       "run.artifacts_dir": "absolute path of a directory Kronn creates for this run, outside every checkout (each run has its own; a SubWorkflow child too). Exec steps write files there (screenshots, logs, large reports); a Claude Code or Codex Agent step whose prompt names this path reads it read-only (same policy as read_only_repos: --add-dir, Edit denied, mandatory sandbox). Removed when the run ends; kept while it waits for approval or is interrupted.",
+      "run.variant": "`normal`, or `shadow` in the shadow run a human enabled on the workflow (its sub-runs inherit it). Use it wherever both runs would otherwise share a name or a path: a git branch (`fix/x-{{run.variant}}`; worktrees share the repository's branches), a file outside the run's worktree and outside run.artifacts_dir, a report title.",
+      "refs.<name>": "id of the object the workflow's `refs.<name>` declares (`refs: {name: {kind, id}}`, kind page|workflow|quick_prompt|quick_api|quick_exec|skill, name [a-z][a-z0-9_]{0,40}); accepted even in Exec inline code. Exec steps also get it as env `KRONN_REF_<NAME>` (upper case). Prefer it to a pasted id: export/import remaps it.",
       "ref:<kind>:<slug>": "local id of another resource, kind one of workflow, qe, qa, prompt, skill, plugin, artifact; resolved at run start in the run's project, then the global scope (identity of a kronn/ import, else the slug of the resource's name). Unknown or ambiguous fails the step before launch. Structured id fields (sub_workflow_id, quick_prompt_id, quick_api_id, batch_quick_prompt_id, CollectApiData quick_api_id/quick_exec_id) also accept `ref:<kind>:<slug>`, stored as the local id at save. Scripts: GET /api/resources/resolve?ref=<kind>:<slug>&project=<id>.",
       "project.<path>": "the run's project profile `kronn/project.toml` (schema v1: validation.targets.<name>.command, forge.{base_branch,merge_method,required_approvals,pr_template,labels.<name>.{name,triggers}}, tracker.{kind,project_key,statuses.<name>,transitions.<name>.{from,to}}, delivery.workflows.<name>.{workflow,inputs.<input>}). Read once at run start at the commit of the main checkout's default-branch ref (origin/HEAD's branch, else main, else master; local branch first), never from the run's worktree, and pinned with the run: resumes and child runs see the same values. A table or array renders as JSON, items by index. A read without `??` fails the run before its first step when the profile or key is missing; use it for repository-specific values instead of hard-coding them. Reserved name.",
       "issue.{title,body,number,url,labels}": "tracker-trigger fields (Cron/Tracker workflows).",

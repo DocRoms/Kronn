@@ -659,7 +659,9 @@ falls back to `KRONN_AUTH_TOKEN` for host sessions.
 
 *Requests.* A token is accepted only on `BRIDGE_ROUTES` (derived from the bridge
 script; `backend/scripts/test_bridge_routes.py` fails on drift either way), and
-the agent library's write routes are listed but never granted. Every id is
+the agent library's write routes are listed but never granted, except a
+custom skill's creation and update, scoped like a Quick Prompt's (deleting or
+restoring a skill stays human). Every id is
 read wherever the request names it: declared path parameters (undecodable ones
 refused), the query, any depth of the JSON body, and the workflow an import
 carries in `content`. *Default deny on id fields*: a key that looks like an id

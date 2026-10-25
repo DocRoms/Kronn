@@ -175,6 +175,14 @@ export function automationPath({ tab, resourceId, runId, editor }: AutomationSel
   return resourceId ? `${path}/${encodeURIComponent(resourceId)}` : path;
 }
 
+/** The anchor of the wizard's shadow settings, on a workflow's edit address. */
+export const SHADOW_SECTION_HASH = 'shadow';
+
+/** The wizard of one workflow, opened on its shadow settings. */
+export function workflowShadowSettingsPath(workflowId: string): string {
+  return `${automationPath({ tab: 'workflows', resourceId: workflowId, editor: 'edit' })}#${SHADOW_SECTION_HASH}`;
+}
+
 /** The address of one workflow, optionally with one of its runs revealed. */
 export function workflowPath(workflowId: string, runId?: string | null): string {
   return automationPath({ tab: 'workflows', resourceId: workflowId, runId });

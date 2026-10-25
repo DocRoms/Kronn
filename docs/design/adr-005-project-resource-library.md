@@ -35,7 +35,7 @@ What the code does today:
   (`custom-<slug>`). Updating one rewrites the same file in place and
   atomically, so renaming keeps its id and a run that resolves it later still
   finds it
-  [src: file: backend/src/api/skills.rs:85-116#update]
+  [src: file: backend/src/api/skills.rs:133-201#update]
   [src: file: backend/src/core/skills.rs:901-962#update_custom_skill]
   [src: file: backend/src/core/directives.rs:345-380#update_custom_directive]
   [src: file: backend/src/core/profiles.rs:521-547#update_custom_profile].
@@ -210,7 +210,7 @@ parent `node_modules`, Python's site-packages) are not covered
 [src: file: backend/src/core/approved_scripts.rs:127-134#validate_files]
 [src: file: backend/src/core/approved_scripts.rs:173-179#copy_dir]
 [src: file: backend/src/core/approved_scripts.rs:181-231#prepare_copy]
-[src: file: backend/src/api/workflows.rs:1600-1672#pin_exec_script_files]
+[src: file: backend/src/api/workflows.rs:1617-1689#pin_exec_script_files]
 [src: file: backend/src/workflows/runner.rs:1251-1288#carrying_repository]
 [src: file: backend/src/workflows/exec_step.rs:91-137#approved_script_child].
 
@@ -331,7 +331,7 @@ the step by name. A discussion still reads the checkout as it is.
   `workflow:triage`, `skill:block-migration`, `plugin:github`.
 - Instance-bound references (API config, MCP config, connection, agent or
   model) are requirements resolved locally on import, as `rebind_api_configs`
-  already does for API configs [src: file: backend/src/api/workflows.rs:4074-4107#rebind_api_configs].
+  already does for API configs [src: file: backend/src/api/workflows.rs:4083-4116#rebind_api_configs].
 - Ids embedded in artifact HTML are rewritten on import, as `remap_html`
   already does [src: file: backend/src/api/artifact_portability/import.rs:338-377#remap_html].
 - Workflows (KT-917). One resolver serves every kind (`workflow`, `qe`, `qa`,

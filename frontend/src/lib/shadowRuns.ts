@@ -1,11 +1,16 @@
 /** KT-1449 — a shadow run carries its variant and its normal run in its trigger context. */
-import type { RunStatus, StepResult, WorkflowRun } from '../types/generated';
+import type { RunStatus, StepResult, WorkflowRun, WorkflowShadow } from '../types/generated';
 
 const SKIPPED_SIGNAL = '[SIGNAL: SKIPPED_SHADOW]';
 
 function context(run: WorkflowRun): Record<string, unknown> {
   const value: unknown = run.trigger_context;
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+}
+
+/** How many skill and Quick Prompt versions a shadow configuration tests. */
+export function shadowTestedCount(shadow: WorkflowShadow | null | undefined): number {
+  return Object.keys(shadow?.skills ?? {}).length + Object.keys(shadow?.quick_prompt_versions ?? {}).length;
 }
 
 export function isShadowRun(run: WorkflowRun): boolean {

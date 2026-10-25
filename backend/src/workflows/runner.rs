@@ -5254,6 +5254,7 @@ mod tests {
             exec_setup_args: vec![],
             exec_stdin: None,
             quick_prompt_id: None,
+            quick_prompt_version: None,
             quick_prompt_variables: std::collections::HashMap::new(),
             json_data_payload: None,
             collect_api_data: None,
@@ -5625,6 +5626,7 @@ mod tests {
             exec_agent_written: None,
             exec_agent_lines: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
+            quick_prompt_version: None,
         }
     }
 

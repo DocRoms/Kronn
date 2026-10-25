@@ -16,6 +16,7 @@ pub(super) fn declarations() -> Vec<Value> {
         "on_failure":{"type":"array","items":{"type":"object"}},
         "exec_allowlist":{"type":"array","items":{"type":"string"}},
         "concurrency_limit":{"type":"integer"},
+        "refs":{"type":"object","description":"{name: {kind, id}}; steps read {{refs.<name>}}."},
         "variables":{"type":"array","items":{"type":"object"},"description":"Each: {name, label, placeholder, required}."}
     });
     let mut create = editable.clone();
@@ -60,6 +61,7 @@ pub(super) const AUTHORED_FIELDS: &[&str] = &[
     "on_failure",
     "exec_allowlist",
     "variables",
+    "refs",
 ];
 
 fn draft_patch(

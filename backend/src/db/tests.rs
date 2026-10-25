@@ -1904,6 +1904,7 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
         trigger: WorkflowTrigger::Manual,
         steps: vec![WorkflowStep {
             id: None,
+            quick_prompt_version: None,
             step_type: StepType::default(),
             output_format: StepOutputFormat::default(),
             description: None,
@@ -5501,6 +5502,7 @@ fn workflow_multi_step_roundtrip() {
         steps: vec![
             WorkflowStep {
                 id: None,
+                quick_prompt_version: None,
                 step_type: StepType::default(),
                 output_format: StepOutputFormat::default(),
                 description: None,
@@ -5574,6 +5576,7 @@ fn workflow_multi_step_roundtrip() {
             },
             WorkflowStep {
                 id: None,
+                quick_prompt_version: None,
                 step_type: StepType::default(),
                 output_format: StepOutputFormat::default(),
                 description: None,
@@ -5650,6 +5653,7 @@ fn workflow_multi_step_roundtrip() {
             },
             WorkflowStep {
                 id: None,
+                quick_prompt_version: None,
                 step_type: StepType::default(),
                 output_format: StepOutputFormat::default(),
                 description: None,
@@ -5778,6 +5782,7 @@ fn workflow_update_steps_count() {
     // Add a second step
     wf.steps.push(WorkflowStep {
         id: None,
+        quick_prompt_version: None,
         step_type: StepType::default(),
         output_format: StepOutputFormat::default(),
         description: None,

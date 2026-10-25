@@ -265,6 +265,16 @@ pub fn record_general_origin(
     Ok(())
 }
 
+/// Drop every room's provenance of a general resource: an id that can be
+/// reused (a skill's slug) must not hand a new resource to an old room.
+pub fn forget_general_origin(conn: &Connection, kind: &str, resource_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM general_resource_origins WHERE kind = ?1 AND resource_id = ?2",
+        params![kind, resource_id],
+    )?;
+    Ok(())
+}
+
 fn primary_project(conn: &Connection, discussion_id: &str) -> Result<Option<Option<String>>> {
     Ok(conn
         .query_row(

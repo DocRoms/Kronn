@@ -74,6 +74,33 @@ pub async fn hydrate_step_from_quick_prompt(
         }
         Err(e) => return Err(format!("QuickPrompt preflight failed: {}", e)),
     };
+    // A pinned step loads that saved version's content; the QP's identity,
+    // approval and connection stay the current ones.
+    let mut qp = qp;
+    if let Some(index) = step.quick_prompt_version {
+        let lookup = qp_id.clone();
+        let version = db
+            .with_read_conn(move |conn| {
+                crate::db::quick_prompts::get_quick_prompt_version(conn, &lookup, index)
+            })
+            .await
+            .map_err(|e| format!("QuickPrompt preflight failed: {e}"))?
+            .ok_or_else(|| {
+                format!("Agent step references version {index} of QuickPrompt `{qp_id}`, which does not exist.")
+            })?;
+        apply_version(&mut qp, version);
+        // The approval of a repository Quick Prompt covers a content: the
+        // pinned one is checked too.
+        let checked = qp.clone();
+        db.with_read_conn(move |conn| {
+            crate::core::repository_resources::ensure_quick_prompt_execution_approved(
+                conn, &checked,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await
+        .map_err(|e| format!("QuickPrompt preflight failed: {e}"))?;
+    }
 
     // `prompt_template` : un step a TOUJOURS un prompt_template (String,
     // pas Option). On considère qu'un prompt_template vide ou whitespace
@@ -287,6 +314,7 @@ mod tests {
             exec_agent_written: None,
             exec_agent_lines: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
+            quick_prompt_version: None,
         }
     }
 
@@ -329,6 +357,38 @@ mod tests {
             step.agent_settings.as_ref().unwrap().tier,
             Some(ModelTier::Reasoning)
         );
+    }
+
+    #[tokio::test]
+    async fn a_pinned_step_loads_its_version_and_an_unknown_one_is_refused() {
+        let db = Database::open_in_memory().unwrap();
+        let qp_id = seed_qp(&db, make_qp("qp-pinned", "First wording")).await;
+        let mut edited = make_qp("qp-pinned", "Second wording");
+        edited.skill_ids = vec!["skill-c".into()];
+        db.with_conn(move |conn| crate::db::quick_prompts::update_quick_prompt(conn, &edited))
+            .await
+            .unwrap();
+
+        let mut pinned = blank_step(Some(qp_id.clone()));
+        pinned.quick_prompt_version = Some(1);
+        hydrate_step_from_quick_prompt(&mut pinned, &db, None)
+            .await
+            .unwrap();
+        assert_eq!(pinned.prompt_template, "First wording");
+        assert_eq!(pinned.skill_ids, vec!["skill-a", "skill-b"]);
+
+        let mut latest = blank_step(Some(qp_id.clone()));
+        hydrate_step_from_quick_prompt(&mut latest, &db, None)
+            .await
+            .unwrap();
+        assert_eq!(latest.prompt_template, "Second wording");
+
+        let mut unknown = blank_step(Some(qp_id));
+        unknown.quick_prompt_version = Some(9);
+        let err = hydrate_step_from_quick_prompt(&mut unknown, &db, None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("version 9"), "{err}");
     }
 
     #[tokio::test]
@@ -656,4 +716,18 @@ mod tests {
             .unwrap();
         assert_eq!(step.prompt_template, "Real QP prompt");
     }
+}
+
+/// The content a Quick Prompt version saved, over the current Quick Prompt.
+pub(crate) fn apply_version(
+    qp: &mut crate::models::QuickPrompt,
+    version: crate::models::QuickPromptVersion,
+) {
+    qp.prompt_template = version.prompt_template;
+    qp.variables = version.variables;
+    qp.skill_ids = version.skill_ids;
+    qp.profile_ids = version.profile_ids;
+    qp.directive_ids = version.directive_ids;
+    qp.agent = version.agent;
+    qp.tier = version.tier;
 }
