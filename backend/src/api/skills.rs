@@ -56,11 +56,39 @@ async fn check_project(
     }
 }
 
+type Bridge = Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>;
+
+/// `allowed-tools` pre-approves tools in the agents' native skill files: a
+/// bridge token never sets or changes it, only keeps what a human wrote.
+const ALLOWED_TOOLS_ARE_HUMAN: &str =
+    "a skill's allowed_tools pre-approve agent tools: only a human sets or changes them";
+
+fn tools_value(tools: Option<&str>) -> Option<&str> {
+    tools.map(str::trim).filter(|tools| !tools.is_empty())
+}
+
+/// Forget the rooms a skill id was created from: a slug can be reused once
+/// its skill is gone, and must not hand the new skill to an old room.
+async fn forget_origin(state: &AppState, id: &str) -> Result<(), String> {
+    let id = id.to_owned();
+    state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussion_scope::forget_general_origin(conn, "skill", &id)
+        })
+        .await
+        .map_err(|error| format!("Cannot record the skill's origin: {error}"))
+}
+
 /// POST /api/skills — create a custom skill
 pub async fn create(
     State(state): State<AppState>,
+    bridge: Bridge,
     Json(req): Json<CreateSkillRequest>,
 ) -> Json<ApiResponse<Skill>> {
+    if bridge.is_some() && tools_value(req.allowed_tools.as_deref()).is_some() {
+        return Json(ApiResponse::err(ALLOWED_TOOLS_ARE_HUMAN));
+    }
     if let Err(error) = check_project(&state, req.project_id.as_ref()).await {
         return Json(ApiResponse::err(error));
     }
@@ -74,12 +102,32 @@ pub async fn create(
         req.allowed_tools.as_deref(),
         req.project_id.as_ref().and_then(|p| p.as_deref()),
     ) {
-        Ok(id) => match skills::get_skill(&id) {
-            Some(skill) => Json(ApiResponse::ok(skill)),
-            None => Json(ApiResponse::err("Skill created but could not be loaded")),
-        },
+        Ok(id) => {
+            if let Err(error) = forget_origin(&state, &id).await {
+                return Json(ApiResponse::err(error));
+            }
+            match skills::get_skill(&id) {
+                Some(skill) => Json(ApiResponse::ok(skill)),
+                None => Json(ApiResponse::err("Skill created but could not be loaded")),
+            }
+        }
         Err(e) => Json(ApiResponse::err(e)),
     }
+}
+
+/// What an agent's update would change in the stored skill.
+fn changes(existing: &Skill, req: &CreateSkillRequest) -> bool {
+    let project = match &req.project_id {
+        Some(next) => next.as_deref().filter(|p| !p.is_empty()),
+        None => existing.project_id.as_deref(),
+    };
+    existing.name != req.name
+        || existing.description != req.description
+        || existing.icon != req.icon
+        || existing.category != req.category
+        || existing.content != req.content
+        || tools_value(existing.license.as_deref()) != tools_value(req.license.as_deref())
+        || existing.project_id.as_deref() != project
 }
 
 /// PUT /api/skills/:id — update a custom skill in place. The id never
@@ -87,13 +135,50 @@ pub async fn create(
 pub async fn update(
     Path(id): Path<String>,
     State(state): State<AppState>,
-    Json(req): Json<CreateSkillRequest>,
+    bridge: Bridge,
+    Json(mut req): Json<CreateSkillRequest>,
 ) -> Json<ApiResponse<Skill>> {
     if !id.starts_with("custom-") {
         return Json(ApiResponse::err("Cannot modify builtin skills"));
     }
     if let Err(error) = check_project(&state, req.project_id.as_ref()).await {
         return Json(ApiResponse::err(error));
+    }
+    if bridge.is_some() {
+        let Some(existing) = skills::get_skill(&id) else {
+            return Json(ApiResponse::err(format!("Skill '{id}' not found")));
+        };
+        let stored = tools_value(existing.allowed_tools.as_deref());
+        match tools_value(req.allowed_tools.as_deref()) {
+            None if req.allowed_tools.is_none() => {
+                req.allowed_tools = stored.map(str::to_owned);
+            }
+            sent if sent == stored => {}
+            _ => return Json(ApiResponse::err(ALLOWED_TOOLS_ARE_HUMAN)),
+        }
+        // Like a Quick Prompt (KT-1037): a workflow loading this skill
+        // unpinned would run the agent's edit under a human's activation.
+        if changes(&existing, &req) {
+            let agent = crate::api::workflows::agent_label(&state, &bridge)
+                .await
+                .unwrap_or_default();
+            let summary = format!("Skill « {} » edited by {agent}", existing.name);
+            let skill_id = id.clone();
+            if let Err(error) = state
+                .db
+                .with_conn(move |conn| {
+                    crate::core::resource_refs::disable_workflows_loading_skill(
+                        conn, &skill_id, &agent, &summary,
+                    )
+                    .map(|_| ())
+                })
+                .await
+            {
+                return Json(ApiResponse::err(format!(
+                    "Cannot disable the workflows using this skill: {error}"
+                )));
+            }
+        }
     }
 
     match skills::update_custom_skill(
@@ -142,9 +227,15 @@ pub async fn restore(Path((id, index)): Path<(String, u32)>) -> Json<ApiResponse
 }
 
 /// DELETE /api/skills/:id — delete a custom skill
-pub async fn delete(Path(id): Path<String>, _state: State<AppState>) -> Json<ApiResponse<bool>> {
+pub async fn delete(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Json<ApiResponse<bool>> {
     match skills::delete_custom_skill(&id) {
-        Ok(deleted) => Json(ApiResponse::ok(deleted)),
+        Ok(deleted) => match forget_origin(&state, &id).await {
+            Ok(()) => Json(ApiResponse::ok(deleted)),
+            Err(error) => Json(ApiResponse::err(error)),
+        },
         Err(e) => Json(ApiResponse::err(e)),
     }
 }

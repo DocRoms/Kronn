@@ -793,3 +793,34 @@ async fn quick_prompt_native_run_names_a_mistyped_case_override_at_launch() {
         "the refusal must name the actual mismatch, not the generic catalogue-absence reason: {events}"
     );
 }
+
+#[tokio::test]
+async fn a_worker_naming_a_tool_its_catalogue_leaves_out_is_refused() {
+    let state = state_with_prompts().await;
+    let worker = KronnToolExecutor::arc_for_worker_room(
+        state,
+        Some("general".into()),
+        AgentType::Ollama,
+        None,
+        None,
+        None,
+    );
+    for name in ["skill_update", "qp_update", "task_list"] {
+        let outcome = worker
+            .execute(&ToolCall {
+                id: name.into(),
+                name: name.into(),
+                arguments: json!({}),
+            })
+            .await;
+        assert!(!outcome.ok, "{name}: {}", outcome.content);
+        assert!(
+            outcome
+                .content
+                .to_string()
+                .contains("not available to a worker"),
+            "{name}: {}",
+            outcome.content
+        );
+    }
+}

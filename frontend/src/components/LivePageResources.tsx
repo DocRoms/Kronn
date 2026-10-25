@@ -7,7 +7,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Layers, FlaskConical, ArrowUpCircle, ArrowRight, CheckCircle2, RefreshCw } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { pages as pagesApi, workflows as workflowsApi } from '../lib/api';
-import { automationPath, workflowPath } from '../lib/routes';
+import { automationPath, workflowPath, workflowShadowSettingsPath } from '../lib/routes';
 import { skillBaseId, skillPinnedVersion } from '../lib/automationSkills';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import { AppLink } from './AppLink';
@@ -176,7 +176,7 @@ export function LivePageResources({ pageId, onNavigateWorkflow }: Props) {
       {shadowed === 0 && firstWorkflow && (
         <p className="live-pages-resources-hint">
           <FlaskConical size={11} aria-hidden /> {t('pages.resources.shadowHint')}{' '}
-          <AppLink to={automationPath({ tab: 'workflows', resourceId: firstWorkflow.workflow_id, editor: 'edit' })}>
+          <AppLink to={workflowShadowSettingsPath(firstWorkflow.workflow_id)}>
             {t('pages.resources.shadowHintLink', firstWorkflow.workflow_name)}
           </AppLink>
         </p>

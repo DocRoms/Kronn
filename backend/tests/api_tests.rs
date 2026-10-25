@@ -1841,7 +1841,7 @@ async fn live_page_resources_list_what_its_workflows_load_per_lane() {
 }
 
 /// KT-1450 — promoting the shadow hands the tested version to the normal lane:
-/// a skill in every step that loads it, a Quick Prompt as its current version.
+/// a skill in every step that loads it, a Quick Prompt pinned on its steps.
 #[tokio::test]
 async fn promoting_the_shadow_hands_the_tested_version_to_the_normal_lane() {
     let state = test_state();
@@ -1897,12 +1897,14 @@ async fn promoting_the_shadow_hands_the_tested_version_to_the_normal_lane() {
 
     let promoted = promote("quick_prompt", &qp_id).await;
     assert_eq!(promoted["success"], true, "{promoted}");
+    assert_eq!(promoted["data"]["steps"][2]["quick_prompt_version"], 1);
+    // Other workflows may load the Quick Prompt: it keeps its latest version.
     let (_, history) = get_json(app.clone(), &format!("/api/quick-prompts/{qp_id}/history")).await;
     assert_eq!(
-        history["data"][0]["prompt_template"], "Old wording.",
+        history["data"][0]["prompt_template"], "New wording.",
         "{history}"
     );
-    assert_eq!(history["data"][0]["version_index"], 3, "{history}");
+    assert_eq!(history["data"][0]["version_index"], 2, "{history}");
 }
 
 /// KT-1098 — a slug is renamed under the creation rules, and the old one keeps

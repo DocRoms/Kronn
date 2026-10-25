@@ -8314,6 +8314,8 @@
 .qe-pending strong { color: var(--kr-warning); }
 
 /* KT-1449 — shadow runs: settings card, run badges, comparison */
+.wf-shadow-entry[data-active="true"] { color: var(--kr-accent); border-color: var(--kr-accent-border); background: var(--kr-accent-bg); }
+.wf-simple-external-effect { margin-top: var(--kr-sp-3); }
 .wf-shadow-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: var(--kr-fs-sm); padding: 4px 0; }
 .wf-shadow-toggle { justify-content: flex-start; font-weight: 600; cursor: pointer; }
 .wf-shadow-projects { display: flex; flex-direction: column; gap: 6px; font-size: var(--kr-fs-sm); padding: 4px 0; }

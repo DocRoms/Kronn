@@ -156,13 +156,17 @@ pub async fn apply_versions(state: &AppState, workflow: &mut Workflow) -> anyhow
         .collect();
     // A step without skills of its own loads its QP's: they are read here so
     // the swap below reaches them too.
-    let inherited: Vec<String> = workflow
+    let inherited: Vec<(String, Option<u32>)> = workflow
         .steps
         .iter()
         .chain(workflow.on_failure.iter())
         .filter(|step| step.skill_ids.is_empty())
-        .filter_map(|step| step.quick_prompt_id.clone())
-        .filter(|id| !shadow.quick_prompt_versions.contains_key(id))
+        .filter_map(|step| {
+            step.quick_prompt_id
+                .clone()
+                .map(|id| (id, step.quick_prompt_version))
+        })
+        .filter(|(id, _)| !shadow.quick_prompt_versions.contains_key(id))
         .collect();
     let (versions, current_skills) = state
         .db
@@ -175,10 +179,19 @@ pub async fn apply_versions(state: &AppState, workflow: &mut Workflow) -> anyhow
                     found.insert(id, version);
                 }
             }
+            // Keyed by QP and pinned version: two steps may pin different ones.
             let mut skills = std::collections::HashMap::new();
-            for id in inherited {
-                if let Some(qp) = crate::db::quick_prompts::get_quick_prompt(conn, &id)? {
-                    skills.insert(id, qp.skill_ids);
+            for (id, pinned) in inherited {
+                let found = match pinned {
+                    Some(index) => {
+                        crate::db::quick_prompts::get_quick_prompt_version(conn, &id, index)?
+                            .map(|version| version.skill_ids)
+                    }
+                    None => crate::db::quick_prompts::get_quick_prompt(conn, &id)?
+                        .map(|qp| qp.skill_ids),
+                };
+                if let Some(found) = found {
+                    skills.insert((id, pinned), found);
                 }
             }
             Ok((found, skills))
@@ -208,12 +221,14 @@ pub async fn apply_versions(state: &AppState, workflow: &mut Workflow) -> anyhow
             if step.directive_ids.is_empty() {
                 step.directive_ids = version.directive_ids.clone();
             }
+            // Hydration then loads this same version for what the step leaves out.
+            step.quick_prompt_version = Some(version.version_index);
         }
         if step.skill_ids.is_empty() {
             if let Some(skills) = step
                 .quick_prompt_id
-                .as_ref()
-                .and_then(|id| current_skills.get(id))
+                .clone()
+                .and_then(|id| current_skills.get(&(id, step.quick_prompt_version)))
             {
                 step.skill_ids = skills.clone();
             }
@@ -324,20 +339,20 @@ pub fn promote(
                 .ok_or_else(|| {
                     anyhow::anyhow!("The shadow does not choose a version of {}", request.id)
                 })?;
-            let tested =
-                crate::db::quick_prompts::get_quick_prompt_version(conn, &request.id, version)?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Quick Prompt {} has no version {version}", request.id)
-                    })?;
-            let mut current = crate::db::quick_prompts::get_quick_prompt(conn, &request.id)?
-                .ok_or_else(|| anyhow::anyhow!("Quick Prompt {} not found", request.id))?;
-            current.prompt_template = tested.prompt_template;
-            current.variables = tested.variables;
-            current.skill_ids = tested.skill_ids;
-            current.profile_ids = tested.profile_ids;
-            current.directive_ids = tested.directive_ids;
-            current.updated_at = chrono::Utc::now();
-            crate::db::quick_prompts::update_quick_prompt(conn, &current)?;
+            crate::db::quick_prompts::get_quick_prompt_version(conn, &request.id, version)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Quick Prompt {} has no version {version}", request.id)
+                })?;
+            // The workflow's steps pin the tested version: the Quick Prompt,
+            // which other workflows may load, is left as it is.
+            for step in workflow
+                .steps
+                .iter_mut()
+                .chain(workflow.on_failure.iter_mut())
+                .filter(|step| step.quick_prompt_id.as_deref() == Some(request.id.as_str()))
+            {
+                step.quick_prompt_version = Some(version);
+            }
         }
         other => anyhow::bail!("Unknown resource kind `{other}`"),
     }

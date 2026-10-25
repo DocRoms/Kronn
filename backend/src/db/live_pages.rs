@@ -2100,14 +2100,25 @@ pub fn list_live_page_resources(
                 .chain(step.batch_quick_prompt_id.iter())
             {
                 let (name, latest, qp_skills) = prompt_name(qp_id)?;
+                // Only `quick_prompt_id` takes a pinned version, never the batch prompt.
+                let pinned = step
+                    .quick_prompt_version
+                    .filter(|_| step.quick_prompt_id.as_ref() == Some(qp_id));
                 if skills.is_empty() {
-                    skills = qp_skills;
+                    skills = match pinned {
+                        Some(index) => {
+                            crate::db::quick_prompts::get_quick_prompt_version(conn, qp_id, index)?
+                                .map(|version| version.skill_ids)
+                                .unwrap_or(qp_skills)
+                        }
+                        None => qp_skills,
+                    };
                 }
                 let used = LivePageResourceUse {
                     workflow_id: workflow.id.clone(),
                     workflow_name: workflow.name.clone(),
                     step_name: step.name.clone(),
-                    normal: None,
+                    normal: pinned.map(|index| format!("v{index}")),
                     shadow: shadow
                         .and_then(|s| s.quick_prompt_versions.get(qp_id))
                         .map(|n| format!("v{n}")),

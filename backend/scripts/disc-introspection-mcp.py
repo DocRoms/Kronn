@@ -1771,9 +1771,9 @@ TOOLS = [
     {
         "name": "workflow_get",
         "description": (
-            "Fetch a workflow's full definition, the exact shape "
-            "`workflow_create_draft`/`workflow_update` accept. Read a real "
-            "workflow here before cloning or patching it."
+            "Fetch a workflow's full definition (with its human-set `shadow`), "
+            "the shape `workflow_create_draft`/`workflow_update` accept. Read a "
+            "real workflow here before cloning or patching it."
         ),
         "inputSchema": {
             "type": "object",
@@ -1914,18 +1914,17 @@ TOOLS = [
     {
         "name": "qp_get",
         "description": (
-            "Fetch a Quick Prompt's FULL definition by id — including the "
-            "`prompt_template` BODY that `qp_list` omits, plus all bindings "
-            "(variables, skill/profile/directive ids, agent, tier). Use it to "
-            "understand what a QP actually does so you can RUN it yourself "
-            "(render the template with the variables, then act), or to read a "
-            "QP before editing it with `qp_update`. `qp_list` only tells you a "
-            "QP exists; `qp_get` tells you what it does."
+            "Fetch a Quick Prompt's FULL definition by id: the `prompt_template` "
+            "BODY that `qp_list` omits, all bindings (variables, skill/profile/"
+            "directive ids, agent, tier) and its saved `versions`. Read it to learn "
+            "what a QP does, to RUN it yourself (render the template, then act) or "
+            "before `qp_update`. `version: N` returns that saved version."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "qp_id": {"type": "string", "description": "Quick Prompt id (from `qp_list`)."},
+                "version": {"type": "integer"},
             },
             "required": ["qp_id"],
         },
@@ -1980,8 +1979,9 @@ TOOLS = [
         "name": "skill_get",
         "description": (
             "Fetch one skill's FULL definition by id, including its markdown "
-            "`content`, license and allowed-tools fields omitted by "
-            "`skills_list`. Read before editing or applying a skill."
+            "`content`, license and allowed-tools; a custom skill lists its "
+            "`versions`, and `custom-x@N` reads version N. Read before editing "
+            "or applying a skill."
         ),
         "inputSchema": {
             "type": "object",
@@ -2024,11 +2024,9 @@ TOOLS = [
     {
         "name": "skill_create",
         "description": (
-            "Create a CUSTOM skill in the user's library. Required: `name`, "
-            "`description`, `icon`, `category` (one of Language/Domain/Business), "
-            "`content` (the markdown skill body). Optional: `license`, "
-            "`allowed_tools`, `project_id` (used in that project only). "
-            "Bind it via an Agent step's / QP's `skill_ids`. Returns the skill incl its id."
+            "Create a CUSTOM skill (v1) in this room's project; `content` is its "
+            "markdown body. Bind it via a step's / QP's `skill_ids`. Rules: "
+            'tool_manual({tool: "skill_create"}).'
         ),
         "inputSchema": {
             "type": "object",
@@ -2037,9 +2035,8 @@ TOOLS = [
                 "description": {"type": "string"},
                 "icon": {"type": "string", "description": "Emoji or short icon token."},
                 "category": {"type": "string", "enum": ["Language", "Domain", "Business"]},
-                "content": {"type": "string", "description": "Markdown body of the skill."},
+                "content": {"type": "string"},
                 "license": {"type": "string"},
-                "allowed_tools": {"type": "string"},
                 "project_id": {"type": "string"},
             },
             "required": ["name", "description", "icon", "category", "content"],
@@ -2048,28 +2045,26 @@ TOOLS = [
     {
         "name": "skill_update",
         "description": (
-            "Patch a CUSTOM skill in place, same id (only fields you pass change; "
-            "`project_id` \"\" makes it global). Builtins are rejected."
+            "Patch a CUSTOM skill, same id (only fields you pass change): a new "
+            'version; `custom-x@N` pins keep theirs. Rules: tool_manual({tool: "skill_update"}).'
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "skill_id": {"type": "string", "description": "Id of the custom skill to patch."},
+                "skill_id": {"type": "string"},
                 "name": {"type": "string"},
                 "description": {"type": "string"},
                 "icon": {"type": "string"},
                 "category": {"type": "string", "enum": ["Language", "Domain", "Business"]},
                 "content": {"type": "string"},
                 "license": {"type": "string"},
-                "allowed_tools": {"type": "string"},
-                "project_id": {"type": "string"},
             },
             "required": ["skill_id"],
         },
     },
     {
         "name": "skill_delete",
-        "description": "Delete a custom skill by id (builtins are protected). IRREVERSIBLE. Past runs keep the prompts they used; only future runs lose it.",
+        "description": "Human-only, IRREVERSIBLE (drops its version history): the bridge refuses it.",
         "inputSchema": {
             "type": "object",
             "properties": {"skill_id": {"type": "string"}},
@@ -8672,7 +8667,29 @@ def call_qp_get(args):
         raise RuntimeError(
             f"qp_get: quick prompt {qid!r} not found — call qp_list to see what exists"
         )
-    return qp
+    # Its saved versions (newest first): the list without bodies, or one whole.
+    wanted = args.get("version")
+    if wanted is not None and (isinstance(wanted, bool) or not isinstance(wanted, int) or wanted < 1):
+        raise RuntimeError("qp_get: 'version' is a version_index from 1")
+    try:
+        versions = _unwrap(_http("GET", f"/api/quick-prompts/{urllib.parse.quote(qid, safe='')}/history")) or []
+    except RuntimeError as e:
+        if wanted is not None:
+            raise
+        return {**qp, "versions_unavailable": str(e)}
+    if wanted is not None:
+        found = next((v for v in versions if v.get("version_index") == wanted), None)
+        if not found:
+            have = [v.get("version_index") for v in versions]
+            raise RuntimeError(f"qp_get: no version {wanted}; saved versions: {have}")
+        return found
+    newest = max((v.get("version_index") or 0 for v in versions), default=0)
+    listed = [
+        {"version_index": v.get("version_index"), "created_at": v.get("created_at"),
+         "current": v.get("version_index") == newest}
+        for v in versions
+    ]
+    return {**qp, "versions": listed}
 
 
 def call_qp_delete(args):
@@ -9368,7 +9385,8 @@ _AGENT_LIB = {
     "skill": {
         "path": "/api/skills",
         "required": ("name", "description", "icon", "category", "content"),
-        "optional": ("license", "allowed_tools", "project_id"),
+        # allowed_tools is a human's: absent, an update keeps the stored value.
+        "optional": ("license", "project_id"),
         "categories": ("Language", "Domain", "Business"),
         "update_remints_id": False,
     },
@@ -9454,25 +9472,50 @@ def _lib_delete(kind, args):
 def call_skill_create(args):
     """Create a custom SKILL (POST /api/skills). Required: name, description,
     icon, category (Language|Domain|Business), content (the markdown body).
-    Optional: license, allowed_tools, project_id. Use to author a reusable skill an Agent
-    step / QP can then bind via `skill_ids`. Returns the created skill (incl id)."""
+    Optional: license, project_id (the gate forces this room's project).
+    Returns the created skill (incl id)."""
     return _lib_create("skill", args)
 
 
+def _versions_meta(versions):
+    """A version list without its bodies: read one with its index."""
+    return [
+        {key: v.get(key) for key in ("version_index", "created_at", "current") if key in v}
+        for v in versions or []
+    ]
+
+
 def call_skill_get(args):
-    """Return one FULL skill, including its markdown content body."""
-    return _lib_get("skill", args)
+    """Return one FULL skill, including its markdown content body. A custom
+    skill also lists its `versions` (newest first, no body); `custom-x@N`
+    returns version N as saved (KT-1434). Read only: restoring is human."""
+    iid = args.get("skill_id") or args.get("id") or ""
+    base, pinned, index = str(iid).partition("@")
+    if pinned and not (base.startswith("custom-") and index.isdigit() and int(index) >= 1):
+        raise RuntimeError(
+            f"skill_get: {iid!r} — a version is `custom-<slug>@N`, N from 1"
+        )
+    skill = _lib_get("skill", {"skill_id": base})
+    segment = urllib.parse.quote(base, safe="")
+    if pinned:
+        return _unwrap(_http("GET", f"/api/skills/{segment}/versions/{int(index)}"))
+    if not base.startswith("custom-"):
+        return skill
+    try:
+        versions = _unwrap(_http("GET", f"/api/skills/{segment}/history"))
+    except RuntimeError as e:
+        return {**skill, "versions_unavailable": str(e)}
+    return {**skill, "versions": _versions_meta(versions)}
 
 
 def call_skill_update(args):
-    """Patch a CUSTOM skill (load-merge-write over PUT /api/skills/<id>). Builtin
-    skills are rejected by the backend. ⚠ The backend recreates the skill, so
-    the id CHANGES — use the `id` in the returned object afterwards."""
+    """Patch a CUSTOM skill (load-merge-write over PUT /api/skills/<id>), same
+    id; each change is a new version. Builtin skills are rejected."""
     return _lib_update("skill", args)
 
 
 def call_skill_delete(args):
-    """Delete a custom skill by id (builtins are protected)."""
+    """Delete a custom skill by id: human-only, the bridge refuses it."""
     return _lib_delete("skill", args)
 
 
@@ -10374,7 +10417,44 @@ TOOL_MANUALS = {
         "Exec step declares it with a `KRONN_NOOP` line on stdout or stderr, an Agent step "
         "with `\"no_change\": true` in its envelope; an identical Page publish is inferred. "
         "On an existing workflow retention is human-only: `workflow_update` does not take it; "
-        "ask the user to change it in the editor (\"Run retention\")."
+        "ask the user to change it in the editor (\"Run retention\").\n\n"
+        "Mark every step that acts outside Kronn (posts, comments, sends, deploys, pushes, moves a ticket) with external_effect: true: a shadow run skips it, an unmarked one acts twice. "
+        "Use {{run.variant}} (normal or shadow) in every branch name or path both runs would share, and {{refs.<name>}} (Exec env KRONN_REF_<NAME>) rather than a pasted id. "
+        "`custom-x@N` in skill_ids pins a skill version. "
+        "The shadow config is human-only: workflow_get shows it, no agent tool sets it; point the user to the workflow editor's Shadow runs settings, and to the Resources panel of a Page the workflow feeds to promote a version. "
+        'Details: tool_manual({tool: "workflow-architect", section: "Versions and shadow runs"}).'
+    ),
+    "skill_get": (
+        "skill_get({skill_id}) returns the skill whole; a custom skill adds `versions`: version_index, created_at and current, newest first, without bodies. "
+        "skill_get({skill_id: `custom-x@N`}) returns version N whole. "
+        "Builtin skills have no versions. "
+        "`custom-x@N` in the skill_ids of a step, a Quick Prompt or a discussion loads that version, frozen; the bare id follows every edit, and saving refuses a version that does not exist. "
+        "A project's skill and its versions are read only where that project is in reach. "
+        "Restoring a version is a human action, in the skill's version history. "
+        'Pinning and shadow runs: tool_manual({tool: "workflow-architect", section: "Versions and shadow runs"}).'
+    ),
+    "skill_create": (
+        "skill_create({name, description, icon, category, content}) saves a custom skill as version 1 and returns it with its id, custom-<slug>. "
+        "category is Language, Domain or Business; content is the markdown body agents load. "
+        "It lands in this room's or workflow's project: project_id may name that project only, and a room without a project creates a global skill only once a human granted it « General · write ». "
+        "allowed_tools pre-approve agent tools, so only a human sets them: a skill an agent creates has none. "
+        "Bind it in skill_ids as custom-<slug> (follows every edit) or custom-<slug>@1 (frozen)."
+    ),
+    "skill_update": (
+        "skill_update({skill_id, ...}) changes only the fields passed (name, description, icon, category, content, license) and keeps the others, its project and allowed_tools included. "
+        "Each save that changes the skill adds a version; one that changes nothing adds none. "
+        "A step, Quick Prompt or discussion pinned to custom-x@N keeps loading version N, while an enabled workflow loading the bare custom-x is disabled until a human enables it again. "
+        "Writable: a custom skill of this room's or workflow's project; in a room without a project, the global skills it created once granted « General · write »; never a builtin skill. "
+        "To try the new version on real runs, a human picks it in the workflow's Shadow runs settings. "
+        "Restoring a version and deleting a skill are human actions."
+    ),
+    "qp_get": (
+        "qp_get({qp_id}) returns the Quick Prompt whole with its `versions`: version_index, created_at and current, newest first, without bodies; each save adds one, v1 is its creation. "
+        "qp_get({qp_id, version: N}) returns version N whole: its template, variables and bindings as saved then. "
+        "A step cannot pin a Quick Prompt version; only a workflow's shadow loads another one (shadow.quick_prompt_versions, set by a human). "
+        "A project's Quick Prompt and its versions are read only where that project is in reach. "
+        "Deleting a version is a human action. "
+        'Shadow runs: tool_manual({tool: "workflow-architect", section: "Versions and shadow runs"}).'
     ),
     "qp_run": (
         "Call `qp_list` first to resolve the QP id and its required variables. Pass values "

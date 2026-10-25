@@ -32,7 +32,8 @@ import { workflowRunStatusCardModel } from '../../lib/runStatusCardModel';
 import { liveStepWaitingKey, runStatusTimeline } from '../../lib/workflowUiUtils';
 import { AgentSwitchPicker, type AgentSwitchTarget } from '../AgentSwitchPicker';
 import { CopyIdPill } from '../CopyIdPill';
-import { WorkflowWizard } from './WorkflowWizard';
+import { WorkflowWizard, type WorkflowWizardSection } from './WorkflowWizard';
+import { ShadowStatusButton } from './ShadowRunsCard';
 import { StepTokensBadge } from './StepTokens';
 import '../../pages/WorkflowsPage.css';
 
@@ -227,7 +228,8 @@ export interface WorkflowDetailProps {
   liveRun: LiveRunState | null;
   onTrigger: () => void;
   onRefresh: () => void;
-  onEdit: () => void;
+  /** Open the wizard, optionally on one of the workflow's settings. */
+  onEdit: (section?: WorkflowWizardSection) => void;
   projects?: Project[];
   configLanguage?: string;
   onDeleteRun: (runId: string) => void;
@@ -1871,6 +1873,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
           </button>
         </div>
         <div className="wf-detail-actions">
+          <ShadowStatusButton shadow={workflow.shadow} projects={projects} onOpen={() => onEdit('shadow')} t={t} />
           <button className="wf-small-btn" onClick={() => onEdit()}>
             <Settings size={10} /> {t('wf.edit')}
           </button>

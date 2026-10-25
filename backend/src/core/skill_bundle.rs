@@ -48,6 +48,46 @@ fn line_end(line: &str) -> &'static str {
     }
 }
 
+/// The skill file without `allowed-tools`: that list pre-approves tools in the
+/// agents' native skill files, a choice an imported file never makes here.
+/// Fails when the stripped file still declares tools, whatever its spelling.
+pub fn without_allowed_tools(raw: &str) -> Result<String, String> {
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    let stripped = match frontmatter(&lines) {
+        None => raw.to_string(),
+        Some((open, close)) => {
+            let mut out = String::with_capacity(raw.len());
+            let mut index = 0;
+            while index < lines.len() {
+                let line = lines[index];
+                if index > open
+                    && index < close
+                    && !indented(line)
+                    && entry_key(line) == Some("allowed-tools")
+                {
+                    // The key's value may continue on indented or list lines.
+                    index += 1;
+                    while index < close
+                        && (indented(lines[index]) || lines[index].trim_start().starts_with('-'))
+                    {
+                        index += 1;
+                    }
+                    continue;
+                }
+                out.push_str(line);
+                index += 1;
+            }
+            out
+        }
+    };
+    match super::skills::parse_skill_markdown("custom-import-check", &stripped, false) {
+        Some(skill) if skill.allowed_tools.is_some() => {
+            Err("An imported skill cannot pre-approve tools (`allowed-tools`)".into())
+        }
+        _ => Ok(stripped),
+    }
+}
+
 /// The skill file without its project scope: a scope names a project of the
 /// exporting Kronn, meaningless elsewhere.
 pub fn portable_content(raw: &str) -> String {
@@ -325,7 +365,7 @@ pub fn apply(
                 .clone()
                 .ok_or_else(|| format!("Skill `{}` has no local match", decision.source_id))
         };
-        let portable = portable_content(&skill.content);
+        let portable = without_allowed_tools(&portable_content(&skill.content))?;
         let target = match (decision.action, decision.resolution) {
             (SkillImportAction::Reuse, _)
             | (SkillImportAction::Conflict, Some(SkillConflictResolution::UseExisting)) => {
@@ -413,6 +453,24 @@ mod tests {
             project,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn an_imported_skill_never_pre_approves_tools_whatever_the_spelling() {
+        for raw in [
+            "---\nname: Review\ndescription: d\nallowed-tools: Bash(git *) Write\n---\nBody\n",
+            "---\nname: Review\ndescription: d\nallowed-tools:\n  - Bash\n  - Write\n---\nBody\n",
+            "---\nname: Review\ndescription: d\nallowed-tools: >-\n  Bash Write\n---\nBody\n",
+        ] {
+            let stripped = without_allowed_tools(raw).unwrap();
+            assert!(!stripped.contains("allowed-tools"), "{stripped}");
+            assert!(!stripped.contains("Write"), "{stripped}");
+            assert!(stripped.contains("description: d") && stripped.ends_with("Body\n"));
+        }
+        assert_eq!(
+            without_allowed_tools("No frontmatter\n").unwrap(),
+            "No frontmatter\n"
+        );
     }
 
     #[test]

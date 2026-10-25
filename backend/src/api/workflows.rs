@@ -713,6 +713,21 @@ pub(crate) fn validate_imported_sub_workflow_graph(
 pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
     crate::core::skill_versions::validate_pins(&s.skill_ids)
         .map_err(|e| format!("Step « {} »: {e}", s.name))?;
+    match (s.quick_prompt_version, s.quick_prompt_id.as_deref()) {
+        (Some(0), _) => {
+            return Err(format!(
+                "Step « {} »: Quick Prompt versions start at 1",
+                s.name
+            ))
+        }
+        (Some(_), None) => {
+            return Err(format!(
+                "Step « {} »: `quick_prompt_version` needs a `quick_prompt_id`",
+                s.name
+            ))
+        }
+        _ => {}
+    }
     if let Some(tools) = s.agent_settings.as_ref().and_then(|a| a.tools.as_ref()) {
         if !matches!(s.step_type, StepType::Agent) {
             return Err(format!(
@@ -4174,6 +4189,9 @@ pub(crate) fn remap_workflow_step_dependencies(
     if let Some(id) = &mut step.quick_prompt_id {
         remap_required("le Quick Prompt", &step.name, id, quick_prompts)?;
     }
+    // A Quick Prompt comes over without its history: a pinned version of it
+    // has nothing to name here, the step loads its latest one.
+    step.quick_prompt_version = None;
     if let Some(id) = &mut step.batch_quick_prompt_id {
         remap_required("le Quick Prompt", &step.name, id, quick_prompts)?;
     }
@@ -7161,6 +7179,7 @@ pub async fn suggestions(
                     exec_setup_args: vec![],
                     exec_stdin: None,
                     quick_prompt_id: None,
+                    quick_prompt_version: None,
                     quick_prompt_variables: std::collections::HashMap::new(),
                     json_data_payload: None,
                     collect_api_data: None,
@@ -8134,6 +8153,7 @@ mod tests {
             exec_setup_args: vec![],
             exec_stdin: None,
             quick_prompt_id: None,
+            quick_prompt_version: None,
             quick_prompt_variables: std::collections::HashMap::new(),
             json_data_payload: None,
             collect_api_data: None,

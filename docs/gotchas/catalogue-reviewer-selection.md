@@ -4,7 +4,7 @@ The workflow review picker keeps `reviewer_agent` and its nullable
 `reviewer_tier` as the existing review configuration. Enabling review leaves
 the tier `reasoning` for a newly enabled review. A saved `null` tier remains
 `null` until the operator makes an explicit picker choice, including the
-explicit return to the agent default. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4409-4451#reviewer_tier]
+explicit return to the agent default. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4461-4503#reviewer_tier]
 
 `AgentSwitchPicker` accepts a nullable current tier so an existing saved review
 can be displayed without forcing a tier selection. Its concrete-tier and

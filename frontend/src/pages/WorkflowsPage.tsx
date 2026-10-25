@@ -1,6 +1,6 @@
 import { Fragment, memo, useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { RunRetentionBanner, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
-import { automationPath, sameAutomationSelection, type AutomationSelection, type AutomationTab, type SelectionReason } from '../lib/routes';
+import { automationPath, sameAutomationSelection, SHADOW_SECTION_HASH, type AutomationSelection, type AutomationTab, type SelectionReason } from '../lib/routes';
 import { writeAutomationLastVisit, type AutomationLastVisit } from '../lib/automationNavigation';
 import { isUsableExternalConnection, unusableExternalAgentTargets } from '../lib/externalAgentIdentity';
 import { appendLiveBuffer } from '../lib/workflowUiUtils';
@@ -34,7 +34,7 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
 import { AutoDisabledReview } from '../components/workflows/AutoDisabledReview';
 import { AUTO_DISABLE_REASON_KEY } from '../lib/autoDisableReason';
-import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
+import { WorkflowWizard, type WorkflowWizardSection } from '../components/workflows/WorkflowWizard';
 import { agentSettingsForSelection } from '../lib/agentSelection';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
@@ -517,6 +517,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
   // The address can open the wizard (`/workflows/new`, `/workflows/<id>/edit`).
   const [showCreate, setShowCreate] = useState(selection?.editor === 'create');
   const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null);
+  const [editSection, setEditSection] = useState<WorkflowWizardSection | null>(null);
   // An edit address names the workflow before its detail is loaded: the
   // wizard opens on it once it is (and the page keeps reporting the edit).
   const [pendingEditId, setPendingEditId] = useState<string | null>(
@@ -1253,6 +1254,8 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
   // The edit address's workflow is loaded: the wizard opens on it.
   if (pendingEditId && detailWorkflow?.id === pendingEditId) {
     setPendingEditId(null);
+    // `/workflows/<id>/edit#shadow` opens the wizard on the shadow settings.
+    setEditSection(window.location.hash === `#${SHADOW_SECTION_HASH}` ? 'shadow' : null);
     setEditingWorkflow(detailWorkflow);
   }
 
@@ -2802,6 +2805,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
           agentAccess={agentAccess}
           configLanguage={configLanguage}
           editWorkflow={editingWorkflow}
+          initialSection={editSection ?? undefined}
           onNavigatePage={onNavigatePage}
           onNavigateSettings={onNavigateSettings}
           onDone={() => { setEditingWorkflow(null); refetch(); if (editingWorkflow) openDetail(editingWorkflow.id); }}
@@ -3092,7 +3096,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                   undefined,
                   Math.max(RUN_FETCH_PAGE_SIZE, detailRunPageCount),
                 )}
-                onEdit={() => setEditingWorkflow(detailWorkflow)}
+                onEdit={section => { setEditSection(section ?? null); setEditingWorkflow(detailWorkflow); }}
                 projects={projects}
                 configLanguage={configLanguage}
                 onNavigatePage={onNavigatePage}

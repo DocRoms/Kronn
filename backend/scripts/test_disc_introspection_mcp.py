@@ -6887,13 +6887,39 @@ class WorkflowQpCrudToolTests(unittest.TestCase):
     def test_qp_get_returns_full_qp_with_template(self):
         full = {"id": "qp-1", "name": "Triage", "prompt_template": "Analyse {{ticket}} …",
                 "variables": [{"name": "ticket"}], "agent": "ClaudeCode", "skill_ids": ["s1"]}
-        fake = mock.MagicMock(return_value=self._env([full, {"id": "other"}]))
+        versions = [
+            {"version_index": 2, "created_at": "t2", "prompt_template": "Analyse {{ticket}} …"},
+            {"version_index": 1, "created_at": "t1", "prompt_template": "Old"},
+        ]
+        def route(method, path, *args, **kwargs):
+            if path == "/api/quick-prompts/qp-1/history":
+                return self._env(versions)
+            self.assertEqual((method, path), ("GET", "/api/quick-prompts"))
+            return self._env([full, {"id": "other"}])
+        fake = mock.MagicMock(side_effect=route)
         with mock.patch.object(self.mod, "_http", fake):
             out = self.mod.call_qp_get({"qp_id": "qp-1"})
-        # the FULL body (which qp_list drops) is returned
+            old = self.mod.call_qp_get({"qp_id": "qp-1", "version": 1})
+            with self.assertRaisesRegex(RuntimeError, r"no version 7; saved versions: \[2, 1\]"):
+                self.mod.call_qp_get({"qp_id": "qp-1", "version": 7})
+            for wrong in (0, "1", True):
+                with self.assertRaisesRegex(RuntimeError, "version_index from 1"):
+                    self.mod.call_qp_get({"qp_id": "qp-1", "version": wrong})
+        # the FULL body (which qp_list drops) is returned, with its versions sans bodies
         self.assertEqual(out["prompt_template"], "Analyse {{ticket}} …")
         self.assertEqual(out["agent"], "ClaudeCode")
-        self.assertEqual(fake.call_args.args[:2], ("GET", "/api/quick-prompts"))
+        self.assertEqual(out["versions"], [
+            {"version_index": 2, "created_at": "t2", "current": True},
+            {"version_index": 1, "created_at": "t1", "current": False},
+        ])
+        self.assertEqual(old["prompt_template"], "Old")
+
+    def test_qp_get_reads_no_history_of_a_qp_it_cannot_see(self):
+        fake = mock.MagicMock(return_value=self._env([{"id": "other"}]))
+        with mock.patch.object(self.mod, "_http", fake):
+            with self.assertRaises(RuntimeError):
+                self.mod.call_qp_get({"qp_id": "qp-1", "version": 1})
+        self.assertEqual(fake.call_count, 1, "the scoped list is read first")
 
     def test_qp_get_not_found_raises(self):
         fake = mock.MagicMock(return_value=self._env([{"id": "other"}]))
@@ -7637,11 +7663,52 @@ class AgentLibraryCrudTests(unittest.TestCase):
             "id": "custom-review", "name": "Review", "content": "# Full body",
             "license": "MIT", "allowed_tools": "Read, Grep",
         }
-        fake = mock.MagicMock(return_value=self._env([full]))
+        history = [
+            {"skill_id": "custom-review", "version_index": 2, "content": "# Full body",
+             "created_at": "t2", "current": True},
+            {"skill_id": "custom-review", "version_index": 1, "content": "# Old",
+             "created_at": "t1", "current": False},
+        ]
+        routes = {
+            "/api/skills": [full, {"id": "rust", "content": "builtin"}],
+            "/api/skills/custom-review/history": history,
+            "/api/skills/custom-review/versions/1": history[1],
+        }
+        fake = mock.MagicMock(side_effect=lambda method, path, *a, **k: self._env(routes[path]))
         with mock.patch.object(self.mod, "_http", fake):
             out = self.mod.call_skill_get({"skill_id": "custom-review"})
-        self.assertEqual(out, full)
-        self.assertEqual(fake.call_args.args, ("GET", "/api/skills"))
+            pinned = self.mod.call_skill_get({"skill_id": "custom-review@1"})
+            builtin = self.mod.call_skill_get({"skill_id": "rust"})
+            for wrong in ("custom-review@0", "custom-review@x", "rust@1"):
+                with self.assertRaisesRegex(RuntimeError, "custom-<slug>@N"):
+                    self.mod.call_skill_get({"skill_id": wrong})
+        self.assertEqual(out, {**full, "versions": [
+            {"version_index": 2, "created_at": "t2", "current": True},
+            {"version_index": 1, "created_at": "t1", "current": False},
+        ]})
+        self.assertEqual(pinned["content"], "# Old")
+        self.assertNotIn("versions", builtin)
+        paths = [c.args[1] for c in fake.call_args_list]
+        # Each read starts on the scoped list, so a skill out of reach stops there.
+        self.assertEqual(paths[:4], [
+            "/api/skills", "/api/skills/custom-review/history",
+            "/api/skills", "/api/skills/custom-review/versions/1",
+        ])
+
+    def test_skill_get_of_an_unlisted_skill_reads_no_version(self):
+        fake = mock.MagicMock(return_value=self._env([]))
+        with mock.patch.object(self.mod, "_http", fake):
+            with self.assertRaisesRegex(RuntimeError, "not found"):
+                self.mod.call_skill_get({"skill_id": "custom-other@1"})
+        self.assertEqual(fake.call_count, 1)
+
+    def test_version_manuals_are_served(self):
+        for tool in ("skill_get", "qp_get"):
+            manual = self.mod.call_tool_manual({"tool": tool})["manual"]
+            self.assertIn("Versions and shadow runs", manual)
+        draft = self.mod.call_tool_manual({"tool": "workflow_create_draft"})["manual"]
+        for fact in ("external_effect: true", "{{run.variant}}", "KRONN_REF_<NAME>", "human-only"):
+            self.assertIn(fact, draft)
 
     def test_profile_and_directive_get_return_omitted_bodies(self):
         cases = [
@@ -7688,6 +7755,38 @@ class AgentLibraryCrudTests(unittest.TestCase):
         self.assertEqual(put[2]["name"], "New")
         self.assertEqual(put[2]["content"], "oc")
         self.assertEqual(put[2]["conflicts"], ["x"])
+
+    def test_skill_update_never_sends_allowed_tools(self):
+        # The stored value stays a human's: the backend keeps it when absent.
+        existing = [{
+            "id": "custom-r", "name": "Old", "description": "d", "icon": "i",
+            "category": "Domain", "content": "old", "allowed_tools": "Bash",
+            "project_id": "p1", "is_builtin": False,
+        }]
+        calls = []
+
+        def fake_http(method, path, body=None, **kwargs):
+            calls.append((method, path, body))
+            return self._env(existing if method == "GET" else {"id": "custom-r"})
+
+        with mock.patch.object(self.mod, "_http", fake_http):
+            self.mod.call_skill_update({
+                "skill_id": "custom-r", "content": "new", "allowed_tools": "Bash(*)",
+            })
+        put = next(c for c in calls if c[0] == "PUT")
+        self.assertEqual(put[1], "/api/skills/custom-r")
+        self.assertEqual(put[2]["content"], "new")
+        self.assertEqual(put[2]["project_id"], "p1")
+        self.assertNotIn("allowed_tools", put[2])
+
+    def test_skill_write_manuals_are_served_and_schemas_stay_lean(self):
+        for tool in ("skill_create", "skill_update"):
+            manual = self.mod.call_tool_manual({"tool": tool})["manual"]
+            self.assertIn("allowed_tools", manual)
+            declared = next(t for t in self.mod.TOOLS if t["name"] == tool)
+            self.assertNotIn("allowed_tools", declared["inputSchema"]["properties"])
+        update = next(t for t in self.mod.TOOLS if t["name"] == "skill_update")
+        self.assertNotIn("project_id", update["inputSchema"]["properties"])
 
     def test_update_unknown_id_raises(self):
         with mock.patch.object(self.mod, "_http", return_value=self._env([])):

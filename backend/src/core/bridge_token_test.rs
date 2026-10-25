@@ -284,25 +284,56 @@ fn every_listed_pattern_is_registered_in_the_router() {
     }
 }
 
-/// B-09 — the shared agent library is read, never written, by a token.
+/// B-09 — profiles and directives are read, never written, by a token; a
+/// skill is created and updated like a Quick Prompt, deleted by a human only.
 #[test]
 fn the_agent_library_is_read_only_for_a_token() {
-    for library in ["/api/skills", "/api/profiles", "/api/directives"] {
+    for library in ["/api/profiles", "/api/directives"] {
         assert_eq!(route("GET", library).rule, Rule::Read);
         assert_eq!(route("POST", library).rule, Rule::Denied);
         let item = format!("{library}/{{id}}");
         assert_eq!(route("PUT", &item).rule, Rule::Denied);
         assert_eq!(route("DELETE", &item).rule, Rule::Denied);
     }
+    assert_eq!(route("GET", "/api/skills").rule, Rule::Read);
+    assert_eq!(route("POST", "/api/skills").rule, Rule::Write);
+    assert_eq!(route("PUT", "/api/skills/{id}").rule, Rule::Write);
+    assert_eq!(route("DELETE", "/api/skills/{id}").rule, Rule::Denied);
+    assert!(route_for("POST", "/api/skills/{id}/versions/{version}/restore").is_none());
     let grant = grant(&["a-room"]);
     assert!(authorize(
         &grant,
-        route("PUT", "/api/skills/{id}"),
+        route("DELETE", "/api/skills/{id}"),
         Some("p1"),
         &[],
         world
     )
     .is_err());
+}
+
+/// A builtin skill or a pinned version is never a write target, whatever its
+/// residence; a project's custom skill is, from that project only.
+#[test]
+fn only_a_project_s_custom_skill_is_written() {
+    let grant = grant(&["a-room"]);
+    let put = route("PUT", "/api/skills/{id}");
+    let p1 = |_: Kind, _: &str| Ok(Some(Residence::Projects(HashSet::from(["p1".to_owned()]))));
+    for (id, allowed) in [
+        ("custom-own", true),
+        ("custom-own@1", false),
+        ("rust", false),
+    ] {
+        let ids = [target(Kind::Skill, id)];
+        assert_eq!(
+            authorize(&grant, put, Some("p1"), &ids, p1).is_ok(),
+            allowed,
+            "{id}"
+        );
+    }
+    let ids = [target(Kind::Skill, "custom-own")];
+    assert!(authorize(&grant, put, Some("p2"), &ids, p1).is_err());
+    let global = |_: Kind, _: &str| Ok(Some(Residence::Global));
+    assert!(authorize(&grant, put, Some("p1"), &ids, global).is_err());
 }
 
 // ─── Id collection ──────────────────────────────────────────────────────────

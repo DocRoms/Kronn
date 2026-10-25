@@ -6,7 +6,7 @@ of six installed local models, it passed 35/42 cells; progressive loading passed
 on a failed action are not a performance improvement at comparable quality.
 `KRONN_TIERED_TOOLS=1` keeps progressive loading available as an opt-in experiment.
 [src: file: docs/research/native-tool-catalogue-2026-09-22.json:44-2756]
-[src: file: backend/src/api/agent_tools.rs:419-427#tiered_tools_enabled]
+[src: file: backend/src/api/agent_tools.rs:426-434#tiered_tools_enabled]
 
 ## Protocol and reproducibility
 

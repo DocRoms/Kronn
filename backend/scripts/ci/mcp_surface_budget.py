@@ -146,7 +146,10 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # declaration went 2_746 -> 2_732.
 # KT-1381: `media_generate` says "media source" (the local ComfyUI counts),
 # 3 B shorter than "HTTP connection"; the ComfyUI detail lives in its manual.
-CATALOGUE_MAX_BYTES = 84_843
+# Skill writes for agents: `skill_create` / `skill_update` point to their manuals,
+# lose `allowed_tools` (human-only) and the update's `project_id` (never moves);
+# `skill_delete` says it is human-only and irreversible. -393 B (84_843 -> 84_450).
+CATALOGUE_MAX_BYTES = 84_450
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

@@ -11908,6 +11908,11 @@ quick_api_id?: string | null,
  */
 quick_prompt_id?: string | null,
 /**
+ * Version of `quick_prompt_id` the step loads; unset follows its latest
+ * version. A shadow run may still test another one.
+ */
+quick_prompt_version?: number | null,
+/**
  * Optional bindings from Quick Prompt variable names to workflow
  * template expressions. This keeps the QP reusable from the library
  * (`{{production_errors}}`) while an Agent step can feed it from an

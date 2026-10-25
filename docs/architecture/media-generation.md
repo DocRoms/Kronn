@@ -166,7 +166,7 @@ without a reload.
 * Agents: `media_generate` and `media_job_status`, by two independent routes —
   CLI agents through the `kronn-internal` MCP bridge, HTTP agents through the
   native orchestration catalogue
-  [src: file: backend/src/api/agent_tools.rs:1138-1178#media_generate]. The bridge route came
+  [src: file: backend/src/api/agent_tools.rs:1214-1254#media_generate]. The bridge route came
   first; the native one closed the half of the fleet that could not reach it.
 * **The connection is optional (KT-686).** A generation names one, or names
   none and Kronn uses the only connection configured for that modality. When

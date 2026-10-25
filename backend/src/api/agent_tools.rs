@@ -59,6 +59,9 @@ mod workflow_tools;
 #[path = "agent_page_tools.rs"]
 mod page_tools;
 
+#[path = "agent_version_tools.rs"]
+mod version_tools;
+
 pub struct KronnToolExecutor {
     state: AppState,
     /// Scopes `api_call` to the calling conversation when there is one, so the
@@ -400,7 +403,7 @@ pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
     ),
     (
         "automations",
-        "save and run APIs, commands and prompts; author disabled workflows: `qa_create_draft`, `qa_update`, `qe_create_draft`, `qe_update`, `qe_run`, `qe_list`, `qp_list`, `qp_run`, `qp_create_draft`, `qp_update`, `workflow_list`, `workflow_get`, `workflow_step_schema`, `workflow_create_draft`, `workflow_update`",
+        "save and run APIs, commands and prompts; author disabled workflows: `qa_create_draft`, `qa_update`, `qe_create_draft`, `qe_update`, `qe_run`, `qe_list`, `qp_list`, `qp_get`, `qp_run`, `qp_create_draft`, `qp_update`, `skill_get`, `skill_create`, `skill_update`, `workflow_list`, `workflow_get`, `workflow_step_schema`, `workflow_create_draft`, `workflow_update`",
         &[
             "qa_create_draft",
             "qa_update",
@@ -409,9 +412,13 @@ pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
             "qe_run",
             "qe_list",
             "qp_list",
+            "qp_get",
             "qp_run",
             "qp_create_draft",
             "qp_update",
+            "skill_get",
+            "skill_create",
+            "skill_update",
             "workflow_list",
             "workflow_get",
             "workflow_step_schema",
@@ -686,6 +693,21 @@ fn build_tool_catalogue() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "qp_get",
+                "description": "Read one saved Quick Prompt whole (prompt_template, bindings) with its saved `versions`; `version: N` returns that version whole. Details: tool_manual({tool: \"qp_get\"}).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "qp_id": {"type": "string", "description": "id from qp_list"},
+                        "version": {"type": "integer"},
+                    },
+                    "required": ["qp_id"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "qp_run",
                 "description": "Launch one saved Quick Prompt in a new discussion, using its saved model, persona and rules. Tracking: tool_manual({tool: \"qp_run\"}).",
                 "parameters": {
@@ -740,6 +762,60 @@ fn build_tool_catalogue() -> Vec<Value> {
                         },
                     },
                     "required": ["qp_id"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "skill_get",
+                "description": "Read one skill whole (its markdown content); a custom skill lists its `versions`, and `custom-x@N` reads version N. Details: tool_manual({tool: \"skill_get\"}).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {"type": "string", "description": "e.g. from a step's skill_ids"},
+                    },
+                    "required": ["skill_id"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "skill_create",
+                "description": "Save a custom skill (version 1) in this discussion's project; `content` is its markdown body. Rules: tool_manual({tool: \"skill_create\"}).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "icon": {"type": "string"},
+                        "category": {"type": "string", "enum": ["Language", "Domain", "Business"]},
+                        "content": {"type": "string"},
+                        "license": {"type": "string"},
+                        "project_id": {"type": "string"},
+                    },
+                    "required": ["name", "description", "icon", "category", "content"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "skill_update",
+                "description": "Change only the named fields of a custom skill, same id: a new version; steps pinned to `custom-x@N` keep theirs. Rules: tool_manual({tool: \"skill_update\"}).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "icon": {"type": "string"},
+                        "category": {"type": "string", "enum": ["Language", "Domain", "Business"]},
+                        "content": {"type": "string"},
+                        "license": {"type": "string"},
+                    },
+                    "required": ["skill_id"],
                 },
             },
         }),
@@ -1427,6 +1503,65 @@ fn workflow_tool_catalogue(has_project: bool) -> Vec<Value> {
         .collect()
 }
 
+/// Tools a worker is never offered, and never runs even when it names one.
+const NOT_FOR_A_WORKER: &[&str] = &[
+    // A worker's room is not a room it is the agent of: no grants to ask for.
+    "room_scope",
+    // Backlog browsing and shaping — the principal owns the plan.
+    "task_list",
+    "task_create",
+    "plan_get",
+    "task_update",
+    "task_update_dod",
+    "task_link_discussion",
+    "task_add_blocker",
+    "task_remove_blocker",
+    // Launching or steering OTHER executions from inside one.
+    "agent_list",
+    "task_exec_prepare",
+    "task_exec_launch",
+    "task_exec_cancel",
+    "task_exec_reassign",
+    "task_exec_review",
+    // Durable jobs are a principal/recovery capability. A bounded worker
+    // must finish this attempt or report what its no-shell boundary
+    // prevented; spawning work behind the principal's back makes the
+    // attempt and its review evidence impossible to reason about.
+    "agent_job_start",
+    // Its catalogue goes with it: offering the list without the only tool
+    // that consumes it is precisely the wrong turn this filter removes.
+    "qe_list",
+    // And running one directly is the same capability by another route. A
+    // worker has one task and is already briefed; choosing among the saved
+    // commands of a project it is visiting is not part of that contract.
+    // `qe_run` without `qe_list` would also be exactly the runnable-but-
+    // undiscoverable shape this pair was just fixed for.
+    "qe_run",
+    // Authoring automations is a principal capability outright: a worker
+    // that leaves a new Quick API behind has changed the instance, which
+    // is not something its delivery can be reviewed against.
+    "qa_create_draft",
+    "qa_update",
+    "qe_create_draft",
+    "qe_update",
+    "qp_list",
+    "qp_get",
+    "qp_run",
+    "qp_create_draft",
+    "qp_update",
+    // Like a Quick Prompt: a worker leaves no library change behind.
+    "skill_create",
+    "skill_update",
+    "agent_schedule_wake",
+    "agent_resume_status",
+    "agent_resume_cancel",
+    "workflow_list",
+    "workflow_get",
+    "workflow_step_schema",
+    "workflow_create_draft",
+    "workflow_update",
+];
+
 /// Narrow the catalogue to what a worker needs to deliver its one task.
 ///
 /// KT-398 — found by delegating a real task to a local model. The worker was
@@ -1439,59 +1574,6 @@ fn workflow_tool_catalogue(has_project: bool) -> Vec<Value> {
 /// a guard against a bad model; it is refusing to offer a wrong turn. `task_get`
 /// stays: reading its own task's DoD is legitimate.
 fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
-    const NOT_FOR_A_WORKER: &[&str] = &[
-        // A worker's room is not a room it is the agent of: no grants to ask for.
-        "room_scope",
-        // Backlog browsing and shaping — the principal owns the plan.
-        "task_list",
-        "task_create",
-        "plan_get",
-        "task_update",
-        "task_update_dod",
-        "task_link_discussion",
-        "task_add_blocker",
-        "task_remove_blocker",
-        // Launching or steering OTHER executions from inside one.
-        "agent_list",
-        "task_exec_prepare",
-        "task_exec_launch",
-        "task_exec_cancel",
-        "task_exec_reassign",
-        "task_exec_review",
-        // Durable jobs are a principal/recovery capability. A bounded worker
-        // must finish this attempt or report what its no-shell boundary
-        // prevented; spawning work behind the principal's back makes the
-        // attempt and its review evidence impossible to reason about.
-        "agent_job_start",
-        // Its catalogue goes with it: offering the list without the only tool
-        // that consumes it is precisely the wrong turn this filter removes.
-        "qe_list",
-        // And running one directly is the same capability by another route. A
-        // worker has one task and is already briefed; choosing among the saved
-        // commands of a project it is visiting is not part of that contract.
-        // `qe_run` without `qe_list` would also be exactly the runnable-but-
-        // undiscoverable shape this pair was just fixed for.
-        "qe_run",
-        // Authoring automations is a principal capability outright: a worker
-        // that leaves a new Quick API behind has changed the instance, which
-        // is not something its delivery can be reviewed against.
-        "qa_create_draft",
-        "qa_update",
-        "qe_create_draft",
-        "qe_update",
-        "qp_list",
-        "qp_run",
-        "qp_create_draft",
-        "qp_update",
-        "agent_schedule_wake",
-        "agent_resume_status",
-        "agent_resume_cancel",
-        "workflow_list",
-        "workflow_get",
-        "workflow_step_schema",
-        "workflow_create_draft",
-        "workflow_update",
-    ];
     catalogue
         .into_iter()
         .filter_map(|mut tool| {
@@ -1652,6 +1734,17 @@ impl ToolExecutor for KronnToolExecutor {
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolOutcome {
+        // The worker catalogue leaves these out; a worker naming one anyway is
+        // refused here too, before the gate and any handler.
+        if self.worker_room && NOT_FOR_A_WORKER.contains(&call.name.as_str()) {
+            return fail(
+                call,
+                format!(
+                    "tool `{}` is not available to a worker; use only the tools of this request",
+                    call.name
+                ),
+            );
+        }
         // KT-1346 — the same gate as a CLI agent's bridge call, before the tool runs.
         let gated = match self.gate(call).await {
             Ok(gated) => gated,
@@ -1780,6 +1873,14 @@ impl ToolExecutor for KronnToolExecutor {
             | "workflow_step_schema"
             | "workflow_create_draft"
             | "workflow_update" => self.execute_workflow_tool(call).await,
+            "skill_get" | "qp_get" => self.execute_version_tool(call).await,
+            "skill_create" | "skill_update" => {
+                let caller = gated
+                    .admitted
+                    .as_ref()
+                    .map(|admitted| axum::Extension(admitted.caller.clone()));
+                self.execute_skill_write(call, caller).await
+            }
             "qp_list" => {
                 let Json(res) = crate::api::quick_prompts::list(State(self.state.clone())).await;
                 match (res.success, res.data) {
@@ -4264,11 +4365,28 @@ const ROOM_SCOPE_NOT_HERE: &str = "room_scope is for a room's own agent. A workf
 /// Both reaches, as an agent needs them (KT-1341).
 pub(crate) const ROOM_SCOPE_MANUAL: &str = "A room has one primary project: its working directory, where what it creates lands, and the only project whose API configs and credentials it may use. A human may also grant the room other projects: read (tasks, rooms, runs, pages), write (planning only: create and edit tasks there, `project_ids` naming it), or every project. room_scope() returns the grants, the pending requests, the journal and `requestable`: the names of the registered projects not granted that you may ask for (the prompt never names them). When a call is refused as outside this room's project, ask with room_scope({project, access, reason}): it files a request the human approves, narrows or declines in the room, and grants nothing by itself; do not wait or retry, continue with what you can do. A grant never opens another project's credentials, never runs its workflows, and never reaches a workflow step or a worker posting in the room. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a room without a project writes general resources only once a human granted it « General · write ». Full doctrine: tool_manual({tool: \"workflow-architect\", section: \"Reach\"}).";
 
+/// Version reading, shared word for word with the bridge's manuals (KT-1341).
+pub(crate) const SKILL_GET_MANUAL: &str = "skill_get({skill_id}) returns the skill whole; a custom skill adds `versions`: version_index, created_at and current, newest first, without bodies. skill_get({skill_id: `custom-x@N`}) returns version N whole. Builtin skills have no versions. `custom-x@N` in the skill_ids of a step, a Quick Prompt or a discussion loads that version, frozen; the bare id follows every edit, and saving refuses a version that does not exist. A project's skill and its versions are read only where that project is in reach. Restoring a version is a human action, in the skill's version history. Pinning and shadow runs: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
+
+/// Skill writes, shared word for word with the bridge's manuals.
+pub(crate) const SKILL_CREATE_MANUAL: &str = "skill_create({name, description, icon, category, content}) saves a custom skill as version 1 and returns it with its id, custom-<slug>. category is Language, Domain or Business; content is the markdown body agents load. It lands in this room's or workflow's project: project_id may name that project only, and a room without a project creates a global skill only once a human granted it « General · write ». allowed_tools pre-approve agent tools, so only a human sets them: a skill an agent creates has none. Bind it in skill_ids as custom-<slug> (follows every edit) or custom-<slug>@1 (frozen).";
+
+pub(crate) const SKILL_UPDATE_MANUAL: &str = "skill_update({skill_id, ...}) changes only the fields passed (name, description, icon, category, content, license) and keeps the others, its project and allowed_tools included. Each save that changes the skill adds a version; one that changes nothing adds none. A step, Quick Prompt or discussion pinned to custom-x@N keeps loading version N, while an enabled workflow loading the bare custom-x is disabled until a human enables it again. Writable: a custom skill of this room's or workflow's project; in a room without a project, the global skills it created once granted « General · write »; never a builtin skill. To try the new version on real runs, a human picks it in the workflow's Shadow runs settings. Restoring a version and deleting a skill are human actions.";
+
+pub(crate) const QP_GET_MANUAL: &str = "qp_get({qp_id}) returns the Quick Prompt whole with its `versions`: version_index, created_at and current, newest first, without bodies; each save adds one, v1 is its creation. qp_get({qp_id, version: N}) returns version N whole: its template, variables and bindings as saved then. A step cannot pin a Quick Prompt version; only a workflow's shadow loads another one (shadow.quick_prompt_versions, set by a human). A project's Quick Prompt and its versions are read only where that project is in reach. Deleting a version is a human action. Shadow runs: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
+
+/// What a workflow author must know of shadow runs, refs and pins.
+pub(crate) const WORKFLOW_VARIANTS_MANUAL: &str = "Mark every step that acts outside Kronn (posts, comments, sends, deploys, pushes, moves a ticket) with external_effect: true: a shadow run skips it, an unmarked one acts twice. Use {{run.variant}} (normal or shadow) in every branch name or path both runs would share, and {{refs.<name>}} (Exec env KRONN_REF_<NAME>) rather than a pasted id. `custom-x@N` in skill_ids pins a skill version. The shadow config is human-only: workflow_get shows it, no agent tool sets it; point the user to the workflow editor's Shadow runs settings, and to the Resources panel of a Page the workflow feeds to promote a version. Details: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
+
 fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
     const MANUALS: &[(&str, &str)] = &[
         ("room_scope", ROOM_SCOPE_MANUAL),
         ("page_create", page_tools::CREATE_MANUAL),
         ("page_update_html", page_tools::UPDATE_MANUAL),
+        ("skill_get", SKILL_GET_MANUAL),
+        ("skill_create", SKILL_CREATE_MANUAL),
+        ("skill_update", SKILL_UPDATE_MANUAL),
+        ("qp_get", QP_GET_MANUAL),
         (
             "workflow_create_draft",
             "Before composing, read the workflow guide: tool_manual({tool: \"workflow-architect\"}), then the sections you need. \
@@ -4277,7 +4395,8 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              Read workflow_get on an accessible example. Send name, trigger (e.g. {type: Manual}) \
              and 1–20 steps; each has name and step_type:{type: ...}. Optional authoring fields: \
              actions, safety, workspace_config, guards, artifacts, on_failure (0–20 steps), \
-             exec_allowlist, concurrency_limit, variables ({name,label,placeholder,required}). \
+             exec_allowlist, concurrency_limit, variables ({name,label,placeholder,required}), \
+             refs ({name: {kind, id}}). \
              Exec binaries must be allowlisted. The workflow is always disabled for human review; \
              no native tool here enables, triggers or deletes it. Cron/Tracker drafts default \
              concurrency_limit to 1. Omitted project_id inherits the room; null means general; \
@@ -4429,7 +4548,14 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
             json!({"tool": "signals", "catalogue": crate::api::signal_catalog::catalogue()})
         }
         Some(wanted) => match MANUALS.iter().find(|(name, _)| *name == wanted) {
-            Some((name, manual)) => json!({ "tool": name, "manual": manual }),
+            Some((name, manual)) => {
+                let manual = if matches!(*name, "workflow_create_draft" | "workflow_update") {
+                    format!("{manual}\n\n{WORKFLOW_VARIANTS_MANUAL}")
+                } else {
+                    (*manual).to_owned()
+                };
+                json!({ "tool": name, "manual": manual })
+            }
             None => json!({
                 "error": format!("no manual for `{wanted}`"),
                 "available": MANUALS.iter().map(|(name, _)| *name).chain(["signals", WORKFLOW_GUIDE]).collect::<Vec<_>>(),
@@ -5481,9 +5607,13 @@ mod tests {
             "qa_create_draft",
             "qa_update",
             "qp_list",
+            "qp_get",
             "qp_run",
             "qp_create_draft",
             "qp_update",
+            "skill_get",
+            "skill_create",
+            "skill_update",
             "qe_create_draft",
             "qe_update",
             "tool_manual",
@@ -5745,6 +5875,7 @@ mod tests {
         let has = |name: &str| worker.iter().any(|tool| tool == name);
         for withheld in [
             "qp_list",
+            "qp_get",
             "qp_run",
             "qp_create_draft",
             "qp_update",

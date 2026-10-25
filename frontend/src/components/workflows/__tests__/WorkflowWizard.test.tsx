@@ -1477,3 +1477,49 @@ describe('jsonPathToTarget', () => {
 });
 
 afterEach(() => cleanup());
+
+// ── Shadow runs: reachable in both modes, openable from the detail page ──
+
+describe('WorkflowWizard — shadow runs settings', () => {
+  it('offers the shadow card in the simple Task step', () => {
+    renderWizard();
+    fireEvent.change(screen.getByLabelText('wiz.name'), { target: { value: 'Named' } });
+    fireEvent.click(screen.getByText('wiz.next'));
+    expect(screen.getByTestId('wf-shadow-card')).toBeInTheDocument();
+    // Collapsed while the shadow is off: nothing to review yet.
+    expect(screen.queryByTestId('wf-shadow-enabled')).toBeNull();
+  });
+
+  it('opens a simple workflow on its shadow settings, expanded, with the step flag beside it', async () => {
+    const original = Element.prototype.scrollIntoView;
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      renderWizard({ editWorkflow: mkWorkflow(), initialSection: 'shadow' });
+      const card = screen.getByTestId('wf-shadow-card');
+      const toggle = within(card).getByRole('button', { expanded: true });
+      await waitFor(() => expect(toggle).toHaveFocus());
+      expect(scrollIntoView).toHaveBeenCalled();
+      expect(screen.queryByTestId('wiz-external-effect-simple')).toBeNull();
+      fireEvent.click(screen.getByTestId('wf-shadow-enabled'));
+      expect(screen.getByTestId('wf-shadow-nothing-skipped')).toHaveTextContent('wf.shadow.nothingSkippedSimple');
+      fireEvent.click(screen.getByTestId('wiz-external-effect-simple'));
+      expect(screen.getByTestId('wiz-external-effect-simple')).toBeChecked();
+      expect(screen.getByTestId('wf-shadow-skipped')).toBeInTheDocument();
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it('opens an advanced workflow on the Config step with the shadow card expanded', () => {
+    renderWizard({
+      editWorkflow: mkWorkflow({ steps: [mkStep(), mkStep({ id: '22222222-2222-4222-8222-222222222222', name: 'second' })] }),
+      initialSection: 'shadow',
+    });
+    const card = screen.getByTestId('wf-shadow-card');
+    expect(within(card).getByRole('button', { expanded: true })).toBeInTheDocument();
+    // Config also holds the execution limits: this is the advanced step 4.
+    expect(screen.getByTestId('wf-shadow-enabled')).toBeInTheDocument();
+    expect(screen.queryByTestId('wiz-external-effect-simple')).toBeNull();
+  });
+});

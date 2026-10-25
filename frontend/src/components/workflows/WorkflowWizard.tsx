@@ -36,6 +36,7 @@ import type {
 import { SafetyWarnings } from './SafetyWarnings';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import { RunRetentionCard } from './RunRetentionCard';
+import QuickPromptVersionPin from '../QuickPromptVersionPin';
 import { ShadowRunsCard } from './ShadowRunsCard';
 import { WorkflowRefsCard } from './WorkflowRefsCard';
 import type { RefOptions } from '../../lib/workflowRefs';
@@ -285,6 +286,8 @@ export interface WorkflowWizardProps {
   /** Render only the requested step editor, without the workflow-wide wizard
    *  chrome. Used by WorkflowDetail's Preview/Edit inspector. */
   focusedStepOnly?: boolean;
+  /** Open an existing workflow on one of its settings, expanded and in view. */
+  initialSection?: WorkflowWizardSection;
   /** Leave the wizard and open the selected Page. The Page id remains
    * copyable when navigation is not provided (embedded/test contexts). */
   onNavigatePage?: (pageId: string) => void;
@@ -292,7 +295,10 @@ export interface WorkflowWizardProps {
   onNavigateSettings?: () => void;
 }
 
-export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentChoices, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false, onNavigatePage, onNavigateSettings }: WorkflowWizardProps) {
+/** A workflow setting the wizard can be opened on. */
+export type WorkflowWizardSection = 'shadow';
+
+export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentChoices, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false, initialSection, onNavigatePage, onNavigateSettings }: WorkflowWizardProps) {
   const { t } = useT();
   const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
     ? installedAgentTypes
@@ -357,7 +363,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const initialStepIndex = initialStepId
     ? Math.max(0, editWorkflow?.steps.findIndex(step => step.id === initialStepId) ?? 0)
     : 0;
-  const [wizardStep, setWizardStep] = useState((initialStepId || focusedStepOnly) && needsAdvanced ? 2 : 0);
+  const [wizardStep, setWizardStep] = useState(() => {
+    if ((initialStepId || focusedStepOnly) && needsAdvanced) return 2;
+    // The shadow card sits in Task (simple) or Config (advanced).
+    if (initialSection === 'shadow' && isEdit) return needsAdvanced ? 3 : 1;
+    return 0;
+  });
+  // Scroll to the shadow card once, on arrival; coming back to its step later does not.
+  const [shadowFocus, setShadowFocus] = useState(initialSection === 'shadow' && isEdit);
   const [expandedStepTypePicker, setExpandedStepTypePicker] = useState<number | null>(null);
   const [name, setName] = useState(editWorkflow?.name ?? '');
   const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
@@ -1786,6 +1799,37 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           ))}
           {triggerType === 'Cron' && (
             <TimezoneField id="wf-cron-timezone-simple" value={cronTimezone} onChange={setCronTimezone} schedule={buildCronExpr()} />
+          )}
+
+          <ShadowRunsCard
+            value={shadow}
+            onChange={setShadow}
+            steps={steps}
+            projects={projects}
+            skills={availableSkills}
+            quickPrompts={availableQuickPrompts}
+            t={t}
+            focusOnOpen={shadowFocus}
+            onFocused={() => setShadowFocus(false)}
+            nothingSkippedHint={t('wf.shadow.nothingSkippedSimple')}
+          />
+          {/* Simple mode has no step « Advanced » section: the one step's flag lives here. */}
+          {shadow?.enabled && steps[0] && (
+            <div className="wf-simple-external-effect">
+              <label className="wf-label">
+                <input
+                  type="checkbox"
+                  data-testid="wiz-external-effect-simple"
+                  checked={steps[0].external_effect ?? false}
+                  aria-describedby="wiz-external-effect-hint-simple"
+                  onChange={e => updateStep(0, { external_effect: e.target.checked || undefined })}
+                />{' '}
+                {t('wiz.externalEffect')}
+              </label>
+              <p id="wiz-external-effect-hint-simple" className="text-xs text-muted mb-1">
+                {t('wiz.externalEffectHint')}
+              </p>
+            </div>
           )}
         </div>
       )}
@@ -3908,7 +3952,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         <select
                           className="wf-select text-sm"
                           value={step.quick_prompt_id ?? ''}
-                          onChange={e => updateStep(i, { quick_prompt_id: e.target.value || null })}
+                          onChange={e => updateStep(i, { quick_prompt_id: e.target.value || null, quick_prompt_version: null })}
                           aria-label={t('wiz.agentQpPicker')}
                         >
                           <option value="">{t('wiz.agentQpPickerInline')}</option>
@@ -3920,6 +3964,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         </select>
                         {availableQuickPrompts.length === 0 && (
                           <p className="text-2xs text-ghost mt-1">{t('wiz.agentQpPickerNone')}</p>
+                        )}
+                        {selectedQp && (
+                          <QuickPromptVersionPin
+                            qpId={selectedQp.id}
+                            qpName={selectedQp.name}
+                            value={step.quick_prompt_version}
+                            onChange={version => updateStep(i, { quick_prompt_version: version })}
+                          />
                         )}
                         {selectedQp && (
                           <div className="wf-qref-banner">
@@ -5051,7 +5103,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               not hidden, not advanced — first-class safety control). */}
           <ExecutionLimitsCard value={guards} onChange={setGuards} t={t} />
           <RunRetentionCard value={retention} onChange={setRetention} t={t} />
-          <ShadowRunsCard value={shadow} onChange={setShadow} steps={steps} projects={projects} skills={availableSkills} quickPrompts={availableQuickPrompts} t={t} />
+          <ShadowRunsCard value={shadow} onChange={setShadow} steps={steps} projects={projects} skills={availableSkills} quickPrompts={availableQuickPrompts} t={t} focusOnOpen={shadowFocus} onFocused={() => setShadowFocus(false)} />
           <WorkflowRefsCard value={refs} onChange={setRefs} options={refOptions} t={t} />
 
           {/* 0.7.0 Phase 5 — Exec allowlist. Visible by default; the
