@@ -3893,6 +3893,7 @@ fn workflow_delete_is_blocked_by_live_paused_or_resumable_runs() {
         "finished runs and clean interruptions do not block"
     );
 
+    let worktree = std::env::temp_dir();
     for (id, status, workspace) in [
         ("running", RunStatus::Running, None),
         ("pending", RunStatus::Pending, None),
@@ -3900,7 +3901,12 @@ fn workflow_delete_is_blocked_by_live_paused_or_resumable_runs() {
         (
             "interrupted",
             RunStatus::Interrupted,
-            Some("/repo/.kronn/worktrees/i".to_string()),
+            Some(worktree.display().to_string()),
+        ),
+        (
+            "interrupted-gone",
+            RunStatus::Interrupted,
+            Some("/repo/.kronn/worktrees/removed-since".to_string()),
         ),
     ] {
         let mut run = sample_run(id, "w1");
@@ -3908,6 +3914,7 @@ fn workflow_delete_is_blocked_by_live_paused_or_resumable_runs() {
         run.workspace_path = workspace;
         crate::db::workflows::insert_run(&conn, &run).unwrap();
     }
+    // The interruption whose worktree is gone does not block.
     assert_eq!(blocking(&conn), 4);
 }
 
