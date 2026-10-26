@@ -1,0 +1,38 @@
+{
+  "task": "KT-1403",
+  "date": "2026-10-26",
+  "model": "flux-2-klein-4b.safetensors",
+  "connection_id": "local:comfyui",
+  "job_id": "media-e5423287a82bb7fc8519bd4cc984cbd9e8ca55d89ae0a29cb77963e1fd22d717",
+  "discussion_id": "8cc0538a-ec0e-48ce-9166-09787ed75e06",
+  "comfyui_prompt_id": "d751641b-f5e8-495e-adf1-97b2f90768bd",
+  "status": "completed",
+  "result": {
+    "context_file_id": "a65fee83-2dc8-4e07-9e43-d2375f3408b9",
+    "width": 1344,
+    "height": 768,
+    "bytes": 1975867,
+    "sha256": "8b2698ce36488edc27f1d431b82a78cbd108a31f8407433821fb302b3c4ebded"
+  },
+  "reference_hashes": [
+    {
+      "source_sha256": "f97db6ab8573ddbbff2d5dc0fa1251bf1b23c668527a69776dda16b99a59a10a",
+      "comfyui_upload_sha256": "f97db6ab8573ddbbff2d5dc0fa1251bf1b23c668527a69776dda16b99a59a10a",
+      "match": true
+    },
+    {
+      "source_sha256": "dfdae7734074fcba374bfc801805eb026d284666907af6df57232b5b17261322",
+      "comfyui_upload_sha256": "dfdae7734074fcba374bfc801805eb026d284666907af6df57232b5b17261322",
+      "match": true
+    },
+    {
+      "source_sha256": "22a23246b56471356b63386a2cacbdf98fbc3f999f0eaa156de6cbbb47862b05",
+      "comfyui_upload_sha256": "22a23246b56471356b63386a2cacbdf98fbc3f999f0eaa156de6cbbb47862b05",
+      "match": true
+    }
+  ],
+  "comfyui_status": "success",
+  "three_reference_paths_verified": true,
+  "positive_and_negative_conditioning_chains_verified": true,
+  "source": "user-launched discussion; full local receipt under .kronn/artifacts/kt1403/klein-local-2026-10-26/; source and output images not committed"
+}

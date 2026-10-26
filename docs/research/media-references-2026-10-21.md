@@ -1,10 +1,29 @@
 # Three-source media references — KT-1403 (2026-10-21)
 
-The local video recipe completed through Kronn's generation API and worker.
-The image recipe remains pending: the official Redux weight file is absent and
-requires the user's Hugging Face access. This is a partial qualification, not
-an end-to-end image-and-video acceptance.
+The local video recipe completed through Kronn's generation API and worker on
+October 21. On October 26, the user also generated an image locally with three
+references using FLUX.2 Klein 4B; the source bytes and executed graph were
+checked. The separate Redux recipe remains untested because its official
+weight file is absent.
 [src: file: docs/research/media-references-2026-10-21.json:1]
+[src: file: docs/research/media-references-klein-2026-10-26.json:1]
+
+## Image measurement — October 26
+
+The user submitted three distinct context files in a Kronn discussion. The
+completed local ComfyUI job produced a 1344×768 image. All three uploaded files
+match their sources by SHA-256; each has a `LoadImage` → resize → `VAEEncode`
+path, and three ordered `ReferenceLatent` nodes feed each conditioning branch
+of the executed sampler. The output is saved as a Kronn context file. A local
+receipt retains the paths and hashes without committing the user's images.
+[src: file: docs/research/media-references-klein-2026-10-26.json:1]
+
+The user judged the result functional and reasonably good, with the remaining
+visual outcome depending on the prompt. This is a report on this test, not a
+general guarantee of identity or visual fidelity. The user's earlier test
+exposed separate repeated-generation and unauthorised external-fallback
+problems, tracked as KT-1481 and KT-1420; neither is fixed by this PR.
+[src: user: 2026-10-26: confirmation in this conversation]
 
 ## Video measurement
 
@@ -43,14 +62,14 @@ quality. Eight steps were used for this transport recipe; no comparison with
 the default step count was performed.
 [src: file: docs/research/media-references-2026-10-21.json:1]
 
-## Remaining acceptance
+## Redux and HTTP coverage
 
-Run the same opt-in recipe with `KRONN_REFERENCE_RECIPE_MODALITY=image` after
-installing the legitimately obtained `flux1-redux-dev.safetensors` under
-`style_models/`. The vision weight is already present on the test installation.
-Keep the image and video acceptance items open until the image output and its
-three-source graph are available. The HTTP paths have automated transport
-coverage; no billable remote generation was executed for this qualification.
+The Redux workflow may be tested separately with
+`KRONN_REFERENCE_RECIPE_MODALITY=image` after installing a legitimately
+obtained `flux1-redux-dev.safetensors` under `style_models/`; the vision weight
+was already present on the test installation. The HTTP paths have automated
+transport coverage; no billable remote generation was executed by Codex for
+this qualification.
 [src: file: backend/tests/support/api_media_references.rs:10]
 [src: file: backend/src/api/comfyui.rs:328]
 
@@ -78,7 +97,8 @@ base's ceiling. The ceiling is lowered to that measurement.
 [src: file: backend/scripts/disc-introspection-mcp.py:2378]
 
 The October 21 video evidence is historical; no new real generation was run
-for this rebase. The Redux image acceptance gap remains open.
+for this rebase. The user subsequently ran the Klein image measurement above;
+the separate Redux workflow remains untested.
 [src: file: docs/research/media-references-2026-10-21.json:1]
 
 ## October 21 automated validation
@@ -103,5 +123,5 @@ After the October 21 rebase, these checks passed:
 - `lint_with_conn_unwrap.py` and `git diff --check`.
 
 The real ComfyUI video recipe passed separately. HTTP provider tests use mock
-servers; full browser E2E and a live remote provider run were not performed.
-The image recipe remains the explicit acceptance gap described above.
+servers; full browser E2E and a live remote provider run were not performed for
+that October 21 validation. See the later Klein measurement above.
