@@ -141,6 +141,10 @@ cd Kronn
 
 `./kronn start` (and `make start`) pulls the published images (`ghcr.io/docroms/kronn-backend` and `-frontend`, amd64 and arm64) and compiles nothing. Source builds, their memory check and how `VERSION` picks the image: [docs/install.md](docs/install.md#published-images-and-source-builds). On Windows, use WSL2.
 
+To keep Kronn running in the background with no terminal (macOS LaunchAgent /
+Linux `systemd --user`), use `./kronn service install`; see
+[docs/operations/service.md](docs/operations/service.md).
+
 ### macOS and contributors: `start-dev`
 
 Docker on macOS cannot run your host agents or read the Keychain, so on a Mac use `./kronn start-dev`: backend and UI run natively, with backend hot-reload. It needs Rust, Node ≥ 24, pnpm and Watchexec, and names any missing tool with an install hint. Details: [docs/install.md](docs/install.md#develop--run-from-source-natively-no-app-build-hot-reload).

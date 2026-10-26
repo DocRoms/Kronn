@@ -90,6 +90,7 @@ Spec: [`agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest b
 | RTK / compression integration | `docs/architecture/rtk-integration.md` |
 | Workflow engine work | `docs/architecture/overview.md`, `docs/inconsistencies-tech-debt.md`, `docs/coding-rules.md` |
 | Docker / deployment / starting the stack | `docs/operations/debug-operations.md`, `docs/operations/running-the-stack.md` |
+| Background service (`kronn service`) | `docs/operations/service.md` |
 | Secret themes / unlock features | `docs/operations/secret-themes.md` |
 | **Désagentification / `ApiCall` step** | `docs/operations/deagent-apicall.md` |
 | **Ollama local models** (offload, `num_ctx`, quality escalation) | `docs/operations/ollama-local-models.md` |
@@ -138,7 +139,7 @@ Never load everything "just in case".
 ## 4. Development constraints
 
 - **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
-- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`. E2E: `pnpm test:e2e` (Playwright; backend must be running, Vite is auto-spawned). Fixtures, page objects and specs: `frontend/e2e/README.md`.
+- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`. E2E: `pnpm test:e2e` (Playwright; see `frontend/e2e/README.md`).
 - **Release versions are mechanically synchronized**: use `make bump V=x.y.z`,
   then `make check-version` before tagging. The guard compares `VERSION`, app
   manifests and lockfiles, the first changelog release, both READMEs (including
