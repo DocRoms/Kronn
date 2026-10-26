@@ -66,19 +66,31 @@ fn export_embed_origins(conn: &Connection, page_id: &str, html: &str) -> Result<
     Ok(crate::core::embed_origins::normalize_declared(&origins))
 }
 
+/// The page with its datasets' contents: what a project resource file carries.
 pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
+    read_page(conn, id, true)
+}
+
+/// The page as an Artifact file carries it: its datasets keep their name,
+/// kind, schema and limits, never their snapshot or points. Those are the
+/// data the page published (API answers, names, links), not its definition.
+pub(crate) fn export_bare_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
+    read_page(conn, id, false)
+}
+
+fn read_page(conn: &Connection, id: &str, with_data: bool) -> Result<ArtifactBundlePage> {
     let page_id = crate::db::live_pages::resolve_live_page_id(conn, id)?
         .ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
     // Refuse oversized observations before hydrating the complete dataset graph.
     let estimated: Option<i64> = conn.query_row(
-        "SELECT length(CAST(r.html AS BLOB)) +
+        "SELECT length(CAST(r.html AS BLOB)) + CASE WHEN ?2 THEN
             COALESCE((SELECT SUM(COALESCE(length(CAST(d.current_json AS BLOB)), 0) + COALESCE(length(CAST(d.schema_json AS BLOB)), 0) + length(CAST(d.name AS BLOB)) + 80)
                 FROM live_page_datasets d WHERE d.page_id = p.id), 0) +
             COALESCE((SELECT SUM(length(CAST(pt.payload_json AS BLOB)) + length(CAST(COALESCE(pt.dedupe_key, '') AS BLOB)) + 80)
                 FROM live_page_dataset_points pt JOIN live_page_datasets d ON d.id = pt.dataset_id
-                WHERE d.page_id = p.id), 0)
+                WHERE d.page_id = p.id), 0) ELSE 0 END
          FROM live_pages p JOIN live_page_revisions r ON r.id = p.current_revision_id
-         WHERE p.id = ?1", [&page_id], |row| row.get(0)).optional()?;
+         WHERE p.id = ?1", rusqlite::params![&page_id, with_data], |row| row.get(0)).optional()?;
     let estimated = estimated.ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
     if estimated > MAX_BUNDLE_BYTES as i64 {
         bail!("Artifact exceeds the 64 MiB bundle limit");
@@ -88,7 +100,7 @@ pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundleP
     let mut datasets = Vec::with_capacity(detail.datasets.len());
     for view in detail.datasets {
         let dataset = view.dataset;
-        let points = if dataset.kind == LivePageDatasetKind::TimeSeries {
+        let points = if with_data && dataset.kind == LivePageDatasetKind::TimeSeries {
             let mut statement = conn.prepare(
                 "SELECT observed_at, payload_json, dedupe_key FROM live_page_dataset_points
                  WHERE dataset_id = ?1 ORDER BY observed_at, rowid",
@@ -118,8 +130,11 @@ pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundleP
         datasets.push(ArtifactBundleDataset {
             name: dataset.name,
             kind: dataset.kind,
-            has_current: dataset.current.is_some(),
-            current: dataset.current.unwrap_or(serde_json::Value::Null),
+            has_current: with_data && dataset.current.is_some(),
+            current: dataset
+                .current
+                .filter(|_| with_data)
+                .unwrap_or(serde_json::Value::Null),
             schema: dataset.schema,
             max_points: dataset.max_points,
             max_age_days: dataset.max_age_days,
@@ -140,7 +155,7 @@ pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundleP
 }
 
 fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
-    let artifact = export_page(conn, id)?;
+    let artifact = export_bare_page(conn, id)?;
     let root_id = artifact.id.clone();
     let root_slug = artifact.slug.clone();
     let mut pages = BTreeMap::new();
@@ -184,7 +199,7 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
         }
         let size = match kind {
             ResourceKind::Artifact => {
-                let page = export_page(conn, &id)?;
+                let page = export_bare_page(conn, &id)?;
                 if pages.contains_key(&page.id) || page.id == root_id {
                     continue;
                 }
