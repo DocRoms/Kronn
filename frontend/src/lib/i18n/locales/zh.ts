@@ -4,6 +4,7 @@ const zh: TranslationDict = {
   "disc.media.moveReferenceUp": "上移参考图",
   "disc.media.moveReferenceDown": "下移参考图",
   "disc.media.referenceLimitExceeded": "此模型最多接受 {0} 张图片。请先移除多余图片。",
+  "comfyui.family.flux2_klein4b": "FLUX.2 Klein 4B — 图像与多参考图",
   "comfyui.family.wan21_vace": "Wan 2.1 VACE — 视频参考图",
   'comfyui.settings.denoise': '图像变换强度',
   'comfyui.settings.denoiseHint': '0 保留原图；越接近 1，变化越明显。',

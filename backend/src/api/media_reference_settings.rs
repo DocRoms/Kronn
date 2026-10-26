@@ -146,19 +146,8 @@ pub async fn set_limit(
         .and_then(|support| support.workflow.clone());
     let mut config = state.config.write().await;
     if crate::api::comfyui::is_local(&connection) {
-        let folder = if req.modality == MediaModality::Image {
-            crate::core::comfyui::IMAGE_FOLDER
-        } else {
-            crate::core::comfyui::VIDEO_FOLDER
-        };
-        let family = config
-            .comfyui
-            .chosen_family(folder, &req.model)
-            .or(config.comfyui.image_family.filter(|_| {
-                req.modality == MediaModality::Image
-                    && config.comfyui.image_model.as_deref() == Some(&req.model)
-            }))
-            .or_else(|| crate::core::comfyui::family_of(folder, &req.model, None, None));
+        let family =
+            crate::api::comfyui::reference_family(&config.comfyui, &req.model, req.modality);
         if crate::core::comfyui_references::workflow_id(family) != workflow.as_deref() {
             return Json(ApiResponse::err(
                 "the configured workflow changed; reload its reference settings",

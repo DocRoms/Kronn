@@ -19,7 +19,7 @@ pub struct ComfyUiConfig {
     /// `host.docker.internal` from Docker).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    /// Checkpoint file used for images (`models/checkpoints`).
+    /// Image model file (`checkpoints` or `diffusion_models`, per family).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_model: Option<String>,
     /// Diffusion model file used for videos (`models/diffusion_models`).
@@ -61,7 +61,7 @@ pub fn is_unset(config: &ComfyUiConfig) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[ts(export)]
 pub struct ComfyUiModel {
-    /// ComfyUI folder: `checkpoints` (image) or `diffusion_models` (video).
+    /// ComfyUI folder: `checkpoints` or `diffusion_models` (image or video).
     pub folder: String,
     pub file: String,
     /// `None` = Kronn does not know how to run it until the user picks its

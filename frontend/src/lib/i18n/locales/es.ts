@@ -4,6 +4,7 @@ const es: TranslationDict = {
   "disc.media.moveReferenceUp": "Subir referencia",
   "disc.media.moveReferenceDown": "Bajar referencia",
   "disc.media.referenceLimitExceeded": "Este modelo acepta {0} imagen(es). Retira las imágenes adicionales antes de generar.",
+  "comfyui.family.flux2_klein4b": "FLUX.2 Klein 4B — imágenes y múltiples referencias",
   "comfyui.family.wan21_vace": "Wan 2.1 VACE — referencias de vídeo",
   'comfyui.settings.denoise': 'Intensidad de transformación',
   'comfyui.settings.denoiseHint': '0 conserva la imagen; los valores cercanos a 1 la transforman más.',

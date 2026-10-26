@@ -305,18 +305,24 @@ pub(crate) fn reference_family(
     model: &str,
     modality: MediaModality,
 ) -> Option<ComfyFamily> {
-    let folder = match modality {
-        MediaModality::Image => IMAGE_FOLDER,
-        MediaModality::Video => VIDEO_FOLDER,
-    };
-    config
-        .chosen_family(folder, model)
+    [IMAGE_FOLDER, VIDEO_FOLDER]
+        .into_iter()
+        .find_map(|folder| {
+            config
+                .chosen_family(folder, model)
+                .filter(|family| crate::core::comfyui::folder_of(*family) == folder)
+        })
         .or_else(|| {
             config.image_family.filter(|_| {
                 modality == MediaModality::Image && config.image_model.as_deref() == Some(model)
             })
         })
-        .or_else(|| family_of(folder, model, None, None))
+        .or_else(|| {
+            [IMAGE_FOLDER, VIDEO_FOLDER]
+                .into_iter()
+                .find_map(|folder| family_of(folder, model, None, None))
+        })
+        .filter(|family| family.modality() == modality)
 }
 
 pub async fn reference_capabilities(
@@ -324,19 +330,20 @@ pub async fn reference_capabilities(
     model: &str,
     modality: MediaModality,
 ) -> crate::agents::media_capabilities::MediaModelCapabilities {
+    use crate::core::comfyui_klein;
     use crate::core::comfyui_references::{MULTI_REFERENCE_LIMIT, REDUX_MODEL, REDUX_VISION};
     use crate::models::{MediaReferenceLimitSource, MediaReferenceSupport};
     let mut result = capabilities(model, modality);
-    let folder = match modality {
-        MediaModality::Image => IMAGE_FOLDER,
-        MediaModality::Video => VIDEO_FOLDER,
-    };
     let family = reference_family(config, model, modality);
+    let folder = family
+        .map(crate::core::comfyui::folder_of)
+        .unwrap_or(IMAGE_FOLDER);
     let (maximum, required, mut blocker): (u32, &[&str], Option<String>) = match family {
         Some(ComfyFamily::Sdxl) => (1, &["LoadImage", "VAEEncode"], None),
         Some(ComfyFamily::FluxSchnell) => (MULTI_REFERENCE_LIMIT, &["LoadImage", "StyleModelLoader", "CLIPVisionLoader", "CLIPVisionEncode", "StyleModelApply"], None),
+        Some(ComfyFamily::Flux2Klein4b) => (comfyui_klein::REFERENCE_LIMIT, comfyui_klein::REQUIRED_NODES, None),
         Some(ComfyFamily::Wan21Vace) => (MULTI_REFERENCE_LIMIT, &["LoadImage", "WanVaceToVideo", "TrimVideoLatent"], None),
-        _ => (0, &[], Some("Kronn's selected ComfyUI workflow does not take source images. Select SDXL img2img, FLUX Redux, or a Wan VACE video model; this is a workflow limitation, not a statement about every local model.".into())),
+        _ => (0, &[], Some("Kronn's selected ComfyUI workflow does not take source images. Select SDXL img2img, FLUX Redux, FLUX.2 Klein 4B, or a Wan VACE video model; this is a workflow limitation, not a statement about every local model.".into())),
     };
     let base = base_url(config);
     if maximum > 0 {
@@ -395,6 +402,35 @@ pub async fn reference_capabilities(
             if !missing.is_empty() {
                 blocker = Some(format!(
                     "FLUX Redux requires {}. Add these model files to ComfyUI, then check again.",
+                    missing.join(", ")
+                ));
+            }
+        } else if family == Some(ComfyFamily::Flux2Klein4b) {
+            let (encoders, vaes) = tokio::join!(
+                list_folder(&base, TEXT_ENCODER_FOLDER),
+                list_folder(&base, VAE_FOLDER)
+            );
+            let mut missing = Vec::new();
+            if !encoders
+                .unwrap_or_default()
+                .iter()
+                .any(|name| name == comfyui_klein::TEXT_ENCODER)
+            {
+                missing.push(format!(
+                    "{TEXT_ENCODER_FOLDER}/{}",
+                    comfyui_klein::TEXT_ENCODER
+                ));
+            }
+            if !vaes
+                .unwrap_or_default()
+                .iter()
+                .any(|name| name == comfyui_klein::VAE)
+            {
+                missing.push(format!("{VAE_FOLDER}/{}", comfyui_klein::VAE));
+            }
+            if !missing.is_empty() {
+                blocker = Some(format!(
+                    "FLUX.2 Klein 4B requires {}. Add these files to ComfyUI, then check again.",
                     missing.join(", ")
                 ));
             }
@@ -489,6 +525,7 @@ async fn sampler_choices(base: &str) -> (Vec<String>, Vec<String>) {
 fn family_defaults() -> Vec<ComfyUiFamilyDefaults> {
     [
         ComfyFamily::FluxSchnell,
+        ComfyFamily::Flux2Klein4b,
         ComfyFamily::Sdxl,
         ComfyFamily::Wan21T2v,
         ComfyFamily::Wan21Vace,
@@ -1045,6 +1082,9 @@ async fn slot_family(
     file: &str,
     modality: MediaModality,
 ) -> Result<ComfyFamily, String> {
+    if let Some(family) = reference_family(config, file, modality) {
+        return Ok(family);
+    }
     let folder = match modality {
         MediaModality::Image => IMAGE_FOLDER,
         MediaModality::Video => VIDEO_FOLDER,
@@ -1230,8 +1270,9 @@ pub async fn set_model_family(
             }
         }
         // The image slot runs the workflow chosen here from now on.
-        if folder == IMAGE_FOLDER && slot(&comfyui.image_model).as_deref() == Some(file.as_str()) {
-            comfyui.image_family = family;
+        if slot(&comfyui.image_model).as_deref() == Some(file.as_str()) {
+            comfyui.image_family =
+                family.filter(|family| family.modality() == MediaModality::Image);
         }
     })
     .await
@@ -1320,6 +1361,78 @@ pub fn names_local(reference: &str) -> bool {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn klein_is_an_image_diffusion_model_and_requires_its_companions() {
+        use crate::core::comfyui_klein;
+        use wiremock::{matchers::path, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let model = "flux-2-klein-4b.safetensors";
+        let config = ComfyUiConfig {
+            endpoint: Some(server.uri()),
+            ..Default::default()
+        };
+        assert_eq!(
+            slot_family(&server.uri(), &config, model, MediaModality::Image)
+                .await
+                .unwrap(),
+            ComfyFamily::Flux2Klein4b
+        );
+        assert!(
+            slot_family(&server.uri(), &config, model, MediaModality::Video)
+                .await
+                .is_err()
+        );
+        let caps = reference_capabilities(&config, model, MediaModality::Image).await;
+        assert_eq!(caps.max_input_references, Some(0));
+        assert!(caps
+            .reference_support
+            .unwrap()
+            .blocker
+            .unwrap()
+            .contains("required nodes"));
+        for node in comfyui_klein::REQUIRED_NODES {
+            Mock::given(path(format!("/object_info/{node}")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({*node:{}})),
+                )
+                .mount(&server)
+                .await;
+        }
+        Mock::given(path("/models/diffusion_models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(vec![model]))
+            .mount(&server)
+            .await;
+        let caps = reference_capabilities(&config, model, MediaModality::Image).await;
+        let reason = caps.reference_support.unwrap().blocker.unwrap();
+        assert!(reason.contains(comfyui_klein::TEXT_ENCODER), "{reason}");
+        assert!(reason.contains(comfyui_klein::VAE), "{reason}");
+        for (folder, file) in [
+            (TEXT_ENCODER_FOLDER, comfyui_klein::TEXT_ENCODER),
+            (VAE_FOLDER, comfyui_klein::VAE),
+        ] {
+            Mock::given(path(format!("/models/{folder}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(vec![file]))
+                .mount(&server)
+                .await;
+        }
+        let caps = reference_capabilities(&config, model, MediaModality::Image).await;
+        assert_eq!(caps.max_input_references, Some(4));
+        let support = caps.reference_support.unwrap();
+        assert_eq!(
+            support.workflow.as_deref(),
+            Some("flux2-klein4b-references-v1")
+        );
+        assert!(support.blocker.is_none());
+        let mut changed = config.clone();
+        changed
+            .model_families
+            .insert(format!("{VIDEO_FOLDER}/{model}"), ComfyFamily::Wan21T2v);
+        assert_ne!(
+            reference_family(&changed, model, MediaModality::Image),
+            Some(ComfyFamily::Wan21T2v)
+        );
+    }
 
     #[tokio::test]
     async fn reference_limits_require_installed_models_and_nodes_and_recover_after_installation() {

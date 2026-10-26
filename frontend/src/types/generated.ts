@@ -2199,7 +2199,7 @@ timeout_secs?: number | null,
  */
 output_format: CollectQuickExecOutputFormat, };
 
-export type ComfyFamily = "flux_schnell" | "sdxl" | "wan21_t2v" | "wan21_vace";
+export type ComfyFamily = "flux_schnell" | "flux2_klein4b" | "sdxl" | "wan21_t2v" | "wan21_vace";
 
 /**
  * Generation settings a user may override per slot in the card. Empty =
@@ -2223,7 +2223,7 @@ export type ComfyUiConfig = {
  */
 endpoint?: string | null,
 /**
- * Checkpoint file used for images (`models/checkpoints`).
+ * Image model file (`checkpoints` or `diffusion_models`, per family).
  */
 image_model?: string | null,
 /**
@@ -2257,7 +2257,7 @@ export type ComfyUiFamilyDefaults = { family: ComfyFamily, settings: ResolvedGen
  */
 export type ComfyUiModel = {
 /**
- * ComfyUI folder: `checkpoints` (image) or `diffusion_models` (video).
+ * ComfyUI folder: `checkpoints` or `diffusion_models` (image or video).
  */
 folder: string, file: string,
 /**

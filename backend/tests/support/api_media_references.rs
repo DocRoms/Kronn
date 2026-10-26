@@ -147,7 +147,11 @@ async fn remote() -> (AppState, Router, MockServer) {
 
 #[tokio::test]
 async fn comfyui_three_sources_survive_a_slot_change_between_the_api_and_worker() {
-    for modality in ["image", "video"] {
+    for (modality, image_model) in [
+        ("image", "flux1-schnell-fp8.safetensors"),
+        ("image", "flux-2-klein-4b.safetensors"),
+        ("video", "flux1-schnell-fp8.safetensors"),
+    ] {
         let state = test_state();
         seed_media_connection(&state, None, None).await;
         let server = MockServer::start().await;
@@ -159,7 +163,10 @@ async fn comfyui_three_sources_survive_a_slot_change_between_the_api_and_worker(
             "StyleModelApply",
             "WanVaceToVideo",
             "TrimVideoLatent",
-        ] {
+        ]
+        .into_iter()
+        .chain(kronn::core::comfyui_klein::REQUIRED_NODES.iter().copied())
+        {
             Mock::given(path(format!("/object_info/{node}")))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({node:{}})))
                 .mount(&server)
@@ -169,7 +176,10 @@ async fn comfyui_three_sources_survive_a_slot_change_between_the_api_and_worker(
             ("checkpoints", vec!["flux1-schnell-fp8.safetensors"]),
             (
                 "diffusion_models",
-                vec!["wan2.1_vace_1.3B_fp16.safetensors"],
+                vec![
+                    "wan2.1_vace_1.3B_fp16.safetensors",
+                    "flux-2-klein-4b.safetensors",
+                ],
             ),
             ("style_models", vec!["flux1-redux-dev.safetensors"]),
             (
@@ -178,9 +188,15 @@ async fn comfyui_three_sources_survive_a_slot_change_between_the_api_and_worker(
             ),
             (
                 "text_encoders",
-                vec!["umt5_xxl_fp8_e4m3fn_scaled.safetensors"],
+                vec![
+                    "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                    "qwen_3_4b.safetensors",
+                ],
             ),
-            ("vae", vec!["wan_2.1_vae.safetensors"]),
+            (
+                "vae",
+                vec!["wan_2.1_vae.safetensors", "flux2-vae.safetensors"],
+            ),
         ] {
             Mock::given(path(format!("/models/{folder}")))
                 .respond_with(ResponseTemplate::new(200).set_body_json(files))
@@ -220,7 +236,7 @@ async fn comfyui_three_sources_survive_a_slot_change_between_the_api_and_worker(
             .await;
         let mut config = kronn::models::ComfyUiConfig {
             endpoint: Some(server.uri()),
-            image_model: Some("flux1-schnell-fp8.safetensors".into()),
+            image_model: Some(image_model.into()),
             video_model: Some("wan2.1_vace_1.3B_fp16.safetensors".into()),
             ..Default::default()
         };
@@ -296,7 +312,22 @@ async fn comfyui_three_sources_survive_a_slot_change_between_the_api_and_worker(
                 .unwrap()
                 .ends_with(&format!("-{index}.png")));
         }
-        let sampler = if modality == "image" { "5" } else { "8" };
+        let sampler = if image_model == "flux-2-klein-4b.safetensors" {
+            assert_eq!(graph["model"]["inputs"]["unet_name"], image_model);
+            assert_eq!(
+                graph["guider"]["inputs"]["positive"],
+                json!(["reference_positive_2", 0])
+            );
+            assert_eq!(
+                graph["reference_positive_2"]["inputs"]["conditioning"],
+                json!(["reference_positive_1", 0])
+            );
+            "sigmas"
+        } else if modality == "image" {
+            "5"
+        } else {
+            "8"
+        };
         assert_eq!(
             graph[sampler]["inputs"]["steps"],
             if modality == "image" { 7 } else { 9 }

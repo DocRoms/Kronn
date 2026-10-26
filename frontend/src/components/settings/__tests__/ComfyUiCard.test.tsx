@@ -49,6 +49,24 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('ComfyUiCard (KT-1381)', () => {
+  it('selects Klein from diffusion models for images and shows its own defaults', async () => {
+    const model = 'flux-2-klein-4b.safetensors';
+    const initial = online();
+    initial.models.push({ folder: 'diffusion_models', file: model, family: 'flux2_klein4b', modality: 'image', chosen: false });
+    initial.family_defaults.push({ family: 'flux2_klein4b', settings: { steps: 4, cfg: 1, sampler: 'euler', scheduler: 'flux2' } });
+    status.mockResolvedValue(initial);
+    setSlots.mockResolvedValue({ image_model: model, video_model: null });
+    await act(async () => { render(<ComfyUiCard t={t} />); });
+    fireEvent.focus(screen.getByTestId('comfyui-slot-image'));
+    await act(async () => { fireEvent.click(screen.getByRole('option', { name: /flux-2-klein/ })); });
+    expect(setSlots).toHaveBeenCalledWith({ image_model: model, video_model: null });
+    fireEvent.focus(screen.getByTestId('comfyui-slot-video'));
+    expect(screen.queryByRole('option', { name: /flux-2-klein/ })).not.toBeInTheDocument();
+    fireEvent.blur(screen.getByTestId('comfyui-slot-video'));
+    fireEvent.focus(screen.getByTestId('comfyui-scheduler-image'));
+    expect(screen.getByRole('option', { name: 'flux2' })).toBeInTheDocument();
+  });
+
   it('offers the install command and the first-launch step when ComfyUI is not found', async () => {
     status.mockResolvedValue({ ...online({ state: 'not_found', version: null, models: [] }) });
     await act(async () => { render(<ComfyUiCard t={t} />); });

@@ -421,12 +421,12 @@ connection with the reserved id `local:comfyui` (alias `comfyui`, no
 credential, no text tier), and every media path resolves it: generation and
 its preflights, `/api/media/models`, the estimate, the worker, the bridge
 guard and the `agent_list` catalogue.
-[src: file: backend/src/api/comfyui.rs:1242]
+[src: file: backend/src/api/comfyui.rs:1283]
 [src: file: backend/src/api/orchestration.rs:13358]
 
 ComfyUI runs a node graph, so a model is usable only when Kronn has a
 compatible integrated workflow for its family (FLUX.1 schnell, SDXL such as
-RealVisXL, Wan 2.1 text-to-video, or Wan VACE). The family comes from the architecture a checkpoint's
+RealVisXL, FLUX.2 Klein 4B distilled, Wan 2.1 text-to-video, or Wan VACE). The family comes from the architecture a checkpoint's
 header declares (FLUX.1 schnell, any SDXL base), else from its exact file
 name in the measured list — never from what a name suggests. Anything else is
 listed on the card, disabled, until the user picks the workflow it runs with:
@@ -435,7 +435,7 @@ The family validated when the image slot is chosen is saved with it
 (`image_family`), so a job never depends on reading the header again.
 A Wan job also needs its text encoder and VAE; one missing is refused before
 submission.
-[src: file: backend/src/core/comfyui.rs:191]
+[src: file: backend/src/core/comfyui.rs:198]
 
 Nothing on the card assumes one machine. The server address (default
 `http://127.0.0.1:8188`, `host.docker.internal` from Docker) and the install
@@ -443,9 +443,9 @@ folder checked when the server is down (default `~/ComfyUI-Installs`, Comfy
 Desktop's) are settings. Each slot keeps optional steps, guidance, sampler and
 scheduler overrides; an empty field uses the family's measured default, and
 the sampler lists come from the running ComfyUI's `/object_info/KSampler`.
-[src: file: backend/src/api/comfyui.rs:443]
-[src: file: backend/src/api/comfyui.rs:1144]
-[src: file: backend/src/core/comfyui.rs:269]
+[src: file: backend/src/api/comfyui.rs:479]
+[src: file: backend/src/api/comfyui.rs:1184]
+[src: file: backend/src/core/comfyui.rs:277]
 
 Images are queued like videos: `POST /prompt` records ComfyUI's prompt id as
 the provider handle, `/history/<id>` is polled, and the file is fetched from
@@ -513,13 +513,31 @@ ComfyUI reference paths:
 | --- | --- | --- |
 | SDXL img2img | 1 | `LoadImage` → `VAEEncode` → sampler latent; configurable denoise below 1 (default 0.55) |
 | FLUX schnell + Redux | 3 | `style_models/flux1-redux-dev.safetensors`, `clip_vision/sigclip_vision_patch14_384.safetensors`; one vision encode and style conditioning application per source |
+| FLUX.2 Klein 4B distilled | 4 | `diffusion_models/flux-2-klein-4b.safetensors`, `text_encoders/qwen_3_4b.safetensors`, `vae/flux2-vae.safetensors`; one `LoadImage` → resize → `VAEEncode` per source, with chained `ReferenceLatent` conditioning |
 | Wan 2.1 VACE | 3 | VACE diffusion weights, Wan text encoder and VAE; one `WanVaceToVideo` per source, chained conditioning, then `TrimVideoLatent` |
 
 These are limits of Kronn's integrated graphs, not universal limits of the model
 families. The preflight probes the required nodes and model files. A missing
 dependency makes the effective count zero with an actionable reason; increasing
 the configured count cannot remove that blocker.
-[src: file: backend/src/api/comfyui.rs:322]
+[src: file: backend/src/api/comfyui.rs:328]
+
+Klein uses separate diffusion weights rather than an all-in-one checkpoint;
+model selection follows the family/modality, not the folder's historical image
+or video label. Its default graph uses four Euler steps, CFG 1 and
+`Flux2Scheduler`; choosing another scheduler uses `BasicScheduler`. Source
+order is preserved on both conditioning branches. Its integration tests use a
+mock ComfyUI and a node-input contract captured from ComfyUI 0.42.1.
+`ImageScaleToTotalPixels` requires `resolution_steps`: workflow-template widget
+positions do not supply API field names. Check `/object_info/<node>` when
+constructing a graph. Successful local discussion generation and visual
+assessment remain pending; the initial user attempt uploaded all three sources
+but was rejected because this input was misnamed, before the correction.
+[src: file: backend/src/core/comfyui_klein.rs:32]
+[src: file: backend/tests/fixtures/comfyui-klein-nodes-0.42.1.json:65]
+[src: file: backend/tests/support/api_media_references.rs:147]
+[src: url: https://docs.comfy.org/tutorials/flux/flux-2-klein]
+[src: user: 2026-10-26: install-and-configure-only-before-user-discussion-test]
 
 Kronn uploads every source via `/upload/image` under stable job-specific names,
 then builds the graph itself. Adding a node to a different workflow open in the
@@ -528,7 +546,7 @@ the accepted endpoint, family and generation settings across queueing and
 retries. The original source ids and mode remain the result provenance.
 [src: file: backend/src/models/media.rs:54]
 [src: file: backend/src/agents/media_runner.rs:778]
-[src: file: backend/src/agents/media_runner.rs:940]
+[src: file: backend/src/agents/media_runner.rs:937]
 
 The official [Redux examples](https://comfyanonymous.github.io/ComfyUI_examples/flux/#redux)
 show the model files and conditioning nodes; the [Wan VACE examples](https://comfyanonymous.github.io/ComfyUI_examples/wan/#vace-reference-image-to-video)

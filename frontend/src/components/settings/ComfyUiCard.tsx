@@ -17,7 +17,7 @@ const SLOTS: { modality: MediaModality; icon: string; field: 'image_model' | 'vi
 
 const FAMILIES_BY_FOLDER: Record<string, ComfyFamily[]> = {
   checkpoints: ['flux_schnell', 'sdxl'],
-  diffusion_models: ['wan21_t2v', 'wan21_vace'],
+  diffusion_models: ['flux2_klein4b', 'wan21_t2v', 'wan21_vace'],
 };
 
 interface SlotDraft { denoise: string; steps: string; cfg: string; sampler: string; scheduler: string }
@@ -55,8 +55,8 @@ function slotSettings(draft: SlotDraft): ComfyGenSettings {
 
 /** The family the slot's model runs with, for the placeholders. */
 function slotFamily(status: ComfyUiStatus, modality: MediaModality): ComfyFamily | null {
-  if (modality === 'video') return status.models.find(model => model.folder === 'diffusion_models' && model.file === status.video_model)?.family ?? null;
-  return status.models.find(model => model.folder === 'checkpoints' && model.file === status.image_model)?.family ?? null;
+  const selected = modality === 'video' ? status.video_model : status.image_model;
+  return status.models.find(model => model.modality === modality && model.file === selected)?.family ?? null;
 }
 
 function choiceOptions(choices: string[], current: string) {
@@ -486,7 +486,7 @@ export function ComfyUiCard({ t }: ComfyUiCardProps) {
                         <SearchableSelect
                           className="searchable-select--compact"
                           value={slot.scheduler}
-                          options={choiceOptions(status.schedulers, slot.scheduler)}
+                          options={choiceOptions(family === 'flux2_klein4b' ? ['flux2', ...status.schedulers] : status.schedulers, slot.scheduler)}
                           disabled={savingSettings}
                           onChange={next => editSlot(modality, 'scheduler', next)}
                           label={t('comfyui.settings.scheduler')}

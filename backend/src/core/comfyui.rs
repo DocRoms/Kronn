@@ -1,9 +1,9 @@
 //! ComfyUI as a local media target (KT-1381): the model families Kronn has
-//! measured, the workflow it submits for each, and the reading of ComfyUI's
+//! integrates, the workflow it submits for each, and the reading of ComfyUI's
 //! job history. Pure functions; the HTTP calls live in the codec and the API.
 //!
 //! ComfyUI runs a node graph, not "prompt + model". A family is therefore a
-//! measured workflow, never a guess: a model is usable only when its file
+//! defined workflow, never a guess: a model is usable only when its file
 //! declares a known architecture or is listed in [`KNOWN_MODELS`].
 
 use anyhow::{bail, Result};
@@ -32,6 +32,8 @@ pub const VAE_FOLDER: &str = "vae";
 pub enum ComfyFamily {
     /// FLUX.1 schnell all-in-one checkpoint: 4 steps, no negative prompt.
     FluxSchnell,
+    /// FLUX.2 Klein 4B distilled diffusion model with Qwen3 and Flux2 VAE.
+    Flux2Klein4b,
     /// SDXL all-in-one checkpoint (RealVisXL): 30 steps with a negative prompt.
     Sdxl,
     /// Wan 2.1 text-to-video: diffusion model + umt5 text encoder + VAE.
@@ -42,15 +44,20 @@ pub enum ComfyFamily {
 impl ComfyFamily {
     pub fn modality(self) -> MediaModality {
         match self {
-            Self::FluxSchnell | Self::Sdxl => MediaModality::Image,
+            Self::FluxSchnell | Self::Flux2Klein4b | Self::Sdxl => MediaModality::Image,
             Self::Wan21T2v | Self::Wan21Vace => MediaModality::Video,
         }
     }
 }
 
-/// Files whose workflow was measured on 2026-10-19 (KT-1381). Exact names:
+/// Exact files with an integrated workflow:
 /// a checkpoint is matched by what it is, not by what its name suggests.
 pub const KNOWN_MODELS: &[(&str, &str, ComfyFamily)] = &[
+    (
+        VIDEO_FOLDER,
+        "flux-2-klein-4b.safetensors",
+        ComfyFamily::Flux2Klein4b,
+    ),
     (
         VIDEO_FOLDER,
         "wan2.1_vace_1.3B_fp16.safetensors",
@@ -179,9 +186,9 @@ const WAN_NEGATIVE: &str = "blurry, low quality, distorted, static, worst qualit
 
 /// The folder a family's main file sits in.
 pub fn folder_of(family: ComfyFamily) -> &'static str {
-    match family.modality() {
-        MediaModality::Image => IMAGE_FOLDER,
-        MediaModality::Video => VIDEO_FOLDER,
+    match family {
+        ComfyFamily::FluxSchnell | ComfyFamily::Sdxl => IMAGE_FOLDER,
+        ComfyFamily::Flux2Klein4b | ComfyFamily::Wan21T2v | ComfyFamily::Wan21Vace => VIDEO_FOLDER,
     }
 }
 
@@ -250,10 +257,11 @@ pub struct ResolvedGenSettings {
 }
 
 impl ComfyFamily {
-    /// The settings measured on 2026-10-19 for this family.
+    /// Defaults for the integrated workflow.
     pub fn defaults(self) -> ResolvedGenSettings {
         let (steps, cfg, sampler, scheduler) = match self {
             Self::FluxSchnell => (4, 1.0, "euler", "simple"),
+            Self::Flux2Klein4b => (4, 1.0, "euler", "flux2"),
             Self::Sdxl => (30, 5.0, "dpmpp_sde", "karras"),
             Self::Wan21T2v | Self::Wan21Vace => (30, 6.0, "uni_pc", "simple"),
         };
@@ -341,7 +349,10 @@ pub const VIDEO_SIZES: &[(&str, u32, u32)] =
 pub const VIDEO_DURATIONS_SECS: &[u32] = &[2, 3, 4, 5];
 pub const VIDEO_FPS: u32 = 16;
 
-fn size_for(table: &[(&str, u32, u32)], aspect_ratio: Option<&str>) -> Result<(u32, u32)> {
+pub(super) fn size_for(
+    table: &[(&str, u32, u32)],
+    aspect_ratio: Option<&str>,
+) -> Result<(u32, u32)> {
     let wanted = aspect_ratio.map(str::trim).unwrap_or(table[0].0);
     table
         .iter()
@@ -392,6 +403,9 @@ pub fn image_workflow(
 ) -> Result<Value> {
     let (width, height) = size_for(IMAGE_SIZES, params.aspect_ratio.as_deref())?;
     let (latent, negative) = match family {
+        ComfyFamily::Flux2Klein4b => {
+            return super::comfyui_klein::workflow(checkpoint, prompt, params, seed, settings, &[]);
+        }
         ComfyFamily::FluxSchnell => ("EmptySD3LatentImage", ""),
         ComfyFamily::Sdxl => ("EmptyLatentImage", SDXL_NEGATIVE),
         ComfyFamily::Wan21T2v | ComfyFamily::Wan21Vace => {

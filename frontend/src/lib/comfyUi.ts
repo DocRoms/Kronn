@@ -10,7 +10,7 @@ export function comfyUiSlotOptions(
 ): SearchableSelectOption[] {
   const folder = modality === 'image' ? 'checkpoints' : 'diffusion_models';
   return models
-    .filter(model => model.folder === folder)
+    .filter(model => model.modality === modality || (model.modality === null && model.folder === folder))
     .filter(model => model.modality === null || model.modality === modality)
     .map(model => ({
       value: model.file,

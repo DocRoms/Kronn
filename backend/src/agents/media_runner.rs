@@ -830,30 +830,27 @@ async fn advance_local_comfyui(
             // Saved with the slot, so a failing header read cannot make a
             // known model look unknown; read from ComfyUI only for a model
             // that is no longer the slot's.
-            let saved = config
-                .chosen_family(crate::core::comfyui::IMAGE_FOLDER, &job.model)
-                .or(config
-                    .image_family
-                    .filter(|_| config.image_model.as_deref() == Some(job.model.as_str())));
+            let saved =
+                crate::api::comfyui::reference_family(&config, &job.model, MediaModality::Image);
             let family = match saved {
                 Some(family) => Some(family),
                 None if submitting => {
-                    let found = crate::api::comfyui::model_family(
+                    crate::api::comfyui::model_family(
                         &base,
                         &config,
                         crate::core::comfyui::IMAGE_FOLDER,
                         &job.model,
                     )
-                    .await;
-                    // A slot chosen before the family was saved with it
-                    // gets it now, so the header is read only once.
-                    if let Some(family) = found {
-                        crate::api::comfyui::remember_image_family(state, &job.model, family).await;
-                    }
-                    found
+                    .await
                 }
                 None => None,
             };
+            // Known filenames also resolve old slots without reading a header.
+            if submitting {
+                if let Some(family) = family {
+                    crate::api::comfyui::remember_image_family(state, &job.model, family).await;
+                }
+            }
             let settings = family
                 .unwrap_or(crate::core::comfyui::ComfyFamily::Sdxl)
                 .settings(&config.image_settings);

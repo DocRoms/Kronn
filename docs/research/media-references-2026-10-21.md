@@ -16,7 +16,7 @@ trimmed before decoding. The recipe also changes the selected ComfyUI slot
 after enqueueing to exercise the job's saved endpoint, family and settings.
 [src: file: docs/research/media-references-2026-10-21.json:1]
 [src: file: backend/tests/support/api_media_references.rs:10]
-[src: file: backend/src/core/comfyui_references.rs:80]
+[src: file: backend/src/core/comfyui_references.rs:84]
 
 | Measurement | Observed value |
 | --- | --- |
@@ -52,7 +52,7 @@ Keep the image and video acceptance items open until the image output and its
 three-source graph are available. The HTTP paths have automated transport
 coverage; no billable remote generation was executed for this qualification.
 [src: file: backend/tests/support/api_media_references.rs:10]
-[src: file: backend/src/api/comfyui.rs:322]
+[src: file: backend/src/api/comfyui.rs:328]
 
 See [the media architecture](../architecture/media-generation.md#configurable-source-image-limits-kt-1403)
 for the supported workflow matrix, dependencies and exact recipe command.

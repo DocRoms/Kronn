@@ -12,6 +12,7 @@ pub fn workflow_id(family: Option<ComfyFamily>) -> Option<&'static str> {
     match family {
         Some(ComfyFamily::Sdxl) => Some("sdxl-img2img-v1"),
         Some(ComfyFamily::FluxSchnell) => Some("flux-redux-v1"),
+        Some(ComfyFamily::Flux2Klein4b) => Some("flux2-klein4b-references-v1"),
         Some(ComfyFamily::Wan21Vace) => Some("wan21-vace-references-v1"),
         _ => None,
     }
@@ -32,6 +33,9 @@ pub fn image_workflow(
     references: ImageReferences<'_>,
 ) -> Result<Value> {
     let ImageReferences { images, denoise } = references;
+    if family == ComfyFamily::Flux2Klein4b {
+        return super::comfyui_klein::workflow(checkpoint, prompt, params, seed, settings, images);
+    }
     let mut graph = comfyui::image_workflow(family, checkpoint, prompt, params, seed, settings)?;
     if images.is_empty() {
         return Ok(graph);
