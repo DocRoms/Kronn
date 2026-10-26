@@ -1903,6 +1903,65 @@ mod tests {
         assert!(body.contains("<meta name=\"kronn-served-frame-src\" content=\"&#39;self&#39;\""));
     }
 
+    /// Service mode (KRONN_UI_DIST): the UI is served on the API port, and the
+    /// API routes keep precedence over the static fallback.
+    #[tokio::test]
+    async fn ui_fallback_serves_index_and_keeps_api_routes() {
+        let dist = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dist.path().join("index.html"),
+            "<!doctype html><html><head><title>k</title></head><body>kronn-ui</body></html>",
+        )
+        .unwrap();
+        assert!(crate::api::live_pages::valid_ui_dist(dist.path()));
+        assert!(!crate::api::live_pages::valid_ui_dist(
+            &dist.path().join("missing")
+        ));
+        let state = test_state();
+        let app = crate::api::live_pages::with_ui_fallback(
+            build_router_with_auth(state.clone(), false),
+            dist.path(),
+            state,
+        );
+
+        let root = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("accept", "text/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(root.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            root.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("kronn-ui"), "{html}");
+
+        let health = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        let bytes = health.into_body().collect().await.unwrap().to_bytes();
+        let json: Value = serde_json::from_slice(&bytes).expect("health is JSON");
+        assert_eq!(json["ok"], true);
+    }
+
     /// `/api/health` exposes `in_docker` (a bool) so the UI can gate the
     /// agent Install button — installs land in the container under Docker, so
     /// the UI must point to the host-side CLI instead. Health is unauthed.
