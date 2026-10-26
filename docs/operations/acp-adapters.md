@@ -328,7 +328,7 @@ workflow Agent step is launched with. Undeclared, the argv is unchanged.
   and sends no catalogue instructions on `initialize` (only the decision-card bullet when `disc_append` is declared).
   [src: file: backend/scripts/disc-introspection-mcp.py:5893-5908#_declared_step_tools]
   [src: file: backend/scripts/disc-introspection-mcp.py:12027-12042#_declared_step_tools]
-  [src: file: backend/scripts/disc-introspection-mcp.py:12130-12139#_declared_step_tools]
+  [src: file: backend/scripts/disc-introspection-mcp.py:12133-12142#_declared_step_tools]
 - The direct CLI fallback (`KRONN_ACP_ADAPTER_*=0`) refuses a declared step
   rather than launch it with every tool.
 

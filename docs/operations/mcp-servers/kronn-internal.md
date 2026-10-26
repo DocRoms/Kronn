@@ -650,7 +650,7 @@ recovery; every orchestration mutation stays fail-closed until the fresh bridge
 is ready.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4044-4130#_attempt_resume]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:10818-10829#_bridge_freshness]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10827-10838#_GUARDED_ORCHESTRATION_TOOLS]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10830-10841#_GUARDED_ORCHESTRATION_TOOLS]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
 process that loaded the preceding schema. After upgrading to 0.11.0, reconnect
@@ -796,7 +796,7 @@ discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
 `[src: file: backend/src/agents/runner.rs:12793-12843#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2640-2668#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:5846-5878#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:12116-12129#_spawned_task_worker_mode]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:5846-5878#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:12119-12132#_spawned_task_worker_mode]`
 
 Native HTTP workers can finish the Git side of that contract without receiving
 a shell. Their catalogue includes `git_commit`, but execution is refused unless
@@ -809,7 +809,7 @@ local Ollama/LiteLLM/NVIDIA worker capable of producing the clean committed HEAD
 required by `task_exec_deliver` without turning the HTTP tool catalogue into
 arbitrary Git access.
 `[src: file: backend/src/api/agent_workspace_tools.rs:567-574#git_commit_payload] [src: file: backend/src/api/agent_workspace_tools.rs:615-692#git_commit_payload_with_data_dir_lock]`
-`[src: file: backend/src/api/agent_tools.rs:3630-3702#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1466-1477#DISCUSSION_ONLY]`
+`[src: file: backend/src/api/agent_tools.rs:3632-3704#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1466-1477#DISCUSSION_ONLY]`
 `[src: file: backend/src/db/orchestration.rs:947-979#managed_working_execution_for_workspace]`
 
 ## Rich discussion output
@@ -848,11 +848,11 @@ The MCP `initialize` instructions expose this contract before any room tool is
 called, and `disc_join` repeats it in the room protocol. The full document and
 diagram examples remain on demand in the Kronn Docs skill so the permanent MCP
 catalogue does not pay for a long manual.
-`[src: file: backend/scripts/disc-introspection-mcp.py:12052-12058#first_contact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:12055-12061#first_contact]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:111-119#validRoots]`
 `[src: file: backend/src/api/disc_prompts.rs:469-474#rich_output_notice]`
 `[src: file: backend/src/api/disc_invite.rs:583-713#join_next_steps]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11895-12004#initialize]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11898-12007#initialize]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4433-4449#MAX_DISC_APPEND_ATTACHMENTS] [src: file: backend/scripts/disc-introspection-mcp.py:53#MAX_DISC_APPEND_ATTACHMENTS]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4524-4590#_attach_files_to_appended_message]`
 `[src: file: frontend/src/components/MessageAttachments.tsx:114-299#AttachmentThumb]`

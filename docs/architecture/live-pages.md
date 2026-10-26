@@ -8,7 +8,7 @@ workflow steps, stored IDs and sandbox event names keep their established
 contracts. An Artifact is the same persisted resource; renaming its product
 label does not migrate or duplicate it. Historical code and documentation use
 “Page” for that domain model.
-[src: file: frontend/src/lib/i18n/locales/en.ts:179-180#nav.pages]
+[src: file: frontend/src/lib/i18n/locales/en.ts:201-202#nav.pages]
 [src: file: frontend/src/lib/live-page-navigation.ts:50-55#standaloneLivePageUrl]
 
 ## Portable JSON bundles
@@ -750,7 +750,7 @@ Allowed sites. One global list per Kronn, `embed_allowed_origins` in
 `POST /api/config/embed-origins` with `{add, remove}`; each origin is
 normalized (lowercase host, default port dropped, IDN as punycode) and a
 malformed one rejects the whole change.
-[src: file: backend/src/models/setup.rs:73-79#embed_allowed_origins]
+[src: file: backend/src/models/setup.rs:81-87#embed_allowed_origins]
 [src: file: backend/src/core/embed_origins.rs:52-55#normalize_origin]
 [src: file: backend/src/api/live_pages.rs:889-891#change_embed_origins]
 The UI is Configuration → Artifacts → External content (Allowed sites): type an
