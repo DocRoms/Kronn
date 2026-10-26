@@ -40,7 +40,9 @@ Releases are built from source for now; prebuilt archives are future work.
 release is named `<VERSION file>-dev-<short sha>` (plus `-dirty<timestamp>` when
 the working tree has uncommitted changes, so every install gets its own
 release). The health check still compares against the backend's own version,
-which is the plain `VERSION`.
+which is the plain `VERSION`. Such an install has no `src/` clone; the first
+`kronn service update` (even with `--check`) creates it, so a dev install can
+move to a tagged release.
 
 ## Layout
 

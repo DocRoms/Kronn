@@ -698,6 +698,15 @@ _service_clone_url() {
     printf '%s\n' "${url:-$KRONN_SERVICE_DEFAULT_REPO}"
 }
 
+# Clones the release sources into <dir> unless it already holds a clone.
+_service_clone_into() { # <dir>
+    local dir="$1" url
+    [[ -d "$dir/.git" ]] && return 0
+    url="$(_service_clone_url)"
+    info "Cloning $url ..."
+    git clone --quiet "$url" "$dir" || { fail "git clone failed."; return 1; }
+}
+
 cmd_service_install() {
     local from_checkout=0 arg
     _SERVICE_ASSUME_YES=0
@@ -756,10 +765,7 @@ cmd_service_install() {
             info "Updating the service clone..."
             git -C "$src" fetch --tags --quiet || { fail "git fetch failed in $src"; return 1; }
         else
-            local url
-            url="$(_service_clone_url)"
-            info "Cloning $url ..."
-            git clone --quiet "$url" "$src" || { fail "git clone failed."; return 1; }
+            _service_clone_into "$src" || return 1
         fi
         version="$(service_latest_release_tag "$src")"
         if [[ -z "$version" ]]; then
