@@ -524,12 +524,47 @@ pub fn parse_report(period_kind: &str, json: &[u8]) -> Result<UsageReport, Strin
     })
 }
 
+/// First day of the current period (`YYYYMMDD`), for ccusage's `--since`.
+///
+/// ccusage reports the whole log history whatever the period: `daily` /
+/// `weekly` / `monthly` only change how rows are grouped, so its `totals` is
+/// the all-time spend for all three (#270). Bounding the report to today /
+/// this week (Monday-based, like `--start-of-week monday`) / this month makes
+/// the toggle select a window.
+pub fn period_since(period_kind: &str, today: chrono::NaiveDate) -> String {
+    use chrono::Datelike;
+    let start = match period_kind {
+        "weekly" => {
+            today - chrono::Duration::days(i64::from(today.weekday().num_days_from_monday()))
+        }
+        "monthly" => today.with_day(1).unwrap_or(today),
+        _ => today,
+    };
+    start.format("%Y%m%d").to_string()
+}
+
 /// The `ccusage` process: the base environment only (KT-1006), plus where
-/// Claude's logs live when the user moved them.
-fn ccusage_command(program: &std::path::Path, period_kind: &str) -> tokio::process::Command {
+/// Claude's logs live when the user moved them. Dates are read in Kronn's
+/// timezone, which ccusage is told too so both cut days at the same instant.
+fn ccusage_command(
+    program: &std::path::Path,
+    period_kind: &str,
+    timezone: chrono_tz::Tz,
+    today: chrono::NaiveDate,
+) -> tokio::process::Command {
     use crate::core::child_env::{self, ChildRoute};
     let mut command = crate::core::cmd::async_cmd(program, ChildRoute::Tool);
-    command.arg(period_kind).arg("--json");
+    command
+        .arg(period_kind)
+        .arg("--json")
+        .arg("--since")
+        .arg(period_since(period_kind, today))
+        .arg("--timezone")
+        .arg(timezone.name());
+    if period_kind == "weekly" {
+        // Only `weekly` accepts it; `daily` / `monthly` reject unknown flags.
+        command.arg("--start-of-week").arg("monday");
+    }
     if let Some(dir) = child_env::parent_var("CLAUDE_CONFIG_DIR") {
         command.env("CLAUDE_CONFIG_DIR", dir);
     }
@@ -546,7 +581,7 @@ fn ccusage_command(program: &std::path::Path, period_kind: &str) -> tokio::proce
     command
 }
 
-/// Run `ccusage <period> --json` and parse the result.
+/// Run `ccusage <period> --json --since <period start>` and parse the result.
 ///
 /// Returns a clean `Err(String)` if the binary is missing or errors — the
 /// caller surfaces it as a friendly "usage reporting unavailable" message
@@ -555,7 +590,9 @@ fn ccusage_command(program: &std::path::Path, period_kind: &str) -> tokio::proce
 pub async fn fetch_usage(period: &str) -> Result<UsageReport, String> {
     let period_kind = normalize_period(period);
     let program = resolve_ccusage_program()?;
-    let mut command = ccusage_command(&program, period_kind);
+    let timezone = crate::core::timezone::current();
+    let today = chrono::Utc::now().with_timezone(&timezone).date_naive();
+    let mut command = ccusage_command(&program, period_kind, timezone, today);
 
     let output = command
         .output()
@@ -585,7 +622,12 @@ mod tests {
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
         let command = crate::core::child_env::with_parent_env(&borrowed, || {
-            ccusage_command(std::path::Path::new("/usr/bin/ccusage"), "daily")
+            ccusage_command(
+                std::path::Path::new("/usr/bin/ccusage"),
+                "daily",
+                chrono_tz::Tz::UTC,
+                chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap(),
+            )
         });
         probe::assert_built_without_secrets(command.as_std(), "/usr/bin", &[]);
         assert_eq!(
@@ -593,6 +635,62 @@ mod tests {
                 .get("CLAUDE_CONFIG_DIR")
                 .map(String::as_str),
             Some("/home/u/.claude-alt")
+        );
+    }
+
+    #[test]
+    fn period_since_starts_the_current_day_week_or_month() {
+        // Thursday 2026-10-22.
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
+        assert_eq!(period_since("daily", today), "20261022");
+        assert_eq!(period_since("weekly", today), "20261019");
+        assert_eq!(period_since("monthly", today), "20261001");
+        // A Monday starts its own week; a week can start in the previous month.
+        let monday = chrono::NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        assert_eq!(period_since("weekly", monday), "20261026");
+        let saturday = chrono::NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
+        assert_eq!(period_since("weekly", saturday), "20260727");
+    }
+
+    #[test]
+    fn ccusage_is_bounded_to_the_current_period_in_kronn_timezone() {
+        // #270: without `--since` every period returned the all-time total.
+        let args = |period_kind: &str| -> Vec<String> {
+            ccusage_command(
+                std::path::Path::new("/usr/bin/ccusage"),
+                period_kind,
+                chrono_tz::Tz::Europe__Paris,
+                chrono::NaiveDate::from_ymd_opt(2026, 10, 22).unwrap(),
+            )
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+        };
+        assert_eq!(
+            args("monthly"),
+            [
+                "monthly",
+                "--json",
+                "--since",
+                "20261001",
+                "--timezone",
+                "Europe/Paris"
+            ]
+        );
+        // ccusage 20 rejects `--start-of-week` on `daily` / `monthly`.
+        assert_eq!(
+            args("weekly"),
+            [
+                "weekly",
+                "--json",
+                "--since",
+                "20261019",
+                "--timezone",
+                "Europe/Paris",
+                "--start-of-week",
+                "monday",
+            ]
         );
     }
 
