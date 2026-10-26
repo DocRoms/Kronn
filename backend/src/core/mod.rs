@@ -120,6 +120,7 @@ pub mod scanner;
 pub mod secret_facts;
 pub mod secret_scrub;
 pub mod session_budget;
+pub mod shell_path;
 pub mod skill_bundle;
 pub mod skill_guide;
 pub mod skill_migration;
