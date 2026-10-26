@@ -514,7 +514,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   `agent_dispatch_jobs` `group_id` concurrency limit `[src: file: backend/src/db/agent_dispatch.rs:604-613#group_concurrency_limit]`
   exists for batch fan-out; orchestration dispatches enqueue with `group_id: None`.
 - **Human escalation** — `Escalated` surfaces in the parent discussion, as the workflow Human Gate does
-  with its decide endpoint `[src: file: backend/src/api/workflows.rs:5743-5930#decide_run]`, but the
+  with its decide endpoint `[src: file: backend/src/api/workflows.rs:5763-5950#decide_run]`, but the
   execution's own state machine carries the decision: the user force-approves (→ `Approved`), hands back
   with guidance (→ `Working`) `[src: file: backend/src/models/orchestration.rs:309-309#Escalated]`, or abandons
   (→ `Cancelled`, reachable from any non-terminal state) `[src: file: backend/src/models/orchestration.rs:274-283#can_transition_to]`.
