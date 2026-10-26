@@ -2596,7 +2596,7 @@ async fn workflow_import_rolls_back_all_dependencies_and_root_on_late_insert_fai
 }
 
 #[tokio::test]
-async fn artifact_export_bundles_saved_publishers_and_preserves_retained_values_read_only() {
+async fn artifact_export_bundles_saved_publishers_and_leaves_dataset_values_behind_read_only() {
     let (state, _) = workflow_portability_fixture().await;
     let before = workflow_import_database_snapshot(&state).await;
     let app = build_router_with_auth(state.clone(), false);
@@ -2607,10 +2607,15 @@ async fn artifact_export_bundles_saved_publishers_and_preserves_retained_values_
     assert_eq!(bundle["kind"], "kronn.artifact");
     assert_eq!(bundle["version"], 2);
     assert_eq!(bundle["artifact"]["html"], "<h1>Portable</h1>");
-    assert_eq!(bundle["artifact"]["datasets"][0]["has_current"], true);
-    assert_eq!(
-        bundle["artifact"]["datasets"][0]["current"],
-        serde_json::json!({"seed": true})
+    // The dataset travels as a definition: what the page published stays here.
+    let dataset = &bundle["artifact"]["datasets"][0];
+    assert_eq!(dataset["name"], "summary", "{dataset}");
+    assert_eq!(dataset["has_current"], false, "{dataset}");
+    assert_eq!(dataset["current"], Value::Null);
+    assert_eq!(dataset["points"], serde_json::json!([]));
+    assert!(
+        !bundle.to_string().contains("seed"),
+        "no published value leaks into the file: {bundle}"
     );
     for (key, id) in [
         ("referenced_quick_prompts", "qp-portable"),
@@ -2672,7 +2677,8 @@ async fn artifact_import_reuses_identical_automations_copies_publishers_and_reje
     let (_, page) = get_json(app.clone(), &format!("/api/pages/{id}")).await;
     assert_eq!(
         page["data"]["datasets"][0]["current"],
-        serde_json::json!({"seed":true})
+        Value::Null,
+        "an imported Artifact starts without data: {page}"
     );
     let imported_id = id.to_owned();
     state
@@ -3066,7 +3072,8 @@ async fn artifact_import_rollback_leaves_no_origin_mapping_or_partial_resource()
 }
 
 #[tokio::test]
-async fn artifact_roundtrip_preserves_null_points_and_reuses_previous_import_identities() {
+async fn artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previous_import_identities(
+) {
     let (source, _) = workflow_portability_fixture().await;
     let (_, exported) = get_json(
         build_router_with_auth(source, false),
@@ -3124,13 +3131,19 @@ async fn artifact_roundtrip_preserves_null_points_and_reuses_previous_import_ide
         let datasets = roundtrip["data"]["artifact"]["datasets"]
             .as_array()
             .unwrap();
+        // A file from before bare exports still imports with its values;
+        // exported again, each dataset keeps its definition, not its values.
         for dataset in bundle["artifact"]["datasets"].as_array().unwrap() {
+            let mut bare = dataset.clone();
+            bare["has_current"] = serde_json::json!(false);
+            bare["current"] = Value::Null;
+            bare["points"] = serde_json::json!([]);
             assert_eq!(
                 datasets
                     .iter()
                     .find(|item| item["name"] == dataset["name"])
                     .unwrap(),
-                dataset
+                &bare
             );
         }
         let (_, actions) = get_json(app.clone(), &format!("/api/pages/{id}/actions")).await;
@@ -4019,7 +4032,7 @@ async fn artifact_preview_rejects_missing_graph_targets_and_inconsistent_snapsho
     let mut missing = exported["data"].clone();
     missing["referenced_quick_prompts"] = serde_json::json!([]);
     let mut inconsistent = exported["data"].clone();
-    inconsistent["artifact"]["datasets"][0]["has_current"] = serde_json::json!(false);
+    inconsistent["artifact"]["datasets"][0]["current"] = serde_json::json!({"seed": true});
     for bundle in [missing, inconsistent] {
         let (_, response) = post_json(
             app.clone(),
@@ -30830,6 +30843,99 @@ async fn workflow_export_carries_custom_skills_and_import_reuses_creates_or_sett
     assert!(
         old["notice"].as_str().unwrap_or_default().contains(&skill),
         "the unresolved skill is reported: {old}"
+    );
+}
+
+/// A step pinned to a version of a bundled skill imports into a Kronn that
+/// never had the skill: the pin is checked once the import has created it.
+#[tokio::test]
+async fn workflow_import_accepts_a_pin_to_a_bundled_skill_absent_locally() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_import_accepts_a_pin_to_a_bundled_skill_absent_locally",
+    ) {
+        return;
+    }
+    let source = test_state();
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(source.clone(), false);
+    let skill = create_skill(app.clone(), "Pinned review", "Check the pins.").await;
+    let workflow = skill_workflow(app.clone(), serde_json::json!([format!("{skill}@1")])).await;
+    let (_, exported) = get_json(app, &format!("/api/workflows/{workflow}/export")).await;
+    let file = serde_json::to_string(&exported).unwrap();
+
+    fresh_skill_dir(&root, "target");
+    let target = build_router_with_auth(test_state(), false);
+    let (_, imported) = post_json(
+        target,
+        "/api/workflows/import",
+        serde_json::json!({"content": file, "project_id": null, "skill_choices": []}),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let pinned = imported["data"]["steps"][0]["skill_ids"][0]
+        .as_str()
+        .unwrap();
+    assert!(
+        pinned.starts_with("custom-") && pinned.ends_with("@1"),
+        "the step stays pinned to the created skill: {imported}"
+    );
+}
+
+/// A skill a JsonData step lists by id (for a script that loads it) travels
+/// with the workflow, and the imported payload names the created copy.
+#[tokio::test]
+async fn workflow_export_carries_skills_a_json_data_payload_lists_by_id() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_export_carries_skills_a_json_data_payload_lists_by_id",
+    ) {
+        return;
+    }
+    let source = test_state();
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(source.clone(), false);
+    let skill = create_skill(app.clone(), "Repo conventions", "Follow the conventions.").await;
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Per repo", "project_id": null, "trigger": {"type": "Manual"},
+            "steps": [{"name": "skills", "step_type": {"type": "JsonData"},
+                       "json_data_payload": {"org/repo": [skill], "note": "custom- not an id"}}],
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let workflow = created["data"]["id"].as_str().unwrap().to_string();
+    let (_, exported) = get_json(app, &format!("/api/workflows/{workflow}/export")).await;
+    let bundled = exported["referenced_skills"].as_array().unwrap();
+    assert_eq!(bundled.len(), 1, "{exported}");
+    assert_eq!(bundled[0]["id"], skill.as_str());
+
+    fresh_skill_dir(&root, "target");
+    let target = build_router_with_auth(test_state(), false);
+    let (_, imported) = post_json(
+        target.clone(),
+        "/api/workflows/import",
+        serde_json::json!({"content": serde_json::to_string(&exported).unwrap(),
+                           "project_id": null, "skill_choices": []}),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let payload = &imported["data"]["steps"][0]["json_data_payload"];
+    let local = payload["org/repo"][0].as_str().unwrap();
+    assert_eq!(payload["note"], "custom- not an id");
+    let (_, listed) = get_json(target, "/api/skills").await;
+    assert!(
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == local && s["content"] == "Follow the conventions."),
+        "the payload names the imported skill {local}: {listed}"
     );
 }
 

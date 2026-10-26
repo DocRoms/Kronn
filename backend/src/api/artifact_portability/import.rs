@@ -159,7 +159,8 @@ fn load_existing(conn: &Connection, kind: ResourceKind, id: &str) -> Result<Opti
                 |row| row.get(0),
             )?;
             if exists {
-                Some(serde_json::to_value(export_page(conn, id)?)?)
+                // Compared with a bundle page, which never carries data.
+                Some(serde_json::to_value(export_bare_page(conn, id)?)?)
             } else {
                 None
             }
@@ -248,6 +249,7 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Ve
         bail!("Unsupported Artifact bundle kind or version");
     }
     let skills = bundle.referenced_skills;
+    let bundled_skill_ids: BTreeSet<String> = skills.iter().map(|skill| skill.id.clone()).collect();
     let mut resources = Vec::new();
     for page in std::iter::once(bundle.artifact).chain(bundle.referenced_artifacts) {
         validate_page(&page)?;
@@ -257,8 +259,11 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Ve
     for mut workflow in bundle.referenced_workflows {
         super::super::workflows::clear_human_approvals(&mut workflow.steps);
         super::super::workflows::clear_human_approvals(&mut workflow.on_failure);
-        super::super::workflows::validate_workflow_for_import(&workflow)
-            .map_err(anyhow::Error::msg)?;
+        super::super::workflows::validate_workflow_for_import_bundled(
+            &workflow,
+            &bundled_skill_ids,
+        )
+        .map_err(anyhow::Error::msg)?;
         resources.push(Resource::new(ResourceKind::Workflow, workflow)?);
     }
     for prompt in bundle.referenced_quick_prompts {
@@ -417,6 +422,9 @@ fn remap_value(
                         .clone();
                 }
                 crate::core::skill_bundle::remap_ids(&mut step.skill_ids, skills.ids);
+                if let Some(payload) = step.json_data_payload.as_mut() {
+                    crate::core::skill_bundle::remap_payload(payload, skills.ids);
+                }
             }
             let maps = crate::workflows::refs::RefRemaps {
                 pages: &map[&ResourceKind::Artifact],

@@ -3740,6 +3740,9 @@ pub(crate) fn workflow_dependency_ids<'a>(
         }
         for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
             dependencies.skills.extend(step.skill_ids.iter().cloned());
+            if let Some(payload) = &step.json_data_payload {
+                crate::core::skill_bundle::ids_in_payload(payload, &mut dependencies.skills);
+            }
             if let Some(id) = step
                 .quick_prompt_id
                 .as_deref()
@@ -4009,6 +4012,20 @@ pub async fn export_workflow(
 /// malformed child can't slip in. Returns a user-facing error string.
 pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
     validate_workflow_for_import_keeping(wf, &[])
+}
+
+/// [`validate_workflow_for_import`] for a workflow arriving with the skills
+/// `bundled`: a version pinned to one of them exists only once the import has
+/// created it, so it is not looked up among this instance's skills.
+pub(crate) fn validate_workflow_for_import_bundled(
+    wf: &Workflow,
+    bundled: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let mut wf = wf.clone();
+    for step in wf.steps.iter_mut().chain(wf.on_failure.iter_mut()) {
+        step.skill_ids.retain(|id| !bundled.contains(id));
+    }
+    validate_workflow_for_import(&wf)
 }
 
 /// The foreach file of every SubWorkflow step stays a plain worktree-relative
@@ -4401,7 +4418,7 @@ async fn import_workflow_written(
 
     // Validate every workflow in the bundle like a fresh create.
     for w in &all_wfs {
-        if let Err(e) = validate_workflow_for_import(w) {
+        if let Err(e) = validate_workflow_for_import_bundled(w, &bundled_skill_ids) {
             return Json(ApiResponse::err(e));
         }
     }
@@ -4641,6 +4658,9 @@ async fn import_workflow_written(
     for w in &mut prepared {
         for step in w.steps.iter_mut().chain(w.on_failure.iter_mut()) {
             crate::core::skill_bundle::remap_ids(&mut step.skill_ids, &skill_ids);
+            if let Some(payload) = step.json_data_payload.as_mut() {
+                crate::core::skill_bundle::remap_payload(payload, &skill_ids);
+            }
         }
         crate::workflows::shadow::remap_imported(w, &skill_ids, &qp_id_remap);
         for reference in w.refs.values_mut() {

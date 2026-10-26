@@ -15,9 +15,14 @@ label does not migrate or duplicate it. Historical code and documentation use
 
 The Artifact export action downloads a `kronn.artifact` version-2 JSON bundle
 (version 1, without bundled skills, still imports).
-It contains the current HTML, named dataset values (including JSON `null`
-distinct from an unpopulated snapshot), schemas, retention settings and every
-retained time-series point with its observation time and deduplication key.
+It contains the current HTML and each dataset's definition: name, kind,
+schema and retention settings. It carries no dataset value: every snapshot
+is exported unpopulated and every time series without points, so the file
+never shares what the page published (#273). A bundle written before still
+imports with its values (including JSON `null` distinct from an unpopulated
+snapshot, and time-series points with their observation time and
+deduplication key). Project repository resources, which read the same page
+export, still carry the values.
 It follows parsed action targets and workflow dependencies transitively,
 including saved workflows that publish into the root Artifact, their failure
 steps, sub-workflows, Quick Prompts, Quick APIs, Quick Execs and secondary
@@ -29,6 +34,7 @@ links are not included.
 [src: file: backend/src/models/artifact_portability.rs:9-52#ArtifactBundlePoint]
 [src: file: backend/src/models/artifact_portability.rs:54-74#ArtifactBundle]
 [src: file: backend/src/api/artifact_portability.rs:26-29#MAX_BUNDLE_ITEMS]
+[src: file: backend/src/api/artifact_portability.rs:73-78#export_bare_page]
 [src: file: backend/src/api/artifact_portability.rs:294-303#export_bundle]
 
 Import is available in the library and in a workflow's publishing step before
@@ -50,11 +56,14 @@ Reused local Quick Execs require no new approval. Choosing another file clears
 all approvals. New Quick APIs show their saved method, endpoint and plugin;
 an unspecified method is shown as unknown, not inferred.
 The custom skills of bundled workflows and Quick Prompts travel as
-`referenced_skills` (file, name, version, sha256). The preview shows each one as
+`referenced_skills` (file, name, version, sha256): those in steps' `skill_ids`,
+Quick Prompts, shadow variants and `refs`, plus any JsonData payload value
+spelled like a custom skill id (`custom-x`, `custom-x@N`) that names a local
+skill. The preview shows each one as
 reused (same content here), created, or in conflict (same name, other content),
 where the user picks a copy (default) or the local skill (`skill_choices`, part
-of the reviewed digest). Steps and Quick Prompts are remapped to the resulting
-ids; see the glossary's "Bundled skill".
+of the reviewed digest). Steps, JsonData payload values and Quick Prompts are
+remapped to the resulting ids; see the glossary's "Bundled skill".
 [src: file: backend/src/api/artifact_portability/import.rs:552-558#approved_quick_exec_ids]
 [src: file: backend/src/api/artifact_portability/import.rs:777-779#digest]
 [src: file: frontend/src/components/ArtifactImportDialog.tsx:71-74#setApprovedExecIds]
