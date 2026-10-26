@@ -2377,13 +2377,11 @@ TOOLS = [
     {
         "name": "media_generate",
         "description": (
-            "Generate an image/video on a configured media source; returns "
-            "`{job_id, status, model}`. The configured slot fixes the model; a "
-            "missing one is refused with setup guidance. Billed: video per "
-            "second, image per picture; audio (on unless `generate_audio: "
-            "false`) adds cost. Use the shortest useful clip. Keep `wait: "
-            "false` (default): the asset arrives in the discussion as a context "
-            "file for all agents. Use `true` only if needed in this answer. "
+            "Generate image/video on a configured media source; returns "
+            "`{job_id, status, model}`. The slot fixes the model; missing slots "
+            "return setup guidance. Billed per second/picture; audio adds cost. "
+            "Use the shortest useful clip. Default `wait: false` delivers a "
+            "context file to all discussion agents; use `true` only if needed now. "
             "Envelope, chaining and cost: tool_manual."
         ),
         "inputSchema": {
@@ -2395,7 +2393,7 @@ TOOLS = [
                 },
                 "expected_model": {
                     "type": "string",
-                    "description": "Optional model id read from agent_list: refuse a changed slot, never override it.",
+                    "description": "From agent_list: reject a changed slot, never override it.",
                 },
                 "modality": {
                     "type": "string",
@@ -2429,12 +2427,11 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Ids of images ALREADY IN THIS DISCUSSION to generate "
-                        "from — never paths or URLs, order matters, as many as "
-                        "the model advertises. Needs `reference_mode`. One may "
-                        "be an earlier clip's last image — that is how clips "
-                        "are chained; Kronn cannot cut it, the human keeps it "
-                        "from the Assets carousel."
+                        "Image ids or unique exact filenames IN THIS DISCUSSION; "
+                        "never paths or URLs, order matters. Needs `reference_mode`. "
+                        "Limit: what agent_list advertises. "
+                        "For chaining, a human keeps the previous clip's last "
+                        "image from Assets; Kronn cannot cut it."
                     ),
                 },
                 "reference_asset_id": {
@@ -2445,10 +2442,8 @@ TOOLS = [
                     "type": "string",
                     "enum": ["first_frame", "last_frame", "reference"],
                     "description": (
-                        "Use of those images. A first/last frame is video-only "
-                        "and takes ONE picture; `reference` accepts multiple "
-                        "pictures for images or videos up to the effective "
-                        "`max_input_references` in agent_list."
+                        "First/last frame: video only, one image. `reference`: "
+                        "image/video, up to agent_list's `max_input_references`."
                     ),
                 },
                 "wait": {

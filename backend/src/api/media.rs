@@ -2119,10 +2119,10 @@ async fn resolve_references(
         if let (MediaReferenceMode::Reference, Some(maximum)) =
             (mode, capabilities.max_input_references)
         {
-            if asset_ids.len() as u32 > maximum {
+            if resolved_ids.len() as u32 > maximum {
                 return Err(format!(
                     "model '{model}' takes at most {maximum} reference image(s), {} were sent",
-                    asset_ids.len()
+                    resolved_ids.len()
                 ));
             }
         }

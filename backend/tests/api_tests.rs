@@ -27884,6 +27884,26 @@ async fn media_generate_records_every_reference_image_for_an_image() {
 async fn media_generate_accepts_an_exact_filename_of_this_rooms_image_only() {
     let state = test_state();
     seed_media_connection(&state, Some("google/gemini-3-pro-image"), None).await;
+    let files = tempfile::tempdir().unwrap();
+    let source = files.path().join("mine.png");
+    std::fs::write(&source, b"source-image").unwrap();
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path("/v1/images/models"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"data":[{
+            "id":"google/gemini-3-pro-image", "supported_parameters":{"input_references":{"type":"range","max":1}}
+        }]}))).mount(&server).await;
+    let base = server.uri();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE external_api_connections SET endpoint = ?1 WHERE id = 'conn-media'",
+                [base],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
     state
         .db
         .with_conn(|connection| {
@@ -27902,7 +27922,7 @@ async fn media_generate_accepts_an_exact_filename_of_this_rooms_image_only() {
         "asset-mine",
         "disc-media",
         "image/png",
-        Some("/tmp/m.png"),
+        source.to_str(),
     )
     .await;
     seed_reference_image(
@@ -27976,6 +27996,32 @@ async fn media_generate_accepts_an_exact_filename_of_this_rooms_image_only() {
     // The id keeps working, and naming one image both ways sends it once.
     let by_id = generate("asset-mine").await;
     assert_eq!(by_id["success"], true, "got {by_id}");
+    let (_, aliases) = post_json(
+        app.clone(),
+        "/api/media/generate",
+        serde_json::json!({
+            "connection_id": "conn-media", "modality": "image",
+            "prompt": "une princesse", "discussion_id": "disc-media",
+            "reference_asset_ids": ["asset-mine", "image-7b163056.png"],
+            "reference_mode": "reference"
+        }),
+    )
+    .await;
+    assert_eq!(
+        aliases["success"], true,
+        "one image must fit the one-image limit: {aliases}"
+    );
+    let alias_job = aliases["data"]["job_id"].as_str().unwrap().to_string();
+    let stored = state
+        .db
+        .with_read_conn(move |conn| kronn::db::media_jobs::get(conn, &alias_job))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.params.reference_ids(),
+        vec!["asset-mine".to_string()]
+    );
 
     // Another room's filename is refused, and its id is not disclosed.
     let elsewhere = generate("image-of-another-room.png").await;

@@ -57,14 +57,38 @@ coverage; no billable remote generation was executed for this qualification.
 See [the media architecture](../architecture/media-generation.md#configurable-source-image-limits-kt-1403)
 for the supported workflow matrix, dependencies and exact recipe command.
 
-## Automated validation
+## October 26 rebase for 0.15.2
+
+The branch now builds on `main` at `9f3889ee2`. KT-1418's exact-filename
+lookup is preserved: accepted references are stored as canonical context-file
+ids, and aliases of one image count once toward the model's visual-reference
+limit. The API/worker regression mixes filenames (including an accented name)
+and ids for three sources, for both image and video, then changes the local
+slot before the worker runs.
+[src: commit: 9f3889ee2]
+[src: file: backend/src/api/media.rs:1877#resolve_references]
+[src: file: backend/tests/api_tests.rs:27884#media_generate_accepts_an_exact_filename_of_this_rooms_image_only]
+[src: file: backend/tests/support/api_media_references.rs:149#comfyui_three_sources_survive_a_slot_change_between_the_api_and_worker]
+
+The old CI catalogue failure was a 220-byte increase in the media tool
+declaration. Compact guidance retains the source, ordering, limit and slot
+contracts; the measured catalogue is now 84,389 bytes, 61 bytes below this
+base's ceiling. The ceiling is lowered to that measurement.
+[src: file: backend/scripts/ci/mcp_surface_budget.py:154#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/disc-introspection-mcp.py:2378]
+
+The October 21 video evidence is historical; no new real generation was run
+for this rebase. The Redux image acceptance gap remains open.
+[src: file: docs/research/media-references-2026-10-21.json:1]
+
+## October 21 automated validation
 
 Before rebasing on `36de741e4`, the full nextest run passed 11,277 functional
 tests; its only failure was displaced documentation citations. The complete
 frontend suite passed 6,817 tests, with the four local-server tests rerun
 outside the filesystem/network sandbox after their port binding was refused.
 
-After rebasing, these checks passed:
+After the October 21 rebase, these checks passed:
 
 - `cargo nextest run -E 'test(media) | test(comfy)' --test-threads 6`: 214 tests.
 - `cargo clippy --tests -- -D warnings`, `cargo fmt --check`, `make typegen`.

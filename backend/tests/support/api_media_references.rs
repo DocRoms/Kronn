@@ -233,10 +233,27 @@ async fn comfyui_three_sources_survive_a_slot_change_between_the_api_and_worker(
             std::fs::write(&file, format!("source-{id}")).unwrap();
             seed_reference_image(&state, id, "disc-media", "image/png", file.to_str()).await;
         }
+        state
+            .db
+            .with_conn(|conn| {
+                for (id, filename) in [
+                    ("a", "rouge.png"),
+                    ("b", "carré bleu.png"),
+                    ("c", "vert.png"),
+                ] {
+                    conn.execute(
+                        "UPDATE context_files SET filename = ?2 WHERE id = ?1",
+                        rusqlite::params![id, filename],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
         let app = build_router_with_auth(state.clone(), false);
         let (_, answer) = post_json(app, "/api/media/generate", json!({
             "connection_id":"local:comfyui", "modality":modality, "discussion_id":"disc-media",
-            "prompt":"compose", "reference_mode":"reference", "reference_asset_ids":["c","a","b"]
+            "prompt":"compose", "reference_mode":"reference", "reference_asset_ids":["vert.png","a","carré bleu.png"]
         })).await;
         assert_eq!(answer["success"], true, "{answer}");
         state.config.write().await.comfyui = Default::default();
