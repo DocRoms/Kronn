@@ -39,6 +39,7 @@ source "$KRONN_DIR/lib/analyze.sh"
 source "$KRONN_DIR/lib/repos.sh"
 source "$KRONN_DIR/lib/api-client.sh"
 source "$KRONN_DIR/lib/service.sh"
+source "$KRONN_DIR/lib/service-update.sh"
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 # load_config / save_config live in lib/config.sh (sourced above) so they're

@@ -230,6 +230,7 @@ EOF
     # update from a shell without the install-time values, or with others.
     unset KRONN_PORT KRONN_DATA_DIR
     [ "$(service_port)" = "4000" ]
+    [ "$(service_data_dir)" = "$TEST_TMPDIR/data" ]
     KRONN_PORT=5000
     [ "$(service_port)" = "4000" ]
     # A reinstall keeps them unless the shell sets new ones.
@@ -245,6 +246,32 @@ EOF
     [ "$(service_port)" = "5000" ]
     unset KRONN_PORT
     [ "$(service_port)" = "3140" ]
+}
+
+@test "once installed, a key the unit does not set means the default, not the shell's value" {
+    local default
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        default="$HOME/Library/Application Support/com.kronn.kronn"
+    else
+        default="$HOME/.config/kronn"
+    fi
+    # Not installed: the shell decides (install is about to write it).
+    KRONN_DATA_DIR="$TEST_TMPDIR/dev-data"
+    [ "$(service_data_dir)" = "$TEST_TMPDIR/dev-data" ]
+    # Installed from a plain shell, then update/rollback from one exporting a
+    # dev database and another XDG_CONFIG_HOME: the service opens the default.
+    unset KRONN_DATA_DIR XDG_CONFIG_HOME
+    service_write_unit
+    KRONN_DATA_DIR="$TEST_TMPDIR/dev-data"
+    XDG_CONFIG_HOME="$TEST_TMPDIR/dev-xdg"
+    [ "$(service_data_dir)" = "$default" ]
+    [ "$(service_db_backup)" = "$default/kronn.db.backup" ]
+    KRONN_SERVICE_KIND=systemd
+    unset KRONN_DATA_DIR XDG_CONFIG_HOME
+    service_write_unit
+    KRONN_DATA_DIR="$TEST_TMPDIR/dev-data"
+    XDG_CONFIG_HOME="$TEST_TMPDIR/dev-xdg"
+    [ "$(service_data_dir)" = "$default" ]
 }
 
 @test "kronn status asks the service's port, unless KRONN_API_BASE is explicit" {
