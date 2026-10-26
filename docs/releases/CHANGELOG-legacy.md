@@ -1511,7 +1511,7 @@ Made `SubWorkflow` usable end-to-end by the AI path AND the templates.
 
 ### Added — Recursive sub-workflows, Phase 1c (UI) (2026-06-11)
 
-- **Wizard**: a `Sub-workflow` step type + a picker of existing workflows (self excluded; cycle/depth/no-gate enforced server-side at save). TS types (`StepType.SubWorkflow` + `WorkflowStep.sub_workflow_id` + `StepResult.child_run_id`) hand-edited into `generated.ts`.
+- **Wizard**: a `Sub-workflow` step type + a picker of existing workflows (self excluded; cycle/depth/no-gate enforced server-side at save). TS types (`StepType.SubWorkflow` + `WorkflowStep.sub_workflow_id` + `StepResult.child_run_id`) added via `make typegen` into `generated.ts`.
 - **RunDetail**: a `SOUS-WF` step badge + a `↳ sub-run <id>` drill indicator (full recursive tree view is a follow-up).
 - i18n FR/EN/ES for the new step type, picker, and constraints hint.
 

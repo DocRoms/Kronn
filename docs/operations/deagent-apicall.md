@@ -708,9 +708,9 @@ Fix: snapshot the relevant fields onto `StepResult` at execution time.
   - `📤 NOTIFY hooks.slack.com`
   - `Codex` / `Claude Code` (agent steps)
   - `Layers BATCH` (batch fan-out)
-- The `ts-rs` auto-mirroring picks up the new fields; manual update of
-  `frontend/src/types/generated.ts` for the optional fields with the
-  right TS shape.
+- The `ts-rs` bindings pick up the new fields; regenerate
+  `frontend/src/types/generated.ts` with `make typegen` so the optional
+  fields get the right TypeScript shape.
 
 ## Live step status (2026-04-26)
 
