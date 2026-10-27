@@ -68,15 +68,16 @@ remapped to the resulting ids; see the glossary's "Bundled skill".
 [src: file: backend/src/api/artifact_portability/import.rs:777-779#digest]
 [src: file: frontend/src/components/ArtifactImportDialog.tsx:71-74#setApprovedExecIds]
 
-Imported snapshots retain the publisher's values, including any identity a
+An export carries no dataset values. A file exported before #273 still does:
+its imported snapshots retain the publisher's values, including any identity a
 workflow previously collected from an API's current-user endpoint. They are
-not the recipient's identity: import copies dataset values as initial data,
+not the recipient's identity: import copies those values as initial data,
 and the runtime delivers those stored datasets without resolving a viewer.
 When a Page uses such a dataset for a personal default, recollect using the
 recipient's configured connection and reopen the Page before checking that
 default; do not infer the viewer from an imported identity snapshot.
-[src: file: backend/src/api/artifact_portability.rs:114-122]
-[src: file: backend/src/api/artifact_portability/import.rs:827-839]
+[src: file: backend/src/api/artifact_portability.rs:133-137]
+[src: file: backend/src/api/artifact_portability/import.rs:924]
 [src: file: frontend/src/lib/live-page-sandbox.ts:314-333#runtimeData]
 
 Configured connections, their stored credentials, agent-library entries and

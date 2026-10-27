@@ -97,6 +97,7 @@ fn read_page(conn: &Connection, id: &str, with_data: bool) -> Result<ArtifactBun
     }
     let detail = crate::db::live_pages::get_live_page(conn, &page_id)?
         .ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
+    let created_at = detail.page.created_at;
     let mut datasets = Vec::with_capacity(detail.datasets.len());
     for view in detail.datasets {
         let dataset = view.dataset;
@@ -138,7 +139,12 @@ fn read_page(conn: &Connection, id: &str, with_data: bool) -> Result<ArtifactBun
             schema: dataset.schema,
             max_points: dataset.max_points,
             max_age_days: dataset.max_age_days,
-            updated_at: dataset.updated_at,
+            // A bare dataset does not date the page's last publication.
+            updated_at: if with_data {
+                dataset.updated_at
+            } else {
+                created_at
+            },
             points,
         });
     }
