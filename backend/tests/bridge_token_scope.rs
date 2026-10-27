@@ -4893,7 +4893,7 @@ fn exposes_project(value: &Value, project_id: &str, project_path: &std::path::Pa
 
 #[test]
 fn disk_report_project_check_distinguishes_ids_and_paths_from_substrings() {
-    let root = std::env::temp_dir().join("fixture-p2-parent");
+    let root = std::path::PathBuf::from("fixture-p2-parent");
     let other = root.join("p2");
     let safe = json!({"project_id":"p1", "path":root.join("p1")});
     assert!(!exposes_project(&safe, "p2", &other));
