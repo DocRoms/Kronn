@@ -76,9 +76,10 @@ async function readOnly(page: Page, theme: string) {
 const REMEASURED = new Set(['bgGradient', 'pseudoContent', 'bgOverlap']);
 
 type Remeasured = { target: string; fg: string; bg: string; large: boolean };
+type RemeasureTarget = { selector: string; html: string };
 
-async function remeasure(page: Page, targets: string[]): Promise<Remeasured[]> {
-  return page.evaluate((selectors) => {
+async function remeasure(page: Page, targets: RemeasureTarget[]): Promise<Remeasured[]> {
+  return page.evaluate((references) => {
     // `rgb(r g b / a)` in 0-255, or `color(srgb r g b / a)` in 0-1 (color-mix).
     const parse = (css: string) => {
       const [r, g, b, a] = (css.replace(/^color\(srgb/, '').match(/[\d.]+(e-?\d+)?/g) ?? ['0', '0', '0']).map(Number);
@@ -93,33 +94,56 @@ async function remeasure(page: Page, targets: string[]): Promise<Remeasured[]> {
     const rgb = (c: { r: number; g: number; b: number }) =>
       `rgb(${Math.round(c.r)}, ${Math.round(c.g)}, ${Math.round(c.b)})`;
     const out: Array<{ target: string; fg: string; bg: string; large: boolean }> = [];
-    for (const selector of selectors) {
-      const el = document.querySelector(selector) as HTMLElement | null;
-      if (!el || el.closest('[disabled], [aria-disabled="true"]')) continue;
-      const layers: Array<{ r: number; g: number; b: number; a: number }> = [];
-      let opacity = 1;
-      for (let node: HTMLElement | null = el; node; node = node.parentElement) {
-        const style = getComputedStyle(node);
-        opacity *= Number(style.opacity);
-        const bg = parse(style.backgroundColor);
-        if (style.backgroundColor === 'transparent' || bg.a === 0) continue;
-        layers.push(bg);
-        if (bg.a >= 1) break;
+    for (const { selector, html } of references) {
+      let elements: HTMLElement[];
+      if (selector === ':root' && !/^\s*<html(?:\s|>)/i.test(html)) {
+        // axe falls back to :root when the element it examined is detached
+        // before it can create a selector. Resolve its captured HTML against
+        // the current DOM, rather than measuring the unrelated <html> node.
+        const template = document.createElement('template');
+        template.innerHTML = html;
+        const snapshot = template.content.firstElementChild;
+        if (!snapshot) throw new Error(`Cannot resolve axe target: ${html}`);
+        const byId = snapshot.id ? document.getElementById(snapshot.id) : null;
+        const attrs = Array.from(snapshot.attributes).filter(attr => attr.name !== '...');
+        elements = (byId && byId.localName === snapshot.localName ? [byId]
+          : Array.from(document.getElementsByTagName(snapshot.localName)).filter(candidate =>
+            attrs.every(attr => {
+              const value = candidate.getAttribute(attr.name);
+              return value !== null && (attr.value.endsWith('...')
+                ? value.startsWith(attr.value.slice(0, -3)) : value === attr.value);
+            }))) as HTMLElement[];
+      } else {
+        const element = document.querySelector(selector) as HTMLElement | null;
+        elements = element ? [element] : [];
       }
-      const opaque = layers.at(-1);
-      if (opaque && opaque.a >= 1) layers.pop();
-      let base = opaque && opaque.a >= 1 ? opaque : parse(getComputedStyle(document.body).backgroundColor);
-      for (const layer of layers.reverse()) base = { ...over(layer, base), a: 1 };
-      const style = getComputedStyle(el);
-      const fg = parse(style.color);
-      const px = Number.parseFloat(style.fontSize);
-      const bold = Number(style.fontWeight) >= 700;
-      out.push({
-        target: selector,
-        fg: rgb(over({ ...fg, a: fg.a * opacity }, base)),
-        bg: rgb(base),
-        large: px >= 24 || (bold && px >= 18.66),
-      });
+      for (const el of elements) {
+        if (el.closest('[disabled], [aria-disabled="true"]')) continue;
+        const layers: Array<{ r: number; g: number; b: number; a: number }> = [];
+        let opacity = 1;
+        for (let node: HTMLElement | null = el; node; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          opacity *= Number(style.opacity);
+          const bg = parse(style.backgroundColor);
+          if (style.backgroundColor === 'transparent' || bg.a === 0) continue;
+          layers.push(bg);
+          if (bg.a >= 1) break;
+        }
+        const opaque = layers.at(-1);
+        if (opaque && opaque.a >= 1) layers.pop();
+        let base = opaque && opaque.a >= 1 ? opaque : parse(getComputedStyle(document.body).backgroundColor);
+        for (const layer of layers.reverse()) base = { ...over(layer, base), a: 1 };
+        const style = getComputedStyle(el);
+        const fg = parse(style.color);
+        const px = Number.parseFloat(style.fontSize);
+        const bold = Number(style.fontWeight) >= 700;
+        out.push({
+          target: selector,
+          fg: rgb(over({ ...fg, a: fg.a * opacity }, base)),
+          bg: rgb(base),
+          large: px >= 24 || (bold && px >= 18.66),
+        });
+      }
     }
     return out;
   }, targets);
@@ -132,12 +156,12 @@ async function contrastViolations(page: Page, label: string, exclude: string[] =
   const results = await builder.analyze();
   const checked = results.passes.reduce((n, r) => n + r.nodes.length, 0);
   const reasons = new Map<string, number>();
-  const undecided: string[] = [];
+  const undecided: RemeasureTarget[] = [];
   for (const node of results.incomplete.flatMap(r => r.nodes)) {
     const key = String((node.any[0]?.data as { messageKey?: string } | undefined)?.messageKey ?? 'other');
     reasons.set(key, (reasons.get(key) ?? 0) + 1);
     const target = node.target.length === 1 ? String(node.target[0]) : null;
-    if (REMEASURED.has(key) && target) undecided.push(target);
+    if (REMEASURED.has(key) && target) undecided.push({ selector: target, html: node.html });
   }
   const remeasured = await remeasure(page, undecided);
   const failing = remeasured
@@ -262,6 +286,19 @@ async function focusStops(page: Page, presses: number): Promise<{ checked: numbe
 }
 
 test.describe.configure({ timeout: 90_000, retries: 0 });
+
+test('contrast remeasurement resolves axe root fallbacks without hiding real text', async ({ page }) => {
+  await page.setContent('<style>body { background: rgb(24, 24, 24) } p { color: rgb(0, 0, 0) }</style>'
+    + '<p id="visible">Low contrast</p><p class="a-long-class-name-with-suffix">Also low contrast</p>');
+  const measured = await remeasure(page, [
+    { selector: ':root', html: '<p id="removed">No longer visible</p>' },
+    { selector: ':root', html: '<p id="visible">Low contrast</p>' },
+    { selector: ':root', html: '<p class="a-long-class-name..." ...>' },
+    { selector: '#visible', html: '<p id="visible">Low contrast</p>' },
+  ]);
+  expect(measured).toHaveLength(3);
+  for (const item of measured) expect(contrast(item.fg, item.bg)).toBeLessThan(4.5);
+});
 
 test.describe('a11y — no contrast violation in the dark themes', () => {
   for (const theme of DARK_THEMES) {
