@@ -106,13 +106,18 @@ async function remeasure(page: Page, targets: RemeasureTarget[]): Promise<Remeas
         if (!snapshot) throw new Error(`Cannot resolve axe target: ${html}`);
         const byId = snapshot.id ? document.getElementById(snapshot.id) : null;
         const attrs = Array.from(snapshot.attributes).filter(attr => attr.name !== '...');
+        const capturedText = snapshot.textContent?.trim();
         elements = (byId && byId.localName === snapshot.localName ? [byId]
           : Array.from(document.getElementsByTagName(snapshot.localName)).filter(candidate =>
-            attrs.every(attr => {
+            (!capturedText || candidate.textContent?.trim() === capturedText) && attrs.every(attr => {
               const value = candidate.getAttribute(attr.name);
               return value !== null && (attr.value.endsWith('...')
                 ? value.startsWith(attr.value.slice(0, -3)) : value === attr.value);
             }))) as HTMLElement[];
+        elements = elements.filter(element => {
+          const style = getComputedStyle(element);
+          return style.visibility === 'visible' && (element.getClientRects().length > 0 || style.display === 'contents');
+        });
       } else {
         const element = document.querySelector(selector) as HTMLElement | null;
         elements = element ? [element] : [];
@@ -289,7 +294,8 @@ test.describe.configure({ timeout: 90_000, retries: 0 });
 
 test('contrast remeasurement resolves axe root fallbacks without hiding real text', async ({ page }) => {
   await page.setContent('<style>body { background: rgb(24, 24, 24) } p { color: rgb(0, 0, 0) }</style>'
-    + '<p id="visible">Low contrast</p><p class="a-long-class-name-with-suffix">Also low contrast</p>');
+    + '<p id="visible">Low contrast</p><p class="a-long-class-name-with-suffix">Also low contrast</p>'
+    + '<p hidden class="a-long-class-name-with-suffix">Hidden text</p>');
   const measured = await remeasure(page, [
     { selector: ':root', html: '<p id="removed">No longer visible</p>' },
     { selector: ':root', html: '<p id="visible">Low contrast</p>' },
