@@ -145,6 +145,20 @@ fn canonical(mut value: Value, kind: ResourceKind) -> Value {
                 }
             }
         }
+        // A file from before bare exports carries values; a stored page is
+        // compared without them, so neither side's values make them differ.
+        // A stored page lists its datasets by name, whatever the file's order.
+        if kind == ResourceKind::Artifact {
+            if let Some(datasets) = object.get_mut("datasets").and_then(Value::as_array_mut) {
+                datasets.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+                for dataset in datasets.iter_mut().filter_map(Value::as_object_mut) {
+                    dataset.insert("has_current".into(), json!(false));
+                    dataset.insert("current".into(), Value::Null);
+                    dataset.insert("points".into(), json!([]));
+                    dataset.remove("updated_at");
+                }
+            }
+        }
     }
     value
 }
@@ -159,7 +173,7 @@ fn load_existing(conn: &Connection, kind: ResourceKind, id: &str) -> Result<Opti
                 |row| row.get(0),
             )?;
             if exists {
-                // Compared with a bundle page, which never carries data.
+                // Compared without data: `canonical` drops a bundle page's values.
                 Some(serde_json::to_value(export_bare_page(conn, id)?)?)
             } else {
                 None

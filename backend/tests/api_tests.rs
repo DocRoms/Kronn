@@ -3083,6 +3083,7 @@ async fn artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previo
     let mut bundle = exported["data"].clone();
     let snapshot = bundle["artifact"]["datasets"][0].clone();
     let mut null_snapshot = snapshot.clone();
+    null_snapshot["has_current"] = serde_json::json!(true);
     null_snapshot["current"] = Value::Null;
     null_snapshot["schema"] = serde_json::json!({"type":["null","object"]});
     let mut never = snapshot.clone();
@@ -3102,6 +3103,13 @@ async fn artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previo
     bundle["artifact"]["html"] = serde_json::json!(
         r#"<h1>Été 🦀</h1><script type="application/kronn-action" data-action-id="run">{"kind":"quick_exec","target_id":"qe-portable"}</script>"#
     );
+    // A secondary page of an old file also carries values.
+    let mut secondary = bundle["artifact"].clone();
+    secondary["id"] = serde_json::json!("page-secondary");
+    secondary["slug"] = serde_json::json!("legacy-secondary");
+    secondary["title"] = serde_json::json!("Legacy secondary");
+    secondary["html"] = serde_json::json!("<p>Secondary</p>");
+    bundle["referenced_artifacts"] = serde_json::json!([secondary]);
     let state = test_state();
     let app = build_router_with_auth(state.clone(), false);
     let content = serde_json::to_string(&bundle).unwrap();
@@ -3113,6 +3121,16 @@ async fn artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previo
         )
         .await;
         assert_eq!(preview["data"]["can_import"], true, "{preview}");
+        let secondary = preview["data"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["source_id"] == "page-secondary")
+            .unwrap();
+        // Imported again, the stored secondary page (read without values)
+        // is the same page as the file's, values and all.
+        let expected = if number == 1 { "create" } else { "reuse" };
+        assert_eq!(secondary["disposition"], expected, "{preview}");
         let (_, imported) = post_json(
             app.clone(),
             "/api/pages/import",
@@ -3131,20 +3149,71 @@ async fn artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previo
         let datasets = roundtrip["data"]["artifact"]["datasets"]
             .as_array()
             .unwrap();
-        // A file from before bare exports still imports with its values;
-        // exported again, each dataset keeps its definition, not its values.
+        // A file from before bare exports still imports with its values…
+        let page = id.clone();
+        let (stored, points, created) = state
+            .db
+            .with_read_conn(move |conn| {
+                let created: String = conn.query_row(
+                    "SELECT created_at FROM live_pages WHERE id = ?1",
+                    [&page],
+                    |row| row.get(0),
+                )?;
+                let mut statement = conn.prepare(
+                    "SELECT name, current_json FROM live_page_datasets
+                     WHERE page_id = ?1 ORDER BY name",
+                )?;
+                let stored = statement
+                    .query_map([&page], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut statement = conn.prepare(
+                    "SELECT pt.dedupe_key FROM live_page_dataset_points pt
+                     JOIN live_page_datasets d ON d.id = pt.dataset_id
+                     WHERE d.page_id = ?1 ORDER BY pt.observed_at, pt.rowid",
+                )?;
+                let points = statement
+                    .query_map([&page], |row| row.get::<_, Option<String>>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok((stored, points, created))
+            })
+            .await
+            .unwrap();
+        let created = chrono::DateTime::parse_from_rfc3339(&created).unwrap();
+        let summary = snapshot["name"].as_str().unwrap().to_owned();
+        let current = |name: &str| {
+            stored
+                .iter()
+                .find(|(stored, _)| stored == name)
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert_eq!(current(&summary).as_deref(), Some("null"), "{stored:?}");
+        assert_eq!(current("never"), None, "{stored:?}");
+        assert_eq!(
+            points,
+            vec![Some("first".to_owned()), Some("second".to_owned())]
+        );
+        // …exported again, each dataset keeps its definition, not its values.
         for dataset in bundle["artifact"]["datasets"].as_array().unwrap() {
             let mut bare = dataset.clone();
             bare["has_current"] = serde_json::json!(false);
             bare["current"] = Value::Null;
             bare["points"] = serde_json::json!([]);
-            assert_eq!(
-                datasets
-                    .iter()
-                    .find(|item| item["name"] == dataset["name"])
-                    .unwrap(),
-                &bare
-            );
+            let mut exported = datasets
+                .iter()
+                .find(|item| item["name"] == dataset["name"])
+                .unwrap()
+                .clone();
+            // A bare dataset is dated by its page, not by its last value.
+            let dated = |value: &Value| {
+                chrono::DateTime::parse_from_rfc3339(value.as_str().unwrap()).unwrap()
+            };
+            assert_eq!(dated(&exported["updated_at"]), created, "{exported}");
+            exported["updated_at"] = bare["updated_at"].clone();
+            assert_eq!(exported, bare);
         }
         let (_, actions) = get_json(app.clone(), &format!("/api/pages/{id}/actions")).await;
         assert_eq!(actions["data"][0]["state"], "proposed", "{actions}");
@@ -30868,7 +30937,7 @@ async fn workflow_import_accepts_a_pin_to_a_bundled_skill_absent_locally() {
     fresh_skill_dir(&root, "target");
     let target = build_router_with_auth(test_state(), false);
     let (_, imported) = post_json(
-        target,
+        target.clone(),
         "/api/workflows/import",
         serde_json::json!({"content": file, "project_id": null, "skill_choices": []}),
     )
@@ -30877,9 +30946,16 @@ async fn workflow_import_accepts_a_pin_to_a_bundled_skill_absent_locally() {
     let pinned = imported["data"]["steps"][0]["skill_ids"][0]
         .as_str()
         .unwrap();
+    let (base, version) = pinned.split_once('@').unwrap();
+    assert_eq!(version, "1", "the step stays pinned: {imported}");
+    let (_, listed) = get_json(target, "/api/skills").await;
     assert!(
-        pinned.starts_with("custom-") && pinned.ends_with("@1"),
-        "the step stays pinned to the created skill: {imported}"
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == base && s["content"] == "Check the pins."),
+        "the pin names the skill this Kronn created: {listed}"
     );
 }
 
@@ -30954,13 +31030,23 @@ async fn artifact_bundle_carries_custom_skills_and_import_creates_them() {
     fresh_skill_dir(&root, "source");
     let app = build_router_with_auth(state.clone(), false);
     let skill = create_skill(app.clone(), "Page review", "Read the page.").await;
+    let listed_skill = create_skill(app.clone(), "Repo conventions", "Follow them.").await;
     let attached = skill.clone();
+    let payload_skill = listed_skill.clone();
     state
         .db
         .with_conn(move |conn| {
             let mut workflow =
                 kronn::db::workflows::get_workflow(conn, "workflow-portable")?.unwrap();
-            workflow.steps[0].skill_ids = vec![attached.clone()];
+            workflow.steps[0].skill_ids = vec![format!("{attached}@1")];
+            // #273 — a skill a JsonData step lists by id travels with the page.
+            workflow.steps.push(
+                serde_json::from_value(serde_json::json!({
+                    "name": "skills", "step_type": {"type": "JsonData"},
+                    "json_data_payload": {"org/repo": [payload_skill]},
+                }))
+                .unwrap(),
+            );
             kronn::db::workflows::update_workflow(conn, &workflow)?;
             conn.execute(
                 "UPDATE quick_prompts SET skill_ids_json = ?1 WHERE id = 'qp-portable'",
@@ -30973,11 +31059,17 @@ async fn artifact_bundle_carries_custom_skills_and_import_creates_them() {
     let (_, exported) = get_json(app, "/api/pages/page-portable/export").await;
     let bundle = &exported["data"];
     assert_eq!(bundle["version"], 2);
-    assert_eq!(
-        bundle["referenced_skills"][0]["id"],
-        skill.as_str(),
-        "{bundle}"
-    );
+    let mut bundled: Vec<_> = bundle["referenced_skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap().to_owned())
+        .collect();
+    bundled.sort();
+    // The pinned version travels on its own, next to the current skill.
+    let mut expected = vec![skill.clone(), format!("{skill}@1"), listed_skill.clone()];
+    expected.sort();
+    assert_eq!(bundled, expected, "{bundle}");
     let content = serde_json::to_string(bundle).unwrap();
 
     fresh_skill_dir(&root, "target");
@@ -31011,18 +31103,53 @@ async fn artifact_bundle_carries_custom_skills_and_import_creates_them() {
     )
     .await;
     assert_eq!(imported["success"], true, "{imported}");
-    let (workflow_skills, prompt_skills) = target_state
+    let (workflow, prompt_skills) = target_state
         .db
         .with_read_conn(|conn| {
             let workflow = kronn::db::workflows::list_workflows(conn)?.remove(0);
             let prompt = kronn::db::quick_prompts::list_quick_prompts(conn)?.remove(0);
-            Ok((workflow.steps[0].skill_ids.clone(), prompt.skill_ids))
+            Ok((workflow, prompt.skill_ids))
         })
         .await
         .unwrap();
-    assert_eq!(workflow_skills, prompt_skills);
-    let local = kronn::core::skills::get_skill(&workflow_skills[0]).expect("created");
+    // The pin names the created copy, at a version this Kronn has.
+    let (pinned, version) = workflow.steps[0].skill_ids[0].split_once('@').unwrap();
+    assert_eq!(version, "1");
+    assert_ne!(pinned, skill.as_str(), "the pin is remapped");
+    let local = kronn::core::skills::get_skill(pinned).expect("created");
     assert_eq!(local.content, "Read the page.");
+    let local = kronn::core::skills::get_skill(&prompt_skills[0]).expect("created");
+    assert_eq!(local.content, "Read the page.");
+    let payload = workflow
+        .steps
+        .iter()
+        .find(|step| step.name == "skills")
+        .and_then(|step| step.json_data_payload.as_ref())
+        .unwrap();
+    let listed = payload["org/repo"][0].as_str().unwrap();
+    let local = kronn::core::skills::get_skill(listed).expect("created");
+    assert_eq!(local.content, "Follow them.");
+
+    // A pin to a skill neither bundled nor local is still refused.
+    let mut foreign = bundle.clone();
+    foreign["referenced_workflows"][0]["steps"][0]["skill_ids"] =
+        serde_json::json!(["custom-absent@1"]);
+    let (_, refused) = post_json(
+        target,
+        "/api/pages/import/preview",
+        serde_json::json!({"content": serde_json::to_string(&foreign).unwrap(),
+                           "project_id": null, "choices": [],
+                           "approved_quick_exec_ids": ["qe-portable"]}),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("custom-absent"),
+        "{refused}"
+    );
 }
 
 async fn refs_fixture(state: &AppState, project_path: &str) {

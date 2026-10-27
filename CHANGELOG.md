@@ -110,8 +110,10 @@ Release notes for 0.9.3 and earlier are available in the
 - An exported Artifact no longer carries its data. Each dataset keeps its
   name, kind, schema and limits, without its snapshot or its time-series
   points, so sharing the file shares the page, not what it published (API
-  answers, names, links). A file exported before keeps importing with its
-  values. Project repository resources are unchanged (#273).
+  answers, names, links), nor when it last published. A file exported
+  before keeps importing with its values, and importing it again reuses the
+  pages it already created. Project repository resources are unchanged
+  (#273).
 
 ## [0.15.1] - 2026-10-22
 
