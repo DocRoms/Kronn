@@ -529,7 +529,7 @@ pub fn parse_report(period_kind: &str, json: &[u8]) -> Result<UsageReport, Strin
 /// ccusage reports the whole log history whatever the period: `daily` /
 /// `weekly` / `monthly` only change how rows are grouped, so its `totals` is
 /// the all-time spend for all three (#270). Bounding the report to today /
-/// this week (Monday-based, like `--start-of-week monday`) / this month makes
+/// this week (Monday-based, ccusage's default) / this month makes
 /// the toggle select a window.
 pub fn period_since(period_kind: &str, today: chrono::NaiveDate) -> String {
     use chrono::Datelike;
@@ -546,25 +546,22 @@ pub fn period_since(period_kind: &str, today: chrono::NaiveDate) -> String {
 /// The `ccusage` process: the base environment only (KT-1006), plus where
 /// Claude's logs live when the user moved them. Dates are read in Kronn's
 /// timezone, which ccusage is told too so both cut days at the same instant.
+/// `since` bounds the report (`YYYYMMDD`); `None` reads the whole history.
 fn ccusage_command(
     program: &std::path::Path,
     period_kind: &str,
     timezone: chrono_tz::Tz,
-    today: chrono::NaiveDate,
+    since: Option<String>,
 ) -> tokio::process::Command {
     use crate::core::child_env::{self, ChildRoute};
     let mut command = crate::core::cmd::async_cmd(program, ChildRoute::Tool);
-    command
-        .arg(period_kind)
-        .arg("--json")
-        .arg("--since")
-        .arg(period_since(period_kind, today))
-        .arg("--timezone")
-        .arg(timezone.name());
-    if period_kind == "weekly" {
-        // Only `weekly` accepts it; `daily` / `monthly` reject unknown flags.
-        command.arg("--start-of-week").arg("monday");
+    command.arg(period_kind).arg("--json");
+    if let Some(since) = since {
+        command.arg("--since").arg(since);
     }
+    // Weeks start on Monday by default. `--start-of-week` is not passed: the
+    // ccusage 20.0.5 pinned in the Docker image rejects it, even on `weekly`.
+    command.arg("--timezone").arg(timezone.name());
     if let Some(dir) = child_env::parent_var("CLAUDE_CONFIG_DIR") {
         command.env("CLAUDE_CONFIG_DIR", dir);
     }
@@ -581,18 +578,25 @@ fn ccusage_command(
     command
 }
 
-/// Run `ccusage <period> --json --since <period start>` and parse the result.
+/// Run `ccusage <period> --json` and parse the result.
+///
+/// By default the report covers the current day / week / month only (#270):
+/// ccusage returns the whole log history whatever the period, so without a
+/// window its `totals` is the same all-time figure for all three. `history`
+/// keeps the whole history, for callers that average over it (the observed
+/// model costs of the Agents tab).
 ///
 /// Returns a clean `Err(String)` if the binary is missing or errors — the
 /// caller surfaces it as a friendly "usage reporting unavailable" message
 /// (e.g. in local dev where ccusage isn't installed; it ships in the Docker
 /// image).
-pub async fn fetch_usage(period: &str) -> Result<UsageReport, String> {
+pub async fn fetch_usage(period: &str, history: bool) -> Result<UsageReport, String> {
     let period_kind = normalize_period(period);
     let program = resolve_ccusage_program()?;
     let timezone = crate::core::timezone::current();
     let today = chrono::Utc::now().with_timezone(&timezone).date_naive();
-    let mut command = ccusage_command(&program, period_kind, timezone, today);
+    let since = (!history).then(|| period_since(period_kind, today));
+    let mut command = ccusage_command(&program, period_kind, timezone, since);
 
     let output = command
         .output()
@@ -626,7 +630,7 @@ mod tests {
                 std::path::Path::new("/usr/bin/ccusage"),
                 "daily",
                 chrono_tz::Tz::UTC,
-                chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap(),
+                None,
             )
         });
         probe::assert_built_without_secrets(command.as_std(), "/usr/bin", &[]);
@@ -655,43 +659,54 @@ mod tests {
     #[test]
     fn ccusage_is_bounded_to_the_current_period_in_kronn_timezone() {
         // #270: without `--since` every period returned the all-time total.
-        let args = |period_kind: &str| -> Vec<String> {
+        let args = |period_kind: &str, since: Option<&str>| -> Vec<String> {
             ccusage_command(
                 std::path::Path::new("/usr/bin/ccusage"),
                 period_kind,
                 chrono_tz::Tz::Europe__Paris,
-                chrono::NaiveDate::from_ymd_opt(2026, 10, 22).unwrap(),
+                since.map(str::to_string),
             )
             .as_std()
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
         };
-        assert_eq!(
-            args("monthly"),
-            [
-                "monthly",
-                "--json",
-                "--since",
-                "20261001",
-                "--timezone",
-                "Europe/Paris"
-            ]
+        for (period_kind, since) in [
+            ("daily", "20261022"),
+            ("weekly", "20261019"),
+            ("monthly", "20261001"),
+        ] {
+            // No `--start-of-week`: ccusage 20.0.5 (Docker image) rejects it
+            // on every period, `weekly` included.
+            assert_eq!(
+                args(period_kind, Some(since)),
+                [
+                    period_kind,
+                    "--json",
+                    "--since",
+                    since,
+                    "--timezone",
+                    "Europe/Paris"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn ccusage_history_mode_has_no_window() {
+        // The Agents tab averages model costs over the whole history.
+        let command = ccusage_command(
+            std::path::Path::new("/usr/bin/ccusage"),
+            "monthly",
+            chrono_tz::Tz::Europe__Paris,
+            None,
         );
-        // ccusage 20 rejects `--start-of-week` on `daily` / `monthly`.
-        assert_eq!(
-            args("weekly"),
-            [
-                "weekly",
-                "--json",
-                "--since",
-                "20261019",
-                "--timezone",
-                "Europe/Paris",
-                "--start-of-week",
-                "monday",
-            ]
-        );
+        let args: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["monthly", "--json", "--timezone", "Europe/Paris"]);
     }
 
     #[test]

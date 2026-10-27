@@ -5355,21 +5355,6 @@
 }
 .usage-table tbody tr:hover { background: rgba(var(--kr-accent-rgb), 0.04); }
 
-.usage-pager {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--kr-sp-3, 10px);
-  margin-top: var(--kr-sp-3, 10px);
-}
-.usage-pager-label {
-  font-size: var(--kr-fs-xs);
-  color: var(--kr-text-secondary);
-  font-variant-numeric: tabular-nums;
-  min-width: 3ch;
-  text-align: center;
-}
-
 .telemetry-coverage {
   margin-top: var(--kr-sp-5);
   padding-top: var(--kr-sp-5);
