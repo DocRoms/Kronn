@@ -4876,11 +4876,40 @@ fn volume_projects(body: &Value) -> Vec<String> {
     ids
 }
 
+fn exposes_project(value: &Value, project_id: &str, project_path: &std::path::Path) -> bool {
+    match value {
+        Value::String(value) => {
+            value == project_id || std::path::Path::new(value).starts_with(project_path)
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(|item| exposes_project(item, project_id, project_path)),
+        Value::Object(fields) => fields
+            .values()
+            .any(|item| exposes_project(item, project_id, project_path)),
+        _ => false,
+    }
+}
+
+#[test]
+fn disk_report_project_check_distinguishes_ids_and_paths_from_substrings() {
+    let root = std::env::temp_dir().join("fixture-p2-parent");
+    let other = root.join("p2");
+    let safe = json!({"project_id":"p1", "path":root.join("p1")});
+    assert!(!exposes_project(&safe, "p2", &other));
+    assert!(exposes_project(&json!({"project_id":"p2"}), "p2", &other));
+    assert!(exposes_project(
+        &json!({"entries":[{"path":other.join("target") }]}),
+        "p2",
+        &other
+    ));
+}
+
 /// KT-1347 — a token reads free space and the aggregates, plus its own
 /// project's lanes; the operator keeps the full view.
 #[tokio::test]
 async fn the_disk_report_is_scoped_to_the_token_s_project() {
-    let (app, _repos) = fixture().await;
+    let (app, repos) = fixture().await;
     let (status, full) = call(&app, "GET", "/api/maintenance/disk", None, None).await;
     assert_eq!(status, 200, "{full}");
     assert_eq!(volume_projects(&full), ["p1", "p2"]);
@@ -4901,7 +4930,10 @@ async fn the_disk_report_is_scoped_to_the_token_s_project() {
     for entry in mine["data"]["entries"].as_array().unwrap() {
         assert_eq!(entry["project_id"], "p1", "{mine}");
     }
-    assert!(!mine.to_string().contains("p2"), "{mine}");
+    assert!(
+        !exposes_project(&mine, "p2", &repos.path().join("p2")),
+        "{mine}"
+    );
     assert!(
         mine["data"]["totals"]
             .as_array()
