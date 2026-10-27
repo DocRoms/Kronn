@@ -2377,13 +2377,11 @@ TOOLS = [
     {
         "name": "media_generate",
         "description": (
-            "Generate an image/video on a configured media source; returns "
-            "`{job_id, status, model}`. The configured slot fixes the model; a "
-            "missing one is refused with setup guidance. Billed: video per "
-            "second, image per picture; audio (on unless `generate_audio: "
-            "false`) adds cost. Use the shortest useful clip. Keep `wait: "
-            "false` (default): the asset arrives in the discussion as a context "
-            "file for all agents. Use `true` only if needed in this answer. "
+            "Generate image/video on a configured media source; returns "
+            "`{job_id, status, model}`. The slot fixes the model; missing slots "
+            "return setup guidance. Billed per second/picture; audio adds cost. "
+            "Use the shortest useful clip. Default `wait: false` delivers a "
+            "context file to all discussion agents; use `true` only if needed now. "
             "Envelope, chaining and cost: tool_manual."
         ),
         "inputSchema": {
@@ -2392,6 +2390,10 @@ TOOLS = [
                 "connection_id": {
                     "type": "string",
                     "description": "Optional, from `agent_list`; omitted, the only one.",
+                },
+                "expected_model": {
+                    "type": "string",
+                    "description": "From agent_list: reject a changed slot, never override it.",
                 },
                 "modality": {
                     "type": "string",
@@ -2425,12 +2427,11 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Ids of images ALREADY IN THIS DISCUSSION to generate "
-                        "from — never paths or URLs, order matters, as many as "
-                        "the model advertises. Needs `reference_mode`. One may "
-                        "be an earlier clip's last image — that is how clips "
-                        "are chained; Kronn cannot cut it, the human keeps it "
-                        "from the Assets carousel."
+                        "Image ids or unique exact filenames IN THIS DISCUSSION; "
+                        "never paths or URLs, order matters. Needs `reference_mode`. "
+                        "Limit: what agent_list advertises. "
+                        "For chaining, a human keeps the previous clip's last "
+                        "image from Assets; Kronn cannot cut it."
                     ),
                 },
                 "reference_asset_id": {
@@ -2441,9 +2442,8 @@ TOOLS = [
                     "type": "string",
                     "enum": ["first_frame", "last_frame", "reference"],
                     "description": (
-                        "Use of those images. A first/last frame is video-only "
-                        "and takes ONE picture; `reference` is what an image "
-                        "uses."
+                        "First/last frame: video only, one image. `reference`: "
+                        "image/video, up to agent_list's `max_input_references`."
                     ),
                 },
                 "wait": {
@@ -8998,7 +8998,7 @@ def call_media_generate(args):
     # Ambiguous providers are returned to the caller instead of selected here.
     if args.get("connection_id"):
         body["connection_id"] = args["connection_id"]
-    for key in ("duration_secs", "resolution", "aspect_ratio"):
+    for key in ("duration_secs", "resolution", "aspect_ratio", "expected_model"):
         if args.get(key) is not None:
             body[key] = args[key]
     # Ids inside the bound discussion, checked server-side. Sending one without
@@ -10730,8 +10730,10 @@ TOOL_MANUALS["media_generate"] = (
     "answer says which connection was billed.\n\n"
     "Local ComfyUI. When the operator set a ComfyUI model, `agent_list` also "
     "lists `local:comfyui` (alias `comfyui`): images and videos generated on "
-    "this machine, billed nothing, with no source image (`reference_asset_ids` "
-    "is refused there). It is slow: about a minute for an image, around ten "
+    "this machine, billed nothing. Source support depends on the configured "
+    "workflow and installed dependencies: read max_input_references and "
+    "reference_support.blocker. A missing Kronn adapter is not a model's "
+    "incapability. It is slow: about a minute for an image, around ten "
     "for two seconds of video, so prefer `wake_when_ready` over `wait`.\n\n"
     "Parameters come from the model, not from habit. `agent_list` returns one "
     "entry per configured media slot, each carrying the `capabilities` the "
@@ -10742,8 +10744,9 @@ TOOL_MANUALS["media_generate"] = (
     "a null `capabilities` means the catalogue could not be read, so keep your "
     "defaults rather than inventing one.\n\n"
     "References. Order matters: providers weigh reference images by position. "
-    "A video takes one picture; an image takes as many as "
-    "`max_input_references` advertises. `reference_mode` says what the picture "
+    "Images and videos accept multiple visual references when their effective "
+    "`max_input_references` permits it; unknown is not zero. Explicitly pass "
+    "`reference_mode: reference` for these. `reference_mode` says what the picture "
     "IS to the generation: `first_frame` and `last_frame` pin the clip's exact "
     "opening or closing image (video only, one picture), `reference` is a "
     "visual the model draws from. A video model can start from (or end on) a "

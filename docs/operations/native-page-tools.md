@@ -56,7 +56,7 @@ Workflows also publish data through the `PublishPageData` step.
 Rendering still uses the existing Page viewer and its network-denying CSP;
 persisting an action block never launches its automation.
 [src: file: backend/src/api/agent_tools.rs:358-363#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2529-2538#declarations_for_family]
+[src: file: backend/src/api/agent_tools.rs:2530-2539#declarations_for_family]
 [src: file: backend/src/api/agent_tools.rs:1481-1505#workflow_tool_catalogue]
 [src: file: backend/src/api/agent_tools.rs:1869-1871#execute_page_tool]
 [src: file: backend/src/api/agent_tools.rs:5662-5720#workflow_catalogue_is_bounded_and_contains_no_planning_mutation]
@@ -133,4 +133,4 @@ other declaration changes, the Page delta does not. These are byte counts, not
 provider token measurements. The bridge
 declarations keep their own byte ceiling (84,929 bytes, `mcp_surface_budget.py`).
 [src: file: backend/src/api/agent_page_tests.rs:335-360#native_page_surface_has_a_bounded_measured_cost]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:152#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:154#CATALOGUE_MAX_BYTES]

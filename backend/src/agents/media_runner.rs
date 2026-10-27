@@ -174,10 +174,12 @@ async fn submit(
                 }
                 // Every video model advertises a single frame; sending more
                 // would silently drop all but one.
-                MediaModality::Video => {
-                    ctx.codec
-                        .video_body(&job.model, &job.prompt, &job.params, references.first())
-                }
+                MediaModality::Video => ctx.codec.video_body_with_references(
+                    &job.model,
+                    &job.prompt,
+                    &job.params,
+                    &references,
+                ),
             };
             let body = match built {
                 Ok(body) => body,
@@ -779,7 +781,18 @@ async fn advance_local_comfyui(
     job: &MediaJob,
     now: DateTime<Utc>,
 ) -> std::result::Result<(), AdvanceFailure> {
-    let config = state.config.read().await.comfyui.clone();
+    let mut config = state.config.read().await.comfyui.clone();
+    if let Some(context) = &job.params.comfyui_reference_context {
+        config.endpoint = Some(context.endpoint.clone());
+        let folder = crate::core::comfyui::folder_of(context.family);
+        config
+            .model_families
+            .insert(format!("{folder}/{}", job.model), context.family);
+        match job.modality {
+            MediaModality::Image => config.image_settings = context.settings.clone(),
+            MediaModality::Video => config.video_settings = context.settings.clone(),
+        }
+    }
     let base = crate::api::comfyui::base_url(&config);
     let submitting = job.provider_job_id.as_deref().is_none_or(str::is_empty);
     // A stopped ComfyUI is told at once rather than retried until the
@@ -817,30 +830,27 @@ async fn advance_local_comfyui(
             // Saved with the slot, so a failing header read cannot make a
             // known model look unknown; read from ComfyUI only for a model
             // that is no longer the slot's.
-            let saved = config
-                .chosen_family(crate::core::comfyui::IMAGE_FOLDER, &job.model)
-                .or(config
-                    .image_family
-                    .filter(|_| config.image_model.as_deref() == Some(job.model.as_str())));
+            let saved =
+                crate::api::comfyui::reference_family(&config, &job.model, MediaModality::Image);
             let family = match saved {
                 Some(family) => Some(family),
                 None if submitting => {
-                    let found = crate::api::comfyui::model_family(
+                    crate::api::comfyui::model_family(
                         &base,
                         &config,
                         crate::core::comfyui::IMAGE_FOLDER,
                         &job.model,
                     )
-                    .await;
-                    // A slot chosen before the family was saved with it
-                    // gets it now, so the header is read only once.
-                    if let Some(family) = found {
-                        crate::api::comfyui::remember_image_family(state, &job.model, family).await;
-                    }
-                    found
+                    .await
                 }
                 None => None,
             };
+            // Known filenames also resolve old slots without reading a header.
+            if submitting {
+                if let Some(family) = family {
+                    crate::api::comfyui::remember_image_family(state, &job.model, family).await;
+                }
+            }
             let settings = family
                 .unwrap_or(crate::core::comfyui::ComfyFamily::Sdxl)
                 .settings(&config.image_settings);
@@ -867,18 +877,50 @@ async fn advance_local_comfyui(
     } else {
         None
     };
+    let video_family = config
+        .chosen_family(crate::core::comfyui::VIDEO_FOLDER, &job.model)
+        .or_else(|| {
+            crate::core::comfyui::family_of(
+                crate::core::comfyui::VIDEO_FOLDER,
+                &job.model,
+                None,
+                None,
+            )
+        });
+    let source_images = if submitting
+        && now < job.deadline_at
+        && !job.params.reference_ids().is_empty()
+    {
+        let capabilities =
+            crate::api::comfyui::reference_capabilities(&config, &job.model, job.modality).await;
+        if let Some(reason) = capabilities
+            .reference_support
+            .as_ref()
+            .and_then(|support| support.blocker.as_ref())
+        {
+            return Err(AdvanceFailure::Permanent(reason.clone()));
+        }
+        let references = load_references(&state.db, job)
+            .await
+            .map_err(|error| AdvanceFailure::Permanent(error.to_string()))?;
+        upload_comfyui_references(client, &base, &job.id, &references)
+            .await
+            .map_err(|error| {
+                AdvanceFailure::Permanent(format!("ComfyUI source-image upload failed: {error}"))
+            })?
+    } else {
+        Vec::new()
+    };
     let codec = crate::agents::media_codec::ComfyUiMediaCodec {
         base: base.clone(),
         seed: crate::core::comfyui::seed_for(&job.id),
         image_family,
         settings,
         video_companions,
+        video_family,
+        source_images,
+        denoise: config.image_settings.denoise.unwrap_or(0.55),
     };
-    if !job.params.reference_ids().is_empty() {
-        return Err(AdvanceFailure::Permanent(
-            "the local ComfyUI workflows do not take source images yet".into(),
-        ));
-    }
     let ctx = MediaContext {
         codec: &codec,
         base: &base,
@@ -890,6 +932,48 @@ async fn advance_local_comfyui(
         .map_err(|e| AdvanceFailure::Transient(e.to_string()))?;
     tracing::debug!(job = %job.id, status = ?status, "local ComfyUI media job advanced");
     Ok(())
+}
+
+async fn upload_comfyui_references(
+    client: &reqwest::Client,
+    base: &str,
+    job_id: &str,
+    references: &[crate::agents::media_codec::MediaReferenceImage],
+) -> Result<Vec<String>> {
+    use sha2::{Digest, Sha256};
+    let job_key: String = Sha256::digest(job_id.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let mut names = Vec::with_capacity(references.len());
+    for (index, source) in references.iter().enumerate() {
+        let filename = format!("kronn-{job_key}-{index}.png");
+        let part = reqwest::multipart::Part::bytes(source.bytes.clone())
+            .file_name(filename.clone())
+            .mime_str(&source.mime_type)?;
+        let form = reqwest::multipart::Form::new()
+            .part("image", part)
+            .text("type", "input")
+            .text("overwrite", "true");
+        let body: serde_json::Value = client
+            .post(format!("{}/upload/image", base.trim_end_matches('/')))
+            .multipart(form)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if body["name"].as_str() != Some(filename.as_str())
+            || body["type"].as_str() != Some("input")
+            || body["subfolder"]
+                .as_str()
+                .is_some_and(|folder| !folder.is_empty())
+        {
+            bail!("ComfyUI returned an unexpected source-image name or location");
+        }
+        names.push(filename);
+    }
+    Ok(names)
 }
 
 /// Reads the source image a job named, at the moment it is needed.
@@ -943,6 +1027,70 @@ async fn load_references(
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn uploads_preserve_all_three_sources_order_and_names_on_retry_and_refuse_a_wrong_location(
+    ) {
+        use sha2::{Digest, Sha256};
+        use wiremock::{
+            matchers::{body_string_contains, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        let sources: Vec<_> = ["red-source", "green-source", "blue-source"]
+            .into_iter()
+            .map(|text| crate::agents::media_codec::MediaReferenceImage {
+                mode: crate::models::MediaReferenceMode::Reference,
+                mime_type: "image/png".into(),
+                bytes: text.as_bytes().to_vec(),
+            })
+            .collect();
+        let job_key: String = Sha256::digest(b"job-three")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        for (index, source) in sources.iter().enumerate() {
+            let filename = format!("kronn-{job_key}-{index}.png");
+            Mock::given(method("POST"))
+                .and(path("/upload/image"))
+                .and(body_string_contains(format!("filename=\"{filename}\"")))
+                .and(body_string_contains(
+                    String::from_utf8(source.bytes.clone()).unwrap(),
+                ))
+                .and(body_string_contains("name=\"overwrite\"\r\n\r\ntrue"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"name":filename,"type":"input","subfolder":""}),
+                ))
+                .expect(2)
+                .mount(&server)
+                .await;
+        }
+        let client = reqwest::Client::new();
+        let first = upload_comfyui_references(&client, &server.uri(), "job-three", &sources)
+            .await
+            .unwrap();
+        let retry = upload_comfyui_references(&client, &server.uri(), "job-three", &sources)
+            .await
+            .unwrap();
+        assert_eq!(first, retry);
+        assert_eq!(first.len(), 3);
+        assert!(first[0].ends_with("-0.png") && first[2].ends_with("-2.png"));
+        let other = MockServer::start().await;
+        Mock::given(path("/upload/image"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"name":"wrong.png","type":"output"})),
+            )
+            .mount(&other)
+            .await;
+        assert!(
+            upload_comfyui_references(&client, &other.uri(), "job-three", &sources)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected")
+        );
+    }
     use crate::db::media_jobs::{self, NewMediaJob};
     use crate::models::{MediaJobStatus, MediaModality, MediaParams};
     use chrono::Duration as ChronoDuration;
@@ -1684,6 +1832,9 @@ mod tests {
             image_family: Some(crate::core::comfyui::ComfyFamily::Sdxl),
             settings: crate::core::comfyui::ComfyFamily::Sdxl.defaults(),
             video_companions: None,
+            video_family: None,
+            source_images: Vec::new(),
+            denoise: 0.55,
         };
         let client = reqwest::Client::new();
         async fn read(db: &Database, id: &'static str) -> MediaJob {
@@ -1970,6 +2121,9 @@ mod tests {
             image_family: Some(crate::core::comfyui::ComfyFamily::Sdxl),
             settings: crate::core::comfyui::ComfyFamily::Sdxl.defaults(),
             video_companions: None,
+            video_family: None,
+            source_images: Vec::new(),
+            denoise: 0.55,
         };
         let client = reqwest::Client::new();
         let ctx = MediaContext {

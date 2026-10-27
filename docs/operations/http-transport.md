@@ -240,7 +240,7 @@ under an unrelated agent.
   [src: file: backend/src/api/external_api_connections.rs:695-715#failure_response]
   [src: file: backend/src/api/external_api_connections.rs:810-821#assemble_tier_report]
   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:372-373#billing_error]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1059#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1062#billing_error]
   Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks
   credit, even when the key can load `/v1/models`. Previously the generic
   fallback could hide this behind a later HTTP 400 from a TTS model.
@@ -278,7 +278,7 @@ is the value for `media_generate`'s `reference_asset_ids`. `media_generate` also
 accepts the exact filename of exactly one image of the same discussion, and an
 unknown reference is refused with the list of this discussion's usable images.
 A refused generation is reported to the runner as a failed tool call.
-[src: file: backend/src/api/media.rs:2042-2061#unknown_reference_error]
+[src: file: backend/src/api/media.rs:2134-2153#unknown_reference_error]
 
 `read_file` accepts only file paths registered to the current discussion, even
 without a project. This exception grants no directory listing or writing rights;

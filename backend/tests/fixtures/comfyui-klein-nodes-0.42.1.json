@@ -1,0 +1,197 @@
+{
+  "comfyui_version": "0.42.1",
+  "source": "Local ComfyUI /object_info/<node>, captured 2026-10-26; no prompt submitted.",
+  "nodes": {
+    "UNETLoader": {
+      "required": [
+        "unet_name",
+        "weight_dtype"
+      ],
+      "optional": [],
+      "outputs": [
+        "MODEL"
+      ]
+    },
+    "CLIPLoader": {
+      "required": [
+        "clip_name",
+        "type"
+      ],
+      "optional": [
+        "device"
+      ],
+      "outputs": [
+        "CLIP"
+      ]
+    },
+    "VAELoader": {
+      "required": [
+        "vae_name"
+      ],
+      "optional": [],
+      "outputs": [
+        "VAE"
+      ]
+    },
+    "CLIPTextEncode": {
+      "required": [
+        "text",
+        "clip"
+      ],
+      "optional": [],
+      "outputs": [
+        "CONDITIONING"
+      ]
+    },
+    "ConditioningZeroOut": {
+      "required": [
+        "conditioning"
+      ],
+      "optional": [],
+      "outputs": [
+        "CONDITIONING"
+      ]
+    },
+    "LoadImage": {
+      "required": [
+        "image"
+      ],
+      "optional": [],
+      "outputs": [
+        "IMAGE",
+        "MASK"
+      ]
+    },
+    "ImageScaleToTotalPixels": {
+      "required": [
+        "image",
+        "upscale_method",
+        "megapixels",
+        "resolution_steps"
+      ],
+      "optional": [],
+      "outputs": [
+        "IMAGE"
+      ]
+    },
+    "VAEEncode": {
+      "required": [
+        "pixels",
+        "vae"
+      ],
+      "optional": [],
+      "outputs": [
+        "LATENT"
+      ]
+    },
+    "ReferenceLatent": {
+      "required": [
+        "conditioning"
+      ],
+      "optional": [
+        "latent"
+      ],
+      "outputs": [
+        "CONDITIONING"
+      ]
+    },
+    "EmptyFlux2LatentImage": {
+      "required": [
+        "width",
+        "height",
+        "batch_size"
+      ],
+      "optional": [],
+      "outputs": [
+        "LATENT"
+      ]
+    },
+    "Flux2Scheduler": {
+      "required": [
+        "steps",
+        "width",
+        "height"
+      ],
+      "optional": [],
+      "outputs": [
+        "SIGMAS"
+      ]
+    },
+    "CFGGuider": {
+      "required": [
+        "model",
+        "positive",
+        "negative",
+        "cfg"
+      ],
+      "optional": [],
+      "outputs": [
+        "GUIDER"
+      ]
+    },
+    "RandomNoise": {
+      "required": [
+        "noise_seed"
+      ],
+      "optional": [],
+      "outputs": [
+        "NOISE"
+      ]
+    },
+    "KSamplerSelect": {
+      "required": [
+        "sampler_name"
+      ],
+      "optional": [],
+      "outputs": [
+        "SAMPLER"
+      ]
+    },
+    "SamplerCustomAdvanced": {
+      "required": [
+        "noise",
+        "guider",
+        "sampler",
+        "sigmas",
+        "latent_image"
+      ],
+      "optional": [],
+      "outputs": [
+        "LATENT",
+        "LATENT"
+      ]
+    },
+    "VAEDecode": {
+      "required": [
+        "samples",
+        "vae"
+      ],
+      "optional": [],
+      "outputs": [
+        "IMAGE"
+      ]
+    },
+    "SaveImage": {
+      "required": [
+        "images",
+        "filename_prefix"
+      ],
+      "optional": [],
+      "outputs": [
+        "IMAGE"
+      ]
+    },
+    "BasicScheduler": {
+      "required": [
+        "model",
+        "scheduler",
+        "steps",
+        "denoise"
+      ],
+      "optional": [],
+      "outputs": [
+        "SIGMAS"
+      ]
+    }
+  }
+}

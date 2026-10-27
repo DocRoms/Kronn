@@ -89,7 +89,7 @@ zeroize = "1"           # Wipe derived KEKs / key material from memory after use
 fs2 = "0.4"
 
 # HTTP client (for tracker APIs)
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form", "multipart"] }
 
 # ApiCall step (désagentification) — JSONPath extraction, rate limiting, retry, secret redaction
 serde_json_path = "0.7"   # RFC 9535 JSONPath, runs on serde_json::Value directly
