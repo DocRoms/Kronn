@@ -13,7 +13,7 @@ const details: Record<string, LivePageDetail> = Object.fromEntries(['page-1', 'p
   updated_at: '2026-08-29T10:00:00Z',
   last_published_at: null,
   pinned: false,
-  archived: false,
+  archived: false, html_size_bytes: 0,
   revision: {
     id: `rev-${index + 1}`,
     page_id: id,

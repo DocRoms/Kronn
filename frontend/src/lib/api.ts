@@ -264,6 +264,7 @@ import type {
   LivePageDiscussionLink,
   LivePagePublication,
   LivePageRevision,
+  LivePageRevisionSummary,
   LivePageWorkflowLink, LivePageResource, PromoteShadowRequest,
   LivePagesCapability,
   PublishLivePageRequest,
@@ -3090,7 +3091,9 @@ export const pages = {
     `/pages${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`,
   ),
   get: (id: string) => api<LivePageDetail>('GET', `/pages/${encodeURIComponent(id)}`),
-  revisions: (id: string) => api<LivePageRevision[]>('GET', `/pages/${encodeURIComponent(id)}/revisions`),
+  revisions: (id: string) => api<LivePageRevisionSummary[]>('GET', `/pages/${encodeURIComponent(id)}/revisions`),
+  revision: (id: string, revisionId: string) =>
+    api<LivePageRevision>('GET', `/pages/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}`),
   workflows: (id: string) => api<LivePageWorkflowLink[]>('GET', `/pages/${encodeURIComponent(id)}/workflows`),
   resources: (id: string) => api<LivePageResource[]>('GET', `/pages/${encodeURIComponent(id)}/resources`),
   publications: (id: string) => api<LivePagePublication[]>('GET', `/pages/${encodeURIComponent(id)}/publications`),

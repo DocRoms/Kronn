@@ -171,6 +171,12 @@
 .live-pages-dataset-trigger:hover:not(:disabled) { background: var(--kr-bg-hover); color: var(--kr-accent); }
 .live-pages-dataset-trigger:disabled { cursor: default; }
 .live-pages-data-size { display: inline-flex; align-items: center; gap: 4px; font-family: var(--kr-font-mono); }
+.live-pages-html-weight { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 5px; font-family: var(--kr-font-mono); color: var(--kr-success); background: rgba(var(--kr-success-rgb), .1); }
+.live-pages-html-weight[data-weight="heavy"],
+.live-pages-weight-badge[data-weight="heavy"] { color: var(--kr-warning-amber); background: rgba(var(--kr-warning-amber-rgb), .12); }
+.live-pages-html-weight[data-weight="very-heavy"],
+.live-pages-weight-badge[data-weight="very-heavy"] { color: var(--kr-danger); background: rgba(var(--kr-danger-rgb), .12); }
+.live-pages-weight-badge { flex: none; margin-left: 6px; padding: 0 5px; border-radius: 4px; font: 10px var(--kr-font-mono); }
 .live-pages-revision { display: flex; align-items: center; gap: 5px; color: var(--kr-text-secondary); font: 11px var(--kr-font-mono); }
 .live-pages-relations { display: flex; flex-direction: column; gap: 6px; }
 .live-pages-workflows { display: flex; align-items: center; gap: 6px; min-height: 30px; padding: 7px 9px; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-r-md); background: var(--kr-bg-raised); overflow-x: auto; }
@@ -302,6 +308,9 @@ a.live-pages-refresh-row:hover { background: var(--kr-bg-hover); }
 .live-pages-code-highlight > span { display: block; min-width: max-content; min-height: 20px; }
 .live-pages-code-pane textarea { z-index: 1; resize: none; overflow: auto; outline: 0; background: transparent; color: transparent; caret-color: #f4f6f8; }
 .live-pages-code-pane textarea::selection { background: rgba(var(--kr-accent-rgb), .35); color: transparent; }
+.live-pages-code-editor[data-plain] { grid-template-columns: minmax(0, 1fr); }
+.live-pages-code-editor[data-plain] .live-pages-code-pane textarea { color: #d7dae0; }
+.live-pages-code-editor[data-plain] .live-pages-code-pane textarea::selection { color: inherit; }
 .live-pages-code-highlight .hljs-comment,
 .live-pages-html-diff .hljs-comment { color: #7a8899; font-style: italic; }
 .live-pages-code-highlight .hljs-keyword,
