@@ -919,8 +919,9 @@ async fn ws_credential_refusal(
 }
 
 /// Largest JSON body a bridge-token request may carry (its ids are read before
-/// the handler runs).
-const BRIDGE_BODY_LIMIT: usize = 32 * 1024 * 1024;
+/// the handler runs). It also bounds the buffered response, so it holds a Page
+/// at its 24 MiB HTML guard, escaped, with its datasets (#252).
+const BRIDGE_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 fn bridge_refusal(status: StatusCode, message: &str) -> axum::response::Response {
     use axum::response::IntoResponse;
@@ -1312,16 +1313,18 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/pages/import",
             post(api::artifact_portability::import)
-                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+                .layer(axum::extract::DefaultBodyLimit::max(160 * 1024 * 1024)),
         )
         .route(
             "/api/pages/import/preview",
             post(api::artifact_portability::preview)
-                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+                .layer(axum::extract::DefaultBodyLimit::max(160 * 1024 * 1024)),
         )
         .route(
             "/api/pages",
-            get(api::live_pages::list).post(api::live_pages::create),
+            get(api::live_pages::list)
+                .post(api::live_pages::create)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
         .route(
             "/api/pages/{id}",
@@ -1334,6 +1337,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::artifact_portability::export),
         )
         .route("/api/pages/{id}/revisions", get(api::live_pages::revisions))
+        .route(
+            "/api/pages/{id}/revisions/{revision_id}",
+            get(api::live_pages::revision),
+        )
         .route("/api/pages/{id}/workflows", get(api::live_pages::workflows))
         .route("/api/pages/{id}/resources", get(api::live_pages::resources))
         .route(
@@ -1352,7 +1359,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/pages/{id}/discussions/{discussion_id}",
             delete(api::live_pages::unlink_discussion),
         )
-        .route("/api/pages/{id}/html", put(api::live_pages::update_html))
+        .route(
+            "/api/pages/{id}/html",
+            put(api::live_pages::update_html)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         .route(
             "/api/pages/{id}/datasets",
             post(api::live_pages::add_dataset),
@@ -2508,11 +2519,13 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/workflows/import",
-            post(api::workflows::import_workflow),
+            post(api::workflows::import_workflow)
+                .layer(axum::extract::DefaultBodyLimit::max(160 * 1024 * 1024)),
         )
         .route(
             "/api/workflows/import/preview",
-            post(api::workflows::import_workflow_preview),
+            post(api::workflows::import_workflow_preview)
+                .layer(axum::extract::DefaultBodyLimit::max(160 * 1024 * 1024)),
         )
         .route(
             "/api/workflow-runs/batch-summaries",

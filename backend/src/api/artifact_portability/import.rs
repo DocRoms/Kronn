@@ -183,8 +183,8 @@ fn validate_page(page: &ArtifactBundlePage) -> Result<()> {
     if page.title.trim().is_empty() || page.title.chars().count() > 200 {
         bail!("Artifact title must contain 1–200 characters");
     }
-    if page.html.trim().is_empty() || page.html.len() > 1024 * 1024 {
-        bail!("Artifact HTML must contain 1 byte–1 MiB");
+    if let Err(message) = crate::api::live_pages::validate_page_html(&page.html) {
+        bail!("Artifact {}", message.trim_start_matches("Page "));
     }
     if page.slug.is_empty()
         || page.slug.len() > 120
@@ -238,7 +238,7 @@ fn validate_page(page: &ArtifactBundlePage) -> Result<()> {
 
 fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Vec<BundledSkill>)> {
     if request.content.len() > MAX_BUNDLE_BYTES {
-        bail!("Artifact bundle exceeds 16 MiB");
+        bail!("Artifact bundle exceeds 64 MiB");
     }
     let bundle: ArtifactBundle =
         serde_json::from_str(&request.content).context("Invalid Artifact JSON")?;
@@ -884,6 +884,7 @@ fn create_imported_page(
         last_published_at: None,
         pinned: false,
         archived: false,
+        html_size_bytes: exported.html.len() as u64,
     };
     let revision = LivePageRevision {
         id: revision_id,
@@ -1196,6 +1197,32 @@ mod tests {
             (ResourceKind::QuickApi, HashMap::new()),
             (ResourceKind::QuickExec, HashMap::new()),
         ])
+    }
+
+    #[test]
+    fn import_accepts_the_same_page_html_as_create_and_update() {
+        let page = |html: String| ArtifactBundlePage {
+            id: "page-1".into(),
+            title: "Heavy".into(),
+            slug: "heavy".into(),
+            html,
+            created_by_agent: None,
+            datasets: Vec::new(),
+            embed_origins: Vec::new(),
+        };
+        for html in [
+            "<h1>Light</h1>".to_string(),
+            "x".repeat(2 * 1024 * 1024),
+            " ".repeat(3),
+            "x".repeat(crate::api::live_pages::PAGE_HTML_SAFETY_BYTES + 1),
+        ] {
+            assert_eq!(
+                validate_page(&page(html.clone())).is_ok(),
+                crate::api::live_pages::validate_page_html(&html).is_ok(),
+                "import and create disagree on {} bytes",
+                html.len()
+            );
+        }
     }
 
     #[test]

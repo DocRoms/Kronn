@@ -115,7 +115,7 @@ async fn native_page_validation_failures_leave_no_partial_page() {
         ("title", json!(" ")),
         ("title", json!("é".repeat(201))),
         ("html", json!("\n")),
-        ("html", json!("x".repeat(1_000_001))),
+        ("html", json!("x".repeat(24 * 1024 * 1024 + 1))),
         ("html", json!(42)),
         ("slug", json!("Bad--slug")),
         ("datasets", Value::Null),
@@ -173,6 +173,34 @@ async fn native_page_validation_failures_leave_no_partial_page() {
 }
 
 #[tokio::test]
+async fn native_page_tools_accept_a_heavy_page_and_relay_its_notice() {
+    // #252: HTTP agents get the same rule as the MCP bridge, no 1 MB wall.
+    let state = super::super::quick_prompt_tests::state_with_prompts().await;
+    let executor =
+        KronnToolExecutor::arc(state, Some("general".into()), AgentType::Ollama, None, None);
+    let mut request = page();
+    request["html"] = json!("é".repeat(1_100_000));
+    let created = call(executor.as_ref(), "page_create", request).await;
+    assert!(created.ok, "{}", created.content);
+    assert!(created.content["kronn_notice"]
+        .as_str()
+        .unwrap()
+        .contains("2.1 MB: heavy"));
+    let id = created.content["id"].as_str().unwrap().to_owned();
+    let update = call(
+        executor.as_ref(),
+        "page_update_html",
+        json!({"page_id":id,"html":"x".repeat(5 * 1024 * 1024)}),
+    )
+    .await;
+    assert!(update.ok, "{}", update.content);
+    assert!(update.content["kronn_notice"]
+        .as_str()
+        .unwrap()
+        .contains("5.0 MB: very heavy"));
+}
+
+#[tokio::test]
 async fn native_page_revisions_and_dataset_conflicts_preserve_history() {
     let state = super::super::quick_prompt_tests::state_with_prompts().await;
     let executor = KronnToolExecutor::arc(
@@ -225,7 +253,11 @@ async fn native_page_revisions_and_dataset_conflicts_preserve_history() {
     assert!(update.ok, "{}", update.content);
     assert_eq!(update.content["revision"], 2);
     assert_eq!(update.content["created_by_agent"], "Ollama");
-    for html in [json!(" "), json!("é".repeat(500_001)), json!(false)] {
+    for html in [
+        json!(" "),
+        json!("x".repeat(24 * 1024 * 1024 + 1)),
+        json!(false),
+    ] {
         assert!(
             !call(
                 executor.as_ref(),
@@ -249,7 +281,20 @@ async fn native_page_revisions_and_dataset_conflicts_preserve_history() {
         .await
         .unwrap();
     assert_eq!(revisions.len(), 2);
-    assert_eq!(revisions[1].html, page()["html"].as_str().unwrap());
+    let first = state
+        .db
+        .with_read_conn({
+            let (id, revision_id) = (revisions[1].page_id.clone(), revisions[1].id.clone());
+            move |conn| crate::db::live_pages::get_live_page_revision(conn, &id, &revision_id)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.html, page()["html"].as_str().unwrap());
+    assert_eq!(
+        revisions[1].html_size_bytes,
+        page()["html"].as_str().unwrap().len() as u64
+    );
 }
 
 #[tokio::test]
@@ -548,7 +593,7 @@ async fn native_pages_follow_a_renamed_slug_within_their_scope() {
     // Invalid arguments are refused before any write.
     for arguments in [
         json!({"page_id":"suivi-b","slug":"suivi-c","html":"  "}),
-        json!({"page_id":"suivi-b","slug":"suivi-c","html":"é".repeat(500_001)}),
+        json!({"page_id":"suivi-b","slug":"suivi-c","html":"x".repeat(24 * 1024 * 1024 + 1)}),
         json!({"page_id":"suivi-b","slug":7}),
         json!({"page_id":"suivi-b"}),
     ] {

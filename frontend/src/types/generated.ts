@@ -5301,7 +5301,12 @@ pinned: boolean,
 /**
  * Archived Pages remain addressable by workflows and can be restored.
  */
-archived: boolean, };
+archived: boolean,
+/**
+ * UTF-8 bytes of the current revision's HTML. No limit applies to it:
+ * the UI grades it against the weight thresholds (#252).
+ */
+html_size_bytes: number, };
 
 /**
  * One Page action as the API speaks it: a declaration, plus the launch it
@@ -5410,7 +5415,12 @@ pinned: boolean,
 /**
  * Archived Pages remain addressable by workflows and can be restored.
  */
-archived: boolean, };
+archived: boolean,
+/**
+ * UTF-8 bytes of the current revision's HTML. No limit applies to it:
+ * the UI grades it against the weight thresholds (#252).
+ */
+html_size_bytes: number, };
 
 export type LivePageDiscussionLink = { discussion_id: string, title: string, relation: LivePageDiscussionRelation, archived: boolean, source_message_id?: string, };
 
@@ -5448,6 +5458,13 @@ normal: string | null,
 shadow: string | null, };
 
 export type LivePageRevision = { id: string, page_id: string, revision: number, html: string, created_by_agent: string | null, created_at: string, };
+
+/**
+ * A revision in the history list, without its HTML: the list stays small
+ * however heavy each revision is, and one revision's HTML is fetched only
+ * when it is compared (#252).
+ */
+export type LivePageRevisionSummary = { id: string, page_id: string, revision: number, html_size_bytes: number, created_by_agent: string | null, created_at: string, };
 
 export type LivePagesCapability = { activated: boolean, activated_at: string | null, };
 

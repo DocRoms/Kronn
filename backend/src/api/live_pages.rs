@@ -13,8 +13,59 @@ use crate::models::{
 };
 use crate::AppState;
 
-const MAX_PAGE_HTML_BYTES: usize = 1_000_000;
 const INVALID_SLUG_MESSAGE: &str = "Page slug must contain lowercase ASCII letters, digits and single '-' separators, and must not look like a page id";
+
+/// Not a product limit: Kronn lets a Page weigh what its author wants. This
+/// only stops a runaway writer from buffering gigabytes before SQLite refuses
+/// them. Every path a Page travels fits it with room for JSON escaping and
+/// datasets: the 64 MiB body limit of the write routes and the nginx gateway,
+/// the 64 MiB bridge buffer of Kronn-launched agents and the 64 MiB artifact
+/// bundle (#252). One path stays lower on purpose: the MCP bridge reads one
+/// JSON-RPC request of at most 8 MiB (KT-1139), so an MCP agent writes a Page
+/// of up to about 8 MiB in one call; heavier Pages come through the UI, an
+/// import or the native tools.
+pub(crate) const PAGE_HTML_SAFETY_BYTES: usize = 24 * 1024 * 1024;
+/// Weight grades shown in the UI and sent as a write notice (#252).
+pub(crate) const PAGE_HTML_HEAVY_BYTES: usize = 1024 * 1024;
+pub(crate) const PAGE_HTML_VERY_HEAVY_BYTES: usize = 4 * 1024 * 1024;
+
+pub(crate) fn validate_page_html(html: &str) -> Result<(), String> {
+    if html.trim().is_empty() {
+        return Err("Page HTML must be non-empty".into());
+    }
+    if html.len() > PAGE_HTML_SAFETY_BYTES {
+        return Err(format!(
+            "Page HTML is {}, above the {} safety bound",
+            format_megabytes(html.len()),
+            format_megabytes(PAGE_HTML_SAFETY_BYTES)
+        ));
+    }
+    Ok(())
+}
+
+/// The notice a successful write carries when the HTML is heavy, for the
+/// agent (`kronn_notice`); the Pages UI grades `html_size_bytes` itself.
+pub(crate) fn page_html_weight_notice(bytes: usize) -> Option<String> {
+    let advice = "consider optimizing it: WebP images, data moved to datasets, minification";
+    if bytes > PAGE_HTML_VERY_HEAVY_BYTES {
+        Some(format!(
+            "Page HTML is {}: very heavy, {advice}.",
+            format_megabytes(bytes)
+        ))
+    } else if bytes > PAGE_HTML_HEAVY_BYTES {
+        Some(format!(
+            "Page HTML is {}: heavy, {advice}.",
+            format_megabytes(bytes)
+        ))
+    } else {
+        None
+    }
+}
+
+/// Binary megabytes, as the Pages UI prints them.
+fn format_megabytes(bytes: usize) -> String {
+    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+}
 
 pub async fn capability(
     State(state): State<AppState>,
@@ -84,7 +135,7 @@ pub async fn get(
 pub async fn revisions(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<ApiResponse<Vec<LivePageRevision>>> {
+) -> Json<ApiResponse<Vec<crate::models::LivePageRevisionSummary>>> {
     match state
         .db
         .with_read_conn(move |conn| crate::db::live_pages::list_live_page_revisions(conn, &id))
@@ -98,6 +149,31 @@ pub async fn revisions(
         Err(error) => Json(ApiResponse::err_coded(
             ApiErrorCode::Internal,
             format!("Unable to load Page revisions: {error}"),
+        )),
+    }
+}
+
+/// GET /api/pages/{id}/revisions/{revision_id}: one revision with its HTML,
+/// for the comparison the history list no longer carries (#252).
+pub async fn revision(
+    State(state): State<AppState>,
+    Path((id, revision_id)): Path<(String, String)>,
+) -> Json<ApiResponse<LivePageRevision>> {
+    match state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::live_pages::get_live_page_revision(conn, &id, &revision_id)
+        })
+        .await
+    {
+        Ok(Some(revision)) => Json(ApiResponse::ok(revision)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Page revision not found",
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to load Page revision: {error}"),
         )),
     }
 }
@@ -342,12 +418,10 @@ pub async fn update_html(
     Path(id): Path<String>,
     Json(request): Json<UpdateLivePageHtmlRequest>,
 ) -> Json<ApiResponse<LivePageRevision>> {
-    if request.html.trim().is_empty() || request.html.len() > MAX_PAGE_HTML_BYTES {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "Page HTML must be non-empty and at most 1 MB",
-        ));
+    if let Err(message) = validate_page_html(&request.html) {
+        return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
     }
+    let notice = page_html_weight_notice(request.html.len());
     let html = request.html;
     let actor = request.created_by_agent;
     match state
@@ -357,7 +431,7 @@ pub async fn update_html(
         })
         .await
     {
-        Ok(revision) => Json(ApiResponse::ok(revision)),
+        Ok(revision) => Json(ApiResponse::ok(revision).with_notice(notice)),
         Err(error) if error.to_string().contains("Page not found") => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Page not found",
@@ -380,11 +454,8 @@ pub async fn create(
             return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
         }
     };
-    if request.html.trim().is_empty() || request.html.len() > MAX_PAGE_HTML_BYTES {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "Page HTML must be non-empty and at most 1 MB",
-        ));
+    if let Err(message) = validate_page_html(&request.html) {
+        return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
     }
     let slug = request
         .slug
@@ -415,7 +486,9 @@ pub async fn create(
         last_published_at: None,
         pinned: false,
         archived: false,
+        html_size_bytes: request.html.len() as u64,
     };
+    let notice = page_html_weight_notice(request.html.len());
     let revision = LivePageRevision {
         id: revision_id,
         page_id: page_id.clone(),
@@ -496,7 +569,7 @@ pub async fn create(
         .with_read_conn(move |conn| crate::db::live_pages::get_live_page(conn, &page_id))
         .await
     {
-        Ok(Some(detail)) => Json(ApiResponse::ok(detail)),
+        Ok(Some(detail)) => Json(ApiResponse::ok(detail).with_notice(notice)),
         Ok(None) => Json(ApiResponse::err_coded(
             ApiErrorCode::Internal,
             "Page was created but could not be reloaded",
@@ -948,5 +1021,23 @@ mod tests {
         assert!(normalize_page_title("   ").is_err());
         assert!(normalize_page_title(&"é".repeat(200)).is_ok());
         assert!(normalize_page_title(&"é".repeat(201)).is_err());
+    }
+
+    #[test]
+    fn page_html_has_no_size_limit_below_the_safety_bound() {
+        assert!(validate_page_html("  ").is_err());
+        assert!(validate_page_html(&"x".repeat(20_000_000)).is_ok());
+        let error = validate_page_html(&"x".repeat(PAGE_HTML_SAFETY_BYTES + 1)).unwrap_err();
+        assert!(error.contains("24.0 MB"), "{error}");
+    }
+
+    #[test]
+    fn a_heavy_page_html_is_graded_in_its_notice() {
+        assert_eq!(page_html_weight_notice(PAGE_HTML_HEAVY_BYTES), None);
+        let heavy = page_html_weight_notice(PAGE_HTML_HEAVY_BYTES + 1).unwrap();
+        assert!(heavy.contains("1.0 MB: heavy"), "{heavy}");
+        let very_heavy = page_html_weight_notice(5_452_595).unwrap();
+        assert!(very_heavy.contains("5.2 MB: very heavy"), "{very_heavy}");
+        assert!(very_heavy.contains("datasets"), "{very_heavy}");
     }
 }

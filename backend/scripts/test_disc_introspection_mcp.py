@@ -7315,7 +7315,7 @@ class LivePageToolTests(unittest.TestCase):
         self.assertEqual(http.call_args_list[1].args[:2], ("PUT", "/api/pages/page-1/html"))
 
     def test_page_update_html_refuses_invalid_html_before_any_rename(self):
-        for html in ["", "  \n\t", 3, "é" * 500_001]:
+        for html in ["", "  \n\t", 3, "x" * (24 * 1024 * 1024 + 1)]:
             with self.subTest(html=repr(html)[:20]), \
                  mock.patch.object(self.mod, "_http") as http:
                 with self.assertRaisesRegex(RuntimeError, "html"):
@@ -7326,11 +7326,11 @@ class LivePageToolTests(unittest.TestCase):
     def test_page_update_html_says_the_slug_changed_when_the_revision_fails(self):
         responses = [
             self._env({"id": "page-1", "slug": "new"}),
-            {"success": False, "error": "Page HTML must be non-empty and at most 1 MB"},
+            {"success": False, "error": "Page HTML is 30.0 MB, above the 24.0 MB safety bound"},
         ]
         with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
              mock.patch.object(self.mod, "_http", side_effect=responses):
-            with self.assertRaisesRegex(RuntimeError, "page 'page-1' was already renamed to slug 'new'.*1 MB"):
+            with self.assertRaisesRegex(RuntimeError, "page 'page-1' was already renamed to slug 'new'.*safety bound"):
                 self.mod.call_page_update_html(
                     {"page_id": "old", "slug": "new", "html": "<p>x</p>"})
 

@@ -129,7 +129,7 @@ pub enum LivePageActionClaimOutcome {
 /// Extract `(action_ref, json_body)` pairs from `<script
 /// type="application/kronn-action" data-action-id="...">...</script>` blocks.
 /// A hand-rolled scanner (not a full HTML parser or `regex`) is deliberate:
-/// Page HTML is bounded to 1 MB and author-controlled, and the block shape is
+/// Page HTML is author-controlled (bounded only by a 24 MiB safety guard), the block shape is
 /// fixed, so a tag/attribute scan is sufficient and keeps this dependency
 /// footprint at zero. `to_ascii_lowercase` (not `to_lowercase`) preserves
 /// byte offsets even when the surrounding HTML contains non-ASCII text.

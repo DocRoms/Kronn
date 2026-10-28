@@ -2088,6 +2088,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
                 last_published_at: None,
                 pinned: false,
                 archived: false,
+                html_size_bytes: 0,
             };
             let revision = kronn::models::LivePageRevision {
                 id: "revision-portable".into(),
@@ -2213,6 +2214,48 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
         .is_none());
 
     (state, exported)
+}
+
+#[tokio::test]
+async fn a_workflow_bundle_brings_a_heavy_page_back_within_the_guard() {
+    // #252: a workflow bundle carries its Page like an artifact bundle does,
+    // escaped twice, past axum's 2 MB default.
+    let (state, mut exported) = workflow_portability_fixture().await;
+    let app = build_router_with_auth(state, false);
+    let heavy = format!(
+        "<main>{}</main>",
+        "<div class=\"sprite\" data-frame=\"1\"></div>\n".repeat(18 * 1024 * 1024 / 40)
+    );
+    exported["referenced_pages"][0]["html"] = serde_json::json!(heavy);
+    let request =
+        |bundle: &Value| serde_json::json!({ "content": bundle.to_string(), "project_id": null });
+    let (status, preview) = post_json(
+        app.clone(),
+        "/api/workflows/import/preview",
+        request(&exported),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(preview["success"], true, "{}", preview["error"]);
+    let (status, imported) =
+        post_json(app.clone(), "/api/workflows/import", request(&exported)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(imported["success"], true, "{}", imported["error"]);
+    let (_, pages) = get_json(app.clone(), "/api/pages").await;
+    assert!(pages["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|page| page["html_size_bytes"] == heavy.len() as u64));
+
+    exported["referenced_pages"][0]["html"] = serde_json::json!("x".repeat(24 * 1024 * 1024 + 1));
+    let (_, refused) = post_json(app, "/api/workflows/import/preview", request(&exported)).await;
+    assert_eq!(refused["success"], false);
+    assert!(
+        refused["error"].as_str().unwrap().contains("safety bound"),
+        "{}",
+        refused["error"]
+    );
 }
 
 #[tokio::test]
@@ -2667,6 +2710,108 @@ async fn artifact_import_reuses_identical_automations_copies_publishers_and_reje
     })).await;
     assert_eq!(stale["success"], false, "{stale}");
     assert_eq!(workflow_import_database_snapshot(&state).await, after);
+}
+
+#[tokio::test]
+async fn a_page_above_the_old_bundle_ceiling_exports_and_reimports() {
+    // #252: create, export and import agree on one ceiling. Quotes and
+    // newlines make the HTML grow under JSON escaping, twice on import.
+    let html = format!(
+        "<main>{}</main>",
+        "<div class=\"sprite\" data-frame=\"1\"></div>\n".repeat(18 * 1024 * 1024 / 40)
+    );
+    assert!(html.len() > 16 * 1024 * 1024);
+    let source = build_router_with_auth(test_state(), false);
+    let (_, created) = post_json(
+        source.clone(),
+        "/api/pages",
+        serde_json::json!({ "title": "Sprites", "html": html, "datasets": [] }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{}", created["error"]);
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+    let (_, exported) = get_json(source.clone(), &format!("/api/pages/{id}/export")).await;
+    assert_eq!(exported["success"], true, "{}", exported["error"]);
+
+    let target = build_router_with_auth(test_state(), false);
+    let mut request = serde_json::json!({ "content": exported["data"].to_string() });
+    let (status, preview) =
+        post_json(target.clone(), "/api/pages/import/preview", request.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(preview["data"]["can_import"], true, "{}", preview["error"]);
+    request["preview_digest"] = preview["data"]["digest"].clone();
+    let (status, imported) = post_json(target.clone(), "/api/pages/import", request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(imported["success"], true, "{}", imported["error"]);
+    assert_eq!(
+        imported["data"]["artifact"]["html_size_bytes"],
+        html.len() as u64
+    );
+
+    let (_, refused) = post_json(
+        source,
+        "/api/pages",
+        serde_json::json!({
+            "title": "Runaway",
+            "html": "x".repeat(24 * 1024 * 1024 + 1),
+            "datasets": [],
+        }),
+    )
+    .await;
+    assert_eq!(refused["success"], false);
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("24.0 MB safety bound"),
+        "{}",
+        refused["error"]
+    );
+}
+
+#[tokio::test]
+async fn a_page_revision_is_served_alone_and_only_for_its_own_page() {
+    // #252: the history list carries sizes; one revision's HTML comes from here.
+    let app = build_router_with_auth(test_state(), false);
+    let mut ids = Vec::new();
+    for title in ["First", "Second"] {
+        let (_, created) = post_json(
+            app.clone(),
+            "/api/pages",
+            serde_json::json!({ "title": title, "html": format!("<h1>{title}</h1>"), "datasets": [] }),
+        )
+        .await;
+        assert_eq!(created["success"], true, "{created}");
+        ids.push((
+            created["data"]["id"].as_str().unwrap().to_string(),
+            created["data"]["revision"]["id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        ));
+    }
+    let (first, first_revision) = &ids[0];
+    let (second, _) = &ids[1];
+
+    let (_, list) = get_json(app.clone(), &format!("/api/pages/{first}/revisions")).await;
+    assert_eq!(list["data"][0]["html_size_bytes"], 14);
+    assert!(list["data"][0].get("html").is_none(), "{list}");
+
+    let (status, revision) = get_json(
+        app.clone(),
+        &format!("/api/pages/{first}/revisions/{first_revision}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(revision["data"]["html"], "<h1>First</h1>");
+
+    let (_, foreign) = get_json(
+        app,
+        &format!("/api/pages/{second}/revisions/{first_revision}"),
+    )
+    .await;
+    assert_eq!(foreign["success"], false);
+    assert_eq!(foreign["error_code"], "not_found", "{foreign}");
 }
 
 /// An artifact can come from another instance: an approval it carries is
@@ -3969,6 +4114,60 @@ async fn live_page_list_filters_by_project_without_changing_the_unfiltered_contr
 
     let (_, unfiltered) = get_json(app, "/api/pages").await;
     assert_eq!(unfiltered["data"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn a_heavy_page_is_saved_with_a_weight_notice_and_its_html_size() {
+    // #252: no 1 MB wall any more; a heavy write succeeds and says so.
+    let app = build_router_with_auth(test_state(), false);
+    let (status, created) = post_json(
+        app.clone(),
+        "/api/pages",
+        serde_json::json!({
+            "title": "Sprites",
+            "html": format!("<h1>é</h1>{}", "x".repeat(2_621_440)),
+            "datasets": [],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["success"], true, "{created}");
+    assert!(
+        created["notice"]
+            .as_str()
+            .unwrap()
+            .contains("2.5 MB: heavy"),
+        "{created}"
+    );
+    assert_eq!(created["data"]["html_size_bytes"], 2_621_451);
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+
+    let (status, updated) = put_json_root(
+        app.clone(),
+        &format!("/api/pages/{id}/html"),
+        serde_json::json!({ "html": "x".repeat(4_718_592) }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        updated["notice"]
+            .as_str()
+            .unwrap()
+            .contains("4.5 MB: very heavy"),
+        "{updated}"
+    );
+
+    let (_, light) = put_json_root(
+        app.clone(),
+        &format!("/api/pages/{id}/html"),
+        serde_json::json!({ "html": "<h1>Light</h1>" }),
+    )
+    .await;
+    assert_eq!(light["success"], true, "{light}");
+    assert!(light.get("notice").is_none(), "{light}");
+
+    let (_, pages) = get_json(app, "/api/pages").await;
+    assert_eq!(pages["data"][0]["html_size_bytes"], 14);
 }
 
 #[tokio::test]
@@ -30742,6 +30941,7 @@ async fn refs_fixture(state: &AppState, project_path: &str) {
                 last_published_at: None,
                 pinned: false,
                 archived: false,
+                html_size_bytes: 0,
             };
             let revision = kronn::models::LivePageRevision {
                 id: "rev-refs".into(),

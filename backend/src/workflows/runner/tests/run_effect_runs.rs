@@ -26,6 +26,7 @@ async fn state_with_page() -> (crate::AppState, TokensConfig, AgentsConfig) {
                     last_published_at: None,
                     pinned: false,
                     archived: false,
+                    html_size_bytes: 0,
                 },
                 &crate::models::LivePageRevision {
                     id: "rev-o".into(),

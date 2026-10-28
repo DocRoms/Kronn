@@ -149,7 +149,9 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # Skill writes for agents: `skill_create` / `skill_update` point to their manuals,
 # lose `allowed_tools` (human-only) and the update's `project_id` (never moves);
 # `skill_delete` says it is human-only and irreversible. -393 B (84_843 -> 84_450).
-CATALOGUE_MAX_BYTES = 84_450
+# #252: `page_create` / `page_update_html` no longer promise a 1 MB maximum the
+# backend dropped. -21 B (84_450 -> 84_429).
+CATALOGUE_MAX_BYTES = 84_429
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
