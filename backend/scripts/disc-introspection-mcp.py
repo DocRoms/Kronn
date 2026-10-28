@@ -1584,7 +1584,7 @@ TOOLS = [
                 "slug": {"type": "string", "description": "Optional ASCII slug."},
                 "project_id": {"type": "string", "description": "Optional project binding."},
                 "discussion_id": {"type": "string", "description": "Optional origin discussion."},
-                "html": {"type": "string", "description": "Self-contained HTML, max 1 MB."},
+                "html": {"type": "string", "description": "Self-contained HTML."},
                 "datasets": {
                     "type": "array",
                     "description": "Named PublishPageData contracts; may be empty.",
@@ -1617,7 +1617,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "page_id": {"type": "string", "description": "Page id or slug from page_list."},
-                "html": {"type": "string", "description": "Complete HTML document (1 MB max)."},
+                "html": {"type": "string", "description": "Complete HTML document."},
                 "slug": {"type": "string"},
             },
             "required": ["page_id"],
@@ -7915,7 +7915,7 @@ def call_page_create(args):
     return _unwrap(_http("POST", "/api/pages", body))
 
 
-_PAGE_HTML_MAX_BYTES = 1_000_000  # same limit as PUT /api/pages/{id}/html
+_PAGE_HTML_MAX_BYTES = 24 * 1024 * 1024  # PAGE_HTML_SAFETY_BYTES of PUT /api/pages/{id}/html
 
 
 def call_page_update_html(args):
@@ -7933,7 +7933,7 @@ def call_page_update_html(args):
         if not isinstance(html, str) or not html.strip():
             raise RuntimeError("page_update_html: missing required 'html'")
         if len(html.encode("utf-8")) > _PAGE_HTML_MAX_BYTES:
-            raise RuntimeError("page_update_html: 'html' exceeds 1 MB")
+            raise RuntimeError("page_update_html: 'html' exceeds the 24 MiB safety guard")
     result = None
     if slug is not None:
         result = _unwrap(_http("PATCH", f"/api/pages/{encoded}", {"slug": slug}))

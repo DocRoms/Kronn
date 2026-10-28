@@ -22,7 +22,8 @@ pub(crate) const BUNDLE_KIND: &str = "kronn.artifact";
 /// version 1 bundles still import.
 pub(crate) const BUNDLE_VERSION: u32 = 2;
 pub(crate) const MIN_BUNDLE_VERSION: u32 = 1;
-pub(crate) const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
+/// Holds a Page at its 24 MiB HTML guard plus its datasets (#252).
+pub(crate) const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BUNDLE_ITEMS: usize = 512;
 
 use ArtifactResourceKind as ResourceKind;
@@ -80,7 +81,7 @@ pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundleP
          WHERE p.id = ?1", [&page_id], |row| row.get(0)).optional()?;
     let estimated = estimated.ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
     if estimated > MAX_BUNDLE_BYTES as i64 {
-        bail!("Artifact exceeds the 16 MiB bundle limit");
+        bail!("Artifact exceeds the 64 MiB bundle limit");
     }
     let detail = crate::db::live_pages::get_live_page(conn, &page_id)?
         .ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
@@ -256,7 +257,7 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
             .checked_add(size)
             .ok_or_else(|| anyhow!("Artifact bundle size overflow"))?;
         if bytes > MAX_BUNDLE_BYTES {
-            bail!("Artifact bundle exceeds 16 MiB");
+            bail!("Artifact bundle exceeds 64 MiB");
         }
     }
     let mut redacted_fields = Vec::new();
@@ -286,7 +287,7 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
         redacted_fields,
     };
     if serde_json::to_vec(&bundle)?.len() > MAX_BUNDLE_BYTES {
-        bail!("Artifact bundle exceeds 16 MiB");
+        bail!("Artifact bundle exceeds 64 MiB");
     }
     Ok(bundle)
 }
@@ -359,6 +360,7 @@ mod tests {
                     last_published_at: None,
                     pinned: false,
                     archived: false,
+                    html_size_bytes: 0,
                 };
                 let revision = crate::models::LivePageRevision {
                     id: "rev-src".into(),
@@ -473,6 +475,7 @@ mod tests {
                         last_published_at: None,
                         pinned: false,
                         archived: false,
+                        html_size_bytes: 0,
                     };
                     let revision = crate::models::LivePageRevision {
                         id: format!("rev-{id}"),
@@ -612,6 +615,7 @@ mod tests {
             last_published_at: None,
             pinned: false,
             archived: false,
+            html_size_bytes: 0,
         };
         let revision = crate::models::LivePageRevision {
             id: "rev-1".into(),

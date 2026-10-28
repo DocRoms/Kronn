@@ -7,8 +7,9 @@ use uuid::Uuid;
 use crate::models::{
     CreateLivePageDataset, LivePage, LivePageDataset, LivePageDatasetKind, LivePageDatasetPoint,
     LivePageDatasetView, LivePageDetail, LivePageDiscussionLink, LivePageDiscussionRelation,
-    LivePagePublication, LivePageRevision, LivePageWorkflowLink, LivePageWriteOperation,
-    LivePagesCapability, PublishLivePageRequest, PublishLivePageResult, UpdateLivePageRequest,
+    LivePagePublication, LivePageRevision, LivePageRevisionSummary, LivePageWorkflowLink,
+    LivePageWriteOperation, LivePagesCapability, PublishLivePageRequest, PublishLivePageResult,
+    UpdateLivePageRequest,
 };
 
 #[path = "live_page_datasets.rs"]
@@ -263,7 +264,9 @@ pub(crate) fn create_live_page_in_transaction(
 pub fn list_live_pages(conn: &Connection) -> Result<Vec<LivePage>> {
     let mut stmt = conn.prepare(
         "SELECT id, project_id, title, slug, current_revision_id, data_revision,
-                created_at, updated_at, last_published_at, pinned, archived
+                created_at, updated_at, last_published_at, pinned, archived,
+                (SELECT octet_length(html) FROM live_page_revisions
+                  WHERE id = live_pages.current_revision_id)
            FROM live_pages ORDER BY pinned DESC, updated_at DESC, title COLLATE NOCASE",
     )?;
     let pages = stmt
@@ -275,7 +278,9 @@ pub fn list_live_pages(conn: &Connection) -> Result<Vec<LivePage>> {
 pub fn list_live_pages_for_project(conn: &Connection, project_id: &str) -> Result<Vec<LivePage>> {
     let mut stmt = conn.prepare(
         "SELECT id, project_id, title, slug, current_revision_id, data_revision,
-                created_at, updated_at, last_published_at, pinned, archived
+                created_at, updated_at, last_published_at, pinned, archived,
+                (SELECT octet_length(html) FROM live_page_revisions
+                  WHERE id = live_pages.current_revision_id)
            FROM live_pages WHERE project_id = ?1
            ORDER BY pinned DESC, updated_at DESC, title COLLATE NOCASE",
     )?;
@@ -485,19 +490,50 @@ pub fn unlink_live_page_discussion(
     )? > 0)
 }
 
-pub fn list_live_page_revisions(conn: &Connection, page_id: &str) -> Result<Vec<LivePageRevision>> {
+pub fn list_live_page_revisions(
+    conn: &Connection,
+    page_id: &str,
+) -> Result<Vec<LivePageRevisionSummary>> {
     let canonical_page_id = resolve_live_page_id(conn, page_id)?;
     let Some(canonical_page_id) = canonical_page_id else {
         return Ok(Vec::new());
     };
     let mut stmt = conn.prepare(
-        "SELECT id, page_id, revision, html, created_by_agent, created_at
+        "SELECT id, page_id, revision, octet_length(html), created_by_agent, created_at
            FROM live_page_revisions WHERE page_id = ?1 ORDER BY revision DESC",
     )?;
     let revisions = stmt
-        .query_map([canonical_page_id], map_revision)?
+        .query_map([canonical_page_id], |row| {
+            Ok(LivePageRevisionSummary {
+                id: row.get(0)?,
+                page_id: row.get(1)?,
+                revision: u64::try_from(row.get::<_, i64>(2)?)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, i64::MAX))?,
+                html_size_bytes: row.get::<_, Option<i64>>(3)?.unwrap_or(0).max(0) as u64,
+                created_by_agent: row.get(4)?,
+                created_at: parse_datetime_sql(row.get(5)?)?,
+            })
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(revisions)
+}
+
+pub fn get_live_page_revision(
+    conn: &Connection,
+    page_id: &str,
+    revision_id: &str,
+) -> Result<Option<LivePageRevision>> {
+    let Some(canonical_page_id) = resolve_live_page_id(conn, page_id)? else {
+        return Ok(None);
+    };
+    Ok(conn
+        .query_row(
+            "SELECT id, page_id, revision, html, created_by_agent, created_at
+               FROM live_page_revisions WHERE page_id = ?1 AND id = ?2",
+            [canonical_page_id.as_str(), revision_id],
+            map_revision,
+        )
+        .optional()?)
 }
 
 pub fn update_live_page_html(
@@ -558,7 +594,9 @@ pub fn get_live_page_summary(conn: &Connection, page_id: &str) -> Result<Option<
     Ok(conn
         .query_row(
             "SELECT id, project_id, title, slug, current_revision_id, data_revision,
-                    created_at, updated_at, last_published_at, pinned, archived
+                    created_at, updated_at, last_published_at, pinned, archived,
+                    (SELECT octet_length(html) FROM live_page_revisions
+                      WHERE id = live_pages.current_revision_id)
                FROM live_pages WHERE id = ?1",
             [canonical_id],
             map_page,
@@ -1047,6 +1085,7 @@ fn map_page(row: &Row<'_>) -> rusqlite::Result<LivePage> {
             .transpose()?,
         pinned: row.get(9)?,
         archived: row.get(10)?,
+        html_size_bytes: row.get::<_, Option<i64>>(11)?.unwrap_or(0).max(0) as u64,
     })
 }
 
@@ -1164,6 +1203,7 @@ mod tests {
             last_published_at: None,
             pinned: false,
             archived: false,
+            html_size_bytes: 0,
         };
         let revision = LivePageRevision {
             id: "rev-1".into(),
@@ -1250,6 +1290,7 @@ mod tests {
                 last_published_at: None,
                 pinned: false,
                 archived: false,
+                html_size_bytes: 0,
             },
             &LivePageRevision {
                 id: "rev-0".into(),
@@ -1690,6 +1731,7 @@ mod tests {
             last_published_at: None,
             pinned: false,
             archived: false,
+            html_size_bytes: 0,
         };
         let revision = LivePageRevision {
             id: "rev-bare".into(),

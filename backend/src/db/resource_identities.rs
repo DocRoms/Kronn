@@ -440,6 +440,7 @@ pub(crate) mod tests {
             last_published_at: None,
             pinned: false,
             archived: false,
+            html_size_bytes: 0,
         };
         let revision = crate::models::LivePageRevision {
             id: format!("rev-{id}"),

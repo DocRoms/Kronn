@@ -849,6 +849,7 @@ mod broker_tests {
                         last_published_at: None,
                         pinned: false,
                         archived: false,
+                        html_size_bytes: 0,
                     },
                     &LivePageRevision {
                         id: "rev-team".into(),

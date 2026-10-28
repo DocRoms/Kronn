@@ -28,6 +28,7 @@ fn page(conn: &Connection) {
         last_published_at: None,
         pinned: false,
         archived: false,
+        html_size_bytes: 0,
     };
     let revision = LivePageRevision {
         id: "rev-1".into(),

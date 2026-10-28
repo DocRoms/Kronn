@@ -1816,6 +1816,7 @@ fn imported_artifact(
     existing_id: Option<&str>,
 ) -> anyhow::Result<String> {
     let exported: ArtifactBundlePage = serde::Deserialize::deserialize(&document.resource)?;
+    crate::api::live_pages::validate_page_html(&exported.html).map_err(anyhow::Error::msg)?;
     let page_id = existing_id
         .map(str::to_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1883,6 +1884,7 @@ fn imported_artifact(
             last_published_at: None,
             pinned: false,
             archived: false,
+            html_size_bytes: exported.html.len() as u64,
         };
         let revision = LivePageRevision {
             id: revision_id,
@@ -3492,6 +3494,57 @@ mod tests {
         }
     }
 
+    /// #252 — a Page synced from `kronn/` obeys the guard a Page created by
+    /// hand does: a heavy one comes in, one above 24 MiB is refused.
+    #[tokio::test]
+    async fn a_kronn_import_holds_a_page_to_the_html_guard() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let page_doc =
+            |slug: &str, html: String| crate::core::repository_resources::RepositoryDocument {
+                schema_version: 1,
+                kind: ProjectRepositoryResourceKind::Artifact,
+                slug: slug.into(),
+                updated_at: Utc::now(),
+                requires: vec![],
+                resource: serde_json::json!({
+                    "id": "foreign-page", "title": "Sprites", "slug": slug,
+                    "html": html, "created_by_agent": null, "datasets": []
+                }),
+                redacted_fields: vec![],
+            };
+        let (heavy, refused) = state
+            .db
+            .with_conn(move |conn| {
+                let key = crate::db::resource_identities::project_key(conn, Some("project-1"))?;
+                let heavy = import_document(
+                    conn,
+                    "project-1",
+                    &key,
+                    &page_doc("heavy", "x".repeat(18 * 1024 * 1024)),
+                )
+                .map_err(|e| e.to_string());
+                let refused = import_document(
+                    conn,
+                    "project-1",
+                    &key,
+                    &page_doc("runaway", "x".repeat(24 * 1024 * 1024 + 1)),
+                )
+                .map_err(|e| e.to_string());
+                Ok((heavy, refused))
+            })
+            .await
+            .unwrap();
+        assert!(heavy.is_ok(), "{heavy:?}");
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|error| error.contains("safety bound")),
+            "{refused:?}"
+        );
+    }
+
     /// KT-1017 — a `kronn/` import refuses an unsafe inline line in a
     /// workflow or a Quick Exec, and keeps one only when re-importing over
     /// the exact same stored line.
@@ -4668,6 +4721,7 @@ mod tests {
                     last_published_at: None,
                     pinned: false,
                     archived: false,
+                    html_size_bytes: 0,
                 };
                 let revision = LivePageRevision {
                     id: "rev-1".into(),

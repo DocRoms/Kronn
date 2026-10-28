@@ -4303,6 +4303,11 @@ fn parse_import_envelope(content: &str) -> Result<WorkflowExportEnvelope, String
             envelope.version, EXPORT_VERSION
         ));
     }
+    // A bundled Page obeys the rule a Page created by hand does (#252).
+    for page in &envelope.referenced_pages {
+        crate::api::live_pages::validate_page_html(&page.html)
+            .map_err(|message| format!("Page `{}`: {message}", page.slug))?;
+    }
     Ok(envelope)
 }
 
@@ -4489,6 +4494,7 @@ async fn import_workflow_written(
             last_published_at: None,
             pinned: false,
             archived: false,
+            html_size_bytes: exported_page.html.len() as u64,
         };
         let revision = LivePageRevision {
             id: revision_id,

@@ -18,6 +18,10 @@ pub struct LivePage {
     pub pinned: bool,
     /// Archived Pages remain addressable by workflows and can be restored.
     pub archived: bool,
+    /// UTF-8 bytes of the current revision's HTML. No limit applies to it:
+    /// the UI grades it against the weight thresholds (#252).
+    #[serde(default)]
+    pub html_size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -27,6 +31,20 @@ pub struct LivePageRevision {
     pub page_id: String,
     pub revision: u64,
     pub html: String,
+    pub created_by_agent: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A revision in the history list, without its HTML: the list stays small
+/// however heavy each revision is, and one revision's HTML is fetched only
+/// when it is compared (#252).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LivePageRevisionSummary {
+    pub id: String,
+    pub page_id: String,
+    pub revision: u64,
+    pub html_size_bytes: u64,
     pub created_by_agent: Option<String>,
     pub created_at: DateTime<Utc>,
 }

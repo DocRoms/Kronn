@@ -33,10 +33,10 @@ pub(super) fn declarations() -> Vec<Value> {
             "slug":{"type":"string","description":"Optional ASCII slug."},
             "project_id":{"type":"string","description":"Optional project binding; otherwise inherits the current scope."},
             "discussion_id":{"type":"string","description":"Optional origin discussion; otherwise inherits the current room."},
-            "html":{"type":"string","description":"Complete self-contained HTML, max 1 MB."},
+            "html":{"type":"string","description":"Complete self-contained HTML."},
             "datasets":{"type":"array","description":"Named PublishPageData contracts; may be empty.","items":{"type":"object","properties":dataset,"required":["name","kind"]}}
         }), json!(["title","html","datasets"])),
-        ("page_update_html", "New immutable HTML revision of a Live Page; keeps datasets and publication history. Read page_get first; send the complete HTML. `slug` renames it. Read tool_manual for action buttons.", json!({"page_id":selector,"html":{"type":"string","description":"Complete HTML document (1 MB max)."},"slug":{"type":"string"}}), json!(["page_id"])),
+        ("page_update_html", "New immutable HTML revision of a Live Page; keeps datasets and publication history. Read page_get first; send the complete HTML. `slug` renames it. Read tool_manual for action buttons.", json!({"page_id":selector,"html":{"type":"string","description":"Complete HTML document."},"slug":{"type":"string"}}), json!(["page_id"])),
         ("page_add_dataset", "Attach a dataset so PublishPageData can write to it. Idempotent on name+kind; reusing a name with another kind conflicts.", add_dataset, json!(["page_id","name","kind"]))
     ].into_iter().map(|(name,description,properties,required)| json!({"type":"function","function":{"name":name,"description":description,"parameters":{"type":"object","properties":properties,"required":required}}})).collect()
 }
@@ -53,8 +53,6 @@ fn page_selector(arguments: &Value) -> Result<String, &'static str> {
         .ok_or("page_id is required; use page_list")
 }
 
-const PAGE_HTML_MAX_BYTES: usize = 1_000_000;
-
 /// The HTML and new slug of a `page_update_html` call, refused as a whole when
 /// one of them is invalid so a rename never lands alone.
 fn page_edit(arguments: &Value) -> Result<(Option<String>, Option<String>), &'static str> {
@@ -68,8 +66,8 @@ fn page_edit(arguments: &Value) -> Result<(Option<String>, Option<String>), &'st
         Some(Value::String(html)) if html.trim().is_empty() => {
             return Err("page_update_html: missing required 'html'")
         }
-        Some(Value::String(html)) if html.len() > PAGE_HTML_MAX_BYTES => {
-            return Err("page_update_html: 'html' exceeds 1 MB")
+        Some(Value::String(html)) if html.len() > live_pages::PAGE_HTML_SAFETY_BYTES => {
+            return Err("page_update_html: 'html' exceeds the 24 MiB safety guard")
         }
         Some(Value::String(html)) => Some(html.clone()),
         Some(_) => return Err("page_update_html: missing required 'html'"),
@@ -234,7 +232,7 @@ impl KronnToolExecutor {
                     Err(error) => return fail(call, format!("Invalid Page: {error}")),
                 };
                 let Json(response) = live_pages::create(state, None, Json(request)).await;
-                unwrap_api(call, response.success, response.data, response.error)
+                unwrap_api_noticed(call, response)
             }
             "page_get" | "page_update_html" | "page_add_dataset" => {
                 let id = match page_selector(&call.arguments) {
@@ -364,7 +362,7 @@ impl KronnToolExecutor {
                                     response.error.unwrap_or_default()
                                 ),
                             ),
-                            _ => unwrap_api(call, response.success, response.data, response.error),
+                            _ => unwrap_api_noticed(call, response),
                         }
                     }
                     _ => {
