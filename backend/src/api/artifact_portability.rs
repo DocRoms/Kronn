@@ -230,6 +230,7 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
                 );
                 let deps = super::workflows::workflow_dependency_ids([&workflow]);
                 skill_ids.extend(deps.skills);
+                skill_ids.extend(deps.payload_skills);
                 for (kind, ids) in [
                     (ResourceKind::Artifact, deps.pages),
                     (ResourceKind::QuickPrompt, deps.quick_prompts),
