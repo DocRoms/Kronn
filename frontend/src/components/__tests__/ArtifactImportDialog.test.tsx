@@ -27,7 +27,7 @@ const preview: ArtifactImportPreview = {
 };
 const result: ArtifactImportResult = { artifact: {
   id: 'new-a', title: 'Équipe 🦀', slug: 'new-a', project_id: null, current_revision_id: 'new-r', data_revision: 0,
-  created_at: '2026-09-23T00:00:00Z', updated_at: '2026-09-23T00:00:00Z', last_published_at: null, pinned: false, archived: false,
+  created_at: '2026-09-23T00:00:00Z', updated_at: '2026-09-23T00:00:00Z', last_published_at: null, pinned: false, archived: false, html_size_bytes: 0,
 }, entries: preview.entries, skills: [], allowed_embed_origins: [], not_allowed_embed_origins: [], embed_origins_error: null };
 const content = JSON.stringify({ kind: 'kronn.artifact', version: 1 });
 const chooseFile = async (text = content, size?: number) => {
@@ -253,7 +253,7 @@ describe('ArtifactImportDialog', () => {
   it.each([
     ['wrong kind', JSON.stringify({ kind: 'kronn.workflow', version: 1 }), undefined, 'pages.import.invalidFile'],
     ['future version', JSON.stringify({ kind: 'kronn.artifact', version: 3 }), undefined, 'pages.import.invalidFile'],
-    ['oversized file', content, 16 * 1024 * 1024 + 1, 'pages.import.tooLarge'],
+    ['oversized file', content, 64 * 1024 * 1024 + 1, 'pages.import.tooLarge'],
   ])('rejects %s before a backend preview', async (_case, text, size, error) => {
     render(<ArtifactImportDialog onClose={vi.fn()} onImported={vi.fn()} />);
     await chooseFile(text, size);

@@ -16,7 +16,7 @@ const detail: LivePageDetail = {
   id: 'page-1', project_id: null, title: 'Production health', slug: 'production-health',
   current_revision_id: 'rev-1', data_revision: 2,
   created_at: '2026-08-26T10:00:00Z', updated_at: '2026-08-26T10:00:00Z',
-  last_published_at: '2026-08-26T10:00:00Z', pinned: false, archived: false,
+  last_published_at: '2026-08-26T10:00:00Z', pinned: false, archived: false, html_size_bytes: 0,
   revision: {
     id: 'rev-1', page_id: 'page-1', revision: 1,
     html: '<main><h1>Production health</h1></main>',

@@ -2,14 +2,14 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { LivePage, LivePageAction, LivePageDetail, LivePagePublication } from '../../types/generated';
+import type { LivePage, LivePageAction, LivePageDetail, LivePagePublication, LivePageRevision, LivePageRevisionSummary } from '../../types/generated';
 
 const page: LivePage = {
   id: 'page-1', project_id: null, title: 'Adobe Signals', slug: 'adobe-signals',
   current_revision_id: 'rev-2', data_revision: 3,
   created_at: '2026-08-13T10:00:00Z', updated_at: '2026-08-13T10:00:00Z',
   last_published_at: '2026-08-13T10:00:00Z',
-  pinned: false, archived: false,
+  pinned: false, archived: false, html_size_bytes: 31,
 };
 const detail: LivePageDetail = {
   ...page,
@@ -21,6 +21,9 @@ const detail: LivePageDetail = {
   }],
   slug_aliases: [],
 };
+const legacyRevision: LivePageRevision = { id: 'rev-1', page_id: page.id, revision: 1, html: '<h1>Adobe legacy</h1>', created_by_agent: 'Claude', created_at: '2026-08-12T10:00:00Z' };
+const archivedRevision: LivePageRevision = { id: 'rev-0', page_id: page.id, revision: 0, html: '<h1>Adobe archived</h1>', created_by_agent: 'Claude', created_at: '2026-08-11T10:00:00Z' };
+const summarize = ({ html, ...revision }: LivePageRevision): LivePageRevisionSummary => ({ ...revision, html_size_bytes: html.length });
 const publications: LivePagePublication[] = [3, 2, 1].map(dataRevision => ({
   id: `publication-${dataRevision}`,
   page_id: page.id,
@@ -48,7 +51,7 @@ vi.mock('../../lib/api', () => ({
   discussionActions: { get: vi.fn(), cancel: vi.fn(), launch: vi.fn() },
   docs: { generatePdf: vi.fn(), generateDocx: vi.fn(), generateCsv: vi.fn() },
   pages: {
-    list: vi.fn(), get: vi.fn(), revisions: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
+    list: vi.fn(), get: vi.fn(), revisions: vi.fn(), revision: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
     actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn(),
     update: vi.fn(), delete: vi.fn(), updateHtml: vi.fn(),
     datasetUsage: vi.fn(() => Promise.resolve([])), resources: vi.fn(() => Promise.resolve([])), deleteDataset: vi.fn(), updateDataset: vi.fn(), publish: vi.fn(),
@@ -80,7 +83,7 @@ vi.mock('../../lib/live-page-sandbox', async importOriginal => ({
 
 import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '../../lib/api';
 import { requestRenderedPageHtml } from '../../lib/live-page-sandbox';
-import { HtmlRevisionDiff } from '../../components/HtmlCodeEditor';
+import { HtmlCodeEditor, HtmlRevisionDiff } from '../../components/HtmlCodeEditor';
 import { PagesPage } from '../PagesPage';
 import { triggerDownload } from '../../lib/downloadBlob';
 
@@ -98,10 +101,9 @@ beforeEach(() => {
   actionRelay.onAction = null;
   vi.mocked(pagesApi.list).mockResolvedValue([page]);
   vi.mocked(pagesApi.get).mockResolvedValue(detail);
-  vi.mocked(pagesApi.revisions).mockResolvedValue([
-    detail.revision,
-    { id: 'rev-1', page_id: page.id, revision: 1, html: '<h1>Adobe legacy</h1>', created_by_agent: 'Claude', created_at: '2026-08-12T10:00:00Z' },
-  ]);
+  vi.mocked(pagesApi.revisions).mockResolvedValue([detail.revision, legacyRevision].map(summarize));
+  vi.mocked(pagesApi.revision).mockImplementation(async (_id, revisionId) =>
+    [detail.revision, legacyRevision, archivedRevision].find(revision => revision.id === revisionId)!);
   vi.mocked(pagesApi.workflows).mockResolvedValue([{ id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] }]);
   vi.mocked(pagesApi.publications).mockResolvedValue(publications);
   vi.mocked(pagesApi.discussions).mockResolvedValue([]);
@@ -147,6 +149,59 @@ describe('PagesPage', () => {
     const [filename, blob] = vi.mocked(triggerDownload).mock.calls.at(-1)!;
     expect(filename).toBe('adobe-signals.kronn-artifact.json');
     expect(JSON.parse(await blob.text())).toEqual(bundle);
+  });
+
+  it('ignores a late revision answer so the comparison matches the last pick', async () => {
+    let answerLegacy: (revision: LivePageRevision) => void = () => {};
+    vi.mocked(pagesApi.revisions).mockResolvedValue([detail.revision, legacyRevision, archivedRevision].map(summarize));
+    vi.mocked(pagesApi.revision).mockImplementation((_id, revisionId) => revisionId === 'rev-1'
+      ? new Promise(resolve => { answerLegacy = resolve; })
+      : Promise.resolve(archivedRevision));
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByText('pages.editHtml'));
+    const picker = screen.getByLabelText('pages.compareRevision');
+    fireEvent.change(picker, { target: { value: 'rev-1' } });
+    fireEvent.change(picker, { target: { value: 'rev-0' } });
+    expect(await screen.findByTestId('live-page-html-diff')).toHaveTextContent('Adobe archived');
+    await act(async () => { answerLegacy(legacyRevision); });
+    expect(screen.getByTestId('live-page-html-diff')).toHaveTextContent('Adobe archived');
+    expect(screen.getByRole('button', { name: /pages.restoreRevision:0/ })).toBeEnabled();
+  });
+
+  it('clears the pick when its revision cannot be loaded', async () => {
+    vi.mocked(pagesApi.revisions).mockResolvedValue([detail.revision, legacyRevision, archivedRevision].map(summarize));
+    vi.mocked(pagesApi.revision).mockImplementation(async (_id, revisionId) => {
+      if (revisionId === 'rev-0') throw new Error('revision gone');
+      return legacyRevision;
+    });
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByText('pages.editHtml'));
+    const picker = screen.getByLabelText('pages.compareRevision');
+    fireEvent.change(picker, { target: { value: 'rev-1' } });
+    expect(await screen.findByTestId('live-page-html-diff')).toHaveTextContent('Adobe legacy');
+    fireEvent.change(picker, { target: { value: 'rev-0' } });
+    await waitFor(() => expect(picker).toHaveValue(''));
+    expect(screen.queryByTestId('live-page-html-diff')).toBeNull();
+    expect(await screen.findByText('revision gone')).toBeInTheDocument();
+  });
+
+  it('grades the HTML weight in the header and badges a heavy page in the list', async () => {
+    const heavy = { ...page, html_size_bytes: 5 * 1024 * 1024 };
+    vi.mocked(pagesApi.list).mockResolvedValue([heavy]);
+    vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, html_size_bytes: heavy.html_size_bytes });
+    render(<PagesPage />);
+    const pill = await screen.findByLabelText('pages.htmlWeight.veryHeavy:5.0 MB');
+    expect(pill).toHaveAttribute('data-weight', 'very-heavy');
+    expect(document.querySelector('.live-pages-weight-badge[data-weight="very-heavy"]')).toHaveTextContent('5.0 MB');
+  });
+
+  it('shows a light page in green without a list badge', async () => {
+    render(<PagesPage />);
+    const pill = await screen.findByLabelText('pages.htmlWeight.ok:31 B');
+    expect(pill).toHaveAttribute('data-weight', 'ok');
+    expect(document.querySelector('.live-pages-weight-badge')).toBeNull();
   });
 
   it('says which secrets the exported bundle masked', async () => {
@@ -715,18 +770,15 @@ describe('PagesPage', () => {
     vi.mocked(pagesApi.launchAction).mockClear();
     vi.mocked(pagesApi.cancelAction).mockClear();
     vi.mocked(pagesApi.getAction).mockClear();
-    vi.mocked(pagesApi.revisions).mockResolvedValue([
-      detail.revision,
-      { id: 'rev-1', page_id: page.id, revision: 1, html: '<h1>Adobe legacy</h1>', created_by_agent: 'Claude', created_at: '2026-08-12T10:00:00Z' },
-      { id: 'rev-0', page_id: page.id, revision: 0, html: '<h1>Adobe archived</h1>', created_by_agent: 'Claude', created_at: '2026-08-11T10:00:00Z' },
-    ]);
+    vi.mocked(pagesApi.revisions).mockResolvedValue([detail.revision, legacyRevision, archivedRevision].map(summarize));
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
     fireEvent.click(screen.getByText('pages.editHtml'));
 
     fireEvent.change(screen.getByLabelText('pages.htmlTitle'), { target: { value: '<h1>Current draft</h1>' } });
     fireEvent.change(screen.getByLabelText('pages.compareRevision'), { target: { value: 'rev-1' } });
-    expect(screen.getByTestId('live-page-html-diff')).toHaveTextContent('Adobe legacy');
+    expect(await screen.findByTestId('live-page-html-diff')).toHaveTextContent('Adobe legacy');
+    expect(pagesApi.revision).toHaveBeenCalledWith(page.id, 'rev-1');
     fireEvent.click(screen.getByRole('button', { name: 'pages.preview' }));
     const previews = screen.getByTestId('live-page-html-preview-diff').querySelectorAll('iframe');
     expect(previews).toHaveLength(2);
@@ -735,7 +787,7 @@ describe('PagesPage', () => {
     expect(previews[1]).toHaveAttribute('srcdoc', expect.stringContaining('Current draft'));
 
     fireEvent.change(screen.getByLabelText('pages.compareRevision'), { target: { value: 'rev-0' } });
-    expect(previews[0]).toHaveAttribute('srcdoc', expect.stringContaining('Adobe archived'));
+    await waitFor(() => expect(previews[0]).toHaveAttribute('srcdoc', expect.stringContaining('Adobe archived')));
     expect(previews[1]).toHaveAttribute('srcdoc', expect.stringContaining('Current draft'));
 
     expect(pagesApi.updateHtml).not.toHaveBeenCalled();
@@ -746,6 +798,32 @@ describe('PagesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'pages.code' }));
     expect(screen.getByTestId('live-page-html-diff')).toHaveTextContent('Adobe archived');
     expect(screen.getByTestId('live-page-html-diff')).toHaveTextContent('Current draft');
+  });
+
+  it('keeps a very heavy HTML as plain text in the editor and the diff', () => {
+    const heavy = `<h1 class="x">${'a'.repeat(4 * 1024 * 1024)}</h1>`;
+    const { container, rerender } = render(<HtmlCodeEditor value="<h1>Light</h1>" onChange={() => {}} ariaLabel="html" />);
+    expect(container.querySelector('.live-pages-code-highlight')).not.toBeNull();
+    rerender(<HtmlCodeEditor value={heavy} onChange={() => {}} ariaLabel="html" />);
+    expect(container.querySelector('.live-pages-code-editor')).toHaveAttribute('data-plain', 'true');
+    expect(container.querySelector('.live-pages-code-highlight')).toBeNull();
+    expect(container.querySelector('.live-pages-code-gutter')).toBeNull();
+    expect(screen.getByLabelText('html')).toHaveValue(heavy);
+
+    rerender(
+      <HtmlRevisionDiff
+        previous="<h1>Old</h1>"
+        current={heavy}
+        previousLabel="r1"
+        currentLabel="draft"
+        codeLabel="code"
+        previewLabel="preview"
+        previewLimitations="limits"
+      />,
+    );
+    const diff = screen.getByTestId('live-page-html-diff');
+    expect(diff.querySelector('.hljs-tag, [class^="hljs"]')).toBeNull();
+    expect(diff).toHaveTextContent('<h1>Old</h1>');
   });
 
   it('updates the active static preview when comparison revision and draft props change without mutations', () => {

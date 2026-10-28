@@ -3,6 +3,12 @@ import type { ChangeEvent, KeyboardEvent, UIEvent } from 'react';
 import { highlightHtmlLine } from '../lib/html-syntax';
 import { buildHtmlPreviewDocument } from '../lib/html-preview';
 import { diffLines } from '../lib/qp-history-diff';
+import { PAGE_HTML_VERY_HEAVY_BYTES } from '../lib/live-page-weight';
+
+// Highlighting re-tokenizes every line on each keystroke: seconds on an 18 MiB
+// Page. Above the red weight grade the code stays plain text (#252). Characters
+// stand in for bytes here, a cheap lower bound of the UTF-8 size.
+const isTooHeavyToHighlight = (html: string) => html.length > PAGE_HTML_VERY_HEAVY_BYTES;
 
 interface HtmlCodeEditorProps {
   value: string;
@@ -13,7 +19,8 @@ interface HtmlCodeEditorProps {
 export function HtmlCodeEditor({ value, onChange, ariaLabel }: HtmlCodeEditorProps) {
   const highlightRef = useRef<HTMLPreElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
-  const lines = useMemo(() => value.split('\n'), [value]);
+  const plain = isTooHeavyToHighlight(value);
+  const lines = useMemo(() => (plain ? [] : value.split('\n')), [plain, value]);
   const highlightedLines = useMemo(
     () => lines.map(highlightHtmlLine),
     [lines],
@@ -43,16 +50,20 @@ export function HtmlCodeEditor({ value, onChange, ariaLabel }: HtmlCodeEditorPro
   };
 
   return (
-    <div className="live-pages-code-editor">
-      <div className="live-pages-code-gutter" ref={gutterRef} aria-hidden="true">
-        {lines.map((_, index) => <span key={index}>{index + 1}</span>)}
-      </div>
+    <div className="live-pages-code-editor" data-plain={plain || undefined}>
+      {!plain && (
+        <div className="live-pages-code-gutter" ref={gutterRef} aria-hidden="true">
+          {lines.map((_, index) => <span key={index}>{index + 1}</span>)}
+        </div>
+      )}
       <div className="live-pages-code-pane">
-        <pre ref={highlightRef} className="live-pages-code-highlight" aria-hidden="true">
-          {highlightedLines.map((line, index) => (
-            <span key={index} dangerouslySetInnerHTML={{ __html: line || '&nbsp;' }} />
-          ))}
-        </pre>
+        {!plain && (
+          <pre ref={highlightRef} className="live-pages-code-highlight" aria-hidden="true">
+            {highlightedLines.map((line, index) => (
+              <span key={index} dangerouslySetInnerHTML={{ __html: line || '&nbsp;' }} />
+            ))}
+          </pre>
+        )}
         <textarea
           value={value}
           onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onChange(event.target.value)}
@@ -87,6 +98,10 @@ export function HtmlRevisionDiff({
   previewLimitations,
 }: HtmlRevisionDiffProps) {
   const rows = useMemo(() => diffLines(previous, current), [current, previous]);
+  const plain = isTooHeavyToHighlight(previous) || isTooHeavyToHighlight(current);
+  const lineCode = (line: string) => plain
+    ? <code>{line || '\u00a0'}</code>
+    : <code dangerouslySetInnerHTML={{ __html: highlightHtmlLine(line) || '&nbsp;' }} />;
   const [view, setView] = useState<'code' | 'preview'>('code');
   return (
     <div className="live-pages-revision-comparison" data-testid="live-page-html-comparison">
@@ -102,11 +117,11 @@ export function HtmlRevisionDiff({
               <div key={index} className="live-pages-html-diff-row" data-kind={row.kind}>
                 <span className="live-pages-html-diff-line">
                   <i>{index + 1}</i>
-                  <code dangerouslySetInnerHTML={{ __html: highlightHtmlLine(row.prev) || '&nbsp;' }} />
+                  {lineCode(row.prev)}
                 </span>
                 <span className="live-pages-html-diff-line">
                   <i>{index + 1}</i>
-                  <code dangerouslySetInnerHTML={{ __html: highlightHtmlLine(row.next) || '&nbsp;' }} />
+                  {lineCode(row.next)}
                 </span>
               </div>
             ))}

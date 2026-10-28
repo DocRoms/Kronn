@@ -8,10 +8,12 @@ import {
 } from 'lucide-react';
 import type {
   LivePage, LivePageDatasetUsage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
-  LivePageRevision, LivePageWorkflowLink, Project,
+  LivePageRevision, LivePageRevisionSummary, LivePageWorkflowLink, Project,
 } from '../types/generated';
 import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '../lib/api';
 import { datasetRecords, recordsToRows } from '../lib/live-page-csv';
+import { formatBytes } from '../lib/live-page-weight';
+import { HtmlWeightBadge } from '../components/HtmlWeightBadge';
 import {
   buildSandboxDocument,
   hostTheme,
@@ -116,12 +118,6 @@ function channelId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `page-${Date.now()}-${Math.random()}`;
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-}
 
 // KT-463 — the Export and Sync popovers are native <details>/<summary>,
 // uncontrolled by React. Native <details> never closes itself on an
@@ -199,7 +195,10 @@ export function PagesPage({
   const [linkedWorkflows, setLinkedWorkflows] = useState<LivePageWorkflowLink[]>([]);
   const [recentPublications, setRecentPublications] = useState<LivePagePublication[]>([]);
   const [linkedDiscussions, setLinkedDiscussions] = useState<LivePageDiscussionLink[]>([]);
-  const [revisions, setRevisions] = useState<LivePageRevision[]>([]);
+  const [revisions, setRevisions] = useState<LivePageRevisionSummary[]>([]);
+  // The history list carries no HTML (#252); the compared revision is fetched alone.
+  const [loadedComparison, setLoadedComparison] = useState<LivePageRevision | null>(null);
+  const requestedComparisonRef = useRef<string | null>(null);
   const [query, setQuery] = useState('');
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(readCollapsedPageSections);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -704,7 +703,30 @@ export function PagesPage({
     (total, dataset) => total + dataset.data_size_bytes,
     0,
   ) ?? 0;
-  const comparisonRevision = revisions.find(revision => revision.id === comparisonRevisionId) ?? null;
+  // While another revision loads, the previous comparison stays on screen so
+  // the diff keeps its code/preview mode instead of unmounting; Restore waits
+  // for the selected revision itself.
+  const comparisonRevision = comparisonRevisionId && loadedComparison?.page_id === detail?.id
+    ? loadedComparison
+    : null;
+  const comparisonLoading = comparisonRevision !== null && comparisonRevision.id !== comparisonRevisionId;
+  const compareWithRevision = useCallback((revisionId: string | null) => {
+    requestedComparisonRef.current = revisionId;
+    setComparisonRevisionId(revisionId);
+    if (!revisionId || !detail) return;
+    pagesApi.revision(detail.id, revisionId)
+      .then(revision => {
+        // A late answer for an earlier pick must not replace the current one.
+        if (requestedComparisonRef.current === revisionId) setLoadedComparison(revision);
+      })
+      .catch(cause => {
+        // Only the current pick's failure matters; it clears the pick so the
+        // diff never shows a revision the picker no longer names.
+        if (requestedComparisonRef.current !== revisionId) return;
+        setComparisonRevisionId(null);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      });
+  }, [detail]);
   const mosaicLayoutLabel = useCallback((layout: LivePageMosaicLayout) => {
     switch (layout) {
       case 'two-columns': return t('pages.mosaic.layout.twoColumns');
@@ -955,7 +977,7 @@ export function PagesPage({
                     aria-checked={canMultiSelect ? selected : undefined}
                   >
                     {canMultiSelect && <span className="disc-item-selection-box" data-selected={selected} aria-hidden="true">{selected && <CheckSquare2 size={12} />}</span>}
-                    <span className="disc-item-content"><span className="disc-item-title"><span className="disc-item-title-text">{page.title}</span></span><span className="disc-item-meta"><span className="disc-item-meta-summary">{page.slug}</span></span></span>
+                    <span className="disc-item-content"><span className="disc-item-title"><span className="disc-item-title-text">{page.title}</span></span><span className="disc-item-meta"><span className="disc-item-meta-summary">{page.slug}</span><HtmlWeightBadge bytes={page.html_size_bytes} variant="list" /></span></span>
                   </button>
                   {!canMultiSelect && <CollectionRowActions
                     itemName={page.title}
@@ -1108,6 +1130,7 @@ export function PagesPage({
                     <span className="live-pages-data-size"><Database size={11} /> {formatBytes(totalDatasetSize)}</span>
                     <ChevronDown size={11} />
                   </button>
+                  <HtmlWeightBadge bytes={detail.html_size_bytes} variant="header" />
                   {detail.archived && <span className="live-pages-archived-badge"><Archive size={11} />{t('pages.archived')}</span>}
                   <LivePageSlugEditor
                     key={detail.id}
@@ -1258,7 +1281,7 @@ export function PagesPage({
                       <History size={13} />
                       <select
                         value={comparisonRevisionId ?? ''}
-                        onChange={event => setComparisonRevisionId(event.target.value || null)}
+                        onChange={event => compareWithRevision(event.target.value || null)}
                         aria-label={t('pages.compareRevision')}
                       >
                         <option value="">{t('pages.revisionHistory', revisions.length)}</option>
@@ -1273,6 +1296,7 @@ export function PagesPage({
                       <button
                         type="button"
                         className="live-pages-restore-revision"
+                        disabled={comparisonLoading}
                         onClick={() => {
                           setHtmlDraft(comparisonRevision.html);
                           setComparisonRevisionId(null);

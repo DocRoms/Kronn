@@ -15,7 +15,7 @@ const detail = {
   current_revision_id: 'rev-1', data_revision: 4,
   created_at: '2026-08-13T10:00:00Z', updated_at: '2026-08-13T10:00:00Z',
   last_published_at: '2026-08-13T10:00:00Z',
-  pinned: false, archived: false,
+  pinned: false, archived: false, html_size_bytes: 0,
   revision: { id: 'rev-1', page_id: 'page-1', revision: 2, html: '<h1>Adobe</h1>', created_by_agent: null, created_at: '2026-08-13T10:00:00Z' },
   datasets: [{
     id: 'data-1', page_id: 'page-1', name: 'latency', kind: 'time_series',

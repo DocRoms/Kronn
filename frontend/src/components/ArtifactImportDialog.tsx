@@ -9,7 +9,7 @@ import { SkillImportDecisions } from './SkillImportDecisions';
 import type { ArtifactImportChoice, ArtifactImportPreview, ArtifactImportRequest, ArtifactImportResult, LivePage, Project, SkillImportChoice } from '../types/generated';
 import './ArtifactImportDialog.css';
 
-const MAX_BYTES = 16 * 1024 * 1024;
+const MAX_BYTES = 64 * 1024 * 1024;
 // Version 2 adds bundled custom skills and workflow refs; 1 still imports.
 const BUNDLE_VERSIONS = [1, 2];
 
