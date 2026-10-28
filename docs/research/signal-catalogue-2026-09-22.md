@@ -116,7 +116,7 @@ within its existing budget. No net workflow-token or latency improvement is clai
 [src: file: docs/research/signal-catalogue-2026-09-22.json:91#first_prompt_tokens]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:326#first_prompt_tokens]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:370#first_prompt_tokens]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:152#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:154#CATALOGUE_MAX_BYTES]
 
 ## Functional checks and limits
 

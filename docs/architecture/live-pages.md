@@ -23,7 +23,7 @@ including saved workflows that publish into the root Artifact, their failure
 steps, sub-workflows, Quick Prompts, Quick APIs, Quick Execs and secondary
 Artifacts. Secondary Artifacts do not pull in unrelated incoming publishers.
 Export uses one read transaction. Missing dependencies, unsupported bundles and
-bundles exceeding 16 MiB or 512 resources fail explicitly; nothing is silently
+bundles exceeding 64 MiB or 512 resources fail explicitly; nothing is silently
 truncated. Historical HTML revisions, run/publication history and discussion
 links are not included.
 [src: file: backend/src/models/artifact_portability.rs:9-52#ArtifactBundlePoint]
@@ -175,7 +175,7 @@ The library's source link opens the discussion at that exact message. Removing
 the message clears only its source anchor and preserves the Artifact and its
 discussion link. Streamed previews without a persisted message id do not offer
 this action.
-[src: file: backend/src/api/live_pages.rs:431-443#source_message_id]
+[src: file: backend/src/api/live_pages.rs:501-513#source_message_id]
 [src: file: frontend/src/components/DocPreviewArtifact.tsx:22-33#create]
 [src: file: frontend/src/components/DocPreview.tsx:153#DocPreviewArtifact]
 
@@ -200,7 +200,35 @@ renders the selected revision and the current draft side by side on wide screens
 using the same static isolated HTML policy as Project Code; it has no Live Page
 action bridge. An explicit restore-to-draft action remains separate from the
 comparison. Restoring does not mutate history: saving the restored draft creates
-another immutable revision. `[src: file: frontend/src/components/HtmlCodeEditor.tsx:80-131#HtmlRevisionDiff]`
+another immutable revision. `[src: file: frontend/src/components/HtmlCodeEditor.tsx:91-142#HtmlRevisionDiff]`
+
+### HTML weight
+
+Kronn sets no size limit on a Page's HTML: a Page that embeds its own assets as
+data URIs may weigh what its author wants. Only a 24 MiB safety guard stops a
+runaway writer; create, update and import share it. Every path a Page travels
+holds a Page at the guard with its datasets: the 64 MiB body limit of
+`POST /api/pages` and `PUT /api/pages/{id}/html`, the 64 MiB artifact bundle
+(its import routes accept 160 MiB, the bundle being escaped twice), and the
+64 MiB bridge buffer of Kronn-launched agents. Two paths stay lower on
+purpose. The MCP bridge reads one JSON-RPC request of at most 8 MiB
+(KT-1139), so an MCP agent writes a Page of up to about 8 MiB of HTML in one
+`page_create` or `page_update_html` call (less once quotes and newlines are
+escaped); a heavier Page comes through the UI, an import or the native tools
+of HTTP agents. The rendered export (PDF, DOCX) reads at most 16 Mi
+characters of rendered HTML. Above 4 MiB the HTML editor and the revision
+diff show plain text, without syntax highlighting.
+`[src: file: backend/src/api/live_pages.rs:18-27]`
+The weight is graded instead. `LivePage.html_size_bytes` carries the current
+revision's UTF-8 size. Above 1 MiB the Page is heavy (orange), above 4 MiB very
+heavy (red). The Page header shows the size with that grade, the list badges
+heavy Pages, and a write above 1 MiB still succeeds with an `ApiResponse.notice`
+that the MCP and the native Page tools of HTTP agents relay as `kronn_notice`.
+`[src: file: frontend/src/lib/live-page-weight.ts:1-13]`
+Every revision keeps its full HTML and none is pruned, so a heavy Page saved
+often grows the database by its size on each save. The revision list
+(`GET /api/pages/{id}/revisions`) carries sizes, not HTML; the editor loads the
+one revision it compares from `GET /api/pages/{id}/revisions/{revision_id}`.
 
 JSON is the dataset payload format. Snapshot and collection values are stored
 as one JSON value. Time-series observations are stored as individual rows so a
@@ -216,7 +244,7 @@ A dataset can be emptied, re-limited and deleted after creation:
   the publication ledger like any write, from the API or a `PublishPageData`
   step. Only `clear` may omit `value` (API) or `value_from` (step); the other
   operations still require them, an explicit `null` value included.
-  `[src: file: backend/src/db/live_pages.rs:854-870#Clear]`
+  `[src: file: backend/src/db/live_pages.rs:892-908#Clear]`
 - **Limits.** `PATCH /api/pages/{id}/datasets/{name}` with `max_points` and/or
   `max_age_days` (`null` lifts the age limit) prunes the points beyond the new
   limits in the same transaction, then moves the Page to a new data revision
@@ -247,8 +275,8 @@ caller.
 None of these touch what a trusted button's approval fingerprint covers (the
 block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
-`[src: file: backend/src/api/live_pages.rs:584-594#delete_dataset]`
-`[src: file: backend/src/api/live_pages.rs:619-630#update_dataset]`
+`[src: file: backend/src/api/live_pages.rs:654-664#delete_dataset]`
+`[src: file: backend/src/api/live_pages.rs:689-700#update_dataset]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:7980-7987#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
@@ -276,7 +304,7 @@ A publish that changes a Page (API `POST /api/pages/{id}/publish` or a
 `live_page_data_changed { page_id, data_revision }`. The Pages view and the
 standalone tab re-read that Page at once and post `kronn:page-data` to the
 open frame without rebuilding it; their 30 s poll stays as a fallback.
-`[src: file: backend/src/api/live_pages.rs:790-802#announce_page_data_changed]`
+`[src: file: backend/src/api/live_pages.rs:860-872#announce_page_data_changed]`
 `[src: file: frontend/src/hooks/useLivePageDataPush.ts:9-13#useLivePageDataPush]`
 
 ## « Ma Todo », the default board (KT-1030)
@@ -663,7 +691,7 @@ failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
 [src: file: backend/src/api/workflows.rs:4673-4681#create_live_page_in_transaction]
-[src: file: backend/src/db/live_pages.rs:127-129#create_live_page_in_transaction]
+[src: file: backend/src/db/live_pages.rs:128-130#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
 an advanced escape hatch and remain subject to the same iframe, CSP, payload
@@ -752,7 +780,7 @@ normalized (lowercase host, default port dropped, IDN as punycode) and a
 malformed one rejects the whole change.
 [src: file: backend/src/models/setup.rs:73-79#embed_allowed_origins]
 [src: file: backend/src/core/embed_origins.rs:52-55#normalize_origin]
-[src: file: backend/src/api/live_pages.rs:889-891#change_embed_origins]
+[src: file: backend/src/api/live_pages.rs:962-964#change_embed_origins]
 The UI is Configuration → Artifacts → External content (Allowed sites): type an
 origin, see the exact value that will be saved, add it, or remove a
 permission. Every Page view, the import dialog and that section share one
@@ -762,7 +790,7 @@ the local WebSocket, with no origin in it (never relayed to a P2P peer); every
 open tab, a visible wall screen included, re-reads the list at once and a
 revoked site's players are unmounted. A tab also re-reads on WebSocket
 reconnect (for an event sent while it was disconnected) and on focus.
-[src: file: backend/src/api/live_pages.rs:806-810#announce_embed_origins_changed]
+[src: file: backend/src/api/live_pages.rs:876-880#announce_embed_origins_changed]
 Changes are sent one after the
 other, and a read that started before a change landed (or while one is in
 flight) is discarded, so a slow read can never bring back a revoked site or
@@ -836,11 +864,11 @@ governed by that site's document, not by Kronn's CSP, so an allowed site can
 itself embed other origins; Kronn controls only what the Page frames directly,
 redirects included.
 [src: file: backend/src/core/embed_origins.rs:254#frame_src_sources]
-[src: file: backend/src/api/live_pages.rs:765-766#embed_frame_src]
-[src: file: backend/src/api/live_pages.rs:819-823#document_frame_policy]
+[src: file: backend/src/api/live_pages.rs:838-839#embed_frame_src]
+[src: file: backend/src/api/live_pages.rs:892-896#document_frame_policy]
 [src: file: frontend/vite-frame-policy.ts:72#framePolicyMiddleware]
 [src: file: frontend/src/lib/served-frame-policy.ts:9#parseServedFrameSources]
-[src: file: .docker/nginx.conf:131-132#auth_request]
+[src: file: .docker/nginx.conf:198-199#auth_request]
 
 Bridge. The injected script finds every `[data-kronn-embed]` (including ones
 page scripts render or change later, via a MutationObserver), and posts one
@@ -907,7 +935,7 @@ it was itself imported with. That last part is stored with the Page
 declaration through a chain of imports. It is information for the importer,
 never an authorization, and the creator's allowed sites are not exported.
 [src: file: backend/src/core/embed_origins.rs:149-172#declared_origins]
-[src: file: backend/src/api/artifact_portability.rs:129#export_embed_origins]
+[src: file: backend/src/api/artifact_portability.rs:130#export_embed_origins]
 The import preview lists one row per distinct origin (from the HTML and the
 declaration): already allowed ("in the Artifact and already in your
 configuration"), or Add / Refuse. Answers are not part of the reviewed digest
@@ -1054,7 +1082,9 @@ Discussion id, and otherwise creates an unlinked Page from a host CLI. An empty
 `datasets` array creates a standalone HTML Page and `initial` values create a
 mock-backed design. `page_update_html`
 replaces the complete document by creating an immutable revision; it never
-changes dataset history. Pages are not a
+changes dataset history. One call carries about 8 MiB of HTML at most (the
+bridge's KT-1139 request limit, see HTML weight above); a write above 1 MiB
+returns a `kronn_notice` asking the agent to optimize the Page. Pages are not a
 `KRONN:BUNDLE_READY` category in this vertical, so an agent must never emit a
 placeholder Page id or claim that a workflow bundle will create one.
 

@@ -57,7 +57,7 @@ The regression suite covers HTTP reads and cards, stale database options,
 empty/unreadable files, explicit workflow defaults, clone preservation and a
 scripted Full audit that reads the briefing before its first step in both
 `docs/` and `.ai/`.
-[src: file: backend/tests/api_tests.rs:8065-8103#briefing_file_drives_http_reads_and_audited_project_cards]
+[src: file: backend/tests/api_tests.rs:8266-8304#briefing_file_drives_http_reads_and_audited_project_cards]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:67-97#briefing_residuals_empty_or_unreadable_file_never_resurrects_db_options]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:99-118#briefing_residuals_removing_an_option_in_the_file_overrides_stale_db_notes]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:120-169#briefing_residuals_fresh_clone_keeps_the_generated_project_doc_without_answers]
