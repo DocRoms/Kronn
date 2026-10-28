@@ -8,7 +8,7 @@ exists on the MCP bridge only; native discussion agents do not get it. See
 [Dataset lifecycle](../architecture/live-pages.md#dataset-lifecycle-kt-1104). The dispatcher returns real stored
 objects, not an HTML preview.
 [src: file: backend/src/api/agent_tools.rs:1869-1871#execute_page_tool]
-[src: file: backend/src/api/agent_page_tools.rs:173-386#execute_page_tool]
+[src: file: backend/src/api/agent_page_tools.rs:171-384#execute_page_tool]
 [src: file: backend/scripts/disc-introspection-mcp.py:7980-7986#call_page_delete_dataset]
 
 Native and bridge access are two policies, not one:
@@ -35,8 +35,8 @@ project or origin discussion outside its scope, and derives revision
 authorship from the executor instead of model arguments. Standalone Pages accept an empty dataset array.
 An unknown project or discussion fails through the shared foreign-key checks;
 a failed creation does not leave a partial Page.
-[src: file: backend/src/api/agent_page_tools.rs:86-118#page_in_scope]
-[src: file: backend/src/api/agent_page_tools.rs:120-171#scoped_links]
+[src: file: backend/src/api/agent_page_tools.rs:84-116#page_in_scope]
+[src: file: backend/src/api/agent_page_tools.rs:118-169#scoped_links]
 [src: file: backend/src/api/agent_tools.rs:4577-4579#project_is_in_scope]
 [src: file: backend/src/api/agent_page_tests.rs:18-99#native_pages_follow_mcp_project_scope_inheritance_and_selector_contracts]
 [src: file: backend/src/api/agent_page_tests.rs:86-88#standalone]
@@ -60,8 +60,8 @@ persisting an action block never launches its automation.
 [src: file: backend/src/api/agent_tools.rs:1481-1505#workflow_tool_catalogue]
 [src: file: backend/src/api/agent_tools.rs:1869-1871#execute_page_tool]
 [src: file: backend/src/api/agent_tools.rs:5662-5720#workflow_catalogue_is_bounded_and_contains_no_planning_mutation]
-[src: file: backend/src/api/agent_page_tests.rs:255-298#native_page_html_uses_shared_inert_action_ingestion]
-[src: file: backend/src/api/agent_page_tests.rs:362-493#native_workflow_page_tools_inherit_run_scope_and_execute_all_operations]
+[src: file: backend/src/api/agent_page_tests.rs:300-343#native_page_html_uses_shared_inert_action_ingestion]
+[src: file: backend/src/api/agent_page_tests.rs:407-538#native_workflow_page_tools_inherit_run_scope_and_execute_all_operations]
 [src: file: backend/src/api/agent_page_bench.rs:83-132#native_page_pipeline_publishes_through_the_real_workflow_runner]
 [src: file: frontend/src/lib/__tests__/live-page-sandbox.test.ts:31-36#LIVE_PAGE_CSP]
 [src: user: 2026-09-27: KT-705 review 2 relays Romu's decision to allow workflow Agent Page creation and modification]
@@ -83,7 +83,7 @@ native dispatcher and executes
 `JsonData` followed by `PublishPageData` through the real workflow runner, then
 checks the Page and publication ledger.
 [src: file: backend/src/api/agent_page_tests.rs:18-99#native_pages_follow_mcp_project_scope_inheritance_and_selector_contracts]
-[src: file: backend/src/api/agent_page_tests.rs:300-333#native_page_family_loads_and_dispatches_all_five_operations]
+[src: file: backend/src/api/agent_page_tests.rs:345-378#native_page_family_loads_and_dispatches_all_five_operations]
 [src: file: backend/src/api/agent_page_bench.rs:83-132#native_page_pipeline_publishes_through_the_real_workflow_runner]
 
 The ignored local-model trial uses an in-memory database and a seeded
@@ -131,6 +131,6 @@ envelope), of which KT-1098's optional `slug` on `page_update_html` costs
 Page family stays at or under 4,000 bytes; the absolute sizes move whenever any
 other declaration changes, the Page delta does not. These are byte counts, not
 provider token measurements. The bridge
-declarations keep their own byte ceiling (84,929 bytes, `mcp_surface_budget.py`).
-[src: file: backend/src/api/agent_page_tests.rs:335-360#native_page_surface_has_a_bounded_measured_cost]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:152#CATALOGUE_MAX_BYTES]
+declarations keep their own byte ceiling (84,429 bytes, `mcp_surface_budget.py`).
+[src: file: backend/src/api/agent_page_tests.rs:380-405#native_page_surface_has_a_bounded_measured_cost]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:154#CATALOGUE_MAX_BYTES]

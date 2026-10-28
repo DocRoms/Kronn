@@ -9,6 +9,29 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- Live Pages no longer refuse HTML above 1 MB. A Page may weigh what its
+  author wants; a 24 MiB safety guard only stops a runaway writer, and create,
+  update and import apply the same rule. Artifact bundles go from 16 to
+  64 MiB and the bridge buffer of Kronn-launched agents from 32 to 64 MiB, so
+  a Page at the guard still exports, imports and reaches agents. The MCP
+  bridge keeps its 8 MiB request limit, so an MCP agent writes a Page of up
+  to about 8 MiB in one call (#252).
+- Above 4 MiB, the HTML editor and the revision diff show plain text instead
+  of highlighting every line on each keystroke (#252).
+- A Page's revision history no longer carries every revision's HTML; the
+  revision you compare is loaded alone (#252).
+
+### Added
+
+- The Page header shows the HTML weight: green up to 1 MB, orange up to 4 MB,
+  red above, with advice on how to optimize. The Pages list badges heavy Pages,
+  and a heavy write returns a notice the agent receives as `kronn_notice`
+  (#252).
+
 ## [0.15.1] - 2026-10-22
 
 ### Added
