@@ -3698,6 +3698,9 @@ pub(crate) struct WorkflowDependencyIds {
     pub(crate) pages: std::collections::BTreeSet<String>,
     /// Every skill a step or a ref names (KT-1446); only custom ones travel.
     pub(crate) skills: std::collections::BTreeSet<String>,
+    /// JsonData values spelled like a custom skill id (#273): exported when
+    /// such a skill exists, but no step loads them, so none is "missing".
+    pub(crate) payload_skills: std::collections::BTreeSet<String>,
 }
 
 /// Collect every saved resource referenced by the complete workflow graph.
@@ -3741,7 +3744,10 @@ pub(crate) fn workflow_dependency_ids<'a>(
         for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
             dependencies.skills.extend(step.skill_ids.iter().cloned());
             if let Some(payload) = &step.json_data_payload {
-                crate::core::skill_bundle::ids_in_payload(payload, &mut dependencies.skills);
+                crate::core::skill_bundle::ids_in_payload(
+                    payload,
+                    &mut dependencies.payload_skills,
+                );
             }
             if let Some(id) = step
                 .quick_prompt_id
@@ -3919,6 +3925,7 @@ pub async fn export_workflow(
                 }
             }
             let mut skills = dependencies.skills;
+            skills.extend(dependencies.payload_skills);
             for qp in &qps {
                 skills.extend(qp.skill_ids.iter().cloned());
             }

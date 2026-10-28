@@ -942,9 +942,15 @@ fn create_imported_page(
         ],
     )?;
     for dataset in exported.datasets {
+        // A dataset that arrives without value or point was written here, now.
+        let updated_at = if dataset.has_current || !dataset.points.is_empty() {
+            dataset.updated_at
+        } else {
+            now
+        };
         tx.execute(
             "UPDATE live_page_datasets SET updated_at = ?1 WHERE page_id = ?2 AND name = ?3",
-            rusqlite::params![dataset.updated_at.to_rfc3339(), page.id, dataset.name],
+            rusqlite::params![updated_at.to_rfc3339(), page.id, dataset.name],
         )?;
         for point in dataset.points {
             tx.execute("INSERT INTO live_page_dataset_points
