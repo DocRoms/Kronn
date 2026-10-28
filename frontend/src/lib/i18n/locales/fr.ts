@@ -3327,7 +3327,7 @@ const fr: TranslationDict = {
   'usage.errorToolMissing': 'ccusage n’est pas disponible sur cette installation. Installez-le ou utilisez l’image Kronn qui l’intègre.',
   'usage.errorLogsUnreadable': 'Kronn ne peut pas lire les journaux locaux des agents. Vérifiez les droits d’accès ou le montage du dossier utilisateur.',
   'usage.errorRead': 'Impossible de produire le rapport ccusage. Réessayez ou consultez le détail technique au survol.',
-  'usage.empty': 'Aucun journal CLI compatible trouvé pour cette période.',
+  'usage.empty': 'Aucune consommation enregistrée sur cette période pour l’instant.',
   'usage.loading': 'Chargement de l\'usage…',
   'usage.cacheTooltip': 'Cache create + cache read (les cache-read coûtent ~10× moins).',
   'usage.col.period': 'Période',

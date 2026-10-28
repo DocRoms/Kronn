@@ -3293,7 +3293,7 @@ const zh: TranslationDict = {
   "usage.errorToolMissing": "此安装中未提供 ccusage。请安装它或使用包含它的 Kronn 镜像。",
   "usage.errorLogsUnreadable": "Kronn 无法读取本地代理日志。请检查访问权限或用户文件夹挂载。",
   "usage.errorRead": "无法生成 ccusage 报告。请重试或悬停查看技术细节。",
-  "usage.empty": "此期间未找到兼容 CLI 日志。",
+  "usage.empty": "此期间暂无使用记录。",
   "usage.loading": "正在加载使用情况……",
   "usage.cacheTooltip": "缓存创建 + 缓存读取（缓存读取成本约低 10 倍）。",
   "usage.col.period": "周期",

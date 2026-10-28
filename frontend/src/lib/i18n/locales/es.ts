@@ -3317,7 +3317,7 @@ const es: TranslationDict = {
   'usage.errorToolMissing': 'ccusage no está disponible en esta instalación. Instálalo o utiliza la imagen de Kronn que lo incluye.',
   'usage.errorLogsUnreadable': 'Kronn no puede leer los registros locales de los agentes. Comprueba los permisos de acceso o el montaje de la carpeta de usuario.',
   'usage.errorRead': 'No se pudo generar el informe de ccusage. Inténtalo de nuevo o pasa el cursor para ver los detalles técnicos.',
-  'usage.empty': 'No se encontró ningún registro CLI compatible para este periodo.',
+  'usage.empty': 'Aún no hay consumo registrado en este periodo.',
   'usage.loading': 'Cargando el uso…',
   'usage.cacheTooltip': 'Cache create + cache read (los cache-read cuestan ~10× menos).',
   'usage.col.period': 'Periodo',

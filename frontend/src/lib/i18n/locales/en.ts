@@ -3317,7 +3317,7 @@ const en: TranslationDict = {
   'usage.errorToolMissing': 'ccusage is not available in this installation. Install it or use the Kronn image that includes it.',
   'usage.errorLogsUnreadable': 'Kronn cannot read the local agent logs. Check access permissions or the user-folder mount.',
   'usage.errorRead': 'Could not produce the ccusage report. Try again or hover for the technical details.',
-  'usage.empty': 'No compatible CLI log was found for this period.',
+  'usage.empty': 'No usage recorded for this period yet.',
   'usage.loading': 'Loading usage…',
   'usage.cacheTooltip': 'Cache create + cache read (cache-reads cost ~10× less).',
   'usage.col.period': 'Period',

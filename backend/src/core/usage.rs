@@ -543,6 +543,13 @@ pub fn period_since(period_kind: &str, today: chrono::NaiveDate) -> String {
     start.format("%Y%m%d").to_string()
 }
 
+/// Where the report starts: the current period, or `None` for the whole
+/// history (`history`, read by the Agents tab). Kept apart from
+/// `fetch_usage` so that the choice is tested without running ccusage.
+fn report_since(period_kind: &str, history: bool, today: chrono::NaiveDate) -> Option<String> {
+    (!history).then(|| period_since(period_kind, today))
+}
+
 /// The `ccusage` process: the base environment only (KT-1006), plus where
 /// Claude's logs live when the user moved them. Dates are read in Kronn's
 /// timezone, which ccusage is told too so both cut days at the same instant.
@@ -595,7 +602,7 @@ pub async fn fetch_usage(period: &str, history: bool) -> Result<UsageReport, Str
     let program = resolve_ccusage_program()?;
     let timezone = crate::core::timezone::current();
     let today = chrono::Utc::now().with_timezone(&timezone).date_naive();
-    let since = (!history).then(|| period_since(period_kind, today));
+    let since = report_since(period_kind, history, today);
     let mut command = ccusage_command(&program, period_kind, timezone, since);
 
     let output = command
@@ -693,13 +700,32 @@ mod tests {
     }
 
     #[test]
-    fn ccusage_history_mode_has_no_window() {
-        // The Agents tab averages model costs over the whole history.
+    fn history_drops_the_window_and_the_default_keeps_it() {
+        // Thursday 2026-10-22. Inverting `history` would empty the Agents tab
+        // at the start of each month, and bring the all-time total back.
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
+        assert_eq!(report_since("monthly", true, today), None);
+        assert_eq!(report_since("weekly", true, today), None);
+        assert_eq!(report_since("daily", true, today), None);
+        assert_eq!(
+            report_since("monthly", false, today).as_deref(),
+            Some("20261001")
+        );
+        assert_eq!(
+            report_since("weekly", false, today).as_deref(),
+            Some("20261019")
+        );
+        assert_eq!(
+            report_since("daily", false, today).as_deref(),
+            Some("20261022")
+        );
+
+        // …and ccusage then runs without `--since`, as the Agents tab needs.
         let command = ccusage_command(
             std::path::Path::new("/usr/bin/ccusage"),
             "monthly",
             chrono_tz::Tz::Europe__Paris,
-            None,
+            report_since("monthly", true, today),
         );
         let args: Vec<String> = command
             .as_std()
