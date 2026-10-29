@@ -31,6 +31,13 @@ Release notes for 0.9.3 and earlier are available in the
   red above, with advice on how to optimize. The Pages list badges heavy Pages,
   and a heavy write returns a notice the agent receives as `kronn_notice`
   (#252).
+### Fixed
+
+- The dark-theme contrast scan no longer fails on `:root`, the name axe gives
+  a node it could not address once the page re-rendered it; the Settings route
+  left one such node behind on any dark theme, one run in two.
+- The boot screen's fade-out tolerates a torn-down document, so a settle
+  timer that outlives its test no longer throws `document is not defined`.
 
 ## [0.15.1] - 2026-10-22
 
