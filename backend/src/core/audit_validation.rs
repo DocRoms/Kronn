@@ -766,7 +766,13 @@ pub(crate) struct TdCardOutcome {
 fn failure_lines(failed: &[(String, String)]) -> String {
     failed
         .iter()
-        .map(|(td_id, reason)| format!("- {td_id}: {reason}"))
+        // Truncated like the refusal: the id comes from the agent.
+        .map(|(td_id, reason)| {
+            format!(
+                "- {}: {reason}",
+                td_id.chars().take(100).collect::<String>()
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -879,14 +885,36 @@ pub(crate) fn apply_td_resolutions_at(
     let mut titles = std::collections::HashMap::new();
     for (resolution, reason) in resolutions {
         if !valid_td_id(&resolution.td_id) || !seen.insert(resolution.td_id.as_str()) {
-            return Err(anyhow!("Invalid or duplicate audit TD id"));
+            // Truncated: the id comes from the agent and can be arbitrarily long.
+            return Err(anyhow!(
+                "{}: invalid or duplicate audit TD id",
+                resolution.td_id.chars().take(100).collect::<String>()
+            ));
         }
         let candidate = td_dir.join(format!("{}.md", resolution.td_id));
         // A debt only the index lists has no file yet: the decision writes it.
         let (path, content, existing) = if candidate.symlink_metadata().is_err() {
             let rows = crate::core::td_index::docs_index_rows(&docs_dir);
-            let content = sheet_from_row(&resolution.td_id, rows.get(&resolution.td_id))
-                .ok_or_else(|| anyhow!("{} has no sheet and no index row", resolution.td_id))?;
+            let Some(content) = sheet_from_row(&resolution.td_id, rows.get(&resolution.td_id))
+            else {
+                // `docs_index_rows` skips an unreadable index: the refusal would
+                // then blame a missing row instead of the real cause. Checked
+                // only now, so a row from a dimension index still resolves.
+                let index = docs_dir.join(crate::core::td_index::CENTRAL_INDEX);
+                if let Err(error) = std::fs::read_to_string(&index) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        return Err(anyhow!(error).context(format!(
+                            "{}: no sheet and cannot read {}",
+                            resolution.td_id,
+                            index.display()
+                        )));
+                    }
+                }
+                return Err(anyhow!(
+                    "{} has no sheet and no index row",
+                    resolution.td_id
+                ));
+            };
             (candidate, content, false)
         } else {
             let path = canonical_child(&td_dir, &candidate)?;
@@ -1492,6 +1520,71 @@ mod tests {
                 .is_err()
         );
         assert!(!bare.path().join("docs/tech-debt").exists());
+    }
+
+    #[test]
+    fn a_refused_td_id_is_named_in_the_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs/tech-debt")).unwrap();
+        std::fs::write(
+            tmp.path().join("docs/tech-debt/TD-20261016-twice.md"),
+            "# TD-20261016-twice\n\n- **Status**: Inferred\n",
+        )
+        .unwrap();
+        let twice = TdResolution {
+            td_id: "TD-20261016-twice".into(),
+            action: TdResolutionAction::Confirm,
+        };
+        let error = apply_td_resolutions_at(
+            tmp.path(),
+            &[(&twice, None), (&twice, None)],
+            TdDecisionOrigin::Review,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().starts_with("TD-20261016-twice:"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_card_note_truncates_an_overlong_td_id() {
+        let long = format!("TD-{}", "x".repeat(300));
+        let note = failure_lines(&[(long.clone(), "refused".to_string())]);
+        assert_eq!(note, format!("- {}: refused", &long[..100]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_index_reports_its_cause_not_a_missing_row() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        // A directory in place of the index: reading it fails, but not with NotFound.
+        std::fs::create_dir(docs.join("inconsistencies-tech-debt.md")).unwrap();
+        let row_only = TdResolution {
+            td_id: "TD-20261016-rowonly".into(),
+            action: TdResolutionAction::Confirm,
+        };
+        let error =
+            apply_td_resolutions_at(tmp.path(), &[(&row_only, None)], TdDecisionOrigin::Review)
+                .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("cannot read"), "{message}");
+        assert!(!message.contains("no index row"), "{message}");
+        assert!(!docs.join("tech-debt/TD-20261016-rowonly.md").exists());
+
+        // The same unreadable central index does not refuse a TD whose row
+        // sits in a dimension index.
+        std::fs::write(
+            docs.join("inconsistencies-security.md"),
+            "# Security\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20261016-rowonly | Row elsewhere | API | High | Open |\n",
+        )
+        .unwrap();
+        apply_td_resolutions_at(tmp.path(), &[(&row_only, None)], TdDecisionOrigin::Review)
+            .unwrap();
+        let sheet = std::fs::read_to_string(docs.join("tech-debt/TD-20261016-rowonly.md")).unwrap();
+        assert!(sheet.contains("- **Severity**: High"), "{sheet}");
     }
 
     #[cfg(unix)]
