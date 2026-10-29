@@ -50,6 +50,7 @@ describe('TechDebtBlock', () => {
     expect(screen.queryByTestId('td-validate')).toBeNull();
     fireEvent.click(screen.getByText('techDebt.validationLink'));
     expect(props.onOpenDiscussion).toHaveBeenCalledWith('disc-validation');
+    expect(props.onNavigate).not.toHaveBeenCalledWith('discussions');
     fireEvent.click(screen.getByText('techDebt.tasksLink 1'));
     expect(props.onNavigate).toHaveBeenCalledWith('planning');
   });
