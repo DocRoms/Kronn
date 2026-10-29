@@ -52,6 +52,23 @@ describe('boot screen', () => {
     expect(document.getElementById('kronn-boot')).toBeNull();
   });
 
+  it('forgets a pending settle timer when reset, so none fires after a test ends', () => {
+    mountBootScreen();
+    armBootScreen();
+    resetBootScreenForTests();
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(bootScreenActive()).toBe(true);
+  });
+
+  it('finishes without a document, as when a timer outlives its test', () => {
+    vi.stubGlobal('document', undefined);
+    try {
+      expect(() => finishBootScreen()).not.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('does not flash off between one loader unmounting and the next mounting', () => {
     mountBootScreen();
     const first = holdBootScreen();
