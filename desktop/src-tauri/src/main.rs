@@ -270,14 +270,8 @@ fn bundled_mcp_sidecar_path(resource_dir: &std::path::Path) -> std::path::PathBu
 
 // ── PATH enrichment for desktop apps ───────────────────────────────────────
 
-/// Maximum time we wait for the user's login shell to print its PATH.
-/// 5 seconds is enough for normal zsh/bash startups but kills shells that
-/// hang on plugin downloads, broken `compinit`, or interactive prompts.
-#[cfg(unix)]
-const SHELL_PATH_TIMEOUT_SECS: u64 = 5;
-
 /// Messages emitted before the tracing subscriber exists, logged once it does.
-type StartupLog = Vec<(tracing::Level, String)>;
+type StartupLog = kronn::core::shell_path::StartupLog;
 
 /// Log what [`enrich_path`] collected before tracing started.
 fn log_startup(messages: StartupLog) {
@@ -289,103 +283,6 @@ fn log_startup(messages: StartupLog) {
             _ => tracing::debug!("{message}"),
         }
     }
-}
-
-/// Try to load the user's actual shell PATH by running their login shell.
-/// On macOS GUI apps, the inherited PATH is minimal (/usr/bin:/bin:...).
-/// Apps like VS Code use this technique to get the same PATH as Terminal.app.
-///
-/// Hardened against:
-/// - SHELL not set / pointing to /bin/false / non-existent shell
-/// - Slow/hanging .zshrc, .bashrc (timeout + kill)
-/// - Shells that fail with -i -l (e.g. fish strict mode) — stderr is logged
-/// - Empty SHELL var
-#[cfg(unix)]
-fn shell_path_from_user_shell(log: &mut StartupLog) -> Option<String> {
-    let shell = kronn::core::child_env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty() && s != "/bin/false" && std::path::Path::new(s).exists())
-        .unwrap_or_else(|| "/bin/bash".to_string());
-
-    // Spawn the shell as a child process so we can enforce a timeout.
-    // -i = interactive (sources .zshrc/.bashrc), -l = login (sources .profile)
-    // The rc files run with the base allow-list (HOME, PATH, SHELL…), never
-    // the desktop's whole environment (KT-1006).
-    let mut child = match kronn::core::cmd::sync_tool_cmd(&shell)
-        .args(["-i", "-l", "-c", "echo $PATH"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            log.push((
-                tracing::Level::WARN,
-                format!("Cannot spawn shell {shell} for PATH discovery: {e}"),
-            ));
-            return None;
-        }
-    };
-
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(SHELL_PATH_TIMEOUT_SECS);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = match child.wait_with_output() {
-                    Ok(o) => o,
-                    Err(e) => {
-                        log.push((
-                            tracing::Level::WARN,
-                            format!("Failed to read shell output: {e}"),
-                        ));
-                        return None;
-                    }
-                };
-                if !status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    log.push((
-                        tracing::Level::DEBUG,
-                        format!(
-                            "Shell {shell} exited with {status} when probing PATH; stderr: {}",
-                            stderr.trim()
-                        ),
-                    ));
-                    return None;
-                }
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                return if path.is_empty() { None } else { Some(path) };
-            }
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    log.push((
-                        tracing::Level::WARN,
-                        format!(
-                            "Shell {shell} did not return PATH within {SHELL_PATH_TIMEOUT_SECS}s — killing and falling back to defaults"
-                        ),
-                    ));
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(e) => {
-                log.push((
-                    tracing::Level::WARN,
-                    format!("Failed to poll shell child: {e}"),
-                ));
-                let _ = child.kill();
-                return None;
-            }
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn shell_path_from_user_shell(_log: &mut StartupLog) -> Option<String> {
-    None
 }
 
 /// Discover all `bin/` directories under a node-version-manager root like
@@ -447,7 +344,7 @@ fn enrich_path() -> StartupLog {
 
     // Step 1: try to load the full PATH from the user's shell (Unix only).
     // Has its own timeout so it never blocks startup more than a few seconds.
-    if let Some(shell_path) = shell_path_from_user_shell(&mut log) {
+    if let Some(shell_path) = kronn::core::shell_path::shell_path_from_user_shell(&mut log) {
         for dir in shell_path.split(separator) {
             let dir = dir.to_string();
             if !dir.is_empty() && !paths.contains(&dir) {
@@ -1279,10 +1176,22 @@ mod enrich_path_tests {
     #[test]
     fn the_lan_guard_treats_every_bind_all_host_alike() {
         for host in ["0.0.0.0", "::"] {
-            assert!(embedded_lan_guard(host, false, false, false).is_some(), "{host}");
-            assert!(embedded_lan_guard(host, true, false, false).is_some(), "{host}");
-            assert!(embedded_lan_guard(host, true, true, false).is_none(), "{host}");
-            assert!(embedded_lan_guard(host, false, false, true).is_none(), "{host}");
+            assert!(
+                embedded_lan_guard(host, false, false, false).is_some(),
+                "{host}"
+            );
+            assert!(
+                embedded_lan_guard(host, true, false, false).is_some(),
+                "{host}"
+            );
+            assert!(
+                embedded_lan_guard(host, true, true, false).is_none(),
+                "{host}"
+            );
+            assert!(
+                embedded_lan_guard(host, false, false, true).is_none(),
+                "{host}"
+            );
         }
         assert!(embedded_lan_guard("127.0.0.1", false, false, false).is_none());
         // `::` survives configure_embedded_server, so the guard must see it.
@@ -1559,43 +1468,12 @@ mod enrich_path_tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
-    /// A failing login shell returns no PATH and leaves a message for the
-    /// log, which starts after `enrich_path` runs (nothing is dropped).
-    #[cfg(unix)]
-    #[test]
-    fn shell_path_from_user_shell_reports_a_failing_shell() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("kronn-shell-probe-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let shell = dir.join("failing-shell");
-        std::fs::write(&shell, "#!/bin/sh\necho broken >&2\nexit 3\n").unwrap();
-        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let prev = kronn::core::child_env::var("SHELL").ok();
-        kronn::core::child_env::set_var("SHELL", &shell);
-        let mut log = Vec::new();
-        let result = shell_path_from_user_shell(&mut log);
-        match prev {
-            Some(s) => kronn::core::child_env::set_var("SHELL", s),
-            None => kronn::core::child_env::remove_var("SHELL"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(result, None);
-        assert!(
-            log.iter()
-                .any(|(_, message)| message.contains("exited with") && message.contains("broken")),
-            "{log:?}"
-        );
-    }
-
     /// The startup PATH code runs before tracing exists: it must collect its
     /// messages instead of emitting them, or they are lost.
     #[test]
     fn startup_path_code_emits_no_tracing_event() {
         let source = include_str!("main.rs");
-        for signature in [
-            "fn enrich_path() -> StartupLog {",
-            "fn shell_path_from_user_shell(log: &mut StartupLog) -> Option<String> {",
-        ] {
+        for signature in ["fn enrich_path() -> StartupLog {"] {
             let start = source.find(signature).unwrap();
             let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
             for event in [
