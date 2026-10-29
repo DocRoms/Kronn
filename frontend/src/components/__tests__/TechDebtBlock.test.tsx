@@ -78,7 +78,9 @@ describe('TechDebtBlock', () => {
     expect(screen.queryByTestId('td-validate')).toBeNull();
     fireEvent.click(screen.getByTestId('td-disputes-link'));
     expect(props.onOpenDiscussion).toHaveBeenCalledWith('disc-disputes');
-    expect(props.onNavigate).toHaveBeenCalledWith('discussions');
+    // onOpenDiscussion navigates by itself: a trailing navigate to the bare
+    // page dropped the id and reopened the last discussion viewed (#421).
+    expect(props.onNavigate).not.toHaveBeenCalledWith('discussions');
   });
 
   it('shows no dispute line when none is open', async () => {

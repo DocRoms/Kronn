@@ -1174,7 +1174,6 @@ export function ProjectCard({
             if (info.discussionId) {
               toast(t('audit.partialReverifiedValidation', String(info.unchangedSteps.length)), 'success');
               onOpenDiscussion(info.discussionId);
-              onNavigate('discussions');
             } else {
               toast(t('audit.partialReverified', String(info.unchangedSteps.length)), 'success');
             }
@@ -1217,7 +1216,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+  }, [selectedAuditAgent, selectedAuditTier, selectedAuditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion]);
 
   const startPartialAudit = useCallback(async (steps: number[], acceptUnverifiedAgents = false) => {
     await gateTemplateLaunch(() => void launchPartialAudit(steps, acceptUnverifiedAgents));
@@ -1865,7 +1864,6 @@ export function ProjectCard({
         onRefetch={() => { onRefetch(); setDocStateReload(value => value + 1); }}
         onRefetchDrift={(projectId) => { onRefetchDrift(projectId); setDocStateReload(value => value + 1); }}
         onOpenDiscussion={onOpenDiscussion}
-        onNavigate={onNavigate}
         open={verifyDocsOpen}
         onOpenChange={setVerifyDocsOpen}
         hideTrigger
@@ -2849,7 +2847,6 @@ export function ProjectCard({
                     }}
                     onOpenValidation={(discussionId) => {
                       onOpenDiscussion(discussionId);
-                      onNavigate('discussions');
                     }}
                     techDebtEntry={(
                       <TechDebtTimelineEntry

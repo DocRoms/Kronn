@@ -86,7 +86,6 @@ function setup(overrides: Partial<React.ComponentProps<typeof RevalidateAudit>> 
     onRefetch: vi.fn(),
     onRefetchDrift: vi.fn(),
     onOpenDiscussion: vi.fn(),
-    onNavigate: vi.fn(),
     ...overrides,
   };
   render(<RevalidateAudit {...props} />);
@@ -153,7 +152,7 @@ describe('RevalidateAudit', () => {
     const props = {
       project: PROJECT, auditActive: false, agent: 'ClaudeCode' as const, tier: 'reasoning' as const,
       connectionId: null, toast: vi.fn(), onRefetch: vi.fn(), onRefetchDrift: vi.fn(),
-      onOpenDiscussion: vi.fn(), onNavigate: vi.fn(),
+      onOpenDiscussion: vi.fn(),
     };
     const { rerender } = render(<RevalidateAudit {...props} />);
     const panel = await openPanel();
@@ -446,7 +445,6 @@ describe('RevalidateAudit', () => {
     expect(props.onRefetch).toHaveBeenCalled();
     fireEvent.click(within(panel).getByText('audit.revalidate.done.openValidation'));
     expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-val');
-    expect(props.onNavigate).toHaveBeenCalledWith('discussions');
     expect(within(panel).queryByTestId('revalidate-resume')).toBeNull();
   });
 

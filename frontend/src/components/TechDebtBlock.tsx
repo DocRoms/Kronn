@@ -242,7 +242,7 @@ export function TechDebtBlock({
               type="button"
               className="td-link-btn"
               data-testid="td-disputes-link"
-              onClick={() => { onOpenDiscussion(list.dispute_discussion_id as string); onNavigate('discussions'); }}
+              onClick={() => { onOpenDiscussion(list.dispute_discussion_id as string); }}
             >
               <MessageSquare size={12} /> {t('techDebt.disputesLink')}
             </button>
@@ -271,7 +271,7 @@ export function TechDebtBlock({
           <button
             type="button"
             className="td-link-btn"
-            onClick={() => { onOpenDiscussion(validationId); onNavigate('discussions'); }}
+            onClick={() => { onOpenDiscussion(validationId); }}
           >
             <MessageSquare size={12} /> {t('techDebt.validationLink')}
           </button>
