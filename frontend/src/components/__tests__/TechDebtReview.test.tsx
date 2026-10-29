@@ -231,6 +231,25 @@ describe('TechDebtReview', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('opens the validation without a bare-page navigation (#421)', () => {
+    const props = setup();
+    fireEvent.click(screen.getByText('techDebt.talk.openValidation'));
+    expect(props.onOpenDiscussion).toHaveBeenCalledWith('disc-validation');
+    expect(props.onClose).toHaveBeenCalled();
+    expect(props.onNavigate).not.toHaveBeenCalledWith('discussions');
+  });
+
+  it('opens the item discussion without a bare-page navigation (#421)', async () => {
+    mocked(projectsApi.tdTalk).mockResolvedValueOnce({
+      validation_discussion_id: 'disc-validation', discussion_id: 'disc-talk', messages: [],
+    });
+    const props = setup();
+    fireEvent.click(await screen.findByText('techDebt.talk.openDiscussion'));
+    expect(props.onOpenDiscussion).toHaveBeenCalledWith('disc-talk');
+    expect(props.onClose).toHaveBeenCalled();
+    expect(props.onNavigate).not.toHaveBeenCalledWith('discussions');
+  });
+
   it('stays usable with 150 items', () => {
     const many = Array.from({ length: 150 }, (_, i) =>
       tdItem(`TD-20261001-n${i}`, ['Critical', 'High', 'Medium', 'Low'][i % 4]));

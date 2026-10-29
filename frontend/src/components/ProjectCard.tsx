@@ -2845,9 +2845,7 @@ export function ProjectCard({
                         toast(userError(error), 'error');
                       }
                     }}
-                    onOpenValidation={(discussionId) => {
-                      onOpenDiscussion(discussionId);
-                    }}
+                    onOpenValidation={onOpenDiscussion}
                     techDebtEntry={(
                       <TechDebtTimelineEntry
                         project={proj}
