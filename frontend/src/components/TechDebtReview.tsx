@@ -212,7 +212,6 @@ export function TechDebtReview({
   const openValidation = () => {
     if (!list.validation_discussion_id) return;
     onOpenDiscussion(list.validation_discussion_id);
-    onNavigate('discussions');
     onClose();
   };
 
@@ -503,7 +502,7 @@ export function TechDebtReview({
                   onTargetsChange={targets => setTalkTargets(targets ?? defaultCompareTargets(talkChoices, 'default'))}
                   modelTiers={modelTiers}
                   onTalkChanged={onReload}
-                  onOpenDiscussion={(id) => { onOpenDiscussion(id); onNavigate('discussions'); onClose(); }}
+                  onOpenDiscussion={(id) => { onOpenDiscussion(id); onClose(); }}
                 />
                 {list.validation_discussion_id && (
                   <button type="button" className="td-link-btn" onClick={openValidation}>

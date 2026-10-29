@@ -39,6 +39,14 @@ Release notes for 0.9.3 and earlier are available in the
 - The boot screen's fade-out tolerates a torn-down document, so a settle
   timer that outlives its test no longer throws `document is not defined`.
 
+### Fixed
+
+- Opening an audit validation from the project page (audit timeline,
+  tech-debt validation or disputes link, docs check panel, a partial audit
+  that re-verified unchanged sections) opens that discussion again, instead
+  of the last discussion viewed, which could belong to another project
+  (#421).
+
 ## [0.15.1] - 2026-10-22
 
 ### Added

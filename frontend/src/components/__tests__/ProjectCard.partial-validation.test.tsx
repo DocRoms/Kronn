@@ -159,7 +159,9 @@ describe('ProjectCard — partial refresh validation UX', () => {
     await clickUpdate();
     expect(props.toast).toHaveBeenCalledWith('audit.partialReverifiedValidation 1', 'success');
     expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-reverified');
-    expect(props.onNavigate).toHaveBeenCalledWith('discussions');
+    // onOpenDiscussion navigates by itself: a trailing navigate to the bare
+    // page dropped the id and reopened the last discussion viewed (#421).
+    expect(props.onNavigate).not.toHaveBeenCalledWith('discussions');
   });
 
   it('interrupted with done steps: error toast naming their validation, no navigation', async () => {

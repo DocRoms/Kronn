@@ -84,7 +84,9 @@ describe('ProjectCard — validating after the validation discussion finished', 
 
     fireEvent.click(within(block).getByRole('button', { name: /auditTimeline\.validation\.viewDiscussion/ }));
     expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-val');
-    expect(props.onNavigate).toHaveBeenCalledWith('discussions');
+    // onOpenDiscussion navigates by itself: a trailing navigate to the bare
+    // page dropped the id and reopened the last discussion viewed (#421).
+    expect(props.onNavigate).not.toHaveBeenCalledWith('discussions');
   });
 
   it('a refused validation is shown in an error toast', async () => {

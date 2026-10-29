@@ -35,7 +35,6 @@ export interface RevalidateAuditProps {
   onRefetch: () => void;
   onRefetchDrift: (projectId: string) => void;
   onOpenDiscussion: (discId: string) => void;
-  onNavigate: (page: string) => void;
   /** ProjectCard owns the one shared dialog used by its header, timeline and doc viewer. */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -59,7 +58,7 @@ export interface RevalidateAuditProps {
  */
 export function RevalidateAudit({
   project, auditActive, agent, tier, connectionId, toast, gateLaunch,
-  onRefetch, onRefetchDrift, onOpenDiscussion, onNavigate,
+  onRefetch, onRefetchDrift, onOpenDiscussion,
   open: controlledOpen, onOpenChange, hideTrigger = false,
   drift, reconfirmCount = null, docStateUnknown = false,
   onUpdateStale, onAcknowledgeStale, driftAcking = false, onFillPlaceholders, onReconfirm, onFullAudit,
@@ -315,7 +314,7 @@ export function RevalidateAudit({
       return (
         <div className="rv-outcome" data-tone="success">
           <p>{t('audit.revalidate.done.complete')}</p>
-          <button type="button" className="rv-btn" onClick={() => { onOpenDiscussion(id); onNavigate('discussions'); }}>
+          <button type="button" className="rv-btn" onClick={() => { onOpenDiscussion(id); }}>
             {t('audit.revalidate.done.openValidation')}
           </button>
         </div>
@@ -325,7 +324,7 @@ export function RevalidateAudit({
     // interrupted one, may carry their own validation discussion.
     const validationId = partial.discussionId;
     const openValidation = validationId && (
-      <button type="button" className="rv-btn" onClick={() => { onOpenDiscussion(validationId); onNavigate('discussions'); }}>
+      <button type="button" className="rv-btn" onClick={() => { onOpenDiscussion(validationId); }}>
         {t('audit.revalidate.done.openValidation')}
       </button>
     );
