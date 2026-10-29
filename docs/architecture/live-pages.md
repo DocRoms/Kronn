@@ -35,7 +35,7 @@ links are not included.
 [src: file: backend/src/models/artifact_portability.rs:54-74#ArtifactBundle]
 [src: file: backend/src/api/artifact_portability.rs:26-29#MAX_BUNDLE_ITEMS]
 [src: file: backend/src/api/artifact_portability.rs:73-78#export_bare_page]
-[src: file: backend/src/api/artifact_portability.rs:294-303#export_bundle]
+[src: file: backend/src/api/artifact_portability.rs:316-325#export_bundle]
 
 Import is available in the library and in a workflow's publishing step before
 the library is activated. The user selects a project and reviews each planned
@@ -64,8 +64,8 @@ reused (same content here), created, or in conflict (same name, other content),
 where the user picks a copy (default) or the local skill (`skill_choices`, part
 of the reviewed digest). Steps, JsonData payload values and Quick Prompts are
 remapped to the resulting ids; see the glossary's "Bundled skill".
-[src: file: backend/src/api/artifact_portability/import.rs:552-558#approved_quick_exec_ids]
-[src: file: backend/src/api/artifact_portability/import.rs:777-779#digest]
+[src: file: backend/src/api/artifact_portability/import.rs:574-580#approved_quick_exec_ids]
+[src: file: backend/src/api/artifact_portability/import.rs:799-801#digest]
 [src: file: frontend/src/components/ArtifactImportDialog.tsx:71-74#setApprovedExecIds]
 
 An export carries no dataset values. A file exported before #273 still does:
@@ -76,8 +76,8 @@ and the runtime delivers those stored datasets without resolving a viewer.
 When a Page uses such a dataset for a personal default, recollect using the
 recipient's configured connection and reopen the Page before checking that
 default; do not infer the viewer from an imported identity snapshot.
-[src: file: backend/src/api/artifact_portability.rs:133-137]
-[src: file: backend/src/api/artifact_portability/import.rs:924]
+[src: file: backend/src/api/artifact_portability.rs:134-138]
+[src: file: backend/src/api/artifact_portability/import.rs:925]
 [src: file: frontend/src/lib/live-page-sandbox.ts:314-333#runtimeData]
 
 Configured connections, their stored credentials, agent-library entries and
@@ -92,7 +92,7 @@ import preview shows that list. `{{…}}` references are kept.
 [src: file: backend/src/core/export_secrets.rs:15-16#REDACTED]
 The selected project applies to newly created automation definitions and
 Artifact action scopes. A deliberately reused local definition is unchanged.
-[src: file: backend/src/api/artifact_portability/import.rs:379-383#remap_value]
+[src: file: backend/src/api/artifact_portability/import.rs:398-402#remap_value]
 
 `GET /api/pages/{id}/export`, `POST /api/pages/import/preview` and
 `POST /api/pages/import` retain the established Page API naming. Import requires
@@ -102,7 +102,7 @@ datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
 [src: file: backend/src/lib.rs:1297-1318#artifact_portability]
-[src: file: backend/src/api/artifact_portability/import.rs:1139-1157#preview_digest]
+[src: file: backend/src/api/artifact_portability/import.rs:1147-1165#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
 ## Status
@@ -700,7 +700,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:4673-4681#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:4700-4708#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:128-130#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -748,7 +748,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:4829-4839#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:4856-4866#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
@@ -945,7 +945,7 @@ it was itself imported with. That last part is stored with the Page
 declaration through a chain of imports. It is information for the importer,
 never an authorization, and the creator's allowed sites are not exported.
 [src: file: backend/src/core/embed_origins.rs:149-172#declared_origins]
-[src: file: backend/src/api/artifact_portability.rs:130#export_embed_origins]
+[src: file: backend/src/api/artifact_portability.rs:151#export_embed_origins]
 The import preview lists one row per distinct origin (from the HTML and the
 declaration): already allowed ("in the Artifact and already in your
 configuration"), or Add / Refuse. Answers are not part of the reviewed digest
@@ -961,9 +961,9 @@ sites in `not_allowed_embed_origins` with `embed_origins_error`, and the dialog
 says so before opening the Artifact.
 [src: file: frontend/src/components/ArtifactImportDialog.tsx:171#embed_origins]
 [src: file: backend/src/api/artifact_portability/import.rs:88-101#origins_to_allow]
-[src: file: backend/src/api/artifact_portability/import.rs:1153-1158#apply_changes]
+[src: file: backend/src/api/artifact_portability/import.rs:1181-1186#apply_changes]
 [src: file: backend/src/core/embed_origins.rs:217-218#MAX_EMBED_ORIGINS]
-[src: file: backend/src/api/artifact_portability/import.rs:1173-1177#not_allowed_embed_origins]
+[src: file: backend/src/api/artifact_portability/import.rs:1201-1205#not_allowed_embed_origins]
 
 Security reasoning, in short: the destination Kronn alone decides which sites
 may be framed, and checks every URL at render time, including ones added by
