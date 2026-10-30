@@ -3585,52 +3585,17 @@ pub fn committed_file_changes(
         .collect()
 }
 
-/// `(sha, full message)` of every commit in `base_rev..head_rev`.
-pub fn commit_messages(
-    worktree_path: &Path,
-    base_rev: &str,
-    head_rev: &str,
-) -> Result<Vec<(String, String)>, String> {
-    commit_messages_excluding(worktree_path, base_rev, head_rev, None)
-}
+/// `GIT_GRAFT_FILE` value that reads as "no grafts": `<git-dir>/info/grafts`
+/// is shared by every worktree of the repository, so a worker can write it to
+/// give a commit other parents and hide the commits behind it from a log.
+pub(crate) const NO_GRAFTS_ENV: (&str, &str) = (
+    "GIT_GRAFT_FILE",
+    if cfg!(windows) { "NUL" } else { "/dev/null" },
+);
 
-/// The commits of `base_rev..head_rev` that are not already reachable from
-/// `exclude` (the integration target): a delivery that merged its target in
-/// is judged on its own commits, not on the target's.
-pub fn commit_messages_excluding(
-    worktree_path: &Path,
-    base_rev: &str,
-    head_rev: &str,
-    exclude: Option<&str>,
-) -> Result<Vec<(String, String)>, String> {
-    reject_option_like_rev(base_rev)?;
-    reject_option_like_rev(head_rev)?;
-    let range = format!("{base_rev}..{head_rev}");
-    let mut args = vec!["log", "-z", "--format=%H%n%B", range.as_str()];
-    let excluded = match exclude {
-        Some(target) => {
-            let branch = resolve_local_branch(worktree_path, target)?;
-            Some(format!("refs/heads/{branch}"))
-        }
-        None => None,
-    };
-    if let Some(excluded) = excluded.as_deref() {
-        args.extend(["--not", excluded]);
-    }
-    args.push("--");
-    let output = crate::core::cmd::git_cmd()
-        .args(&args)
-        .current_dir(worktree_path)
-        .output()
-        .map_err(|e| format!("git log failed in worktree: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git log failed in worktree ({}): {}",
-            worktree_path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
+/// The `(sha, full message)` records of `git log -z --format=%H%n%B`.
+pub(crate) fn parse_commit_log(stdout: &[u8]) -> Vec<(String, String)> {
+    String::from_utf8_lossy(stdout)
         .split('\0')
         .filter(|record| !record.trim().is_empty())
         .map(|record| {
@@ -3638,7 +3603,7 @@ pub fn commit_messages_excluding(
             let (sha, message) = record.split_once('\n').unwrap_or((record, ""));
             (sha.trim().to_string(), message.to_string())
         })
-        .collect())
+        .collect()
 }
 
 /// Raw bytes of `path` as committed at `rev`.
@@ -5286,49 +5251,6 @@ mod tests {
     }
 
     /// Commit a file in `dir` and return the new HEAD sha.
-    /// A delivery that merged its integration target is judged on its own
-    /// commits: a foreign trailer already on the target (another contributor's
-    /// sign-off arriving with a main merge) is not the worker's.
-    #[test]
-    fn commits_already_on_the_target_are_left_out_of_a_delivery() {
-        let repo = make_test_repo("delivery-trailers");
-        let path = repo.path();
-        let git = |args: &[&str]| {
-            assert!(crate::core::cmd::git_cmd()
-                .args(args)
-                .current_dir(path)
-                .status()
-                .unwrap()
-                .success());
-        };
-        let base = head_sha(path);
-        make_branch(path, "target");
-        git(&["checkout", "-q", "target"]);
-        let foreign = commit_file(
-            path,
-            "upstream.txt",
-            "x",
-            "fix: upstream\n\nSigned-off-by: Someone Else <else@example.com>",
-        );
-        git(&["checkout", "-q", "-b", "task", &base]);
-        let own = commit_file(path, "worker.txt", "y", "feat: worker change");
-        git(&["merge", "-q", "--no-ff", "-m", "merge target", "target"]);
-
-        let all = commit_messages(path, &base, "HEAD").unwrap();
-        assert!(all.iter().any(|(sha, _)| *sha == foreign), "{all:?}");
-
-        let delivered = commit_messages_excluding(path, &base, "HEAD", Some("target")).unwrap();
-        let shas: Vec<&str> = delivered.iter().map(|(sha, _)| sha.as_str()).collect();
-        assert!(!shas.contains(&foreign.as_str()), "{delivered:?}");
-        assert!(shas.contains(&own.as_str()), "{delivered:?}");
-        assert!(
-            delivered
-                .iter()
-                .all(|(_, message)| !message.contains("Someone Else")),
-            "{delivered:?}"
-        );
-    }
-
     fn commit_file(dir: &Path, name: &str, content: &str, msg: &str) -> String {
         fs::write(dir.join(name), content).unwrap();
         std::process::Command::new("git")
