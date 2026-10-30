@@ -139,6 +139,20 @@ cd Kronn
 # → http://localhost:3140
 ```
 
+À partir de la **0.15.2**, `./kronn start` télécharge les images publiées
+(`ghcr.io/docroms/kronn-backend` et `-frontend`, amd64 et arm64) et ne compile
+rien : une petite machine suffit. Un checkout de la **0.15.1 ou antérieure** n'a
+pas ce démarrage : son `make start` compile le backend sur ta machine, ce qui
+demande environ 20 Go de mémoire pour Docker. Avec moins, utilise l'installeur
+desktop ci-dessus en attendant la 0.15.2.
+
+Sur `main`, `VERSION` reste celle de la dernière release : `make start` lance son
+image publiée, pas le code local (`make start-build` pour tester tes modifications).
+Un build depuis les sources (`make start-build`, ou une `VERSION` sans image
+publiée) s'arrête avant de compiler quand Docker a moins de 20 Go
+(RAM + swap) ; `KRONN_FORCE_BUILD=1` force le build. Détails et mesures :
+[docs/install.md](docs/install.md#published-images-and-source-builds).
+
 </details>
 
 Dans les deux modes, le wizard scanne tes repos et te guide pour les clés API.

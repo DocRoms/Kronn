@@ -1,0 +1,324 @@
+name: Docker Images
+
+# Publishes the backend and frontend images that `make start` pulls (KT-1468).
+# Compiling the backend crate needs ~19 GB of RAM: no user machine should have
+# to. One image per service and per architecture is built on a NATIVE runner
+# (never the Rust backend under QEMU: hours instead of minutes), then a
+# multi-arch manifest ties amd64 and arm64 under one tag.
+#
+# One-time setup, in the GitHub UI (the API cannot do it): once the first run
+# has created the two packages, open each of
+#   https://github.com/orgs/DocRoms/packages/container/kronn-backend/settings
+#   https://github.com/orgs/DocRoms/packages/container/kronn-frontend/settings
+# (or the same path under /users/DocRoms if the owner is a user account),
+# "Danger Zone" > "Change visibility" > Public. The `verify-public` job fails,
+# naming this step, until an anonymous pull works.
+
+on:
+  push:
+    # This repository tags releases `0.15.1`; `v*` is accepted like the
+    # desktop installers workflow does.
+    tags: ['v*', '[0-9]+.[0-9]+.[0-9]+*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to (re)publish, e.g. 0.15.1'
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # GHCR names are lowercase; compose (docker-compose.yml) uses this exact path.
+  IMAGE_PREFIX: ghcr.io/docroms
+
+jobs:
+  # The tag, the image version and VERSION must agree: `make start` pulls the
+  # image named after VERSION, so a mismatch would publish an unreachable one.
+  resolve:
+    name: Resolve the release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      version: ${{ steps.resolve.outputs.version }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Check version consistency and the tag
+        run: scripts/check-version-sync.sh "$RELEASE_TAG"
+
+      - name: Resolve the image tag
+        id: resolve
+        run: |
+          {
+            echo "ref=$RELEASE_TAG"
+            echo "version=${RELEASE_TAG#v}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.service }} (${{ matrix.arch }})
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { service: backend, arch: amd64, runner: ubuntu-24.04, platform: linux/amd64 }
+          - { service: backend, arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64 }
+          - { service: frontend, arch: amd64, runner: ubuntu-24.04, platform: linux/amd64 }
+          - { service: frontend, arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64 }
+    runs-on: ${{ matrix.runner }}
+    # A cold release build of the backend (thin LTO, one codegen unit) is the
+    # slow one; the frontend takes minutes.
+    timeout-minutes: 90
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+
+      # Republishing an OLD tag (workflow_dispatch) must not bake that tag's
+      # packaging: a Dockerfile older than the runtime UID/GID remap pins uid
+      # 1000, which breaks every host user that is not 1000. The application
+      # source comes from the tag; the two packaging files from the commit
+      # this workflow runs at. On a tag push they are the same commit.
+      - name: Checkout the current backend packaging
+        if: matrix.service == 'backend'
+        uses: actions/checkout@v7
+        timeout-minutes: 5
+        with:
+          ref: ${{ github.sha }}
+          path: packaging
+          sparse-checkout: |
+            backend/Dockerfile
+            backend/entrypoint.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Use the current backend packaging
+        if: matrix.service == 'backend'
+        run: |
+          cp packaging/backend/Dockerfile backend/Dockerfile
+          cp packaging/backend/entrypoint.sh backend/entrypoint.sh
+          rm -rf packaging
+          grep -q kronn_drop_to_host_user backend/entrypoint.sh
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushed by digest only: the tag is attached once, by the manifest job,
+      # to the pair of architectures. `provenance: false` keeps each push a
+      # plain image so the manifest can reference it directly.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          file: ./${{ matrix.service }}/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            ${{ matrix.service == 'backend' && 'CARGO_PROFILE=release' || '' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/DocRoms/Kronn
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-only
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE_PREFIX }}/kronn-${{ matrix.service }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.service }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    name: Publish ${{ matrix.service }} manifest
+    needs: [resolve, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [backend, frontend]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download the digests of both architectures
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-${{ matrix.service }}-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only the immutable version tag is written here. `latest` moves in its own
+      # serialized job below, so two releases publishing at once cannot race on it.
+      - name: Create the multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}/kronn-${{ matrix.service }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          # One file per architecture digest, named after the digest.
+          refs=()
+          for digest in *; do
+            refs+=("$IMAGE@sha256:$digest")
+          done
+          if [ "${#refs[@]}" -ne 2 ]; then
+            echo "::error::Expected one digest per architecture (amd64, arm64), found ${#refs[@]}."
+            exit 1
+          fi
+          docker buildx imagetools create -t "$IMAGE:$VERSION" "${refs[@]}"
+
+      - name: Inspect the result
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}/kronn-${{ matrix.service }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: docker buildx imagetools inspect "$IMAGE:$VERSION"
+
+  # `latest` is what a new install pulls, so it only ever moves forward: never
+  # to a prerelease (0.16.0-rc1), never back to an older stable release.
+  #
+  # Check and write are one critical section. The `concurrency` group admits one
+  # run at a time per image and `cancel-in-progress: false` never kills the one
+  # that is writing; GitHub keeps a single run waiting behind it and replaces an
+  # older waiter by a newer one, which is harmless because a run does not publish
+  # "its" version: it points `latest` at the highest stable release tag the
+  # repository has WHEN IT GETS THE GROUP, provided that release is published.
+  # Whatever order the runs execute in (or whichever waiter is dropped), the last
+  # write is the highest published release, and an older run only repeats it. A
+  # release is tagged before its images exist, so a newer tag whose images are
+  # not published yet leaves `latest` where it is; that release's own run moves
+  # it as soon as its manifest is written (and a failed one: republish it with
+  # workflow_dispatch). Versions are compared as versions: 0.15.1 is above 0.9.7.
+  latest:
+    name: Move latest ${{ matrix.service }}
+    needs: [resolve, manifest]
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [backend, frontend]
+    concurrency:
+      group: docker-images-latest-${{ matrix.service }}
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Point latest at the highest published stable release
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}/kronn-${{ matrix.service }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          TAGS_REMOTE: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+        run: |
+          if ! printf '%s\n' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "$VERSION is a prerelease: latest is left alone."
+            exit 0
+          fi
+          # A remote error must fail the job, not read as "no tag": a green run
+          # that left `latest` untouched would never be retried.
+          if ! remote_tags="$(git ls-remote --tags --refs "$TAGS_REMOTE")"; then
+            echo "::error::git ls-remote failed (see above): cannot tell which release is the highest, latest is NOT moved."
+            exit 1
+          fi
+          # grep exits 1 when no tag is a stable release: that is "none", not an error.
+          stable="$(printf '%s\n' "$remote_tags" | sed 's|.*refs/tags/||; s/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+          highest="$(printf '%s\n' "$stable" | sort -V | tail -n 1)"
+          echo "Highest stable release tag: ${highest:-none}; this run published $VERSION"
+          if [ -z "$highest" ]; then
+            echo "No stable release tag: latest is left alone."
+            exit 0
+          fi
+          # Only a confirmed absence (the registry answers "not found" or
+          # "manifest unknown") may leave `latest` where it is, and only for a
+          # release another run is still publishing. Anything else (network,
+          # auth, 5xx, timeout) is retried briefly, then fails the job with its
+          # diagnostic, whichever version is the highest: a green run would
+          # leave `latest` behind with no job left to move it. The release this
+          # run just published must exist, so for it even an absence is fatal.
+          attempts=3
+          attempt=1
+          until inspect_output="$(docker buildx imagetools inspect "$IMAGE:$highest" 2>&1)"; do
+            if [ "$highest" != "$VERSION" ] && { printf '%s\n' "$inspect_output" | grep -qiF -e "$IMAGE:$highest: not found" -e "manifest unknown" -e "manifest_unknown"; }; then
+              echo "$IMAGE:$highest is not published yet (confirmed by the registry): latest is left alone until its own run publishes it."
+              exit 0
+            fi
+            if [ "$attempt" -ge "$attempts" ]; then
+              printf '%s\n' "$inspect_output" >&2
+              echo "::error::Cannot inspect $IMAGE:$highest after $attempt attempts (see above): latest is NOT moved."
+              exit 1
+            fi
+            echo "Inspect of $IMAGE:$highest failed (attempt $attempt/$attempts), retrying: $inspect_output" >&2
+            attempt=$((attempt + 1))
+            sleep "${INSPECT_RETRY_DELAY:-5}"
+          done
+          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$highest"
+
+  # An install pulls anonymously. A package that is still private makes every
+  # `make start` fall back to the 19 GB source build, so fail loudly here.
+  verify-public:
+    name: Anonymous pull works, both architectures
+    needs: [resolve, manifest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Inspect each image without credentials
+        run: |
+          status=0
+          for service in backend frontend; do
+            image="$IMAGE_PREFIX/kronn-$service:$VERSION"
+            if ! manifest="$(docker buildx imagetools inspect "$image" 2>&1)"; then
+              echo "::error::$image cannot be pulled anonymously. Make the package public: GitHub > Packages > kronn-$service > Package settings > Danger Zone > Change visibility > Public (one-time)."
+              status=1
+              continue
+            fi
+            for platform in linux/amd64 linux/arm64; do
+              if ! grep -q "Platform: *$platform" <<< "$manifest"; then
+                echo "::error::$image has no $platform manifest."
+                status=1
+              fi
+            done
+          done
+          exit "$status"

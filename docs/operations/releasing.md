@@ -48,3 +48,27 @@ gh workflow run "Desktop Build" --ref feat/x.y.z -f release_tag=0.14.1
 The desktop app sets `KRONN_DESKTOP_APP=1`. The banner then only offers a
 release that has an installer for the user's platform. Docker and source
 installs update from the tag, so the banner offers them every release.
+
+## Docker images (GHCR)
+
+Pushing the tag also runs **Docker Images** (`.github/workflows/docker-images.yml`).
+It builds the backend (`CARGO_PROFILE=release`) and the frontend on native
+runners, one per architecture (`ubuntu-24.04` for amd64, `ubuntu-24.04-arm` for
+arm64; the Rust backend is never built under QEMU), then ties both under one
+multi-arch tag: `ghcr.io/docroms/kronn-backend:<version>` and
+`ghcr.io/docroms/kronn-frontend:<version>`, plus `latest` when the version is the highest stable release tag. `latest` is moved by a separate job (`latest`) that runs one at a time per image (`concurrency: docker-images-latest-<service>`, `cancel-in-progress: false`) and, inside that group, points `latest` at the highest stable release tag whose image is published: a slower older run, or two overlapping releases in any order, end with `latest` on the newest one. A newer tag whose images the registry confirms are not published yet ("not found") leaves `latest` where it is until its own run publishes; any other registry or `git ls-remote` error (network, auth, 5xx) is retried and then fails the job; republish a failed one with `workflow_dispatch`. `make start` pulls the
+tag named by `VERSION`, so the tag and `VERSION` must agree (the job runs
+`scripts/check-version-sync.sh <tag>` first), and `docker-compose.yml` carries
+that version as its default image tag (`make bump` updates it).
+
+- **One-time, after the first run**: GitHub creates the two packages private.
+  Open each package's settings (Packages > `kronn-backend` / `kronn-frontend` >
+  Package settings > Danger Zone > Change visibility) and set it **Public**; the
+  API cannot do it. Until then an install cannot pull and falls back to the 19 GB
+  source build. The `verify-public` job fails, naming this step, while a package
+  is still private.
+- **Republish a tag**: run Docker Images by hand (`workflow_dispatch`) with `tag`
+  set to the release, e.g. `gh workflow run "Docker Images" -f tag=0.15.1`. The
+  application source comes from the tag; `backend/Dockerfile` and
+  `backend/entrypoint.sh` come from the commit the workflow runs at, so an old tag
+  still gets the runtime UID/GID remap (an older Dockerfile would pin uid 1000).

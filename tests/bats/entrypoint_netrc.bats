@@ -17,6 +17,11 @@ setup() {
         target="$(command -v "$real" 2>/dev/null || true)"
         case "$target" in /*) ln -sf "$target" "${STUB_BIN}/${real}" ;; esac
     done
+    # The entrypoint drops root first (KT-1468, see entrypoint_host_user.bats):
+    # these tests are about what it does as the unprivileged user, whoever runs
+    # the suite.
+    printf '#!/bin/sh\necho 1000\n' > "${STUB_BIN}/id"
+    chmod +x "${STUB_BIN}/id"
     for stub in true ssh-keyscan curl; do
         printf '#!/bin/sh\nexit 0\n' > "${STUB_BIN}/${stub}"
         chmod +x "${STUB_BIN}/${stub}"

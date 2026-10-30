@@ -24,6 +24,18 @@ Release notes for 0.9.3 and earlier are available in the
   of highlighting every line on each keystroke (#252).
 - A Page's revision history no longer carries every revision's HTML; the
   revision you compare is loaded alone (#252).
+- The backend container accepts any host user or group id from 1 to
+  4294967294 (it used to fall back to 1000 above nine digits).
+- The backend container starts as root only to give its `kronn` user your
+  `KRONN_HOST_UID` and `KRONN_HOST_GID` and to hand its volumes to that user,
+  then runs the backend and every agent as that user, never as root. The image
+  is built once for everyone instead of once per user. `docker compose exec`
+  into the backend now needs `-u kronn` to get the same user as the agents.
+- A bare `docker compose exec backend ...` now opens a root shell (root's home,
+  root-owned files): use `docker compose exec -u kronn backend ...` to act as
+  Kronn.
+- `make start` on a checkout runs the published image of `VERSION`, not your
+  local edits: use `make start-build` to run local code.
 
 ### Added
 
@@ -38,6 +50,43 @@ Release notes for 0.9.3 and earlier are available in the
   left one such node behind on any dark theme, one run in two.
 - The boot screen's fade-out tolerates a torn-down document, so a settle
   timer that outlives its test no longer throws `document is not defined`.
+- Every release tag now publishes the backend and frontend Docker images
+  (`ghcr.io/docroms/kronn-backend` and `kronn-frontend`, linux/amd64 and
+  linux/arm64, built on native runners). From the release that ships this
+  change (0.15.2), `make start` and `./kronn start` pull the image of the
+  checked-out version and start it: they no longer compile the backend on your
+  machine. A checkout of 0.15.1 or earlier keeps its old `make start`, which
+  compiles; republishing the 0.15.1 images does not change that, so a machine
+  under ~20 GB should use the desktop installer until 0.15.2. Before, a Docker install built the
+  715 000-line backend crate locally, which needs about 19 GB of memory, so a
+  machine with less (for example WSL with 5.8 GB) ended with `rustc` killed
+  after minutes of work (KT-1468).
+- `make start-build` (or `KRONN_BUILD_FROM_SOURCE=1`) builds from source; an
+  image that cannot be pulled and is not on the machine yet (a `VERSION` with no
+  published image, e.g. right after `make bump`) falls back to it. A checkout of
+  `main` keeps the last release's `VERSION`, so `make start` runs that release's
+  published image, not the local code. An image that cannot be pulled but is already
+  local (an offline restart) is started as it is, without building.
+  `KRONN_IMAGE_TAG` picks another published tag; quotes around it in `.env` are
+  ignored and `${VAR}` references in it (`KRONN_IMAGE_TAG=${RELEASE_TAG}`) are
+  resolved as Compose does, instead of being passed on literally.
+- Before any source build, Kronn reads the memory Docker can use (plus
+  swap). Below 20 GB, the need of the default build (19 GB peak), it stops at
+  once and names the alternatives: the published image, the desktop installer
+  for your platform, a bigger machine. The message carries the measured numbers
+  (19 GB peak; 10.4 GB and 12 minutes with one codegen thread).
+  `KRONN_FORCE_BUILD=1` builds anyway.
+- The `latest` image tag follows the highest stable release only: republishing
+  an older release from the workflow no longer moves it backwards. It is moved
+  by its own job, one run at a time per image (a queue, nothing is cancelled
+  mid-write), which points `latest` at the highest published stable release at
+  that moment: runs that overlap in any order end with `latest` on the newest.
+  A registry or `git ls-remote` error in that job fails the run (after a short
+  retry), whichever release is the highest, instead of a green run that leaves
+  `latest` unchanged; only a registry that confirms the highest release is not
+  published yet ("not found", "manifest unknown") leaves `latest` alone.
+- An empty `KRONN_IMAGE_TAG` in the environment wins over `.env` and means the
+  `VERSION` default, exactly like Compose; only an unset one reads the file.
 
 ### Fixed
 

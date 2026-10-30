@@ -8,6 +8,16 @@ BATS_BIN="${SCRIPT_DIR}/bats-core/bin/bats"
 # bats 1.13 leaves a failed test's watchdog running: a red run ends this much later.
 export BATS_TEST_TIMEOUT="${BATS_TEST_TIMEOUT:-60}"
 
+# bats aborts ("BATS_TMPDIR ... is not writable") when TMPDIR is a directory the
+# caller cannot write, e.g. the per-user /var/folders/... of a sandboxed run.
+# Fall back to a scratch directory under the checkout.
+if [[ ! -d "${TMPDIR:-/tmp}" || ! -w "${TMPDIR:-/tmp}" ]]; then
+    TMPDIR="$(mktemp -d "${SCRIPT_DIR}/.bats-tmp.XXXXXX")"
+    export TMPDIR
+    trap 'rm -rf "$TMPDIR"' EXIT
+    scratch_tmp=1
+fi
+
 if [[ ! -x "$BATS_BIN" ]]; then
     echo "Error: bats-core not found at ${BATS_BIN}"
     echo "Run: git submodule update --init --recursive"
@@ -20,7 +30,11 @@ fi
 
 # Without a suite deadline, bats owns the process (local default).
 if [[ -z "${BATS_SUITE_TIMEOUT:-}" ]]; then
-    exec "$BATS_BIN" "$@"
+    # exec would skip the cleanup trap of a scratch TMPDIR.
+    [[ -z "${scratch_tmp:-}" ]] && exec "$BATS_BIN" "$@"
+    exit_code=0
+    "$BATS_BIN" "$@" || exit_code=$?
+    exit "$exit_code"
 fi
 
 # A process that outlives its test and keeps bats' FD 3 open hangs the run

@@ -44,12 +44,12 @@ source "$KRONN_DIR/lib/api-client.sh"
 # unit-testable and, crucially, the CLI never clobbers the backend's config.toml.
 
 kiro_container_available() {
-    (cd "$KRONN_DIR" && docker compose exec -T backend /bin/sh -lc \
+    (cd "$KRONN_DIR" && docker compose exec -T -u kronn backend /bin/sh -lc \
         'PATH="$HOME/.local/bin:$PATH"; command -v kiro-cli >/dev/null 2>&1') >/dev/null 2>&1
 }
 
 kiro_container_authenticated() {
-    (cd "$KRONN_DIR" && docker compose exec -T backend /bin/sh -lc \
+    (cd "$KRONN_DIR" && docker compose exec -T -u kronn backend /bin/sh -lc \
         'PATH="$HOME/.local/bin:$PATH"; kiro-cli whoami --format json >/dev/null 2>&1') >/dev/null 2>&1
 }
 
@@ -163,7 +163,7 @@ cmd_web() {
         fi
     fi
 
-    info "Build & starting..."
+    info "Pulling the published image & starting (a source build only if the pull fails)..."
     # KRONN_DEBUG=1 in the environment (set by `./kronn start --debug` upstream)
     # propagates to `make start` as DEBUG=1, which writes KRONN_RUST_LOG=…=debug
     # into .env for this run only. Config.server.debug_mode remains untouched.

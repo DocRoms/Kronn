@@ -1,4 +1,4 @@
-.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff docs-reanchor test-backend test-backend-cov test-backend-lib install-dev-tools require-nextest test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
+.PHONY: install start start-build start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff docs-reanchor test-backend test-backend-cov test-backend-lib install-dev-tools require-nextest test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
 
 # Doc-skippers type `make` bare (or `make install`) before reading anything.
 # Bare `make` used to run the FIRST target — `_gen-override`, an internal Docker
@@ -222,9 +222,6 @@ _snapshot-host-hosts: .env
 	 echo "KRONN_HOSTS_SNAPSHOT=$$snapshot" >> "$$env_tmp"; \
 	 mv "$$env_tmp" .env
 
-## Start everything (Docker, fast build — no LTO, ~4x faster than prod)
-## Pass DEBUG=1 to force verbose logs (kronn=debug,tower_http=debug) for this run.
-## Without DEBUG=1, the backend picks the level from config.server.debug_mode.
 # The universal "I didn't read the docs" entry point. Delegates to the guided
 # CLI (`./kronn start`), which handles the macOS Docker warning, prerequisites,
 # and points at `./kronn start-dev` (native) where appropriate. NOTE: `start`
@@ -234,13 +231,19 @@ install:
 	@echo "$(CYAN)Launching the guided Kronn setup (./kronn start)...$(RESET)"
 	@./kronn start
 
+## Start everything with Docker. Pulls the published images of VERSION and starts
+## them without compiling (KT-1468: the backend crate needs ~19 GB of RAM to
+## build). On main, VERSION is the last release: this runs its image, not local edits.
+## A pull failure (VERSION not published, offline) falls back to a source build behind
+## a memory check (scripts/docker-up.sh). `make start-build` forces the source build.
+## Pass DEBUG=1 to force verbose logs (kronn=debug,tower_http=debug) for this run.
+## Without DEBUG=1, the backend picks the level from config.server.debug_mode.
 start: .env _snapshot-host-hosts _ensure-bind-sources _gen-override _apply-debug-flag
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 		echo "$(YELLOW)  macOS note: Docker can't run your host agents (Claude, Codex, …) or read the Keychain.$(RESET)"; \
 		echo "$(YELLOW)  For native agent execution prefer: ./kronn start-dev$(RESET)"; \
 	fi
-	@echo "$(GREEN)▸ Building $(APP_NAME) (fast profile)...$(RESET)"
-	@CARGO_PROFILE=fast $(DOCKER_COMP) up -d --build
+	@./scripts/docker-up.sh
 	@$(MAKE) --no-print-directory _own-claude-volumes
 	@echo ""
 	@echo "  $(CYAN)╭──╮$(RESET)"
@@ -254,10 +257,16 @@ start: .env _snapshot-host-hosts _ensure-bind-sources _gen-override _apply-debug
 	@echo "       $(CYAN)kronn restart$(RESET)  Restart"
 	@echo ""
 
+## Same as `make start`, but always builds the images from source (skips the
+## pull). Needs ~20 GB of memory for Docker: the memory check stops a smaller
+## machine before it compiles; KRONN_FORCE_BUILD=1 overrides it.
+start-build: export KRONN_BUILD_FROM_SOURCE := 1
+start-build: start
+
 ## Production build (Docker, release with LTO — slow but optimized binary)
 start-prod: .env _snapshot-host-hosts _ensure-bind-sources _gen-override
 	@echo "$(GREEN)▸ Building $(APP_NAME) (production release)...$(RESET)"
-	@$(DOCKER_COMP) up -d --build
+	@KRONN_BUILD_FROM_SOURCE=1 ./scripts/docker-up.sh
 	@$(MAKE) --no-print-directory _own-claude-volumes
 
 .PHONY: _own-claude-volumes
@@ -283,7 +292,7 @@ logs:
 ## Login to Kiro from the backend container (headless-safe OAuth device flow)
 kiro-login: .env _gen-override
 	@echo "$(CYAN)▸ Kiro login (device flow)...$(RESET)"
-	@$(DOCKER_COMP) exec backend /bin/sh -lc 'set -e; PATH="$$HOME/.local/bin:$$PATH"; command -v kiro-cli >/dev/null 2>&1 || (command -v unzip >/dev/null 2>&1 || { echo "Missing unzip in backend image. Rebuild with make start."; exit 1; } ; echo "Installing kiro-cli in container..." ; curl -fsSL https://cli.kiro.dev/install | bash); kiro-cli login --use-device-flow'
+	@$(DOCKER_COMP) exec -u kronn backend /bin/sh -lc 'set -e; PATH="$$HOME/.local/bin:$$PATH"; command -v kiro-cli >/dev/null 2>&1 || (command -v unzip >/dev/null 2>&1 || { echo "Missing unzip in backend image. Rebuild with make start."; exit 1; } ; echo "Installing kiro-cli in container..." ; curl -fsSL https://cli.kiro.dev/install | bash); kiro-cli login --use-device-flow'
 
 ## Clean everything
 clean:
@@ -513,7 +522,8 @@ help:
 	@echo ""
 	@echo "$(GREEN)Usage:$(RESET)"
 	@echo "  make install        Same as ./kronn start (guided)"
-	@echo "  make start          Build & launch (Docker, fast)"
+	@echo "  make start          Pull the published image & launch (Docker); builds only if the pull fails"
+	@echo "  make start-build    Build from source & launch (Docker; needs ~20 GB for Docker, checked first)"
 	@echo "  make start-prod     Build & launch (Docker, release + LTO)"
 	@echo "  make stop           Stop services"
 	@echo "  make logs           Tail logs"
@@ -561,6 +571,8 @@ endif
 		-e 's|Kronn v[0-9]+\.[0-9]+\.[0-9]+|Kronn v$(V)|g' README.fr.md
 	@sed $(SEDI) -E 's|^## Current release: [0-9]+\.[0-9]+\.[0-9]+|## Current release: $(V)|' docs/index.md
 	@sed $(SEDI) -E 's|(git clone --branch )[0-9]+\.[0-9]+\.[0-9]+|\1$(V)|g' docs/install.md
+	@# The published images `make start` pulls (KT-1468) are tagged with VERSION.
+	@sed $(SEDI) -E 's|(\$$\{KRONN_IMAGE_TAG:-)[0-9]+\.[0-9]+\.[0-9]+(\})|\1$(V)\2|g' docker-compose.yml
 	@# 0.8.6 — also bump the hardcoded version in the public site (FR/EN/ES).
 	@# Pre-fix `make bump` skipped these and we shipped 0.8.6 with the site
 	@# still claiming v0.8.5 on the early-access disclaimer + credits line.
@@ -580,7 +592,7 @@ endif
 	@echo "  Files updated: VERSION, backend/Cargo.toml, desktop/src-tauri/Cargo.toml,"
 	@echo "  frontend/package.json, desktop/package.json, desktop/src-tauri/tauri.conf.json,"
 	@echo "  README.md, README.fr.md,"
-	@echo "  docs/index.md, docs/install.md,"
+	@echo "  docs/index.md, docs/install.md, docker-compose.yml (published image tags),"
 	@echo "  site/index.html, site/en.html, site/es.html (v-prefixed mentions only — historical (0.8.x) refs preserved)"
 	@echo "  + Cargo.lock (backend, desktop/src-tauri) synced via cargo update --workspace"
 	@$(MAKE) --no-print-directory check-version

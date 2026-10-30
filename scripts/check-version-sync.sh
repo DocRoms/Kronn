@@ -57,6 +57,20 @@ check_equal "desktop Cargo.lock package kronn" \
 check_equal "desktop Cargo.lock package kronn-desktop" \
     "$(lock_package_version "$ROOT/desktop/src-tauri/Cargo.lock" "kronn-desktop")"
 
+# `make start` pulls the published images of this exact version: the compose
+# defaults must follow VERSION or a fresh install would run another release.
+compose_tags="$(
+    grep -Eo 'kronn-(backend|frontend):\$\{KRONN_IMAGE_TAG:-[^}]*\}' "$ROOT/docker-compose.yml" || true
+)"
+if [ "$(printf '%s\n' "$compose_tags" | grep -c .)" -ne 2 ]; then
+    fail "docker-compose.yml must default both kronn-backend and kronn-frontend images to KRONN_IMAGE_TAG:-$VERSION"
+else
+    while IFS= read -r image_tag; do
+        check_equal "docker-compose.yml ${image_tag%%:*} image tag" \
+            "$(printf '%s' "$image_tag" | sed 's/.*KRONN_IMAGE_TAG:-\([^}]*\)}/\1/')"
+    done <<< "$compose_tags"
+fi
+
 CHANGELOG_VERSION="$(
     sed -nE 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\]( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$/\1/p' "$ROOT/CHANGELOG.md" |
         head -n 1

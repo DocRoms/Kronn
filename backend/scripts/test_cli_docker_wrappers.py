@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ CI_WORKFLOW = ROOT / ".github/workflows/ci-test.yml"
 BUILD_WORKFLOW = ROOT / ".github/workflows/ci-build.yml"
 VERDICT_WORKFLOW = ROOT / ".github/workflows/ci-verdict.yml"
 WORKFLOWS = ROOT / ".github/workflows"
+IMAGES_WORKFLOW = WORKFLOWS / "docker-images.yml"
 # Each test workflow, its label, the job that reads it live, and its aggregate.
 TEST_WORKFLOWS = (
     (CI_WORKFLOW, "ci-test", "require-ci-label", "ci-quality-gates"),
@@ -501,6 +503,399 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("backend_ready=1", workflow)
         self.assertIn('if [ "$backend_ready" -ne 1 ]', workflow)
         self.assertIn('kill -0 "$(cat /tmp/backend.pid)"', workflow)
+
+
+class DockerImagesWorkflowTests(unittest.TestCase):
+    """KT-1468: a release publishes the images `make start` pulls, so nobody
+    compiles the 19 GB backend crate on their own machine."""
+
+    def setUp(self):
+        self.workflow = IMAGES_WORKFLOW.read_text()
+        self.jobs = job_sections(self.workflow)
+
+    def test_it_runs_on_release_tags_and_can_republish_a_tag(self):
+        self.assertRegex(self.workflow, r"(?m)^  push:\n(?:    #.*\n)*    tags: \[")
+        self.assertIn("'[0-9]+.[0-9]+.[0-9]+*'", self.workflow)
+        dispatch = re.search(r"(?m)^  workflow_dispatch:\n(?P<body>(?:    .*\n)+)", self.workflow)
+        self.assertIsNotNone(dispatch)
+        self.assertRegex(dispatch.group("body"), r"(?m)^      tag:\n(?:        .*\n)*        required: true")
+        self.assertEqual(
+            list(self.jobs), ["resolve", "build", "manifest", "latest", "verify-public"],
+        )
+
+    def test_it_may_write_packages_and_nothing_else(self):
+        permissions = re.search(r"(?m)^permissions:\n(?P<body>(?:  .*\n)+)", self.workflow).group("body")
+        self.assertEqual(
+            sorted(line.strip() for line in permissions.splitlines()),
+            ["contents: read", "packages: write"],
+        )
+        self.assertIn("password: ${{ secrets.GITHUB_TOKEN }}", self.workflow)
+
+    def test_the_tag_is_checked_against_version_before_anything_is_built(self):
+        self.assertIn('scripts/check-version-sync.sh "$RELEASE_TAG"', self.jobs["resolve"])
+        self.assertIn("needs: resolve", self.jobs["build"])
+        # `latest` is never written by the manifest job, only by the serialized one.
+        self.assertNotIn(":latest", self.jobs["manifest"])
+
+    def step_script(self, job: str, name: str) -> str:
+        step = re.search(
+            rf"(?ms)^      - name: {re.escape(name)}\n.*?^        run: \|\n(?P<body>(?:          [^\n]*\n|\n)+)",
+            self.jobs[job],
+        )
+        self.assertIsNotNone(step, name)
+        return "\n".join(line[10:] for line in step.group("body").splitlines())
+
+    def manifest_script(self) -> str:
+        return self.step_script("manifest", "Create the multi-arch manifest")
+
+    def latest_script(self) -> str:
+        return self.step_script("latest", "Point latest at the highest published stable release")
+
+    def test_the_manifest_job_writes_only_the_version_tag(self):
+        image = "ghcr.io/docroms/kronn-backend"
+        self.assertEqual(
+            self.run_manifest("0.15.2"),
+            [["buildx", "imagetools", "create", "-t", f"{image}:0.15.2",
+              f"{image}@sha256:{'a' * 64}", f"{image}@sha256:{'b' * 64}"]],
+        )
+
+    def run_manifest(self, version: str) -> list[list[str]]:
+        """Run the real 'Create the multi-arch manifest' step with a recording
+        `docker`. Returns each docker invocation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            digests = root / "digests"
+            digests.mkdir()
+            for digest in ("a" * 64, "b" * 64):
+                (digests / digest).touch()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls = root / "docker.log"
+            docker = bin_dir / "docker"
+            docker.write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\n')
+            docker.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-e", "-c", self.manifest_script()],
+                cwd=digests,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                    "IMAGE": "ghcr.io/docroms/kronn-backend",
+                    "VERSION": version,
+                },
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return [line.split() for line in calls.read_text().splitlines()]
+
+    class Registry:
+        """A fake GHCR and git remote shared by simulated runs of the `latest`
+        step: the repository's git tags, the image tags that exist, and the
+        version the `latest` image tag points at."""
+
+        DOCKER = """#!/bin/sh
+echo "$@" >> "@ROOT@/docker.log"
+case "$3" in
+  inspect)
+    if [ -f "@ROOT@/inspect_error" ]; then cat "@ROOT@/inspect_error" >&2; exit 1; fi
+    grep -qxF "${4##*:}" "@ROOT@/published" || { echo "ERROR: $4: not found" >&2; exit 1; } ;;
+  create) if [ "${5##*:}" = latest ]; then echo "${6##*:}" > "@ROOT@/latest"; fi ;;
+esac
+"""
+
+        def __init__(self, root: pathlib.Path, tags: list[str], published: list[str], latest: str | None = None):
+            self.root = root
+            self.published = set(published)
+            self.env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+            }
+            self.origin = root / "origin"
+            self.origin.mkdir()
+            self.git("init", "-q")
+            self.git("commit", "-q", "--allow-empty", "-m", "release")
+            for tag in tags:
+                self.git("tag", tag)
+            self.bin = root / "bin"
+            self.bin.mkdir()
+            docker = self.bin / "docker"
+            docker.write_text(self.DOCKER.replace("@ROOT@", str(root)))
+            docker.chmod(0o755)
+            self.write_published()
+            if latest is not None:
+                (root / "latest").write_text(latest + "\n")
+
+        def git(self, *args: str) -> None:
+            subprocess.run(["git", *args], cwd=self.origin, env=self.env, check=True, capture_output=True)
+
+        def write_published(self) -> None:
+            (self.root / "published").write_text("".join(v + "\n" for v in sorted(self.published)))
+
+        def publish(self, version: str) -> None:
+            self.published.add(version)
+            self.write_published()
+
+        def read_latest(self) -> str | None:
+            path = self.root / "latest"
+            return path.read_text().strip() if path.exists() else None
+
+    def run_latest(
+        self, registry: "DockerImagesWorkflowTests.Registry", version: str,
+        expect_rc: int = 0, remote: str | None = None,
+    ) -> subprocess.CompletedProcess:
+        """One run of the real `latest` step, as GitHub runs it once the run
+        holds the concurrency group."""
+        result = subprocess.run(
+            ["bash", "-e", "-c", self.latest_script()],
+            env={
+                **registry.env,
+                "PATH": f"{registry.bin}{os.pathsep}{os.environ['PATH']}",
+                "IMAGE": "ghcr.io/docroms/kronn-backend",
+                "VERSION": version,
+                "TAGS_REMOTE": remote or str(registry.origin),
+                "INSPECT_RETRY_DELAY": "0",
+            },
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, expect_rc, result.stdout + result.stderr)
+        return result
+
+    def test_a_failing_inspect_of_the_image_just_published_fails_the_job_after_retries(self):
+        # The run just wrote 0.15.2 and it is the highest release: an inspect
+        # error (auth, network) must not read as "not published yet" in a green run.
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.Registry(pathlib.Path(tmp), ["0.15.1", "0.15.2"], ["0.15.1", "0.15.2"], latest="0.15.1")
+            (registry.root / "inspect_error").write_text("denied: requested access to the resource is denied\n")
+            result = self.run_latest(registry, "0.15.2", expect_rc=1)
+            self.assertIn("denied: requested access to the resource is denied", result.stderr)
+            self.assertIn("::error::", result.stdout)
+            self.assertNotIn("not published yet", result.stdout)
+            self.assertEqual(registry.read_latest(), "0.15.1")
+            calls = (registry.root / "docker.log").read_text().splitlines()
+            self.assertEqual(len(calls), 3, calls)  # short retry, then fatal
+
+    def test_a_transient_inspect_error_on_the_image_just_published_is_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.Registry(pathlib.Path(tmp), ["0.15.1", "0.15.2"], ["0.15.1", "0.15.2"], latest="0.15.1")
+            # Fails once, then the registry answers.
+            docker = registry.bin / "docker"
+            docker.write_text(
+                docker.read_text().replace(
+                    '  inspect)\n',
+                    '  inspect)\n    n=$(wc -l < "@ROOT@/docker.log"); '
+                    'if [ "$n" -le 1 ]; then echo "i/o timeout" >&2; exit 1; fi\n'.replace("@ROOT@", str(registry.root)),
+                    1,
+                )
+            )
+            result = self.run_latest(registry, "0.15.2")
+            self.assertIn("i/o timeout", result.stderr)
+            self.assertEqual(registry.read_latest(), "0.15.2")
+
+    def test_an_inspect_error_on_the_highest_release_of_another_run_fails_the_job(self):
+        # 0.16.0 is the highest and published (or so the tags say), but the
+        # inspect of it errors out: that is not an absence. Reading it as one
+        # would end green with `latest` stuck on 0.15.1 and no job left to fix it.
+        for error in ("i/o timeout", "denied: requested access to the resource is denied", "500 Internal Server Error"):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as tmp:
+                registry = self.Registry(
+                    pathlib.Path(tmp), ["0.15.1", "0.15.2", "0.16.0"], ["0.15.1", "0.15.2", "0.16.0"], latest="0.15.1")
+                (registry.root / "inspect_error").write_text(error + "\n")
+                result = self.run_latest(registry, "0.15.2", expect_rc=1)
+                self.assertIn(error, result.stderr)
+                self.assertIn("::error::Cannot inspect", result.stdout)
+                self.assertNotIn("not published yet", result.stdout)
+                self.assertEqual(registry.read_latest(), "0.15.1")
+                calls = (registry.root / "docker.log").read_text().splitlines()
+                self.assertEqual(len(calls), 3, calls)  # short retry, then fatal
+
+    def test_a_transient_inspect_error_on_the_highest_release_of_another_run_is_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.Registry(
+                pathlib.Path(tmp), ["0.15.1", "0.15.2", "0.16.0"], ["0.15.1", "0.15.2", "0.16.0"], latest="0.15.1")
+            docker = registry.bin / "docker"
+            docker.write_text(
+                docker.read_text().replace(
+                    '  inspect)\n',
+                    '  inspect)\n    n=$(wc -l < "@ROOT@/docker.log"); '
+                    'if [ "$n" -le 1 ]; then echo "i/o timeout" >&2; exit 1; fi\n'.replace("@ROOT@", str(registry.root)),
+                    1,
+                )
+            )
+            self.run_latest(registry, "0.15.2")
+            self.assertEqual(registry.read_latest(), "0.16.0")
+
+    def test_a_registry_that_confirms_the_highest_release_is_absent_leaves_latest_alone(self):
+        # The highest release (0.16.0) belongs to another run that has not
+        # published it yet: the registry says "not found", which is no failure.
+        for answer in (None, "manifest unknown"):
+            with self.subTest(answer=answer), tempfile.TemporaryDirectory() as tmp:
+                registry = self.Registry(
+                    pathlib.Path(tmp), ["0.15.1", "0.15.2", "0.16.0"], ["0.15.1", "0.15.2"], latest="0.15.1")
+                if answer:
+                    (registry.root / "inspect_error").write_text(answer + "\n")
+                result = self.run_latest(registry, "0.15.2")
+                self.assertIn("not published yet", result.stdout)
+                self.assertEqual(registry.read_latest(), "0.15.1")
+                calls = (registry.root / "docker.log").read_text().splitlines()
+                self.assertEqual(len(calls), 1, calls)  # an absence is final, not retried
+
+    def test_the_image_this_run_just_published_missing_is_fatal(self):
+        # Even a "not found" is a failure for the release this run wrote.
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.Registry(pathlib.Path(tmp), ["0.15.1", "0.15.2"], ["0.15.1"], latest="0.15.1")
+            result = self.run_latest(registry, "0.15.2", expect_rc=1)
+            self.assertIn("::error::Cannot inspect", result.stdout)
+            self.assertEqual(registry.read_latest(), "0.15.1")
+
+    def test_a_failing_git_ls_remote_fails_the_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.Registry(pathlib.Path(tmp), ["0.15.2"], ["0.15.2"], latest="0.15.1")
+            missing = pathlib.Path(tmp) / "no-such-remote"
+            result = self.run_latest(registry, "0.15.2", expect_rc=1, remote=str(missing))
+            self.assertIn("fatal:", result.stderr)  # git's own diagnostic is shown
+            self.assertIn("::error::git ls-remote failed", result.stdout)
+            self.assertEqual(registry.read_latest(), "0.15.1")
+            self.assertFalse((registry.root / "docker.log").exists())  # nothing written
+
+    def test_latest_follows_only_the_highest_stable_release_tag(self):
+        tags = ["0.9.7", "0.15.1", "0.15.2", "0.16.0-rc1", "v0.15.0"]
+        published = ["0.9.7", "0.15.0", "0.15.1", "0.15.2", "0.16.0-rc1"]
+        with tempfile.TemporaryDirectory() as tmp:
+            # The newest stable release (0.15.2 > 0.15.1 > 0.9.7, as versions, not text).
+            registry = self.Registry(pathlib.Path(tmp), tags, published)
+            self.run_latest(registry, "0.15.2")
+            self.assertEqual(registry.read_latest(), "0.15.2")
+        for older in ("0.15.1", "0.9.7", "0.15.0"):
+            with tempfile.TemporaryDirectory() as tmp:
+                # Republishing an older stable release must not move `latest` backwards.
+                registry = self.Registry(pathlib.Path(tmp), tags, published, latest="0.15.2")
+                self.run_latest(registry, older)
+                self.assertEqual(registry.read_latest(), "0.15.2", older)
+        with tempfile.TemporaryDirectory() as tmp:
+            # A prerelease never takes `latest`, even above every stable tag.
+            registry = self.Registry(pathlib.Path(tmp), tags, published, latest="0.15.2")
+            self.run_latest(registry, "0.16.0-rc1")
+            self.assertEqual(registry.read_latest(), "0.15.2")
+        with tempfile.TemporaryDirectory() as tmp:
+            # A `v` prefix on the git tag is the same release: the image tag has none.
+            registry = self.Registry(pathlib.Path(tmp), ["0.15.1", "v0.15.2"], ["0.15.2"])
+            self.run_latest(registry, "0.15.2")
+            self.assertEqual(registry.read_latest(), "0.15.2")
+        with tempfile.TemporaryDirectory() as tmp:
+            # The first release of a repository is the highest one.
+            registry = self.Registry(pathlib.Path(tmp), ["0.1.0"], ["0.1.0"])
+            self.run_latest(registry, "0.1.0")
+            self.assertEqual(registry.read_latest(), "0.1.0")
+
+    def test_two_overlapping_releases_end_with_latest_on_the_newest(self):
+        # 0.15.2 is tagged, then 0.16.0 is tagged while 0.15.2 is still building.
+        # The group runs their `latest` steps one at a time, in whichever order
+        # they finish: the last write must be 0.16.0 either way.
+        for order in (("0.15.2", "0.16.0"), ("0.16.0", "0.15.2")):
+            with self.subTest(order=order), tempfile.TemporaryDirectory() as tmp:
+                registry = self.Registry(
+                    pathlib.Path(tmp), ["0.15.1", "0.15.2", "0.16.0"], ["0.15.1"], latest="0.15.1")
+                for version in order:
+                    registry.publish(version)  # the manifest job ran just before its latest step
+                    self.run_latest(registry, version)
+                self.assertEqual(registry.read_latest(), "0.16.0")
+
+    def test_a_newer_tag_without_images_leaves_latest_alone_until_it_publishes(self):
+        # 0.16.0 is tagged but its images are not published when the 0.15.2 run
+        # reaches `latest`: pointing at 0.16.0 would point at nothing, and
+        # pointing at 0.15.2 would be overwritten later anyway. It stays; the
+        # 0.16.0 run moves it once its manifest exists.
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self.Registry(
+                pathlib.Path(tmp), ["0.15.1", "0.15.2", "0.16.0"], ["0.15.1", "0.15.2"], latest="0.15.1")
+            result = self.run_latest(registry, "0.15.2")
+            self.assertEqual(registry.read_latest(), "0.15.1")
+            self.assertIn("not published yet", result.stdout)
+            registry.publish("0.16.0")
+            self.run_latest(registry, "0.16.0")
+            self.assertEqual(registry.read_latest(), "0.16.0")
+
+    def test_latest_is_serialized_and_never_cancels_the_run_that_is_writing(self):
+        latest = self.jobs["latest"]
+        # Queue, do not cancel; one group per image so backend and frontend do not wait on each other.
+        self.assertRegex(
+            latest,
+            r"(?m)^    concurrency:\n      group: docker-images-latest-\$\{\{ matrix\.service \}\}\n      cancel-in-progress: false\n",
+        )
+        self.assertIn("needs: [resolve, manifest]", latest)
+        # The decision is made inside the group, not frozen by an earlier job.
+        self.assertNotIn("latest", self.workflow_outputs("resolve"))
+        self.assertNotIn("needs.resolve.outputs.latest", self.workflow)
+        self.assertNotRegex(self.jobs["manifest"], r"(?m)^    concurrency:")
+
+    def workflow_outputs(self, job: str) -> str:
+        return re.search(r"(?ms)^    outputs:\n(?P<body>(?:      [^\n]*\n)+)", self.jobs[job]).group("body")
+
+    def test_each_architecture_builds_natively_never_under_qemu(self):
+        build = self.jobs["build"]
+        for service in ("backend", "frontend"):
+            self.assertIn(
+                f"service: {service}, arch: amd64, runner: ubuntu-24.04, platform: linux/amd64", build)
+            self.assertIn(
+                f"service: {service}, arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64", build)
+        self.assertNotIn("setup-qemu-action", self.workflow)
+        # One platform per build: a multi-platform build would emulate the other.
+        self.assertIn("platforms: ${{ matrix.platform }}", build)
+        self.assertNotRegex(build, r"platforms:.*,")
+        self.assertIn("matrix.service == 'backend' && 'CARGO_PROFILE=release'", build)
+
+    def test_republishing_an_old_tag_uses_the_current_runtime_user_packaging(self):
+        build = self.jobs["build"]
+        # A tag older than the UID/GID remap would otherwise ship an image that
+        # only works for host uid 1000.
+        self.assertIn("ref: ${{ github.sha }}", build)
+        self.assertIn("backend/Dockerfile\n            backend/entrypoint.sh", build)
+        self.assertIn("cp packaging/backend/Dockerfile backend/Dockerfile", build)
+        self.assertIn("cp packaging/backend/entrypoint.sh backend/entrypoint.sh", build)
+        self.assertIn("grep -q kronn_drop_to_host_user backend/entrypoint.sh", build)
+        self.assertEqual(build.count("if: matrix.service == 'backend'"), 2)
+
+    def test_the_manifest_ties_both_architectures_under_one_tag(self):
+        build, manifest = self.jobs["build"], self.jobs["manifest"]
+        self.assertIn("push-by-digest=true", build)
+        self.assertIn("provenance: false", build)
+        self.assertIn("docker buildx imagetools create", manifest)
+        self.assertIn('"${#refs[@]}" -ne 2', manifest)
+        self.assertIn("needs: [resolve, build]", manifest)
+        self.assertIn("service: [backend, frontend]", manifest)
+
+    def test_the_images_use_the_path_compose_pulls(self):
+        self.assertIn("IMAGE_PREFIX: ghcr.io/docroms", self.workflow)
+        compose = COMPOSE.read_text()
+        for service in ("backend", "frontend"):
+            self.assertRegex(
+                compose,
+                rf"image: ghcr\.io/docroms/kronn-{service}:\$\{{KRONN_IMAGE_TAG:-\d+\.\d+\.\d+\}}",
+            )
+            self.assertIn(f"kronn-${{{{ matrix.service }}}}", self.workflow)
+        # The `build:` stays: `make start-build` and an untagged checkout use it.
+        self.assertGreaterEqual(len(re.findall(r"(?m)^    build:$", compose)), 2)
+
+    def test_an_anonymous_pull_of_both_architectures_is_verified(self):
+        verify = self.jobs["verify-public"]
+        self.assertIn("needs: [resolve, manifest]", verify)
+        self.assertNotIn("login-action", verify)
+        self.assertIn("linux/amd64 linux/arm64", verify)
+        self.assertIn("Change visibility > Public", verify)
+
+    def test_every_job_is_bounded(self):
+        for name, section in self.jobs.items():
+            self.assertRegex(section, r"(?m)^    timeout-minutes: \d+$", name)
+
+    def test_actionlint_accepts_it_when_installed(self):
+        actionlint = shutil.which("actionlint")
+        if actionlint is None:
+            self.skipTest("actionlint is not installed; the structural tests above run everywhere")
+        result = subprocess.run(
+            [actionlint, str(IMAGES_WORKFLOW)], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

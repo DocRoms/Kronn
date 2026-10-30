@@ -113,7 +113,7 @@ async function probeAgentBailout(agent: string): Promise<string | null> {
   if (!cmd) return null;
   const { exec } = await import('node:child_process');
   return new Promise(resolve => {
-    exec(`docker exec kronn-backend-1 sh -c '${cmd.replace(/'/g, `'\\''`)}'`, { timeout: 15_000 }, (_err, stdout, stderr) => {
+    exec(`docker exec -u kronn kronn-backend-1 sh -c '${cmd.replace(/'/g, `'\\''`)}'`, { timeout: 15_000 }, (_err, stdout, stderr) => {
       const out = `${stdout}\n${stderr}`.toLowerCase();
       if (out.includes('monthly request limit reached')) return resolve('Kiro free tier exhausted (resets monthly)');
       if (out.includes('rate limit') || out.includes('rate_limit')) return resolve('Rate limit reached upstream');

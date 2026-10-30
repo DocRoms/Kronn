@@ -48,7 +48,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM debian:trixie-slim
 
-# Create non-root user for runtime (UID/GID overridable via KRONN_HOST_UID/GID)
+# Create the non-root runtime user. APP_UID/APP_GID are only the ids it is born
+# with: the PUBLISHED image (ghcr.io/docroms/kronn-backend, built once for every
+# user) keeps 1000:1000, and entrypoint.sh aligns the user with
+# KRONN_HOST_UID/KRONN_HOST_GID at container start (KT-1468). A local
+# `make start-build` still bakes the host ids in, so there the remap is a no-op.
 # On macOS the default GID is 20 which conflicts with 'dialout' in Debian — handle gracefully.
 ARG APP_UID=1000
 ARG APP_GID=1000
@@ -63,13 +67,17 @@ RUN if getent group ${APP_GID} >/dev/null 2>&1; then \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git curl gnupg nodejs npm python3 python3-pip python3-venv \
     make gh openssh-client unzip \
+    # `setpriv` (util-linux) drops root to the host user in entrypoint.sh.
+    util-linux \
     # kronn-docs sidecar (WeasyPrint) runtime libs. WeasyPrint >=62 renders via
     # Pango + HarfBuzz; the older cairo/gdk-pixbuf libs are kept as a harmless
     # superset so any pinned version in the <65 range resolves. fonts-dejavu-core
     # gives WeasyPrint a default font so PDFs aren't glyphless.
     libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 \
     libgdk-pixbuf-2.0-0 libcairo2 libffi8 fonts-dejavu-core libfontconfig1 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # Fail the build, not every container start, if the privilege drop is absent.
+    && setpriv --version
 
 # Microsoft 365's API-only plugin obtains a delegated Graph token from Azure
 # CLI. Microsoft supports Bookworm packages (the runtime itself is Trixie), so
@@ -248,7 +256,9 @@ ENV PATH="/home/kronn/.local/bin:/usr/local/bin:${PATH}"
 ENV NPM_CONFIG_PREFIX=/home/kronn/.local
 EXPOSE 3140
 
-USER kronn
+# No `USER kronn`: the entrypoint starts as root ONLY to align the kronn user
+# with the host's UID/GID and fix volume ownership, then re-executes itself as
+# that user through `setpriv`. The backend and every agent run unprivileged.
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["kronn"]
 
