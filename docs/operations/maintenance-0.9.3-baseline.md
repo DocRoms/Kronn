@@ -66,7 +66,7 @@ typecheck/lint/test/build gate.
 `pnpm audit --audit-level=moderate` now passes and is mandatory in both the
 regular CI and aggregate dependency-review workflow. The review deliberately
 runs all three audits before failing, so one graph cannot hide findings in
-another. [src: file: .github/workflows/ci-test.yml:985-987#audit-level]
+another. [src: file: .github/workflows/ci-test.yml:992-994#audit-level]
 [src: file: .github/workflows/dependency-review.yml:35-113#continue-on-error]
 
 After the final direct-dependency refresh, `pnpm audit` reports no known

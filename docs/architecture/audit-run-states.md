@@ -291,7 +291,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
   measured cost and duration, or an honest “not measured”.
   [src: file: frontend/src/components/RevalidateAudit.tsx:250-253#revalidate-prose-changed]
   [src: file: frontend/src/components/RevalidateAudit.tsx:345-353#hasTargetedAgentWork]
-  [src: file: frontend/src/components/RevalidateAudit.tsx:354-364#docStateCounts]
+  [src: file: frontend/src/components/RevalidateAudit.tsx:353-363#docStateCounts]
   [src: file: frontend/src/components/RevalidateAudit.tsx:395-426#onUpdateStale]
   [src: file: frontend/src/components/RevalidateAudit.tsx:583-590#onFullAudit]
 - **Human text survives.** A partial update reuses the saved briefing. A Kronn

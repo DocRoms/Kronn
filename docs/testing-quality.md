@@ -235,7 +235,7 @@ statistics use only successful same-branch pull-request runs whose job records
 a verified restored compiled cache. The v3 key cannot restore the former
 debug layout, so the first run is an explicit warmup.
 [src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:166-191#main] [src: file: scripts/ci/backend_ci_slo.mjs:100-104#effectiveMeasurementMode] [src: file: scripts/ci/backend_ci_slo.mjs:83-94#comparableSuccessfulHotRuns]
-[src: file: .github/workflows/ci-test.yml:131-160#verify-backend-cache] [src: file: .github/workflows/ci-test.yml:195-206#cold] [src: file: .github/workflows/ci-test.yml:1006-1026#backend-ci-performance]
+[src: file: .github/workflows/ci-test.yml:131-160#verify-backend-cache] [src: file: .github/workflows/ci-test.yml:195-206#cold] [src: file: .github/workflows/ci-test.yml:1013-1033#backend-ci-performance]
 The observer's Node unit test runs in the blocking `test-python` gate.
 [src: file: .github/workflows/ci-test.yml:622-629#SLO]
 
@@ -379,7 +379,7 @@ gradients or pseudo-elements, and walks keyboard focus. It answers every non-GET
 with 503 and stubs the WebSocket, so it may run read-only against a live backend.
 `[src: file: frontend/src/styles/themeAudit.ts:40-45#textFloor]` `[src: file: frontend/src/styles/themeAudit.ts:176-191#measureTextContrast]` `[src: file: frontend/src/styles/themeAudit.ts:201-214#undefinedTokenUsages]`
 `[src: file: frontend/src/styles/themeAudit.ts:219-235#forcedTextOnTokenBackground]` `[src: file: frontend/src/styles/themeAudit.ts:237-263#forcedTextInInlineStyles]` `[src: file: frontend/src/styles/themeAudit.ts:280-297#undeclaredCustomProperties]`
-`[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:40-71#readOnly]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:73-76#REMEASURED]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:279-317#proposedAction]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:319-335#focusStops]`
+`[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:40-71#readOnly]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:73-76#REMEASURED]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:279-317#proposedAction]` `[src: file: frontend/e2e/specs/a11y-dark-themes.spec.ts:323-339#focusStops]`
 
 When a disposable backend runs in a container, run browser specs with local
 provider stubs in the same network namespace. Their loopback callbacks then
