@@ -511,37 +511,37 @@ jobs:
       - name: Lint — no unwrap() inside with_conn closures
         if: github.event_name != 'push'
         run: |
-          python3 scripts/ci/test_lint_with_conn_unwrap.py
           python3 scripts/ci/lint_with_conn_unwrap.py
       - name: Lint — no fixed path under the system temp dir
         if: github.event_name != 'push'
         run: |
-          python3 scripts/ci/test_lint_fixed_temp_paths.py
           python3 scripts/ci/lint_fixed_temp_paths.py
       - name: Context Budget Gate — agent bootstrap size
         if: github.event_name != 'push'
         run: |
-          python3 scripts/ci/test_context_budget.py
           python3 scripts/ci/context_budget.py
       - name: MCP Surface Budget Gate — tool catalogue size
         if: github.event_name != 'push'
         run: |
-          python3 scripts/ci/test_mcp_surface_budget.py
           python3 scripts/ci/mcp_surface_budget.py
       - name: Gateway body caps — nginx carries every axum body limit
         if: github.event_name != 'push'
         run: |
-          python3 scripts/ci/test_nginx_body_limits.py
           python3 scripts/ci/nginx_body_limits.py
-          python3 scripts/ci/test_gateway_frame_src.py
       - name: Tech-debt registry — index rows match open detail files
         if: github.event_name != 'push'
         run: |
-          python3 scripts/ci/test_tech_debt_registry.py
           python3 scripts/ci/tech_debt_registry.py
-      - name: Release body generator — links match attached installers
+      - name: CI tests — run every backend/scripts/ci/test_*.py
         if: github.event_name != 'push'
-        run: python3 scripts/ci/test_release_notes.py
+        run: |
+          fail=0
+          for t in scripts/ci/test_*.py; do
+            echo "::group::$t"
+            python3 "$t" || fail=1
+            echo "::endgroup::"
+          done
+          exit "$fail"
       - name: Agent task matrix — every task still reaches its content
         if: github.event_name != 'push'
         run: python3 scripts/ci/agent_task_matrix.py
