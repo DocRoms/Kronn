@@ -794,13 +794,22 @@ reap_native_backend() {
 
 cmd_stop() {
     step "Stopping Kronn"
+    local service_left=0
     if service_is_installed && service_is_loaded; then
-        service_unload && success "Background service stopped (start it again with: kronn service start)."
+        if service_unload; then
+            success "Background service stopped (start it again with: kronn service start)."
+        else
+            service_left=1
+        fi
     fi
     reap_native_backend                 # native start-dev stack (watchexec + kronn)
     # Docker stack — only from a checkout (a service release has no Makefile).
     if [[ -f "$KRONN_DIR/Makefile" ]]; then
         (cd "$KRONN_DIR" && make stop)
+    fi
+    if [[ "$service_left" == "1" ]]; then
+        fail "The background service is still running: it could not be stopped (see: kronn service status)."
+        return 1
     fi
     success "Kronn stopped."
 }

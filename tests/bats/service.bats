@@ -84,6 +84,7 @@ make_fake_tree() { # <dir> [version]
     printf '%s\n' "$v" > "$d/VERSION"
     printf '#!/usr/bin/env bash\necho cli\n' > "$d/kronn"
     echo "# lib" > "$d/lib/ui.sh"
+    echo "# service" > "$d/lib/service.sh"
     echo "# comp" > "$d/completions/kronn.bash"
     echo "[package]" > "$d/backend/Cargo.toml"
     echo "print('mcp')" > "$d/backend/scripts/disc-introspection-mcp.py"
@@ -721,6 +722,24 @@ $TEST_TMPDIR/n24.14.0/node"
     [ ! -e "$KRONN_SERVICE_HOME/current" ]
 }
 
+@test "install refuses a latest tag that predates kronn service" {
+    fake_toolchain
+    make_fake_tree "$TEST_TMPDIR/upstream" 0.15.1
+    local up="$TEST_TMPDIR/upstream"
+    git -C "$up" rm -q lib/service.sh
+    git -C "$up" -c user.name=t -c user.email=t@t commit -q -m "no service yet"
+    git -C "$up" tag 0.15.1
+    KRONN_DIR="$up"
+    git -C "$KRONN_DIR" remote add origin "$up"
+    service_build_from_source() { echo "build" >> "$CALLS"; }
+    run cmd_service_install --yes
+    [ "$status" -eq 1 ]
+    [ "${output#*predates \'kronn service\'}" != "$output" ]
+    [ -z "$(grep "^build" "$CALLS")" ]
+    [ -z "$(service_current_version)" ]
+    [ ! -f "$(service_unit_path)" ]
+}
+
 @test "install without --from-checkout builds the latest tag of the service clone" {
     fake_toolchain
     make_fake_tree "$TEST_TMPDIR/upstream" 0.15.0
@@ -1000,6 +1019,19 @@ $TEST_TMPDIR/n24.14.0/node"
     git -C "$KRONN_DIR" remote add origin "git@example.invalid:fork/Kronn.git"
     run _service_clone_url
     [ "$output" = "git@example.invalid:fork/Kronn.git" ]
+}
+
+@test "kronn stop says the service is still running when it cannot unload it" {
+    service_write_unit
+    touch "$STATE/loaded"
+    reap_native_backend() { :; }
+    service_unload() { return 1; }
+    KRONN_DIR="$TEST_TMPDIR/release-cli"
+    mkdir -p "$KRONN_DIR"
+    run cmd_stop
+    [ "$status" -eq 1 ]
+    [ "${output#*still running}" != "$output" ]
+    [ "${output#*Kronn stopped.}" = "$output" ]
 }
 
 @test "kronn restart restarts the service when installed" {

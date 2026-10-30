@@ -24,7 +24,10 @@ kronn service install --yes           # no questions (reinstall, symlink)
 1. checks the prerequisites: `git`, `cargo` (rustup), `node` (>= 24) and `pnpm`;
 2. clones the repository into `~/.kronn/service/src` (the URL is the `origin` of
    the checkout the CLI runs from, `https://github.com/DocRoms/Kronn.git` if it
-   has none) and checks out the highest `X.Y.Z` tag;
+   has none) and checks out the highest `X.Y.Z` tag. A tag without
+   `lib/service.sh` predates `kronn service` (its backend serves no UI and skips
+   the login `PATH`, its CLI has no `service`), so `install` refuses it: until
+   a release ships the service, use `--from-checkout`;
 3. builds it: `cargo build --release` for the backend, then
    `pnpm install --frozen-lockfile && pnpm build` for the frontend;
 4. stages the result as `releases/<version>` and points `current` at it;
@@ -162,7 +165,8 @@ Steps, in order (nothing live changes before step 6):
 1. refuse unless the service is installed; take `update.lock` (a directory with
    a `pid` file; a lock whose pid is dead is cleared, a live one refuses);
 2. `git -C src fetch --tags --force origin`; the target is `--to` (it must be an
-   existing `X.Y.Z` tag) or the highest tag;
+   existing `X.Y.Z` tag) or the highest tag; a target without `lib/service.sh`
+   is refused, `--check` included, like at install;
 3. target equal to the current version: "already up to date", exit 0.
    `--check` stops here and prints current and target;
 4. `git -C src checkout --detach <tag>` (refused when `src/` has local

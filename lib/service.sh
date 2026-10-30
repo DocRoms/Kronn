@@ -688,6 +688,18 @@ service_missing_tools() {
     printf '%s\n' "${missing# }"
 }
 
+# A release older than `kronn service` builds a backend that reads neither
+# KRONN_SERVICE nor KRONN_UI_DIST (no web UI, no login PATH) and a CLI without
+# `service`, yet its health check passes: install and update refuse it.
+_service_tag_ships_service() { # <src> <version>
+    git -C "$1" cat-file -e "$2:lib/service.sh" 2>/dev/null
+}
+
+_service_refuse_pre_service_tag() { # <version>
+    fail "Release $1 predates 'kronn service' (no web UI, no login PATH)."
+    printf "  ${DIM}Use ${BOLD}kronn service install --from-checkout${RESET}${DIM} until a release ships it.${RESET}\n"
+}
+
 _service_clone_url() {
     local url=""
     # Only a checkout names the origin: from a release CLI (current/cli), git
@@ -774,6 +786,10 @@ cmd_service_install() {
         fi
         base_version="$version"
         info "Latest release: $version"
+        if ! _service_tag_ships_service "$src" "$version"; then
+            _service_refuse_pre_service_tag "$version"
+            return 1
+        fi
         git -C "$src" checkout --quiet --force "$version" || { fail "git checkout $version failed."; return 1; }
     fi
 

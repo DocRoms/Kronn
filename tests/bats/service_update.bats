@@ -71,7 +71,8 @@ teardown() {
     rm -rf "$TEST_TMPDIR"
 }
 
-# Origin: a work repo + bare clone, one commit and tag per version.
+# Origin: a work repo + bare clone, one commit and tag per version. Each tag
+# ships lib/service.sh unless NO_SERVICE=1 (a release older than the service).
 add_tag() { # <version>
     local v="$1" w="$TEST_TMPDIR/work"
     if [[ ! -d "$w/.git" ]]; then
@@ -81,6 +82,11 @@ add_tag() { # <version>
         printf '#!/usr/bin/env bash\necho cli\n' > "$w/kronn"
         echo "# lib" > "$w/lib/ui.sh"
         printf '# Changelog\n\n' > "$w/CHANGELOG.md"
+    fi
+    if [[ "${NO_SERVICE:-0}" == "1" ]]; then
+        rm -f "$w/lib/service.sh"
+    else
+        echo "# service" > "$w/lib/service.sh"
     fi
     printf '%s\n' "$v" > "$w/VERSION"
     {
@@ -233,6 +239,26 @@ old_time() { touch -t 202001010000 "$1"; }
     [ "$status" -eq 0 ]
     [ -d "$KRONN_SERVICE_HOME/src/.git" ]
     [ "$(service_current_version)" = "0.2.0" ]
+}
+
+@test "update: a tag that predates kronn service is refused, even by --check" {
+    # A dev install (0.2.0-dev-…) next to the latest tag, which has no service.
+    add_tag 0.1.0
+    install_at 0.1.0
+    NO_SERVICE=1 add_tag 0.0.9
+    run cmd_service_update --to 0.0.9 --yes
+    [ "$status" -eq 1 ]
+    [ "${output#*predates \'kronn service\'}" != "$output" ]
+    [ "$(service_current_version)" = "0.1.0" ]
+    [ -z "$(grep "^build " "$CALLS")" ]
+    NO_SERVICE=1 add_tag 0.3.0
+    run cmd_service_update --check
+    [ "$status" -eq 1 ]
+    [ "${output#*An update is available}" = "$output" ]
+    run cmd_service_update --yes
+    [ "$status" -eq 1 ]
+    [ "$(service_current_version)" = "0.1.0" ]
+    [ -z "$(grep "^build " "$CALLS")" ]
 }
 
 @test "update: an already staged release is reused without a rebuild" {

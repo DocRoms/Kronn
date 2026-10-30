@@ -486,6 +486,11 @@ _su_update_locked() { # <to> <check> <force>
         success "Already up to date ($cur)."
         return 0
     fi
+    # Checked before --check too: a tag without the service is no update.
+    if ! _service_tag_ships_service "$src" "$target"; then
+        _service_refuse_pre_service_tag "$target"
+        return 1
+    fi
     if [[ "$check" == "1" ]]; then
         printf "  ${BOLD}Current${RESET}  %s\n  ${BOLD}Target${RESET}   %s\n" "$cur" "$target"
         info "An update is available: kronn service update"
