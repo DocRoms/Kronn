@@ -31,8 +31,6 @@ Release notes for 0.9.3 and earlier are available in the
   red above, with advice on how to optimize. The Pages list badges heavy Pages,
   and a heavy write returns a notice the agent receives as `kronn_notice`
   (#252).
-### Added
-
 - The backend can run as a background service. With `KRONN_SERVICE=1` it
   resolves the login-shell PATH at startup, before agent detection, and merges
   it into its own, so agent CLIs are found under launchd or systemd. With
