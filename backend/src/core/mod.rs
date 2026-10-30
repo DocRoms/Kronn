@@ -138,6 +138,7 @@ pub mod td_review;
 pub mod td_tasks;
 pub mod template_manifest;
 pub mod timezone;
+pub mod upstream_mirror;
 pub mod usage;
 pub mod user_context;
 pub mod version_sources;

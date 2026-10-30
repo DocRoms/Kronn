@@ -6415,7 +6415,7 @@ async fn deliver_authorized_worker_manifest_inner(
         return Ok(DeliverOutcome::InvalidManifest(detail));
     }
     let git_validation = match git_facts.as_ref() {
-        Some(facts) => validate_delivery_git_facts(facts, &manifest),
+        Some(facts) => validate_delivery_git_facts(facts, &manifest).await,
         None => validate_delivery_git_state(db, &exec, &manifest).await,
     };
     if let Err(detail) = git_validation {
@@ -6518,7 +6518,23 @@ struct DeliveryGitFacts {
     base_sha: String,
     head_sha: String,
     files_touched: Vec<ManifestFile>,
-    /// The integration target: commits already on it are not the worker's.
+    /// Where "already upstream" is decided for this execution; `None` when the
+    /// run names no project, and every commit is then the worker's.
+    upstream: Option<UpstreamSource>,
+}
+
+/// What a delivery needs to tell the commits it merged in from upstream (KT-1498).
+/// Read from the server's own records (run, project row), never from the
+/// worker's worktree nor from the checkout's git config, which every worktree
+/// shares.
+#[derive(Debug, Clone)]
+struct UpstreamSource {
+    project_id: String,
+    /// The project's `repo_url` in Kronn's database: the only remote asked.
+    /// `None` when the project has none: every commit is then inspected.
+    repo_url: Option<String>,
+    /// The run's integration target branch, fetched from that remote when it
+    /// has it (a PR base other than the default branch).
     target_branch: Option<String>,
 }
 
@@ -6670,7 +6686,7 @@ async fn validate_delivery_git_state(
     manifest: &DeliveryManifestV1,
 ) -> Result<(), String> {
     let facts = delivery_git_facts(db, exec).await?;
-    validate_delivery_git_facts(&facts, manifest)
+    validate_delivery_git_facts(&facts, manifest).await
 }
 
 async fn delivery_git_facts(
@@ -6705,24 +6721,42 @@ async fn delivery_git_facts(
         .base_sha
         .as_deref()
         .ok_or_else(|| "execution has no pinned base_sha".to_string())?;
-    let target_branch = execution_target_branch(db, exec).await;
-    delivery_git_facts_from_repo(repo, base_rev, target_branch)
+    let upstream = execution_upstream_source(db, exec).await;
+    delivery_git_facts_from_repo(repo, base_rev, upstream)
 }
 
-/// The run's integration target branch, when the run names one.
-async fn execution_target_branch(db: &Database, exec: &TaskExecution) -> Option<String> {
+/// The project of the execution's run, with its `repo_url` and the run's
+/// integration target; `None` when the run has no project.
+async fn execution_upstream_source(db: &Database, exec: &TaskExecution) -> Option<UpstreamSource> {
     let run_id = exec.orchestration_run_id.clone();
-    db.with_conn(move |conn| crate::db::orchestration::get_orchestration_run(conn, &run_id))
+    let (run, project) = db
+        .with_conn(move |conn| {
+            let Some(run) = crate::db::orchestration::get_orchestration_run(conn, &run_id)? else {
+                return Ok((None, None));
+            };
+            let project = match run.project_id.as_deref() {
+                Some(id) => crate::db::projects::get_project(conn, id)?,
+                None => None,
+            };
+            Ok((Some(run), project))
+        })
         .await
-        .ok()
-        .flatten()
-        .and_then(|run| run.target_branch)
+        .ok()?;
+    let (run, project) = (run?, project?);
+    Some(UpstreamSource {
+        project_id: project.id,
+        repo_url: project
+            .repo_url
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty()),
+        target_branch: run.target_branch,
+    })
 }
 
 fn delivery_git_facts_from_repo(
     repo: std::path::PathBuf,
     base_rev: &str,
-    target_branch: Option<String>,
+    upstream: Option<UpstreamSource>,
 ) -> Result<DeliveryGitFacts, String> {
     let base = worktree::resolve_commit(&repo, base_rev)
         .map_err(|error| format!("cannot resolve execution base_sha: {error}"))?;
@@ -6749,11 +6783,11 @@ fn delivery_git_facts_from_repo(
         base_sha: base,
         head_sha: current,
         files_touched,
-        target_branch,
+        upstream,
     })
 }
 
-fn validate_delivery_git_facts(
+async fn validate_delivery_git_facts(
     facts: &DeliveryGitFacts,
     manifest: &DeliveryManifestV1,
 ) -> Result<(), String> {
@@ -6766,19 +6800,62 @@ fn validate_delivery_git_facts(
         ));
     }
     validate_committed_file_inventory(facts, manifest)?;
-    validate_delivery_identity_trailers(facts)
+    validate_delivery_identity_trailers(facts).await
 }
 
 /// A CLI worker runs `git commit` itself, so nothing strips an identity
 /// trailer the model wrote; every one must name the repository's git identity.
-fn validate_delivery_identity_trailers(facts: &DeliveryGitFacts) -> Result<(), String> {
-    let commits = worktree::commit_messages_excluding(
-        &facts.repo,
-        &facts.base_sha,
-        &facts.head_sha,
-        facts.target_branch.as_deref(),
-    )
-    .map_err(|error| format!("cannot inspect the delivered commit messages: {error}"))?;
+///
+/// Commits the worker merged in from upstream (`origin/main`, the integration
+/// target) are not its own: they are left out, but only once a foreign trailer
+/// has been found among all the delivered commits, so a delivery without one
+/// never waits on the remote.
+async fn validate_delivery_identity_trailers(facts: &DeliveryGitFacts) -> Result<(), String> {
+    let all = delivered_commit_messages(facts).await?;
+    if foreign_identity_trailers(facts, &all)?.is_none() {
+        return Ok(());
+    }
+    let own = commits_outside_upstream(facts, all).await?;
+    let Some((identity, foreign)) = foreign_identity_trailers(facts, &own)? else {
+        return Ok(());
+    };
+    Err(format!(
+        "delivered commits carry identity trailers that do not match this repository's git identity `{identity}`: {}. \
+         Remove these lines and let `git commit -s` add the sign-off; never write an identity trailer by hand \
+         (for example `git reset --soft {}` then `git commit -s -m \"<message>\"`), then deliver the new HEAD.",
+        foreign.join(", "),
+        short_sha(&facts.base_sha),
+    ))
+}
+
+/// Every commit of the delivery, read in a git directory of Kronn's own: the
+/// shared repository's `shallow` file, grafts and replace refs are writable by
+/// the worker and would hide commits from a scan run inside it.
+async fn delivered_commit_messages(
+    facts: &DeliveryGitFacts,
+) -> Result<Vec<(String, String)>, String> {
+    let data_dir = crate::core::config::config_dir()
+        .map_err(|error| format!("cannot inspect the delivered commit messages: {error}"))?;
+    let scan = crate::core::upstream_mirror::scan_dir(&data_dir);
+    let (repo, base, head) = (
+        facts.repo.clone(),
+        facts.base_sha.clone(),
+        facts.head_sha.clone(),
+    );
+    tokio::task::spawn_blocking(move || {
+        crate::core::upstream_mirror::commit_messages_private(&repo, &scan, &base, &head)
+    })
+    .await
+    .map_err(|error| format!("cannot inspect the delivered commit messages: {error}"))?
+    .map_err(|error| format!("cannot inspect the delivered commit messages: {error}"))
+}
+
+/// `(repository identity, foreign trailers)` of `commits`; `None` when every
+/// identity trailer names the repository's identity.
+fn foreign_identity_trailers(
+    facts: &DeliveryGitFacts,
+    commits: &[(String, String)],
+) -> Result<Option<(String, Vec<String>)>, String> {
     let trailers = commits
         .iter()
         .flat_map(|(sha, message)| {
@@ -6789,7 +6866,7 @@ fn validate_delivery_identity_trailers(facts: &DeliveryGitFacts) -> Result<(), S
         })
         .collect::<Vec<_>>();
     if trailers.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let identity = worktree::committer_identity(&facts.repo).map_err(|error| {
         format!("cannot verify the identity trailers of the delivered commits: {error}")
@@ -6799,16 +6876,68 @@ fn validate_delivery_identity_trailers(facts: &DeliveryGitFacts) -> Result<(), S
         .filter(|(_, _, value)| !same_git_identity(value, &identity))
         .map(|(sha, key, value)| format!("{} `{key}: {value}`", short_sha(sha)))
         .collect::<Vec<_>>();
-    if foreign.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "delivered commits carry identity trailers that do not match this repository's git identity `{identity}`: {}. \
-         Remove these lines and let `git commit -s` add the sign-off; never write an identity trailer by hand \
-         (for example `git reset --soft {}` then `git commit -s -m \"<message>\"`), then deliver the new HEAD.",
-        foreign.join(", "),
-        short_sha(&facts.base_sha),
-    ))
+    Ok((!foreign.is_empty()).then_some((identity, foreign)))
+}
+
+/// The delivered commits (`all`) that are not already upstream (KT-1498).
+///
+/// "Upstream" is decided here, at delivery time, from the project's `repo_url`
+/// in Kronn's database: its default branch (and the integration target, when
+/// that remote has it) is fetched into a private mirror under the Kronn data
+/// directory, and only the commits reachable from the fetched tips are left
+/// out. No ref or config of the checkout is read (`refs/*` and `remote.*` are
+/// shared by every worktree), and no local branch is an exemption. Without a
+/// `repo_url`, or when the fetch fails (offline), every commit is returned:
+/// fail closed.
+async fn commits_outside_upstream(
+    facts: &DeliveryGitFacts,
+    all: Vec<(String, String)>,
+) -> Result<Vec<(String, String)>, String> {
+    let Some(source) = facts.upstream.as_ref() else {
+        return Ok(all);
+    };
+    let (mirror, excluded) = match fetch_upstream_mirror(source).await {
+        Ok(fetched) => fetched,
+        Err(error) => {
+            tracing::warn!(
+                "delivery identity check: upstream not fetched, inspecting every commit: {error}"
+            );
+            return Ok(all);
+        }
+    };
+    let (repo, base, head) = (
+        facts.repo.clone(),
+        facts.base_sha.clone(),
+        facts.head_sha.clone(),
+    );
+    tokio::task::spawn_blocking(move || {
+        crate::core::upstream_mirror::commit_messages_outside(
+            &repo, &mirror, &base, &head, &excluded,
+        )
+    })
+    .await
+    .map_err(|error| format!("cannot inspect the delivered commit messages: {error}"))?
+    .map_err(|error| format!("cannot inspect the delivered commit messages: {error}"))
+}
+
+/// Fetch the project's remote into its private mirror: `(mirror, tips)`.
+async fn fetch_upstream_mirror(
+    source: &UpstreamSource,
+) -> Result<(std::path::PathBuf, Vec<String>), String> {
+    let url = source
+        .repo_url
+        .clone()
+        .ok_or_else(|| "the project has no repo_url".to_string())?;
+    let data_dir = crate::core::config::config_dir().map_err(|error| error.to_string())?;
+    let mirror = crate::core::upstream_mirror::mirror_dir(&data_dir, &source.project_id, &url);
+    let branches = source.target_branch.iter().cloned().collect::<Vec<_>>();
+    let dir = mirror.clone();
+    let tips = tokio::task::spawn_blocking(move || {
+        crate::core::upstream_mirror::refresh(&dir, &url, &branches)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    Ok((mirror, tips))
 }
 
 fn short_sha(sha: &str) -> String {
@@ -7961,8 +8090,8 @@ async fn approve_guards(
             "execution has no pinned base_sha".into(),
         )));
     };
-    let target_branch = execution_target_branch(db, exec).await;
-    let facts = match delivery_git_facts_from_repo(repo.to_path_buf(), base, target_branch) {
+    let upstream = execution_upstream_source(db, exec).await;
+    let facts = match delivery_git_facts_from_repo(repo.to_path_buf(), base, upstream) {
         Ok(facts) => facts,
         Err(error) => {
             return Ok(Some(ApproveBlockReason::WorktreeUnavailable(error)));
@@ -7972,7 +8101,7 @@ async fn approve_guards(
         return Ok(Some(ApproveBlockReason::ManifestDiffMismatch(detail)));
     }
     // Also guards deliveries accepted before this check existed.
-    if let Err(detail) = validate_delivery_identity_trailers(&facts) {
+    if let Err(detail) = validate_delivery_identity_trailers(&facts).await {
         return Ok(Some(ApproveBlockReason::ForeignIdentityTrailers(detail)));
     }
     Ok(None)
@@ -32220,6 +32349,805 @@ pub(crate) mod tests {
             matches!(delivered, DeliverOutcome::Delivered { .. }),
             "the sign-off `git commit -s` adds is the repository identity: {delivered:?}"
         );
+    }
+
+    /// `git` in `repo`, which must succeed.
+    fn git_ok(repo: &Path, args: &[&str]) {
+        let output = git(repo, args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    }
+
+    /// A bare "remote" cloned from `repo`'s `main` and made its `origin`, with
+    /// `origin/HEAD` fetched.
+    fn add_remote(repo: &Path) -> tempfile::TempDir {
+        let remote = tempfile::Builder::new()
+            .prefix("kronn-remote-")
+            .tempdir()
+            .unwrap();
+        git_ok(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let url = remote.path().to_str().unwrap().to_string();
+        git_ok(repo, &["remote", "add", "origin", &url]);
+        git_ok(repo, &["push", "-q", "origin", "main"]);
+        git_ok(repo, &["fetch", "-q", "origin"]);
+        git_ok(repo, &["remote", "set-head", "origin", "main"]);
+        remote
+    }
+
+    /// Kronn's own record of the project's remote (`projects.repo_url`): the
+    /// only remote a delivery asks. `add_remote` alone only sets the checkout's
+    /// `origin`, which the identity check never trusts.
+    async fn set_repo_url(db: &Database, url: &Path) {
+        let url = url.to_str().unwrap().to_string();
+        db.with_conn(move |conn| {
+            conn.execute("UPDATE projects SET repo_url = ?1", [&url])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    const FOREIGN_TRAILERS: &str =
+        "Signed-off-by: Someone Else <else@example.com>\nCo-Authored-By: Other <other@example.com>";
+
+    /// Push a commit with foreign trailers onto the remote's `main` (what
+    /// merging a contributor's work does), then fetch it into `repo`'s
+    /// `origin/main`, without moving the local `main`; returns its sha.
+    fn publish_foreign_upstream(repo: &Path, file: &str) -> String {
+        git_ok(
+            repo,
+            &["checkout", "-q", "-b", "upstream-src", "origin/main"],
+        );
+        std::fs::write(repo.join(file), "upstream\n").unwrap();
+        git_ok(repo, &["add", file]);
+        git_ok(
+            repo,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                &format!("fix: upstream {file}\n\n{FOREIGN_TRAILERS}"),
+            ],
+        );
+        let sha = git_rev(repo, "HEAD");
+        git_ok(repo, &["push", "-q", "origin", "upstream-src:main"]);
+        git_ok(repo, &["checkout", "-q", "main"]);
+        git_ok(repo, &["branch", "-q", "-D", "upstream-src"]);
+        git_ok(repo, &["fetch", "-q", "origin"]);
+        sha
+    }
+
+    /// A commit with foreign trailers on a local-only `branch` of `repo`, off
+    /// `main`, never pushed anywhere; returns its sha.
+    fn local_foreign_commit(repo: &Path, branch: &str, file: &str) -> String {
+        git_ok(repo, &["checkout", "-q", "-b", branch, "main"]);
+        std::fs::write(repo.join(file), "foreign\n").unwrap();
+        git_ok(repo, &["add", file]);
+        git_ok(
+            repo,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                &format!("fix: foreign {file}\n\n{FOREIGN_TRAILERS}"),
+            ],
+        );
+        let sha = git_rev(repo, "HEAD");
+        git_ok(repo, &["checkout", "-q", "main"]);
+        sha
+    }
+
+    /// The manifest of the worktree HEAD: every file the branch added.
+    async fn manifest_of_worktree_head(db: &Database, exec_id: &str) -> String {
+        let path = managed_worktree_path(db, exec_id).await;
+        let base = exec_of(db, exec_id).await.base_sha.unwrap();
+        let listed = git(Path::new(&path), &["diff", "--name-only", &base, "HEAD"]);
+        let files = String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .map(|file| serde_json::json!({ "path": file, "kind": "added" }))
+            .collect::<Vec<_>>();
+        manifest_json_with_files_for_dod(
+            &git_rev(Path::new(&path), "HEAD"),
+            serde_json::Value::Array(files),
+            &dod_id_for_execution(db, exec_id).await,
+            true,
+        )
+    }
+
+    /// The worker's commit of `worker.txt` (message `message`, signed by the
+    /// repository identity), then a merge of `rev`; returns the manifest.
+    async fn cli_worker_commit_then_merge(
+        db: &Database,
+        exec_id: &str,
+        message: &str,
+        rev: &str,
+    ) -> String {
+        cli_worker_commit(db, exec_id, "worker.txt", message, &["-s"]).await;
+        merge_into_worktree(db, exec_id, rev).await;
+        manifest_of_worktree_head(db, exec_id).await
+    }
+
+    async fn merge_into_worktree(db: &Database, exec_id: &str, rev: &str) {
+        let path = managed_worktree_path(db, exec_id).await;
+        let merged = git(
+            Path::new(&path),
+            &["merge", "--no-ff", "-m", &format!("merge {rev}"), rev],
+        );
+        assert!(merged.status.success(), "{merged:?}");
+    }
+
+    async fn deliver_cli(db: &Database, exec_id: &str, manifest: &str) -> DeliverOutcome {
+        deliver_worker_manifest(db, exec_id, "ClaudeCode", "sess-a", manifest)
+            .await
+            .unwrap()
+    }
+
+    /// The refusal text of a delivery that must have been refused.
+    fn refusal(outcome: DeliverOutcome) -> String {
+        match outcome {
+            DeliverOutcome::InvalidManifest(detail) => detail,
+            other => panic!("the delivery must be refused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deliver_accepts_a_branch_that_merged_origin_main_with_foreign_upstream_trailers() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        publish_foreign_upstream(repo.path(), "upstream.txt");
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        set_repo_url(&db, remote.path()).await;
+        let manifest =
+            cli_worker_commit_then_merge(&db, &exec_id, "feat: worker change", "origin/main").await;
+
+        let delivered = deliver_cli(&db, &exec_id, &manifest).await;
+        assert!(
+            matches!(delivered, DeliverOutcome::Delivered { .. }),
+            "upstream commits brought in by merging main are not the worker's: {delivered:?}"
+        );
+    }
+
+    /// The remote moves after the launch and the worker merges the new tip:
+    /// nothing was frozen at launch, so the new commits are upstream too.
+    #[tokio::test]
+    async fn deliver_accepts_upstream_commits_that_landed_after_the_launch() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        publish_foreign_upstream(repo.path(), "before.txt");
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        set_repo_url(&db, remote.path()).await;
+        publish_foreign_upstream(repo.path(), "after.txt");
+        let manifest =
+            cli_worker_commit_then_merge(&db, &exec_id, "feat: worker change", "origin/main").await;
+
+        let delivered = deliver_cli(&db, &exec_id, &manifest).await;
+        assert!(
+            matches!(delivered, DeliverOutcome::Delivered { .. }),
+            "main advanced after the launch and was merged: {delivered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_still_refuses_a_worker_trailer_after_merging_origin_main() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let upstream = publish_foreign_upstream(repo.path(), "upstream.txt");
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        set_repo_url(&db, remote.path()).await;
+        let manifest = cli_worker_commit_then_merge(
+            &db,
+            &exec_id,
+            "feat: worker change\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+            "origin/main",
+        )
+        .await;
+
+        let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+        assert!(
+            detail.contains("Co-Authored-By: Claude <noreply@anthropic.com>"),
+            "{detail}"
+        );
+        assert!(
+            !detail.contains("Someone Else") && !detail.contains(&short_sha(&upstream)),
+            "the upstream commit must not be listed as the worker's: {detail}"
+        );
+        assert_eq!(delivery_count(&db).await, 0);
+    }
+
+    /// Without a remote to ask, nothing identifies the upstream commits: every
+    /// commit is inspected, as before KT-1498.
+    #[tokio::test]
+    async fn deliver_without_a_remote_keeps_checking_merged_commits() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let foreign = local_foreign_commit(repo.path(), "elsewhere", "foreign.txt");
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        let manifest =
+            cli_worker_commit_then_merge(&db, &exec_id, "feat: worker change", "elsewhere").await;
+
+        let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+        assert!(
+            detail.contains("Signed-off-by: Someone Else <else@example.com>")
+                && detail.contains(&short_sha(&foreign)),
+            "without a `repo_url` nothing identifies the upstream: {detail}"
+        );
+        assert_eq!(delivery_count(&db).await, 0);
+    }
+
+    /// The `origin` of the checkout is shared by every worktree: a project
+    /// without `repo_url` in Kronn's database does not fall back to it.
+    #[tokio::test]
+    async fn deliver_does_not_fall_back_to_the_origin_of_the_checkout() {
+        let repo = init_repo();
+        let _remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let upstream = publish_foreign_upstream(repo.path(), "upstream.txt");
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        let manifest =
+            cli_worker_commit_then_merge(&db, &exec_id, "feat: worker change", "origin/main").await;
+
+        let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+        assert!(
+            detail.contains(&short_sha(&upstream)),
+            "no `repo_url`, every commit is inspected: {detail}"
+        );
+        assert_eq!(delivery_count(&db).await, 0);
+    }
+
+    /// The remote cannot be reached when the delivery is judged: fail closed.
+    #[tokio::test]
+    async fn deliver_with_an_unreachable_remote_inspects_every_commit() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let upstream = publish_foreign_upstream(repo.path(), "upstream.txt");
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        let manifest =
+            cli_worker_commit_then_merge(&db, &exec_id, "feat: worker change", "origin/main").await;
+        set_repo_url(&db, &remote.path().join("gone.git")).await;
+
+        let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+        assert!(
+            detail.contains("Signed-off-by: Someone Else <else@example.com>")
+                && detail.contains(&short_sha(&upstream)),
+            "offline, upstream commits are inspected like the worker's: {detail}"
+        );
+        assert_eq!(delivery_count(&db).await, 0);
+    }
+
+    /// No local branch is an exemption: the integration target as the checkout
+    /// names it can be advanced (or moved by a worker), the remote does not
+    /// have those commits.
+    #[tokio::test]
+    async fn deliver_inspects_the_commits_of_the_local_target_without_a_remote() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        std::fs::write(repo.path().join("target.txt"), "target\n").unwrap();
+        git_ok(repo.path(), &["add", "target.txt"]);
+        git_ok(
+            repo.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                &format!("fix: target\n\n{FOREIGN_TRAILERS}"),
+            ],
+        );
+        let manifest =
+            cli_worker_commit_then_merge(&db, &exec_id, "feat: worker change", "main").await;
+
+        let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+        assert!(
+            detail.contains("Signed-off-by: Someone Else <else@example.com>"),
+            "{detail}"
+        );
+        assert_eq!(delivery_count(&db).await, 0);
+    }
+
+    /// The worker commits a foreign trailer, then moves the shared
+    /// `refs/heads/<target>` onto its commit.
+    #[tokio::test]
+    async fn deliver_still_refuses_a_worker_trailer_after_it_moves_the_target_branch() {
+        for with_remote in [false, true] {
+            let repo = init_repo();
+            let remote = add_remote(repo.path());
+            let db = Database::open_in_memory().unwrap();
+            let (_task_ref, _parent_id, _child_id, exec_id) =
+                attached_cli_worker(&db, repo.path()).await;
+            if with_remote {
+                set_repo_url(&db, remote.path()).await;
+            }
+            cli_worker_commit(
+                &db,
+                &exec_id,
+                "worker.txt",
+                "feat: worker change\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+                &["-s"],
+            )
+            .await;
+            let path = managed_worktree_path(&db, &exec_id).await;
+            git_ok(Path::new(&path), &["update-ref", "refs/heads/main", "HEAD"]);
+            let manifest = manifest_of_worktree_head(&db, &exec_id).await;
+
+            let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+            assert!(
+                detail.contains("Co-Authored-By: Claude <noreply@anthropic.com>"),
+                "with_remote={with_remote}: {detail}"
+            );
+            assert_eq!(delivery_count(&db).await, 0);
+        }
+    }
+
+    /// The worker points the shared `remote.origin.url` at a bare repository
+    /// that holds its commit as its default branch: Kronn's `repo_url` decides.
+    #[tokio::test]
+    async fn deliver_still_refuses_a_worker_trailer_after_it_repoints_origin() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        set_repo_url(&db, remote.path()).await;
+        cli_worker_commit(
+            &db,
+            &exec_id,
+            "worker.txt",
+            "feat: worker change\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+            &["-s"],
+        )
+        .await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let evil = tempfile::Builder::new()
+            .prefix("kronn-evil-")
+            .tempdir()
+            .unwrap();
+        git_ok(evil.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let evil_url = evil.path().to_str().unwrap().to_string();
+        git_ok(
+            Path::new(&path),
+            &["push", "-q", &evil_url, "HEAD:refs/heads/main"],
+        );
+        git_ok(
+            Path::new(&path),
+            &["config", "remote.origin.url", &evil_url],
+        );
+        let manifest = manifest_of_worktree_head(&db, &exec_id).await;
+
+        let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+        assert!(
+            detail.contains("Co-Authored-By: Claude <noreply@anthropic.com>"),
+            "{detail}"
+        );
+        assert_eq!(delivery_count(&db).await, 0);
+    }
+
+    /// A same-tree replacement commit with a clean message stands in for the
+    /// worker's commit in an ordinary `git log`: the identity check reads the
+    /// objects as stored.
+    #[tokio::test]
+    async fn deliver_still_refuses_a_worker_trailer_hidden_by_a_replacement_ref() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        set_repo_url(&db, remote.path()).await;
+        cli_worker_commit(
+            &db,
+            &exec_id,
+            "worker.txt",
+            "feat: worker change\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+            &["-s"],
+        )
+        .await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let original = git_rev(Path::new(&path), "HEAD");
+        replace_with_clean_commit(Path::new(&path), &original);
+        let shown = git(Path::new(&path), &["log", "-1", "--format=%B", "HEAD"]);
+        assert!(
+            !String::from_utf8_lossy(&shown.stdout).contains("Co-Authored-By"),
+            "the replacement must hide the trailer from an ordinary log"
+        );
+        let manifest = manifest_of_worktree_head(&db, &exec_id).await;
+
+        let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+        assert!(
+            detail.contains("Co-Authored-By: Claude <noreply@anthropic.com>"),
+            "{detail}"
+        );
+        assert_eq!(delivery_count(&db).await, 0);
+    }
+
+    /// `commit` replaced by a commit with the same tree and parents and a clean
+    /// message (`git replace`, stored in the refs every worktree shares).
+    fn replace_with_clean_commit(repo: &Path, commit: &str) {
+        let parent = git_rev(repo, &format!("{commit}^"));
+        let clean = git(
+            repo,
+            &[
+                "commit-tree",
+                &format!("{commit}^{{tree}}"),
+                "-p",
+                &parent,
+                "-m",
+                "feat: clean",
+            ],
+        );
+        assert!(clean.status.success(), "{clean:?}");
+        let clean = String::from_utf8_lossy(&clean.stdout).trim().to_string();
+        git_ok(repo, &["replace", "--force", commit, &clean]);
+    }
+
+    /// Another worker (or this one) moves the shared remote-tracking refs onto
+    /// a commit with foreign trailers, before or after the launch: the commit
+    /// is not upstream, because the remote does not have it.
+    #[tokio::test]
+    async fn deliver_ignores_remote_tracking_refs_that_a_worker_moved_before_the_launch() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let poisoned = local_foreign_commit(repo.path(), "other-worker", "poison.txt");
+        git_ok(
+            repo.path(),
+            &["update-ref", "refs/remotes/origin/main", &poisoned],
+        );
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        set_repo_url(&db, remote.path()).await;
+        let manifest =
+            cli_worker_commit_then_merge(&db, &exec_id, "feat: worker change", "origin/main").await;
+
+        let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+        assert!(
+            detail.contains("Signed-off-by: Someone Else <else@example.com>")
+                && detail.contains(&short_sha(&poisoned)),
+            "a commit the remote does not have is inspected: {detail}"
+        );
+        assert_eq!(delivery_count(&db).await, 0);
+    }
+
+    #[tokio::test]
+    async fn deliver_still_refuses_a_worker_trailer_after_it_moves_the_remote_tracking_refs() {
+        let tampering: [&[&[&str]]; 3] = [
+            &[&["update-ref", "refs/remotes/origin/main", "HEAD"]],
+            &[
+                &["update-ref", "refs/remotes/origin/elsewhere", "HEAD"],
+                &[
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/elsewhere",
+                ],
+            ],
+            &[&[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/heads/main",
+            ]],
+        ];
+        for commands in tampering {
+            let repo = init_repo();
+            let remote = add_remote(repo.path());
+            let db = Database::open_in_memory().unwrap();
+            publish_foreign_upstream(repo.path(), "upstream.txt");
+            let (_task_ref, _parent_id, _child_id, exec_id) =
+                attached_cli_worker(&db, repo.path()).await;
+            set_repo_url(&db, remote.path()).await;
+            cli_worker_commit(
+                &db,
+                &exec_id,
+                "worker.txt",
+                "feat: worker change\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+                &["-s"],
+            )
+            .await;
+            let path = managed_worktree_path(&db, &exec_id).await;
+            for args in commands {
+                git_ok(Path::new(&path), args);
+            }
+            let manifest = manifest_of_worktree_head(&db, &exec_id).await;
+
+            let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+            assert!(
+                detail.contains("Co-Authored-By: Claude <noreply@anthropic.com>"),
+                "{commands:?}: {detail}"
+            );
+            assert_eq!(delivery_count(&db).await, 0);
+        }
+    }
+
+    /// The identity check is also made again at approve time, from the remote.
+    #[tokio::test]
+    async fn approve_is_refused_when_a_delivered_foreign_trailer_is_no_longer_upstream() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        publish_foreign_upstream(repo.path(), "upstream.txt");
+        let (_task_ref, parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        set_repo_url(&db, remote.path()).await;
+        let manifest =
+            cli_worker_commit_then_merge(&db, &exec_id, "feat: worker change", "origin/main").await;
+        let delivered = deliver_cli(&db, &exec_id, &manifest).await;
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+        // The remote forgets the commit (a force-push): it is nobody's but the
+        // branch's now.
+        git_ok(repo.path(), &["push", "-q", "-f", "origin", "main:main"]);
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::ApproveBlocked {
+                reason: ApproveBlockReason::ForeignIdentityTrailers(detail),
+            } => assert!(detail.contains("Signed-off-by: Someone Else"), "{detail}"),
+            other => panic!("expected an identity-trailer approve block, got {other:?}"),
+        }
+    }
+
+    /// The re-check at approve time reads the objects as stored too: a
+    /// replacement ref made after the delivery does not hide the commit the
+    /// remote no longer has.
+    #[tokio::test]
+    async fn approve_is_refused_when_a_replacement_ref_hides_a_no_longer_upstream_trailer() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let upstream = publish_foreign_upstream(repo.path(), "upstream.txt");
+        let (_task_ref, parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        set_repo_url(&db, remote.path()).await;
+        let manifest =
+            cli_worker_commit_then_merge(&db, &exec_id, "feat: worker change", "origin/main").await;
+        let delivered = deliver_cli(&db, &exec_id, &manifest).await;
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+        git_ok(repo.path(), &["push", "-q", "-f", "origin", "main:main"]);
+        replace_with_clean_commit(repo.path(), &upstream);
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::ApproveBlocked {
+                reason: ApproveBlockReason::ForeignIdentityTrailers(detail),
+            } => assert!(detail.contains("Signed-off-by: Someone Else"), "{detail}"),
+            other => panic!("expected an identity-trailer approve block, got {other:?}"),
+        }
+    }
+
+    /// `info/grafts` is shared by every worktree: the worker gives `commit` the
+    /// parents `parents`, which hides the commits behind it from an ordinary
+    /// `git log`.
+    fn write_grafts(repo: &Path, commit: &str, parents: &[&str]) {
+        let common = git(
+            repo,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        );
+        let common = String::from_utf8_lossy(&common.stdout).trim().to_string();
+        let info = Path::new(&common).join("info");
+        std::fs::create_dir_all(&info).unwrap();
+        let line = std::iter::once(commit)
+            .chain(parents.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        std::fs::write(info.join("grafts"), format!("{line}\n")).unwrap();
+    }
+
+    /// A graft that cuts the worker's trailer commit out of the history must
+    /// not turn the first scan into an early success.
+    #[tokio::test]
+    async fn deliver_still_refuses_a_worker_trailer_hidden_by_a_graft() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        set_repo_url(&db, remote.path()).await;
+        cli_worker_commit(
+            &db,
+            &exec_id,
+            "first.txt",
+            "feat: first\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+            &["-s"],
+        )
+        .await;
+        cli_worker_commit(&db, &exec_id, "second.txt", "feat: second", &["-s"]).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let base = exec_of(&db, &exec_id).await.base_sha.unwrap();
+        write_grafts(
+            Path::new(&path),
+            &git_rev(Path::new(&path), "HEAD"),
+            &[&base],
+        );
+        let shown = git(
+            Path::new(&path),
+            &["log", "--format=%H", &format!("{base}..HEAD")],
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&shown.stdout).lines().count(),
+            1,
+            "the graft must hide the first commit from an ordinary log"
+        );
+        let manifest = manifest_of_worktree_head(&db, &exec_id).await;
+
+        let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+        assert!(
+            detail.contains("Co-Authored-By: Claude <noreply@anthropic.com>"),
+            "{detail}"
+        );
+        assert_eq!(delivery_count(&db).await, 0);
+    }
+
+    /// The re-check at approve time reads the history without grafts too: one
+    /// that drops the upstream parent of the merge hides the commit the remote
+    /// no longer has.
+    #[tokio::test]
+    async fn approve_is_refused_when_a_graft_hides_a_no_longer_upstream_trailer() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        publish_foreign_upstream(repo.path(), "upstream.txt");
+        let (_task_ref, parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        set_repo_url(&db, remote.path()).await;
+        let manifest =
+            cli_worker_commit_then_merge(&db, &exec_id, "feat: worker change", "origin/main").await;
+        let delivered = deliver_cli(&db, &exec_id, &manifest).await;
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+        git_ok(repo.path(), &["push", "-q", "-f", "origin", "main:main"]);
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let merge = git_rev(Path::new(&path), "HEAD");
+        let own_parent = git_rev(Path::new(&path), "HEAD^1");
+        write_grafts(Path::new(&path), &merge, &[&own_parent]);
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::ApproveBlocked {
+                reason: ApproveBlockReason::ForeignIdentityTrailers(detail),
+            } => assert!(detail.contains("Signed-off-by: Someone Else"), "{detail}"),
+            other => panic!("expected an identity-trailer approve block, got {other:?}"),
+        }
+    }
+
+    /// `commit` made a shallow boundary: the `shallow` file is shared by every
+    /// worktree, and a log run in the repository stops at the commits it lists.
+    fn write_shallow(repo: &Path, commit: &str) {
+        let common = git(
+            repo,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        );
+        let common = String::from_utf8_lossy(&common.stdout).trim().to_string();
+        std::fs::write(Path::new(&common).join("shallow"), format!("{commit}\n")).unwrap();
+    }
+
+    /// On top of `parent`: a commit with foreign trailers, then a clean one.
+    /// Returns `(foreign, clean tip)`.
+    fn foreign_then_clean(repo: &Path, parent: &str) -> (String, String) {
+        let tree = format!("{parent}^{{tree}}");
+        let commit_tree = |parent: &str, message: &str| {
+            let out = git(repo, &["commit-tree", &tree, "-p", parent, "-m", message]);
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let foreign = commit_tree(parent, &format!("fix: foreign\n\n{FOREIGN_TRAILERS}"));
+        let clean = commit_tree(&foreign, "chore: clean");
+        (foreign, clean)
+    }
+
+    /// A merged side whose foreign commit sits behind a clean one that the
+    /// worker declared shallow: an ordinary log never reaches it.
+    #[tokio::test]
+    async fn deliver_still_refuses_a_foreign_commit_hidden_behind_a_shallow_boundary() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, _parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        cli_worker_commit(&db, &exec_id, "worker.txt", "feat: worker change", &["-s"]).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let base = exec_of(&db, &exec_id).await.base_sha.unwrap();
+        let (foreign, side_tip) = foreign_then_clean(Path::new(&path), &base);
+        merge_into_worktree(&db, &exec_id, &side_tip).await;
+        let manifest = manifest_of_worktree_head(&db, &exec_id).await;
+        write_shallow(Path::new(&path), &side_tip);
+        let range = format!("{base}..HEAD");
+        let shown = git(Path::new(&path), &["log", "--format=%H", &range]);
+        assert!(
+            !String::from_utf8_lossy(&shown.stdout).contains(&foreign),
+            "the shallow boundary must hide the foreign commit from an ordinary log"
+        );
+
+        let detail = refusal(deliver_cli(&db, &exec_id, &manifest).await);
+        assert!(
+            detail.contains("Signed-off-by: Someone Else <else@example.com>")
+                && detail.contains(&short_sha(&foreign)),
+            "{detail}"
+        );
+        assert_eq!(delivery_count(&db).await, 0);
+    }
+
+    /// A clean commit on top of the remote's `main`; returns its sha.
+    fn publish_clean_upstream_on_top(repo: &Path) -> String {
+        git_ok(repo, &["checkout", "-q", "-b", "clean-src", "origin/main"]);
+        std::fs::write(repo.join("clean.txt"), "clean\n").unwrap();
+        git_ok(repo, &["add", "clean.txt"]);
+        git_ok(repo, &["commit", "-q", "-m", "chore: clean upstream"]);
+        let sha = git_rev(repo, "HEAD");
+        git_ok(repo, &["push", "-q", "origin", "clean-src:main"]);
+        git_ok(repo, &["checkout", "-q", "main"]);
+        git_ok(repo, &["branch", "-q", "-D", "clean-src"]);
+        git_ok(repo, &["fetch", "-q", "origin"]);
+        sha
+    }
+
+    /// The re-check at approve time is not steered by a shallow boundary either:
+    /// the remote forgot the foreign commit and the worker hid it behind the
+    /// clean commit that follows it.
+    #[tokio::test]
+    async fn approve_is_refused_when_a_shallow_boundary_hides_a_no_longer_upstream_trailer() {
+        let repo = init_repo();
+        let remote = add_remote(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        publish_foreign_upstream(repo.path(), "upstream.txt");
+        let upstream_tip = publish_clean_upstream_on_top(repo.path());
+        let (_task_ref, parent_id, _child_id, exec_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        set_repo_url(&db, remote.path()).await;
+        let manifest =
+            cli_worker_commit_then_merge(&db, &exec_id, "feat: worker change", "origin/main").await;
+        let delivered = deliver_cli(&db, &exec_id, &manifest).await;
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        seed_cli_session(&db, 102, &parent_id, "sess-b").await;
+        git_ok(repo.path(), &["push", "-q", "-f", "origin", "main:main"]);
+        let path = managed_worktree_path(&db, &exec_id).await;
+        write_shallow(Path::new(&path), &upstream_tip);
+
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        match outcome {
+            ReviewOutcome::ApproveBlocked {
+                reason: ApproveBlockReason::ForeignIdentityTrailers(detail),
+            } => assert!(detail.contains("Signed-off-by: Someone Else"), "{detail}"),
+            other => panic!("expected an identity-trailer approve block, got {other:?}"),
+        }
     }
 
     #[tokio::test]
