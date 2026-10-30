@@ -2656,6 +2656,8 @@ export interface PlanningTaskListFilters {
   withDiscussion?: boolean;
   cursor?: number;
   limit?: number;
+  /** `false` skips the per-project and General counts when only `total` is read. */
+  withCounts?: boolean;
 }
 
 export const planning = {
@@ -2672,6 +2674,7 @@ export const planning = {
     }
     if (filters.cursor !== undefined) query.set('cursor', String(filters.cursor));
     if (filters.limit !== undefined) query.set('limit', String(filters.limit));
+    if (filters.withCounts !== undefined) query.set('with_counts', String(filters.withCounts));
     const suffix = query.size > 0 ? `?${query.toString()}` : '';
     return api<PlanningTaskListResponse>('GET', `/planning/tasks${suffix}`);
   },

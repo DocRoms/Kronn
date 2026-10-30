@@ -149,13 +149,16 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # Skill writes for agents: `skill_create` / `skill_update` point to their manuals,
 # lose `allowed_tools` (human-only) and the update's `project_id` (never moves);
 # `skill_delete` says it is human-only and irreversible. -393 B (84_843 -> 84_450).
+# KT-1351: `task_list` says its grouped counts come with the first page only,
+# paid for inside its own description: -16 B (84_450 -> 84_434).
 # #252: `page_create` / `page_update_html` no longer promise a 1 MB maximum the
 # backend dropped. -21 B (84_450 -> 84_429).
 # #241: `task_exec_review` says whose identity the bridge sends (the room's
 # native agent in its own turn, else the joined CLI session), paid for inside
 # its own declaration (shorter refusal clause and `task_execution_id` text):
 # net zero, ceiling unchanged.
-CATALOGUE_MAX_BYTES = 84_429
+# KT-1351 + #252 + #241 together, merged: measured 84_413 B.
+CATALOGUE_MAX_BYTES = 84_413
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

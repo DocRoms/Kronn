@@ -346,10 +346,10 @@ TOOLS = [
     {
         "name": "task_list",
         "description": (
-            "List compact planning-task summaries with bounded pagination. "
-            "Returns no Markdown description, DoD body, links or event log; "
-            "call task_get only for the task you need. Filters: search, "
-            "status, priority, project_id, discussion_id, tag, with_discussion."
+            "List compact task summaries, paginated; no description, DoD, "
+            "links or events (task_get fetches one). Filters: search, status, "
+            "priority, project_id, discussion_id, tag, with_discussion. "
+            "project_totals/unassigned_total: first page only."
         ),
         "inputSchema": {
             "type": "object",

@@ -343,6 +343,16 @@ describe('api module', () => {
       );
     });
 
+    it('asks the backend to skip the grouped counts only when told to', async () => {
+      mockFetchResponse({ items: [], next_cursor: null });
+      const { planning } = await getApi();
+      await planning.list({ projectId: 'p1', limit: 1, withCounts: false });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/planning/tasks?project_id=p1&limit=1&with_counts=false',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
     it('uses copyable KT references safely in detail and update routes', async () => {
       mockFetchResponse({});
       const { planning } = await getApi();

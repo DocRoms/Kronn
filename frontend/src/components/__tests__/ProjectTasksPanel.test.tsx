@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { planning } from '../../lib/api';
+import { MAX_PLANNING_PAGES } from '../../lib/planningPages';
 import type { PlanningTaskSummary } from '../../types/generated';
 import { ProjectTasksPanel } from '../ProjectTasksPanel';
 
@@ -44,7 +45,7 @@ describe('ProjectTasksPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(planning.list).mockReset()
-      .mockResolvedValue({ items: [task], next_cursor: null });
+      .mockResolvedValue({ items: [task], next_cursor: null, total: 1, project_totals: {}, unassigned_total: 0 });
     vi.mocked(planning.create).mockReset().mockResolvedValue({} as never);
     vi.mocked(planning.update).mockReset().mockResolvedValue({} as never);
   });
@@ -68,6 +69,58 @@ describe('ProjectTasksPanel', () => {
     await waitFor(() => {
       expect(planning.update).toHaveBeenCalledWith('task-uuid', { status: 'done' });
     });
+  });
+
+  it('reads every page and reports the backend total, not the size of a page', async () => {
+    const onCountChange = vi.fn();
+    const second = { ...task, id: 'task-2', reference: 'KT-43', title: 'Second page' };
+    vi.mocked(planning.list).mockReset()
+      .mockResolvedValueOnce({ items: [task], next_cursor: 100, total: 2, project_totals: {}, unassigned_total: 0 })
+      .mockResolvedValueOnce({ items: [second], next_cursor: null, total: 2, project_totals: {}, unassigned_total: 0 });
+    render(
+      <ProjectTasksPanel
+        projectId="project-1"
+        onOpenPlanning={vi.fn()}
+        onCountChange={onCountChange}
+        toast={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText('Second page')).toBeInTheDocument();
+    expect(screen.getByText('Ship planning')).toBeInTheDocument();
+    expect(planning.list).toHaveBeenNthCalledWith(2, { projectId: 'project-1', limit: 100, cursor: 100 });
+    expect(onCountChange).toHaveBeenLastCalledWith(2);
+  });
+
+  it('says the list stopped when the page ceiling is reached, and still reports the total', async () => {
+    const onCountChange = vi.fn();
+    const total = MAX_PLANNING_PAGES * 100 + 7;
+    vi.mocked(planning.list).mockReset().mockImplementation(async ({ cursor } = {}) => {
+      const page = (cursor ?? 0) / 100;
+      return {
+        items: [{ ...task, id: `task-${page}`, reference: `KT-${page}`, title: `Task ${page}` }],
+        next_cursor: (page + 1) * 100,
+        total,
+        project_totals: {},
+        unassigned_total: 0,
+      };
+    });
+    render(
+      <ProjectTasksPanel
+        projectId="project-1"
+        onOpenPlanning={vi.fn()}
+        onCountChange={onCountChange}
+        toast={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByText(`projects.tasks.truncated ${MAX_PLANNING_PAGES} ${total}`),
+    ).toBeInTheDocument();
+    // No request goes past the ceiling, however many pages the total announces.
+    const cursors = vi.mocked(planning.list).mock.calls.map(([filters]) => filters?.cursor ?? 0);
+    expect(Math.max(...cursors)).toBe((MAX_PLANNING_PAGES - 1) * 100);
+    expect(onCountChange).toHaveBeenLastCalledWith(total);
   });
 
   it('creates a task already linked to the project and opens global planning', async () => {

@@ -639,6 +639,11 @@ pub struct PlanningTaskListQuery {
     pub cursor: Option<i64>,
     #[serde(default = "default_planning_limit")]
     pub limit: u32,
+    /// The per-project and General counts cost two grouped queries. They ride
+    /// on the first page by default; `false` skips them for a caller that only
+    /// reads `total`.
+    #[serde(default)]
+    pub with_counts: Option<bool>,
 }
 
 fn default_planning_limit() -> u32 {
@@ -657,6 +662,7 @@ impl Default for PlanningTaskListQuery {
             with_discussion: None,
             cursor: None,
             limit: default_planning_limit(),
+            with_counts: None,
         }
     }
 }
@@ -666,4 +672,22 @@ impl Default for PlanningTaskListQuery {
 pub struct PlanningTaskListResponse {
     pub items: Vec<PlanningTaskSummary>,
     pub next_cursor: Option<i64>,
+    /// Every task matching the query, whatever the page: the one number the
+    /// project tab, the Planning page and `task_list` agree on.
+    pub total: i64,
+    /// The same count per project, over the same filtered set: a task counts
+    /// for a project through a direct link or a linked discussion, and a task
+    /// in two projects counts in both. A project with no match is absent.
+    /// Present on the first page only (cursor 0 or absent), and not when
+    /// `with_counts=false`: omitted otherwise, never an empty map that would
+    /// read as "no project has a task".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_totals: Option<std::collections::HashMap<String, i64>>,
+    /// Matching tasks whose projects, direct or through a linked discussion,
+    /// are none: the rows of the Planning sidebar's "General" group. Present
+    /// with `project_totals`, omitted otherwise, never a 0 that was not computed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unassigned_total: Option<i64>,
 }

@@ -7,7 +7,7 @@ human-gated proposal cards and delta-only prompt notifications are implemented.
 `[src: file: backend/src/db/sql/081_planning_tasks.sql:1-99#planning_tasks]`
 `[src: file: backend/src/api/planning.rs:223-264#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:311-358#decide_proposal_item]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:326-650#plan_get]`
-`[src: file: frontend/src/pages/PlanningPage.tsx:175-195#withDiscussion]`
+`[src: file: frontend/src/pages/PlanningPage.tsx:191-216#withDiscussion]`
 `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3710-3741#planning_change_count]`
 
 This document is the implementation brief for a future Planning workspace and
@@ -184,7 +184,7 @@ Writes are separate tools with narrow schemas. Lists are compact by default and
 full content is returned only for an explicitly requested task.
 `task_update_dod(task_id, dod_id, completed)` is the preferred narrow write for
 checkbox progress. Delta timestamps are compared numerically as RFC3339
-instants, independent of `Z`/offset spelling and fractional precision. `[src: file: backend/src/db/planning.rs:2680-2728#task_changes]` Agents are
+instants, independent of `Z`/offset spelling and fractional precision. `[src: file: backend/src/db/planning.rs:2734-2782#task_changes]` Agents are
 taught this contract in the same prompt/instruction layer that advertises the
 discussion-history tools `disc_meta`, `disc_get_message` and `disc_summarize`:
 the delayed history notice also lists the Planning reads and says how to write (a direct `task_create`, or a `kronn-plan-action` proposal). `[src: file: backend/src/api/disc_prompts.rs:569-599#introspection_notice]`
@@ -247,8 +247,8 @@ assignees. The role is optional (`owner` | `reviewer`).
 6. **Project workspace — implemented** — project cards expose their linked
    tasks, quick creation/completion and direct navigation to each task's global
    Planning detail without duplicating task state.
-   `[src: file: frontend/src/components/ProjectCard.tsx:2439-2450#ProjectTasksPanel]` `[src: file: frontend/src/components/ProjectTasksPanel.tsx:80-113#createTask]`
-   `[src: file: frontend/src/components/ProjectTasksPanel.tsx:152-161#onOpenPlanning]` `[src: file: frontend/src/routes/ProjectsRoute.tsx:51-58#toPlanningTask]`
+   `[src: file: frontend/src/components/ProjectCard.tsx:2439-2450#ProjectTasksPanel]` `[src: file: frontend/src/components/ProjectTasksPanel.tsx:88-121#createTask]`
+   `[src: file: frontend/src/components/ProjectTasksPanel.tsx:160-169#onOpenPlanning]` `[src: file: frontend/src/routes/ProjectsRoute.tsx:51-58#toPlanningTask]`
 7. **Deferred delegation** — task-to-discussion briefing and agent launch only
    after the task workflow is proven manually.
 

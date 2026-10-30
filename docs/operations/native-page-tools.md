@@ -133,4 +133,4 @@ other declaration changes, the Page delta does not. These are byte counts, not
 provider token measurements. The bridge
 declarations keep their own byte ceiling (84,429 bytes, `mcp_surface_budget.py`).
 [src: file: backend/src/api/agent_page_tests.rs:380-405#native_page_surface_has_a_bounded_measured_cost]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:158#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:161#CATALOGUE_MAX_BYTES]

@@ -1531,11 +1531,11 @@ pub fn list_tasks(
     conn: &Connection,
     query: &PlanningTaskListQuery,
 ) -> Result<PlanningTaskListResponse> {
-    let mut sql = String::from(
-        "SELECT DISTINCT t.id
-         FROM planning_tasks t
-         WHERE 1 = 1",
-    );
+    // One WHERE clause feeds both the page and the total, so a count can never
+    // follow a different definition than the rows it sits next to: archived
+    // tasks are out unless asked for, a subtask counts as a task, and a task
+    // belongs to a project through a direct link or a linked discussion.
+    let mut sql = String::from(" WHERE 1 = 1");
     let mut values: Vec<Value> = Vec::new();
 
     if let Some(search) = query
@@ -1605,6 +1605,57 @@ pub fn list_tasks(
         });
     }
 
+    let total: i64 = conn.query_row(
+        &format!("SELECT COUNT(DISTINCT t.id) FROM planning_tasks t{sql}"),
+        params_from_iter(values.iter().cloned()),
+        |row| row.get(0),
+    )?;
+    // The Planning sidebar's group counts: the same WHERE, grouped by project.
+    // They describe the whole filtered set, not a page, so they are computed
+    // once, on the first page; later pages carry only `total`, and the two
+    // fields are left out rather than zeroed so an unfilled count is never read
+    // as a real 0.
+    let with_group_counts = query.cursor.unwrap_or(0) <= 0 && query.with_counts.unwrap_or(true);
+    let mut project_totals = None;
+    let mut unassigned_total = None;
+    if with_group_counts {
+        let mut totals = std::collections::HashMap::new();
+        // A task's projects: a direct link or a linked discussion's project, the
+        // very set `get_summary` reports as `project_ids`.
+        const TASK_PROJECTS: &str = "SELECT task_id, project_id FROM planning_task_projects
+             UNION
+             SELECT td.task_id, d.project_id
+             FROM planning_task_discussions td
+             JOIN discussions d ON d.id = td.discussion_id
+             WHERE d.project_id IS NOT NULL";
+        let mut statement = conn.prepare(&format!(
+            "SELECT tp.project_id, COUNT(DISTINCT t.id)
+             FROM planning_tasks t
+             JOIN ({TASK_PROJECTS}) tp ON tp.task_id = t.id{sql}
+             GROUP BY tp.project_id"
+        ))?;
+        let rows = statement.query_map(params_from_iter(values.iter().cloned()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (project_id, count) = row?;
+            totals.insert(project_id, count);
+        }
+        // "General" lists the tasks whose `project_ids` is empty, so it counts
+        // exactly those: no direct link and no linked discussion with a project.
+        let unassigned: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(DISTINCT t.id) FROM planning_tasks t{sql}
+                 AND NOT EXISTS (SELECT 1 FROM ({TASK_PROJECTS}) tp WHERE tp.task_id = t.id)"
+            ),
+            params_from_iter(values.iter().cloned()),
+            |row| row.get(0),
+        )?;
+        project_totals = Some(totals);
+        unassigned_total = Some(unassigned);
+    }
+    let mut sql = format!("SELECT DISTINCT t.id FROM planning_tasks t{sql}");
+
     let offset = query.cursor.unwrap_or(0).max(0);
     let limit = query.limit.clamp(1, 100);
     sql.push_str(
@@ -1630,6 +1681,9 @@ pub fn list_tasks(
     }
     Ok(PlanningTaskListResponse {
         next_cursor: has_more.then_some(offset + limit as i64),
+        total,
+        project_totals,
+        unassigned_total,
         items,
     })
 }
@@ -3639,6 +3693,191 @@ mod tests {
             project_tasks.items[0].project_ids,
             vec!["project-1".to_string()]
         );
+    }
+
+    /// KT-1351 — the project tab, the Planning page and `task_list` all read
+    /// `total`. On a project mixing subtasks, a multi-project task, a task
+    /// reached only through a discussion, a done task and an archived one, it
+    /// is the same number whatever the page size, and it counts exactly the
+    /// non-archived tasks the pages return.
+    #[test]
+    fn project_task_total_is_one_definition_across_pages() {
+        let connection = connection();
+        let now = Utc::now().to_rfc3339();
+        for id in ["p-a", "p-b"] {
+            connection
+                .execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES (?1, ?1, ?2, ?3, ?3)",
+                    params![id, format!("/tmp/{id}"), now],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO discussions (id, project_id, title, created_at, updated_at)
+                 VALUES ('disc-a', 'p-a', 'Plan', ?1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        let in_project = |title: &str, projects: &[&str]| CreatePlanningTaskRequest {
+            project_ids: projects.iter().map(|id| id.to_string()).collect(),
+            ..request(title)
+        };
+
+        let parent = create_task(&connection, &in_project("Parent", &["p-a"])).unwrap();
+        let subtask = CreatePlanningTaskRequest {
+            parent_id: Some(parent.summary.reference.clone()),
+            ..in_project("Subtask", &["p-a"])
+        };
+        create_task(&connection, &subtask).unwrap();
+        create_task(&connection, &in_project("Shared", &["p-a", "p-b"])).unwrap();
+        create_task(&connection, &in_project("Only B", &["p-b"])).unwrap();
+        let done = create_task(&connection, &in_project("Done", &["p-a"])).unwrap();
+        let archived = create_task(&connection, &in_project("Archived", &["p-a"])).unwrap();
+        for (id, status) in [
+            (&done.summary.id, PlanningTaskStatus::Done),
+            (&archived.summary.id, PlanningTaskStatus::Archived),
+        ] {
+            update_task(
+                &connection,
+                id,
+                &UpdatePlanningTaskRequest {
+                    status: Some(status),
+                    ..update_request()
+                },
+            )
+            .unwrap();
+        }
+        let via_discussion = create_task(&connection, &request("Via discussion")).unwrap();
+        link_discussion(
+            &connection,
+            &via_discussion.summary.id,
+            &LinkPlanningDiscussionRequest {
+                discussion_id: "disc-a".into(),
+                placement: PlanningPlacement::Active,
+                is_primary: false,
+                position: None,
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+
+        let query = |limit: u32, cursor: Option<i64>| PlanningTaskListQuery {
+            project_id: Some("p-a".into()),
+            limit,
+            cursor,
+            ..PlanningTaskListQuery::default()
+        };
+        // Parent, Subtask, Shared, Done, Via discussion — Archived and Only B
+        // are out.
+        let whole = list_tasks(&connection, &query(100, None)).unwrap();
+        assert_eq!(whole.items.len(), 5);
+        assert_eq!(whole.total, 5);
+
+        let first = list_tasks(&connection, &query(2, None)).unwrap();
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(first.total, 5, "total is not the size of the page");
+        let last = list_tasks(&connection, &query(2, Some(4))).unwrap();
+        assert_eq!(last.items.len(), 1);
+        assert_eq!(last.total, 5);
+
+        let archived_only = list_tasks(
+            &connection,
+            &PlanningTaskListQuery {
+                status: Some(PlanningTaskStatus::Archived),
+                ..query(100, None)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (archived_only.items.len() as i64, archived_only.total),
+            (1, 1)
+        );
+
+        let other = list_tasks(
+            &connection,
+            &PlanningTaskListQuery {
+                project_id: Some("p-b".into()),
+                ..PlanningTaskListQuery::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            other.total, 2,
+            "a multi-project task counts in each project"
+        );
+
+        // The sidebar's group counts come from the same set, at any page size:
+        // `project_totals` agrees with what a per-project query reports. They are
+        // computed once, on the first page.
+        for page in [query(100, None), query(2, None), query(2, Some(0))] {
+            let listed = list_tasks(&connection, &page).unwrap();
+            let totals = listed.project_totals.as_ref().expect("first page counts");
+            assert_eq!(totals.get("p-a"), Some(&5));
+            // Shared is the only p-a task also in p-b.
+            assert_eq!(totals.get("p-b"), Some(&1));
+            // Every p-a task is linked, Via discussion through its discussion.
+            assert_eq!(listed.unassigned_total, Some(0));
+        }
+        let later = list_tasks(&connection, &query(2, Some(4))).unwrap();
+        assert_eq!(later.total, 5, "total follows every page");
+        // Not computed is not zero: a later page leaves both fields out.
+        assert!(later.project_totals.is_none() && later.unassigned_total.is_none());
+        let wire = serde_json::to_value(&later).unwrap();
+        assert!(wire.get("project_totals").is_none() && wire.get("unassigned_total").is_none());
+        // `with_counts=false` skips them on the first page too.
+        let bare = list_tasks(
+            &connection,
+            &PlanningTaskListQuery {
+                with_counts: Some(false),
+                ..query(1, None)
+            },
+        )
+        .unwrap();
+        assert_eq!(bare.total, 5);
+        assert!(bare.project_totals.is_none() && bare.unassigned_total.is_none());
+
+        // A task with no direct project and no discussion is the one General row.
+        create_task(&connection, &request("Loose")).unwrap();
+        let unfiltered = list_tasks(&connection, &PlanningTaskListQuery::default()).unwrap();
+        assert_eq!(unfiltered.total, 7);
+        assert_eq!(unfiltered.unassigned_total, Some(1));
+        // The count is the rows General lists: tasks whose `project_ids` is empty,
+        // so Via discussion (listed under p-a) is not in it.
+        let general_rows = unfiltered
+            .items
+            .iter()
+            .filter(|task| task.project_ids.is_empty())
+            .count() as i64;
+        assert_eq!(unfiltered.unassigned_total, Some(general_rows));
+        for (project, expected) in [("p-a", 5), ("p-b", 2)] {
+            let single = list_tasks(
+                &connection,
+                &PlanningTaskListQuery {
+                    project_id: Some(project.into()),
+                    ..PlanningTaskListQuery::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(single.total, expected);
+            assert_eq!(
+                unfiltered
+                    .project_totals
+                    .as_ref()
+                    .and_then(|totals| totals.get(project)),
+                Some(&expected)
+            );
+            let listed_in_group = unfiltered
+                .items
+                .iter()
+                .filter(|task| task.project_ids.iter().any(|id| id == project))
+                .count() as i64;
+            assert_eq!(
+                listed_in_group, expected,
+                "a group lists the rows it counts"
+            );
+        }
     }
 
     #[test]

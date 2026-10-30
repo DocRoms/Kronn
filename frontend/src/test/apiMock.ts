@@ -509,7 +509,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     planning: {
-      list: resolve({ items: [], next_cursor: null }),
+      list: resolve({ items: [], next_cursor: null, total: 0, project_totals: {}, unassigned_total: 0 }),
       get: resolve(null),
       create: resolve({}),
       update: resolve({}),

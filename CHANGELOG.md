@@ -87,6 +87,19 @@ Release notes for 0.9.3 and earlier are available in the
   published yet ("not found", "manifest unknown") leaves `latest` alone.
 - An empty `KRONN_IMAGE_TAG` in the environment wins over `.env` and means the
   `VERSION` default, exactly like Compose; only an unset one reads the file.
+- A project's task count was three different numbers: the Planning sidebar,
+  the project's Tasks tab and `task_list` each counted their own way. They now
+  share one definition: archived tasks are out unless asked for, a subtask is
+  a task, a multi-project task counts in each of its projects, and a task
+  belongs to a project through a direct link or a linked discussion. The
+  sidebar shows the backend's counts and lists every page, so a group lists
+  the rows its count announces; "General" counts exactly the tasks with no
+  project at all. The list stops after 5,000 tasks and says so. The
+  per-project and General counts come with the first page of `task_list` only
+  and are left out after a cursor, so an agent never reads an uncomputed 0 as
+  "no task without a project". A search in the sidebar lists exactly the tasks
+  the backend counted, including those matched only by their description
+  (KT-1351, #237).
 
 ### Fixed
 
