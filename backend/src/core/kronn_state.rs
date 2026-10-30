@@ -60,6 +60,14 @@ pub struct AuditEntry {
     pub provenance: AuditProvenance,
 }
 
+/// A validation a later one replaced: who signed off, and when.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ValidationEntry {
+    pub validated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validated_by: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct KronnState {
     /// Inline self-explanation — present on every write, ignored on read
@@ -82,6 +90,11 @@ pub struct KronnState {
     /// Pseudo of the operator whose audit opened the validation (KT-1122).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation_started_by: Option<String>,
+
+    /// Earlier validations, oldest first: a person re-validated the docs as
+    /// they stood after an edit made outside Kronn (KT-1489).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_history: Vec<ValidationEntry>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrapped_at: Option<String>,
@@ -342,6 +355,26 @@ pub fn mark_validated_by(
     // Replaced, never merged: a validation whose opener is unknown must not
     // keep crediting the previous run's opener.
     state.validation_started_by = started_by.map(str::to_string);
+    write(project_path, &mut state)
+}
+
+/// A person validated the docs as they stand now, after an edit made outside
+/// Kronn (KT-1489): the previous validation joins `validation_history` and
+/// `validated_at` / `validated_by` name this one. The opener of the earlier
+/// run is dropped, it did not open this validation. Refused when nothing is
+/// validated: this re-dates a validation, it never grants one.
+pub fn revalidate_current(project_path: &Path, by: &str) -> Result<(), String> {
+    let mut state = load_for_mutation(project_path)?;
+    let Some(previous) = state.validated_at.take() else {
+        return Err("The documentation is not validated: nothing to validate again".to_string());
+    };
+    state.validation_history.push(ValidationEntry {
+        validated_at: previous,
+        validated_by: state.validated_by.take(),
+    });
+    state.validated_at = Some(today_iso());
+    state.validated_by = Some(by.to_string());
+    state.validation_started_by = None;
     write(project_path, &mut state)
 }
 

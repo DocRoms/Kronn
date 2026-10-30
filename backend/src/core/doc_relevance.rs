@@ -339,8 +339,11 @@ const ABSENCE_PHRASES: &[&str] = &[
     "used to ",
     "n'existe plus",
     "n'existe pas",
+    "n'existent pas",
     "does not exist",
+    "do not exist",
     "doesn't exist",
+    "don't exist",
     "resolved to nothing",
     "if we add",
     "we could",
@@ -529,12 +532,176 @@ fn path_is_said_missing(clause: &str, open: usize, close: usize) -> bool {
     })
 }
 
+/// The clause outside inline code, lowercased, with the typographic apostrophe
+/// a French editor writes (`n’existe pas`) read as the one the phrases use.
+fn prose_outside_code(clause: &str) -> String {
+    clause
+        .split('`')
+        .step_by(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+        .replace(['\u{2019}', '\u{2018}', '\u{02bc}'], "'")
+}
+
+/// The clause speaks of something that is not there (or no longer is).
+fn tells_absence(clause: &str) -> bool {
+    let lower = prose_outside_code(clause);
+    ABSENCE_PHRASES.iter().any(|p| lower.contains(p))
+}
+
+/// Phrases that say, outright, that a path is not there. Narrower than
+/// `ABSENCE_PHRASES` on purpose: "is used to", "no longer", "we could" speak
+/// of history or of plans, and a deleted file they describe is a broken
+/// citation, not a claim of absence.
+const EXPLICIT_ABSENCE: &[&str] = &[
+    "n'existe pas",
+    "n'existent pas",
+    "n'existe plus",
+    "n'existent plus",
+    "does not exist",
+    "do not exist",
+    "doesn't exist",
+    "don't exist",
+    "no longer exist",
+];
+
+/// `text` names exactly the path `file`, alone or with a line span after it
+/// (`src/a.rs`, `./src/a.rs:3-9`), never a longer path that merely contains it.
+fn names_path(text: &str, file: &str) -> bool {
+    let text = text.trim();
+    let text = text.strip_prefix("./").unwrap_or(text);
+    let bare = match text.rsplit_once(':') {
+        Some((head, span))
+            if !span.is_empty()
+                && span.chars().all(|c| c.is_ascii_digit() || c == '-')
+                && span.chars().next().is_some_and(|c| c.is_ascii_digit()) =>
+        {
+            head
+        }
+        _ => text,
+    };
+    bare == file
+}
+
+/// Words that join a path to the absence statement about it ("`x.yml`, which
+/// does not exist", "`x.yml`, qui n'existe pas").
+const ABSENCE_LINKERS: &[&str] = &[
+    "which", "that", "who", "qui", "que", "lequel", "laquelle", "and", "et",
+];
+
+/// A generic name for the cited file, when the sentence names no path: "the
+/// file does not exist: [src: …]".
+const GENERIC_SUBJECTS: &[&str] = &[
+    "the file",
+    "this file",
+    "that file",
+    "the path",
+    "this path",
+    "that path",
+    "le fichier",
+    "ce fichier",
+    "le chemin",
+    "ce chemin",
+];
+
+/// The clause with its `[src: …]` markers and its inline-code ticks removed,
+/// lowercased, with the typographic apostrophe read as the plain one.
+fn clause_prose(clause: &str) -> String {
+    let mut text = String::new();
+    let mut rest = clause;
+    while let Some(start) = rest.find("[src:") {
+        text.push_str(&rest[..start]);
+        rest = match rest[start..].find(']') {
+            Some(end) => &rest[start + end + 1..],
+            None => "",
+        };
+    }
+    text.push_str(rest);
+    text.replace('`', "")
+        .to_lowercase()
+        .replace(['\u{2019}', '\u{2018}', '\u{02bc}'], "'")
+}
+
+/// An explicit absence phrase of the clause is about `file` itself: the words
+/// right before it are the path (alone or in a list of paths, behind a "which"
+/// / "qui"), or, with no path named, a generic "the file" that opens the
+/// sentence. An absence about something else in the sentence ("`a.rs` reads
+/// the config, the cache n'existe pas encore") does not count: a deleted
+/// `a.rs` stays a broken citation.
+fn absence_is_about(clause: &str, file: &str) -> bool {
+    let text = clause_prose(clause);
+    let file = file.to_lowercase();
+    EXPLICIT_ABSENCE.iter().any(|phrase| {
+        text.match_indices(phrase).any(|(at, _)| {
+            let head = text[..at].trim();
+            for token in head.rsplit(char::is_whitespace) {
+                let token = token.trim_matches(|c: char| ",;:()".contains(c));
+                if token.is_empty() || ABSENCE_LINKERS.contains(&token) {
+                    continue;
+                }
+                if names_path(token, &file) {
+                    return true;
+                }
+                // Another path of a list ("`a.rs` and `b.rs` do not exist").
+                if !(token.contains('/') || token.contains('.')) {
+                    break;
+                }
+            }
+            GENERIC_SUBJECTS.contains(&head)
+        })
+    })
+}
+
+/// The clause says outright that `file` is not there: an explicit absence
+/// phrase about it, or the path in backticks labelled missing.
+fn clause_says_file_gone(clause: &str, file: &str) -> bool {
+    absence_is_about(clause, file)
+        || clause
+            .match_indices('`')
+            .collect::<Vec<_>>()
+            .chunks(2)
+            .any(|pair| {
+                pair.len() == 2
+                    && names_path(&clause[pair[0].0 + 1..pair[1].0], file)
+                    && path_is_said_missing(clause, pair[0].0, pair[1].0)
+            })
+}
+
+/// Every occurrence of the citation `cite` (its label: path and lines) sits in
+/// a sentence that says the cited file is not there ("the Jenkinsfile copies
+/// `config/x.yml`, which does not exist [src: file: config/x.yml]"): the
+/// citation backs the absence, a missing file does not make it stale. The
+/// exception is local to the citation (KT-1489): a sentence that cites the same
+/// file for another span, or a second sentence that cites this span as a present
+/// fact, is its own claim and keeps the citation broken. Only an explicit
+/// absence counts: "`a.rs` is used to check tokens" stays a claim that the file
+/// exists.
+pub(crate) fn says_cite_gone(content: &str, cite: &str) -> bool {
+    let mut found = false;
+    for clause in content.lines().flat_map(clauses) {
+        for raw in crate::core::anti_halluc::extract_source_markers(clause) {
+            let Some((path, lines, _)) = crate::core::anti_halluc::file_citation_anchored(&raw)
+            else {
+                continue;
+            };
+            if citation_drift::cite_label(&path, lines) != cite {
+                continue;
+            }
+            found = true;
+            if !clause_says_file_gone(clause, &path) {
+                return false;
+            }
+        }
+    }
+    found
+}
+
 fn tells_history(clause: &str) -> bool {
-    let outside_code = clause.split('`').step_by(2).collect::<Vec<_>>().join(" ");
-    let lower = outside_code.to_lowercase();
-    if ABSENCE_PHRASES.iter().any(|p| lower.contains(p)) {
+    if tells_absence(clause) {
         return true;
     }
+    let lower = prose_outside_code(clause);
     lower
         .split(|c: char| !c.is_alphabetic())
         .any(|word| HISTORY_WORDS.contains(&word))
@@ -1202,8 +1369,13 @@ fn judge(
     let mut anchors = 0usize;
     let mut evidence: Vec<RelevanceEvidence> = Vec::new();
     for label in &labels {
+        let state = citation_state(ctx.project, label, ctx.drift, ctx.moved);
+        // A citation of a file the sentence says is gone backs that claim.
+        if state == CitationState::FileMissing && says_cite_gone(&section.text, label) {
+            continue;
+        }
         anchors += 1;
-        match citation_state(ctx.project, label, ctx.drift, ctx.moved) {
+        match state {
             // A moved line resolves: Kronn re-anchors it, nothing is lost.
             CitationState::Unchanged | CitationState::Moved => {}
             state => evidence.push(RelevanceEvidence {

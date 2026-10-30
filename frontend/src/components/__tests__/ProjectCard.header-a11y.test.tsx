@@ -189,7 +189,7 @@ describe('ProjectCard — header accessibility', () => {
       steps: [], recorded_audits: [], recorded_validated_at: null,
       latest_validation: null, lease_orphaned: false,
     } as never);
-    vi.mocked(projectsApi.docProvenance).mockResolvedValue({ docs: [], to_reconfirm: 0 });
+    vi.mocked(projectsApi.docProvenance).mockResolvedValue({ docs: [], to_reconfirm: 0, outside_kronn: [] });
     vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
       sources_state: 'needs_reverification', sections: [], agent_steps: [], reanchor_count: 1, human_count: 0, unanchored: [], unanchored_docs: [], relevance: { sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0, untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null },
     });
@@ -276,7 +276,7 @@ describe('ProjectCard — header accessibility', () => {
         steps: [], recorded_audits: [], recorded_validated_at: null,
         latest_validation: null, lease_orphaned: false,
       } as never);
-      vi.mocked(projectsApi.docProvenance).mockResolvedValue({ docs: [], to_reconfirm: 0 });
+      vi.mocked(projectsApi.docProvenance).mockResolvedValue({ docs: [], to_reconfirm: 0, outside_kronn: [] });
       vi.mocked(projectsApi.revalidationPlan).mockResolvedValue({
         sources_state: 'clean', sections: [], agent_steps: [], reanchor_count: 0, human_count: 0, unanchored: [], unanchored_docs: [], relevance: { sections: 0, anchors_intact: 0, outdated: 0, no_longer_relevant: 0, unanchored: 0, untouched_stale: 0, missing_references: 0, prose_missing: 0, anchored_intact_pct: null },
       });
@@ -302,7 +302,7 @@ describe('ProjectCard — header accessibility', () => {
       steps: [], recorded_audits: [], recorded_validated_at: null,
       latest_validation: null, lease_orphaned: false,
     } as never);
-    vi.mocked(projectsApi.docProvenance).mockResolvedValue({ docs: [], to_reconfirm: 0 });
+    vi.mocked(projectsApi.docProvenance).mockResolvedValue({ docs: [], to_reconfirm: 0, outside_kronn: [] });
     vi.mocked(projectsApi.revalidationPlan).mockRejectedValue(new Error('unavailable'));
     renderCard({
       project: { audit_status: 'Audited' },

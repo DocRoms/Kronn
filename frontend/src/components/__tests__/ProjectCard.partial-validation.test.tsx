@@ -243,6 +243,7 @@ describe('ProjectCard — partial refresh validation UX', () => {
     });
     vi.mocked(projectsApi.docProvenance).mockImplementation(async (_id, detail = false) => ({
       to_reconfirm: 1,
+      outside_kronn: [],
       docs: detail ? [{
         doc: 'docs/repo-map.md', state: 'to_reconfirm', reason: 'audit_validation', scope: 'doc',
         validated_at: '2026-10-01T10:00:00Z', sections: [],

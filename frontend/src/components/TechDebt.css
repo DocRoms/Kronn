@@ -42,6 +42,9 @@
   align-items: center;
   gap: var(--kr-sp-4);
 }
+/* Step 4 of the audit timeline: "Tech debt  [Settle the debt (3)] · Open the debt file". */
+.td-timeline-label { color: var(--kr-text-muted); font-size: var(--kr-fs-md); }
+.td-timeline-sep { color: var(--kr-text-ghost); }
 .td-sev-count {
   display: inline-flex;
   align-items: center;

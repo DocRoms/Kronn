@@ -50,6 +50,7 @@ const doc = (path: string, overrides: Partial<DocProvenanceStatus> = {}): DocPro
 const report = (docs: DocProvenanceStatus[]): DocProvenanceReport => ({
   docs,
   to_reconfirm: docs.filter(d => d.state === 'to_reconfirm').length,
+  outside_kronn: [],
 });
 
 const provenance = () => projectsApi.docProvenance as ReturnType<typeof vi.fn>;

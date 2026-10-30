@@ -22,7 +22,7 @@ import { activityCategoryLabel } from '../lib/activity-category';
 import { DocStateSummary } from './DocStateSummary';
 import type { DocStateCounts } from './docState';
 import type {
-  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown, RepoAuditRun, ValidationBlock,
+  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown, BrokenDocCitation, RepoAuditRun, ValidationBlock,
   LinkedRepo, ModelTier, ModelTiersConfig,
 } from '../types/generated';
 import './AuditTimeline.css';
@@ -176,6 +176,8 @@ export interface AuditTimelineProps {
   techDebtEntry: ReactNode;
   /** The same verifier opened from the compact project header and stale docs. */
   onVerifyDocs?: () => void;
+  /** « Valider cette version » recorded the docs as they read: refetch what shows the validation. */
+  onVersionValidated?: () => void;
   docStateCounts?: DocStateCounts | null;
   refreshTrigger: number;
   toast: (msg: string, kind: 'success' | 'error' | 'info' | 'warning') => void;
@@ -284,6 +286,11 @@ export function AuditTimeline(props: AuditTimelineProps) {
   const [validatedBy, setValidatedBy] = useState<string | null>(null);
   const [recordedStartedBy, setRecordedStartedBy] = useState<string | null>(null);
   const [recordedValidatedAt, setRecordedValidatedAt] = useState<string | null>(null);
+  // KT-1489 — docs edited outside Kronn since the validation, and the outcome
+  // of « Valider cette version » when citations still block it.
+  const [outsideKronn, setOutsideKronn] = useState<string[]>([]);
+  const [versionBusy, setVersionBusy] = useState(false);
+  const [versionBroken, setVersionBroken] = useState<BrokenDocCitation[]>([]);
   // KT-1199 — the audit run the repository describes (a colleague's, after a
   // fetch or a rebase) and whether the server would validate from it.
   const [repoRun, setRepoRun] = useState<RepoAuditRun | null>(null);
@@ -375,6 +382,40 @@ export function AuditTimeline(props: AuditTimelineProps) {
       .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setValidationBlock(null); setLatestRunStatus(null); setLatestRun(null); setRepoRun(null); setRepoCanValidate(false); setStepsLoaded(true); setLoadFailed(true); } });
     return () => { alive = false; };
   }, [projectId, resumable, refreshTrigger, auditActive, liveStep, reloadTick]);
+
+  useEffect(() => {
+    // The banner only shows on a validated project: nothing to reset otherwise.
+    if (auditStatus !== 'Validated') return undefined;
+    let alive = true;
+    projectsApi.docProvenance(projectId)
+      .then(report => {
+        if (!alive) return;
+        setOutsideKronn(report.outside_kronn ?? []);
+        // A fresh load: the docs may have been fixed since the refusal.
+        setVersionBroken([]);
+      })
+      .catch(() => { if (alive) setOutsideKronn([]); });
+    return () => { alive = false; };
+  }, [projectId, auditStatus, refreshTrigger, reloadTick]);
+
+  const validateVersion = async () => {
+    if (versionBusy) return;
+    setVersionBusy(true);
+    try {
+      const outcome = await projectsApi.validateCurrentDocs(projectId);
+      setVersionBroken(outcome.broken);
+      if (outcome.validated) {
+        setOutsideKronn([]);
+        props.toast(t('auditTimeline.validated.outside.done'), 'success');
+        props.onVersionValidated?.();
+        setReloadTick(n => n + 1);
+      }
+    } catch (e) {
+      props.toast(String(e instanceof Error ? e.message : e), 'error');
+    } finally {
+      setVersionBusy(false);
+    }
+  };
 
   const redo = useMemo(() => new Set(resumable?.steps_to_redo ?? []), [resumable]);
   // Steps that never ran have no row: the run's length also comes from the
@@ -1229,6 +1270,73 @@ export function AuditTimeline(props: AuditTimelineProps) {
                     : null,
                 ].filter(Boolean).join(' · ')}
               </p>
+            )}
+            {validated && !auditActive && outsideKronn.length > 0 && (
+              <div className="audit-tl-note" role="status" data-testid="audit-timeline-outside-kronn">
+                {versionBroken.length > 0 ? (
+                  <p>⚠ {t('auditTimeline.validated.outside.broken', versionBroken.length)}</p>
+                ) : (
+                  <>
+                    <p>⚠ {recordedValidatedAt
+                      ? t('auditTimeline.validated.outside.banner', recordedValidatedAt)
+                      : t('auditTimeline.validated.outside.bannerNoDate')}</p>
+                    <p className="audit-tl-muted">{t('auditTimeline.validated.outside.hint')}</p>
+                  </>
+                )}
+                <div className="audit-tl-validation-actions">
+                  {versionBroken.length > 0 && props.onVerifyDocs ? (
+                    <>
+                      <button
+                        type="button"
+                        className="audit-tl-btn audit-tl-btn-small audit-tl-btn-primary"
+                        data-testid="audit-timeline-fix-broken"
+                        onClick={props.onVerifyDocs}
+                      >
+                        {t('docState.action.fixBroken')}
+                      </button>
+                      {/* A fix made by hand in the repository: run the free check again. */}
+                      <button
+                        type="button"
+                        className="td-link-btn"
+                        data-testid="audit-timeline-recheck-version"
+                        disabled={versionBusy}
+                        onClick={() => void validateVersion()}
+                      >
+                        {versionBusy ? <Loader2 size={12} className="spin" /> : <RotateCcw size={12} />} {t('auditTimeline.validated.outside.recheck')}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="audit-tl-btn audit-tl-btn-small audit-tl-btn-primary"
+                      data-testid="audit-timeline-validate-version"
+                      disabled={versionBusy}
+                      onClick={() => void validateVersion()}
+                    >
+                      {versionBusy ? <Loader2 size={12} className="spin" /> : <ShieldCheck size={12} />} {t('auditTimeline.validated.outside.validate')}
+                    </button>
+                  )}
+                </div>
+                {versionBroken.length > 0 ? (
+                  <details data-testid="audit-timeline-outside-broken">
+                    <summary>{t('auditTimeline.validated.outside.brokenList', versionBroken.length)}</summary>
+                    <ul>
+                      {versionBroken.map(b => (
+                        <li key={`${b.doc}:${b.citation.cite}`}>
+                          <code>{b.doc}</code> — <code>{b.citation.cite}</code> ({t(`audit.revalidate.state.${b.citation.state}`)})
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : (
+                  <details data-testid="audit-timeline-outside-docs">
+                    <summary>{t('auditTimeline.validated.outside.docs', outsideKronn.length)}</summary>
+                    <ul>
+                      {outsideKronn.map(doc => <li key={doc}><code>{doc}</code></li>)}
+                    </ul>
+                  </details>
+                )}
+              </div>
             )}
             {validated && props.techDebtEntry}
           </Phase>

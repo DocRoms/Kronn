@@ -150,6 +150,10 @@ pub struct DocProvenanceReport {
     pub docs: Vec<DocProvenanceStatus>,
     #[ts(type = "number")]
     pub to_reconfirm: usize,
+    /// Docs that differ from what Kronn recorded though no Kronn write
+    /// explains it: edited, deleted or added by hand or by another tool
+    /// (KT-1489). Sorted.
+    pub outside_kronn: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -349,6 +353,24 @@ pub fn record_all(project: &Path, reason: ValidationReason) -> Result<(), String
         {
             continue;
         }
+        if let Some(content) = read_doc(project, &doc) {
+            let record = whole_doc_record(project, &content, reason)?;
+            file.docs.insert(doc, record);
+        }
+    }
+    write(project, &mut file)
+}
+
+/// A person validated the docs as they stand now, whatever changed them
+/// (KT-1489): every doc is recorded as it reads, an edit made outside Kronn
+/// included, and the record of a doc that no longer exists goes. Unlike
+/// [`record_all`] it launders nothing by accident — the caller is the explicit
+/// human action.
+pub fn accept_current(project: &Path, reason: ValidationReason) -> Result<(), String> {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut file = read_strict(project)?;
+    file.docs.retain(|doc, _| read_doc(project, doc).is_some());
+    for doc in crate::core::citation_drift::doc_files(project) {
         if let Some(content) = read_doc(project, &doc) {
             let record = whole_doc_record(project, &content, reason)?;
             file.docs.insert(doc, record);
@@ -675,7 +697,51 @@ pub fn report(project: &Path, detail: bool) -> Result<DocProvenanceReport, Strin
             .filter(|d| d.state == ProvenanceState::ToReconfirm)
             .count(),
         docs,
+        outside_kronn: outside_kronn_in(project, &file),
     })
+}
+
+/// The docs whose text is neither what a validation recorded nor what Kronn
+/// last wrote. A doc Kronn rewrote since keeps its `last_kronn_sha256`: as
+/// long as it still reads that, Kronn is the author. A record kept for the
+/// `owner="human"` sections of a doc nobody validated (`HumanOwned`) is the
+/// person's own text, and a doc without any record was added after the last
+/// validation, which recorded every doc.
+fn outside_kronn_in(project: &Path, file: &ProvenanceFile) -> Vec<String> {
+    // Nothing was ever recorded (a project validated before provenance
+    // existed): there is no state to differ from.
+    if file.docs.is_empty() {
+        return Vec::new();
+    }
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for (doc, record) in &file.docs {
+        if record.reason == ValidationReason::HumanOwned {
+            continue;
+        }
+        let current = read_doc(project, doc);
+        if !is_modified(record, current.as_deref()) {
+            continue;
+        }
+        let kronn_output = current
+            .as_deref()
+            .zip(record.last_kronn_sha256.as_deref())
+            .is_some_and(|(text, last)| sha256_hex(text.as_bytes()) == last);
+        if !kronn_output {
+            out.insert(doc.clone());
+        }
+    }
+    for doc in crate::core::citation_drift::doc_files(project) {
+        if !file.docs.contains_key(&doc) && !file.last_kronn_docs.contains_key(&doc) {
+            out.insert(doc);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// [`ProvenanceFile`] docs the project holds outside Kronn's own writes, see
+/// [`DocProvenanceReport::outside_kronn`].
+pub fn outside_kronn(project: &Path) -> Result<Vec<String>, String> {
+    Ok(outside_kronn_in(project, &read_strict(project)?))
 }
 
 // ─── Confirm ──────────────────────────────────────────────────────────────
