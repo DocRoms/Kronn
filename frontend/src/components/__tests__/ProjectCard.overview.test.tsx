@@ -656,8 +656,9 @@ describe('ProjectCard — repository overview', () => {
       updated_at: new Date(2026, 0, index + 1).toISOString(),
     })) as unknown as Discussion[];
     vi.mocked(planningApi.list).mockResolvedValueOnce({
-      items: Array.from({ length: 4 }, () => ({})),
+      items: [{}],
       next_cursor: null,
+      total: 4,
     } as never);
 
     render(
@@ -691,6 +692,10 @@ describe('ProjectCard — repository overview', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /projects\.master\.tab\.tasks 4/ }))
         .toBeInTheDocument();
+    });
+    // The tab reads `total` alone: it must not pay for the grouped counts.
+    expect(planningApi.list).toHaveBeenCalledWith({
+      projectId: PROJECT.id, limit: 1, withCounts: false,
     });
 
     fireEvent.click(discussionsTab);
@@ -743,6 +748,9 @@ describe('ProjectCard — repository overview', () => {
         updated_at: '2026-07-25T00:00:00Z',
       }],
       next_cursor: null,
+      total: 1,
+      project_totals: {},
+      unassigned_total: 0,
     });
     const onNavigate = vi.fn();
 

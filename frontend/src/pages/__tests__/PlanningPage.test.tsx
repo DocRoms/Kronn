@@ -28,7 +28,8 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 
 import { PlanningPage } from '../PlanningPage';
-import type { PlanningTaskDetail, PlanningTaskSummary, Project } from '../../types/generated';
+import { MAX_PLANNING_PAGES } from '../../lib/planningPages';
+import type { PlanningTaskDetail, PlanningTaskListResponse, PlanningTaskSummary, Project } from '../../types/generated';
 
 function summary(overrides: Partial<PlanningTaskSummary> = {}): PlanningTaskSummary {
   return {
@@ -68,6 +69,25 @@ function detail(task: PlanningTaskSummary = summary()): PlanningTaskDetail {
   };
 }
 
+/** A list answer whose counts are the ones the backend would report for `items`. */
+function listPage(
+  items: PlanningTaskSummary[],
+  overrides: Partial<PlanningTaskListResponse> = {},
+): PlanningTaskListResponse {
+  const project_totals: Record<string, number> = {};
+  for (const task of items) {
+    for (const id of task.project_ids) project_totals[id] = (project_totals[id] ?? 0) + 1;
+  }
+  return {
+    items,
+    next_cursor: null,
+    total: items.length,
+    project_totals,
+    unassigned_total: items.filter(task => task.project_ids.length === 0).length,
+    ...overrides,
+  };
+}
+
 async function findCanonicalTaskRow(title: string): Promise<HTMLButtonElement> {
   const matches = await screen.findAllByText(title);
   const match = matches.find(node => node.closest('.disc-sidebar-projects'));
@@ -83,19 +103,16 @@ describe('PlanningPage', () => {
     localStorage.clear();
     vi.stubGlobal('confirm', () => true);
     vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: false, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
-    mocks.list.mockResolvedValue({
-      items: [
-        summary(),
-        summary({
-          id: 'task-done',
-          reference: 'KT-2',
-          title: 'Old task',
-          status: 'done',
-          priority: 'low',
-        }),
-      ],
-      next_cursor: null,
-    });
+    mocks.list.mockResolvedValue(listPage([
+      summary(),
+      summary({
+        id: 'task-done',
+        reference: 'KT-2',
+        title: 'Old task',
+        status: 'done',
+        priority: 'low',
+      }),
+    ]));
     mocks.create.mockResolvedValue(detail(summary({
       id: 'task-new',
       reference: 'KT-3',
@@ -128,20 +145,20 @@ describe('PlanningPage', () => {
   });
 
   it('renders the planning empty state through the real page adapter', async () => {
-    mocks.list.mockResolvedValueOnce({ items: [], next_cursor: null });
+    mocks.list.mockResolvedValueOnce(listPage([]));
     render(<PlanningPage projects={[]} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
     expect(await screen.findByText('planning.emptyBacklog')).toBeInTheDocument();
   });
 
   it('covers the narrow rail, empty backlog, selection, and open menu on the real Planning page', async () => {
     vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
-    mocks.list.mockResolvedValueOnce({ items: [], next_cursor: null });
+    mocks.list.mockResolvedValueOnce(listPage([]));
     const props = { projects: [], discussions: [], toast: vi.fn(), onNavigateDiscussion: vi.fn() };
     const view = render(<PlanningPage {...props} />);
     expect(await screen.findByText('planning.emptyBacklog')).toBeInTheDocument();
 
     mocks.list.mockReset();
-    mocks.list.mockResolvedValue({ items: [summary()], next_cursor: null });
+    mocks.list.mockResolvedValue(listPage([summary()]));
     view.unmount();
     render(<PlanningPage {...props} />);
     await findCanonicalTaskRow('Upgrade PHP');
@@ -159,20 +176,12 @@ describe('PlanningPage', () => {
     const favorite = summary({ id: 'task-later-page', title: 'Later-page favorite' });
     const visible = summary({ id: 'task-visible', title: 'Visible task', status: 'done' });
     localStorage.setItem('kronn:collection-favorites:planning', JSON.stringify([favorite.id]));
-    mocks.list.mockImplementation(async filters => {
-      if (filters.search === 'visible') {
-        return { items: [visible], next_cursor: 100 };
-      }
-      // This is still the first page, so the saved favorite is outside the
-      // current result even with no active filter.
-      return { items: [visible], next_cursor: 100 };
-    });
+    // The saved favorite is not in the filtered answer, whatever the filter.
+    mocks.list.mockImplementation(async () => listPage([visible]));
 
     const props = { projects: [], discussions: [], toast: vi.fn(), onNavigateDiscussion: vi.fn() };
     const first = render(<PlanningPage {...props} />);
     await findCanonicalTaskRow(visible.title);
-    // The first response deliberately has a next cursor: the favorite is on
-    // a later page and is therefore absent from the list passed to the hook.
     expect(mocks.list).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: undefined, limit: 100 }));
     fireEvent.change(screen.getByRole('textbox', { name: 'planning.search' }), { target: { value: 'visible' } });
     await waitFor(() => expect(mocks.list).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -206,7 +215,7 @@ describe('PlanningPage', () => {
       { id: 'project-beta', name: 'Beta' },
     ] as Project[];
     localStorage.setItem('kronn:collection-favorites:planning', JSON.stringify([favorite.id]));
-    mocks.list.mockResolvedValueOnce({ items: [favorite, ...recentTasks], next_cursor: null });
+    mocks.list.mockResolvedValueOnce(listPage([favorite, ...recentTasks]));
 
     render(<PlanningPage projects={projects} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
     await findCanonicalTaskRow(favorite.title);
@@ -241,6 +250,154 @@ describe('PlanningPage', () => {
     fireEvent.click(betaRecentRow);
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('recent-0'));
     expect(betaRecentRow).toHaveAttribute('aria-current', 'true');
+  });
+
+  it('lists every page, so a project group shows exactly the rows its count announces', async () => {
+    // 150 tasks sit in Alpha and a page holds 100: the sidebar pages through
+    // both, so the group's count (the backend's, the one the project tab and
+    // task_list report) equals the rows it lists.
+    const alphaRows = Array.from({ length: 150 }, (_, index) => summary({
+      id: `alpha-${index}`, reference: `KT-${index + 10}`, title: `Alpha task ${index}`,
+      project_ids: ['project-alpha'],
+    }));
+    const loose = summary({ id: 'loose', reference: 'KT-500', title: 'Loose task' });
+    const everything = [...alphaRows, loose];
+    mocks.list.mockImplementation(async filters => {
+      const start = filters.cursor ?? 0;
+      const end = start + (filters.limit ?? 100);
+      // Like the backend: the grouped counts ride on the first page only.
+      return listPage(everything.slice(start, end), {
+        next_cursor: end < everything.length ? end : null,
+        total: everything.length,
+        project_totals: start === 0 ? { 'project-alpha': 150 } : {},
+        unassigned_total: start === 0 ? 1 : 0,
+      });
+    });
+    const projects = [{ id: 'project-alpha', name: 'Alpha' }] as Project[];
+
+    render(<PlanningPage projects={projects} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+    await findCanonicalTaskRow('Alpha task 149');
+
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+    expect(mocks.list).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: 100, limit: 100 }));
+    const projectsSection = screen.getByText('projects.title').closest('.disc-sidebar-section') as HTMLElement;
+    const group = (name: string) => projectsSection.querySelector<HTMLElement>(`[data-planning-group="${name}"]`)!;
+    const count = (name: string) => group(name).querySelector('.disc-group-count')?.textContent;
+    const listed = (name: string) => group(name).querySelectorAll('button.collection-shell-row-button').length;
+    expect(count('project:project-alpha')).toBe('150');
+    expect(listed('project:project-alpha')).toBe(150);
+    expect(count('general')).toBe('1');
+    expect(listed('general')).toBe(1);
+    expect(projectsSection.querySelector('.disc-group-btn .disc-group-count')?.textContent).toBe('151');
+  });
+
+  it('counts a task linked to a project only through a discussion in that project, not in General', async () => {
+    // The backend reports such a task's project in `project_ids`, so it is
+    // listed under Alpha; the General count is the backend's, and equals the
+    // rows General lists (the one task with no project at all).
+    const viaDiscussion = summary({
+      id: 'via-discussion', reference: 'KT-20', title: 'Via discussion',
+      project_ids: ['project-alpha'], discussion_ids: ['disc-1'],
+    });
+    const direct = summary({
+      id: 'direct', reference: 'KT-21', title: 'Direct task', project_ids: ['project-alpha'],
+    });
+    const loose = summary({ id: 'loose', reference: 'KT-22', title: 'Loose task' });
+    mocks.list.mockResolvedValue(listPage([viaDiscussion, direct, loose], {
+      total: 3,
+      project_totals: { 'project-alpha': 2 },
+      unassigned_total: 1,
+    }));
+    const projects = [{ id: 'project-alpha', name: 'Alpha' }] as Project[];
+
+    render(<PlanningPage projects={projects} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+    await findCanonicalTaskRow('Via discussion');
+
+    const projectsSection = screen.getByText('projects.title').closest('.disc-sidebar-section') as HTMLElement;
+    const group = (name: string) => projectsSection.querySelector<HTMLElement>(`[data-planning-group="${name}"]`)!;
+    const count = (name: string) => group(name).querySelector('.disc-group-count')?.textContent;
+    const listed = (name: string) => group(name).querySelectorAll('button.collection-shell-row-button').length;
+    expect(count('project:project-alpha')).toBe('2');
+    expect(listed('project:project-alpha')).toBe(2);
+    expect(count('general')).toBe('1');
+    expect(listed('general')).toBe(1);
+    expect(within(group('general')).queryByText('Via discussion')).toBeNull();
+  });
+
+  it('lists, under a search, every task the backend counted, even one matched only by its description', async () => {
+    // The backend search also reads the description; the label the shell could
+    // filter on (title, reference, tags) does not carry it.
+    const descriptions: Record<string, string> = {
+      'by-title': 'Nothing relevant',
+      'by-description': 'Move the runtime forward',
+      other: 'Unrelated',
+    };
+    const byTitle = summary({
+      id: 'by-title', reference: 'KT-30', title: 'Runtime bump', tags: [], project_ids: ['project-alpha'],
+    });
+    const byDescription = summary({
+      id: 'by-description', reference: 'KT-31', title: 'Upgrade PHP', tags: [], project_ids: ['project-alpha'],
+    });
+    const other = summary({ id: 'other', reference: 'KT-32', title: 'Other', tags: [], project_ids: ['project-alpha'] });
+    mocks.list.mockImplementation(async filters => {
+      const needle = (filters.search ?? '').toLowerCase();
+      const matches = [byTitle, byDescription, other].filter(task => !needle || [
+        task.title, task.reference, descriptions[task.id],
+      ].some(field => field.toLowerCase().includes(needle)));
+      return listPage(matches);
+    });
+    const projects = [{ id: 'project-alpha', name: 'Alpha' }] as Project[];
+
+    render(<PlanningPage projects={projects} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+    await findCanonicalTaskRow('Other');
+    fireEvent.change(screen.getByRole('textbox', { name: 'planning.search' }), { target: { value: 'runtime' } });
+    await waitFor(() => expect(mocks.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'runtime' })));
+    await waitFor(() => expect(screen.queryByText('Other')).toBeNull());
+
+    const projectsSection = screen.getByText('projects.title').closest('.disc-sidebar-section') as HTMLElement;
+    const alpha = projectsSection.querySelector<HTMLElement>('[data-planning-group="project:project-alpha"]')!;
+    expect(alpha.querySelector('.disc-group-count')?.textContent).toBe('2');
+    expect(alpha.querySelectorAll('button.collection-shell-row-button')).toHaveLength(2);
+    expect(within(alpha).getByText('Upgrade PHP')).toBeInTheDocument();
+  });
+
+  it('does not report a failure of a request a newer one superseded', async () => {
+    const toast = vi.fn();
+    let rejectFirst: (cause: Error) => void = () => {};
+    mocks.list.mockReset();
+    mocks.list
+      .mockImplementationOnce(() => new Promise((_, reject) => { rejectFirst = reject; }))
+      .mockResolvedValue(listPage([summary()]));
+
+    render(<PlanningPage projects={[]} discussions={[]} toast={toast} onNavigateDiscussion={vi.fn()} />);
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByRole('textbox', { name: 'planning.search' }), { target: { value: 'php' } });
+    await findCanonicalTaskRow('Upgrade PHP');
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+
+    await act(async () => { rejectFirst(new Error('stale')); });
+
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it('says so when the page ceiling stops the list short of its count', async () => {
+    const everything = Array.from({ length: MAX_PLANNING_PAGES * 100 + 1 }, (_, index) => summary({
+      id: `bulk-${index}`, reference: `KT-${index + 10}`, title: `Bulk ${index}`,
+    }));
+    mocks.list.mockImplementation(async filters => {
+      const start = filters.cursor ?? 0;
+      const end = start + (filters.limit ?? 100);
+      return listPage(everything.slice(start, end), {
+        next_cursor: end < everything.length ? end : null,
+        total: everything.length,
+        project_totals: {},
+        unassigned_total: start === 0 ? everything.length : 0,
+      });
+    });
+
+    render(<PlanningPage projects={[]} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+    expect(await screen.findByText(/^planning\.truncated:/, {}, { timeout: 8000 })).toBeInTheDocument();
+    expect(mocks.list).toHaveBeenCalledTimes(MAX_PLANNING_PAGES);
   });
 
   it('uses the shared title, favorites, collapse, and bulk archive flow', async () => {
@@ -303,6 +460,198 @@ describe('PlanningPage', () => {
     fireEvent.click(second);
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-done'));
     expect(second).toHaveAttribute('aria-current', 'true');
+  });
+
+  describe('after a mutation, the rows and the counts are read together', () => {
+    /** What the server holds: every list answer is derived from it, as the backend does. */
+    function serve(initial: PlanningTaskSummary[]) {
+      const store = [...initial];
+      mocks.list.mockImplementation(async () => listPage(store.filter(task => task.status !== 'archived')));
+      mocks.update.mockImplementation(async (id: string, patch: { status?: PlanningTaskSummary['status'] }) => {
+        const task = store.find(item => item.id === id)!;
+        Object.assign(task, patch);
+        return detail(task);
+      });
+      return store;
+    }
+    const projects = [{ id: 'project-alpha', name: 'Alpha' }] as Project[];
+    const groupOf = (name: string) => screen.getByText('projects.title')
+      .closest('.disc-sidebar-section')!
+      .querySelector<HTMLElement>(`[data-planning-group="${name}"]`)!;
+    const countOf = (name: string) => groupOf(name).querySelector('.disc-group-count')?.textContent;
+    const listedIn = (name: string) => groupOf(name).querySelectorAll('button.collection-shell-row-button').length;
+    const totalCount = () => screen.getByText('projects.title')
+      .closest('.disc-sidebar-section')!
+      .querySelector('.disc-group-count')?.textContent;
+
+    async function createFromDialog(title: string) {
+      fireEvent.click(screen.getByRole('button', { name: 'planning.quickCreate' }));
+      fireEvent.change(screen.getByRole('textbox', { name: 'planning.taskTitle' }), { target: { value: title } });
+      fireEvent.click(screen.getByRole('button', { name: 'planning.createAction' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    }
+
+    it('counts a task created through the quick-create dialog', async () => {
+      const store = serve([
+        summary({ id: 'g-1', reference: 'KT-1', title: 'General one' }),
+        summary({ id: 'g-2', reference: 'KT-2', title: 'General two' }),
+      ]);
+      mocks.create.mockImplementation(async input => {
+        const created = summary({ id: 'g-3', reference: 'KT-3', title: input.title, status: 'idea' });
+        store.push(created);
+        return detail(created);
+      });
+
+      render(<PlanningPage projects={projects} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+      await findCanonicalTaskRow('General one');
+      expect(totalCount()).toBe('2');
+      expect(countOf('general')).toBe('2');
+
+      await createFromDialog('General three');
+
+      await findCanonicalTaskRow('General three');
+      await waitFor(() => expect(totalCount()).toBe('3'));
+      expect(countOf('general')).toBe('3');
+      expect(listedIn('general')).toBe(3);
+    });
+
+    it('keeps the current filters when it re-reads after a creation', async () => {
+      const store = serve([summary({ id: 'g-1', reference: 'KT-1', title: 'General one' })]);
+      mocks.create.mockImplementation(async input => {
+        const created = summary({ id: 'g-2', reference: 'KT-2', title: input.title, status: 'idea' });
+        store.push(created);
+        return detail(created);
+      });
+
+      render(<PlanningPage projects={projects} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+      await findCanonicalTaskRow('General one');
+      fireEvent.change(screen.getByRole('textbox', { name: 'planning.search' }), { target: { value: 'general' } });
+      await waitFor(() => expect(mocks.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'general' })));
+      mocks.list.mockClear();
+
+      await createFromDialog('General two');
+
+      await waitFor(() => expect(mocks.list).toHaveBeenCalled());
+      expect(mocks.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'general' }));
+    });
+
+    it('counts a subtask created from the detail panel in its parent project', async () => {
+      const parent = summary({ id: 'parent', reference: 'KT-1', title: 'Parent task', project_ids: ['project-alpha'] });
+      const store = serve([parent]);
+      mocks.get.mockImplementation(async id => detail(store.find(task => task.id === id)!));
+      mocks.create.mockImplementation(async input => {
+        const created = summary({
+          id: 'child', reference: 'KT-2', title: input.title, parent_id: 'parent',
+          project_ids: input.project_ids ?? [],
+        });
+        store.push(created);
+        return detail(created);
+      });
+
+      render(<PlanningPage projects={projects} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+      fireEvent.click(await findCanonicalTaskRow('Parent task'));
+      expect(countOf('project:project-alpha')).toBe('1');
+      const input = await screen.findByPlaceholderText('planning.addSubtask');
+      fireEvent.change(input, { target: { value: 'Child task' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+
+      await waitFor(() => expect(totalCount()).toBe('2'));
+      expect(countOf('project:project-alpha')).toBe('2');
+      expect(listedIn('project:project-alpha')).toBe(2);
+    });
+
+    describe('a mutation that settles after the filters changed', () => {
+      /** A server that filters by title, as the search does, over two fixed tasks. */
+      function serveFiltered() {
+        const store = [
+          summary({ id: 'alpha', reference: 'KT-1', title: 'Alpha task' }),
+          summary({ id: 'beta', reference: 'KT-2', title: 'Beta task' }),
+        ];
+        mocks.list.mockImplementation(async (params: { search?: string }) => listPage(
+          store.filter(task => !params.search || task.title.toLowerCase().includes(params.search.toLowerCase())),
+        ));
+        mocks.get.mockImplementation(async id => detail(store.find(task => task.id === id)!));
+        return store;
+      }
+      const rowTitles = () => [...document.querySelectorAll('.disc-sidebar-projects button.collection-shell-row-button')]
+        .map(row => (row.textContent ?? '').match(/(Alpha|Beta|Gamma) task/)?.[0])
+        .sort();
+      async function searchFor(value: string) {
+        fireEvent.change(screen.getByRole('textbox', { name: 'planning.search' }), { target: { value } });
+        await waitFor(() => expect(mocks.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: value })));
+        await waitFor(() => expect(rowTitles()).toEqual(['Beta task']));
+      }
+
+      it('keeps the new search when a detail save finishes after it', async () => {
+        serveFiltered();
+        let finishSave!: () => void;
+        mocks.update.mockImplementation((id: string) => new Promise(resolve => {
+          finishSave = () => resolve(detail(summary({ id, reference: 'KT-1', title: 'Alpha task' })));
+        }));
+
+        render(<PlanningPage projects={projects} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+        fireEvent.click(await findCanonicalTaskRow('Alpha task'));
+        fireEvent.click(await screen.findByRole('button', { name: 'common.save' }));
+        await waitFor(() => expect(mocks.update).toHaveBeenCalled());
+
+        await searchFor('beta');
+        const readsBefore = mocks.list.mock.calls.length;
+        await act(async () => { finishSave(); });
+
+        await waitFor(() => expect(mocks.list.mock.calls.length).toBeGreaterThan(readsBefore));
+        expect(mocks.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'beta' }));
+        expect(rowTitles()).toEqual(['Beta task']);
+        expect(totalCount()).toBe('1');
+      });
+
+      it('keeps the new search when a quick creation finishes after it', async () => {
+        const store = serveFiltered();
+        let finishCreate!: () => void;
+        mocks.create.mockImplementation((input: { title: string }) => new Promise(resolve => {
+          finishCreate = () => {
+            const created = summary({ id: 'gamma', reference: 'KT-3', title: input.title, status: 'idea' });
+            store.push(created);
+            resolve(detail(created));
+          };
+        }));
+
+        render(<PlanningPage projects={projects} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+        await findCanonicalTaskRow('Alpha task');
+        fireEvent.click(screen.getByRole('button', { name: 'planning.quickCreate' }));
+        fireEvent.change(screen.getByRole('textbox', { name: 'planning.taskTitle' }), { target: { value: 'Gamma task' } });
+        fireEvent.click(screen.getByRole('button', { name: 'planning.createAction' }));
+        await waitFor(() => expect(mocks.create).toHaveBeenCalled());
+
+        await searchFor('beta');
+        const readsBefore = mocks.list.mock.calls.length;
+        await act(async () => { finishCreate(); });
+
+        await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+        await waitFor(() => expect(mocks.list.mock.calls.length).toBeGreaterThan(readsBefore));
+        expect(mocks.list).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'beta' }));
+        expect(rowTitles()).toEqual(['Beta task']);
+        expect(totalCount()).toBe('1');
+      });
+    });
+
+    it('counts a task a bulk archive took out of the backlog', async () => {
+      serve([
+        summary({ id: 'a-1', reference: 'KT-1', title: 'Keep me', project_ids: ['project-alpha'] }),
+        summary({ id: 'a-2', reference: 'KT-2', title: 'Archive me', project_ids: ['project-alpha'] }),
+      ]);
+
+      render(<PlanningPage projects={projects} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+      await findCanonicalTaskRow('Archive me');
+      expect(countOf('project:project-alpha')).toBe('2');
+      fireEvent.click(screen.getByRole('button', { name: 'collection.moreActions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'collection.selectMultiple' }));
+      fireEvent.click(screen.getByRole('checkbox', { name: /Archive me.*collection\.selectItem/ }));
+      fireEvent.click(screen.getByRole('button', { name: 'collection.archiveSelected' }));
+
+      await waitFor(() => expect(countOf('project:project-alpha')).toBe('1'));
+      expect(totalCount()).toBe('1');
+      expect(listedIn('project:project-alpha')).toBe(1);
+    });
   });
 
   it('opens task creation from the compact header action and removes the inline form', async () => {
@@ -573,7 +922,7 @@ describe('PlanningPage', () => {
       reference: 'KT-101',
       title: 'Outside first page',
     });
-    mocks.list.mockResolvedValueOnce({ items: [summary()], next_cursor: null });
+    mocks.list.mockResolvedValueOnce(listPage([summary()]));
     mocks.get.mockResolvedValueOnce(detail(outsideFirstPage));
     render(
       <PlanningPage
@@ -801,7 +1150,7 @@ describe('PlanningPage', () => {
   // KT-1148 — the first load does not wait out the filter debounce, and the
   // sidebar shows the shared loader rather than an empty backlog meanwhile.
   it('starts the first load at once and shows the loader until it answers', async () => {
-    let answer: (value: { items: PlanningTaskSummary[]; next_cursor: null }) => void = () => {};
+    let answer: (value: PlanningTaskListResponse) => void = () => {};
     mocks.list.mockReturnValueOnce(new Promise(resolve => { answer = resolve; }));
     render(
       <PlanningPage projects={[]} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />,
@@ -810,7 +1159,7 @@ describe('PlanningPage', () => {
     expect(screen.getByRole('status')).toHaveTextContent('common.loading');
     expect(screen.queryByText('planning.emptyBacklog')).toBeNull();
 
-    answer({ items: [], next_cursor: null });
+    answer(listPage([]));
     expect(await screen.findByText('planning.emptyBacklog')).toBeInTheDocument();
     expect(screen.queryByRole('status')).toBeNull();
   });

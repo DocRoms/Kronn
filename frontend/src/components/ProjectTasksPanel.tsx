@@ -12,6 +12,7 @@ import {
   Plus,
 } from 'lucide-react';
 import { planning } from '../lib/api';
+import { listAllPlanningTasks } from '../lib/planningPages';
 import { useT } from '../lib/I18nContext';
 import type { PlanningTaskSummary } from '../types/generated';
 import { CopyIdPill } from './CopyIdPill';
@@ -33,6 +34,8 @@ export function ProjectTasksPanel({
   const { t } = useT();
   const [tasks, setTasks] = useState<PlanningTaskSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [total, setTotal] = useState(0);
+  const [truncated, setTruncated] = useState(false);
   const [quickTitle, setQuickTitle] = useState('');
   const [creating, setCreating] = useState(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
@@ -40,9 +43,12 @@ export function ProjectTasksPanel({
   const loadTasks = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await planning.list({ projectId, limit: 100 });
+      const response = await listAllPlanningTasks({ projectId });
+      if (!response) return;
       setTasks(response.items);
-      onCountChange?.(response.items.length);
+      setTotal(response.total);
+      setTruncated(response.truncated);
+      onCountChange?.(response.total);
     } catch {
       toast(t('projects.tasks.loadError'), 'error');
     } finally {
@@ -52,11 +58,13 @@ export function ProjectTasksPanel({
 
   useEffect(() => {
     let active = true;
-    planning.list({ projectId, limit: 100 })
+    listAllPlanningTasks({ projectId }, () => !active)
       .then(response => {
-        if (active) {
+        if (active && response) {
           setTasks(response.items);
-          onCountChange?.(response.items.length);
+          setTotal(response.total);
+          setTruncated(response.truncated);
+          onCountChange?.(response.total);
         }
       })
       .catch(() => {
@@ -205,6 +213,7 @@ export function ProjectTasksPanel({
         </div>
       ) : (
         <div className="project-task-groups">
+          {truncated && <p className="project-tasks-state" role="status">{t('projects.tasks.truncated', tasks.length, total)}</p>}
           <section>
             <h4>{t('projects.tasks.active')} <span>{activeTasks.length}</span></h4>
             <div className="project-task-list">{activeTasks.map(renderTask)}</div>

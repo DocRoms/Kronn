@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { planning } from '../lib/api';
+import { listAllPlanningTasks } from '../lib/planningPages';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { userError } from '../lib/userError';
@@ -57,6 +58,12 @@ interface Props {
   toast: ToastFn;
   /** Opens a discussion; with a workspace, its Git panel on that workspace. */
   onNavigateDiscussion: (discussionId: string, options?: { gitWorkspaceId?: string }) => void;
+}
+
+interface TaskCounts {
+  total: number;
+  byProject: Record<string, number>;
+  unassigned: number;
 }
 
 const PRIORITIES: PlanningTaskPriority[] = ['critical', 'high', 'normal', 'low'];
@@ -104,6 +111,10 @@ function PlanningPageView({
   const isMobile = useIsMobile();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [tasks, setTasks] = useState<PlanningTaskSummary[]>([]);
+  // The backend's counts for the whole filtered set. `tasks` is only the loaded
+  // page, so a group cannot count its own rows: a project's count here is the
+  // one the project tab and `task_list` report.
+  const [counts, setCounts] = useState<TaskCounts>({ total: 0, byProject: {}, unassigned: 0 });
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<PlanningTaskStatus | ''>('');
   const [priorityFilter, setPriorityFilter] = useState<PlanningTaskPriority | ''>('');
@@ -128,9 +139,11 @@ function PlanningPageView({
   const [saving, setSaving] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [tasksLoaded, setTasksLoaded] = useState(false);
+  // The page ceiling was hit: the sidebar lists a prefix of `counts.total`.
+  const [tasksTruncated, setTasksTruncated] = useState(false);
   // Settled on the first answer, failed or not: the loader never outlives it.
   const [tasksSettled, setTasksSettled] = useState(false);
-  const scheduledFetchRef = useRef<((cursor?: number) => Promise<void>) | null>(null);
+  const scheduledFetchRef = useRef<(() => Promise<void>) | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(readCollapsedPlanningSections);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const createTriggerRef = useRef<HTMLButtonElement>(null);
@@ -172,27 +185,45 @@ function PlanningPageView({
     });
   }, []);
 
-  const fetchTasks = useCallback(async (cursor?: number) => {
-    const append = cursor !== undefined;
+  // Every page of the filtered set, so a group lists exactly the rows its count
+  // announces. A newer query supersedes an older one still paging.
+  const fetchSeqRef = useRef(0);
+  const fetchTasks = useCallback(async () => {
+    const seq = ++fetchSeqRef.current;
     try {
-      const result = await planning.list({
+      const result = await listAllPlanningTasks({
         search: search.trim() || undefined,
         status: status || undefined,
         priority: priorityFilter || undefined,
         projectId: projectId || undefined,
         tag: tag || undefined,
         withDiscussion: withDiscussion === '' ? undefined : withDiscussion === 'yes',
-        cursor,
-        limit: 100,
+      }, () => seq !== fetchSeqRef.current);
+      if (!result) return;
+      setTasks(result.items);
+      setTasksTruncated(result.truncated);
+      setCounts({
+        total: result.total,
+        byProject: result.project_totals,
+        unassigned: result.unassigned_total,
       });
-      setTasks(previous => append ? [...previous, ...result.items] : result.items);
-      if (!append) setTasksLoaded(true);
+      setTasksLoaded(true);
     } catch (cause) {
-      toast(userError(cause), 'error');
+      if (seq === fetchSeqRef.current) toast(userError(cause), 'error');
     } finally {
-      if (!append) setTasksSettled(true);
+      if (seq === fetchSeqRef.current) setTasksSettled(true);
     }
   }, [priorityFilter, projectId, search, status, tag, toast, withDiscussion]);
+
+  // A mutation that can move a task in or out of a group (creation, subtask,
+  // project or discussion link, archive) re-reads the rows and the counts
+  // together; the local edit it follows only bridges the round trip. It settles
+  // after an await, so it reads the fetch of the filters in force when it
+  // settles, never the closure it was created with: an old one would reload
+  // filters the user has since changed and win the request sequence.
+  const latestFetchRef = useRef(fetchTasks);
+  useEffect(() => { latestFetchRef.current = fetchTasks; }, [fetchTasks]);
+  const refreshTasks = useCallback(() => { void latestFetchRef.current(); }, []);
 
   // The debounce is for typing in the filters; the first load starts at once.
   // A re-run for the same query (StrictMode's double mount) fetches nothing.
@@ -269,6 +300,7 @@ function PlanningPageView({
     try {
       const created = await planning.create({ title, priority: quickPriority, status: 'idea' });
       setTasks(previous => [...previous, created]);
+      refreshTasks();
       setQuickTitle('');
       setCreateModalOpen(false);
       toast(t('planning.created'), 'success');
@@ -313,6 +345,7 @@ function PlanningPageView({
     const updated = await planning.update(taskId, patch);
     setTasks(previous => previous.map(item => item.id === taskId ? updated : item));
     if (selectedId === taskId) setDetail(updated);
+    refreshTasks();
     return updated;
   };
 
@@ -322,6 +355,7 @@ function PlanningPageView({
       const archived = await Promise.all(selected.map(task => planning.update(task.id, { status: 'archived' })));
       const archivedIds = new Set(archived.map(task => task.id));
       setTasks(previous => previous.map(task => archived.find(item => item.id === task.id) ?? task));
+      refreshTasks();
       if (selectedId && archivedIds.has(selectedId)) setSelectedId(null);
       toast(t('collection.archiveSuccess', selected.length), 'success');
     } catch (cause) {
@@ -363,6 +397,9 @@ function PlanningPageView({
           items={tasks}
           getId={task => task.id}
           getLabel={task => `${task.title} ${task.reference} ${task.tags.join(' ')}`}
+          // The backend search also matches the description; filtering again on
+          // the label would hide rows the counts still include.
+          filterQuery={false}
           persistence={{
             query: search,
             onQueryChange: setSearch,
@@ -460,6 +497,7 @@ function PlanningPageView({
                   id,
                   label: projectNames.get(id) ?? id.slice(0, 8),
                   tasks: visibleItems.filter(task => task.project_ids.includes(id)),
+                  count: counts.byProject[id],
                 }))
                 .sort((left, right) => left.label.localeCompare(right.label));
               const generalTasks = visibleItems.filter(task => task.project_ids.length === 0);
@@ -511,7 +549,7 @@ function PlanningPageView({
                 </div>;
               };
 
-              const group = (key: string, label: string, groupTasks: PlanningTaskSummary[]) => {
+              const group = (key: string, label: string, groupTasks: PlanningTaskSummary[], count?: number) => {
                 if (groupTasks.length === 0) return null;
                 const collapsed = collapsedInCurrentMode(key);
                 return <div key={key} data-planning-group={key}>
@@ -524,13 +562,14 @@ function PlanningPageView({
                   >
                     <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsed} />
                     <Target size={10} />
-                    <span>{label}</span><span className="disc-group-count">{groupTasks.length}</span>
+                    <span>{label}</span><span className="disc-group-count">{count ?? groupTasks.length}</span>
                   </button>
                   {!collapsed && groupTasks.map(task => row(task, key))}
                 </div>;
               };
 
               return <div className="disc-sidebar-list planning-sidebar-list">
+                {tasksTruncated && <div className="disc-empty" role="status">{t('planning.truncated', tasks.length, counts.total)}</div>}
                 {favorites.length > 0 && <div className="disc-sidebar-section disc-sidebar-favorites" data-expanded={!isSectionCollapsed('favorites')}>
                   <CollectionFavoritesHeader
                     label={t('disc.favorites')}
@@ -554,11 +593,11 @@ function PlanningPageView({
                   <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('projects')} aria-expanded={!collapsedInCurrentMode('projects')}>
                     <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsedInCurrentMode('projects')} />
                     <Folder size={10} />
-                    <span>{t('projects.title')}</span><span className="disc-group-count">{visibleItems.length}</span>
+                    <span>{t('projects.title')}</span><span className="disc-group-count">{counts.total}</span>
                   </button>
                   {!collapsedInCurrentMode('projects') && <div className="disc-project-tree">
-                    {group('general', t('disc.general'), generalTasks)}
-                    {projectGroups.map(project => group(`project:${project.id}`, project.label, project.tasks))}
+                    {group('general', t('disc.general'), generalTasks, counts.unassigned)}
+                    {projectGroups.map(project => group(`project:${project.id}`, project.label, project.tasks, project.count))}
                   </div>}
                 </div>}
 
@@ -642,6 +681,7 @@ function PlanningPageView({
                           const refreshed = await planning.get(detail.id);
                           setDetail(refreshed);
                           setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
+                          refreshTasks();
                           toast(t('planning.discussionLinked'), 'success');
                         } catch (cause) {
                           toast(userError(cause), 'error');
@@ -663,6 +703,7 @@ function PlanningPageView({
                             ...previous.map(item => item.id === refreshed.id ? refreshed : item),
                             created,
                           ]);
+                          refreshTasks();
                           toast(t('planning.subtaskCreated'), 'success');
                         } catch (cause) {
                           toast(userError(cause), 'error');

@@ -6892,7 +6892,27 @@ export type PlanningTaskEvent = { id: string, action: string, actor_kind: Planni
 
 export type PlanningTaskLink = { id: string, label: string, url: string, position: number, };
 
-export type PlanningTaskListResponse = { items: Array<PlanningTaskSummary>, next_cursor: number | null, };
+export type PlanningTaskListResponse = { items: Array<PlanningTaskSummary>, next_cursor: number | null,
+/**
+ * Every task matching the query, whatever the page: the one number the
+ * project tab, the Planning page and `task_list` agree on.
+ */
+total: number,
+/**
+ * The same count per project, over the same filtered set: a task counts
+ * for a project through a direct link or a linked discussion, and a task
+ * in two projects counts in both. A project with no match is absent.
+ * Present on the first page only (cursor 0 or absent), and not when
+ * `with_counts=false`: omitted otherwise, never an empty map that would
+ * read as "no project has a task".
+ */
+project_totals?: { [key in string]: number },
+/**
+ * Matching tasks whose projects, direct or through a linked discussion,
+ * are none: the rows of the Planning sidebar's "General" group. Present
+ * with `project_totals`, omitted otherwise, never a 0 that was not computed.
+ */
+unassigned_total?: number, };
 
 export type PlanningTaskPriority = "critical" | "high" | "normal" | "low";
 

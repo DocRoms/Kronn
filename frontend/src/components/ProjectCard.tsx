@@ -249,9 +249,9 @@ export function ProjectCard({
   useEffect(() => {
     if (!detailMode || !isOpen) return;
     let alive = true;
-    planning.list({ projectId: proj.id, limit: 100 })
+    planning.list({ projectId: proj.id, limit: 1, withCounts: false })
       .then(response => {
-        if (alive) setProjectTaskCount(response.items.length);
+        if (alive) setProjectTaskCount(response.total);
       })
       .catch(() => {
         if (alive) setProjectTaskCount(null);

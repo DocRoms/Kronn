@@ -954,7 +954,7 @@ fn build_tool_catalogue() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "task_list",
-                "description": "Find compact Planning task summaries linked to this discussion. Use task_get only after choosing one result.",
+                "description": "Find compact Planning task summaries linked to this discussion. `total` counts every task matching the filters (subtasks included; archived ones only when `status=archived`), not just this page; `project_totals` and `unassigned_total` come with the first page only, absent after a cursor. Use task_get only after choosing one result.",
                 "parameters": {
                     "type": "object",
                     "properties": {
