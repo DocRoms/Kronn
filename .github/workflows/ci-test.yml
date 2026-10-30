@@ -923,6 +923,13 @@ jobs:
       - name: Verify release version consistency
         run: make check-version
 
+      - name: Pull the base image of the entrypoint container test
+        # tests/bats/entrypoint_container.bats starts the REAL entrypoint.sh as
+        # root in a small debian image (setpriv drop, passwd rewrite, /data
+        # ownership, KT-1468). It skips without a Docker daemon; this runner has
+        # one, so it runs here. Pulled up front to stay inside the per-test timeout.
+        run: docker pull debian:trixie-slim
+
       - name: Run bats tests
         # A stuck test fails by name: BATS_TEST_TIMEOUT (60s, run.sh) bounds
         # each test, BATS_SUITE_TIMEOUT the run when a stray process keeps

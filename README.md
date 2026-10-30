@@ -128,6 +128,20 @@ cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
 
+From **0.15.2** on, `./kronn start` pulls the published images
+(`ghcr.io/docroms/kronn-backend` and `-frontend`, amd64 and arm64) and compiles
+nothing, so a small machine is fine. A checkout of **0.15.1 or earlier** has no
+such start: its `make start` compiles the backend on your machine, which needs
+about 20 GB of memory for Docker. On a machine with less, use the desktop
+installer above until 0.15.2 is out.
+
+On `main`, `VERSION` stays at the last release: `make start` runs that release's
+published image, not your local code (use `make start-build` for your edits).
+A source build (`make start-build`, or a `VERSION` with no published image) stops
+before compiling when Docker has under 20 GB (RAM + swap); `KRONN_FORCE_BUILD=1`
+overrides. Details and measured numbers:
+[docs/install.md](docs/install.md#published-images-and-source-builds).
+
 > **macOS:** use `./kronn start-dev` instead (native). Docker on macOS cannot run your
 > host agents (Claude, Codex, …) or read the Keychain — `start-dev` runs backend + UI
 > natively in one command. (`make install` also lands on the guided setup.)

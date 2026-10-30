@@ -1,6 +1,11 @@
 services:
   backend:
     restart: unless-stopped
+    # Published image of the checked-out version (KT-1468): `make start` pulls
+    # it instead of compiling the 715 k-line backend crate (19 GB peak) on the
+    # user's machine. `build:` stays for `make start-build` and for a VERSION
+    # with no published image yet. The tag below is bumped with VERSION (`make bump`).
+    image: ghcr.io/docroms/kronn-backend:${KRONN_IMAGE_TAG:-0.15.1}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -205,6 +210,7 @@ services:
 
   frontend:
     restart: unless-stopped
+    image: ghcr.io/docroms/kronn-frontend:${KRONN_IMAGE_TAG:-0.15.1}
     build:
       context: ./frontend
       dockerfile: Dockerfile

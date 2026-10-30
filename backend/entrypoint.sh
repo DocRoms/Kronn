@@ -1,6 +1,182 @@
 #!/bin/sh
 set -e
 
+# ── Run as the host user, never as root (KT-1468) ────────────────────────────
+# A published image cannot know the UID/GID that owns the user's bind mounts
+# (~/.claude, ~/.ssh, the repositories, …), so the `kronn` user is aligned with
+# KRONN_HOST_UID / KRONN_HOST_GID when the container starts. The container
+# starts as root only for this block, then re-executes THIS script as that
+# user: everything below, the backend and every agent it spawns, runs
+# unprivileged. When no remap is needed (the ids already match: an image built
+# locally for this user, or a host user 1000:1000) only the ownership checks
+# remain, and they change nothing.
+#
+# KRONN_PASSWD_FILE / KRONN_GROUP_FILE / KRONN_MOUNTINFO exist so the logic can
+# be exercised outside a container; production never sets them.
+KRONN_PASSWD_FILE="${KRONN_PASSWD_FILE:-/etc/passwd}"
+KRONN_GROUP_FILE="${KRONN_GROUP_FILE:-/etc/group}"
+KRONN_MOUNTINFO="${KRONN_MOUNTINFO:-/proc/self/mountinfo}"
+
+# Leading zeros carry no value ("0000000007" is 7, "000" is root, and a
+# leading zero must never reach a tool that reads it as octal).
+kronn_strip_zeros() { # <digits> -> $kronn_stripped
+  kronn_stripped="$1"
+  while [ "${#kronn_stripped}" -gt 1 ] && [ "${kronn_stripped#0}" != "$kronn_stripped" ]; do
+    kronn_stripped="${kronn_stripped#0}"
+  done
+}
+
+# A usable host id: numeric, not root (agents must never run as uid/gid 0), and
+# a 32-bit id other than the 4294967295 "nobody" sentinel: 1..4294967294. Ids
+# above nine digits are real (LDAP/AD-mapped users, 1000000000). The bound is
+# compared in two five-digit halves, so `sh` arithmetic never overflows.
+kronn_valid_id() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  kronn_strip_zeros "$1"
+  id="$kronn_stripped"
+  [ "$id" != "0" ] || return 1
+  [ "${#id}" -le 10 ] || return 1
+  [ "${#id}" -eq 10 ] || return 0
+  id_high="${id%?????}"
+  id_low="${id#"$id_high"}"
+  kronn_strip_zeros "$id_low"
+  id_low="$kronn_stripped"
+  [ "$id_high" -lt 42949 ] || { [ "$id_high" -eq 42949 ] && [ "$id_low" -le 67294 ]; }
+}
+
+# `uid:gid` owning a path (GNU stat in the image, BSD stat on a developer Mac).
+kronn_owner_of() {
+  stat -c '%u:%g' "$1" 2>/dev/null || stat -f '%u:%g' "$1" 2>/dev/null
+}
+
+kronn_passwd_field() { # <field number>
+  awk -F: -v n="$1" '$1 == "kronn" { print $n; exit }' "$KRONN_PASSWD_FILE"
+}
+
+# Rewrite a file in place through a temp copy (keeps the inode and mode).
+kronn_rewrite() { # <file> <awk args…>
+  target="$1"
+  shift
+  awk "$@" "$target" > "$target.kronn.tmp"
+  cat "$target.kronn.tmp" > "$target"
+  rm -f "$target.kronn.tmp"
+}
+
+# What the image itself created for the old ids (the home tree, the docs venv,
+# ccusage). Only that filesystem: every mount below it (the user's bind mounts,
+# the named volumes) is pruned, so nothing of the host is touched here. A
+# `find -user OLD` rather than `chown -R`: it leaves alone any file the old ids
+# do not own. A function: `set --` below must not replace the entrypoint's args.
+kronn_chown_image_trees() {
+  for tree in "$kronn_home" /usr/local/lib/node_modules/ccusage; do
+    [ -d "$tree" ] || continue
+    set -- "$tree" -xdev
+    if [ -r "$KRONN_MOUNTINFO" ]; then
+      for mount_point in $(awk '{ print $5 }' "$KRONN_MOUNTINFO"); do
+        case "$mount_point" in
+          *\\*) ;;  # an escaped (space-bearing) path: cannot be pruned by name
+          "$tree"/*) set -- "$@" -path "$mount_point" -prune -o ;;
+        esac
+      done
+    fi
+    find "$@" \( -user "$cur_uid" -o -group "$cur_gid" \) \
+      -exec chown -h "$want_uid:$want_gid" {} + 2>/dev/null || true
+  done
+}
+
+kronn_drop_to_host_user() {
+  cur_uid="$(kronn_passwd_field 3)"
+  cur_gid="$(kronn_passwd_field 4)"
+  kronn_home="$(kronn_passwd_field 6)"
+  if [ -z "$cur_uid" ] || [ -z "$kronn_home" ]; then
+    echo "[entrypoint] fatal: no 'kronn' user in this image; refusing to run as root." >&2
+    exit 1
+  fi
+
+  want_uid="${KRONN_HOST_UID:-}"
+  want_gid="${KRONN_HOST_GID:-}"
+  if ! kronn_valid_id "$want_uid"; then
+    [ -z "$want_uid" ] || echo "[entrypoint] warning: KRONN_HOST_UID='$want_uid' is not a non-root uid; keeping $cur_uid." >&2
+    want_uid="$cur_uid"
+  else
+    kronn_strip_zeros "$want_uid"
+    want_uid="$kronn_stripped"
+  fi
+  if ! kronn_valid_id "$want_gid"; then
+    [ -z "$want_gid" ] || echo "[entrypoint] warning: KRONN_HOST_GID='$want_gid' is not a non-root gid; keeping $cur_gid." >&2
+    want_gid="$cur_gid"
+  else
+    kronn_strip_zeros "$want_gid"
+    want_gid="$kronn_stripped"
+  fi
+  # Whatever the image's own user says: the drop never lands on root.
+  if [ "$want_uid" = "0" ] || [ "$want_gid" = "0" ]; then
+    echo "[entrypoint] fatal: the kronn user resolves to uid $want_uid / gid $want_gid; refusing to run as root." >&2
+    exit 1
+  fi
+
+  if [ "$want_gid" != "$cur_gid" ]; then
+    # The group named `kronn` must own the gid. On macOS the host gid is 20,
+    # which is `dialout` in Debian: take that entry over (as the build-time
+    # remap always did) so `chown kronn:kronn` keeps meaning the right gid.
+    kronn_rewrite "$KRONN_GROUP_FILE" -F: -v OFS=: -v gid="$want_gid" '
+      $1 == "kronn" && $3 != gid { next }
+      $3 == gid { $1 = "kronn"; seen = 1 }
+      { print }
+      END { if (!seen) print "kronn:x:" gid ":" }
+    '
+  fi
+  if [ "$want_uid" != "$cur_uid" ] || [ "$want_gid" != "$cur_gid" ]; then
+    # Same for the uid: a host user with a low or system-range uid (7 is `lp`)
+    # lands on an image account. Two passwd entries at one uid make getpwuid
+    # answer with the first, so ssh, git, `whoami` and the language runtimes
+    # would resolve the old account's name and home instead of kronn's. kronn
+    # takes the uid over and the old entry goes (its group is left alone).
+    taken_by="$(awk -F: -v uid="$want_uid" '$1 != "kronn" && $3 == uid { printf "%s ", $1 }' "$KRONN_PASSWD_FILE")"
+    [ -z "$taken_by" ] || echo "[entrypoint] note: uid $want_uid belonged to image user(s) ${taken_by% }; the kronn user takes it over." >&2
+    kronn_rewrite "$KRONN_PASSWD_FILE" -F: -v OFS=: -v uid="$want_uid" -v gid="$want_gid" '
+      $1 != "kronn" && $3 == uid { next }
+      $1 == "kronn" { $3 = uid; $4 = gid }
+      { print }
+    '
+
+    kronn_chown_image_trees
+  fi
+
+  # Named volumes keep the owner their mount point had when they were created
+  # (the image's ids): fix a volume whose top directory is not ours. Only when
+  # needed: a volume already owned by the right user is never walked.
+  for volume in "${KRONN_DATA_DIR:-/data}" \
+      "$kronn_home/.npm" "$kronn_home/.cache/uv" "$kronn_home/.local/share/uv" \
+      "$kronn_home/.claude/projects" "$kronn_home/.claude/sessions"; do
+    [ -d "$volume" ] || continue
+    if [ "$(kronn_owner_of "$volume")" != "$want_uid:$want_gid" ]; then
+      chown -R "$want_uid:$want_gid" "$volume" 2>/dev/null \
+        || echo "[entrypoint] warning: could not hand $volume to $want_uid:$want_gid." >&2
+    fi
+  done
+
+  # Keep the supplementary groups compose added (`group_add`, e.g. the Docker
+  # socket's, opt-in) but never root's: the agents get gid 0 from nowhere.
+  groups="$want_gid"
+  for group_id in $(id -G); do
+    case ",$groups," in *",$group_id,"*) continue ;; esac
+    [ "$group_id" = "0" ] || groups="$groups,$group_id"
+  done
+
+  command -v setpriv >/dev/null 2>&1 || {
+    echo "[entrypoint] fatal: setpriv (util-linux) is missing; refusing to run as root." >&2
+    exit 1
+  }
+  HOME="$kronn_home"
+  export HOME
+  exec setpriv --reuid="$want_uid" --regid="$want_gid" --groups="$groups" "$0" "$@"
+}
+
+if [ "$(id -u)" = "0" ]; then
+  kronn_drop_to_host_user "$@"
+fi
+
 # Symlink host home path → container home so agent configs with hardcoded
 # absolute host paths resolve correctly inside the container.
 # Example: Vibe's config.toml may have save_dir = "/home/<user>/.vibe/logs/session"

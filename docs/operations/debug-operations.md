@@ -56,7 +56,7 @@
 ### HTTP 401 Unauthorized after upgrade
 - **Symptom**: All API calls return 401 after upgrading from a version that auto-generated auth tokens.
 - **Cause**: Legacy `auth_token` in config.toml without the new `auth_enabled=true` flag.
-- **Fix**: On startup, backend clears tokens where `auth_enabled=false` (migration). If persists, manually remove `auth_token` line from config.toml: `docker exec kronn-backend sed -i '/^auth_token/d' /data/config.toml && docker restart kronn-backend`.
+- **Fix**: On startup, backend clears tokens where `auth_enabled=false` (migration). If persists, manually remove `auth_token` line from config.toml: `docker exec -u kronn kronn-backend sed -i '/^auth_token/d' /data/config.toml && docker restart kronn-backend`.
 
 ### SQLite WAL issues on network/synced drives
 - **Symptom**: Database lock errors, slow writes, or corruption.

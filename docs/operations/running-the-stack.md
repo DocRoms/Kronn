@@ -8,7 +8,7 @@ stack, not to start a task. Content verbatim.
 
 - **Docker + Docker Compose** required for running the full stack.
 - **Windows**: WSL2 is mandatory — Kronn mounts host binaries, Unix sockets, and Linux paths. Docker Desktop is not required; Docker Engine inside WSL works. Install WSL: `wsl --install`.
-- Start: `./kronn start` or `make start` (builds and runs all services).
+- Start: `./kronn start` or `make start` (pulls the published images of `VERSION` and runs all services, no compile; `make start-build` builds from source behind a memory check, see [install](../install.md#published-images-and-source-builds)).
 - Start natively (no Docker): `./kronn start-dev` — one command, runs backend + Vite with hot-reload against the **host** CLIs (the macOS path, since Docker can't run Darwin binaries / read the Keychain). UI on **:5173** (the backend serves API-only on :3140 in native mode). Equivalent to `make dev-backend` + `make dev-frontend` in two terminals.
 - Stop: `./kronn stop` or `make stop`.
 - Restart: `./kronn restart`.

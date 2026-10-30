@@ -2,6 +2,54 @@
 
 Kronn runs on **Linux**, **macOS**, and **Windows (via WSL2)**. The only requirements are Docker, Docker Compose, and a Linux-compatible environment.
 
+> **Low on memory?** From **0.15.2** on, the Docker install pulls ready-made images and **does not compile anything**, so a small machine is fine. A checkout of **0.15.1 or earlier** still compiles the backend on your machine (about 20 GB of memory for Docker): on a smaller machine use the desktop installer (`Kronn_<version>_x64-setup.exe` on Windows, from [Releases](https://github.com/DocRoms/Kronn/releases/latest); it needs no Docker at all). A *source build* of a newer checkout needs about 20 GB too, see [Published images and source builds](#published-images-and-source-builds).
+
+---
+
+## Published images and source builds
+
+From **0.15.2** on, `./kronn start` (and `make start`) does **not** compile Kronn on your machine. The pull is done by the `Makefile` and `scripts/docker-up.sh` of the checkout you run, so a checkout of 0.15.1 or earlier, whose `make start` still runs `docker compose up --build`, compiles locally whatever is published: for those, use the desktop installer on a machine under ~20 GB. Every release publishes the backend and the frontend as multi-architecture images (linux/amd64 and linux/arm64) on GitHub Container Registry:
+
+- `ghcr.io/docroms/kronn-backend:<version>`
+- `ghcr.io/docroms/kronn-frontend:<version>`
+
+`<version>` is the content of the `VERSION` file of the checkout you run (`KRONN_IMAGE_TAG=<tag>` picks another one, in the environment or in `.env`; surrounding quotes are ignored and `$VAR` / `${VAR:-x}` references are resolved the way Compose does). Start is `docker compose pull` of those two images, then `docker compose up -d --no-build`. The `latest` tag follows the highest stable release only: a prerelease, or an older release republished from the workflow, never moves it. `latest` is moved by a job that runs one at a time and points it at the highest published stable release, so a slower older run cannot overwrite a newer release. An empty `KRONN_IMAGE_TAG` in the environment means "the default" (`VERSION`), as in Compose, and is not replaced by the value in `.env`.
+
+**Behaviour change:** `make start` on a checkout runs the published image of `VERSION`, not your local edits: use `make start-build` to run local code.
+
+A **source build** happens only when you ask for it or when an image is neither pullable nor already on your machine (a `VERSION` with no published image yet, e.g. right after `make bump`). A checkout of `main` keeps the last release's `VERSION`, so the pull succeeds and runs that release, not your local code:
+
+| How | What it does |
+| --- | --- |
+| `make start-build` or `KRONN_BUILD_FROM_SOURCE=1 ./kronn start` | Skips the pull and builds both images from source. |
+| a failed pull, the image is already on this machine | Starts that copy (`up --no-build`) and says so: an offline restart never recompiles. |
+| a failed pull, no local copy | Builds only the service that could not be pulled. |
+
+### Memory check before a source build
+
+The backend is one 715 000-line Rust crate. Compiling it peaks at roughly:
+
+| Build | Peak memory | Time |
+| --- | --- | --- |
+| Docker default (profile `fast`, 16 codegen units in parallel) | 19.0 GB | 2 min 50 |
+| one codegen thread (`-j1`) | 10.4 GB | 12 min |
+| `./kronn start-dev` (native, opt-level 0) | 9.9 GB | n/a |
+
+(Measured on the `kronn` crate with its dependencies already built.) A machine without that memory has `rustc` killed ("cannot allocate memory") after minutes of work, so before any backend source build Kronn reads the memory **Docker** can use (`docker info`: the Docker Desktop VM, or the WSL VM) plus the swap it can read, and:
+
+- **below 20 GB** (the default build's 19 GB peak plus headroom; a 16 GB machine with no swap is refused): stops at once, before compiling, and prints the alternatives (the published image, the desktop installer for your platform, a bigger machine);
+- **20 GB or more**, or when the memory cannot be measured: builds.
+
+`KRONN_FORCE_BUILD=1 make start-build` builds anyway (the 10.4 GB / 12 min figure above is a one-thread build you would have to configure yourself). `KRONN_BUILD_MIN_GB` changes the threshold. On Docker Desktop the limit is *Settings > Resources > Memory*; on WSL it is `memory=` in `%UserProfile%\.wslconfig`.
+
+A low-memory build mode that trades time for memory is tracked separately (KT-1482); until then the numbers above are only what was measured.
+
+### The container runs as you
+
+The published image is built once for everyone, so it cannot know your user id. The container starts as root only long enough to give its `kronn` user the id and group id in `KRONN_HOST_UID` and `KRONN_HOST_GID` (written to `.env` by `make start`), to hand the data volumes to that user, then runs the backend, and every agent it starts, as that user. Files written to your bind mounts (`~/.claude`, your repositories, ...) belong to you, and nothing runs as root. To open a shell in the container, use `docker compose exec -u kronn backend sh`.
+
+**Behaviour change:** a bare `docker compose exec backend ...` now opens a root shell (root's home, root-owned files): use `-u kronn` to act as Kronn.
+
 ---
 
 ## Linux
@@ -196,6 +244,7 @@ cd kronn
 - **Clone repos inside WSL** (`~/Repositories/`), not on `/mnt/c/`. The Windows filesystem via WSL is 5-10x slower.
 - **Access from Windows**: `http://localhost:3140` works directly in your Windows browser — WSL forwards ports automatically.
 - **VS Code integration**: Install the [WSL extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-wsl) to edit WSL files natively from VS Code.
+- **Less than ~20 GB of memory for WSL?** From 0.15.2, `./kronn start` pulls images instead of compiling, so that is fine. A checkout of 0.15.1 or earlier compiles the backend and needs that much: use the desktop installer (`Kronn_<version>_x64-setup.exe`) instead. A source build (`make start-build`) of a newer checkout stops before compiling when the WSL VM has under 20 GB (RAM + swap); raise `memory=` in `%UserProfile%\.wslconfig` if you really want one.
 - **Docker Desktop is optional**: Docker Engine inside WSL is lighter and faster. Only install Docker Desktop if you need its GUI or Kubernetes features.
 
 ---
@@ -236,4 +285,4 @@ git checkout 0.8.11   # the newest tag from the Releases page
 
 > Running from `main` (development)? `git pull` instead — but expect unreleased code.
 
-This rebuilds containers and applies any new changes.
+This pulls the published images of the checked-out version and recreates the containers (no compile). On `main`, `VERSION` stays at the last release, so this runs that release's image, not the code you pulled: use `make start-build` to run it. Only a `VERSION` with no published image makes the pull fail; Kronn then builds from source, after the memory check described in [Published images and source builds](#published-images-and-source-builds).
