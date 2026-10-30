@@ -43,6 +43,7 @@ Release notes for 0.9.3 and earlier are available in the
   red above, with advice on how to optimize. The Pages list badges heavy Pages,
   and a heavy write returns a notice the agent receives as `kronn_notice`
   (#252).
+
 ### Fixed
 
 - The dark-theme contrast scan no longer fails on `:root`, the name axe gives
@@ -95,6 +96,25 @@ Release notes for 0.9.3 and earlier are available in the
   that re-verified unchanged sections) opens that discussion again, instead
   of the last discussion viewed, which could belong to another project
   (#421).
+- Importing an Artifact or a workflow whose step pins a version of a custom
+  skill the file carries (`custom-x@1`) no longer fails with "this version
+  does not exist" on a Kronn that never had the skill: the pin is checked
+  once the import has created it (#273).
+- A custom skill a JsonData step lists by id (say, per-repository skills
+  that an Exec script loads through the API) is now exported with the
+  workflow or Artifact, and the imported payload names the created copy.
+  Before, the file left it out and the script failed on the other Kronn
+  with "skills absent" (#273).
+
+### Security
+
+- An exported Artifact no longer carries its data. Each dataset keeps its
+  name, kind, schema and limits, without its snapshot or its time-series
+  points, so sharing the file shares the page, not what it published (API
+  answers, names, links), nor when it last published. A file exported
+  before keeps importing with its values, and importing it again reuses the
+  pages it already created. Project repository resources are unchanged
+  (#273).
 
 ## [0.15.1] - 2026-10-22
 

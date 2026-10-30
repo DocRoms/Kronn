@@ -145,6 +145,20 @@ fn canonical(mut value: Value, kind: ResourceKind) -> Value {
                 }
             }
         }
+        // A file from before bare exports carries values; a stored page is
+        // compared without them, so neither side's values make them differ.
+        // A stored page lists its datasets by name, whatever the file's order.
+        if kind == ResourceKind::Artifact {
+            if let Some(datasets) = object.get_mut("datasets").and_then(Value::as_array_mut) {
+                datasets.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+                for dataset in datasets.iter_mut().filter_map(Value::as_object_mut) {
+                    dataset.insert("has_current".into(), json!(false));
+                    dataset.insert("current".into(), Value::Null);
+                    dataset.insert("points".into(), json!([]));
+                    dataset.remove("updated_at");
+                }
+            }
+        }
     }
     value
 }
@@ -159,7 +173,8 @@ fn load_existing(conn: &Connection, kind: ResourceKind, id: &str) -> Result<Opti
                 |row| row.get(0),
             )?;
             if exists {
-                Some(serde_json::to_value(export_page(conn, id)?)?)
+                // Compared without data: `canonical` drops a bundle page's values.
+                Some(serde_json::to_value(export_bare_page(conn, id)?)?)
             } else {
                 None
             }
@@ -248,6 +263,7 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Ve
         bail!("Unsupported Artifact bundle kind or version");
     }
     let skills = bundle.referenced_skills;
+    let bundled_skill_ids: BTreeSet<String> = skills.iter().map(|skill| skill.id.clone()).collect();
     let mut resources = Vec::new();
     for page in std::iter::once(bundle.artifact).chain(bundle.referenced_artifacts) {
         validate_page(&page)?;
@@ -257,8 +273,11 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Ve
     for mut workflow in bundle.referenced_workflows {
         super::super::workflows::clear_human_approvals(&mut workflow.steps);
         super::super::workflows::clear_human_approvals(&mut workflow.on_failure);
-        super::super::workflows::validate_workflow_for_import(&workflow)
-            .map_err(anyhow::Error::msg)?;
+        super::super::workflows::validate_workflow_for_import_bundled(
+            &workflow,
+            &bundled_skill_ids,
+        )
+        .map_err(anyhow::Error::msg)?;
         resources.push(Resource::new(ResourceKind::Workflow, workflow)?);
     }
     for prompt in bundle.referenced_quick_prompts {
@@ -417,6 +436,9 @@ fn remap_value(
                         .clone();
                 }
                 crate::core::skill_bundle::remap_ids(&mut step.skill_ids, skills.ids);
+                if let Some(payload) = step.json_data_payload.as_mut() {
+                    crate::core::skill_bundle::remap_payload(payload, skills.ids);
+                }
             }
             let maps = crate::workflows::refs::RefRemaps {
                 pages: &map[&ResourceKind::Artifact],
@@ -585,7 +607,7 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
         let is_root = key == root_key;
         if is_root {
             // The root is always new (a fresh copy per import, never reused —
-            // see `artifact_roundtrip_preserves_null_points_and_reuses_previous_import_identities`).
+            // see `artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previous_import_identities`).
             // Observe the identity this slug currently maps to, so committing
             // a DIFFERENT mapping between preview and commit invalidates the
             // stale preview, without hydrating every previous copy.
@@ -920,9 +942,15 @@ fn create_imported_page(
         ],
     )?;
     for dataset in exported.datasets {
+        // A dataset that arrives without value or point was written here, now.
+        let updated_at = if dataset.has_current || !dataset.points.is_empty() {
+            dataset.updated_at
+        } else {
+            now
+        };
         tx.execute(
             "UPDATE live_page_datasets SET updated_at = ?1 WHERE page_id = ?2 AND name = ?3",
-            rusqlite::params![dataset.updated_at.to_rfc3339(), page.id, dataset.name],
+            rusqlite::params![updated_at.to_rfc3339(), page.id, dataset.name],
         )?;
         for point in dataset.points {
             tx.execute("INSERT INTO live_page_dataset_points
