@@ -607,7 +607,7 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
         let is_root = key == root_key;
         if is_root {
             // The root is always new (a fresh copy per import, never reused —
-            // see `artifact_roundtrip_preserves_null_points_and_reuses_previous_import_identities`).
+            // see `artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previous_import_identities`).
             // Observe the identity this slug currently maps to, so committing
             // a DIFFERENT mapping between preview and commit invalidates the
             // stale preview, without hydrating every previous copy.

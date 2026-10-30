@@ -43,6 +43,7 @@ Release notes for 0.9.3 and earlier are available in the
   red above, with advice on how to optimize. The Pages list badges heavy Pages,
   and a heavy write returns a notice the agent receives as `kronn_notice`
   (#252).
+
 ### Fixed
 
 - The dark-theme contrast scan no longer fails on `:root`, the name axe gives
