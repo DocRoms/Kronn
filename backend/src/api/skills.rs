@@ -84,9 +84,12 @@ async fn forget_origin(state: &AppState, id: &str) -> Result<(), String> {
 pub async fn create(
     State(state): State<AppState>,
     bridge: Bridge,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<CreateSkillRequest>,
 ) -> Json<ApiResponse<Skill>> {
-    if bridge.is_some() && tools_value(req.allowed_tools.as_deref()).is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker)
+        && tools_value(req.allowed_tools.as_deref()).is_some()
+    {
         return Json(ApiResponse::err(ALLOWED_TOOLS_ARE_HUMAN));
     }
     if let Err(error) = check_project(&state, req.project_id.as_ref()).await {
@@ -136,6 +139,7 @@ pub async fn update(
     Path(id): Path<String>,
     State(state): State<AppState>,
     bridge: Bridge,
+    marker: crate::core::bridge_token::AgentMark,
     Json(mut req): Json<CreateSkillRequest>,
 ) -> Json<ApiResponse<Skill>> {
     if !id.starts_with("custom-") {
@@ -144,7 +148,7 @@ pub async fn update(
     if let Err(error) = check_project(&state, req.project_id.as_ref()).await {
         return Json(ApiResponse::err(error));
     }
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         let Some(existing) = skills::get_skill(&id) else {
             return Json(ApiResponse::err(format!("Skill '{id}' not found")));
         };
@@ -159,7 +163,7 @@ pub async fn update(
         // Like a Quick Prompt (KT-1037): a workflow loading this skill
         // unpinned would run the agent's edit under a human's activation.
         if changes(&existing, &req) {
-            let agent = crate::api::workflows::agent_label(&state, &bridge)
+            let agent = crate::api::workflows::agent_label(&state, &bridge, &marker)
                 .await
                 .unwrap_or_default();
             let summary = format!("Skill « {} » edited by {agent}", existing.name);

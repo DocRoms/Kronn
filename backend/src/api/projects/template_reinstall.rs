@@ -620,8 +620,9 @@ pub async fn template_reinstall_plan(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
 ) -> Json<ApiResponse<TemplateReinstallPlan>> {
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return bridge_refusal();
     }
     plan_for(
@@ -637,9 +638,10 @@ pub async fn template_reinstall(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     body: Option<Json<TemplateReinstallRequest>>,
 ) -> Json<ApiResponse<TemplateReinstallReport>> {
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return bridge_refusal();
     }
     reinstall_for(

@@ -1,11 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { UnsafeExecStep, Workflow, WorkflowBlocker, WorkflowReadiness } from '../../../types/generated';
 
 const unsafeSteps = vi.fn();
 const readiness = vi.fn();
 const listQuickExecs = vi.fn();
-const updateQuickExec = vi.fn();
+const activateQuickExec = vi.fn();
 vi.mock('../../../lib/api', () => ({
   workflows: {
     unsafeSteps: (...args: unknown[]) => unsafeSteps(...args),
@@ -13,7 +15,7 @@ vi.mock('../../../lib/api', () => ({
   },
   quickExecs: {
     list: (...args: unknown[]) => listQuickExecs(...args),
-    update: (...args: unknown[]) => updateQuickExec(...args),
+    activate: (...args: unknown[]) => activateQuickExec(...args),
   },
 }));
 vi.mock('../../../lib/I18nContext', () => ({
@@ -94,8 +96,19 @@ describe('UnsafeStepsPanel', () => {
     expect(screen.queryByText('wf.unsafeIntro')).toBeNull();
     expect(screen.queryByText('wf.unsafeHow')).toBeNull();
     expect(screen.queryByLabelText('wf.unsafeAgentPromptLabel')).toBeNull();
-    fireEvent.click(screen.getByText('wf.approvalReview'));
-    expect(screen.getByText('bash ["-c","terraform plan \\"$1\\"","_","{{x}}"]')).toBeDefined();
+    // KT-1490 — the waiting line shows what it runs and its activate button at once.
+    expect(screen.queryByText('wf.approvalReview')).toBeNull();
+    // It explains the activation, not the manual fix of a line Kronn cannot rewrite.
+    expect(screen.getByText('wf.unsafeActivationExplain|bash')).toBeDefined();
+    expect(screen.queryByText('wf.unsafeManual')).toBeNull();
+    expect(screen.queryByText('écrite par un agent')).toBeNull();
+    // The step line reads as a command in the shared code block, not as raw JSON.
+    const line = screen.getByText(`bash -c 'terraform plan "$1"' _ {{x}}`);
+    expect(line.tagName).toBe('PRE');
+    expect(line.classList.contains('qe-command')).toBe(true);
+    expect(line.textContent).not.toContain('[');
+    // Waiting for an activation is not a failure: neutral frame, not the error one.
+    expect(screen.getByRole('alert').getAttribute('data-tone')).toBe('neutral');
     fireEvent.click(screen.getByText('wf.unsafeApprove'));
     await waitFor(() => expect(onApprove).toHaveBeenCalledWith(pending));
   });
@@ -153,6 +166,8 @@ describe('UnsafeStepsPanel', () => {
     render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
     await screen.findByText('greet');
     expect(screen.getByRole('heading').textContent).toContain('wf.unsafeTitle');
+    // Unsafe code keeps the error frame.
+    expect(screen.getByRole('alert').getAttribute('data-tone')).toBe('error');
     expect(screen.getByText('wf.unsafeIntro')).toBeDefined();
     expect(screen.queryByText('wf.approvalIntro')).toBeNull();
   });
@@ -211,6 +226,12 @@ describe('UnsafeStepsPanel', () => {
     expect(local.textContent).toContain('(script)');
     expect(local.textContent).toContain(script.message);
     expect(local.textContent).toContain(script.action);
+    // A step with no Quick Exec to activate: its action line is the one the
+    // neutral tone recolours, inside the neutral frame.
+    expect(alert.getAttribute('data-tone')).toBe('neutral');
+    const action = screen.getByText(script.action);
+    expect(action.classList.contains('wf-unsafe-manual')).toBe(true);
+    expect(alert.contains(action)).toBe(true);
     unmount();
 
     unsafeSteps.mockResolvedValue([fixable]);
@@ -225,7 +246,7 @@ describe('UnsafeStepsPanel', () => {
     expect(screen.queryByText('dup')).toBeNull();
   });
 
-  it('approves a saved Quick Exec source on the Quick Exec itself, then rechecks', async () => {
+  it('activates a saved Quick Exec source on the Quick Exec itself, then rechecks', async () => {
     unsafeSteps.mockResolvedValue([]);
     const blocker: WorkflowBlocker = {
       workflow_id: 'wf-1', workflow_name: 'PR review', step: 'cw-start', on_failure: false,
@@ -242,15 +263,73 @@ describe('UnsafeStepsPanel', () => {
       args: ['logs', '{{from}}'], timeout_secs: 30, output_format: 'json', variables: [], pinned: false,
       created_at: 'now', updated_at: 'now',
     }]);
-    updateQuickExec.mockResolvedValue({});
+    activateQuickExec.mockResolvedValue({});
     render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
 
     const approve = await screen.findByText('wf.qeApprove|CloudWatch|aws');
-    expect(updateQuickExec).not.toHaveBeenCalled();
+    // The Quick Exec line is the shared code block, and the frame is neutral.
+    const line = screen.getByText('aws logs {{from}}');
+    expect(line.tagName).toBe('PRE');
+    expect(line.classList.contains('qe-command')).toBe(true);
+    expect(screen.getByRole('alert').getAttribute('data-tone')).toBe('neutral');
+    expect(activateQuickExec).not.toHaveBeenCalled();
     fireEvent.click(approve);
-    await waitFor(() => expect(updateQuickExec).toHaveBeenCalledWith('qe-cw', expect.objectContaining({
-      command: 'aws', args: ['logs', '{{from}}'], project_id: 'p1', unmodelled_args_approved: true,
-    })));
+    // KT-1490 — the human's activation names the line they read.
+    await waitFor(() => expect(activateQuickExec).toHaveBeenCalledWith('qe-cw', {
+      command: 'aws', args: ['logs', '{{from}}'],
+    }));
     await waitFor(() => expect(readiness).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows the line it activates; a line changed between render and click is refused and the new line shown', async () => {
+    unsafeSteps.mockResolvedValue([]);
+    const blocker: WorkflowBlocker = {
+      workflow_id: 'wf-1', workflow_name: 'PR review', step: 'cw-start', on_failure: false,
+      kind: 'human_approval', phase: 'source', reason: 'unmodelled_program',
+      message: 'Quick Exec « CloudWatch »', action: '', human_only: true,
+      quick_exec: { id: 'qe-cw', name: 'CloudWatch', source_alias: 'q', program: 'aws' },
+    };
+    const blocked = { workflow_id: 'wf-1', workflow_name: 'PR review', enabled: true, ready: false, blockers: [blocker], human_approval_count: 1, checked_workflow_ids: ['wf-1'], summary: '' } as WorkflowReadiness;
+    readiness.mockResolvedValue(blocked);
+    const saved = (args: string[]) => [{
+      id: 'qe-cw', name: 'CloudWatch', icon: '🔎', description: '', project_id: 'p1', command: 'aws',
+      args, timeout_secs: 30, output_format: 'json', variables: [], pinned: false,
+      created_at: 'now', updated_at: 'now',
+    }];
+    listQuickExecs.mockReset();
+    activateQuickExec.mockReset();
+    listQuickExecs.mockResolvedValue(saved(['logs', '{{from}}']));
+    activateQuickExec.mockRejectedValue(new Error('La ligne a changé'));
+    render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
+
+    const approve = await screen.findByText('wf.qeApprove|CloudWatch|aws');
+    expect(screen.getByText('aws logs {{from}}')).toBeDefined();
+    // The agent rewrites the line after the panel rendered.
+    listQuickExecs.mockResolvedValue(saved(['iam', 'delete-user', '{{from}}']));
+    fireEvent.click(approve);
+    await waitFor(() => expect(activateQuickExec).toHaveBeenCalledWith('qe-cw', {
+      command: 'aws', args: ['logs', '{{from}}'],
+    }));
+    await waitFor(() => expect(screen.getByTestId('readiness-quick-exec').textContent).toContain('a changé'));
+    expect(await screen.findByText('aws iam delete-user {{from}}')).toBeDefined();
+    expect(activateQuickExec).toHaveBeenCalledTimes(1);
+  });
+
+  it('styles the neutral tone and the command block without the warning colour or a flush block', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/components/QuickExecActivation.css'), 'utf8');
+    const rule = (selector: string) => {
+      const start = css.indexOf(`${selector} {`);
+      expect(start, selector).toBeGreaterThanOrEqual(0);
+      return css.slice(start, css.indexOf('}', start));
+    };
+    // Warning colour only in the error tone: the neutral one uses the accent ink.
+    const manual = rule(".wf-unsafe-panel[data-tone='neutral'] .wf-unsafe-manual");
+    expect(manual).toContain('color: var(--kr-accent-ink)');
+    expect(manual).not.toContain('warning');
+    // The command block is spaced from the text above and the button below,
+    // like the room card's.
+    const block = rule('.wf-unsafe-fix .qe-command');
+    expect(block).toContain('margin: var(--kr-sp-3) 0');
+    expect(rule('.qe-activation-card,\n.qe-pending-activation')).toContain('gap: var(--kr-sp-3)');
   });
 });

@@ -56,6 +56,7 @@ async fn remove(
     let Json(response) = delete_dataset(
         State(state.clone()),
         caller,
+        None,
         Path(("stats".into(), name.into())),
         Query(DeleteLivePageDatasetQuery { force }),
     )
@@ -110,6 +111,7 @@ async fn only_a_human_changes_limits_or_reads_the_usage() {
     let Json(agent_limits) = update_dataset(
         State(state.clone()),
         agent(),
+        None,
         Path(("stats".into(), "free".into())),
         Json(limits()),
     )
@@ -118,6 +120,7 @@ async fn only_a_human_changes_limits_or_reads_the_usage() {
     let Json(human_limits) = update_dataset(
         State(state.clone()),
         None,
+        None,
         Path(("stats".into(), "free".into())),
         Json(limits()),
     )
@@ -125,6 +128,7 @@ async fn only_a_human_changes_limits_or_reads_the_usage() {
     assert_eq!(human_limits.data.unwrap().points_removed, 2);
     let Json(zero) = update_dataset(
         State(state.clone()),
+        None,
         None,
         Path(("stats".into(), "free".into())),
         Json(UpdateLivePageDatasetRequest {
@@ -136,9 +140,9 @@ async fn only_a_human_changes_limits_or_reads_the_usage() {
     assert_eq!(zero.error_code.as_deref(), Some("validation"));
 
     let Json(agent_usage) =
-        dataset_usage(State(state.clone()), agent(), Path("stats".into())).await;
+        dataset_usage(State(state.clone()), agent(), None, Path("stats".into())).await;
     assert_eq!(agent_usage.error_code.as_deref(), Some("validation"));
-    let Json(usage) = dataset_usage(State(state.clone()), None, Path("stats".into())).await;
+    let Json(usage) = dataset_usage(State(state.clone()), None, None, Path("stats".into())).await;
     let usage = usage.data.unwrap();
     assert_eq!(usage.len(), 3);
     assert!(usage

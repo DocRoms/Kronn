@@ -211,6 +211,7 @@ async fn execute_claimed_action(
                 State(state.clone()),
                 Path(action.target_id.clone()),
                 None,
+                None,
                 Json(RunQuickApiRequest {
                     variables,
                     workflow_run_id: None,

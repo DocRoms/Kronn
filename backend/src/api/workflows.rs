@@ -2305,9 +2305,11 @@ pub(crate) fn awaiting_approval_notice(wf: &Workflow) -> Option<String> {
         .collect();
     (!names.is_empty()).then(|| {
         format!(
-            "Étapes Exec écrites par un agent, enregistrées mais en attente de l'approbation \
-             d'un humain dans l'éditeur avant de tourner : {}. Dis à l'utilisateur de les \
-             approuver.",
+            "Étapes Exec écrites par un agent, enregistrées mais inactives : elles passent des \
+             valeurs du run à un programme que Kronn ne vérifie pas seul et ne tournent pas \
+             tant qu'un humain ne les a pas activées (bouton « Activer » dans le panneau « À \
+             valider » de la page du workflow) : {}. Continue ton travail et dis à \
+             l'utilisateur qu'elles attendent son activation ; un agent ne peut pas les activer.",
             names.join(", ")
         )
     })
@@ -2346,10 +2348,13 @@ pub(crate) fn clear_stale_approvals(steps: &mut [WorkflowStep]) {
 }
 
 impl WorkflowWriter {
-    fn from_bridge(
+    /// An agent wrote the request: it holds a bridge token, or the MCP bridge
+    /// marked it (a host-launched CLI has no token; KT-1490).
+    fn from_caller(
         bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+        marker: &crate::core::bridge_token::AgentMark,
     ) -> Self {
-        if bridge.is_some() {
+        if crate::core::bridge_token::agent_authored(bridge, marker) {
             Self::Agent
         } else {
             Self::Human
@@ -2360,10 +2365,17 @@ impl WorkflowWriter {
 pub async fn create(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<CreateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
-    let label = agent_label(&state, &bridge).await;
-    create_as_labeled(state, req, WorkflowWriter::from_bridge(&bridge), label).await
+    let label = agent_label(&state, &bridge, &marker).await;
+    create_as_labeled(
+        state,
+        req,
+        WorkflowWriter::from_caller(&bridge, &marker),
+        label,
+    )
+    .await
 }
 
 /// Who a bridge-token caller is, for the record of an automatic disable:
@@ -2371,9 +2383,13 @@ pub async fn create(
 pub(crate) async fn agent_label(
     state: &AppState,
     bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: &crate::core::bridge_token::AgentMark,
 ) -> Option<String> {
     use rusqlite::OptionalExtension;
-    let caller = bridge.as_ref()?;
+    let Some(caller) = bridge.as_ref() else {
+        // A host session has no token to name its room: just « an agent ».
+        return marker.is_some().then(|| AN_AGENT.to_string());
+    };
     let discussion = caller.own_discussions.first().cloned();
     let agent = match discussion {
         Some(id) => state
@@ -2442,8 +2458,9 @@ pub async fn create_agent_proposal(
 pub async fn list_auto_disabled(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
 ) -> Json<ApiResponse<Vec<AutoDisabledWorkflow>>> {
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
     }
     match state
@@ -2462,9 +2479,10 @@ pub async fn list_auto_disabled(
 pub async fn reenable(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<ReenableWorkflowsRequest>,
 ) -> Json<ApiResponse<Vec<Workflow>>> {
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
     }
     reenable_as_human(state, req.ids).await
@@ -2984,10 +3002,18 @@ pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<UpdateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
-    let label = agent_label(&state, &bridge).await;
-    update_as_labeled(state, id, req, WorkflowWriter::from_bridge(&bridge), label).await
+    let label = agent_label(&state, &bridge, &marker).await;
+    update_as_labeled(
+        state,
+        id,
+        req,
+        WorkflowWriter::from_caller(&bridge, &marker),
+        label,
+    )
+    .await
 }
 
 pub(crate) async fn update_as(
@@ -3109,6 +3135,7 @@ pub async fn update_step(
     State(state): State<AppState>,
     Path(id): Path<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<UpdateWorkflowStepRequest>,
 ) -> Json<ApiResponse<Workflow>> {
     let wf_id = id.clone();
@@ -3148,8 +3175,8 @@ pub async fn update_step(
             Ok(update) => update,
             Err(e) => return Json(ApiResponse::err(format!("Invalid step: {e}"))),
         };
-    let label = agent_label(&state, &bridge).await;
-    let writer = WorkflowWriter::from_bridge(&bridge);
+    let label = agent_label(&state, &bridge, &marker).await;
+    let writer = WorkflowWriter::from_caller(&bridge, &marker);
     let Json(response) = update_written(state.clone(), id, update, writer, label, Some(base)).await;
     Json(with_awaiting_notice(&state, response).await)
 }
@@ -4244,9 +4271,10 @@ pub(crate) fn remap_workflow_step_dependencies(
 pub async fn import_workflow(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<ImportWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
-    let Json(mut response) = import_workflow_written(state.clone(), bridge, req).await;
+    let Json(mut response) = import_workflow_written(state.clone(), bridge, marker, req).await;
     let missing = response.notice.take();
     let mut response = with_awaiting_notice(&state, response).await;
     response.notice = match (missing, response.notice.take()) {
@@ -4347,6 +4375,7 @@ pub async fn import_workflow_preview(
 async fn import_workflow_written(
     state: AppState,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     req: ImportWorkflowRequest,
 ) -> Json<ApiResponse<Workflow>> {
     let envelope = match parse_import_envelope(&req.content) {
@@ -4378,9 +4407,9 @@ async fn import_workflow_written(
     all_wfs.push(envelope.workflow);
     all_wfs.extend(envelope.referenced_workflows);
     // An import never carries an approval: a human approves in the editor.
-    // Through an agent's bridge token (the MCP clone path), its lines are
-    // the agent's (KT-1017).
-    let by_agent = bridge.is_some();
+    // Through an agent's bridge (the MCP clone path), its lines are the
+    // agent's (KT-1017), token or marker.
+    let by_agent = crate::core::bridge_token::agent_authored(&bridge, &marker);
     let writer = if by_agent {
         WorkflowWriter::Agent
     } else {
@@ -6289,9 +6318,16 @@ pub async fn resume_interrupted(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     payload: Bytes,
 ) -> Json<ApiResponse<ResumeRunResponse>> {
-    resume_interrupted_as(state, run_id, WorkflowWriter::from_bridge(&bridge), payload).await
+    resume_interrupted_as(
+        state,
+        run_id,
+        WorkflowWriter::from_caller(&bridge, &marker),
+        payload,
+    )
+    .await
 }
 
 pub(crate) async fn resume_interrupted_as(
@@ -7407,6 +7443,8 @@ pub struct TestCollectApiDataRequest {
 /// a required source fails, so successful sources remain inspectable.
 pub async fn test_collect_api_data(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<TestCollectApiDataRequest>,
 ) -> Json<ApiResponse<TestApiCallResponse>> {
     use crate::workflows::api_call_executor::ApiCallLogContext;
@@ -7433,7 +7471,7 @@ pub async fn test_collect_api_data(
         ApiCallLogContext::manual_test(),
         &req.exec_allowlist,
         &work_dir,
-        &crate::core::api_access::ApiCaller::Human,
+        &crate::api::quick_apis::broker_caller(&bridge, &marker, None),
     )
     .await;
     let success = outcome.result.status == RunStatus::Success;
@@ -7481,6 +7519,8 @@ fn parsed_step_envelope(output: &str) -> Option<serde_json::Value> {
 /// run in production.
 pub async fn test_api_call(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<TestApiCallRequest>,
 ) -> Json<ApiResponse<TestApiCallResponse>> {
     use crate::workflows::api_call_executor::{
@@ -7498,7 +7538,7 @@ pub async fn test_api_call(
         &ctx,
         SecurityPolicy::production(),
         ApiCallLogContext::manual_test(),
-        &crate::core::api_access::ApiCaller::Human,
+        &crate::api::quick_apis::broker_caller(&bridge, &marker, None),
     )
     .await;
 
@@ -8738,7 +8778,7 @@ mod tests {
             own_run: None,
             agent: None,
         }));
-        let Json(by_bridge) = create(State(state.clone()), bridge, Json(request())).await;
+        let Json(by_bridge) = create(State(state.clone()), bridge, None, Json(request())).await;
         let Json(by_tools) = create_as(state.clone(), request(), WorkflowWriter::Agent).await;
         for response in [by_bridge, by_tools] {
             assert!(response.success, "{:?}", response.error);
@@ -8795,6 +8835,48 @@ mod tests {
         );
     }
 
+    /// KT-1490: a workflow draft whose Exec line hands a run value to a CLI
+    /// Kronn does not model (`fastly purge --key {{surrogate_key}}`) is saved
+    /// by an agent, inactive, and the response says how a human activates it.
+    #[tokio::test]
+    async fn an_agent_draft_with_an_unmodelled_cli_is_saved_inactive() {
+        let state = agent_state();
+        let request = || -> CreateWorkflowRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": "purge", "project_id": null, "trigger": {"type": "Manual"},
+                "exec_allowlist": ["fastly"],
+                "steps": [{"name": "purge", "step_type": {"type": "Exec"},
+                           "exec_command": "fastly",
+                           "exec_args": ["purge", "--key", "{{surrogate_key}}"]}]
+            }))
+            .unwrap()
+        };
+        let bridge = Some(axum::Extension(crate::core::bridge_token::BridgeCaller {
+            token_id: "t".into(),
+            project: None,
+            own_discussions: vec![],
+            own_run: None,
+            agent: None,
+        }));
+        let Json(by_bridge) = create(State(state.clone()), bridge, None, Json(request())).await;
+        let Json(by_tools) = create_as(state.clone(), request(), WorkflowWriter::Agent).await;
+        for response in [by_bridge, by_tools] {
+            assert!(response.success, "{:?}", response.error);
+            let notice = response.notice.clone().expect("told how it is activated");
+            assert!(
+                notice.contains("inactives")
+                    && notice.contains("Activer")
+                    && notice.contains("purge"),
+                "{notice}"
+            );
+            let saved = response.data.unwrap();
+            let step = &saved.steps[0];
+            assert_eq!(step.exec_agent_written, Some(true));
+            assert_eq!(step.exec_unmodelled_args_approved, None);
+            assert!(crate::core::inline_code::runtime_refusal(step).is_some());
+        }
+    }
+
     /// Only a human approves an unmodelled program: neither the bridge token
     /// nor the Kronn agent tools can set it, on create or on a changed line,
     /// while an agent's edit elsewhere keeps the stored approval.
@@ -8821,6 +8903,7 @@ mod tests {
         let Json(by_bridge) = create(
             State(state.clone()),
             bridge.clone(),
+            None,
             Json(request(vec!["plan", "{{x}}"])),
         )
         .await;
@@ -8848,6 +8931,7 @@ mod tests {
         );
         let Json(by_human) = create(
             State(state.clone()),
+            None,
             None,
             Json(request(vec!["plan", "{{x}}"])),
         )
@@ -8879,6 +8963,7 @@ mod tests {
             State(state.clone()),
             Path(id),
             bridge,
+            None,
             Json(update(vec!["apply", "{{x}}"], "renamed")),
         )
         .await;
@@ -8908,6 +8993,7 @@ mod tests {
             let Json(declared) = create(
                 State(state.clone()),
                 None,
+                None,
                 Json(request(
                     serde_json::json!([{"name": name, "label": "x", "placeholder": ""}]),
                     source(serde_json::json!({})),
@@ -8921,6 +9007,7 @@ mod tests {
             );
             let Json(sourced) = create(
                 State(state.clone()),
+                None,
                 None,
                 Json(request(
                     serde_json::json!([]),
@@ -10223,17 +10310,19 @@ mod tests {
         let Json(refused) = reenable(
             State(state.clone()),
             bridge.clone(),
+            None,
             Json(ReenableWorkflowsRequest {
                 ids: vec![created.id.clone()],
             }),
         )
         .await;
         assert!(!refused.success, "a bridge token cannot re-enable");
-        let Json(refused_list) = list_auto_disabled(State(state.clone()), bridge).await;
+        let Json(refused_list) = list_auto_disabled(State(state.clone()), bridge, None).await;
         assert!(!refused_list.success, "nor list what to re-enable");
 
         let Json(enabled) = reenable(
             State(state.clone()),
+            None,
             None,
             Json(ReenableWorkflowsRequest {
                 ids: vec![created.id.clone()],
@@ -10285,6 +10374,7 @@ mod tests {
         .unwrap();
         let Json(imported) = import_workflow(
             State(state.clone()),
+            None,
             None,
             Json(ImportWorkflowRequest {
                 skill_choices: vec![],
@@ -10719,6 +10809,7 @@ mod tests {
         let imported = import_workflow(
             State(state.clone()),
             None,
+            None,
             Json(ImportWorkflowRequest {
                 skill_choices: vec![],
                 content,
@@ -10800,6 +10891,7 @@ mod tests {
                 import_workflow(
                     State(state),
                     bridge,
+                    None,
                     Json(ImportWorkflowRequest {
                         skill_choices: vec![],
                         content,

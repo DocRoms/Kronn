@@ -96,7 +96,7 @@ or relax worker isolation. Workers run through WSL instead; the boundary
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
 runtimes report that a restart is required instead of attempting the Unix
 file-descriptor script reload used during source development.
-[src: file: backend/scripts/disc-introspection-mcp.py:11426-11436#_schedule_bridge_reload]
+[src: file: backend/scripts/disc-introspection-mcp.py:11454-11464#_schedule_bridge_reload]
 
 The desktop sidecar build runs an MCP smoke test from a relocated directory
 with spaces and non-ASCII characters, an empty PATH and an ephemeral HTTP
@@ -326,9 +326,9 @@ workflow Agent step is launched with. Undeclared, the argv is unchanged.
   server. [src: file: backend/src/agents/runner.rs:5921-5942#declared_mcp_servers]
 - The bridge, given `--step-tools=`, lists and dispatches only those tools
   and sends no catalogue instructions on `initialize` (only the decision-card bullet when `disc_append` is declared).
-  [src: file: backend/scripts/disc-introspection-mcp.py:5893-5908#_declared_step_tools]
-  [src: file: backend/scripts/disc-introspection-mcp.py:12027-12042#_declared_step_tools]
-  [src: file: backend/scripts/disc-introspection-mcp.py:12130-12139#_declared_step_tools]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5900-5915#_declared_step_tools]
+  [src: file: backend/scripts/disc-introspection-mcp.py:12055-12070#_declared_step_tools]
+  [src: file: backend/scripts/disc-introspection-mcp.py:12158-12167#_declared_step_tools]
 - The direct CLI fallback (`KRONN_ACP_ADAPTER_*=0`) refuses a declared step
   rather than launch it with every tool.
 

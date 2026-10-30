@@ -36,6 +36,8 @@ pub struct QuickExecPendingApproval {
     /// The program that receives run values, e.g. `aws`.
     pub program: String,
     pub message: String,
+    /// A human refused to activate this very line (KT-1490); it stays inactive.
+    pub refused: bool,
 }
 
 /// GET /api/quick-execs/pending-approvals — the Quick Execs a run would refuse
@@ -45,10 +47,15 @@ pub async fn pending_approvals(
 ) -> Json<ApiResponse<Vec<QuickExecPendingApproval>>> {
     match state
         .db
-        .with_read_conn(crate::db::quick_execs::list_quick_execs)
+        .with_read_conn(|conn| {
+            Ok((
+                crate::db::quick_execs::list_quick_execs(conn)?,
+                crate::db::quick_execs::refused_activation_ids(conn)?,
+            ))
+        })
         .await
     {
-        Ok(items) => Json(ApiResponse::ok(
+        Ok((items, refused)) => Json(ApiResponse::ok(
             items
                 .into_iter()
                 .filter_map(|exec| {
@@ -60,6 +67,7 @@ pub async fn pending_approvals(
                         exec.agent_written == Some(true),
                     )?;
                     Some(QuickExecPendingApproval {
+                        refused: refused.contains(&exec.id),
                         id: exec.id,
                         program,
                         message,
@@ -74,9 +82,13 @@ pub async fn pending_approvals(
 pub async fn create(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(request): Json<CreateQuickExecRequest>,
 ) -> Json<ApiResponse<QuickExec>> {
-    create_as(state, request, bridge.is_some()).await
+    let by_agent = crate::core::bridge_token::agent_authored(&bridge, &marker);
+    let response = create_as(state.clone(), request, by_agent).await;
+    announce_from_agent(&state, bridge.as_ref(), marker.as_ref(), &response.0).await;
+    response
 }
 
 /// Create a Quick Exec. `by_agent` (bridge token or Kronn agent tools) drops
@@ -136,9 +148,13 @@ pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(request): Json<CreateQuickExecRequest>,
 ) -> Json<ApiResponse<QuickExec>> {
-    update_as(state, id, request, bridge.is_some()).await
+    let by_agent = crate::core::bridge_token::agent_authored(&bridge, &marker);
+    let response = update_as(state.clone(), id, request, by_agent).await;
+    announce_from_agent(&state, bridge.as_ref(), marker.as_ref(), &response.0).await;
+    response
 }
 
 /// Update a Quick Exec; see [`create_as`] for `by_agent`.
@@ -739,6 +755,7 @@ pub async fn export(
 pub async fn import(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(request): Json<ImportQuickExecRequest>,
 ) -> Json<ApiResponse<QuickExec>> {
     let envelope: QuickExecExportEnvelope = match serde_json::from_str(&request.content) {
@@ -750,10 +767,11 @@ pub async fn import(
     }
     let mut item = envelope.quick_exec;
     // An import never carries an approval: a human approves in the editor.
-    // Through an agent's bridge token, the line is the agent's (KT-1017).
+    // Through an agent's bridge (token or marker), the line is the agent's (KT-1017).
     item.unmodelled_args_approved = None;
-    item.agent_written =
-        (bridge.is_some() && needs_agent_approval(&item.command, &item.args)).then_some(true);
+    item.agent_written = (crate::core::bridge_token::agent_authored(&bridge, &marker)
+        && needs_agent_approval(&item.command, &item.args))
+    .then_some(true);
     let validation = CreateQuickExecRequest {
         name: item.name.clone(),
         icon: Some(item.icon.clone()),
@@ -850,15 +868,248 @@ pub(crate) fn needs_agent_approval(command: &str, args: &[String]) -> bool {
     )
 }
 
-/// The notice for a saved Quick Exec an agent wrote that waits for a human.
+/// The notice for a saved Quick Exec an agent wrote that waits for a human:
+/// it is saved and inactive, and the agent carries on (KT-1490).
 fn awaiting_approval_notice(item: &QuickExec) -> Option<String> {
     (item.agent_written == Some(true) && item.unmodelled_args_approved != Some(true)).then(|| {
         format!(
-            "Quick Exec « {} » écrit par un agent : enregistré, il attend l'approbation d'un \
-             humain dans l'éditeur avant de tourner. Dis à l'utilisateur de l'approuver.",
+            "Quick Exec « {} » enregistrée, inactive : elle passe des valeurs du run à un \
+             programme que Kronn ne vérifie pas seul, donc elle ne tourne pas tant qu'un humain \
+             ne l'a pas activée (bouton « Activer » de la carte postée dans cette room, panneau \
+             « À valider », ou Automatisations → Quick Execs). Continue ton travail \
+             (Page, workflow) : référence-la normalement et dis à l'utilisateur qu'elle attend \
+             son activation. Ne lui demande pas de la réécrire à la main. Un agent ne peut pas \
+             l'activer.",
             item.name
         )
     })
+}
+
+/// A Quick Exec an agent saved that now waits for a human: the program, when
+/// the line passes run values to one Kronn does not check alone.
+fn waiting_program(item: &QuickExec) -> Option<String> {
+    if item.agent_written != Some(true) {
+        return None;
+    }
+    crate::core::inline_code::quick_exec_approval_needed(
+        &item.name,
+        &item.command,
+        &item.args,
+        item.unmodelled_args_approved == Some(true),
+        true,
+    )
+    .map(|(program, _)| program)
+}
+
+/// The activation card, as the room reads it: a System message holding one
+/// JSON object after the `[kronn-activate:` marker.
+pub(crate) fn activation_card_content(item: &QuickExec, program: &str) -> String {
+    format!(
+        "[kronn-activate: {}]",
+        serde_json::json!({
+            "quick_exec_id": item.id,
+            "name": item.name,
+            "program": program,
+        })
+    )
+}
+
+/// Posts the one-click activation card in the room an agent saved a waiting
+/// Quick Exec from. One card per line: saving the same line again adds none,
+/// a changed line adds a new one. The save never fails for the card.
+pub(crate) async fn announce_activation(
+    state: &AppState,
+    discussion_id: Option<&str>,
+    item: &QuickExec,
+) {
+    let (Some(discussion_id), Some(program)) = (discussion_id, waiting_program(item)) else {
+        return;
+    };
+    use sha2::{Digest, Sha256};
+    let digest =
+        Sha256::digest(serde_json::to_vec(&(&item.command, &item.args)).unwrap_or_default());
+    let line: String = digest
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let message = DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
+        session_continuity: None,
+        kind: Default::default(),
+        model: None,
+        lint_report: None,
+        id: format!("qe-activation:{}:{line}", item.id),
+        role: MessageRole::System,
+        channel: MessageChannel::Main,
+        content: activation_card_content(item, &program),
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        auth_mode: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo: None,
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
+    };
+    let discussion_id = discussion_id.to_string();
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let known: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                    [&message.id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if !known {
+                crate::db::discussions::insert_message(conn, &discussion_id, &message)?;
+            }
+            Ok(())
+        })
+        .await;
+    if let Err(error) = result {
+        tracing::warn!("Quick Exec activation card not posted: {error}");
+    }
+}
+
+/// The card for an agent's save: the launch's one discussion for a bridge
+/// token, else the room a host session says it joined (its marker).
+async fn announce_from_agent(
+    state: &AppState,
+    bridge: Option<&axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: Option<&axum::Extension<crate::core::bridge_token::AgentMarker>>,
+    response: &ApiResponse<QuickExec>,
+) {
+    let Some(item) = response.data.as_ref() else {
+        return;
+    };
+    let room = match (bridge, marker) {
+        (Some(axum::Extension(caller)), _) => match caller.own_discussions.as_slice() {
+            [discussion_id] => Some(discussion_id.clone()),
+            _ => None,
+        },
+        (None, Some(axum::Extension(marker))) => marker.discussion_id.clone(),
+        (None, None) => None,
+    };
+    announce_activation(state, room.as_deref(), item).await;
+}
+
+/// The line a human read and activates; a line changed since is refused.
+#[derive(Debug, Clone, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ActivateQuickExecRequest {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+/// Whether the stored line is still the one a human read and still waits for an
+/// activation. Run inside the transaction that records the decision.
+fn check_waiting_line(
+    existing: &QuickExec,
+    request: &ActivateQuickExecRequest,
+) -> Result<(), String> {
+    if existing.command != request.command.trim() || existing.args != request.args {
+        return Err(
+            "La ligne de cette Quick Exec a changé depuis que tu l'as lue : relis-la avant de l'activer."
+                .into(),
+        );
+    }
+    let waits = matches!(
+        crate::core::inline_code::first_unsafe_placeholder_with(
+            &existing.command,
+            &existing.args,
+            crate::core::argv_roles::Trust {
+                agent_written: existing.agent_written == Some(true),
+                ..Default::default()
+            },
+        ),
+        Some(crate::core::inline_code::InlineFinding::UnmodelledProgram(
+            ..
+        ))
+    );
+    if !waits {
+        return Err("Cette Quick Exec n'attend aucune activation de ce type".into());
+    }
+    Ok(())
+}
+
+/// Records a human's decision on the line they read: check and write are one
+/// atomic step (see [`crate::db::quick_execs::settle_waiting_line`]).
+async fn settle_waiting_line(
+    state: &AppState,
+    id: &str,
+    request: ActivateQuickExecRequest,
+    activate: bool,
+) -> Result<QuickExec, String> {
+    use crate::db::quick_execs::{settle_waiting_line, WaitingLineOutcome};
+    let id = id.to_owned();
+    match state
+        .db
+        .with_conn(move |conn| {
+            settle_waiting_line(conn, &id, activate, |existing| {
+                check_waiting_line(existing, &request)
+            })
+        })
+        .await
+    {
+        Ok(WaitingLineOutcome::Settled(item)) => Ok(item),
+        Ok(WaitingLineOutcome::Refused(why)) => Err(why),
+        Ok(WaitingLineOutcome::Gone) => Err("Quick Exec not found".into()),
+        Err(error) => Err(format!("DB error: {error}")),
+    }
+}
+
+/// POST /api/quick-execs/:id/activate — a human activates a Quick Exec that
+/// waits (KT-1490). The route is absent from the bridge-token table and the
+/// handler refuses a bridge caller or an agent-marked request, an operator
+/// token included: an agent never activates.
+pub async fn activate(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
+    Json(request): Json<ActivateQuickExecRequest>,
+) -> Json<ApiResponse<QuickExec>> {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
+        return Json(ApiResponse::err(
+            "Only a human activates a Quick Exec: an agent cannot",
+        ));
+    }
+    match settle_waiting_line(&state, &id, request, true).await {
+        Ok(item) => Json(ApiResponse::ok(item)),
+        Err(error) => Json(ApiResponse::err(error)),
+    }
+}
+
+/// POST /api/quick-execs/:id/refuse-activation — a human declines the line an
+/// agent saved (KT-1490). The Quick Exec stays inactive; the refusal is kept
+/// for the line that was read, so the room's card says « Refusée » after a
+/// reload. Human only, exactly like [`activate`]: absent from the bridge-token
+/// table, refused to a bridge caller and to an agent-marked request.
+pub async fn refuse_activation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
+    Json(request): Json<ActivateQuickExecRequest>,
+) -> Json<ApiResponse<bool>> {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
+        return Json(ApiResponse::err(
+            "Only a human refuses a Quick Exec's activation: an agent cannot",
+        ));
+    }
+    match settle_waiting_line(&state, &id, request, false).await {
+        Ok(_) => Json(ApiResponse::ok(true)),
+        Err(error) => Json(ApiResponse::err(error)),
+    }
 }
 
 /// The [`Trust`](crate::core::argv_roles::Trust) of a saved Quick Exec: it
@@ -1032,6 +1283,7 @@ mod tests {
                 import(
                     State(state),
                     bridge,
+                    None,
                     Json(ImportQuickExecRequest {
                         content,
                         project_id: None,
@@ -1150,7 +1402,8 @@ mod tests {
             .unwrap()
         };
         // An agent's save goes through, unapproved and named as waiting.
-        let Json(by_bridge) = create(State(state.clone()), bridge(), Json(clone(&approved))).await;
+        let Json(by_bridge) =
+            create(State(state.clone()), bridge(), None, Json(clone(&approved))).await;
         let Json(by_tools) = create_as(state.clone(), clone(&approved), true).await;
         for saved in [by_bridge, by_tools] {
             assert!(saved.success, "{:?}", saved.error);
@@ -1162,7 +1415,7 @@ mod tests {
             );
             assert_eq!(item.agent_written, Some(true));
         }
-        let Json(by_human) = create(State(state.clone()), None, Json(clone(&approved))).await;
+        let Json(by_human) = create(State(state.clone()), None, None, Json(clone(&approved))).await;
         assert!(by_human.success, "{:?}", by_human.error);
         let id = by_human.data.unwrap().id;
 
@@ -1174,13 +1427,555 @@ mod tests {
         assert_eq!(kept.data.unwrap().unmodelled_args_approved, Some(true));
         let mut changed = clone(&approved);
         changed.args = vec!["s3".into(), "rm".into(), "{{bucket}}".into()];
-        let Json(dropped) = update(State(state.clone()), Path(id), bridge(), Json(changed)).await;
+        let Json(dropped) = update(
+            State(state.clone()),
+            Path(id),
+            bridge(),
+            None,
+            Json(changed),
+        )
+        .await;
         let dropped = dropped.data.expect("saved, waiting for a human");
         assert_eq!(
             dropped.unmodelled_args_approved, None,
             "a changed line loses the approval"
         );
         assert_eq!(dropped.agent_written, Some(true));
+    }
+
+    fn purge_line() -> CreateQuickExecRequest {
+        let mut line = request("fastly");
+        line.name = "Purge CDN".into();
+        line.args = vec!["purge".into(), "--key".into(), "{{surrogate_key}}".into()];
+        line.variables = serde_json::from_value(serde_json::json!([
+            {"name": "surrogate_key", "label": "Key", "placeholder": "", "required": true}
+        ]))
+        .unwrap();
+        line
+    }
+
+    fn bridge_in(
+        discussion: &str,
+    ) -> Option<axum::Extension<crate::core::bridge_token::BridgeCaller>> {
+        Some(axum::Extension(crate::core::bridge_token::BridgeCaller {
+            token_id: "t".into(),
+            project: None,
+            own_discussions: vec![discussion.into()],
+            own_run: None,
+            agent: None,
+        }))
+    }
+
+    async fn room(state: &crate::AppState, id: &str) {
+        let id = id.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = Utc::now();
+                crate::db::discussions::insert_discussion(
+                    conn,
+                    &Discussion {
+                        connection_id: None,
+                        awaiting_agent: false,
+                        agent_running: false,
+                        id,
+                        project_id: None,
+                        title: "room".into(),
+                        agent: AgentType::ClaudeCode,
+                        language: "en".into(),
+                        participants: vec![AgentType::ClaudeCode],
+                        message_count: 0,
+                        non_system_message_count: 0,
+                        messages: vec![],
+                        skill_ids: vec![],
+                        profile_ids: vec![],
+                        directive_ids: vec![],
+                        archived: false,
+                        pinned: false,
+                        workspace_mode: "Direct".into(),
+                        workspace_path: None,
+                        worktree_branch: None,
+                        tier: ModelTier::Default,
+                        model: None,
+                        pin_first_message: false,
+                        summary_cache: None,
+                        summary_up_to_msg_idx: None,
+                        summary_strategy: SummaryStrategy::OnDemand,
+                        introspection_call_count: 0,
+                        shared_id: None,
+                        shared_with: vec![],
+                        workflow_run_id: None,
+                        test_mode_restore_branch: None,
+                        test_mode_stash_ref: None,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn cards_in(state: &crate::AppState, id: &str) -> Vec<String> {
+        let id = id.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let mut statement = conn.prepare(
+                    "SELECT content FROM messages WHERE discussion_id = ?1 \
+                     AND content LIKE '[kronn-activate:%'",
+                )?;
+                let rows = statement.query_map([&id], |row| row.get::<_, String>(0))?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn stored(state: &crate::AppState, id: &str) -> QuickExec {
+        let id = id.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::quick_execs::get_quick_exec(conn, &id))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    /// KT-1490: an agent saves a line that passes run values to a program
+    /// Kronn does not model (`fastly purge --key {{surrogate_key}}`) on every
+    /// path; it is stored inactive and the response says how it is activated.
+    #[tokio::test]
+    async fn an_agent_saves_an_unmodelled_cli_inactive_on_every_path() {
+        let state = state();
+        room(&state, "room-1").await;
+        let Json(by_bridge) = create(
+            State(state.clone()),
+            bridge_in("room-1"),
+            None,
+            Json(purge_line()),
+        )
+        .await;
+        let Json(by_tools) = create_as(state.clone(), purge_line(), true).await;
+        let Json(seed) = create_as(state.clone(), request("fastly"), true).await;
+        let seed = seed.data.expect("a line without a value is saved");
+        let mut edited = purge_line();
+        edited.name = "Purge CDN (edit)".into();
+        let Json(by_update) = update_as(state.clone(), seed.id, edited, true).await;
+        for saved in [by_bridge, by_tools, by_update] {
+            assert!(saved.success, "{:?}", saved.error);
+            let notice = saved.notice.clone().expect("the agent is told it waits");
+            assert!(
+                notice.contains("inactive")
+                    && notice.contains("Activer")
+                    && notice.contains("humain"),
+                "{notice}"
+            );
+            let item = saved.data.unwrap();
+            assert_eq!(item.unmodelled_args_approved, None, "stored inactive");
+            assert_eq!(item.agent_written, Some(true));
+        }
+        // The room where the agent saved it receives one activation card.
+        let cards = cards_in(&state, "room-1").await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert!(cards[0].contains("\"program\":\"fastly\"") && cards[0].contains("Purge CDN"));
+        // The same line announced again adds no second card.
+        let id = serde_json::from_str::<serde_json::Value>(
+            cards[0]
+                .trim_start_matches("[kronn-activate: ")
+                .trim_end_matches(']'),
+        )
+        .unwrap()["quick_exec_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        announce_activation(&state, Some("room-1"), &stored(&state, &id).await).await;
+        assert_eq!(
+            cards_in(&state, "room-1").await.len(),
+            1,
+            "same line, same card"
+        );
+    }
+
+    /// KT-1490: the run refuses an inactive line with the activation hint;
+    /// one human activation lets it through; a bridge token cannot activate.
+    #[tokio::test]
+    async fn an_inactive_line_is_refused_until_a_human_activates_it() {
+        let state = state();
+        let Json(saved) = create_as(state.clone(), purge_line(), true).await;
+        let item = saved.data.unwrap();
+        let (_, hint) = crate::core::inline_code::quick_exec_approval_needed(
+            &item.name,
+            &item.command,
+            &item.args,
+            false,
+            true,
+        )
+        .expect("waits");
+        assert!(
+            hint.contains("en attente d'activation") && hint.contains("Activer"),
+            "{hint}"
+        );
+
+        let line = ActivateQuickExecRequest {
+            command: item.command.clone(),
+            args: item.args.clone(),
+        };
+        // No bridge token activates: the handler refuses and the route is not
+        // in the bridge table.
+        let Json(by_agent) = activate(
+            State(state.clone()),
+            Path(item.id.clone()),
+            bridge(),
+            None,
+            Json(line.clone()),
+        )
+        .await;
+        assert!(!by_agent.success);
+        assert!(
+            crate::core::bridge_token::route_for("POST", "/api/quick-execs/{id}/activate")
+                .is_none()
+        );
+        assert_eq!(
+            stored(&state, &item.id).await.unmodelled_args_approved,
+            None
+        );
+        // An agent's own save cannot carry the approval either.
+        let mut forged = purge_line();
+        forged.unmodelled_args_approved = Some(true);
+        let Json(forged) = update_as(state.clone(), item.id.clone(), forged, true).await;
+        assert_eq!(forged.data.unwrap().unmodelled_args_approved, None);
+
+        // A line that changed since the human read it is not activated.
+        let Json(stale) = activate(
+            State(state.clone()),
+            Path(item.id.clone()),
+            None,
+            None,
+            Json(ActivateQuickExecRequest {
+                command: "fastly".into(),
+                args: vec!["purge".into(), "--all".into()],
+            }),
+        )
+        .await;
+        assert!(!stale.success);
+
+        let step = |item: &QuickExec| WorkflowStep {
+            name: item.name.clone(),
+            step_type: StepType::Exec,
+            exec_command: Some(item.command.clone()),
+            exec_args: item.args.clone(),
+            exec_unmodelled_args_approved: item.unmodelled_args_approved,
+            exec_agent_written: item.agent_written,
+            ..Default::default()
+        };
+        assert!(crate::core::inline_code::runtime_refusal(&step(&item)).is_some());
+        let Json(pending) = pending_approvals(State(state.clone())).await;
+        assert_eq!(pending.data.unwrap().len(), 1);
+        let Json(activated) = activate(
+            State(state.clone()),
+            Path(item.id.clone()),
+            None,
+            None,
+            Json(line),
+        )
+        .await;
+        assert!(activated.success, "{:?}", activated.error);
+        let activated = stored(&state, &item.id).await;
+        assert_eq!(activated.unmodelled_args_approved, Some(true));
+        assert_eq!(activated.agent_written, Some(true));
+        assert_eq!(
+            crate::core::inline_code::runtime_refusal(&step(&activated)),
+            None
+        );
+        let Json(pending) = pending_approvals(State(state.clone())).await;
+        assert!(pending.data.unwrap().is_empty());
+        // A later agent edit of the line loses the activation.
+        let mut edited = purge_line();
+        edited.args.push("--soft".into());
+        let Json(edited) = update_as(state.clone(), item.id.clone(), edited, true).await;
+        assert_eq!(edited.data.unwrap().unmodelled_args_approved, None);
+    }
+
+    /// KT-1490: the human activates the line they read. A line whose program
+    /// alone changed since is refused, though its args are the ones read.
+    #[tokio::test]
+    async fn activation_refuses_a_line_whose_command_alone_changed() {
+        let state = state();
+        let Json(saved) = create_as(state.clone(), purge_line(), true).await;
+        let item = saved.data.unwrap();
+        let other = ActivateQuickExecRequest {
+            command: "gcloud".into(),
+            args: item.args.clone(),
+        };
+        let Json(activated) = activate(
+            State(state.clone()),
+            Path(item.id.clone()),
+            None,
+            None,
+            Json(other.clone()),
+        )
+        .await;
+        let Json(refused) = refuse_activation(
+            State(state.clone()),
+            Path(item.id.clone()),
+            None,
+            None,
+            Json(other),
+        )
+        .await;
+        assert!(!activated.success && !refused.success);
+        for error in [activated.error, refused.error] {
+            assert!(
+                error.unwrap_or_default().contains("a changé"),
+                "the read line is no longer the stored one"
+            );
+        }
+        assert_eq!(
+            stored(&state, &item.id).await.unmodelled_args_approved,
+            None
+        );
+        // The stored line itself, with the padding a form leaves, still goes through.
+        let Json(padded) = activate(
+            State(state.clone()),
+            Path(item.id.clone()),
+            None,
+            None,
+            Json(ActivateQuickExecRequest {
+                command: " fastly ".into(),
+                args: item.args.clone(),
+            }),
+        )
+        .await;
+        assert!(padded.success, "{:?}", padded.error);
+    }
+
+    /// KT-1490: a line that waits for no activation (it passes no run value to
+    /// an unmodelled program) is neither activated nor refused: there is
+    /// nothing for a human to decide, and no approval is written for it.
+    #[tokio::test]
+    async fn a_line_that_waits_for_nothing_is_not_activated() {
+        let state = state();
+        let mut plain = purge_line();
+        plain.name = "Purge all".into();
+        plain.args = vec!["purge".into(), "--all".into()];
+        plain.variables = Vec::new();
+        let Json(saved) = create_as(state.clone(), plain, true).await;
+        let item = saved.data.expect("an agent can save a line without values");
+        let line = ActivateQuickExecRequest {
+            command: item.command.clone(),
+            args: item.args.clone(),
+        };
+        let Json(activated) = activate(
+            State(state.clone()),
+            Path(item.id.clone()),
+            None,
+            None,
+            Json(line.clone()),
+        )
+        .await;
+        assert!(!activated.success);
+        assert!(activated
+            .error
+            .unwrap_or_default()
+            .contains("n'attend aucune activation"));
+        let Json(refused) = refuse_activation(
+            State(state.clone()),
+            Path(item.id.clone()),
+            None,
+            None,
+            Json(line),
+        )
+        .await;
+        assert!(!refused.success);
+        assert_eq!(
+            stored(&state, &item.id).await.unmodelled_args_approved,
+            None,
+            "no approval written for a line that needed none"
+        );
+    }
+
+    /// KT-1490 (owner review): the read, the check and the write of an
+    /// activation are one step. An agent edit landing inside it is not undone by
+    /// the write (the old line, with its stale fields, never comes back), and a
+    /// delete there is a conflict, not a success.
+    #[tokio::test]
+    async fn activation_is_atomic_against_a_concurrent_edit_or_delete() {
+        use crate::db::quick_execs::{settle_waiting_line, WaitingLineOutcome};
+        let state = state();
+        let Json(saved) = create_as(state.clone(), purge_line(), true).await;
+        let item = saved.data.unwrap();
+
+        // The line changes after the check read it: a conflict, nothing approved.
+        let id = item.id.clone();
+        let outcome = state
+            .db
+            .with_conn(move |conn| {
+                settle_waiting_line(conn, &id, true, |_| {
+                    conn.execute(
+                        "UPDATE quick_execs SET args_json = '[\"service\",\"delete\"]' WHERE id = ?1",
+                        [&id],
+                    ).unwrap();
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert!(matches!(outcome, WaitingLineOutcome::Refused(why) if why.contains("a changé")));
+        assert_eq!(
+            stored(&state, &item.id).await.unmodelled_args_approved,
+            None
+        );
+
+        // A field outside the line changes: the activation lands and does not
+        // rewrite it back to what was read.
+        let Json(saved) = create_as(state.clone(), purge_line(), true).await;
+        let other = saved.data.unwrap();
+        let id = other.id.clone();
+        let outcome = state
+            .db
+            .with_conn(move |conn| {
+                settle_waiting_line(conn, &id, true, |_| {
+                    conn.execute(
+                        "UPDATE quick_execs SET timeout_secs = 7, name = 'Renamed' WHERE id = ?1",
+                        [&id],
+                    )
+                    .unwrap();
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert!(matches!(outcome, WaitingLineOutcome::Settled(_)));
+        let after = stored(&state, &other.id).await;
+        assert_eq!(after.unmodelled_args_approved, Some(true));
+        assert_eq!(
+            after.timeout_secs, 7,
+            "an unrelated edit is not overwritten"
+        );
+        assert_eq!(after.name, "Renamed");
+
+        // The row is deleted inside the step: a conflict, never a success.
+        let Json(saved) = create_as(state.clone(), purge_line(), true).await;
+        let gone = saved.data.unwrap();
+        let id = gone.id.clone();
+        let outcome = state
+            .db
+            .with_conn(move |conn| {
+                settle_waiting_line(conn, &id, true, |_| {
+                    conn.execute("DELETE FROM quick_execs WHERE id = ?1", [&id])
+                        .unwrap();
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert!(matches!(outcome, WaitingLineOutcome::Refused(_)));
+    }
+
+    /// KT-1490: « Refuser » is recorded server-side by a human only, names the
+    /// line that was read, leaves the line inactive, and is asked again once
+    /// the line changes.
+    #[tokio::test]
+    async fn a_refusal_is_recorded_by_a_human_only_and_the_line_stays_inactive() {
+        let state = state();
+        let Json(saved) = create_as(state.clone(), purge_line(), true).await;
+        let item = saved.data.unwrap();
+        let line = ActivateQuickExecRequest {
+            command: item.command.clone(),
+            args: item.args.clone(),
+        };
+        let refused_flag = |state: AppState| async move {
+            let Json(pending) = pending_approvals(State(state)).await;
+            pending.data.unwrap()[0].refused
+        };
+        assert!(!refused_flag(state.clone()).await);
+
+        // Neither a bridge token nor a marked request refuses on a human's behalf.
+        let Json(by_token) = refuse_activation(
+            State(state.clone()),
+            Path(item.id.clone()),
+            bridge(),
+            None,
+            Json(line.clone()),
+        )
+        .await;
+        assert!(!by_token.success);
+        let Json(by_marker) = refuse_activation(
+            State(state.clone()),
+            Path(item.id.clone()),
+            None,
+            Some(axum::Extension(
+                crate::core::bridge_token::AgentMarker::default(),
+            )),
+            Json(line.clone()),
+        )
+        .await;
+        assert!(!by_marker.success);
+        assert!(!refused_flag(state.clone()).await);
+        assert!(crate::core::bridge_token::route_for(
+            "POST",
+            "/api/quick-execs/{id}/refuse-activation"
+        )
+        .is_none());
+
+        // A line other than the one stored is not refused.
+        let Json(stale) = refuse_activation(
+            State(state.clone()),
+            Path(item.id.clone()),
+            None,
+            None,
+            Json(ActivateQuickExecRequest {
+                command: "fastly".into(),
+                args: vec!["purge".into(), "--all".into()],
+            }),
+        )
+        .await;
+        assert!(!stale.success);
+
+        let Json(refused) = refuse_activation(
+            State(state.clone()),
+            Path(item.id.clone()),
+            None,
+            None,
+            Json(line.clone()),
+        )
+        .await;
+        assert!(refused.success, "{:?}", refused.error);
+        assert!(
+            refused_flag(state.clone()).await,
+            "still listed, now refused"
+        );
+        let kept = stored(&state, &item.id).await;
+        assert_eq!(
+            kept.unmodelled_args_approved, None,
+            "the line stays inactive"
+        );
+
+        // Editing the line asks again.
+        let mut edited = purge_line();
+        edited.args.push("--soft".into());
+        let _ = update_as(state.clone(), item.id.clone(), edited, true).await;
+        assert!(!refused_flag(state.clone()).await);
+    }
+
+    /// KT-1490: shells, paths, wrappers and inline-code interpolation stay
+    /// refused at save for an agent.
+    #[tokio::test]
+    async fn an_agent_save_still_refuses_what_is_not_a_waiting_line() {
+        let state = state();
+        let mut shell = request("bash");
+        shell.args = vec!["-c".into(), "echo {{x}}".into()];
+        assert!(!create_as(state.clone(), shell, true).await.0.success);
+        let mut path = request("/usr/bin/fastly");
+        path.args = vec!["purge".into(), "{{x}}".into()];
+        assert!(!create_as(state.clone(), path, true).await.0.success);
+        let mut inline = request("python3");
+        inline.args = vec!["-c".into(), "print('{{x}}')".into()];
+        assert!(!create_as(state.clone(), inline, true).await.0.success);
+        let mut wrapper = request("env");
+        wrapper.args = vec!["{{x}}".into()];
+        assert!(!create_as(state.clone(), wrapper, true).await.0.success);
     }
 
     #[test]

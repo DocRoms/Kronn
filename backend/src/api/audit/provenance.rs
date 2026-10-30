@@ -57,9 +57,10 @@ pub async fn confirm_doc_provenance(
     State(state): State<AppState>,
     Path(id): Path<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<ConfirmDocsRequest>,
 ) -> Json<ApiResponse<DocProvenanceReport>> {
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "Only a human can confirm a documentation change",

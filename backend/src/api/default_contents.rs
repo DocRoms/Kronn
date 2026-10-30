@@ -19,8 +19,9 @@ pub async fn todo_status(State(state): State<AppState>) -> Json<ApiResponse<Defa
 pub async fn install_todo(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
 ) -> Json<ApiResponse<DefaultTodoStatus>> {
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "Only a human can reinstall Kronn's todo board",

@@ -38,9 +38,10 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<QuickAp
 pub async fn create(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<CreateQuickApiRequest>,
 ) -> Json<ApiResponse<QuickApi>> {
-    let agent = crate::api::workflows::agent_label(&state, &bridge).await;
+    let agent = crate::api::workflows::agent_label(&state, &bridge, &marker).await;
     create_as(state, req, agent).await
 }
 
@@ -117,9 +118,10 @@ pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<CreateQuickApiRequest>,
 ) -> Json<ApiResponse<QuickApi>> {
-    let agent = crate::api::workflows::agent_label(&state, &bridge).await;
+    let agent = crate::api::workflows::agent_label(&state, &bridge, &marker).await;
     update_as(state, id, req, agent).await
 }
 
@@ -419,6 +421,28 @@ pub async fn import_qa(
     }
 }
 
+/// Who the broker sees behind a Quick API run (KT-1490). A bridge token names
+/// its agent; a request carrying the agent marker is an agent too, whatever
+/// bearer it holds — a host CLI joined through the bridge is not the person in
+/// the UI, so it never skips the agent access policy. Only a request that is
+/// neither is a human.
+pub(crate) fn broker_caller(
+    bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: &crate::core::bridge_token::AgentMark,
+    native: Option<&crate::core::api_access::ApiCaller>,
+) -> crate::core::api_access::ApiCaller {
+    match (bridge, marker, native) {
+        (Some(axum::Extension(caller)), _, _) => caller.api_caller(),
+        (None, Some(axum::Extension(marker)), _) => crate::core::api_access::ApiCaller::Agent {
+            identity: None,
+            discussion_ids: marker.discussion_id.iter().cloned().collect(),
+            workflow_run_id: None,
+        },
+        (None, None, Some(native)) => native.clone(),
+        (None, None, None) => crate::core::api_access::ApiCaller::Human,
+    }
+}
+
 /// POST /api/quick-apis/:id/run
 ///
 /// Standalone execution of a saved QuickApi. The user passes values for
@@ -430,14 +454,11 @@ pub async fn run_qa(
     State(state): State<AppState>,
     Path(id): Path<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<RunQuickApiRequest>,
 ) -> Json<ApiResponse<RunQuickApiResponse>> {
     let mut launch = req.launch.clone().unwrap_or_default();
-    let api_caller = match (&bridge, &req.caller) {
-        (Some(axum::Extension(caller)), _) => caller.api_caller(),
-        (None, Some(native)) => native.clone(),
-        (None, None) => crate::core::api_access::ApiCaller::Human,
-    };
+    let api_caller = broker_caller(&bridge, &marker, req.caller.as_ref());
     // A Kronn-launched agent runs a shared Quick API for its own project only,
     // with a config that project can see (never the config's own project).
     if let Some(axum::Extension(caller)) = &bridge {
@@ -886,8 +907,10 @@ async fn persist_quick_api_terminal(
 pub async fn batch_run_qa(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<BatchRunQuickApiRequest>,
 ) -> Json<ApiResponse<BatchRunQuickApiResponse>> {
+    let api_caller = broker_caller(&None, &marker, None);
     let run_id = Uuid::new_v4().to_string();
     let created_at = Utc::now();
     let queued = crate::models::SharedRun {
@@ -1236,7 +1259,7 @@ pub async fn batch_run_qa(
         &state,
         &ctx,
         crate::workflows::api_call_executor::ApiCallLogContext::manual_test(),
-        &crate::core::api_access::ApiCaller::Human,
+        &api_caller,
     )
     .await;
 
@@ -1384,6 +1407,39 @@ fn normalize_batch_items(
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    /// KT-1490: a marked request is an agent whatever else it carries, so it
+    /// never skips the agent access policy as « the person in the UI ».
+    #[test]
+    fn a_marked_request_is_an_agent_to_the_broker() {
+        use crate::core::api_access::ApiCaller;
+        use crate::core::bridge_token::AgentMarker;
+        let marked = Some(axum::Extension(AgentMarker {
+            discussion_id: Some("room-host".into()),
+        }));
+        let marker_alone = broker_caller(&None, &marked, None);
+        assert!(
+            matches!(&marker_alone, ApiCaller::Agent { identity: None, discussion_ids, .. }
+                if discussion_ids == &["room-host".to_string()]),
+            "{marker_alone:?}"
+        );
+        // A caller the body names as human cannot lower the marker's verdict.
+        let claiming_human = broker_caller(&None, &marked, Some(&ApiCaller::Human));
+        assert!(
+            matches!(claiming_human, ApiCaller::Agent { .. }),
+            "{claiming_human:?}"
+        );
+        // Unmarked and tokenless: the person in the UI, as before.
+        assert!(matches!(
+            broker_caller(&None, &None, None),
+            ApiCaller::Human
+        ));
+        // Unmarked, with an in-process caller: that caller.
+        assert!(matches!(
+            broker_caller(&None, &None, Some(&ApiCaller::unidentified_agent())),
+            ApiCaller::Agent { .. }
+        ));
+    }
 
     /// A project-local Quick API renamed to shadow the global one a project
     /// workflow names by `ref:` captures it: the workflow is disabled.

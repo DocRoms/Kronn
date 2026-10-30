@@ -28,6 +28,8 @@ import { ImportantMessageCard } from './ImportantMessageCard';
 import { SourceCitationChip } from './SourceCitationChip';
 import { hasSourceCitation, isCheckoutVerified, isLaneVerified, laneOf, splitSourceCitations } from '../lib/sourceCitations';
 import { DiscussionActionCard } from './DiscussionActionCard';
+import { QuickExecActivationCard } from './QuickExecActivation';
+import { parseActivationCard } from '../lib/activationCard';
 import { parsePlanningProposal } from '../lib/planningProposal';
 import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
@@ -606,6 +608,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   // recognises tool activity at a glance.
   const isKronnTool = msg.role === 'System' && msg.content.startsWith('[kronn-internal:');
   const isKronnPlanning = msg.role === 'System' && msg.content.startsWith('[kronn-planning:');
+  const activationCard = msg.role === 'System' ? parseActivationCard(msg.content) : null;
   const executionContext = msg.role === 'System' ? parseExecutionContext(msg.content) : null;
   const [revealedExecutionVariables, setRevealedExecutionVariables] = useState<Record<string, string>>({});
   const [revealingExecutionVariable, setRevealingExecutionVariable] = useState<string | null>(null);
@@ -706,6 +709,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         data-variant={isOrchestrator ? 'orchestration' : msg.role === 'System' ? (
           isKronnTool ? 'kronn-tool'
           : isKronnPlanning ? 'kronn-planning'
+          : activationCard ? 'kronn-activation'
           : msg.content.startsWith('summary cached') ? 'summary'
                   : executionContext ? 'execution-context'
                   : 'error'
@@ -919,14 +923,14 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               <div
                 className="disc-msg-agent-label"
                 style={{
-                  color: isKronnPlanning
+                  color: isKronnPlanning || activationCard
                     ? 'var(--kr-accent-ink)'
                     : msg.content.startsWith('summary cached')
                       ? 'var(--kr-success)'
                       : 'var(--kr-error)',
                 }}
               >
-                {executionContext
+                {executionContext || activationCard
                   ? <ShieldCheck size={10} />
                   : isKronnPlanning
                   ? <ListTodo size={10} />
@@ -936,6 +940,8 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 {' '}
                 {executionContext
                   ? 'Execution context'
+                  : activationCard
+                  ? t('qeActivation.header')
                   : isKronnPlanning
                   ? t('planning.receipt')
                   : msg.content.startsWith('summary cached')
@@ -1051,6 +1057,9 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           // the markdown render — we don't want a second copy of
           // `[kronn-internal: ...]` rendered as raw text below.
           null
+        ) : activationCard ? (
+          // KT-1490 — the one-click activation of a Quick Exec an agent saved inactive.
+          <QuickExecActivationCard card={activationCard} />
         ) : executionContext ? (
           <section className="disc-execution-context" aria-label={t('executionVariables.contextAria')}>
             <div><strong>{executionContext.run_kind}</strong> · {new Date(executionContext.resolved_at).toLocaleString()}</div>

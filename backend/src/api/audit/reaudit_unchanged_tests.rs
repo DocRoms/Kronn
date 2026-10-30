@@ -752,6 +752,7 @@ impl Audited {
             axum::extract::State(self.state.clone()),
             axum::extract::Path((PROJECT_ID.to_string(), run_id.to_string(), step)),
             bridge,
+            None,
             axum::Json(crate::api::audit::AcceptAuditStepRequest {
                 reason: reason.map(str::to_string),
                 override_unsound,

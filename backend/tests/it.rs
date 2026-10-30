@@ -33,6 +33,8 @@ mod own_process;
 
 #[path = "adapter_worker_policy.rs"]
 mod adapter_worker_policy;
+#[path = "agent_marker_quick_exec.rs"]
+mod agent_marker_quick_exec;
 #[path = "anti_hallu_citation_forms.rs"]
 mod anti_hallu_citation_forms;
 #[path = "anti_hallu_lang_claims.rs"]

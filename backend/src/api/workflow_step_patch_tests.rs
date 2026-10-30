@@ -73,6 +73,7 @@ async fn patch(
         State(state.clone()),
         Path(id.to_string()),
         caller,
+        None,
         Json(step_request(body)),
     )
     .await;
@@ -316,6 +317,7 @@ async fn a_step_patch_saves_what_the_full_update_saves() {
         State(state.clone()),
         Path(via_put.id.clone()),
         bridge(),
+        None,
         Json(serde_json::from_value(json!({"steps": steps})).unwrap()),
     )
     .await;
@@ -479,6 +481,7 @@ async fn concurrent_workflow_field_edit(human_patch: serde_json::Value) {
     let Json(human) = update(
         State(state.clone()),
         Path(wf.id.clone()),
+        None,
         None,
         Json(serde_json::from_value(human_patch.clone()).unwrap()),
     )

@@ -14,6 +14,7 @@ async fn accept(
         axum::extract::State(state.clone()),
         axum::extract::Path((PROJECT_ID.to_string(), run_id.to_string(), step as u32)),
         None,
+        None,
         axum::Json(crate::api::audit::AcceptAuditStepRequest {
             reason: Some("kept as it stands".into()),
             override_unsound: override_unsound.then_some(true),

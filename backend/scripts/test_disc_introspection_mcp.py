@@ -438,6 +438,174 @@ class CurrentDiscMetaCacheTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 1)
 
 
+class AgentMarkerTests(unittest.TestCase):
+    """KT-1490 — every request the bridge sends says an agent wrote it, whatever
+    bearer it carries. A host-launched CLI has no scoped token, so without the
+    marker its Quick Exec reached the server as a human's."""
+
+    def setUp(self):
+        self.mod = _load_module(isolate_http=False)
+
+    @staticmethod
+    def _response():
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = b'{"success": true, "data": {}}'
+        cm.__enter__.return_value.__iter__.return_value = iter([b'{"success": true, "data": {}}'])
+        cm.__exit__.return_value = False
+        return cm
+
+    def _sent(self, call, env):
+        """The Request `call` hands to urlopen, under the environment `env`."""
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch("urllib.request.urlopen", return_value=self._response()) as urlopen:
+            try:
+                call()
+            except Exception:  # the fake body is not what every caller parses
+                pass
+        urlopen.assert_called()
+        return urlopen.call_args[0][0]
+
+    @staticmethod
+    def _header(req, name):
+        return {key.lower(): value for key, value in req.header_items()}.get(name.lower())
+
+    def _environments(self):
+        none = {"KRONN_BRIDGE_TOKEN": "", "KRONN_AUTH_TOKEN": ""}
+        return {
+            "host session, no credential": none,
+            "host session, operator token": {**none, "KRONN_AUTH_TOKEN": "operator-secret"},
+            "kronn-launched, bridge token": {**none, "KRONN_BRIDGE_TOKEN": "kbt_scoped"},
+        }
+
+    def test_every_write_call_carries_the_marker_whatever_the_bearer(self):
+        for label, env in self._environments().items():
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                with self.subTest(env=label, method=method):
+                    req = self._sent(
+                        lambda: self.mod._http(method, "/api/quick-execs", {"name": "x"}), env
+                    )
+                    self.assertEqual(req.get_method(), method)
+                    self.assertEqual(self._header(req, "X-Kronn-Agent"), "1")
+
+    def test_reads_raw_text_and_streams_carry_the_marker_too(self):
+        env = self._environments()["host session, operator token"]
+        for label, call in {
+            "GET": lambda: self.mod._http("GET", "/api/quick-execs"),
+            "text": lambda: self.mod._http_text("GET", "/api/conventions/agents-md-format-v1"),
+            "sse": lambda: self.mod._audit_open_sse("/api/projects/p/full-audit", {}),
+        }.items():
+            with self.subTest(call=label):
+                self.assertEqual(self._header(self._sent(call, env), "X-Kronn-Agent"), "1")
+
+    def test_the_marker_does_not_change_the_bearer(self):
+        envs = self._environments()
+        anonymous = self._sent(
+            lambda: self.mod._http("POST", "/api/quick-execs", {}), envs["host session, no credential"]
+        )
+        self.assertIsNone(self._header(anonymous, "Authorization"))
+        operator = self._sent(
+            lambda: self.mod._http("POST", "/api/quick-execs", {}),
+            envs["host session, operator token"],
+        )
+        self.assertEqual(self._header(operator, "Authorization"), "Bearer operator-secret")
+        scoped = self._sent(
+            lambda: self.mod._http("POST", "/api/quick-execs", {}),
+            envs["kronn-launched, bridge token"],
+        )
+        self.assertEqual(self._header(scoped, "Authorization"), "Bearer kbt_scoped")
+
+    def test_qe_create_draft_from_a_host_session_is_marked_and_names_its_room(self):
+        """The reported case: `fastly purge --key {{surrogate_key}}` saved from a
+        CLI the user launched, joined to a room, holding an operator token only."""
+        env = {
+            "KRONN_BRIDGE_TOKEN": "",
+            "KRONN_AUTH_TOKEN": "operator-secret",
+            "KRONN_DISCUSSION_ID": "room-host",
+        }
+        sent = []
+
+        def urlopen(req, timeout=None):
+            sent.append(req)
+            return self._response()
+
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch("urllib.request.urlopen", side_effect=urlopen):
+            self.mod._CURRENT_DISC_ID = "room-host"
+            self.mod.call_qe_create_draft({
+                "name": "Purge Fastly",
+                "command": "fastly",
+                "args": ["purge", "--key", "{{surrogate_key}}"],
+            })
+        saves = [r for r in sent if r.get_method() == "POST" and r.full_url.endswith("/api/quick-execs")]
+        self.assertEqual(len(saves), 1)
+        self.assertEqual(self._header(saves[0], "X-Kronn-Agent"), "1")
+        self.assertEqual(self._header(saves[0], "X-Kronn-Discussion"), "room-host")
+        self.assertEqual(self._header(saves[0], "Authorization"), "Bearer operator-secret")
+        body = json.loads(saves[0].data)
+        self.assertNotIn("unmodelled_args_approved", body, "the bridge never sends an approval")
+
+    def test_the_first_save_after_a_reconnect_names_the_restored_room(self):
+        """Owner review: a host CLI with a persisted room reconnects (no binding in
+        memory) and its first call is a save with an explicit `project_id`. The
+        room is restored before the request, not after it."""
+        import tempfile
+        env = {"KRONN_BRIDGE_TOKEN": "", "KRONN_AUTH_TOKEN": "operator-secret"}
+        env_without_room = {k: v for k, v in os.environ.items() if k != "KRONN_DISCUSSION_ID"}
+        sent = []
+
+        def urlopen(req, timeout=None):
+            sent.append(req)
+            if req.full_url.endswith("/api/discussions/peer-resume"):
+                body = json.loads(req.data)
+                reply = {"disc_id": "room-host", "session_pk": 7,
+                         "resume_token": body["next_resume_token"]}
+                cm = mock.MagicMock()
+                cm.__enter__.return_value.read.return_value = json.dumps(
+                    {"success": True, "data": reply}).encode()
+                cm.__exit__.return_value = False
+                return cm
+            return self._response()
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(os.environ, env_without_room, clear=True), \
+             mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch("urllib.request.urlopen", side_effect=urlopen), \
+             mock.patch.object(self.mod, "_BINDING_DIR", tmp), \
+             mock.patch.dict(self.mod._BINDING_PATH_CACHE,
+                             {"computed": True, "path": os.path.join(tmp, "binding.json")}):
+            self.mod._CURRENT_DISC_ID = None  # as after a reconnect
+            self.assertTrue(self.mod._write_binding("room-host", "kr-resume-old"))
+            self.mod.call_qe_create_draft({
+                "name": "Purge Fastly",
+                "command": "fastly",
+                "project_id": "project-explicit",
+                "args": ["purge", "--key", "{{surrogate_key}}"],
+            })
+        saves = [r for r in sent if r.get_method() == "POST" and r.full_url.endswith("/api/quick-execs")]
+        self.assertEqual(len(saves), 1)
+        self.assertEqual(self._header(saves[0], "X-Kronn-Discussion"), "room-host")
+        self.assertEqual(self._header(saves[0], "X-Kronn-Agent"), "1")
+
+    def test_no_request_is_built_without_the_marker(self):
+        """A new `urllib.request.Request` site must go through `_authorize`."""
+        import ast
+        tree = ast.parse(Path(_SCRIPT).read_text())
+        for function in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+            builds = any(
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "Request"
+                for n in ast.walk(function)
+            )
+            if builds:
+                calls = {
+                    n.func.id
+                    for n in ast.walk(function)
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                }
+                self.assertIn("_authorize", calls, f"{function.name} sends no agent marker")
+
+
 class ResolveIdTests(unittest.TestCase):
     def setUp(self):
         self.mod = _load_module()

@@ -710,9 +710,15 @@ impl Drop for CancelGuard {
 async fn auth_middleware(
     State(state): State<AppState>,
     headers: HeaderMap,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Result<axum::response::Response, StatusCode> {
+    // The MCP bridge marks every request an agent wrote, whatever bearer it
+    // carries (KT-1490). The handlers read it as « not a human », and nothing
+    // reads its absence as « a human »: it only ever lowers a request.
+    if let Some(marker) = crate::core::bridge_token::AgentMarker::from_headers(&headers) {
+        request.extensions_mut().insert(marker);
+    }
     // Skip auth for health endpoint (Docker healthcheck)
     if request.uri().path() == "/api/health"
         || request.uri().path() == api::live_pages::EMBED_FRAME_SRC_PATH
@@ -2646,6 +2652,15 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/quick-execs/pending-approvals",
             get(api::quick_execs::pending_approvals),
+        )
+        // KT-1490: a human's activation, deliberately absent from the bridge-token list.
+        .route(
+            "/api/quick-execs/{id}/activate",
+            post(api::quick_execs::activate),
+        )
+        .route(
+            "/api/quick-execs/{id}/refuse-activation",
+            post(api::quick_execs::refuse_activation),
         )
         .route(
             "/api/quick-execs/{id}",

@@ -87,6 +87,7 @@ impl Validated {
             axum::extract::State(fx.h.state.clone()),
             axum::extract::Path(PROJECT_ID.to_string()),
             None,
+            None,
             axum::Json(crate::core::doc_provenance::ConfirmDocsRequest {
                 docs: vec!["docs/AGENTS.md".into()],
             }),
@@ -407,6 +408,7 @@ async fn a_changed_cited_line_is_corrected_by_the_agent_and_the_badge_goes_back_
         axum::extract::State(fx.h.state.clone()),
         axum::extract::Path(PROJECT_ID.to_string()),
         None,
+        None,
         axum::Json(crate::core::doc_provenance::ConfirmDocsRequest {
             docs: vec![RULES.into()],
         }),
@@ -565,6 +567,7 @@ async fn a_human_section_citation_is_corrected_then_confirmed_by_its_owner() {
     let confirmed = crate::api::audit::confirm_doc_provenance(
         axum::extract::State(fx.h.state.clone()),
         axum::extract::Path(PROJECT_ID.to_string()),
+        None,
         None,
         axum::Json(crate::core::doc_provenance::ConfirmDocsRequest {
             docs: vec![GLOSSARY.into()],
@@ -1567,6 +1570,7 @@ async fn only_explicitly_confirmed_docs_advance_the_local_run_proof() {
         let confirmed = crate::api::audit::provenance::confirm_doc_provenance(
             axum::extract::State(fx.h.state.clone()),
             axum::extract::Path(PROJECT_ID.to_string()),
+            None,
             None,
             axum::Json(crate::core::doc_provenance::ConfirmDocsRequest {
                 docs: vec![doc.into()],

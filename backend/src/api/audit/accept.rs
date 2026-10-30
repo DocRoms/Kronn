@@ -137,10 +137,11 @@ pub async fn accept_audit_step(
     State(state): State<AppState>,
     Path((id, run_id, step)): Path<(String, String, u32)>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<AcceptAuditStepRequest>,
 ) -> Json<ApiResponse<AcceptAuditStepResponse>> {
     // A human decision: never an agent's, whatever route list lets it through.
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return Json(ApiResponse::err(
             "Accepting an audit step is a human decision: refused to an agent's bridge token.",
         ));

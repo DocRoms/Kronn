@@ -629,9 +629,10 @@ pub struct DeleteLivePageDatasetQuery {
 pub async fn dataset_usage(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Vec<crate::models::LivePageDatasetUsage>>> {
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "Dataset usage is shown to a human only",
@@ -659,10 +660,11 @@ pub async fn dataset_usage(
 pub async fn delete_dataset(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Path((id, name)): Path<(String, String)>,
     Query(query): Query<DeleteLivePageDatasetQuery>,
 ) -> Json<ApiResponse<crate::models::DeleteLivePageDatasetResult>> {
-    if query.force && bridge.is_some() {
+    if query.force && crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "Only a human can delete a dataset that is still in use",
@@ -694,10 +696,11 @@ pub async fn delete_dataset(
 pub async fn update_dataset(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Path((id, name)): Path<(String, String)>,
     Json(request): Json<crate::models::UpdateLivePageDatasetRequest>,
 ) -> Json<ApiResponse<crate::models::UpdateLivePageDatasetResult>> {
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "Only a human can change a dataset's retention limits",
