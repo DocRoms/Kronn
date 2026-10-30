@@ -2865,6 +2865,11 @@ export function ProjectCard({
                       />
                     )}
                     onVerifyDocs={() => setVerifyDocsOpen(true)}
+                    onVersionValidated={() => {
+                      onRefetch();
+                      onRefetchDrift(proj.id);
+                      setDocStateReload(n => n + 1);
+                    }}
                     docStateCounts={docStateCounts}
                     refreshTrigger={auditCompletedTick}
                     toast={toast}

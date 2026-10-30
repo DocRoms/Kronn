@@ -4,7 +4,7 @@ Kronn blocks new delegations for a provider after a real quota-exhaustion recove
 
 A human confirmation in Config > Agents can acknowledge that one provider's quota is available again. The action records an idempotent provider-scoped audit event and watermark; it does not restart, cancel, or change any historical execution or recovery row. A later quota marker for that provider is newer than the watermark and blocks launches again. [src: file: backend/src/db/orchestration.rs:2570-2611#rearm_provider_quota]
 
-The re-arm endpoint is a browser route and is not part of the task-worker MCP surface. [src: file: backend/src/lib.rs:3041-3044#rearm_provider_quota] [src: file: backend/src/api/orchestration.rs:13563-13595#rearm_provider_quota]
+The re-arm endpoint is a browser route and is not part of the task-worker MCP surface. [src: file: backend/src/lib.rs:3045-3048#rearm_provider_quota] [src: file: backend/src/api/orchestration.rs:13563-13595#rearm_provider_quota]
 
 ## Reassigning to the same provider is a re-arm (KT-838)
 

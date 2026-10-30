@@ -71,4 +71,4 @@ the version read is no longer conditional on an installed RTK binary.
 [src: file: backend/src/core/versions.rs:816-825#refresh_start_is_deduplicated_and_respects_ttl]
 [src: file: backend/tests/api_tests.rs:202-268#cli_release_recheck_returns_agent_metadata_and_distinct_rtk_ccusage_versions]
 [src: file: frontend/src/components/settings/__tests__/CompressionSection.test.tsx:261-278#versionCheckMock]
-[src: file: frontend/src/test/apiMock.ts:628-632#RtkVersionInfo]
+[src: file: frontend/src/test/apiMock.ts:629-633#RtkVersionInfo]

@@ -710,7 +710,7 @@ pub(crate) fn open_disputes_refusal(
 /// Documents Kronn owns that still carry a placeholder or a `TODO:` marker.
 /// The validation's first phase settles every such unknown; TD sheets and
 /// dated reports have their own review and are not counted here.
-fn unresolved_unknowns(
+pub(crate) fn unresolved_unknowns(
     project_path: &std::path::Path,
     report: &crate::core::document_optimization::DocumentaryOptimizationReport,
 ) -> Vec<String> {

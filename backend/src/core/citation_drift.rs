@@ -290,10 +290,13 @@ fn read_lines(path: &Path) -> FileLines {
 
 // ─── Citations of a doc ───────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct DocCitation {
     cite: String,
     file: String,
     lines: Option<(usize, usize)>,
+    /// The `#symbol` the cited lines must hold, when the citation names one.
+    anchor: Option<String>,
 }
 
 pub(crate) fn cite_label(file: &str, lines: Option<(usize, usize)>) -> String {
@@ -306,18 +309,43 @@ pub(crate) fn cite_label(file: &str, lines: Option<(usize, usize)>) -> String {
 
 /// The distinct file citations of a doc, in order of first appearance.
 fn doc_citations(content: &str) -> Vec<DocCitation> {
+    citations_of(content, false)
+}
+
+/// Every distinct `(citation, #symbol)` of a doc: the same lines cited under two
+/// anchors yield two entries, since the key of a citation does not carry its
+/// anchor (KT-1489).
+fn doc_anchors(content: &str) -> Vec<DocCitation> {
+    citations_of(content, true)
+}
+
+fn citations_of(content: &str, per_anchor: bool) -> Vec<DocCitation> {
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for raw in crate::core::anti_halluc::extract_source_markers(content) {
-        let Some((file, lines)) = crate::core::anti_halluc::file_citation(&raw) else {
+        let Some((file, lines, anchor)) = crate::core::anti_halluc::file_citation_anchored(&raw)
+        else {
             continue;
         };
-        if !is_plain_relative(Path::new(&file)) {
+        // `[src: …]` in a template's own text, `<path>` and `src/*.rs` show the
+        // syntax: they name no file, so no file can be missing (KT-1489).
+        if !is_plain_relative(Path::new(&file))
+            || crate::core::docs_citations::is_placeholder(&file)
+        {
             continue;
         }
         let cite = cite_label(&file, lines);
-        if seen.insert(cite.clone()) {
-            out.push(DocCitation { cite, file, lines });
+        let key = match (per_anchor, &anchor) {
+            (true, Some(symbol)) => format!("{cite}#{symbol}"),
+            _ => cite.clone(),
+        };
+        if seen.insert(key) {
+            out.push(DocCitation {
+                cite,
+                file,
+                lines,
+                anchor,
+            });
             if out.len() >= MAX_CITATIONS_PER_DOC {
                 break;
             }
@@ -994,7 +1022,11 @@ fn evaluate_section(project_path: &Path, doc: &str, entry: &DocFingerprints) -> 
             continue;
         }
         let status = evaluate_citation(project_path, fp);
-        if status.state == CitationState::Unchanged {
+        // A claim that says the file is not there is right when it is not
+        // (KT-1489): the citation backs the absence, it is not broken by it.
+        let backs_absence = status.state == CitationState::FileMissing
+            && crate::core::doc_relevance::says_cite_gone(&content, &fp.cite);
+        if status.state == CitationState::Unchanged || backs_absence {
             section.unchanged_count += 1;
         } else {
             section.stale |= status.state.is_broken();
@@ -1007,6 +1039,105 @@ fn evaluate_section(project_path: &Path, doc: &str, entry: &DocFingerprints) -> 
         .map(|c| c.cite.clone())
         .collect();
     section
+}
+
+/// What the code holds for a citation no fingerprint covers (cited since the
+/// validation): the file, the line range, the `#symbol` its lines must hold.
+/// There is no recorded content to compare, so a range that is still in the
+/// file but moved away from what it described can only be caught by its anchor.
+fn probe_unrecorded(project_path: &Path, citation: &DocCitation) -> CitationState {
+    let Some(path) = resolve_cited(project_path, &citation.file) else {
+        return CitationState::FileMissing;
+    };
+    let (lines, citable) = match read_lines(&path) {
+        FileLines::Missing => return CitationState::FileMissing,
+        FileLines::Opaque => return CitationState::Unchanged,
+        FileLines::Lines { lines, citable } => (lines, citable),
+    };
+    let Some((start, end)) = citation.lines else {
+        return CitationState::Unchanged;
+    };
+    if cited_block(&lines, citable, start, end).is_none() {
+        return CitationState::Removed;
+    }
+    match citation.anchor.as_deref() {
+        Some(symbol)
+            if crate::core::anti_halluc::anchor_miss(&path, (start, end), symbol).is_some() =>
+        {
+            CitationState::Changed
+        }
+        _ => CitationState::Unchanged,
+    }
+}
+
+/// The citations the docs carry whose target does not hold and that no
+/// recorded fingerprint vouches for: `(doc, status)`. A citation no fingerprint
+/// covers (a doc added or edited since the validation) is probed whole. A
+/// recorded one whose lines are unchanged is probed for its `#symbol` only,
+/// since a fingerprint does not record the anchor: an anchor changed by hand to
+/// a symbol the lines do not hold is caught here. Every distinct anchor is
+/// checked, also a second one on lines already cited, and on the new lines of a
+/// block that only moved. A recorded citation that
+/// drifted is `check`'s to report. Deterministic, reads the code only (KT-1489).
+pub(crate) fn unrecorded_problems(project_path: &Path) -> Vec<(String, CitationStatus)> {
+    let recorded = read_strict(project_path).ok().flatten().unwrap_or_default();
+    let mut out = Vec::new();
+    for doc in doc_files(project_path) {
+        let Some(content) = read_doc(project_path, &doc) else {
+            continue;
+        };
+        let fingerprints: BTreeMap<&str, &CitationFingerprint> = recorded
+            .docs
+            .get(&doc)
+            .map(|entry| {
+                entry
+                    .citations
+                    .iter()
+                    .map(|c| (c.cite.as_str(), c))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for citation in doc_anchors(&content) {
+            let state = match fingerprints.get(citation.cite.as_str()) {
+                None => probe_unrecorded(project_path, &citation),
+                Some(fp) if citation.anchor.is_some() => {
+                    let status = evaluate_citation(project_path, fp);
+                    match (status.state, status.current_line, citation.lines) {
+                        (CitationState::Unchanged, _, _) => {
+                            probe_unrecorded(project_path, &citation)
+                        }
+                        // The block only moved: the validation re-anchors the
+                        // citation to its new lines, where the anchor must hold.
+                        (CitationState::Moved, Some(found), Some((start, end))) => {
+                            let moved = DocCitation {
+                                lines: Some((found, found + (end - start))),
+                                ..citation.clone()
+                            };
+                            probe_unrecorded(project_path, &moved)
+                        }
+                        _ => continue,
+                    }
+                }
+                Some(_) => continue,
+            };
+            let backs_absence = state == CitationState::FileMissing
+                && crate::core::doc_relevance::says_cite_gone(&content, &citation.cite);
+            if state.is_broken() && !backs_absence {
+                out.push((
+                    doc.clone(),
+                    CitationStatus {
+                        cite: citation.cite,
+                        file: citation.file,
+                        line: citation.lines.map(|l| l.0),
+                        end_line: citation.lines.map(|l| l.1),
+                        state,
+                        current_line: None,
+                    },
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Every recorded section, evaluated against the current code.

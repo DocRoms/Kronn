@@ -403,7 +403,7 @@ pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, 
     Ok(done)
 }
 
-fn reanchor_statuses(
+pub(crate) fn reanchor_statuses(
     project_path: &FsPath,
     content: &str,
     section: &citation_drift::SectionCitations,

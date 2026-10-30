@@ -70,7 +70,7 @@ pub struct MovedAnchor {
 }
 
 /// A syntax example such as `<path>:<line>` or `src/{a,b}.rs`, not a citation.
-fn is_placeholder(citation: &str) -> bool {
+pub(crate) fn is_placeholder(citation: &str) -> bool {
     citation.contains(['<', '>', '{', '}', '*', '…']) || citation.contains("...")
 }
 

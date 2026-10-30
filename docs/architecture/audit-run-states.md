@@ -124,7 +124,7 @@ this degrades and continues.
   refuses any bridge caller. It is refused when the target is missing, empty
   or still holds template placeholders. It is also refused when the run is not
   the latest `Interrupted` run, or while the audit lease is held.
-  [src: file: backend/src/lib.rs:1879-1884#accept_audit_step] [src: file: backend/src/api/audit/accept.rs:137-145#BridgeCaller] [src: file: backend/src/api/audit/accept.rs:59-81#check_target] [src: file: backend/src/api/audit/accept.rs:174-184#latest] [src: file: backend/src/api/audit/accept.rs:277-279#DocsWriteLease]
+  [src: file: backend/src/lib.rs:1883-1888#accept_audit_step] [src: file: backend/src/api/audit/accept.rs:137-145#BridgeCaller] [src: file: backend/src/api/audit/accept.rs:59-81#check_target] [src: file: backend/src/api/audit/accept.rs:174-184#latest] [src: file: backend/src/api/audit/accept.rs:277-279#DocsWriteLease]
 - Once no failed step is left, the resume runs no agent step and only
   finalizes the run. It goes to `Completed`, writes its validation discussion,
   which lists the accepted steps apart, and makes the project validatable.
@@ -188,7 +188,7 @@ this degrades and continues.
   plan queues its owning step (or lists it as manual when no step owns it)
   and the badge stays raised, even when relevance sees nothing wrong with its
   citations. Accepting the step or a successful run clears the banner.
-  [src: file: backend/src/api/audit/revalidate.rs:199-230#partial_docs] [src: file: backend/src/core/citation_drift.rs:498-518#partial_docs]
+  [src: file: backend/src/api/audit/revalidate.rs:199-230#partial_docs] [src: file: backend/src/core/citation_drift.rs:525-545#partial_docs]
 
 ## Leases and agents that could block a project
 
@@ -238,7 +238,7 @@ this degrades and continues.
   run is resumable, it says so and offers "Retry". Every launch button stays
   disabled until it knows. A step retried alone never falls back to a whole
   audit when its run is no longer resumable.
-  [src: file: frontend/src/components/ProjectCard.tsx:529-538#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:889-895#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:516-518#launchBlocked]
+  [src: file: frontend/src/components/ProjectCard.tsx:529-538#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:889-895#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:557-559#launchBlocked]
 
 ## Every error carries its action (KT-1169)
 
@@ -256,10 +256,10 @@ this degrades and continues.
 | Verify-docs dialog | A stale-sections refresh failed. | The stale section stays in the single doc-state block. “Update affected steps” retries the partial run; “Verified, unchanged” settles it without an agent. Both remain unavailable while a resumable run takes priority. |
 | Toasts during a run | A step failed or warned. | Informational: the run ends with that step's "Retry this step" and "Accept as it stands". |
 
-- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:818-836#launchError] [src: file: frontend/src/components/ProjectCard.tsx:1074-1097#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:456#auditLaunchError]
-- Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:851-863#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:864-874#loadFailed]
-- Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:514-536#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:967-970#acceptError]
-- Validation prerequisites and linked actions. [src: file: frontend/src/components/AuditTimeline.tsx:1067-1129#completedLocalRun]
+- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:858-876#launchError] [src: file: frontend/src/components/ProjectCard.tsx:1074-1097#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:456#auditLaunchError]
+- Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:891-903#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:904-914#loadFailed]
+- Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:554-576#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:1007-1010#acceptError]
+- Validation prerequisites and linked actions. [src: file: frontend/src/components/AuditTimeline.tsx:1107-1169#completedLocalRun]
 - Verify-docs actions and resumable priority. [src: file: frontend/src/components/RevalidateAudit.tsx:395-426#onUpdateStale] [src: file: frontend/src/components/ProjectCard.tsx:1523-1535#primaryAuditAction]
 - Recap read error. [src: file: frontend/src/components/AuditRecapPanel.tsx:363-368#errorBlock]
 
@@ -268,7 +268,7 @@ this degrades and continues.
 “Verify docs” is the single entry point in the project header, the audit
 timeline and a stale document's viewer. It has no lifecycle of its own.
 [src: file: frontend/src/components/ProjectCard.tsx:1601-1615#project-audit-primary]
-[src: file: frontend/src/components/AuditTimeline.tsx:578-583#onVerifyDocs]
+[src: file: frontend/src/components/AuditTimeline.tsx:618-623#onVerifyDocs]
 [src: file: frontend/src/components/AiDocViewer.tsx:529-538#onOpenDocState]
 
 - **Fail-closed doc state.** One block reports four counts: broken citations,
@@ -402,17 +402,17 @@ action from the latest local run of any kind and that run's `latest_validation`;
 an older completed Full or Partial run cannot authorize Validate after a newer
 specialized run. Discussion-title guesses never authorize Validate.
 [src: file: frontend/src/components/ProjectCard.tsx:583-589#latest]
-[src: file: frontend/src/components/AuditTimeline.tsx:339-349#latestRun]
-[src: file: frontend/src/components/AuditTimeline.tsx:1120-1182#linkedValidation]
+[src: file: frontend/src/components/AuditTimeline.tsx:346-356#latestRun]
+[src: file: frontend/src/components/AuditTimeline.tsx:1160-1222#linkedValidation]
 
-- Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:212-227#stepStatus]
-- Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:500-507#launchLabel]
-- Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:515#stepActions]
-- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:520-521#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:678-683#validationInProgress]
-- Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:1096-1109#runPending]
-- Confirmation before a fresh full audit. [src: file: frontend/src/components/AuditTimeline.tsx:1305-1346#confirmRelaunch]
-- Orphaned lease banner. [src: file: frontend/src/components/AuditTimeline.tsx:740-817#leaseOrphaned]
-- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:703-704#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:454#cancelPending]
+- Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:214-229#stepStatus]
+- Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:540-547#launchLabel]
+- Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:556#stepActions]
+- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:561-562#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:678-683#validationInProgress]
+- Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:1136-1149#runPending]
+- Confirmation before a fresh full audit. [src: file: frontend/src/components/AuditTimeline.tsx:1448-1489#confirmRelaunch]
+- Orphaned lease banner. [src: file: frontend/src/components/AuditTimeline.tsx:780-857#leaseOrphaned]
+- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:743-744#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:454#cancelPending]
 
 ## Validation and document trust (KT-1206)
 
@@ -457,7 +457,7 @@ changes cannot certify themselves. Reverification also plans bounded agent
 work for changed prose; deleted or unowned documents require manual attention.
 [src: file: backend/src/db/audit_documents.rs:93-126#advance_local_changes]
 [src: file: backend/src/db/audit_documents.rs:62-91#confirm_paths]
-[src: file: backend/src/core/doc_provenance.rs:703-713#contains_placeholder]
+[src: file: backend/src/core/doc_provenance.rs:769-779#contains_placeholder]
 [src: file: backend/src/api/audit/revalidate.rs:294-351#plan_with_documents]
 
 A no-change partial run restores validation only when every tracked validated
@@ -465,7 +465,7 @@ document and every selected target remained byte-identical. The learning gate
 does not treat a changed human-validated document, or one with broken citations,
 as human-validated evidence until its trust conditions hold again.
 [src: file: backend/src/api/audit/helpers.rs:1094-1119#validation_restore_snapshots]
-[src: file: backend/src/core/doc_provenance.rs:777-815#source_provenance_with_citations]
+[src: file: backend/src/core/doc_provenance.rs:843-881#source_provenance_with_citations]
 [src: file: backend/src/core/learning_gate.rs:57-71#source_provenance_with_citations]
 
 ## Validation completion, reasons and provenance (KT-1122)
@@ -506,13 +506,88 @@ as human-validated evidence until its trust conditions hold again.
   as `validation_started_by` when the validation is opened, and as
   `validated_by` when it is validated, on the run row and in
   `docs/.kronn.json` (`validated_by`, `validation_started_by`).
-  [src: file: backend/src/core/kronn_state.rs:330-346#mark_validated_by]
+  [src: file: backend/src/core/kronn_state.rs:343-359#mark_validated_by]
   [src: file: backend/src/db/audit_validation.rs:125-140#set_started_by]
 - **Boot repair.** At startup, completions already visible in the messages are
   stamped, and open validations an older audit left behind are archived only
   when title and first message carry the generated provenance, they predate the
   latest linked run, and no agent is queued, running or awaited. Idempotent.
   [src: file: backend/src/db/audit_validation.rs:175-248#repair]
+
+## Docs edited outside Kronn after the validation (KT-1489)
+
+Only the start of an audit revokes `validated_at`; an edit made by hand or by
+another tool revokes nothing. Step 4 therefore compares the docs with what
+`provenance.json` recorded (`outside_kronn` in the provenance report): a doc
+that is neither the validated text nor the last text Kronn wrote, a doc deleted
+since, and a doc added since are reported with the date of the validation. The
+record kept for the `owner="human"` sections of a doc nobody validated
+(`HumanOwned`) is the person's own text: that check skips it. The banner reads
+« since the last validation » when `.kronn.json` holds no date.
+[src: file: backend/src/core/doc_provenance.rs:710-739#outside_kronn_in]
+
+The banner (hidden while an audit runs) carries one primary button, named by
+its outcome. Edited docs: « Valider la doc telle qu'elle est » with the changed
+docs folded in a `<details>`. Approval refused: the same slot becomes « Corriger
+les citations et chemins » (the header's « Vérifier la doc », same label key)
+with the broken citations folded, and a quiet « Revérifier après correction »
+link that runs the same free check again once the files were repaired by hand
+(the refusal does not clear by itself in an open view). The tech-debt controls
+are a separate row.
+
+« Valider la doc telle qu'elle est » (`POST /api/projects/{id}/validate-current-docs`, human
+only, held under the project's docs lease, no agent) runs the deterministic
+checks of « Vérifier la doc » first. When any citation is broken (file gone,
+line changed, range or `#symbol` that no longer holds, including a doc
+citing another doc) it records nothing and answers with the list, and « Vérifier
+la doc » stays the way to treat them. The verdict is the fingerprint's own: a
+block whose content changed stays broken even when its `#symbol` is found
+elsewhere (the agent-assisted plan may suggest a new line for it, the direct
+validation never does), and every `#symbol` anchor is probed at the lines the
+validation will write. Otherwise it re-anchors moved lines,
+re-records the fingerprints and the provenance, stamps the unowned docs as read,
+moves the previous `validated_at` / `validated_by` to `validation_history` in
+`docs/.kronn.json`, and dates the new validation.
+[src: file: backend/src/api/audit/validate_version.rs:51-73#broken_citations]
+[src: file: backend/src/core/kronn_state.rs:366-379#revalidate_current]
+
+Nothing is left half done. The records it depends on (`.kronn.json`,
+`provenance.json` and `citations.json`) are read strictly before the first write, so an unreadable
+one refuses the validation with nothing changed (`check` and `record_all` read a
+malformed `citations.json` as an empty record, which would accept a changed line
+without comparing it to its fingerprint); the docs and the three records
+are snapshotted before the writes and put back, atomically and with their
+mode, if one of them fails, so « Vérifier la doc » still sees the drift. A file
+that exists but cannot be read refuses the validation at the snapshot; a file
+the rollback cannot restore is named in the error. The audit documents of the run are
+confirmed after that, in the database: if that write fails the validation on
+disk stands and the response is an error that says so.
+[src: file: backend/src/api/audit/validate_version.rs:160-213#validate_with]
+
+Two readings never count as broken: the `[src: …]` of a template's own
+explanation, and a claim that says the cited file does not exist. The second is
+narrow: the sentence that carries the `[src: …]` marker of that file must say it
+outright (« n'existe pas », « does not exist », « no longer exists », or the
+path labelled missing), and the phrase must be about that path (the path right
+before it, alone or in a list, or a generic « the file » opening the sentence):
+« `a.rs` lit la config, le cache n'existe pas » is about the cache. « is used to », « no longer », « we could » speak of
+history or plans, and a deleted file they describe is a broken citation.
+Paths are compared whole, in the marker and in the sentence: « missing
+`old/src/auth.rs` » next to a marker on `src/auth.rs` is about another path.
+The exception belongs to the citation (its `file:lines` label), not to the
+file: every occurrence of that citation in the doc must be an absence statement
+to be exempt. A present-tense sentence citing `src/auth.rs:3` next to a
+sentence « The file does not exist » citing `src/auth.rs` leaves the first
+citation broken, in either order, whether or not the spans are identical, and
+whether the citation is recorded or new.
+[src: file: backend/src/core/doc_relevance.rs:680-700#says_cite_gone]
+[src: file: backend/src/core/citation_drift.rs:1080-1095#unrecorded_problems]
+
+A `#symbol` is not part of a citation's key (`file:lines`), so the anchors are
+checked on their own: every distinct `(citation, #symbol)` of a doc is probed,
+including the ones on lines a fingerprint already covers and a second anchor on
+the same lines. A recorded citation whose lines drifted stays `check`'s to
+report.
 
 ## The run, portable by the repository
 
@@ -591,7 +666,7 @@ version is independent of the application's release version; the first tracked
 catalogue uses `kronn:doc-version="1.1"`. A version or catalogue mismatch, or
 missing files, stays visible even on an audited project. Filled project docs
 are not compared against template bytes to decide whether an update exists.
-[src: file: backend/src/core/kronn_state.rs:94-95#template]
+[src: file: backend/src/core/kronn_state.rs:107-108#template]
 [src: file: backend/src/core/template_manifest.rs:66-80#snapshot]
 [src: file: templates/docs/AGENTS.md:1#kronn]
 

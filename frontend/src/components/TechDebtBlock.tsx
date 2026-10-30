@@ -157,7 +157,8 @@ export function TechDebtTimelineEntry({
     return <p className="audit-tl-muted" data-testid="audit-timeline-td-empty">{t('auditTimeline.validated.noDebt')}</p>;
   }
   return (
-    <div className="td-block-actions" data-testid="audit-timeline-td-entry">
+    <div className="td-block-actions td-timeline-row" data-testid="audit-timeline-td-entry">
+      <span className="td-timeline-label">{t('auditTimeline.validated.debtLabel')}</span>
       {list ? (
         <TechDebtReviewButton
           project={project}
@@ -174,6 +175,7 @@ export function TechDebtTimelineEntry({
       ) : error ? (
         <span className="td-block-error">{t('techDebt.loadError', error)}</span>
       ) : null}
+      <span className="td-timeline-sep" aria-hidden="true">·</span>
       <button type="button" className="td-link-btn" data-testid="audit-timeline-td-open-file" onClick={onOpenFile}>
         <FileText size={12} /> {t('auditTimeline.validated.openFile')}
       </button>

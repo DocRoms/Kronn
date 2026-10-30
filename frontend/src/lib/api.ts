@@ -181,6 +181,7 @@ import type {
   CitationDriftResponse,
   RevalidateAuditRequest,
   RevalidationPlan,
+  ValidateVersionOutcome,
   TdTasksOutcome,
   TdReviewList,
   TdDecisionItem,
@@ -1306,6 +1307,9 @@ export const projects = {
   /** KT-1079 — « Confirmer »: an empty list confirms every doc to reconfirm. */
   confirmDocProvenance: (id: string, docs: string[]) =>
     api<DocProvenanceReport>('POST', `/projects/${id}/doc-provenance/confirm`, { docs }),
+  /** KT-1489 — « Valider cette version »: no agent; refused with the citations to correct when some are broken. */
+  validateCurrentDocs: (id: string) =>
+    api<ValidateVersionOutcome>('POST', `/projects/${id}/validate-current-docs`),
   /** KT-1168 — what « Revalider l'audit » would do, computed without writing. */
   revalidationPlan: (id: string) => api<RevalidationPlan>('GET', `/projects/${id}/revalidation`),
   getBriefing: (id: string) => api<string | null>('GET', `/projects/${id}/briefing`),

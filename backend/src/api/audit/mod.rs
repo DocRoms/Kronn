@@ -45,6 +45,7 @@ pub(crate) mod step_remit;
 pub mod td_review;
 pub mod td_tasks;
 pub mod validate;
+mod validate_version;
 pub mod validation;
 mod version_context;
 
@@ -62,6 +63,7 @@ pub use run::*;
 pub use td_review::{create_td_task, decide_tds, list_tds, start_td_talk, td_talk};
 pub use td_tasks::convert_td_tasks;
 pub use validate::*;
+pub use validate_version::validate_current_docs;
 // Selective re-export of `pub(crate)` helpers actually consumed from
 // outside this module — sibling `api::projects::*` calls these via
 // `crate::api::audit::Foo`. The remaining `pub(crate)` helpers

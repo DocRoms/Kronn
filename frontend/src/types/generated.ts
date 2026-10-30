@@ -1676,6 +1676,11 @@ export type BriefingTracker = "unknown" | "jira" | "github_issues" | "gitlab_iss
 
 export type BriefingYesNo = "unknown" | "yes" | "no";
 
+/**
+ * A citation that blocks the validation, with the doc that carries it.
+ */
+export type BrokenDocCitation = { doc: string, citation: CitationStatus, };
+
 export type BrowseEntry = { name: string, path: string,
 /**
  * This directory is itself a working copy — worth selecting as is.
@@ -4118,7 +4123,13 @@ export type DiscWorkspaceSetResponse = { workspace: DiscussionWorkspace, blocker
 
 export type DiscWorkspaceState = { disc_id: string, session_pk: number, current: DiscussionWorkspace | null, workspaces: Array<DiscussionWorkspace>, };
 
-export type DocProvenanceReport = { docs: Array<DocProvenanceStatus>, to_reconfirm: number, };
+export type DocProvenanceReport = { docs: Array<DocProvenanceStatus>, to_reconfirm: number,
+/**
+ * Docs that differ from what Kronn recorded though no Kronn write
+ * explains it: edited, deleted or added by hand or by another tool
+ * (KT-1489). Sorted.
+ */
+outside_kronn: Array<string>, };
 
 export type DocProvenanceStatus = { doc: string, state: ProvenanceState, reason: ValidationReason, scope: ProvenanceScope, validated_at: string,
 /**
@@ -11057,6 +11068,27 @@ model_breakdowns: Array<UsageModelBreakdown>, input_tokens: number, output_token
  * Aggregate totals across all rows.
  */
 export type UsageTotals = { input_tokens: number, output_tokens: number, cache_creation_tokens: number, cache_read_tokens: number, total_tokens: number, total_cost: number, };
+
+/**
+ * What « Valider cette version » did.
+ */
+export type ValidateVersionOutcome = {
+/**
+ * The current docs are now the validated version.
+ */
+validated: boolean,
+/**
+ * The citations to correct first; empty when `validated`.
+ */
+broken: Array<BrokenDocCitation>,
+/**
+ * Moved citations rewritten to their new line.
+ */
+reanchored: number,
+/**
+ * Docs recorded as validated.
+ */
+docs: number, };
 
 /**
  * Why validating the project's latest audit run is not possible now. The
