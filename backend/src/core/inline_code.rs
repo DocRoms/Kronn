@@ -347,12 +347,17 @@ pub fn quick_exec_approval_needed(
     match first_unsafe_placeholder_with(command.trim(), args, trust)? {
         InlineFinding::UnmodelledProgram(program, path) => {
             let message = format!(
-                "Quick Exec « {name} » : `{{{{{path}}}}}` est passé à `{program}`, que Kronn ne \
-                 vérifie pas seul{}. Un humain doit approuver cette Quick Exec : depuis la page du \
-                 workflow (panneau « À valider ») ou dans Automatisations → Quick Execs → « {name} », \
-                 case « {program} reçoit des valeurs du run ; je confirme qu'il traite ses arguments \
-                 comme de simples données ».",
-                if agent_written { " (ligne écrite par un agent)" } else { "" }
+                "Quick Exec « {name} » en attente d'activation : `{{{{{path}}}}}` est passé à \
+                 `{program}`, que Kronn ne vérifie pas seul{}. Rien ne tourne avant qu'un humain \
+                 l'active : bouton « Activer » de la carte dans la room où elle a été créée, \
+                 panneau « À valider » de la page du workflow, ou Automatisations → Quick Execs → \
+                 « {name} » (case « {program} reçoit des valeurs du run ; je confirme qu'il traite \
+                 ses arguments comme de simples données »).",
+                if agent_written {
+                    " (ligne écrite par un agent)"
+                } else {
+                    ""
+                }
             );
             Some((program, message))
         }
@@ -462,7 +467,7 @@ pub fn approval_message(subject: &str, program: &str, path: &str, agent_written:
     if agent_written {
         format!(
             "{subject} : écrite par un agent, cette ligne passe `{{{{{path}}}}}` à `{program}` ; \
-             elle attend ton approbation dans l'éditeur avant de tourner."
+             elle est en attente d'activation et ne tourne pas avant que tu l'actives dans l'éditeur."
         )
     } else {
         unmodelled_message(subject, program, path)

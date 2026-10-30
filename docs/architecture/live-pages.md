@@ -91,7 +91,7 @@ definitions and import identities, and refuses stale decisions. All resources,
 datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
-[src: file: backend/src/lib.rs:1297-1318#artifact_portability]
+[src: file: backend/src/lib.rs:1303-1324#artifact_portability]
 [src: file: backend/src/api/artifact_portability/import.rs:1119-1137#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
@@ -277,7 +277,7 @@ block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
 `[src: file: backend/src/api/live_pages.rs:654-664#delete_dataset]`
 `[src: file: backend/src/api/live_pages.rs:689-700#update_dataset]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:7974-7981#call_page_delete_dataset]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:7988-7995#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
 become rows, a single array inside an object envelope is expanded while scalar
@@ -580,7 +580,7 @@ fence carries one intention.
 [src: file: frontend/src/hooks/useLivePageActions.ts:174-218#handleIntent]
 [src: file: frontend/src/hooks/useLivePageActions.ts:276-288#anyInFlight]
 [src: file: frontend/src/components/LivePageActionOverlay.tsx:40#Escape]
-[src: file: frontend/src/components/DiscussionActionCard.tsx:33-35#relaunch]
+[src: file: frontend/src/components/DiscussionActionCard.tsx:35-37#relaunch]
 
 When authoring a local row move after an action succeeds, preserve the row's
 detail fields and update any separate detail dataset and in-memory index before
@@ -608,10 +608,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:12089-12278#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:13314-13356#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:13597-13639#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:13562-13615#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:12218-12407#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:13491-13533#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:13728-13770#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:13772-13825#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -650,8 +650,8 @@ Agents learn this contract where they write Page HTML: the MCP manuals of
 `data-kronn-action-state`, what the card shows), `page_update_html` adds that a
 block's reference must stay stable across revisions since it ties a button to
 its past launches, and the `workflow-architect` skill carries the same rules.
-`[src: file: backend/scripts/disc-introspection-mcp.py:10017-10052#_PAGE_ACTION_CONTRACT]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10347-10356#page_update_html]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10045-10080#_PAGE_ACTION_CONTRACT]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10375-10384#page_update_html]`
 `[src: file: backend/src/skills/workflow-architect.md:384-391#data-kronn-action-state]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records
@@ -690,7 +690,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:4673-4681#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:4708-4716#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:128-130#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -780,7 +780,7 @@ normalized (lowercase host, default port dropped, IDN as punycode) and a
 malformed one rejects the whole change.
 [src: file: backend/src/models/setup.rs:73-79#embed_allowed_origins]
 [src: file: backend/src/core/embed_origins.rs:52-55#normalize_origin]
-[src: file: backend/src/api/live_pages.rs:962-964#change_embed_origins]
+[src: file: backend/src/api/live_pages.rs:965-967#change_embed_origins]
 The UI is Configuration → Artifacts → External content (Allowed sites): type an
 origin, see the exact value that will be saved, add it, or remove a
 permission. Every Page view, the import dialog and that section share one
@@ -790,7 +790,7 @@ the local WebSocket, with no origin in it (never relayed to a P2P peer); every
 open tab, a visible wall screen included, re-reads the list at once and a
 revoked site's players are unmounted. A tab also re-reads on WebSocket
 reconnect (for an event sent while it was disconnected) and on focus.
-[src: file: backend/src/api/live_pages.rs:876-880#announce_embed_origins_changed]
+[src: file: backend/src/api/live_pages.rs:879-883#announce_embed_origins_changed]
 Changes are sent one after the
 other, and a read that started before a change landed (or while one is in
 flight) is discarded, so a slow read can never bring back a revoked site or
@@ -864,8 +864,8 @@ governed by that site's document, not by Kronn's CSP, so an allowed site can
 itself embed other origins; Kronn controls only what the Page frames directly,
 redirects included.
 [src: file: backend/src/core/embed_origins.rs:254#frame_src_sources]
-[src: file: backend/src/api/live_pages.rs:838-839#embed_frame_src]
-[src: file: backend/src/api/live_pages.rs:892-896#document_frame_policy]
+[src: file: backend/src/api/live_pages.rs:841-842#embed_frame_src]
+[src: file: backend/src/api/live_pages.rs:895-899#document_frame_policy]
 [src: file: frontend/vite-frame-policy.ts:72#framePolicyMiddleware]
 [src: file: frontend/src/lib/served-frame-policy.ts:9#parseServedFrameSources]
 [src: file: .docker/nginx.conf:198-199#auth_request]

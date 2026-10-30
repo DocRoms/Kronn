@@ -129,7 +129,7 @@ async fn a_restart_mid_run_leaves_a_resumable_run_and_no_live_progress() {
         .await
         .unwrap();
 
-    let progress = super::audit_status(State(state.clone()), Path("p1".to_string()), None)
+    let progress = super::audit_status(State(state.clone()), Path("p1".to_string()), None, None)
         .await
         .0;
     assert!(

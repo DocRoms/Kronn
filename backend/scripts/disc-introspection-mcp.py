@@ -2852,6 +2852,28 @@ def _bearer_token():
     return os.environ.get("KRONN_BRIDGE_TOKEN") or os.environ.get("KRONN_AUTH_TOKEN")
 
 
+# Sent on every request, whatever the bearer: a host-launched CLI joined through
+# this bridge carries no scoped token (an operator token, or nothing), yet what
+# it writes is an agent's. The server reads the header only to treat the request
+# as an agent's, never as a human's approval, so it can lower a request and
+# never raise one (KT-1490).
+AGENT_MARKER_HEADER = "X-Kronn-Agent"
+AGENT_DISCUSSION_HEADER = "X-Kronn-Discussion"
+
+
+def _authorize(req):
+    """Mark `req` as agent-authored and attach the bearer this bridge presents."""
+    req.add_header(AGENT_MARKER_HEADER, "1")
+    # Where a host session's activation card goes: the room it joined. Read from
+    # the binding already held, never resolved here (resolving calls `_http`).
+    room = _CURRENT_DISC_ID or os.environ.get("KRONN_DISCUSSION_ID")
+    if room:
+        req.add_header(AGENT_DISCUSSION_HEADER, room)
+    token = _bearer_token()
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+
+
 # 0.8.6 phase 2 — Captured MCP `clientInfo` from initialize handshake.
 #
 # Every MCP client sends `{name, version}` in its `initialize` request.
@@ -4251,9 +4273,7 @@ def _current_disc_meta():
         req = urllib.request.Request(url, method="GET")
         # Same bearer as _http(): without it, an auth-enforced instance 401s
         # this read and the silent fallback drops project/agent inheritance.
-        token = _bearer_token()
-        if token:
-            req.add_header("Authorization", f"Bearer {token}")
+        _authorize(req)
         with urllib.request.urlopen(req, timeout=5) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         data = payload.get("data") or {}
@@ -4309,9 +4329,7 @@ def _http(method, path, body=None, timeout=180):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, method=method, data=data)
     req.add_header("Content-Type", "application/json")
-    token = _bearer_token()
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
+    _authorize(req)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.load(resp)
@@ -4366,9 +4384,7 @@ def _http_text(method, path):
     which returns the embedded `text/markdown` spec verbatim."""
     url = f"{_backend_url()}{path}"
     req = urllib.request.Request(url, method=method)
-    token = _bearer_token()
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
+    _authorize(req)
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:
             return resp.read().decode("utf-8")
@@ -4493,9 +4509,7 @@ def _http_upload_context_file(disc_id, file_path):
         data=payload,
     )
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-    token = _bearer_token()
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
+    _authorize(req)
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:
             return _unwrap(json.load(resp))
@@ -8785,10 +8799,25 @@ def call_qa_create_draft(args):
     return _unwrap(_http("POST", "/api/quick-apis", body))
 
 
+def _restore_room_binding():
+    """Re-attach the room before a save that may post an activation card.
+
+    `_authorize` only reads the binding already held, and after an MCP reconnect
+    that is empty until `_disc_id()` resumes it. A save with an explicit
+    `project_id` never resolves the room on its own, so its first request would
+    go out without `X-Kronn-Discussion` and the server would have no room to post
+    the card in. Best effort: with no room to restore the save still goes out."""
+    try:
+        _disc_id()
+    except RuntimeError:
+        pass
+
+
 def call_qe_create_draft(args):
     for field in ("name", "command"):
         if not args.get(field):
             raise RuntimeError(f"qe_create_draft: missing required '{field}'")
+    _restore_room_binding()
     body = dict(args)
     if "project_id" not in body or body.get("project_id") is None:
         inherited = _current_project_id()
@@ -8805,6 +8834,7 @@ def call_qe_update(args):
     qe_id = args.get("qe_id")
     if not qe_id:
         raise RuntimeError("qe_update: missing required 'qe_id'")
+    _restore_room_binding()
     existing_list = _unwrap(_http("GET", "/api/quick-execs")) or []
     existing = next((item for item in existing_list if item.get("id") == qe_id), None)
     if not existing:
@@ -9805,9 +9835,7 @@ def _audit_open_sse(path, body):
     req = urllib.request.Request(url, method="POST", data=json.dumps(body).encode())
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "text/event-stream")
-    token = _bearer_token()
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
+    _authorize(req)
     return urllib.request.urlopen(req, timeout=None)  # noqa: S310
 
 

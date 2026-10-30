@@ -348,6 +348,7 @@ async fn execute_claimed_action(
                 State(state.clone()),
                 Path(action.target_id.clone()),
                 None,
+                None,
                 Json(RunQuickApiRequest {
                     variables,
                     workflow_run_id: None,
@@ -604,10 +605,11 @@ pub struct TrustLivePageActionRequest {
 pub async fn trust(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Path(action_id): Path<String>,
     Json(request): Json<TrustLivePageActionRequest>,
 ) -> Json<ApiResponse<LivePageActionTrust>> {
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "Only a human can approve a Page action to run without confirmation",
@@ -654,9 +656,10 @@ pub async fn trust(
 pub async fn revoke_trust(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Path(action_id): Path<String>,
 ) -> Json<ApiResponse<bool>> {
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "Only a human can change a Page action's approval",

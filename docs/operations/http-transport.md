@@ -49,7 +49,7 @@ no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/runner.rs:8037-8043#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:1984-1989#cost_incomplete]
 [src: file: backend/src/api/audit/full.rs:2239#reported_cost_usd_micros]
-[src: file: backend/src/api/audit/drift.rs:1294#reported_cost_usd_micros]
+[src: file: backend/src/api/audit/drift.rs:1295#reported_cost_usd_micros]
 
 Audit executors have a separate bounded policy: 64 calls per file mutation tool
 (`write_file`, `edit_file`, `edit_lines`, `insert_after_line`), 48 for
@@ -285,7 +285,7 @@ without a project. This exception grants no directory listing or writing rights;
 `.kronn/context-files` remains read-only inside a project too. Symlink
 attachments are refused. Unrelated files outside the workspace keep the existing
 refusal. Images are never returned as lossy text by `read_file`.
-[src: file: backend/src/api/agent_tools.rs:3540-3572#read_attached_file]
+[src: file: backend/src/api/agent_tools.rs:3556-3588#read_attached_file]
 [src: file: backend/src/api/agent_workspace_tools.rs:1297-1341#read_attachment_payload]
 
 CLI agents retain the existing attachment prompt: an image's path and an

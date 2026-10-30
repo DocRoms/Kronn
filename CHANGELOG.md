@@ -13,6 +13,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- An agent can now save a Quick Exec or an Exec line that passes run values to
+  a program Kronn does not model (`fastly purge --key {{surrogate_key}}`): it
+  is stored inactive, the save response says a human activates it, and the
+  agent carries on instead of stopping. The run keeps refusing it until then.
+  Shells, paths, wrappers and interpolation inside inline code are still
+  refused at save. A human activates it with one click on the room's card, in
+  « À valider », on a Page or discussion action, or on the workflow's
+  readiness list; the notice shows the exact line and sends exactly that line,
+  so a line an agent rewrote in between is refused and shown again; each argument is shown quoted, so two different argument lists never read alike; the activation checks and writes the line in one atomic step and never overwrites a concurrent edit. « Refuser »
+  is kept server-side (migration 277). Activation and refusal are the human's
+  only: a bridge token, or a request carrying the MCP bridge's `X-Kronn-Agent`
+  marker (a CLI launched from the host, whose room is restored before its first save after a reconnect), cannot do either, and that marker now
+  also keeps the other human-only routes and the Quick API access policy from
+  treating such a CLI as a person (KT-1490).
+
 - Live Pages no longer refuse HTML above 1 MB. A Page may weigh what its
   author wants; a 24 MiB safety guard only stops a runaway writer, and create,
   update and import apply the same rule. Artifact bundles go from 16 to

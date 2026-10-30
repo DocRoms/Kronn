@@ -51,9 +51,10 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<QuickPr
 pub async fn create(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<CreateQuickPromptRequest>,
 ) -> Json<ApiResponse<QuickPrompt>> {
-    let agent = crate::api::workflows::agent_label(&state, &bridge).await;
+    let agent = crate::api::workflows::agent_label(&state, &bridge, &marker).await;
     create_as(state, req, agent).await
 }
 
@@ -126,9 +127,10 @@ pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<CreateQuickPromptRequest>,
 ) -> Json<ApiResponse<QuickPrompt>> {
-    let agent = crate::api::workflows::agent_label(&state, &bridge).await;
+    let agent = crate::api::workflows::agent_label(&state, &bridge, &marker).await;
     update_as(state, id, req, agent).await
 }
 

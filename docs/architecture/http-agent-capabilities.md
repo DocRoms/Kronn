@@ -123,7 +123,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3339-3406#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3355-3422#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -169,7 +169,7 @@ So the boundary today is **not** "HTTP agents cannot write". It is:
 One trap in that sentence, worth naming because the catalogue says otherwise: `git_commit`
 IS declared to a discussion agent, and its handler refuses every caller that is not the
 active native worker in its managed task worktree
-`[src: file: backend/src/api/agent_tools.rs:3666-3714#git_commit]`. So an ordinary `@ollama` in a room
+`[src: file: backend/src/api/agent_tools.rs:3682-3730#git_commit]`. So an ordinary `@ollama` in a room
 sees the tool and is turned away by it. The refusal is correct; the declaration is the part
 that misleads, and it is kept declared only because a worker room is built by narrowing the
 same catalogue.
@@ -274,7 +274,7 @@ setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
 [src: file: backend/src/api/agent_tools.rs:357-437#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2527-2535#tools_load]
+[src: file: backend/src/api/agent_tools.rs:2543-2551#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -347,7 +347,7 @@ briefing are discussions). The only
 other repos a step names are those the user linked to the project
 (`Project.linked_repos`), a voluntary declaration that stays in every step
 [src: file: backend/src/api/audit/full.rs:337-338#format_linked_repos_for_prompt]
-[src: file: backend/src/api/audit/drift.rs:466-467#format_linked_repos_for_prompt]. What remains: the block for a
+[src: file: backend/src/api/audit/drift.rs:468-469#format_linked_repos_for_prompt]. What remains: the block for a
 linked repo still says to start with `<repo-path>/docs/AGENTS.md`, a path an HTTP
 agent's tools refuse because it is outside the project, so for that agent the
 block is information, not something it can follow. Making that block
@@ -403,7 +403,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:884-912#extract]
-  [src: file: backend/src/api/agent_tools.rs:4708-4732#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4724-4748#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down
@@ -455,7 +455,7 @@ Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
 [src: file: backend/src/api/agent_workflow_tools.rs:65-122#draft_patch]
 [src: file: backend/src/api/agent_workflow_tools.rs:209-211#enabled]
-[src: file: backend/src/api/workflows.rs:2648-2708#validate_step_references]
+[src: file: backend/src/api/workflows.rs:2666-2726#validate_step_references]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete
 contract from `GET /api/workflows/step-schema`; native agents receive the same
@@ -463,7 +463,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-467#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9561-9563#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9591-9593#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON

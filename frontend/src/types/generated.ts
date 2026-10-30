@@ -43,6 +43,11 @@ export type AcknowledgeDriftRequest = { sections: Array<string>,
  */
 shown_paths?: Array<ShownPath>, };
 
+/**
+ * The line a human read and activates; a line changed since is refused.
+ */
+export type ActivateQuickExecRequest = { command: string, args: Array<string>, };
+
 export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string,
 /**
  * Number of times this durable dispatch has been claimed. A value above
@@ -7684,7 +7689,11 @@ export type QuickExecPendingApproval = { id: string,
 /**
  * The program that receives run values, e.g. `aws`.
  */
-program: string, message: string, };
+program: string, message: string,
+/**
+ * A human refused to activate this very line (KT-1490); it stays inactive.
+ */
+refused: boolean, };
 
 export type QuickExecResult = { status: QuickExecStatus,
 /**

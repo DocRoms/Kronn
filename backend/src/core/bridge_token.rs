@@ -175,6 +175,58 @@ impl BridgeCaller {
     }
 }
 
+/// The header the MCP bridge script puts on every request (KT-1490). A CLI the
+/// user launched from the host and joined through the bridge carries no scoped
+/// token — an operator token, or nothing — yet what it writes is an agent's.
+pub const AGENT_MARKER_HEADER: &str = "x-kronn-agent";
+
+/// The room a host-session bridge is joined to, sent beside the marker. It
+/// only tells Kronn where to post the activation card; it grants no reach.
+pub const AGENT_DISCUSSION_HEADER: &str = "x-kronn-discussion";
+
+/// A request that said, with [`AGENT_MARKER_HEADER`], an agent wrote it. The
+/// auth middleware is the only place that attaches it. It can lower a request
+/// to an agent's — a line saved with no approval, an approval refused — and
+/// never raise one: no handler grants a human's right on its absence.
+#[derive(Debug, Clone, Default)]
+pub struct AgentMarker {
+    /// The room the sender says it is joined to (not checked here).
+    pub discussion_id: Option<String>,
+}
+
+impl AgentMarker {
+    /// The marker of a request, if it carries one.
+    pub fn from_headers(headers: &axum::http::HeaderMap) -> Option<Self> {
+        headers.contains_key(AGENT_MARKER_HEADER).then(|| Self {
+            discussion_id: headers
+                .get(AGENT_DISCUSSION_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|id| {
+                    !id.is_empty()
+                        && id.len() <= 128
+                        && id
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "-_:.".contains(c))
+                })
+                .map(str::to_owned),
+        })
+    }
+}
+
+/// The `Option<Extension<AgentMarker>>` a handler takes beside its
+/// [`BridgeCaller`].
+pub type AgentMark = Option<axum::Extension<AgentMarker>>;
+
+/// Whether an agent wrote the request: it holds a bridge token, or it carries
+/// the marker whatever bearer it has. Every place that decides « agent-written »
+/// or « human-only » asks this, never `bridge.is_some()` alone; the access
+/// policy's caller comes from `api::quick_apis::broker_caller`, which reads the
+/// marker the same way (no route hardcodes `ApiCaller::Human`).
+pub fn agent_authored(bridge: &Option<axum::Extension<BridgeCaller>>, marker: &AgentMark) -> bool {
+    bridge.is_some() || marker.is_some()
+}
+
 /// Holds a live token; dropping it revokes the token.
 pub struct BridgeTokenGuard {
     value: String,

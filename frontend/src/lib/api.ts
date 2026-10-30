@@ -1,4 +1,4 @@
-import type { AcceptAuditStepResponse, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange, QuickExecPendingApproval } from '../types/generated';
+import type { AcceptAuditStepResponse, ActivateQuickExecRequest, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange, QuickExecPendingApproval } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
 import type { ComfyUiConfig, ComfyUiStatus, ExternalApiConnection, SetComfyUiSlotsRequest, SetComfyUiSettingsRequest, SetComfyUiModelFamilyRequest } from '../types/generated';
@@ -3293,6 +3293,12 @@ export const quickExecs = {
   list: () => api<QuickExec[]>('GET', '/quick-execs'),
   /** KT-1398 — the Quick Execs a run refuses until a human approves them. */
   pendingApprovals: () => api<QuickExecPendingApproval[]>('GET', '/quick-execs/pending-approvals'),
+  /** KT-1490 — a human activates a Quick Exec that waits; the line read must still be the stored one. */
+  activate: (id: string, line: ActivateQuickExecRequest) =>
+    api<QuickExec>('POST', `/quick-execs/${id}/activate`, line),
+  /** KT-1490 — a human declines the line read; recorded server-side, the Quick Exec stays inactive. */
+  refuseActivation: (id: string, line: ActivateQuickExecRequest) =>
+    api<boolean>('POST', `/quick-execs/${id}/refuse-activation`, line),
   create: (req: CreateQuickExecRequest) => api<QuickExec>('POST', '/quick-execs', req),
   update: (id: string, req: CreateQuickExecRequest) =>
     api<QuickExec>('PUT', `/quick-execs/${id}`, req),

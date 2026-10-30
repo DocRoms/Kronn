@@ -84,15 +84,21 @@ impl KronnToolExecutor {
             Err(error) => return fail(call, format!("invalid skill fields: {error}")),
         };
         let Json(res) = if call.name == "skill_create" {
-            crate::api::skills::create(State(self.state.clone()), caller, Json(request)).await
+            crate::api::skills::create(State(self.state.clone()), caller, None, Json(request)).await
         } else {
             let id = args["skill_id"]
                 .as_str()
                 .unwrap_or_default()
                 .trim()
                 .to_owned();
-            crate::api::skills::update(Path(id), State(self.state.clone()), caller, Json(request))
-                .await
+            crate::api::skills::update(
+                Path(id),
+                State(self.state.clone()),
+                caller,
+                None,
+                Json(request),
+            )
+            .await
         };
         unwrap_api(call, res.success, res.data, res.error)
     }

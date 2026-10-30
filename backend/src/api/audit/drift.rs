@@ -99,10 +99,11 @@ pub async fn acknowledge_drift(
     State(state): State<AppState>,
     Path(id): Path<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
     Json(req): Json<AcknowledgeDriftRequest>,
 ) -> Json<ApiResponse<DriftCheckResponse>> {
     // Not on the bridge route list either: this guard holds if it ever is.
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         return Json(ApiResponse::err(
             "Acknowledging stale sections is a human decision: refused to an agent's bridge token.",
         ));

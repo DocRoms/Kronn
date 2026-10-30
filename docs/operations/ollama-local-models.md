@@ -33,10 +33,10 @@ references for the lifecycle actions they steer. A worker is still offered
 so a local model never has to reconstruct an opaque UUID, and it answers only
 the execution's principal or its own native worker.
 `[src: file: backend/src/api/agent_tools.rs:1612-1755#worker_room_catalogue]`
-`[src: file: backend/src/api/agent_tools.rs:2910-2934#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:4060-4082#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:2864-2893#task_exec_status]`
-`[src: file: backend/src/api/agent_tools.rs:4022-4058#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:2926-2950#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4076-4098#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:2880-2909#task_exec_status]`
+`[src: file: backend/src/api/agent_tools.rs:4038-4074#native_execution_for_caller]`
 
 The discussion SSE path resolves this scope from the durable
 `task_executions.sub_discussion_id` lineage before it constructs the HTTP tool
@@ -169,7 +169,7 @@ or parent-milestone section: a bounded edit has neither.
 `[src: file: backend/src/api/agent_workspace_tools.rs:1693-1710#validate_range_indentation]`
 `[src: file: backend/src/agents/runner.rs:1391-1405#structural_refusal]`
 `[src: file: backend/src/agents/runner.rs:1407-1424#worker_repair_iteration_limit]`
-`[src: file: backend/src/api/orchestration.rs:8893-8961#worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:9095-9160#worker_scope]`
 
 For a pure insertion, do not make the worker reproduce a paragraph inside a
 replacement range. Use one verified anchor line:
@@ -595,7 +595,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:4084-4112#count_arg] [src: file: backend/src/api/agent_tools.rs:3779-3822#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:4100-4128#count_arg] [src: file: backend/src/api/agent_tools.rs:3795-3838#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes

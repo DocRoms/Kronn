@@ -1006,6 +1006,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "276_workflow_shadow",
         include_str!("sql/276_workflow_shadow.sql"),
     ),
+    (
+        "277_quick_exec_activation_refusals",
+        include_str!("sql/277_quick_exec_activation_refusals.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

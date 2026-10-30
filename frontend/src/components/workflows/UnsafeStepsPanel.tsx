@@ -6,10 +6,12 @@
 // approval is told apart from a value inside code, and blocked sub-workflows
 // or rollbacks are named so a saved chain is never mistaken for a ready one.
 import { useEffect, useState } from 'react';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, ShieldCheck } from 'lucide-react';
 import { quickExecs as quickExecsApi, workflows as workflowsApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
-import type { UnsafeExecStep, Workflow, WorkflowBlocker, WorkflowReadiness } from '../../types/generated';
+import { commandLine } from '../../lib/commandLine';
+import '../QuickExecActivation.css';
+import type { QuickExec, UnsafeExecStep, Workflow, WorkflowBlocker, WorkflowReadiness } from '../../types/generated';
 
 interface UnsafeStepsPanelProps {
   workflow: Workflow;
@@ -20,6 +22,12 @@ interface UnsafeStepsPanelProps {
 
 const issueKey = (issue: UnsafeExecStep) =>
   `${issue.on_failure ? 'rollback' : 'main'}:${issue.step_name}:${issue.phase}:${issue.source_alias ?? ''}`;
+
+/** The line of the Quick Exec a blocker names, as read with the blockers. */
+const quickExecLine = (execs: QuickExec[], id: string) => {
+  const exec = execs.find(item => item.id === id);
+  return exec ? commandLine(exec.command, exec.args) : '';
+};
 
 const phaseLabel = (issue: UnsafeExecStep, t: (key: string, ...args: (string | number)[]) => string) => {
   if (issue.phase === 'setup') return ` (${t('wf.unsafeSetup')})`;
@@ -37,6 +45,9 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
   const [readiness, setReadiness] = useState<WorkflowReadiness | null>(null);
   const [reload, setReload] = useState(0);
   const [approveError, setApproveError] = useState<string | null>(null);
+  // The Quick Execs the blockers name, read with them: the line shown is the
+  // line an activation sends.
+  const [blockedExecs, setBlockedExecs] = useState<QuickExec[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,36 +57,34 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
       .catch(() => { if (!cancelled) setIssues([]); });
     Promise.resolve()
       .then(() => workflowsApi.readiness(workflow.id))
-      .then(found => { if (!cancelled) setReadiness(found ?? null); })
+      .then(async found => {
+        const named = (found?.blockers ?? []).some(blocker => blocker.quick_exec);
+        const execs = named ? await Promise.resolve(quickExecsApi.list()).catch(() => []) : [];
+        if (cancelled) return;
+        setReadiness(found ?? null);
+        setBlockedExecs(execs ?? []);
+      })
       .catch(() => { if (!cancelled) setReadiness(null); });
     return () => { cancelled = true; };
   }, [workflow, reload]);
 
-  // KT-1398 — a saved Quick Exec a collection runs is approved here, on the
-  // Quick Exec itself: the run reads the approval from its row.
+  // KT-1398 — a saved Quick Exec a collection runs is activated here, on the
+  // Quick Exec itself: the run reads the approval from its row. KT-1490: the
+  // line shown is the line sent, and the server refuses it if it changed since;
+  // the panel then reads again and shows the new line.
   const approveQuickExec = async (blocker: WorkflowBlocker) => {
     const target = blocker.quick_exec;
     if (!target || applying) return;
     setApplying(`qe:${target.id}`);
     setApproveError(null);
     try {
-      const exec = (await quickExecsApi.list()).find(item => item.id === target.id);
+      const exec = blockedExecs.find(item => item.id === target.id);
       if (!exec) throw new Error(t('wf.qeApproveMissing', target.name));
-      await quickExecsApi.update(exec.id, {
-        name: exec.name,
-        icon: exec.icon,
-        description: exec.description,
-        project_id: exec.project_id,
-        command: exec.command,
-        args: exec.args,
-        timeout_secs: exec.timeout_secs,
-        output_format: exec.output_format,
-        variables: exec.variables,
-        unmodelled_args_approved: true,
-      });
+      await quickExecsApi.activate(exec.id, { command: exec.command, args: exec.args });
       setReload(value => value + 1);
     } catch (error) {
       setApproveError(error instanceof Error ? error.message : String(error));
+      setReload(value => value + 1);
     } finally {
       setApplying(null);
     }
@@ -110,6 +119,11 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
   const title = codeIssues.length > 0
     ? t('wf.unsafeTitle')
     : needsHuman ? t('wf.approvalTitle') : t('wf.readinessTitle');
+
+  // Nothing failed when the only thing left is a human's activation: the panel
+  // is neutral then, and keeps the error frame for code that is unsafe.
+  const waitingOnly = codeIssues.length === 0 && needsHuman
+    && local.every(blocker => blocker.human_only || !!blocker.quick_exec);
 
   // A line that needs a human's approval is not an agent's to work around.
   const manualIssues = issues.filter(
@@ -167,9 +181,10 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
       className="wf-unsafe-panel"
       role="alert"
       aria-label={title}
+      data-tone={waitingOnly ? 'neutral' : 'error'}
     >
       <h4 className="wf-unsafe-title">
-        <AlertTriangle size={14} />
+        {waitingOnly ? <ShieldCheck size={14} /> : <AlertTriangle size={14} />}
         {title}
       </h4>
       {codeIssues.length > 0 && <p className="wf-unsafe-intro" data-kind="code">{t('wf.unsafeIntro')}</p>}
@@ -197,6 +212,7 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
               <p className="wf-unsafe-manual-reason">{blocker.message}</p>
               {blocker.quick_exec ? (
                 <div className="wf-unsafe-fix" data-testid="readiness-quick-exec">
+                  <pre className="qe-command">{quickExecLine(blockedExecs, blocker.quick_exec.id)}</pre>
                   <button
                     type="button"
                     className="wf-btn-secondary wf-unsafe-apply"
@@ -229,6 +245,9 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
       <ul className="wf-unsafe-list">
         {issues.map(issue => {
           const key = issueKey(issue);
+          // KT-1490 — a line waiting for activation shows what it runs and its
+          // activate button at once: the human is here to activate it.
+          const waiting = issue.reason === 'unmodelled_program' && !!onApprove;
           return (
             <li key={key} className="wf-unsafe-item">
               <div className="wf-unsafe-item-head">
@@ -241,18 +260,20 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
                     ? ` — ${issue.agent_written ? t('wf.unsafeAgentWritten') : t('wf.unsafeUnmodelled', issue.command)}`
                     : ''}
                 </span>
-                <button
-                  type="button"
-                  className="wf-btn-secondary"
-                  aria-expanded={open === key}
-                  onClick={() => setOpen(open === key ? null : key)}
-                >
-                  {issue.suggested_args
-                    ? t('wf.unsafeSuggest')
-                    : issue.reason === 'unmodelled_program' ? t('wf.approvalReview') : t('wf.unsafeHow')}
-                </button>
+                {!waiting && (
+                  <button
+                    type="button"
+                    className="wf-btn-secondary"
+                    aria-expanded={open === key}
+                    onClick={() => setOpen(open === key ? null : key)}
+                  >
+                    {issue.suggested_args
+                      ? t('wf.unsafeSuggest')
+                      : issue.reason === 'unmodelled_program' ? t('wf.approvalReview') : t('wf.unsafeHow')}
+                  </button>
+                )}
               </div>
-              {open === key && (
+              {(open === key || waiting) && (
                 issue.suggested_args ? (
                   <div className="wf-unsafe-fix">
                     <pre className="wf-unsafe-diff" aria-label={t('wf.unsafeDiff')}>
@@ -271,11 +292,17 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
                   </div>
                 ) : (
                   <div className="wf-unsafe-fix">
-                    <p className="wf-unsafe-manual">{t('wf.unsafeManual')}</p>
-                    <p className="wf-unsafe-manual-reason">{issue.manual_fix}</p>
+                    {waiting ? (
+                      <p className="wf-unsafe-manual-reason">{t('wf.unsafeActivationExplain', issue.command)}</p>
+                    ) : (
+                      <>
+                        <p className="wf-unsafe-manual">{t('wf.unsafeManual')}</p>
+                        <p className="wf-unsafe-manual-reason">{issue.manual_fix}</p>
+                      </>
+                    )}
                     {issue.reason === 'unmodelled_program' && onApprove && (
                       <>
-                        <pre className="wf-unsafe-diff">{`${issue.command} ${JSON.stringify(issue.args)}`}</pre>
+                        <pre className="qe-command">{commandLine(issue.command, issue.args)}</pre>
                         <button
                           type="button"
                           className="wf-btn-secondary wf-unsafe-apply"

@@ -134,6 +134,120 @@ pub fn update_quick_exec_pinned(conn: &Connection, id: &str, pinned: bool) -> Re
     )? > 0)
 }
 
+/// A human's « Refuser » on the line an agent saved (KT-1490): kept with the
+/// line it was given for, so a line edited since is asked again.
+pub fn record_activation_refusal(
+    conn: &Connection,
+    id: &str,
+    command: &str,
+    args: &[String],
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO quick_exec_activation_refusals (quick_exec_id, command, args_json, refused_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(quick_exec_id) DO UPDATE SET
+            command = excluded.command, args_json = excluded.args_json,
+            refused_at = excluded.refused_at",
+        params![
+            id,
+            command,
+            serde_json::to_string(args)?,
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+/// What a human's decision on a waiting line came to (KT-1490).
+#[derive(Debug)]
+pub enum WaitingLineOutcome {
+    /// The Quick Exec no longer exists.
+    Gone,
+    /// The check refused the stored line, or the line changed under the write.
+    Refused(String),
+    /// The decision is recorded; the Quick Exec as it now stands.
+    Settled(QuickExec),
+}
+
+/// A human activates, or refuses, the line they read: the read, the check and
+/// the write are one immediate transaction, and the write is conditional on the
+/// exact line the check saw, so an edit (or a delete) cannot slip between them.
+/// An activation sets the approval and nothing else — it never rewrites a field
+/// an agent changed since, and a row that moved reports a conflict rather than
+/// a success.
+pub fn settle_waiting_line(
+    conn: &Connection,
+    id: &str,
+    activate: bool,
+    check: impl FnOnce(&QuickExec) -> Result<(), String>,
+) -> Result<WaitingLineOutcome> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let Some(mut item) = get_quick_exec(&tx, id)? else {
+        return Ok(WaitingLineOutcome::Gone);
+    };
+    // The stored text of the line, read with the line the check sees.
+    let args_json: String = tx.query_row(
+        "SELECT args_json FROM quick_execs WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    if let Err(why) = check(&item) {
+        return Ok(WaitingLineOutcome::Refused(why));
+    }
+    let changed = || {
+        WaitingLineOutcome::Refused(
+            "La ligne de cette Quick Exec a changé depuis que tu l'as lue : relis-la avant de décider."
+                .into(),
+        )
+    };
+    if activate {
+        let updated_at = chrono::Utc::now();
+        let rows = tx.execute(
+            "UPDATE quick_execs SET unmodelled_args_approved = 1, updated_at = ?2
+             WHERE id = ?1 AND command = ?3 AND args_json = ?4 AND agent_written = ?5",
+            params![
+                id,
+                updated_at.to_rfc3339(),
+                item.command,
+                args_json,
+                i32::from(item.agent_written == Some(true)),
+            ],
+        )?;
+        if rows != 1 {
+            return Ok(changed());
+        }
+        clear_activation_refusal(&tx, id)?;
+        item.unmodelled_args_approved = Some(true);
+        item.updated_at = updated_at;
+    } else {
+        record_activation_refusal(&tx, id, &item.command, &item.args)?;
+    }
+    tx.commit()?;
+    Ok(WaitingLineOutcome::Settled(item))
+}
+
+pub fn clear_activation_refusal(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM quick_exec_activation_refusals WHERE quick_exec_id = ?1",
+        [id],
+    )?;
+    Ok(())
+}
+
+/// The Quick Execs whose current line a human refused to activate.
+pub fn refused_activation_ids(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.quick_exec_id FROM quick_exec_activation_refusals r
+         JOIN quick_execs q ON q.id = r.quick_exec_id
+         WHERE q.command = r.command AND q.args_json = r.args_json",
+    )?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|row| row.ok())
+        .collect();
+    Ok(ids)
+}
+
 pub fn delete_quick_exec(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM quick_execs WHERE id = ?1", [id])?;
     Ok(())

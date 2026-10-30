@@ -1,0 +1,133 @@
+/* KT-1490 — activating a Quick Exec an agent saved inactive: the room card and
+ * the notice a Page action or a workflow step shows. Tokens only. */
+
+.qe-activation-card,
+.qe-pending-activation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.24);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-accent-rgb), 0.05);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  line-height: 1.45;
+}
+
+/* The notice sits under an action card, not inside the room bubble. */
+.qe-pending-activation {
+  margin: var(--kr-sp-4) var(--kr-sp-5) var(--kr-sp-5);
+}
+
+/* The room bubble already frames the card. */
+.qe-activation-card {
+  padding: var(--kr-sp-2) 0;
+  border: 0;
+  background: transparent;
+}
+
+.qe-activation-card__title,
+.qe-pending-activation__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2) var(--kr-sp-3);
+  margin: 0;
+}
+
+.qe-activation-card__title {
+  font-weight: 600;
+}
+
+/* One code block for every place a Quick Exec line is shown to the human who
+ * activates it: the room card, the action notice and the workflow panel. */
+.qe-command {
+  flex: 1 1 100%;
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: 0;
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-code);
+  color: var(--kr-text-on-dark);
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.qe-activation-card__hint,
+.qe-activation-card__error,
+.qe-pending-activation__error {
+  margin: 0;
+  color: var(--kr-text-secondary);
+}
+
+.qe-activation-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-3);
+}
+
+/* Inline-sized, side by side, one size: primary then secondary. */
+.qe-activation-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  padding: var(--kr-sp-2) var(--kr-sp-5);
+  border-radius: var(--kr-r-sm);
+  font-family: inherit;
+  font-size: var(--kr-fs-sm);
+  font-weight: 500;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.qe-activation-btn[data-kind='primary'] {
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
+  background: rgba(var(--kr-accent-rgb), 0.1);
+  color: var(--kr-accent);
+}
+
+.qe-activation-btn[data-kind='secondary'] {
+  border: 1px solid var(--kr-border);
+  background: none;
+  color: var(--kr-text-tertiary);
+}
+
+.qe-activation-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* The room header of the card is neutral: nothing failed, a human is asked. */
+.disc-msg-bubble[data-role='system'][data-variant='kronn-activation'] {
+  border-color: rgba(var(--kr-accent-rgb), 0.3);
+  background: rgba(var(--kr-accent-rgb), 0.065);
+}
+
+/* The workflow panel waiting for an activation is neutral like the room card:
+ * nothing failed, a human is asked. The red frame stays for unsafe code. */
+.wf-unsafe-panel[data-tone='neutral'] {
+  border-color: rgba(var(--kr-accent-rgb), 0.3);
+  background: rgba(var(--kr-accent-rgb), 0.065);
+}
+
+.wf-unsafe-panel[data-tone='neutral'] .wf-unsafe-title {
+  color: var(--kr-accent-ink);
+}
+
+/* The action line of a step that has no Quick Exec to activate reads like the
+ * rest of the neutral panel: the warning colour stays in the error tone. */
+.wf-unsafe-panel[data-tone='neutral'] .wf-unsafe-manual {
+  color: var(--kr-accent-ink);
+}
+
+/* Same vertical rhythm as the room card (--kr-sp-3 between the text, the code
+ * block and the button); the panel is not a flex column. */
+.wf-unsafe-fix .qe-command {
+  margin: var(--kr-sp-3) 0;
+}

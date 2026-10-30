@@ -114,9 +114,9 @@ card is rendered beside the folded report, visible without opening its details.
 Only a matching row with `source_kind: orchestration` enables that path; an
 orchestrator display label or ordinary notification alone renders no card and
 no false refusal notice.
-[src: file: frontend/src/components/MessageBubble.tsx:2102-2109#ImportantMessageCard]
+[src: file: frontend/src/components/MessageBubble.tsx:2109-2116#ImportantMessageCard]
 [src: file: frontend/src/components/ImportantMessageCard.tsx:36-130#ImportantMessageCard]
-[src: file: frontend/src/components/MessageBubble.tsx:1120-1130#serverEventOnly]
+[src: file: frontend/src/components/MessageBubble.tsx:1121-1131#serverEventOnly]
 
 The bar re-fetches when the transcript's newest durable message id changes
 (`messageRevision`, the same idiom `DiscussionQuestionBanner` uses) — one

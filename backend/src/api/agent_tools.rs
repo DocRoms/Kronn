@@ -2088,6 +2088,14 @@ impl ToolExecutor for KronnToolExecutor {
                 };
                 let Json(res) =
                     crate::api::quick_execs::create_as(self.state.clone(), request, true).await;
+                if let Some(item) = &res.data {
+                    crate::api::quick_execs::announce_activation(
+                        &self.state,
+                        self.disc_id.as_deref(),
+                        item,
+                    )
+                    .await;
+                }
                 unwrap_api_noticed(call, res)
             }
             "qe_update" => {
@@ -2126,6 +2134,14 @@ impl ToolExecutor for KronnToolExecutor {
                     true,
                 )
                 .await;
+                if let Some(item) = &res.data {
+                    crate::api::quick_execs::announce_activation(
+                        &self.state,
+                        self.disc_id.as_deref(),
+                        item,
+                    )
+                    .await;
+                }
                 unwrap_api_noticed(call, res)
             }
             "qe_list" => {
@@ -2166,6 +2182,7 @@ impl ToolExecutor for KronnToolExecutor {
                 let Json(res) = crate::api::quick_apis::run_qa(
                     State(self.state.clone()),
                     Path(qa.id),
+                    None,
                     None,
                     Json(crate::models::RunQuickApiRequest {
                         variables,
@@ -4448,7 +4465,7 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
         ),
         (
             "qe_create_draft",
-            "A Quick Exec is one saved command. There is NO shell: `command` is the              binary alone and every argument is its own element of `args`. A pipe, a              redirection, a `&&`, a glob or a `$VAR` written inside a string reaches the              binary as literal text — it is not interpreted, and that is the point.\n\n             So `aws logs tail /my/group --since 1h` is              `command: \"aws\"`, `args: [\"logs\", \"tail\", \"/my/group\",              \"--since\", \"1h\"]`. Never `command: \"aws logs tail ...\"`.\n\n             `{{var}}` is substituted inside an element before execution, so              `args: [\"logs\", \"tail\", \"{{group}}\"]` with a declared `group`              variable is the way to parameterise it. Substitution happens per element,              which is what stops a value containing a space from becoming two arguments.\n\n             `output_format` decides what a caller gets back: `json` parsed as-is, `csv`              as an array of objects, `lines` as an array, `text` as a string. Pick the              one the command actually produces — a mismatch is returned as an error, not              silently coerced.\n\n             `timeout_secs` is a ceiling, not a hint: the process is killed at it. The              working directory is the project's, and a Quick Exec scoped to a project              cannot be started from a room belonging to another one.",
+            "A Quick Exec is one saved command. There is NO shell: `command` is the              binary alone and every argument is its own element of `args`. A pipe, a              redirection, a `&&`, a glob or a `$VAR` written inside a string reaches the              binary as literal text — it is not interpreted, and that is the point.\n\n             So `aws logs tail /my/group --since 1h` is              `command: \"aws\"`, `args: [\"logs\", \"tail\", \"/my/group\",              \"--since\", \"1h\"]`. Never `command: \"aws logs tail ...\"`.\n\n             `{{var}}` is substituted inside an element before execution, so              `args: [\"logs\", \"tail\", \"{{group}}\"]` with a declared `group`              variable is the way to parameterise it. Substitution happens per element,              which is what stops a value containing a space from becoming two arguments.\n\n             `output_format` decides what a caller gets back: `json` parsed as-is, `csv`              as an array of objects, `lines` as an array, `text` as a string. Pick the              one the command actually produces — a mismatch is returned as an error, not              silently coerced.\n\n             `timeout_secs` is a ceiling, not a hint: the process is killed at it. The              working directory is the project's, and a Quick Exec scoped to a project              cannot be started from a room belonging to another one.\n\n             A command Kronn does not model itself (`fastly`, `aws`...) that receives a              `{{var}}` is saved anyway, INACTIVE: the result carries a `kronn_notice`, the room              gets an Activer card, and it runs only once a human activates it. Carry on              (Page, workflow) and tell the user it waits; you cannot activate it, and the              user does not need to rewrite it.",
         ),
         (
             "qe_run",

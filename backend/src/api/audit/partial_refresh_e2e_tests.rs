@@ -254,6 +254,7 @@ async fn acknowledge(
         axum::extract::State(fx.h.state.clone()),
         axum::extract::Path(PROJECT_ID.to_string()),
         bridge,
+        None,
         axum::Json(crate::models::AcknowledgeDriftRequest {
             sections: sections.iter().map(|s| s.to_string()).collect(),
             shown_paths: Vec::new(),

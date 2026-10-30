@@ -57,6 +57,7 @@ async fn an_agent_identity_can_neither_approve_nor_revoke() {
     let Json(refused) = trust(
         State(state.clone()),
         agent(),
+        None,
         Path(ACTION.into()),
         Json(TrustLivePageActionRequest {
             fingerprint: fingerprint.clone(),
@@ -70,12 +71,14 @@ async fn an_agent_identity_can_neither_approve_nor_revoke() {
     let Json(approved) = trust(
         State(state.clone()),
         None,
+        None,
         Path(ACTION.into()),
         Json(TrustLivePageActionRequest { fingerprint }),
     )
     .await;
     assert!(approved.success, "{:?}", approved.error);
-    let Json(refused) = revoke_trust(State(state.clone()), agent(), Path(ACTION.into())).await;
+    let Json(refused) =
+        revoke_trust(State(state.clone()), agent(), None, Path(ACTION.into())).await;
     assert!(!refused.success);
     let Json(listed) = trusts_for_live_page(State(state.clone()), Path(PAGE.into())).await;
     assert!(
@@ -83,7 +86,7 @@ async fn an_agent_identity_can_neither_approve_nor_revoke() {
         "an agent cannot withdraw it either"
     );
 
-    let Json(revoked) = revoke_trust(State(state.clone()), None, Path(ACTION.into())).await;
+    let Json(revoked) = revoke_trust(State(state.clone()), None, None, Path(ACTION.into())).await;
     assert_eq!(revoked.data, Some(true));
 }
 
@@ -92,6 +95,7 @@ async fn a_trusted_launch_takes_no_typed_value_nor_agent_choice() {
     let (state, fingerprint) = seeded().await;
     let Json(approved) = trust(
         State(state.clone()),
+        None,
         None,
         Path(ACTION.into()),
         Json(TrustLivePageActionRequest { fingerprint }),
@@ -128,6 +132,7 @@ async fn a_trusted_launch_takes_no_typed_value_nor_agent_choice() {
 async fn trusted_claim(state: &AppState, fingerprint: String) -> String {
     let Json(approved) = trust(
         State(state.clone()),
+        None,
         None,
         Path(ACTION.into()),
         Json(TrustLivePageActionRequest { fingerprint }),
@@ -346,6 +351,7 @@ async fn approve_listed(state: &AppState) {
     let fingerprint = listed_state(state).await.fingerprint.expect("eligible");
     let Json(approved) = trust(
         State(state.clone()),
+        None,
         None,
         Path(ACTION.into()),
         Json(TrustLivePageActionRequest { fingerprint }),

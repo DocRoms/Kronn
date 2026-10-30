@@ -10,6 +10,8 @@ import type { DiscussionAction, DiscussionActionValue, LivePageAction, PromptVar
 import { PromptVariableInput } from './workflows/PromptVariableInput';
 import { RunStatusCard } from './RunStatusCard';
 import { RunOutcomePanel } from './RunOutcomePanel';
+import { PendingActivationNotice } from './QuickExecActivation';
+import { usePendingActivations } from '../hooks/usePendingActivations';
 import { WorkflowStepAgents, type StepAgentChoices } from './WorkflowStepAgents';
 import './DiscussionActionCard.css';
 
@@ -198,6 +200,9 @@ export function KronnActionCard<T extends KronnAction>({
   const [expanded, setExpanded] = useState(initiallyExpanded);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // KT-1490 — a target that waits for a human's activation says so, with the
+  // button, instead of failing when launched.
+  const pendingActivation = usePendingActivations(current.kind, current.target_id, current.target_name);
 
   useEffect(() => {
     if (!ACTIVE_STATES.has(current.state)) return;
@@ -315,6 +320,15 @@ export function KronnActionCard<T extends KronnAction>({
           <ChevronDown size={14} className="discussion-action-card__chevron" aria-hidden />
         </span>
       </button>
+
+      {!ACTIVE_STATES.has(current.state) && (
+        <PendingActivationNotice
+          items={pendingActivation.items}
+          steps={pendingActivation.steps}
+          onActivated={pendingActivation.reload}
+          onRefresh={pendingActivation.reload}
+        />
+      )}
 
       {expanded && current.state === 'proposed' && current.values.length > 0 && (
         <div className="discussion-action-card__fields">

@@ -1040,3 +1040,57 @@ async fn a_room_without_a_project_writes_only_its_own_global_skills() {
     .await;
     assert!(refused(&foreign), "{}", foreign.content);
 }
+
+/// KT-1490 — an HTTP agent saves a Quick Exec that hands a run value to a CLI
+/// Kronn does not model: it is stored inactive, the tool result says how it is
+/// activated, and the agent's room receives the one-click activation card.
+#[tokio::test]
+async fn an_http_agent_saves_an_unmodelled_cli_inactive_and_its_room_gets_the_card() {
+    let World { state, .. } = two_projects().await;
+    let agent = room_agent(&state, "room-a");
+    let created = call(
+        agent.as_ref(),
+        "qe_create_draft",
+        json!({
+            "name": "Purge CDN", "command": "fastly", "output_format": "text",
+            "args": ["purge", "--key", "{{surrogate_key}}"],
+        }),
+    )
+    .await;
+    assert!(created.ok, "{}", created.content);
+    let notice = created.content["kronn_notice"].as_str().unwrap_or_default();
+    assert!(
+        notice.contains("inactive") && notice.contains("Activer"),
+        "{}",
+        created.content
+    );
+    assert!(created.content["unmodelled_args_approved"].is_null());
+    assert_eq!(created.content["agent_written"], true);
+    let id = created.content["id"].as_str().unwrap().to_owned();
+    let cards: Vec<String> = state
+        .db
+        .with_conn(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT content FROM messages WHERE discussion_id = 'room-a' \
+                 AND content LIKE '[kronn-activate:%'",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(cards.len(), 1, "{cards:?}");
+    assert!(cards[0].contains(&id) && cards[0].contains("\"program\":\"fastly\""));
+    // The agent cannot approve it through an edit either.
+    let edited = call(
+        agent.as_ref(),
+        "qe_update",
+        json!({"quick_exec_id": id, "unmodelled_args_approved": true}),
+    )
+    .await;
+    assert!(
+        edited.content["unmodelled_args_approved"].is_null(),
+        "{}",
+        edited.content
+    );
+}

@@ -603,6 +603,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     quickExecs: {
       list: resolve([]),
       pendingApprovals: resolve([]),
+      activate: resolve({}),
+      refuseActivation: resolve(true),
       create: resolve({}),
       update: resolve({}),
       delete: resolve(undefined),

@@ -511,10 +511,16 @@ async fn a_bridge_caller_is_refused_and_the_routes_are_off_the_bridge_list() {
         }))
     };
 
-    let run = template_reinstall(State(state.clone()), AxPath("p1".into()), caller(), None)
-        .await
-        .0;
-    let plan = template_reinstall_plan(State(state), AxPath("p1".into()), caller())
+    let run = template_reinstall(
+        State(state.clone()),
+        AxPath("p1".into()),
+        caller(),
+        None,
+        None,
+    )
+    .await
+    .0;
+    let plan = template_reinstall_plan(State(state), AxPath("p1".into()), caller(), None)
         .await
         .0;
 

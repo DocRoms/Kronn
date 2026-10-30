@@ -26,6 +26,7 @@ pub async fn audit_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    marker: crate::core::bridge_token::AgentMark,
 ) -> Json<ApiResponse<Option<AuditProgress>>> {
     let mut snapshot = match state.audit_tracker.lock() {
         Ok(t) => t.get_progress(&id),
@@ -33,7 +34,7 @@ pub async fn audit_status(
     };
     // An agent keeps the counts-only view: the audit agent's recent actions
     // are for the user's panel.
-    if bridge.is_some() {
+    if crate::core::bridge_token::agent_authored(&bridge, &marker) {
         if let Some(progress) = snapshot.as_mut() {
             progress.recent_activity = None;
         }
@@ -642,7 +643,7 @@ mod audit_status_tests {
                         agent: None,
                     })
                 });
-                audit_status(State(state), Path("p1".into()), caller)
+                audit_status(State(state), Path("p1".into()), caller, None)
                     .await
                     .0
                     .data
