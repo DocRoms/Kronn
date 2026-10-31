@@ -9000,6 +9000,12 @@ local_agent_global_timeout_min: number,
  */
 ollama_context_overrides: { [key in string]: number },
 /**
+ * KT-1529 — hard ceiling, in bytes, on one discussion message or initial
+ * prompt. The everyday limit is derived from the target model's context
+ * window; this is the safety net above every window (default: 4 MB).
+ */
+max_prompt_bytes: number,
+/**
  * User identity — displayed in messages and used for future multi-user
  */
 pseudo: string | null,

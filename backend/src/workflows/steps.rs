@@ -71,10 +71,11 @@ pub(crate) fn native_full_access_refusal_for(agent: &AgentType) -> Option<String
         .then(|| runner::native_full_access_refusal(agent))
 }
 
-/// The step fails once on that refusal (`native_full_access_required: …`):
-/// the same on every attempt, so never retried and never a quota wait; an
-/// ordinary failure otherwise, so `on_failure` still runs.
-fn native_full_access_outcome(step: &WorkflowStep, refusal: String) -> StepOutcome {
+/// The step fails once on that refusal (`native_full_access_required: …`, or a
+/// prompt over its model's limit): the same on every attempt, so never retried
+/// and never a quota wait; an ordinary failure otherwise, so `on_failure` still
+/// runs.
+fn refusal_outcome(step: &WorkflowStep, refusal: String) -> StepOutcome {
     StepOutcome {
         result: StepResult {
             step_name: step.name.clone(),
@@ -265,7 +266,7 @@ pub async fn execute_step(
     let start = Instant::now();
 
     if let Some(refusal) = native_full_access_refusal_for(&step.agent) {
-        return native_full_access_outcome(step, refusal);
+        return refusal_outcome(step, refusal);
     }
 
     // Build prompt (template render + output-format addendum + triage
@@ -451,6 +452,22 @@ pub async fn execute_step(
     let requested_model = preflight.requested_model;
     let effective_model = preflight.effective_model;
     let preflight_warning = preflight.warning;
+
+    // KT-1529 — a prompt built from run data is held to the same rule as a
+    // discussion message: the model's context window, under the configured
+    // hard ceiling. Refused here, once, rather than sent to be truncated.
+    let no_pinned_windows = std::collections::HashMap::new();
+    let prompt_limit = crate::api::discussions::prompt_limit::limit_for(
+        &step.agent,
+        effective_model.as_deref(),
+        ollama_context_overrides.unwrap_or(&no_pinned_windows),
+        crate::api::discussions::prompt_limit::saved_hard_ceiling(),
+    );
+    if let Err(refusal) =
+        crate::api::discussions::prompt_limit::check(prompt.len(), &prompt_limit, "Prompt")
+    {
+        return refusal_outcome(step, refusal);
+    }
 
     // Resolve the step's named external connection once, outside the retry
     // loop. Without this a step pointed at a `Custom` connection failed every
@@ -3511,6 +3528,65 @@ mod http_native_tool_step_tests {
         assert!(outcome.result.output.contains("unsupported"));
         assert!(provider_a.received_requests().await.unwrap().is_empty());
         assert!(provider_b.received_requests().await.unwrap().is_empty());
+    }
+
+    fn big_prompt_step(agent: AgentType, bytes: usize) -> WorkflowStep {
+        WorkflowStep {
+            name: "big-prompt-step".into(),
+            step_type: StepType::Agent,
+            agent,
+            prompt_template: "x".repeat(bytes),
+            ..WorkflowStep::default()
+        }
+    }
+
+    /// Run `step` with no catalogue and no tier overrides.
+    async fn run_step_without_catalog(step: &WorkflowStep) -> StepOutcome {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy();
+        execute_step(
+            step,
+            &project,
+            None,
+            &project,
+            &empty_tokens(),
+            false,
+            &TemplateContext::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("test-run"),
+        )
+        .await
+    }
+
+    // KT-1529 — a step prompt over the model's window (or the hard ceiling) is
+    // refused once, before any agent starts, with the limit and the fix.
+    #[tokio::test]
+    async fn step_prompt_over_the_model_window_is_refused_with_the_fix() {
+        let step = big_prompt_step(AgentType::Ollama, 500_000);
+        let outcome = run_step_without_catalog(&step).await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        let output = &outcome.result.output;
+        assert!(output.starts_with("Prompt too long ("), "{output}");
+        assert!(output.contains("Ollama"), "names the model: {output}");
+        assert!(output.contains("larger context window"), "{output}");
+
+        // A large-context model takes the same size: the refusal is the
+        // window's, not a fixed cap.
+        let step = big_prompt_step(AgentType::ClaudeCode, 700_000);
+        let outcome = run_step_without_catalog(&step).await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            outcome.result.output.starts_with("Prompt too long ("),
+            "{}",
+            outcome.result.output
+        );
     }
 
     #[tokio::test]
