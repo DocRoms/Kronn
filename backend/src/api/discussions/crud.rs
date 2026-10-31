@@ -17,7 +17,7 @@ use crate::db::discussion_questions::{with_pending_counts, DiscussionListItem};
 use crate::models::*;
 use crate::AppState;
 
-use super::{MAX_CONTENT_LEN, MAX_TITLE_LEN};
+use super::MAX_TITLE_LEN;
 
 pub async fn list(
     State(state): State<AppState>,
@@ -326,6 +326,15 @@ pub async fn create(
     if let Err(error) = crate::core::skill_versions::validate_pins(&req.skill_ids) {
         return Json(ApiResponse::err(error));
     }
+    // KT-1529 — the hard ceiling first (cheap, before any DB work); the
+    // model-derived limit follows once the Quick Prompt and targets are known.
+    if let Err(refusal) = super::prompt_limit::check_hard_ceiling(
+        req.initial_prompt.len(),
+        super::prompt_limit::hard_ceiling(&state).await,
+        "Prompt",
+    ) {
+        return Json(ApiResponse::err(refusal));
+    }
     let discussion_id = Uuid::new_v4().to_string();
     let mut launch_qp = None;
     if let Some(qp_id) = req.originating_qp_id.clone() {
@@ -441,12 +450,40 @@ pub async fn create(
             MAX_TITLE_LEN
         )));
     }
-    if req.initial_prompt.len() > MAX_CONTENT_LEN {
-        return Json(ApiResponse::err(format!(
-            "Prompt too long ({} bytes, max {})",
+    // KT-1529 — the limit follows the target model's context window, with the
+    // configured hard ceiling as the safety net.
+    // The model a Quick Prompt pins is stamped on the discussion at insert
+    // (same agent + connection rule as below), so size the first prompt against
+    // it exactly as `send_message` will size the next ones.
+    let pinned_model = launch_qp.as_ref().and_then(|(qp, _)| {
+        (qp.agent == req.agent && qp.connection_id == req.connection_id)
+            .then(|| {
+                qp.agent_settings
+                    .as_ref()
+                    .and_then(|settings| settings.model.clone())
+            })
+            .flatten()
+    });
+    let prompt_limit = super::prompt_limit::resolve_for_targets(
+        &state,
+        &req.initial_targets,
+        &req.agent,
+        req.tier,
+        pinned_model.as_deref(),
+    )
+    .await;
+    // A human-only discussion has no model to protect: only the ceiling applies.
+    let verdict = if req.no_agent {
+        super::prompt_limit::check_hard_ceiling(
             req.initial_prompt.len(),
-            MAX_CONTENT_LEN
-        )));
+            super::prompt_limit::hard_ceiling(&state).await,
+            "Prompt",
+        )
+    } else {
+        super::prompt_limit::check(req.initial_prompt.len(), &prompt_limit, "Prompt")
+    };
+    if let Err(refusal) = verdict {
+        return Json(ApiResponse::err(refusal));
     }
 
     // Reject conflicting directives (eco: avoids injecting contradictory instructions that waste tokens)

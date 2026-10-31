@@ -23,6 +23,8 @@ const BACKEND_PREFIXES = [
   'Discussion',
   'Unsupported',
   'Message too long',
+  // KT-1529 — the refusal names the limit, the model and the fix: keep it whole.
+  'Prompt too long',
   'partial_pending',
   // 0.8.6 — `api()` throws `Error("Server error (HTTP 422) — <body>")`
   // when axum's Json extractor rejects a payload (missing field, null

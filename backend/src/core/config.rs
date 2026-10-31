@@ -156,6 +156,31 @@ pub(crate) fn saved_full_access_in(content: &str, agent: &crate::models::AgentTy
         .unwrap_or(false)
 }
 
+/// `server.max_prompt_bytes` as saved in config.toml, read without any other
+/// effect. Absent, unreadable or not a non-negative integer: `None`. A test
+/// never reads the developer's file.
+pub fn saved_max_prompt_bytes() -> Option<usize> {
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
+    {
+        saved_max_prompt_bytes_in(&std::fs::read_to_string(config_path().ok()?).ok()?)
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn saved_max_prompt_bytes_in(content: &str) -> Option<usize> {
+    let bytes = content
+        .parse::<toml::Table>()
+        .ok()?
+        .get("server")?
+        .get("max_prompt_bytes")?
+        .as_integer()?;
+    usize::try_from(bytes).ok()
+}
+
 /// Full path to config.toml
 pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join(CONFIG_FILE))
@@ -691,6 +716,7 @@ pub fn default_config() -> AppConfig {
             agent_global_timeout_min: crate::models::DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN,
             local_agent_global_timeout_min: crate::models::DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN,
             ollama_context_overrides: std::collections::HashMap::new(),
+            max_prompt_bytes: crate::models::setup::DEFAULT_MAX_PROMPT_BYTES,
             pseudo: None,
             avatar_email: None,
             bio: None,
@@ -1021,6 +1047,24 @@ mod tests {
             &AgentType::OpenCode
         ));
     }
+    #[test]
+    fn the_saved_prompt_ceiling_is_read_without_guessing() {
+        assert_eq!(
+            saved_max_prompt_bytes_in("[server]\nmax_prompt_bytes = 750000\n"),
+            Some(750_000)
+        );
+        assert_eq!(saved_max_prompt_bytes_in("[server]\nport = 3140\n"), None);
+        assert_eq!(saved_max_prompt_bytes_in("not toml ["), None);
+        assert_eq!(
+            saved_max_prompt_bytes_in("[server]\nmax_prompt_bytes = -1\n"),
+            None
+        );
+        assert_eq!(
+            saved_max_prompt_bytes_in("[server]\nmax_prompt_bytes = \"big\"\n"),
+            None
+        );
+    }
+
     use serial_test::serial;
 
     /// Tests that mutate `KRONN_DATA_DIR` (a process-wide env var) must

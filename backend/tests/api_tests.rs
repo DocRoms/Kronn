@@ -9868,6 +9868,199 @@ async fn discussions_list_empty() {
     assert!(json["data"].as_array().unwrap().is_empty());
 }
 
+// KT-1529 — the prompt limit follows the target model's context window, with a
+// configurable hard ceiling above every window.
+#[tokio::test]
+async fn discussion_prompt_limit_follows_the_target_model_window() {
+    let state = test_state();
+    let prompt = "x".repeat(500_000);
+    let create = |agent: &'static str, prompt: String| {
+        let app = build_router_with_auth(state.clone(), false);
+        async move {
+            let (_, json) = post_json(
+                app,
+                "/api/discussions",
+                serde_json::json!({
+                    "title": "big", "agent": agent, "language": "en", "initial_prompt": prompt,
+                }),
+            )
+            .await;
+            json
+        }
+    };
+
+    let large = create("GeminiCli", prompt.clone()).await;
+    assert_eq!(
+        large["success"], true,
+        "500 KB fits a 1M-token window: {large}"
+    );
+
+    let small = create("Ollama", prompt.clone()).await;
+    assert_eq!(small["success"], false, "{small}");
+    let error = small["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("Prompt too long (500000 bytes)"),
+        "{error}"
+    );
+    assert!(error.contains("Ollama"), "names the model/runtime: {error}");
+    assert!(error.contains("Attach the content as a file"), "{error}");
+    assert!(error.contains("larger context window"), "{error}");
+
+    // The hard ceiling binds even a model whose window would take the prompt.
+    state.config.write().await.server.max_prompt_bytes = 400_000;
+    let capped = create("GeminiCli", prompt).await;
+    assert_eq!(capped["success"], false, "{capped}");
+    let error = capped["error"].as_str().unwrap();
+    assert!(error.contains("max_prompt_bytes"), "{error}");
+}
+
+/// Seed a bare discussion row running `agent`, optionally pinned to `model`.
+async fn seed_limit_discussion(
+    state: &AppState,
+    id: &'static str,
+    agent: &'static str,
+    model: Option<&'static str>,
+) {
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, language, participants_json,
+                 created_at, updated_at, message_count, workspace_mode, model)
+                 VALUES (?1, 'T', ?2, 'en', '[]', datetime('now'), datetime('now'), 0, 'Direct', ?3)",
+                rusqlite::params![id, agent, model],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// POST a message and return the raw SSE body (the refusal is an `error` event).
+async fn send_message_sse(state: &AppState, id: &str, body: Value) -> String {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/discussions/{id}/messages"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            45678,
+        ))));
+    let resp = build_router_with_auth(state.clone(), false)
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+async fn limit_message_count(state: &AppState, id: &'static str) -> i64 {
+    state
+        .db
+        .with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1",
+                [id],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+// KT-1529 — `send_message` applies the same rule: the target's window, then the
+// hard ceiling, refused as an SSE `error` event before anything is stored.
+#[tokio::test]
+async fn send_message_prompt_limit_follows_the_target_model_window() {
+    let state = test_state();
+    let content = "x".repeat(500_000);
+    seed_limit_discussion(&state, "d-small", "Ollama", None).await;
+    let body = send_message_sse(&state, "d-small", serde_json::json!({ "content": content })).await;
+    assert!(body.contains("event: error"), "{body}");
+    assert!(body.contains("Message too long (500000 bytes)"), "{body}");
+    assert!(body.contains("Ollama"), "names the model/runtime: {body}");
+    assert!(body.contains("Attach the content as a file"), "{body}");
+    assert!(body.contains("larger context window"), "{body}");
+    assert_eq!(limit_message_count(&state, "d-small").await, 0);
+
+    // The hard ceiling answers first, whatever the model could take.
+    seed_limit_discussion(&state, "d-large", "GeminiCli", None).await;
+    state.config.write().await.server.max_prompt_bytes = 400_000;
+    let body = send_message_sse(&state, "d-large", serde_json::json!({ "content": content })).await;
+    assert!(body.contains("event: error"), "{body}");
+    assert!(body.contains("max_prompt_bytes"), "{body}");
+    assert_eq!(limit_message_count(&state, "d-large").await, 0);
+}
+
+// The discussion's model pin belongs to its own agent: a second agent named in
+// the same message is sized on its own window, not on the pinned model's.
+#[tokio::test]
+async fn send_message_prompt_limit_does_not_lend_the_pinned_model_to_another_target() {
+    let state = test_state();
+    seed_limit_discussion(&state, "d-pinned", "ClaudeCode", Some("claude-sonnet-4-5")).await;
+    let body = send_message_sse(
+        &state,
+        "d-pinned",
+        serde_json::json!({
+            "content": "x".repeat(500_000),
+            "targets": [{ "kind": "agent", "agent_type": "Ollama" }],
+        }),
+    )
+    .await;
+    assert!(body.contains("event: error"), "{body}");
+    assert!(body.contains("Message too long (500000 bytes)"), "{body}");
+    assert!(body.contains("Ollama"), "{body}");
+    assert_eq!(limit_message_count(&state, "d-pinned").await, 0);
+}
+
+// KT-1529 — `revise_message` is refused with the same wording, as a 400.
+#[tokio::test]
+async fn revise_message_prompt_limit_follows_the_target_model_window() {
+    let state = test_state();
+    let content = "x".repeat(500_000);
+    let revise = |id: &'static str| {
+        let app = build_router_with_auth(state.clone(), false);
+        let content = content.clone();
+        async move {
+            post_json(
+                app,
+                &format!("/api/discussions/{id}/messages/revise"),
+                serde_json::json!({
+                    "message_id": "m-1",
+                    "content": content,
+                    "expected_revision": "r-1",
+                    "idempotency_key": "6f1c1f1e-2b8d-4c43-9a3e-0d9f3c1d7a10",
+                }),
+            )
+            .await
+        }
+    };
+
+    seed_limit_discussion(&state, "d-rev-small", "Ollama", None).await;
+    let (status, json) = revise("d-rev-small").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("Message too long (500000 bytes)"),
+        "{error}"
+    );
+    assert!(error.contains("Ollama"), "{error}");
+    assert!(error.contains("larger context window"), "{error}");
+
+    seed_limit_discussion(&state, "d-rev-large", "GeminiCli", None).await;
+    state.config.write().await.server.max_prompt_bytes = 400_000;
+    let (status, json) = revise("d-rev-large").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(
+        json["error"].as_str().unwrap().contains("max_prompt_bytes"),
+        "{json}"
+    );
+}
+
 #[tokio::test]
 async fn discussions_stop_returns_cancelled_false_when_nothing_running() {
     // Endpoint smoke test: POST /api/discussions/:id/stop on a disc that has
