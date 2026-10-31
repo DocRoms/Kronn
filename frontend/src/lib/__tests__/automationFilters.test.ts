@@ -16,6 +16,7 @@ import {
   type AutomationFilterAxis,
   type AutomationFilters,
   type FilterableAutomation,
+  withAutomationStatus,
 } from '../automationFilters';
 
 const item = (over: Partial<FilterableAutomation> & Pick<FilterableAutomation, 'kind' | 'searchText'>): FilterableAutomation => ({
@@ -58,6 +59,42 @@ describe('automation filters', () => {
     expect(names(filters({ active: false }))).toHaveLength(6);
   });
 
+  it('keeps only the disabled workflows with "Désactivés", the inverse of "Actifs"', () => {
+    expect(names(filters({ disabled: true }))).toEqual(['Weekly']);
+    expect(names(filters({ disabled: false }))).toHaveLength(6);
+    // Every automation is either active or disabled, never both nor neither.
+    const active = names(filters({ active: true }));
+    const disabled = names(filters({ disabled: true }));
+    expect(active.length + disabled.length).toBe(6);
+    expect(active.filter(name => disabled.includes(name))).toEqual([]);
+    // A Quick item has no off switch, so it is never disabled.
+    expect(names(filters({ disabled: true, kind: 'quickPrompts' }))).toEqual([]);
+  });
+
+  it('combines "Désactivés" with project, type and search', () => {
+    expect(names(filters({ disabled: true, kind: 'workflows' }))).toEqual(['Weekly']);
+    expect(names(filters({ disabled: true, projectId: AUTOMATION_NO_PROJECT }))).toEqual(['Weekly']);
+    expect(names(filters({ disabled: true, projectId: 'alpha' }))).toEqual([]);
+    expect(names(filters({ disabled: true, query: 'weekly' }))).toEqual(['Weekly']);
+    expect(names(filters({ disabled: true, query: 'nightly' }))).toEqual([]);
+    expect(countAutomationKinds(library, filters({ disabled: true })).all).toBe(1);
+    expect(activeAutomationFilterCount(filters({ disabled: true }))).toBe(1);
+  });
+
+  it('makes "Actifs" and "Désactivés" exclude each other', () => {
+    const active = withAutomationStatus(filters(), 'active', true);
+    expect(active).toMatchObject({ active: true, disabled: false });
+    const disabled = withAutomationStatus(active, 'disabled', true);
+    expect(disabled).toMatchObject({ active: false, disabled: true });
+    expect(withAutomationStatus(disabled, 'active', true)).toMatchObject({ active: true, disabled: false });
+    // Turning one off leaves the other as it was.
+    expect(withAutomationStatus(disabled, 'active', false)).toMatchObject({ active: false, disabled: true });
+    expect(withAutomationStatus(disabled, 'disabled', false)).toMatchObject({ active: false, disabled: false });
+    // The other filters are untouched.
+    expect(withAutomationStatus(filters({ query: 'x', pinned: true }), 'disabled', true))
+      .toMatchObject({ query: 'x', pinned: true, disabled: true });
+  });
+
   it('stacks type, pinned, active, project, recent and search', () => {
     expect(names(filters({ kind: 'quickPrompts', pinned: true }))).toEqual(['Summarise']);
     expect(names(filters({ kind: 'quickPrompts', projectId: 'alpha', query: 'claude' }))).toEqual(['Review']);
@@ -80,6 +117,7 @@ describe('automation filters', () => {
     expect(activeAutomationFilterCount(filters({
       kind: 'skills', pinned: true, active: true, projectId: AUTOMATION_NO_PROJECT, recent: true,
     }))).toBe(5);
+    expect(activeAutomationFilterCount(filters({ disabled: true, pinned: true }))).toBe(2);
   });
 
   it('counts each type given the other filters', () => {

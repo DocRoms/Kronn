@@ -94,6 +94,7 @@ import {
   type AutomationGroup,
   type AutomationGroupBy,
   type AutomationKindFilter,
+  withAutomationStatus,
 } from '../lib/automationFilters';
 import {
   readAutomationGroupBy,
@@ -371,6 +372,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
   );
   const [automationPinnedFilter, setAutomationPinnedFilter] = useState(false);
   const [automationActiveFilter, setAutomationActiveFilter] = useState(false);
+  const [automationDisabledFilter, setAutomationDisabledFilter] = useState(false);
   const [automationRecentFilter, setAutomationRecentFilter] = useState(false);
   // "Group by" is remembered per user (this browser), the last openings feed
   // the Recent chip and the "last opened" sort.
@@ -2353,6 +2355,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
     kind: automationKindFilter,
     pinned: automationPinnedFilter,
     active: automationActiveFilter,
+    disabled: automationDisabledFilter,
     projectId: automationProjectFilter,
     recent: automationRecentFilter,
     query: automationQuery,
@@ -2361,10 +2364,17 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
     if (kind === 'all') setAutomationKindFilter('all');
     else selectAutomationKind(kind);
   };
+  // "Actifs" and "Désactivés" exclude each other.
+  const selectAutomationStatusFilter = (status: 'active' | 'disabled', on: boolean) => {
+    const next = withAutomationStatus(automationFilters, status, on);
+    setAutomationActiveFilter(next.active);
+    setAutomationDisabledFilter(next.disabled);
+  };
   const clearAutomationFilters = () => {
     setAutomationKindFilter(NO_AUTOMATION_FILTERS.kind);
     setAutomationPinnedFilter(NO_AUTOMATION_FILTERS.pinned);
     setAutomationActiveFilter(NO_AUTOMATION_FILTERS.active);
+    setAutomationDisabledFilter(NO_AUTOMATION_FILTERS.disabled);
     setAutomationProjectFilter(NO_AUTOMATION_FILTERS.projectId);
     setAutomationRecentFilter(NO_AUTOMATION_FILTERS.recent);
   };
@@ -2377,7 +2387,8 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
     projects,
     onKindChange: selectAutomationKindFilter,
     onPinnedChange: setAutomationPinnedFilter,
-    onActiveChange: setAutomationActiveFilter,
+    onActiveChange: on => selectAutomationStatusFilter('active', on),
+    onDisabledChange: on => selectAutomationStatusFilter('disabled', on),
     onRecentChange: setAutomationRecentFilter,
     onProjectChange: setAutomationProjectFilter,
     onClear: clearAutomationFilters,

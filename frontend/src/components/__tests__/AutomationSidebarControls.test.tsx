@@ -7,6 +7,7 @@ import { I18nProvider } from '../../lib/I18nContext';
 import {
   AUTOMATION_NO_PROJECT,
   NO_AUTOMATION_FILTERS,
+  withAutomationStatus,
   type AutomationFilters,
   type AutomationGroupBy,
 } from '../../lib/automationFilters';
@@ -45,7 +46,8 @@ function Harness({ initial = NO_AUTOMATION_FILTERS, spies }: {
     projects,
     onKindChange: kind => { spies.onKind(kind); setFilters(current => ({ ...current, kind })); },
     onPinnedChange: pinned => setFilters(current => ({ ...current, pinned })),
-    onActiveChange: active => setFilters(current => ({ ...current, active })),
+    onActiveChange: active => setFilters(current => withAutomationStatus(current, 'active', active)),
+    onDisabledChange: disabled => setFilters(current => withAutomationStatus(current, 'disabled', disabled)),
     onRecentChange: recent => setFilters(current => ({ ...current, recent })),
     onProjectChange: projectId => setFilters(current => ({ ...current, projectId })),
     onClear: () => { spies.onClear(); setFilters(current => ({ ...NO_AUTOMATION_FILTERS, query: current.query })); },
@@ -101,7 +103,7 @@ describe('AutomationSidebarControls — chips', () => {
     expect(kindChip()).toHaveAttribute('data-tour-id', 'automation-filter-type');
     expect(kindChip()).toHaveAttribute('data-value', 'all');
     expect(kindChip()).toHaveAttribute('aria-expanded', 'false');
-    for (const name of ['Épinglés', 'Actifs', 'Récents']) {
+    for (const name of ['Épinglés', 'Actifs', 'Désactivés', 'Récents']) {
       expect(toggle(name)).toHaveAttribute('aria-pressed', 'false');
     }
     expect(projectChip()).toHaveTextContent('Projet');
@@ -186,6 +188,17 @@ describe('AutomationSidebarControls — chips', () => {
     expect(toggle('Actifs')).toHaveAttribute('aria-pressed', 'false');
     expect(toggle('Épinglés')).toHaveAttribute('aria-pressed', 'true');
     expect(kindChip()).toHaveTextContent('Tout');
+  });
+
+  it('makes Active and Disabled exclude each other', () => {
+    const { toggle } = renderControls();
+    fireEvent.click(toggle('Actifs'));
+    fireEvent.click(toggle('Désactivés'));
+    expect(toggle('Désactivés')).toHaveAttribute('aria-pressed', 'true');
+    expect(toggle('Actifs')).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(toggle('Actifs'));
+    expect(toggle('Actifs')).toHaveAttribute('aria-pressed', 'true');
+    expect(toggle('Désactivés')).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('offers "Effacer les filtres" only while a filter is set, and resets every chip', () => {
@@ -304,6 +317,8 @@ describe('400 px stylesheet', () => {
     expect(controlsCss).toMatch(/\.automation-chips \{[^}]*display: flex[^}]*flex-wrap: wrap[^}]*min-width: 0/);
     expect(controlsCss).toMatch(/\.automation-segmented \{[^}]*display: grid[^}]*flex: 1[^}]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)[^}]*min-width: 0/);
     expect(controlsCss).toMatch(/\.automation-groupby \{[^}]*display: flex[^}]*min-width: 0/);
+    // The line break between the Type / Project chips and the four toggles.
+    expect(controlsCss).toMatch(/\.automation-chips-break \{[^}]*flex-basis: 100%[^}]*height: 0/);
   });
 
   it('opens a menu over the width of its block, never wider, and cuts a long project name', () => {

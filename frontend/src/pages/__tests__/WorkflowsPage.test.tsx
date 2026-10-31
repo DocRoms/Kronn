@@ -695,6 +695,65 @@ describe('WorkflowsPage', () => {
       expect(rows(sidebar)).toHaveLength(5);
     });
 
+    it('keeps only the disabled workflows with "Désactivés", exclusive with "Actifs" and lifted by "Effacer les filtres"', async () => {
+      const { sidebar, toggle, clear } = await showLibrary();
+      fireEvent.click(toggle('Désactivés'));
+      expect(toggle('Désactivés')).toHaveAttribute('aria-pressed', 'true');
+      // A Quick Prompt, API or Exec has no off switch: none of them is "disabled".
+      expect(rows(sidebar)).toEqual(['Ouvrir Beta flow']);
+
+      // Choosing "Actifs" lets go of "Désactivés", and the other way round.
+      fireEvent.click(toggle('Actifs'));
+      expect(toggle('Actifs')).toHaveAttribute('aria-pressed', 'true');
+      expect(toggle('Désactivés')).toHaveAttribute('aria-pressed', 'false');
+      expect(rows(sidebar)).not.toContain('Ouvrir Beta flow');
+      expect(rows(sidebar)).toHaveLength(4);
+      fireEvent.click(toggle('Désactivés'));
+      expect(toggle('Actifs')).toHaveAttribute('aria-pressed', 'false');
+      expect(rows(sidebar)).toEqual(['Ouvrir Beta flow']);
+
+      // It counts as a set chip, and "Effacer les filtres" resets it.
+      fireEvent.click(clear() as HTMLElement);
+      expect(toggle('Désactivés')).toHaveAttribute('aria-pressed', 'false');
+      expect(rows(sidebar)).toHaveLength(5);
+    });
+
+    it('combines "Désactivés" with the project and the search', async () => {
+      const { sidebar, controls, search, toggle } = await showLibrary();
+      fireEvent.click(toggle('Désactivés'));
+      fireEvent.click(toggle('Filtrer les automatisations par projet'));
+      // Beta flow is the disabled one and sits in no project.
+      fireEvent.click(within(controls).getByRole('option', { name: 'Sans projet (1)' }));
+      expect(rows(sidebar)).toEqual(['Ouvrir Beta flow']);
+      fireEvent.click(toggle('Sans projet'));
+      expect(within(controls).queryByRole('option', { name: 'Alpha (0)' })).toBeNull();
+      fireEvent.click(toggle('Retirer le filtre projet Sans projet'));
+
+      fireEvent.change(search, { target: { value: 'gamma' } });
+      expect(rows(sidebar)).toEqual([]);
+      fireEvent.change(search, { target: { value: 'beta' } });
+      expect(rows(sidebar)).toEqual(['Ouvrir Beta flow']);
+    });
+
+    it('deletes, in selection mode, only what the "Désactivés" filter leaves in the list', async () => {
+      mockWorkflowsApi.delete.mockClear();
+      mockWorkflowsApi.delete.mockResolvedValue(undefined);
+      vi.stubGlobal('confirm', vi.fn(() => true));
+      const { sidebar, toggle } = await showLibrary();
+      fireEvent.click(toggle('Désactivés'));
+
+      await act(async () => { fireEvent.click(screen.getByLabelText('Autres actions')); });
+      await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: /Sélection multiple/ })); });
+      // Every row still on screen is selectable, and only those.
+      const checkboxes = within(sidebar).getAllByRole('checkbox');
+      expect(checkboxes).toHaveLength(1);
+      for (const checkbox of checkboxes) await act(async () => { fireEvent.click(checkbox); });
+
+      await act(async () => { fireEvent.click(screen.getByLabelText('Supprimer la sélection')); });
+      expect(mockWorkflowsApi.delete).toHaveBeenCalledTimes(1);
+      expect(mockWorkflowsApi.delete).toHaveBeenCalledWith('wf-beta');
+    });
+
     it('sets the order from the ⋯ menu, favorites staying on top', async () => {
       const { sidebar, groupBy } = await showLibrary();
       // Flat, so the whole order can be read at once.

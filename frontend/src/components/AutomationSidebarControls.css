@@ -71,6 +71,10 @@
   gap: var(--kr-sp-1) var(--kr-sp-2);
   min-width: 0;
 }
+.automation-chips-break {
+  flex-basis: 100%;
+  height: 0;
+}
 .automation-chip,
 .automation-chip-clear {
   display: inline-flex;

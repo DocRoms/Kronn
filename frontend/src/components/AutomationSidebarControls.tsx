@@ -32,6 +32,7 @@ export interface AutomationControlsState {
   onKindChange: (kind: AutomationKindFilter) => void;
   onPinnedChange: (pinned: boolean) => void;
   onActiveChange: (active: boolean) => void;
+  onDisabledChange: (disabled: boolean) => void;
   onRecentChange: (recent: boolean) => void;
   onProjectChange: (projectId: string) => void;
   /** Resets every chip; the search keeps its own ✕. */
@@ -42,13 +43,14 @@ type OpenMenu = 'kind' | 'project' | null;
 
 /** "Group by" segmented control and the filter chips, rendered under the
  *  sidebar search (`CollectionShell`'s `afterSidebarHeader` slot): a type chip
- *  that reads "All" until a type is picked, the Pinned / Active / Recent
- *  toggles, and a removable chip for the chosen project. */
+ *  that reads "All" until a type is picked and a removable chip for the chosen
+ *  project on a first line, then the Pinned / Active / Disabled / Recent toggles
+ *  on a second one, so six chips never leave one stranded on a line of its own. */
 export function AutomationSidebarControls({ controls }: { controls: AutomationControlsState }) {
   const { t } = useT();
   const {
     groupBy, onGroupByChange, filters, kindCounts, projectCounts, projects,
-    onKindChange, onPinnedChange, onActiveChange, onRecentChange, onProjectChange, onClear,
+    onKindChange, onPinnedChange, onActiveChange, onDisabledChange, onRecentChange, onProjectChange, onClear,
   } = controls;
   const [menu, setMenu] = useState<OpenMenu>(null);
   const groupByLabelId = useId();
@@ -155,30 +157,6 @@ export function AutomationSidebarControls({ controls }: { controls: AutomationCo
           {kindLabel(filters.kind)}
           <ChevronDown size={11} aria-hidden="true" />
         </button>
-        <button
-          type="button"
-          className="automation-chip"
-          data-active={filters.pinned}
-          aria-pressed={filters.pinned}
-          onClick={() => onPinnedChange(!filters.pinned)}
-        >
-          <Star size={11} fill={filters.pinned ? 'currentColor' : 'none'} aria-hidden="true" />
-          {t('automation.chip.pinned')}
-        </button>
-        <button
-          type="button"
-          className="automation-chip"
-          data-active={filters.active}
-          aria-pressed={filters.active}
-          onClick={() => onActiveChange(!filters.active)}
-        >{t('automation.chip.active')}</button>
-        <button
-          type="button"
-          className="automation-chip"
-          data-active={filters.recent}
-          aria-pressed={filters.recent}
-          onClick={() => onRecentChange(!filters.recent)}
-        >{t('disc.recent')}</button>
         {hasProject ? (
           <span className="automation-chip automation-chip-project" data-active="true">
             <button
@@ -211,6 +189,38 @@ export function AutomationSidebarControls({ controls }: { controls: AutomationCo
             {t('automation.chip.project')}
           </button>
         )}
+        <span className="automation-chips-break" aria-hidden="true" />
+        <button
+          type="button"
+          className="automation-chip"
+          data-active={filters.pinned}
+          aria-pressed={filters.pinned}
+          onClick={() => onPinnedChange(!filters.pinned)}
+        >
+          <Star size={11} fill={filters.pinned ? 'currentColor' : 'none'} aria-hidden="true" />
+          {t('automation.chip.pinned')}
+        </button>
+        <button
+          type="button"
+          className="automation-chip"
+          data-active={filters.active}
+          aria-pressed={filters.active}
+          onClick={() => onActiveChange(!filters.active)}
+        >{t('automation.chip.active')}</button>
+        <button
+          type="button"
+          className="automation-chip"
+          data-active={filters.disabled}
+          aria-pressed={filters.disabled}
+          onClick={() => onDisabledChange(!filters.disabled)}
+        >{t('automation.chip.disabled')}</button>
+        <button
+          type="button"
+          className="automation-chip"
+          data-active={filters.recent}
+          aria-pressed={filters.recent}
+          onClick={() => onRecentChange(!filters.recent)}
+        >{t('disc.recent')}</button>
         {activeAutomationFilterCount(filters) > 0 && (
           <button type="button" className="automation-chip-clear" onClick={() => { setMenu(null); onClear(); }}>
             <X size={11} aria-hidden="true" />{t('collection.clearFilters')}

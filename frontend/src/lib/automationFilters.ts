@@ -1,5 +1,5 @@
 // Filters and grouping of the global Automation page: type, pinned, active,
-// project, recent and free-text search. Pure and in-memory, so the sidebar
+// disabled, project, recent and free-text search. Pure and in-memory, so the sidebar
 // list, the counters of the chips and the tests all read one definition of
 // "matches".
 
@@ -46,6 +46,10 @@ export interface AutomationFilters {
   /** "Actifs": leaves out a disabled workflow. A Quick Prompt, API, Exec or
    *  Skill has no off switch, so it is always active. */
   active: boolean;
+  /** "Désactivés": the inverse of `active`, keeps only the disabled workflows
+   *  (a Quick Prompt, API, Exec or Skill is never disabled). Exclusive with
+   *  `active`, see `withAutomationStatus`. */
+  disabled: boolean;
   /** `all`, `AUTOMATION_NO_PROJECT`, or a project id. */
   projectId: string;
   /** "Récents": keeps what the user opened lately (the list is then ordered
@@ -58,6 +62,7 @@ export const NO_AUTOMATION_FILTERS: AutomationFilters = {
   kind: 'all',
   pinned: false,
   active: false,
+  disabled: false,
   projectId: 'all',
   recent: false,
   query: '',
@@ -73,6 +78,22 @@ export function isAutomationGroupBy(value: unknown): value is AutomationGroupBy 
 
 export function matchesAutomationActive(resource: FilterableAutomation): boolean {
   return resource.workflow?.enabled !== false;
+}
+
+export function matchesAutomationDisabled(resource: FilterableAutomation): boolean {
+  return !matchesAutomationActive(resource);
+}
+
+/** Turns "Actifs" or "Désactivés" on or off. They are opposites, so turning
+ *  one on turns the other off. */
+export function withAutomationStatus(
+  filters: AutomationFilters,
+  status: 'active' | 'disabled',
+  on: boolean,
+): AutomationFilters {
+  return status === 'active'
+    ? { ...filters, active: on, disabled: on ? false : filters.disabled }
+    : { ...filters, disabled: on, active: on ? false : filters.active };
 }
 
 /** Every project an automation is listed under; empty means "no project". */
@@ -102,6 +123,7 @@ export function matchesAutomationFilters(
   return (ignore.includes('kind') || filters.kind === 'all' || resource.kind === filters.kind)
     && (ignore.includes('pinned') || !filters.pinned || resource.pinned)
     && (ignore.includes('active') || !filters.active || matchesAutomationActive(resource))
+    && (ignore.includes('disabled') || !filters.disabled || matchesAutomationDisabled(resource))
     && (ignore.includes('projectId') || matchesAutomationProject(resource, filters.projectId))
     && (ignore.includes('recent') || !filters.recent || resource.lastOpenedAt != null)
     && (ignore.includes('query') || matchesAutomationQuery(resource, filters.query));
@@ -115,6 +137,7 @@ export function activeAutomationFilterCount(filters: AutomationFilters): number 
     filters.kind !== 'all',
     filters.pinned,
     filters.active,
+    filters.disabled,
     filters.projectId !== 'all',
     filters.recent,
   ].filter(Boolean).length;
