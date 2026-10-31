@@ -9868,6 +9868,52 @@ async fn discussions_list_empty() {
     assert!(json["data"].as_array().unwrap().is_empty());
 }
 
+// KT-1529 — the prompt limit follows the target model's context window, with a
+// configurable hard ceiling above every window.
+#[tokio::test]
+async fn discussion_prompt_limit_follows_the_target_model_window() {
+    let state = test_state();
+    let prompt = "x".repeat(500_000);
+    let create = |agent: &'static str, prompt: String| {
+        let app = build_router_with_auth(state.clone(), false);
+        async move {
+            let (_, json) = post_json(
+                app,
+                "/api/discussions",
+                serde_json::json!({
+                    "title": "big", "agent": agent, "language": "en", "initial_prompt": prompt,
+                }),
+            )
+            .await;
+            json
+        }
+    };
+
+    let large = create("GeminiCli", prompt.clone()).await;
+    assert_eq!(
+        large["success"], true,
+        "500 KB fits a 1M-token window: {large}"
+    );
+
+    let small = create("Ollama", prompt.clone()).await;
+    assert_eq!(small["success"], false, "{small}");
+    let error = small["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("Prompt too long (500000 bytes)"),
+        "{error}"
+    );
+    assert!(error.contains("Ollama"), "names the model/runtime: {error}");
+    assert!(error.contains("Attach the content as a file"), "{error}");
+    assert!(error.contains("larger context window"), "{error}");
+
+    // The hard ceiling binds even a model whose window would take the prompt.
+    state.config.write().await.server.max_prompt_bytes = 400_000;
+    let capped = create("GeminiCli", prompt).await;
+    assert_eq!(capped["success"], false, "{capped}");
+    let error = capped["error"].as_str().unwrap();
+    assert!(error.contains("max_prompt_bytes"), "{error}");
+}
+
 #[tokio::test]
 async fn discussions_stop_returns_cancelled_false_when_nothing_running() {
     // Endpoint smoke test: POST /api/discussions/:id/stop on a disc that has

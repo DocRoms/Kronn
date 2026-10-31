@@ -26,7 +26,7 @@ use crate::AppState;
 
 use super::routing::{route_human_turn, DispatchRoute};
 use super::streaming::make_agent_stream;
-use super::{SseStream, MAX_CONTENT_LEN};
+use super::{prompt_limit, SseStream};
 
 /// A stream that says everything it has to say, then ends.
 ///
@@ -384,15 +384,16 @@ pub async fn send_message(
         )]);
     }
     // Input validation
-    if req.content.len() > MAX_CONTENT_LEN {
-        let stream: SseStream = Box::pin(futures::stream::once(async {
-            Ok::<_, Infallible>(
-                Event::default()
-                    .event("error")
-                    .data(serde_json::json!({ "error": "Message too long" }).to_string()),
-            )
-        }));
-        return Sse::new(stream);
+    // KT-1529 — the hard ceiling first (cheap, before any DB work); the
+    // model-derived limit follows once the targets are known.
+    if let Err(refusal) = prompt_limit::check_hard_ceiling(
+        req.content.len(),
+        prompt_limit::hard_ceiling(&state).await,
+        "Message",
+    ) {
+        return sse_events(vec![Event::default()
+            .event("error")
+            .data(serde_json::json!({ "error": refusal }).to_string())]);
     }
 
     let message_id = match req.client_message_id.as_deref() {
@@ -557,6 +558,14 @@ pub async fn send_message(
                 .data(serde_json::json!({ "error": error }).to_string())]);
         }
     };
+    if let Err(refusal) =
+        prompt_limit::enforce_for_discussion(&state, &id, &targets, req.content.len(), "Message")
+            .await
+    {
+        return sse_events(vec![Event::default()
+            .event("error")
+            .data(serde_json::json!({ "error": refusal }).to_string())]);
+    }
     let target = targets.first().map(|target| target.agent_type.clone());
     // Resolve responder ownership before the acceptance transaction so human-
     // only/shared rooms never expose briefly-runnable local dispatch jobs.
@@ -909,10 +918,21 @@ pub async fn revise_message(
     Path(id): Path<String>,
     Json(request): Json<ReviseMessageRequest>,
 ) -> Response {
-    if request.content.trim().is_empty() || request.content.len() > MAX_CONTENT_LEN {
+    if request.content.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::<()>::err("Invalid revised message content")),
+        )
+            .into_response();
+    }
+    if let Err(refusal) = prompt_limit::check_hard_ceiling(
+        request.content.len(),
+        prompt_limit::hard_ceiling(&state).await,
+        "Message",
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<()>::err(refusal)),
         )
             .into_response();
     }
@@ -936,6 +956,21 @@ pub async fn revise_message(
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::err(error))).into_response();
         }
     };
+    if let Err(refusal) = prompt_limit::enforce_for_discussion(
+        &state,
+        &id,
+        &targets,
+        request.content.len(),
+        "Message",
+    )
+    .await
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<()>::err(refusal)),
+        )
+            .into_response();
+    }
     let mut local_dispatch_agents = Vec::new();
     if targets.is_empty() {
         let route = human_dispatch_route(&state, &id, None).await;

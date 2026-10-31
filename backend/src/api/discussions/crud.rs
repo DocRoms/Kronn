@@ -17,7 +17,7 @@ use crate::db::discussion_questions::{with_pending_counts, DiscussionListItem};
 use crate::models::*;
 use crate::AppState;
 
-use super::{MAX_CONTENT_LEN, MAX_TITLE_LEN};
+use super::MAX_TITLE_LEN;
 
 pub async fn list(
     State(state): State<AppState>,
@@ -441,12 +441,28 @@ pub async fn create(
             MAX_TITLE_LEN
         )));
     }
-    if req.initial_prompt.len() > MAX_CONTENT_LEN {
-        return Json(ApiResponse::err(format!(
-            "Prompt too long ({} bytes, max {})",
+    // KT-1529 — the limit follows the target model's context window, with the
+    // configured hard ceiling as the safety net.
+    let prompt_limit = super::prompt_limit::resolve_for_targets(
+        &state,
+        &req.initial_targets,
+        &req.agent,
+        req.tier,
+        None,
+    )
+    .await;
+    // A human-only discussion has no model to protect: only the ceiling applies.
+    let verdict = if req.no_agent {
+        super::prompt_limit::check_hard_ceiling(
             req.initial_prompt.len(),
-            MAX_CONTENT_LEN
-        )));
+            super::prompt_limit::hard_ceiling(&state).await,
+            "Prompt",
+        )
+    } else {
+        super::prompt_limit::check(req.initial_prompt.len(), &prompt_limit, "Prompt")
+    };
+    if let Err(refusal) = verdict {
+        return Json(ApiResponse::err(refusal));
     }
 
     // Reject conflicting directives (eco: avoids injecting contradictory instructions that waste tokens)

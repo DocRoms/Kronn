@@ -23,6 +23,7 @@ pub mod crud;
 pub mod messaging;
 pub mod monitor;
 pub mod orchestration;
+pub(crate) mod prompt_limit;
 pub(crate) mod routing;
 pub mod runtime;
 pub mod slash_markers;
@@ -40,8 +41,6 @@ pub use runtime::*;
 
 /// Maximum title length for discussions (characters).
 pub(super) const MAX_TITLE_LEN: usize = 500;
-/// Maximum content/prompt length (bytes, ~100 KB).
-pub(super) const MAX_CONTENT_LEN: usize = 100_000;
 /// Resolve the configurable absolute timeout captured when each run starts.
 pub(super) fn configured_agent_global_timeout(minutes: u32) -> Duration {
     let minutes = crate::models::clamp_agent_global_timeout_min(u64::from(minutes));

@@ -220,6 +220,11 @@ pub struct ServerConfig {
     /// Kronn or a smaller machine must still load.
     #[serde(default)]
     pub ollama_context_overrides: std::collections::HashMap<String, u64>,
+    /// KT-1529 — hard ceiling, in bytes, on one discussion message or initial
+    /// prompt. The everyday limit is derived from the target model's context
+    /// window; this is the safety net above every window (default: 4 MB).
+    #[serde(default = "default_max_prompt_bytes")]
+    pub max_prompt_bytes: usize,
     /// User identity — displayed in messages and used for future multi-user
     #[serde(default)]
     pub pseudo: Option<String>,
@@ -392,6 +397,10 @@ fn default_max_agents() -> usize {
 }
 fn default_agent_stall_timeout() -> u32 {
     5
+}
+pub(crate) const DEFAULT_MAX_PROMPT_BYTES: usize = 4_000_000;
+fn default_max_prompt_bytes() -> usize {
+    DEFAULT_MAX_PROMPT_BYTES
 }
 // 240, raised from 120 (KT-403): a hard task on a locally-served 27B measured
 // at ~2 h 40 of honest work. The old ceiling existed to stop hung runs from
