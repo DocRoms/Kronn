@@ -744,7 +744,7 @@ The step's output envelope exposes `data = { child_run_id, child_workflow_id, ch
 | `delegate_subtasks.parent_task` | string | **REQUIRED.** Parent task reference or id, templated. |
 | `delegate_subtasks.worker_map` | object | `{ key: { agent, tier?, model? } }` matched against `worker:<key>` subtask tags. This or `default_worker` is required. |
 | `delegate_subtasks.default_worker` | object | `{ agent, tier?, model? }` for untagged subtasks. |
-| `delegate_subtasks.concurrency` / `max_review_rounds` | number | 1-8 (default 1) / 1-10 (default 3). |
+| `delegate_subtasks.concurrency` / `max_review_rounds` | number | 1-8 (default 1) / 1-10 (default: Settings > Workers, 5 out of the box). |
 | `delegate_subtasks.validations` | array | `[{ command, timeout_secs? }]` run on each approved candidate. |
 | `delegate_subtasks.target_branch` / `timeout_secs` | string / number | Default: the run's branch / 21600. |
 

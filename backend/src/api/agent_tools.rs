@@ -1298,7 +1298,8 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "worker": {"type": "object", "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier."},
                 "worker_scope_intent": {"type": "string", "enum": ["generic", "scoped"], "description": "Required sentinel proving the current tool contract was transported. scoped requires worker_scope; generic forbids it."},
                 "worker_scope": worker_scope_schema.clone(),
-                "validations": validations_schema("Optional: the gates you will launch with. A command that could never run (shell syntax, a binary off the allowlist) makes launchable false, with the form that runs.")
+                "validations": validations_schema("Optional: the gates you will launch with. A command that could never run (shell syntax, a binary off the allowlist) makes launchable false, with the form that runs."),
+                "max_review_rounds": max_review_rounds_schema()
             }),
             json!(["task_reference", "worker", "worker_scope_intent"]),
         ),
@@ -1312,7 +1313,8 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "worker_scope": worker_scope_schema,
                 "base_rev": {"type": "string"},
                 "idempotency_key": {"type": "string"},
-                "validations": validations_schema("Principal-owned mechanical gates run on the candidate before integration. Never read from the worker's own manifest. Refused at launch when a command could never run.")
+                "validations": validations_schema("Principal-owned mechanical gates run on the candidate before integration. Never read from the worker's own manifest. Refused at launch when a command could never run."),
+                "max_review_rounds": max_review_rounds_schema()
             }),
             json!(["task_reference", "worker", "worker_scope_intent"]),
         ),
@@ -1360,11 +1362,46 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "task_execution_id": {"type": "string"},
                 "worker": {"type": "object", "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier — the same object agent_list hands back and task_exec_prepare/task_exec_launch accept as worker."},
                 "validations": validations_schema("The COMPLETE new set of gates (it replaces, never merges); [] removes every gate."),
+                "extend_review_rounds": {"type": ["integer", "string"], "description": "Rounds to add, or \"unlimited\"."},
                 "reason": {"type": "string"}
             }),
             json!(["task_execution_id", "reason"]),
         ),
     ]
+}
+
+/// `max_review_rounds` of `task_exec_prepare` / `task_exec_launch`.
+fn max_review_rounds_schema() -> Value {
+    json!({"type": ["integer", "string"], "description": "1-1000 or \"unlimited\"."})
+}
+
+/// The names a native orchestration tool declares. An argument outside them is
+/// refused, not ignored: a silently dropped `target_ref` once launched on `main`.
+fn unknown_argument_refusal(call: &ToolCall) -> Option<String> {
+    let catalogue = orchestration_tool_catalogue();
+    let declared = catalogue
+        .iter()
+        .find(|tool| tool["function"]["name"] == call.name.as_str())?["function"]["parameters"]
+        ["properties"]
+        .as_object()?
+        .clone();
+    let unknown: Vec<&str> = call
+        .arguments
+        .as_object()?
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !declared.contains_key(*key))
+        .collect();
+    (!unknown.is_empty()).then(|| {
+        let mut allowed: Vec<&str> = declared.keys().map(String::as_str).collect();
+        allowed.sort_unstable();
+        format!(
+            "unknown argument(s) {}: {} accepts only {}",
+            unknown.join(", "),
+            call.name,
+            allowed.join(", ")
+        )
+    })
 }
 
 /// Backend-owned continuations for native HTTP agents. A command can only be
@@ -2767,9 +2804,26 @@ impl KronnToolExecutor {
                 }
             }
             "task_exec_prepare" => {
+                if let Some(refusal) = unknown_argument_refusal(call) {
+                    return fail(call, refusal);
+                }
                 let Some(task_reference) = required_string(call, "task_reference") else {
                     return fail(call, "missing required field `task_reference`");
                 };
+                let rounds_refusal = match max_review_rounds_argument(call) {
+                    Ok(_) => None,
+                    Err(detail) => Some(crate::models::CampaignTaskReason {
+                        code: "invalid_max_review_rounds".into(),
+                        detail,
+                    }),
+                };
+                let default_rounds = self
+                    .state
+                    .config
+                    .read()
+                    .await
+                    .workers
+                    .effective_max_review_rounds();
                 let worker = match serde_json::from_value::<crate::models::MessageTarget>(
                     call.arguments["worker"].clone(),
                 ) {
@@ -2802,7 +2856,12 @@ impl KronnToolExecutor {
                             &parent,
                             &worker,
                         )?;
-                        for reason in [scope_refusal, validations_refusal].into_iter().flatten() {
+                        preparation.default_max_review_rounds =
+                            Some(crate::models::review_limit_json(default_rounds));
+                        for reason in [scope_refusal, validations_refusal, rounds_refusal]
+                            .into_iter()
+                            .flatten()
+                        {
                             preparation.launchable = false;
                             preparation.reasons.push(reason);
                         }
@@ -2820,8 +2879,15 @@ impl KronnToolExecutor {
                 }
             }
             "task_exec_launch" => {
+                if let Some(refusal) = unknown_argument_refusal(call) {
+                    return fail(call, refusal);
+                }
                 let Some(task_reference) = required_string(call, "task_reference") else {
                     return fail(call, "missing required field `task_reference`");
+                };
+                let max_review_rounds = match max_review_rounds_argument(call) {
+                    Ok(rounds) => rounds,
+                    Err(detail) => return fail(call, detail),
                 };
                 let worker = match serde_json::from_value::<crate::models::MessageTarget>(
                     call.arguments["worker"].clone(),
@@ -2883,8 +2949,8 @@ impl KronnToolExecutor {
                     Ok(None) => Vec::new(),
                     Err(error) => return fail(call, error),
                 };
-                match crate::api::orchestration::provision_single_task_execution_with_scope_and_validations(
-                    &self.state.db,
+                match crate::api::orchestration::provision_single_task_execution_with_options(
+                    &self.state,
                     crate::api::orchestration::ProvisionInput {
                         task_reference,
                         parent_discussion_id: discussion_id,
@@ -2894,6 +2960,7 @@ impl KronnToolExecutor {
                     },
                     worker_scope,
                     validations,
+                    crate::api::orchestration::SingleTaskLaunchOptions { max_review_rounds },
                 )
                 .await
                 {
@@ -3107,6 +3174,9 @@ impl KronnToolExecutor {
                 unwrap_api(call, response.success, response.data, response.error)
             }
             "task_exec_reassign" => {
+                if let Some(refusal) = unknown_argument_refusal(call) {
+                    return fail(call, refusal);
+                }
                 let Some(execution_id) = required_string(call, "task_execution_id") else {
                     return fail(call, "missing required field `task_execution_id`");
                 };
@@ -3143,11 +3213,14 @@ impl KronnToolExecutor {
                     Ok(validations) => validations,
                     Err(error) => return fail(call, error),
                 };
-                let amendment =
-                    match crate::api::orchestration::execution_amendment(target, validations) {
-                        Ok(amendment) => amendment,
-                        Err(refusal) => return fail(call, refusal),
-                    };
+                let amendment = match crate::api::orchestration::execution_amendment(
+                    target,
+                    validations,
+                    call.arguments.get("extend_review_rounds"),
+                ) {
+                    Ok(amendment) => amendment,
+                    Err(refusal) => return fail(call, refusal),
+                };
                 let authorized = {
                     let execution_id = execution_id.clone();
                     let discussion_id = discussion_id.clone();
@@ -3191,6 +3264,28 @@ impl KronnToolExecutor {
                         )
                         .await;
                         unwrap_api(call, response.success, response.data, response.error)
+                    }
+                    crate::api::orchestration::ExecutionAmendment::ExtendReviewRounds(
+                        extension,
+                    ) => {
+                        let actor = crate::models::PlanningActor {
+                            kind: crate::models::PlanningActorKind::Agent,
+                            id: Some(self.actor_id.clone()),
+                            session_id: self.actor_session_id(),
+                            source_message_id: self.source_message_id.clone(),
+                        };
+                        match crate::api::orchestration::extend_execution_review_rounds(
+                            &self.state,
+                            &resolved_id,
+                            extension,
+                            &reason,
+                            actor,
+                        )
+                        .await
+                        {
+                            Ok(value) => ok(call, value),
+                            Err((_, message)) => fail(call, message),
+                        }
                     }
                     crate::api::orchestration::ExecutionAmendment::ReplaceValidations(
                         validations,
@@ -4136,6 +4231,12 @@ fn required_string(call: &ToolCall, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// `max_review_rounds` of a native launch: absent = Settings > Workers default;
+/// an integer or `"unlimited"`; anything else (including `null`) is refused.
+fn max_review_rounds_argument(call: &ToolCall) -> Result<Option<u32>, String> {
+    crate::api::orchestration::review_rounds_argument(call.arguments.get("max_review_rounds"))
+}
+
 /// The `validations` argument of a principal tool, structure only. `None` is a
 /// genuinely ABSENT field; an explicit `null` is refused, never read as "no
 /// gates". Whether a command can run is decided by
@@ -4497,6 +4598,12 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              agent_list, `worker_scope_intent` (`generic`, or `scoped` with a `worker_scope`), and \
              optionally the `validations` you will launch with. Only `launchable: true` permits a \
              matching task_exec_launch.\n\n\
+             **Review rounds** — `max_review_rounds` (prepare and launch) is the number of \
+             `request_changes` rounds before the execution escalates: an integer from 1 to 1000 \
+             or `\"unlimited\"` (no cap; a looping review burns tokens until a stall or a \
+             campaign `token_budget` stops it). Omitted, it takes Settings > Workers (default 5), which \
+             prepare reports as `default_max_review_rounds`. Anything else, and any argument \
+             the tool does not declare, is refused.\n\n\
              **Validations** — `[{command, quick_exec_id?, timeout_secs?}]` are YOUR mechanical \
              gates: Kronn runs them on the candidate at integration, after review, and never \
              reads them from the worker's manifest. They are NOT run by a shell. Each `command` \
@@ -4531,9 +4638,18 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
         ),
         (
             "task_exec_reassign",
-            "Principal-only, and ONE change per call: pass either a `worker` or `validations`, \
-             never both and never neither. Room, worktree, attempts and evidence are kept \
-             either way.\n\n\
+            "Principal-only, and ONE change per call: pass a `worker`, `validations` or \
+             `extend_review_rounds`, never several and never none. Room, worktree, attempts \
+             and evidence are kept either way.\n\n\
+             **`extend_review_rounds`** raises the execution's review-round limit: the number of \
+             rounds to ADD (1 to 1000), or `\"unlimited\"` for no cap (tokens keep burning on a \
+             review that never converges; a campaign `token_budget` still stops it). Use it when \
+             `task_exec_status` shows the rounds at their limit and the findings are real bugs \
+             to fix, instead of an escalation then a reassignment. A `reason` is required and \
+             journaled. On an execution the limit already escalated, the stored findings are \
+             posted to its worker and it is re-offered to the SAME worker, unless the \
+             campaign's `token_budget` is spent (`stop_reason: token_budget_exhausted`, nothing \
+             is scheduled).\n\n\
              **`worker`** reassigns a blocked, interrupted or awaiting-review execution (a \
              pending delivery is rejected and stays in the attempt history). Pass the flat typed \
              MessageTarget copied from `agent_list`, never the internal \

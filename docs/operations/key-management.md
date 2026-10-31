@@ -277,7 +277,7 @@ all back, so local MCP secrets are never lost to a half import. GitHub
 connections are not exported; those of projects that come back by id are
 kept (the `projects` cascade no longer drops their tokens), and the report
 counts the ones whose project is gone.
-[src: file: backend/src/api/setup.rs:2307-2455#import_clear_statements]
+[src: file: backend/src/api/setup.rs:2341-2489#import_clear_statements]
 [src: file: backend/src/db/github_connections.rs:84-107#restore_rows]
 
 ## Reset

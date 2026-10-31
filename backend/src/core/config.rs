@@ -787,6 +787,7 @@ pub fn default_config() -> AppConfig {
         embed_allowed_origins: Vec::new(),
         audit_reverify_cron: None,
         audit_briefing_docs: false,
+        workers: Default::default(),
     }
 }
 

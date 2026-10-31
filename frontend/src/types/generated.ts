@@ -720,7 +720,11 @@ stt_model?: string | null,
  * Persistent TTS voice choices, keyed by output language code
  * ("fr" → "voice-id-fr", "en" → "voice-id-en", …).
  */
-tts_voices?: Record<string, string>, disabled_agents: Array<AgentType>, };
+tts_voices?: Record<string, string>, disabled_agents: Array<AgentType>,
+/**
+ * KT-1345 — task-worker policy (Settings > Workers).
+ */
+workers: WorkersConfig, };
 
 /**
  * Compact lint feedback echoed to the POSTING agent (tool result), so it can
@@ -2916,7 +2920,8 @@ default_worker?: DelegateWorker,
  */
 concurrency?: number,
 /**
- * Review rounds per subtask before it escalates. Default 3, maximum 10.
+ * Review rounds per subtask before it escalates. Maximum 10; unset uses
+ * Settings > Workers (default 5, or unlimited).
  */
 max_review_rounds?: number,
 /**
@@ -10159,7 +10164,13 @@ export type TaskExecutionPreparation = { task: PlanningTaskDetail, parent_discus
 /**
  * Shown before launch without blocking it.
  */
-warnings?: Array<CampaignTaskReason>, active_execution: TaskExecution | null, };
+warnings?: Array<CampaignTaskReason>, active_execution: TaskExecution | null,
+/**
+ * KT-1345 — the review-round limit this launch gets when it passes no
+ * `max_review_rounds`: an integer, or `"unlimited"`. Filled by the entry
+ * points that hold the config (the preflight reads it, creates nothing).
+ */
+default_max_review_rounds?: number | "unlimited" | undefined, };
 
 export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode, };
 
@@ -11409,6 +11420,25 @@ export type WorkerConnectivityState = "verified" | "unreachable" | "unverified";
  * migration CHECK stay in lockstep.
  */
 export type WorkerOfferStatus = "pending" | "accepting" | "accepted" | "declined" | "expired" | "cancelled";
+
+/**
+ * KT-1345 — Settings > Workers. The review-round limit every launch path
+ * starts from (campaign dialog, single-task MCP launch, delegated subtasks);
+ * each launch may still carry its own. Two fields rather than an optional
+ * integer so that unticking « Unlimited » gives the previous number back.
+ */
+export type WorkersConfig = {
+/**
+ * Review rounds a task execution may use before it escalates (min 1).
+ * Ignored while `review_rounds_unlimited` is set.
+ */
+default_max_review_rounds: number,
+/**
+ * No round cap. Stalls (no delivery, watchdog) still escalate and a
+ * `token_budget`, when set, still stops the run; the cost is tokens spent
+ * on a review that may never converge.
+ */
+review_rounds_unlimited: boolean, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

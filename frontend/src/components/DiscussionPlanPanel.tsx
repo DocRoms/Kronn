@@ -39,6 +39,7 @@ import { TaskCampaignPanel } from './TaskCampaignPanel';
 import { TaskDescription } from './TaskDescription';
 import { TaskAssigneeChips, TaskAssigneePicker } from './TaskAssignees';
 import { TaskExecutionCard } from './TaskExecutionCard';
+import { ExtendReviewRoundsForm } from './ExtendReviewRoundsForm';
 import { TaskLaunchDialog } from './TaskLaunchDialog';
 import { orchestrationResolution } from './taskLaunchResolution';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
@@ -124,6 +125,7 @@ export function DiscussionPlanPanel({
   const [reviewComment, setReviewComment] = useState('');
   const [confirmStop, setConfirmStop] = useState(false);
   const [reassignOpen, setReassignOpen] = useState(false);
+  const [extendOpen, setExtendOpen] = useState(false);
   const [reassignAgent, setReassignAgent] = useState<AgentType>('Codex');
   const [reassignModel, setReassignModel] = useState('');
   const selectedTaskIdRef = useRef<string | null>(initialPanelState.selectedTaskId);
@@ -326,6 +328,7 @@ export function DiscussionPlanPanel({
       setReviewComment('');
       setConfirmStop(false);
       setReassignOpen(false);
+      setExtendOpen(false);
       await refresh(true);
     } catch (cause) {
       setActionError(userError(cause));
@@ -1044,6 +1047,7 @@ export function DiscussionPlanPanel({
                 setReassignModel(execution?.worker_model ?? '');
                 setReassignOpen(true);
               }}
+              onExtendRounds={() => setExtendOpen(true)}
               onApprove={openApproval}
               onRequestChanges={() => setRequestChangesOpen(true)}
             />
@@ -1136,6 +1140,20 @@ export function DiscussionPlanPanel({
                   </button>
                 </div>
               </div>
+            )}
+            {extendOpen && executionDetail && (
+              <ExtendReviewRoundsForm
+                t={t}
+                reviewRounds={executionDetail.lineage.execution.review_rounds}
+                maxReviewRounds={executionDetail.lineage.execution.max_review_rounds}
+                busy={Boolean(actionBusy)}
+                onCancel={() => setExtendOpen(false)}
+                onConfirm={extend => void runExecutionAction('extend', () => orchestration.extendReviewRounds(
+                  executionDetail.lineage.execution.id,
+                  extend,
+                  'Limite de tours relevée depuis le panneau d’orchestration',
+                ))}
+              />
             )}
             {reassignOpen && (
               <div className="orch-inline-action" role="dialog" aria-label={t('orch.exec.reassign')}>

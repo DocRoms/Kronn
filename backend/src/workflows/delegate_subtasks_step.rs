@@ -37,7 +37,6 @@ use super::template::TemplateContext;
 const DISCUSSION_PREFIX: &str = "wf-delegate-";
 const DEFAULT_CONCURRENCY: u32 = 1;
 pub(crate) const MAX_CONCURRENCY: u32 = 8;
-const DEFAULT_REVIEW_ROUNDS: u32 = 3;
 pub(crate) const MAX_REVIEW_ROUNDS: u32 = 10;
 const DEFAULT_TIMEOUT_SECS: u64 = 6 * 3600;
 /// Between two reads of the durable state when nothing moved. An SQL read,
@@ -618,10 +617,17 @@ async fn owner_campaign(
         .concurrency
         .unwrap_or(DEFAULT_CONCURRENCY)
         .clamp(1, MAX_CONCURRENCY);
-    input.max_review_rounds = config
-        .max_review_rounds
-        .unwrap_or(DEFAULT_REVIEW_ROUNDS)
-        .clamp(1, MAX_REVIEW_ROUNDS);
+    // KT-1345 — a step that does not set it uses Settings > Workers.
+    input.max_review_rounds = match config.max_review_rounds {
+        Some(rounds) => rounds.clamp(1, MAX_REVIEW_ROUNDS),
+        None => delegation
+            .state
+            .config
+            .read()
+            .await
+            .workers
+            .effective_max_review_rounds(),
+    };
     input.validations = config.validations.clone();
     let task_ids: Vec<String> = subtasks.iter().map(|task| task.id.clone()).collect();
     let discussion_id = discussion_id.to_string();

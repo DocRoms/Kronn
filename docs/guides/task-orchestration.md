@@ -135,10 +135,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:9114-9118#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:9168-9217#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:7821-7845#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:33540-33641#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:9271-9275#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:9293-9342#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:7919-7943#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:34004-34105#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -146,7 +146,7 @@ human turn. Removing that allowance explicitly does not remove structural
 guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
-[src: file: backend/src/models/setup.rs:298-314#agent_handoff_paid_limit]
+[src: file: backend/src/models/setup.rs:387-403#agent_handoff_paid_limit]
 [src: file: backend/src/db/discussions.rs:1687-1688#MAX_AGENT_HANDOFF_DEPTH]
 [src: file: backend/src/db/discussions.rs:1693-1728#agent_handoff_root]
 [src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
@@ -337,10 +337,10 @@ the Planning page is not checked.
 
 **Stop** cancels live dispatch and always keeps the child branch with its
 commits. What happens to the child worktree is the campaign's
-`cancellation_cleanup_policy`, which defaults to `remove_if_clean` [src: file: backend/src/api/orchestration.rs:9408]:
+`cancellation_cleanup_policy`, which defaults to `remove_if_clean` [src: file: backend/src/api/orchestration.rs:9483]:
 a clean worktree is removed (its provenance is kept), while one with
 uncommitted work, or whose removal Git refuses, is preserved
-[src: file: backend/src/api/orchestration.rs:10846]. Set the policy to
+[src: file: backend/src/api/orchestration.rs:10929]. Set the policy to
 `preserve` to keep the worktree whatever its state. Stop does not force-delete
 local work. It never changes the task's
 status (KT-1267): an `in_progress` or `done` task stays so, because the work may
