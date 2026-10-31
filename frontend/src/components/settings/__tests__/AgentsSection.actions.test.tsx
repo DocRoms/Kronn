@@ -746,7 +746,9 @@ describe('AgentsSection — observed model costs', () => {
     });
     openAgentConfig('ClaudeCode');
 
-    await waitFor(() => expect(usageGetMock).toHaveBeenCalledWith('monthly'));
+    // The per-model average reads the whole history: the default window of the
+    // Usage card (current month only) would empty it at the start of a month.
+    await waitFor(() => expect(usageGetMock).toHaveBeenCalledWith('monthly', { history: true }));
     for (const tier of ['economy', 'default', 'reasoning']) {
       const picker = await screen.findByLabelText(`disc.modelTier ${tier}`);
       fireEvent.focus(picker);

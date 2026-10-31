@@ -4,14 +4,13 @@
  * Pins the UX fixes that followed the first live smoke:
  *   - formatPeriod: ccusage stamps only a bucket *start*, so weekly must render
  *     a `start → end` range and monthly a localised month (daily passes through)
- *   - pagination: the recent-periods table is capped at ROWS_PER_PAGE per page,
- *     Next advances to older rows, and switching period resets to page 1
+ *   - the selector scopes the report: each period shows its own total (#270)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { UsageSection } from '../settings/UsageSection';
-import { formatPeriod, rowsPerPage } from '../settings/usageFormat';
+import { formatPeriod } from '../settings/usageFormat';
 import type { UsageReport, UsageRow } from '../../types/generated';
 
 const { getUsage } = vi.hoisted(() => ({ getUsage: vi.fn() }));
@@ -21,14 +20,6 @@ vi.mock('../../lib/api', () => ({
   config: { getUiLanguage: vi.fn().mockResolvedValue('en') },
 }));
 
-// Local date stepper (the component's addDaysISO is internal) — handles the
-// May→June rollover so 35 consecutive daily buckets are valid ISO dates.
-function iso(start: string, offset: number): string {
-  const d = new Date(`${start}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + offset);
-  return d.toISOString().slice(0, 10);
-}
-
 function row(period: string): UsageRow {
   return {
     period, agent: 'all', models_used: [], model_breakdowns: [],
@@ -36,13 +27,13 @@ function row(period: string): UsageRow {
     cache_read_tokens: 0, total_tokens: 2, total_cost: 0.5,
   };
 }
-function report(period_kind: string, periods: string[]): UsageReport {
+function report(period_kind: string, periods: string[], total_cost = 0): UsageReport {
   return {
     period_kind,
     rows: periods.map(row),
     totals: {
       input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0,
-      cache_read_tokens: 0, total_tokens: 0, total_cost: 0,
+      cache_read_tokens: 0, total_tokens: 0, total_cost,
     },
     agents_detected: ['claude'],
   };
@@ -72,46 +63,39 @@ describe('formatPeriod', () => {
   });
 });
 
-describe('rowsPerPage', () => {
-  it('pages a meaningful span per bucket (≈month / quarter+ / year)', () => {
-    expect(rowsPerPage('daily')).toBe(30);
-    expect(rowsPerPage('weekly')).toBe(15);
-    expect(rowsPerPage('monthly')).toBe(12);
-    expect(rowsPerPage('unknown')).toBe(30); // safe default
+describe('UsageSection period scope', () => {
+  it('shows a different total for each period (#270)', async () => {
+    // ccusage used to return the all-time total whatever the period.
+    getUsage.mockImplementation(async (period: string) => ({
+      daily: report('daily', ['2026-10-27'], 3.7),
+      weekly: report('weekly', ['2026-10-26'], 44.5),
+      monthly: report('monthly', ['2026-10'], 874.06),
+    })[period]);
+
+    await act(async () => {
+      render(<I18nProvider><UsageSection /></I18nProvider>);
+    });
+    await waitFor(() => expect(screen.getByTestId('usage-total-cost').textContent).toBe('$3.70'));
+
+    fireEvent.click(screen.getByTestId('usage-period-weekly'));
+    await waitFor(() => expect(screen.getByTestId('usage-total-cost').textContent).toBe('$44.50'));
+
+    fireEvent.click(screen.getByTestId('usage-period-monthly'));
+    await waitFor(() => expect(screen.getByTestId('usage-total-cost').textContent).toBe('$874.06'));
+
+    expect(getUsage.mock.calls.map(call => call[0])).toEqual(['daily', 'weekly', 'monthly']);
   });
-});
 
-describe('UsageSection pagination', () => {
-  it('caps the daily table at rowsPerPage and pages to older rows', async () => {
-    const perPage = rowsPerPage('daily'); // 30
-    const total = perPage + 5; // 35 → 2 pages
-    // ISO dates from 2026-05-01 onward (35 consecutive days, crosses into June).
-    const days = Array.from({ length: total }, (_, i) => iso('2026-05-01', i));
-    getUsage.mockResolvedValue(report('daily', days));
-
+  it('lists the rows of the report newest first, with no pager', async () => {
+    getUsage.mockResolvedValue(report('daily', ['2026-05-26', '2026-05-27']));
     await act(async () => {
       render(<I18nProvider><UsageSection /></I18nProvider>);
     });
     await openDetails();
 
-    const firstCell = () => screen.getByTestId('usage-table').querySelector('tbody tr td')!.textContent;
-    expect(screen.getAllByRole('row').length - 1).toBe(perPage); // minus header
-    expect(screen.getByTestId('usage-page-indicator').textContent).toBe(`1 / ${Math.ceil(total / perPage)}`);
-    expect(firstCell()).toBe(days[total - 1]); // newest first
-
-    fireEvent.click(screen.getByTestId('usage-next-page'));
-    expect(screen.getByTestId('usage-page-indicator').textContent).toBe(`2 / ${Math.ceil(total / perPage)}`);
-    // page 2 starts at the (perPage+1)-th newest row
-    expect(firstCell()).toBe(days[total - 1 - perPage]);
-    expect(screen.getAllByRole('row').length - 1).toBe(total - perPage); // remainder
-  });
-
-  it('hides the pager when rows fit on a single page', async () => {
-    getUsage.mockResolvedValue(report('daily', ['2026-05-27', '2026-05-26']));
-    await act(async () => {
-      render(<I18nProvider><UsageSection /></I18nProvider>);
-    });
-    await openDetails();
+    const cells = [...screen.getByTestId('usage-table').querySelectorAll('tbody tr td:first-child')]
+      .map(c => c.textContent);
+    expect(cells).toEqual(['2026-05-27', '2026-05-26']);
     expect(screen.queryByTestId('usage-pager')).toBeNull();
   });
 

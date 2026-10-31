@@ -1029,6 +1029,11 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The Usage selector in Settings now scopes the report: Today, This week
+  and This month each show the spend of the current day, week or month. The
+  total used to be the whole history whatever the selector said (#270). The
+  detail table lists that period only, so its pager is gone. The Agents tab
+  still averages each model's cost over the whole history.
 - A skill imported with a workflow or a Page never pre-approves tools: its
   `allowed-tools` is dropped on import, whoever imports it, and an import
   whose skill still declares tools after that is refused. A human sets it
