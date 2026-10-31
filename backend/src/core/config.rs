@@ -691,6 +691,7 @@ pub fn default_config() -> AppConfig {
             agent_global_timeout_min: crate::models::DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN,
             local_agent_global_timeout_min: crate::models::DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN,
             ollama_context_overrides: std::collections::HashMap::new(),
+            max_prompt_bytes: crate::models::setup::DEFAULT_MAX_PROMPT_BYTES,
             pseudo: None,
             avatar_email: None,
             bio: None,
