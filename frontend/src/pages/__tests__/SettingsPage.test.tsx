@@ -225,9 +225,18 @@ const sampleAgent: AgentDetection = {
   runtime_available: false, rtk_available: false, rtk_hook_configured: false,
 };
 
+// The server config is the one a spec may replace for itself; the next spec
+// reads the shared default again.
+const defaultServerConfig = (configApi.getServerConfig as ReturnType<typeof vi.fn>).getMockImplementation();
+
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  // Reset first: `mockImplementation` alone leaves unconsumed `...Once` outcomes
+  // queued for the next spec.
+  const getServerConfig = configApi.getServerConfig as ReturnType<typeof vi.fn>;
+  getServerConfig.mockReset();
+  getServerConfig.mockImplementation(defaultServerConfig!);
 });
 
 it('confirms and re-arms only the provider reported as quota-blocked', async () => {

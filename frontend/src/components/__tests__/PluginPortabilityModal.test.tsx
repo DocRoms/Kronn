@@ -129,6 +129,8 @@ const plainImportPreview = (over: Record<string, unknown> = {}) => ({
 
 describe('PluginPortabilityModal', () => {
   beforeEach(() => {
+    // Call history must not carry over from the spec that ran before.
+    mocks.updateConfig.mockReset();
     mocks.previewImportBundle.mockReset();
     mocks.previewImportBundle.mockResolvedValue(plainImportPreview());
   });

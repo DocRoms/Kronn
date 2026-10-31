@@ -79,6 +79,8 @@ function pageAction(pageId: string, actionRef: string, overrides: Partial<LivePa
 const anchor = { left: 12, top: 16, width: 90, height: 24 };
 
 beforeEach(() => {
+  // Call history must not carry over from the spec that ran before.
+  vi.clearAllMocks();
   relays.length = 0;
   vi.mocked(pagesApi.get).mockImplementation(async pageId => details[pageId]);
   vi.mocked(pagesApi.actions).mockResolvedValue([]);

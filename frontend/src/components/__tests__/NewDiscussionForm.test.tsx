@@ -1554,6 +1554,12 @@ describe('NewDiscussionForm — pre-launch agent check (KT-1107)', () => {
     await act(async () => { fireEvent.click(create); });
   };
 
+  // Reset on both sides: calls recorded by another describe that ran first must
+  // not count here, and nothing here may leak out.
+  beforeEach(async () => {
+    (await readinessMock()).mockReset().mockResolvedValue([]);
+  });
+
   afterEach(async () => {
     (await readinessMock()).mockReset().mockResolvedValue([]);
   });

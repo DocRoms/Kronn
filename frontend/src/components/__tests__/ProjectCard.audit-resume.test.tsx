@@ -101,6 +101,10 @@ function renderCard(onRefetch = noop, detailMode = false, externalAuditLive = fa
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
+  // A spec that reports an audit or a history must not leave it for the next:
+  // put both back to what the shared API mock declares.
+  vi.mocked(projectsApi.auditStatus).mockReset().mockResolvedValue(null);
+  vi.mocked(projectsApi.auditHistory).mockReset().mockResolvedValue([]);
   vi.useFakeTimers();
 });
 

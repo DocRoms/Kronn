@@ -235,6 +235,8 @@ describe('DebugSection — actions', () => {
     });
     renderCard();
     await waitFor(() => expect(debugApi.getLogs).toHaveBeenCalled());
+    // The request is made on mount, the lines arrive after it: copy only what is shown.
+    await waitFor(() => expect(screen.getByText(/line1/)).toBeDefined());
 
     const copyBtn = screen.getByText(/settings\.debugLogsCopy/);
     await act(async () => { fireEvent.click(copyBtn); });

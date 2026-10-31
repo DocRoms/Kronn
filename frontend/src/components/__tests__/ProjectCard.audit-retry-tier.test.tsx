@@ -91,6 +91,8 @@ const launches = () => vi.mocked(projectsApi.fullAuditStream).mock.calls.map(cal
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
+  // The connection list is whatever the previous spec left it: back to none.
+  vi.mocked(externalApi.list).mockReset().mockResolvedValue([]);
   vi.mocked(projectsApi.auditStatus).mockResolvedValue(null);
   vi.mocked(projectsApi.auditResumable).mockResolvedValue(RESUMABLE);
   vi.mocked(projectsApi.auditTimeline).mockResolvedValue({

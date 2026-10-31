@@ -50,6 +50,8 @@ describe('UnsafeStepsPanel', () => {
     unsafeSteps.mockReset();
     readiness.mockReset();
     readiness.mockResolvedValue(null);
+    // A call recorded by one spec must not satisfy or break the next.
+    activateQuickExec.mockReset();
   });
 
   it('renders nothing when every step is safe', async () => {

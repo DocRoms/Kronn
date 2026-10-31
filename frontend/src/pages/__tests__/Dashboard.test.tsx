@@ -106,6 +106,9 @@ import { Dashboard } from '../Dashboard';
 import type { DiscussionListItem, Project } from '../../types/generated';
 
 beforeEach(() => {
+  // The lists a spec feeds the page must not outlive it: back to empty.
+  vi.mocked(projectsApi.list).mockReset().mockResolvedValue([]);
+  vi.mocked(discussionsApi.list).mockReset().mockResolvedValue([]);
   vi.useFakeTimers({ shouldAdvanceTime: true });
   Object.defineProperty(window, 'matchMedia', {
     writable: true,

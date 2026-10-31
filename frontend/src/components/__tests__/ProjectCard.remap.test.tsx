@@ -73,7 +73,12 @@ function renderCard(p: Project, { isOpen = false, onRefetch = vi.fn() } = {}) {
 }
 
 describe('ProjectCard — remap banner', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // A spec that makes a call fail must not leave it failing for the next.
+    vi.mocked(projectsApi.remapPath).mockReset().mockResolvedValue(undefined as never);
+    vi.mocked(projectsApi.cloneAndRemap).mockReset().mockResolvedValue({ project_id: '', new_path: '' } as never);
+  });
 
   it('renders the banner when path_exists === false, even on a collapsed card', () => {
     renderCard(project(), { isOpen: false });

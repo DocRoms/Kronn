@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { useState } from 'react';
 import { render, screen, act, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
@@ -15,24 +15,37 @@ import { readAutomationLastVisit } from '../../lib/automationNavigation';
 import type { AgentsConfig, QuickApi, QuickExec, QuickPrompt, Skill, Workflow, WorkflowSummary } from '../../types/generated';
 
 const mockWorkflowsApi = vi.hoisted(() => ({
-  list: vi.fn().mockResolvedValue([]),
+  list: vi.fn(),
   get: vi.fn(),
   create: vi.fn(),
   update: vi.fn(),
   delete: vi.fn(),
   trigger: vi.fn(),
-  listRuns: vi.fn().mockResolvedValue([]),
-  countRuns: vi.fn().mockResolvedValue(0),
+  listRuns: vi.fn(),
+  countRuns: vi.fn(),
   getRun: vi.fn(),
   deleteRun: vi.fn(),
   deleteAllRuns: vi.fn(),
-  cancelRun: vi.fn().mockResolvedValue({ run_cancelled: true, child_discs_cancelled: 0 }),
+  cancelRun: vi.fn(),
   triggerStream: vi.fn(),
   importWorkflow: vi.fn(),
-  previewImport: vi.fn().mockResolvedValue({ skills: [], missing_skills: [] }),
-  autoDisabled: vi.fn().mockResolvedValue([]),
-  reenable: vi.fn().mockResolvedValue([]),
+  previewImport: vi.fn(),
+  autoDisabled: vi.fn(),
+  reenable: vi.fn(),
 }));
+
+// The one place the default resolved values live: applied once when the mock is
+// declared and again before every spec, so the two can never drift apart.
+const applyWorkflowsApiDefaults = vi.hoisted(() => () => {
+  mockWorkflowsApi.list.mockResolvedValue([]);
+  mockWorkflowsApi.listRuns.mockResolvedValue([]);
+  mockWorkflowsApi.countRuns.mockResolvedValue(0);
+  mockWorkflowsApi.cancelRun.mockResolvedValue({ run_cancelled: true, child_discs_cancelled: 0 });
+  mockWorkflowsApi.previewImport.mockResolvedValue({ skills: [], missing_skills: [] });
+  mockWorkflowsApi.autoDisabled.mockResolvedValue([]);
+  mockWorkflowsApi.reenable.mockResolvedValue([]);
+});
+applyWorkflowsApiDefaults();
 
 // 0.8.2 — WorkflowsPage now uses useWebSocket() to listen for live
 // WorkflowRunUpdated events. Stub it to a no-op so the test runtime
@@ -192,6 +205,14 @@ const fullConfig: AgentsConfig = {
   nvidia: { path: null, installed: false, version: null, full_access: false },
   model_tiers: defaultModelTiers,
 };
+
+// The workflows mock is shared by every spec: a value or a call recorded by one
+// must not shape the next. Put it back to what it was declared with.
+beforeEach(() => {
+  vi.clearAllMocks();
+  for (const fn of Object.values(mockWorkflowsApi)) fn.mockReset();
+  applyWorkflowsApiDefaults();
+});
 
 afterEach(() => {
   cleanup();

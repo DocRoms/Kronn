@@ -1,5 +1,6 @@
 import '@testing-library/jest-dom/vitest';
 import { configure } from '@testing-library/react';
+import { afterEach } from 'vitest';
 
 // Unit tests must never fall through to happy-dom's real HTTP client. A missing
 // API mock previously opened requests to localhost:3000; Vitest then aborted
@@ -74,13 +75,12 @@ for (const name of ['localStorage', 'sessionStorage'] as const) {
   });
 }
 
-// NOT cleared between tests, and that is a known weakness rather than a
-// choice. A component that remembers a choice carries it into the next test,
-// which then passes or fails depending on what ran before it. Clearing here
-// is the right fix, but it currently breaks specs that rely on state a
-// PREVIOUS test wrote (the sidebar collapse suite seeds a group that the
-// contacts specs then read). Untangling those is its own change; until then,
-// a spec whose component persists a choice clears that key itself.
+// Cleared after every test so a persisted choice never leaks into the next
+// one. A spec that reads stored state seeds it explicitly.
+afterEach(() => {
+  localStorage.clear();
+  sessionStorage.clear();
+});
 
 // Unit tests exercise the synchronous `t()` API directly and intentionally
 // validate every shipped dictionary. Production preloads only the active locale

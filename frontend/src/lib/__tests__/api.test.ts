@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // We mock `fetch` globally to test the internal `api()` function behavior.
-beforeEach(() => {
+beforeEach(async () => {
   vi.stubGlobal('fetch', vi.fn());
+  // The base address is module state: a spec that points it somewhere must not
+  // decide the URLs the next one expects.
+  const { setApiBase } = await import('../api');
+  setApiBase('');
 });
 
 afterEach(() => {
