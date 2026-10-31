@@ -90,21 +90,20 @@
 }
 
 .live-pages-viewer-header {
-  display: flex;
   flex: 0 0 auto;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
   min-height: 42px;
-  gap: 10px 16px;
   margin: calc(-1 * var(--kr-sp-4)) calc(-1 * var(--kr-sp-4)) 0;
-  padding: 18px 20px;
-  border-radius: var(--kr-r-xl) var(--kr-r-xl) 0 0;
 }
 
 .live-pages-viewer-header h1 { margin: 0; font-size: var(--kr-fs-xl); }
 .live-pages-viewer-header span { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); }
-.live-pages-title-block { display: flex; flex: 1 1 280px; min-width: 0; flex-direction: column; gap: 4px; }
+.live-pages-viewer-header .disc-chat-header-details-toggle span { color: inherit; font-size: inherit; }
+/* The shared header's rows do not wrap (the discussion's chip strip scrolls);
+   this one's controls do, and its fold holds editors that open downwards. */
+.live-pages-viewer-header .disc-chat-header-sub { flex-wrap: wrap; row-gap: 4px; }
+.live-pages-viewer-header .disc-chat-header-details { flex-wrap: wrap; row-gap: 4px; overflow: visible; }
+.live-pages-viewer-header .disc-chat-header-details > * { flex: 0 0 auto; }
+.live-pages-viewer-header .disc-chat-header-details .live-page-slug-pill { flex: 0 1 auto; min-width: 0; }
 .live-pages-title-display { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .live-pages-title-display h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-pages-title-display button,
@@ -116,14 +115,10 @@
 .live-pages-title-editor button[type='submit'] { color: var(--kr-success); }
 .live-pages-title-editor button:disabled { cursor: not-allowed; opacity: .55; }
 .live-pages-title-editor small { grid-column: 1 / -1; color: var(--kr-danger); font-size: 11px; }
-.live-pages-identity,
 .live-pages-header-actions { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 6px; }
-.live-pages-identity { row-gap: 4px; }
-.live-pages-identity > * { flex: 0 0 auto; }
-.live-pages-identity .live-page-slug-pill { flex: 0 1 auto; min-width: 0; }
 .live-pages-id-pill { min-width: 0; max-width: 100%; }
 .live-pages-id-pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.live-pages-header-actions { position: relative; flex: 0 1 auto; justify-content: flex-end; }
+.live-pages-header-actions { position: relative; flex: 0 1 auto; justify-content: flex-start; }
 .live-pages-header-actions > * { flex: 0 0 auto; }
 .live-pages-header-actions :is(a, button, summary, .live-pages-revision) { white-space: nowrap; }
 .live-pages-open-tab {
@@ -376,14 +371,26 @@ a.live-pages-refresh-row:hover { background: var(--kr-bg-hover); }
   .live-pages-html-preview-diff > section + section { border-top: 1px solid var(--kr-border-subtle); border-left: 0; }
 }
 
-/* The header follows the viewer's own width, which the library sidebar narrows. */
-@container live-page-viewer (max-width: 720px) {
-  .live-pages-header-actions { width: 100%; justify-content: flex-start; }
-}
-@container live-page-viewer (max-width: 480px) {
-  .live-pages-viewer-header { padding: 14px; }
+/* The header follows the viewer's own width, which the library sidebar and the open
+   Sync panel narrow: the text labels fold to their icons (each keeps its aria-label)
+   and row 2 stays on one line instead of wrapping under the Details toggle. */
+@container live-page-viewer (max-width: 640px) {
   .live-pages-open-tab { width: 30px; justify-content: center; padding: 0; }
   .live-pages-open-tab-label { display: none; }
+  .live-pages-action-label { display: none; }
+  .live-pages-editor-toggle { width: 30px; padding: 0; }
+  .live-pages-export-menu summary { padding: 0 7px; }
+  .live-pages-viewer-header .disc-chat-header-sub { flex-wrap: nowrap; }
+  .live-pages-viewer-header .disc-chat-header-sub > .live-pages-header-actions { flex-wrap: nowrap; }
+}
+/* Below that the size figure goes too: the dataset count stays, its size is in the title. */
+@container live-page-viewer (max-width: 480px) {
+  .live-pages-data-size { display: none; }
+}
+/* A viewer this narrow cannot hold the whole row: wrap rather than overlap the Details toggle. */
+@container live-page-viewer (max-width: 360px) {
+  .live-pages-viewer-header .disc-chat-header-sub,
+  .live-pages-viewer-header .disc-chat-header-sub > .live-pages-header-actions { flex-wrap: wrap; }
 }
 
 /* Content-sized Page: the frame is as tall as its document and this shell scrolls it,

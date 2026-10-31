@@ -28,27 +28,26 @@ const renderSwitcher = (panels: SwitchablePanel[], onToggleColumn = vi.fn()) =>
     <DiscussionPanelSwitcher
       panels={panels}
       groupLabel="panels"
-      openLabel="open"
       closeLabel="close"
       onToggleColumn={onToggleColumn}
     />,
   );
 
 describe('DiscussionPanelSwitcher', () => {
-  it('stays a narrow strip while every panel is closed', () => {
+  it('renders nothing while every panel is closed', () => {
     renderSwitcher([panel({ id: 'plan' }), panel({ id: 'git' })]);
-    // The strip is always there — it holds the control that opens the column,
-    // and that control has to sit against the panel it opens. Only the panel
-    // icons wait for a panel to move away from.
-    expect(screen.getByTestId('panel-open-toggle')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'plan' })).toBeNull();
+    // No floating strip over the conversation: the way in is the discussion
+    // header's Details button, which opens the settings panel.
+    expect(screen.queryByTestId('panel-switcher')).toBeNull();
+    expect(screen.queryByTestId('panel-open-toggle')).toBeNull();
   });
 
-  it('opens the column from the strip, not from the discussion header', () => {
+  it('closes the column from the strip while a panel is open', () => {
     const onToggleColumn = vi.fn();
-    renderSwitcher([panel({ id: 'plan' })], onToggleColumn);
+    renderSwitcher([panel({ id: 'plan', active: true })], onToggleColumn);
     fireEvent.click(screen.getByTestId('panel-open-toggle'));
     expect(onToggleColumn).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('panel-open-toggle')).toHaveAttribute('aria-label', 'close');
   });
 
   it('shows the panel icons once one is open', () => {

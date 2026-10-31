@@ -271,18 +271,19 @@ async function openAutomationKind(kind: string) {
 }
 
 function revealCopyableIds() {
-  // On a narrow layout the discussion ID is inside ChatHeader's collapsed
-  // details disclosure. Open its real control before resolving this required
-  // anchor: otherwise the provider finds no discussion ID and skips the step.
+  // The discussion ID lives in the side panel's settings tab, behind the
+  // header's Details button. Open the panel through that real control before
+  // resolving this required anchor: otherwise the provider finds no
+  // discussion ID and skips the step.
   if (!document.querySelector('[data-tour-id="discussion-id-pill"]')) {
     document
       .querySelector<HTMLElement>(
-        '[data-testid="disc-header-details-toggle"][aria-expanded="false"]',
+        '[data-testid="disc-header-details-btn"][aria-expanded="false"]',
       )
       ?.click();
   }
 
-  // The discussion ID lives in the sticky header, while message IDs scroll with
+  // The discussion ID sits in the panel beside the transcript, while message IDs scroll with
   // the transcript. Bring the latest visible message header into view so the
   // tour can point at both concrete IDs at once.
   const messageIds = document.querySelectorAll<HTMLElement>(

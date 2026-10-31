@@ -8,6 +8,7 @@
 
 import { expect, test } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { openDiscussionPanel } from '../pages/DiscussionPanels';
 
 const title = `Portable discussion PW ${Date.now()}`;
 const createdIds = new Set<string>();
@@ -38,8 +39,7 @@ test('exports, imports and replays a discussion idempotently', async ({ page, re
   await dashboard.goto();
   await dashboard.openDiscussion(sourceId);
 
-  const panelRail = page.getByRole('group', { name: 'Panneaux de la discussion' });
-  await panelRail.getByRole('button', { name: 'Ouvrir les panneaux' }).click();
+  const panelRail = await openDiscussionPanel(page);
   const downloadPromise = page.waitForEvent('download');
   await panelRail.getByRole('button', { name: 'Exporter la discussion' }).click();
   const download = await downloadPromise;

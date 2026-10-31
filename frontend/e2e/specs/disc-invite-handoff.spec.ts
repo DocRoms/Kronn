@@ -9,6 +9,7 @@
 
 import { test, expect } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { openDiscussionPanel } from '../pages/DiscussionPanels';
 
 const title = `Invite handoff PW ${Date.now()}`;
 const taskTitle = `Plan focus PW ${Date.now()}`;
@@ -109,8 +110,7 @@ test('enriched handoff carries the plan and the task appears in Focus', async ({
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
   await dashboard.openDiscussion(discId);
-  const panelRail = page.getByRole('group', { name: 'Panneaux de la discussion' });
-  await panelRail.getByRole('button', { name: 'Ouvrir les panneaux' }).click();
+  const panelRail = await openDiscussionPanel(page, 'plan');
   await expect(panelRail.getByRole('button', { name: 'Fermer les panneaux' })).toBeVisible();
   await expect(page.locator('.plan-timeline-section[data-kind="upcoming"]')).toContainText(taskTitle);
 });

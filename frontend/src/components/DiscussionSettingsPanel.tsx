@@ -43,6 +43,7 @@ import type {
 import { ProfileTooltip } from './ProfileTooltip';
 import { DiscussionSkillPicker } from './DiscussionSkillPicker';
 import { DiscussionScopeSection } from './DiscussionScope';
+import { DiscussionDetailsSection } from './DiscussionDetailsSection';
 import './DiscussionToolPanel.css';
 import './DiscussionSettingsPanel.css';
 
@@ -56,10 +57,14 @@ interface Props {
   mcpIncompatibilities: McpIncompatibility[];
   contacts: Contact[];
   onClose: () => void;
+  /** The test-mode CTA the details section carries. */
+  onRequestTestMode?: () => void;
   onDiscussionUpdated: () => void;
   onShare: (contactIds: string[]) => void | Promise<void>;
   toast: ToastFn;
 }
+
+const noop = () => {};
 
 type ConfigSection = 'profiles' | 'skills' | 'directives' | null;
 
@@ -73,6 +78,7 @@ export function DiscussionSettingsPanel({
   mcpIncompatibilities,
   contacts,
   onClose,
+  onRequestTestMode,
   onDiscussionUpdated,
   onShare,
   toast,
@@ -227,7 +233,11 @@ export function DiscussionSettingsPanel({
   );
 
   return (
-    <aside className="disc-tool-panel disc-settings-panel" aria-label={t('disc.settingsPanel')}>
+    <aside
+      className="disc-tool-panel disc-settings-panel"
+      id="disc-settings-panel"
+      aria-label={t('disc.settingsPanel')}
+    >
       <header className="disc-tool-panel-header">
         <div className="disc-tool-panel-title">
           <Settings size={15} />
@@ -261,6 +271,15 @@ export function DiscussionSettingsPanel({
           </div>
           {agentCollaborationControl}
         </section>
+
+        <DiscussionDetailsSection
+          discussion={discussion}
+          projects={projects}
+          onRequestTestMode={onRequestTestMode ?? noop}
+          onDiscussionUpdated={onDiscussionUpdated}
+          toast={toast}
+          t={t}
+        />
 
         {contacts.length > 0 && (
           <section className="disc-settings-section">

@@ -26,63 +26,19 @@
    code panel does) must not leave the strip narrower than what it controls. */
 .disc-panel-switcher {
   width: 100%;
-}
-
-.disc-panel-switcher {
   display: flex;
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
-  /* Same height as the message-search bar it opens beside: two bars on one
-     row that do not line up read as a mistake, however small the gap. */
   min-height: 38px;
-  /* Content-box on purpose: the search bar's own border sits outside its
-     38px, so including ours here left the two a pixel apart. */
   box-sizing: content-box;
   padding: 0 var(--kr-sp-1);
   background: var(--kr-bg-subtle);
 }
 
-/* Open, it sits directly on the panel and shares its edge. Closed, it is a
-   narrow strip holding one control — but it keeps the border's pixel either
-   way, so it stays level with the search bar whatever state it is in. */
+/* It sits directly on the panel and shares its edge. */
 .disc-panel-switcher {
-  border-bottom: 1px solid transparent;
-}
-
-.disc-panel-switcher[data-open='true'] {
-  border-bottom-color: var(--kr-border-ghost);
-}
-
-.disc-panel-switcher[data-open='false'] {
-  border-left: 1px solid var(--kr-border-ghost);
-}
-
-/* KT-596 — closed, the column reserved its width down the WHOLE height of the
-   conversation for two buttons sitting at the top of it. The band read as a
-   hole cut out of the thread.
-
-   So when nothing is open it leaves the flex row entirely and floats over the
-   conversation's top-right corner. `.disc-messages-git-row` reserves the strip's
-   width on its search bar alone — the one row the strip actually overlaps —
-   instead of on every row beneath it. */
-.disc-utility-col[data-floating='true'] {
-  position: absolute;
-  top: 0;
-  right: 0;
-  z-index: 3;
-}
-
-/* Opaque, so a message scrolling underneath is hidden cleanly rather than
-   showing through; rounded and shadowed, so it reads as sitting ON the
-   conversation rather than as a piece of it. */
-.disc-utility-col[data-floating='true'] .disc-panel-switcher {
-  width: auto;
-  border-left: 1px solid var(--kr-border-ghost);
   border-bottom: 1px solid var(--kr-border-ghost);
-  border-bottom-left-radius: var(--kr-r-md);
-  background: var(--kr-bg-surface);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
 .disc-panel-switcher-item {
