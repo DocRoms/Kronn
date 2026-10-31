@@ -39,6 +39,7 @@ pub mod quick;
 pub mod setup;
 pub mod shared_runs;
 pub mod stats;
+pub mod strong_confirm;
 pub mod trust;
 pub mod workflows;
 
@@ -72,6 +73,7 @@ pub use quick::*;
 pub use setup::*;
 pub use shared_runs::*;
 pub use stats::*;
+pub use strong_confirm::*;
 pub use trust::*;
 pub use workflows::*;
 
@@ -174,9 +176,9 @@ pub enum ApiErrorCode {
     UnreachableModel,
     /// No audit starts without a briefing (KT-1192).
     BriefingRequired,
-    /// The route changes or hands out Kronn's own secrets: it needs a code of
-    /// the strong confirmation (`X-Kronn-Confirm`) once one is enrolled (KT-1495).
-    ConfirmRequired,
+    /// The route returns a secret or destroys data and a strong confirmation is
+    /// enrolled: the request must carry a valid code or grant (KT-1496).
+    StrongConfirmationRequired,
 }
 
 impl ApiErrorCode {
@@ -188,7 +190,7 @@ impl ApiErrorCode {
             ApiErrorCode::Internal => "internal",
             ApiErrorCode::UnreachableModel => "unreachable_model",
             ApiErrorCode::BriefingRequired => "briefing_required",
-            ApiErrorCode::ConfirmRequired => "confirm_required",
+            ApiErrorCode::StrongConfirmationRequired => "strong_confirmation_required",
         }
     }
 }

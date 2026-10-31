@@ -28,7 +28,7 @@ that applies the resulting filesystem changes.
 Linked-repository updates hold the source project's lease and acquire each reverse
 target's lease before syncing its `linked-repos.md`. A busy reverse target keeps
 its existing file; the existing best-effort synchronization logs that refusal.
-[src: file: backend/src/api/projects/crud.rs:708-869#set_linked_repos]
+[src: file: backend/src/api/projects/crud.rs:717-878#set_linked_repos]
 
 Validation admission checks the lease even when no audit progress exists. A
 claimed validation job is returned to the queue without consuming an attempt.

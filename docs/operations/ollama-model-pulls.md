@@ -21,4 +21,4 @@ fold of the block are described in
 
 The streaming client accepts both the Ollama endpoint's `message` field and the
 shared SSE limiter's backwards-compatible `error` field, and treats a clean EOF
-without a terminal event as failure. [src: file: frontend/src/lib/api.ts:3424-3471#pull]
+without a terminal event as failure. [src: file: frontend/src/lib/api.ts:3454-3501#pull]

@@ -19902,12 +19902,16 @@ async fn remap_project_path() {
     assert_eq!(status, StatusCode::OK);
     let project_id = json["data"]["id"].as_str().unwrap().to_string();
 
-    // Remap to /tmp (which exists)
+    // Remap to a directory that exists. Not `/tmp` itself: the test data
+    // directory lives under the temp root, and a project may not contain it
+    // (KT-1496).
+    let target = tempfile::tempdir().expect("remap target");
+    let target_path = target.path().to_string_lossy().into_owned();
     let app = kronn::build_router_with_auth(state.clone(), false);
     let (status, json) = post_json(
         app,
         &format!("/api/projects/{}/remap-path", project_id),
-        serde_json::json!({ "path": "/tmp" }),
+        serde_json::json!({ "path": target_path }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "Remap failed: {:?}", json);
@@ -19917,7 +19921,7 @@ async fn remap_project_path() {
     let app = kronn::build_router_with_auth(state.clone(), false);
     let (status, json) = get_json(app, &format!("/api/projects/{}", project_id)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["data"]["path"], "/tmp");
+    assert_eq!(json["data"]["path"], target_path.as_str());
 }
 
 #[tokio::test]
