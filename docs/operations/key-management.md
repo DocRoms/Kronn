@@ -35,7 +35,7 @@ The running process still reads `config.tokens.keys` and
 writes `config.toml` without them. A failure there fails the save and leaves
 the previous file untouched.
 [src: file: backend/src/core/credential_store.rs:346-403#sync_for_save]
-[src: file: backend/src/core/config.rs:361-392#save]
+[src: file: backend/src/core/config.rs:539-573#save]
 
 ## Boot order
 
@@ -214,7 +214,7 @@ Safe to interrupt at any point; a rerun converges:
    are reported together.
 
 `credential_store::read_backup(path, key)` decrypts the backup.
-[src: file: backend/src/core/credential_store.rs:723-727#read_backup]
+[src: file: backend/src/core/credential_store.rs:747-751#read_backup]
 
 Not migrated in this release: rows that do not decrypt with the current key
 are kept untouched (logged as locked) and never deleted by later saves.
@@ -349,6 +349,28 @@ check, adopts that other key, overwrites the sidecar with it and writes it to
 use. A reset's key-only `config.toml` cannot be parsed by 0.14.2 either: run
 the setup once in 0.14.3 before downgrading. Keep the
 `config.toml.pre-credential-store.enc` backup.
+
+## Credentials of `config.toml` that this build could not read (KT-1513)
+
+A `config.toml` written by a newer build, or by another branch, can hold a
+credential this build cannot represent: a provider key with a field it does not
+know, a `[tokens]` entry it has no field for, an unreadable `auth_token`. Such a
+value is never dropped. While the encrypted store is not armed it stays in
+`config.toml`; once the store holds the credentials, `config.toml` no longer
+carries it in clear and Kronn keeps it in `config.toml.preserved.enc` (`0600`),
+encrypted with the instance key like the backup above. The load notice names
+that file. A key rotation re-encrypts it with the backup, a reset deletes it
+together with every `.unreadable.` copy, and a file the current key cannot open
+is set aside as `config.toml.preserved.enc.unreadable.<timestamp>`, never
+overwritten. A value the user sets or clears afterwards, or removes from
+`config.toml` by hand, is not written back; a value they change by hand in
+`config.toml` replaces the sheltered one, which is dropped. Concurrent saves
+write the shelter through a temp file of their own and one at a time.
+A place is treated as a credential when it, or a table above it, is named
+`token(s)`, `secret(s)`, `password(s)`, `pwd`, `passphrase`, `credential(s)`,
+`key`/`keys`, `auth`, `authorization`, `bearer`, `dsn` or `connection_string`
+(any casing, with an optional `_v2`/`_2` suffix); `max_tokens` is a count, not
+a credential.
 
 ## Testing the Keychain path from a dev build
 
