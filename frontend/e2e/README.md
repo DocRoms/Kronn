@@ -51,7 +51,8 @@ avec les navigateurs pré-installés (le tag doit matcher la version de
 e2e/
 ├── fixtures/
 │   ├── api-stubs.ts          # stubBootEndpoints() — bypass /api/setup/status hang
-│   └── kronn-fixture.ts      # `test` étendu : auto stubs + tour skip
+│   ├── kronn-fixture.ts      # `test` étendu : auto stubs + tour skip
+│   └── quick-prompt-seed.ts  # seedQuickPrompt()/deleteQuickPrompt() — un QP que la spec possède
 ├── pages/
 │   ├── DashboardPage.ts      # nav top
 │   ├── WorkflowsPage.ts      # tabs + headers Workflows / QP / QA
@@ -234,10 +235,23 @@ Les artifacts (screenshots / videos / traces) sont dans `test-results/` (gitigno
 ## CI
 
 La suite est intégrée à `.github/workflows/ci-test.yml` avec l'image Playwright
-officielle alignée sur `@playwright/test`. Le backend Rust et Vite sont démarrés
-dans le job, et les artefacts de diagnostic sont conservés en cas d'échec. Les
+officielle alignée sur `@playwright/test`. Le job `test-e2e-shard` est une
+matrice de trois shards (`playwright test --shard=N/3`), et le job `test-e2e`
+les agrège sous le nom de check que le ruleset de `main` exige : chaque shard
+est un runner à part, construit et démarre son propre backend Rust, Vite est lancé par
+Playwright, et `workers: 1` reste de mise dans chaque shard (le backend
+mono-processus pend avec plusieurs workers). Playwright répartit des fichiers
+de spec entiers, pas des tests isolés : un gros fichier déséquilibre les shards.
+Les artefacts de diagnostic sont conservés par shard en cas d'échec
+(`playwright-report-N`, `playwright-test-results-N`, `backend-logs-N`). Les
 canaris agents réels restent désactivés tant que le job ne fournit pas
 explicitement `KRONN_REAL_AGENT_E2E=1` et les credentials correspondants.
+
+Pour voir ce qu'un shard jouera, sans backend :
+
+```bash
+CI=true pnpm exec playwright test --list --shard=2/3
+```
 
 ## Adresses et routage (`routing-addresses.spec.ts`)
 
