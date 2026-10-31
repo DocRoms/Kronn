@@ -63,7 +63,7 @@ persisting an action block never launches its automation.
 [src: file: backend/src/api/agent_page_tests.rs:300-343#native_page_html_uses_shared_inert_action_ingestion]
 [src: file: backend/src/api/agent_page_tests.rs:407-538#native_workflow_page_tools_inherit_run_scope_and_execute_all_operations]
 [src: file: backend/src/api/agent_page_bench.rs:83-132#native_page_pipeline_publishes_through_the_real_workflow_runner]
-[src: file: frontend/src/lib/__tests__/live-page-sandbox.test.ts:31-36#LIVE_PAGE_CSP]
+[src: file: frontend/src/lib/__tests__/live-page-sandbox.test.ts:40-45#LIVE_PAGE_CSP]
 [src: user: 2026-09-27: KT-705 review 2 relays Romu's decision to allow workflow Agent Page creation and modification]
 
 ## Reproducible validation
