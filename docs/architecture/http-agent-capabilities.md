@@ -123,7 +123,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3355-3422#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3362-3429#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -274,7 +274,7 @@ setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
 [src: file: backend/src/api/agent_tools.rs:357-437#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2543-2551#tools_load]
+[src: file: backend/src/api/agent_tools.rs:2549-2557#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -403,7 +403,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:884-912#extract]
-  [src: file: backend/src/api/agent_tools.rs:4724-4748#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4746-4770#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down
@@ -454,8 +454,8 @@ disabled draft. Neither enabling, triggering nor deletion is exposed here.
 Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
 [src: file: backend/src/api/agent_workflow_tools.rs:65-122#draft_patch]
-[src: file: backend/src/api/agent_workflow_tools.rs:209-211#enabled]
-[src: file: backend/src/api/workflows.rs:2666-2726#validate_step_references]
+[src: file: backend/src/api/agent_workflow_tools.rs:215-217#enabled]
+[src: file: backend/src/api/workflows.rs:2808-2868#validate_step_references]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete
 contract from `GET /api/workflows/step-schema`; native agents receive the same

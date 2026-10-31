@@ -79,7 +79,7 @@ impl Mechanism {
     }
 
     /// The program that applies this mechanism.
-    fn launcher(self) -> &'static str {
+    pub(crate) fn launcher(self) -> &'static str {
         match self {
             Self::Seatbelt => SANDBOX_EXEC,
             Self::Bubblewrap => BWRAP,
@@ -179,6 +179,20 @@ impl Mechanism {
     }
 }
 
+/// A way to start a command under an OS sandbox: the worker's lane
+/// ([`Confinement`]) or the profile of what a trust level grants
+/// ([`crate::core::trust_sandbox::LevelConfinement`]).
+pub trait CommandConfinement: Send + Sync {
+    /// The process `probe` becomes under this confinement, not yet started.
+    fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command;
+}
+
+impl CommandConfinement for Confinement {
+    fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command {
+        Confinement::command(self, probe, route)
+    }
+}
+
 /// What a confined command may write. Everything else on disk is read-only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxPolicy {
@@ -190,6 +204,9 @@ pub struct SandboxPolicy {
     /// network. Only a validation of a project whose human opened Docker to its
     /// validations carries one (KT-1433): the socket is the host's root.
     pub docker_socket: Option<PathBuf>,
+    /// Directories the command can neither read nor write (KT-1492): the Kronn
+    /// data directory, for a validation a trust level reached Docker for.
+    pub hidden: Vec<PathBuf>,
 }
 
 impl SandboxPolicy {
@@ -200,6 +217,7 @@ impl SandboxPolicy {
             write_roots: lane.write_roots(),
             temp_dir: lane.tmp_dir(),
             docker_socket: None,
+            hidden: Vec::new(),
         }
     }
 
@@ -233,7 +251,7 @@ impl SandboxPolicy {
 
 /// `path` with its longest existing ancestor canonicalized: a Cargo target that
 /// does not exist yet still resolves through `/tmp` → `/private/tmp`.
-fn real_path(path: &Path) -> PathBuf {
+pub(crate) fn real_path(path: &Path) -> PathBuf {
     let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
     let mut current = path;
     loop {
@@ -251,7 +269,7 @@ fn real_path(path: &Path) -> PathBuf {
 }
 
 /// A Seatbelt string literal: `\` and `"` escaped.
-fn seatbelt_literal(path: &Path) -> String {
+pub(crate) fn seatbelt_literal(path: &Path) -> String {
     let text = path.to_string_lossy();
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -404,6 +422,7 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
             bubblewrap_args_with(&writable, policy.docker_socket.as_deref()),
         ),
     };
+    hide_from(mechanism, &policy.hidden, &mut args);
     args.push(probe.program.clone());
     args.extend(probe.args.iter().cloned());
     let mut env: Vec<(String, OsString)> = probe
@@ -429,6 +448,33 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
         cwd: probe.cwd.clone(),
         env,
         timeout: probe.timeout,
+    }
+}
+
+/// KT-1492 — close `hidden` to the confined command: a Seatbelt deny appended
+/// to the profile (the last matching rule wins), or an empty tmpfs mounted over
+/// each existing directory before the namespaces are unshared.
+pub(crate) fn hide_from(mechanism: Mechanism, hidden: &[PathBuf], args: &mut Vec<String>) {
+    if hidden.is_empty() {
+        return;
+    }
+    match mechanism {
+        Mechanism::Seatbelt => {
+            if let Some(profile) = args.get_mut(1) {
+                profile.push_str(&crate::core::trust_sandbox::seatbelt_hide_rules(hidden));
+            }
+        }
+        Mechanism::Bubblewrap => {
+            let at = args
+                .iter()
+                .position(|arg| arg == "--unshare-net")
+                .unwrap_or(args.len().saturating_sub(1));
+            let tmpfs: Vec<String> = crate::core::trust_sandbox::bubblewrap_mount_points(hidden)
+                .into_iter()
+                .flat_map(|dir| ["--tmpfs".to_string(), dir])
+                .collect();
+            args.splice(at..at, tmpfs);
+        }
     }
 }
 
@@ -585,6 +631,12 @@ impl Confinement {
     /// opened Docker to its validations (KT-1433).
     pub fn with_docker_socket(mut self, socket: PathBuf) -> Self {
         self.policy.docker_socket = Some(socket);
+        self
+    }
+
+    /// This confinement with `dirs` closed to the command (KT-1492).
+    pub fn hiding(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.policy.hidden = dirs;
         self
     }
 

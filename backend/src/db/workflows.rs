@@ -1229,6 +1229,13 @@ fn write_workflow(conn: &Connection, wf: &Workflow, keep_disabled: bool) -> Resu
 }
 
 pub fn delete_workflow(conn: &Connection, id: &str) -> Result<()> {
+    // KT-1492: what the workflow's trust level approved is taken back with it
+    // (a trigger drops its setting on any other path that deletes it).
+    if let Err(error) =
+        crate::db::trust::forget_scope(conn, crate::models::TrustScope::Workflow, id)
+    {
+        tracing::warn!(%error, workflow = id, "trust grants of a deleted workflow were not withdrawn");
+    }
     conn.execute("DELETE FROM workflows WHERE id = ?1", params![id])?;
     Ok(())
 }

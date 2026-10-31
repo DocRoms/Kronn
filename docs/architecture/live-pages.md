@@ -91,7 +91,7 @@ definitions and import identities, and refuses stale decisions. All resources,
 datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
-[src: file: backend/src/lib.rs:1303-1324#artifact_portability]
+[src: file: backend/src/lib.rs:1361-1382#artifact_portability]
 [src: file: backend/src/api/artifact_portability/import.rs:1119-1137#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
@@ -440,7 +440,7 @@ stored as the JSON value; if it does not parse, the step fails the same way.
 Other text is published as a string. The Exec output is scrubbed of the
 project's GitHub token before it reaches the run record or a Page.
 `[src: file: backend/src/workflows/exec_step.rs:59-61#MAX_PUBLISH_OUTPUT_BYTES]`
-`[src: file: backend/src/workflows/exec_step.rs:395-400#secrets]`
+`[src: file: backend/src/workflows/exec_step.rs:411-416#secrets]`
 `[src: file: backend/src/workflows/publish_page_step.rs:152-165#from_exec]`
 `[src: file: backend/src/workflows/publish_page_step.rs:180-226#exec_value]`
 
@@ -608,10 +608,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:12218-12407#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:13491-13533#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:13728-13770#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:13772-13825#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:12344-12533#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:13617-13659#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:13854-13896#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:13898-13951#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -690,7 +690,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:4708-4716#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:4854-4862#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:128-130#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -738,7 +738,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:4829-4839#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:4976-4986#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 

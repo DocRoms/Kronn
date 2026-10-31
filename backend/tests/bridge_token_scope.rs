@@ -4997,3 +4997,197 @@ async fn a_bridge_token_cannot_purge_the_disk() {
     .await;
     assert_eq!(status, 200, "the operator's purge is unchanged");
 }
+
+// ── KT-1492: the code is the proof, whatever the channel ─────────────────────
+
+async fn call_confirm(
+    app: &Router,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+    code: Option<&str>,
+    body: Option<Value>,
+) -> (u16, Value) {
+    let mut builder = Request::builder().method(method).uri(path);
+    if let Some(token) = bearer {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    if let Some(code) = code {
+        builder = builder.header("x-kronn-confirm", code);
+    }
+    let body = match body {
+        Some(body) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(serde_json::to_vec(&body).unwrap())
+        }
+        None => Body::empty(),
+    };
+    let mut request = builder.body(body).unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40404))));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// A bridge token reaches a trust write only with the owner's code, accepted
+/// from the header or a body field: single use, journalled as the bridge
+/// channel. The routes that hand back the seed and every read stay closed to it.
+#[tokio::test]
+async fn a_bridge_token_changes_a_trust_level_only_with_a_valid_code() {
+    let data = tempfile::tempdir().unwrap();
+    kronn::core::child_env::set_var("KRONN_DATA_DIR", data.path());
+    let (_, _repos, db) = fixture_with_db().await;
+    let secret = kronn::core::crypto::generate_secret();
+    let key = kronn::core::crypto::parse_secret(&secret).unwrap();
+    let mut config = kronn::core::config::default_config();
+    config.server.auth_enabled = true;
+    config.server.auth_token = Some("operator-bearer-never-sent-here".into());
+    config.encryption_secret = Some(secret);
+    let state = AppState::new_defaults(
+        Arc::new(RwLock::new(config)),
+        db,
+        DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    let app = build_router_with_auth(state, true);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let enrolment =
+        kronn::core::trust_proof::begin_enrolment(data.path(), &key, "owner", now, false).unwrap();
+    let seed = kronn::core::totp::base32_decode(&enrolment.secret).unwrap();
+    let step = kronn::core::totp::step_of(now);
+    kronn::core::trust_proof::confirm_enrolment(
+        data.path(),
+        &key,
+        &kronn::core::totp::code_at(&seed, step),
+        now,
+    )
+    .unwrap();
+    let next = kronn::core::totp::code_at(&seed, step + 1);
+
+    let agent = bridge_for("room-a");
+    let token = agent.value();
+    let raise = json!({
+        "level": "trusted",
+        "acknowledged_risks": true,
+        "acknowledged_vault_unprotected": true
+    });
+
+    // No code: the gate refuses before any handler.
+    let (status, refused) = call_confirm(
+        &app,
+        "PUT",
+        "/api/trust/instance",
+        Some(token),
+        None,
+        Some(raise.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("confirmation code"),
+        "{refused}"
+    );
+    // A wrong code reaches the handler, which refuses it.
+    let (status, refused) = call_confirm(
+        &app,
+        "PUT",
+        "/api/trust/instance",
+        Some(token),
+        Some("000000"),
+        Some(raise.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing, wrong or already used"),
+        "{refused}"
+    );
+    let (_, level) = call(&app, "GET", "/api/trust/instance", None, None).await;
+    assert_eq!(level["data"]["effective"]["level"], "standard", "{level}");
+
+    // The right code in the header: accepted, for that one action.
+    let (status, done) = call_confirm(
+        &app,
+        "PUT",
+        "/api/trust/instance",
+        Some(token),
+        Some(&next),
+        Some(raise.clone()),
+    )
+    .await;
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["data"]["effective"]["level"], "trusted", "{done}");
+
+    // Spent: the same code, from a body field this time, is a replay.
+    let mut with_field = raise.clone();
+    with_field["level"] = json!("full");
+    with_field["proof"] = json!(next);
+    let (status, replay) = call_confirm(
+        &app,
+        "PUT",
+        "/api/trust/instance",
+        Some(token),
+        None,
+        Some(with_field),
+    )
+    .await;
+    assert_eq!(status, 403, "{replay}");
+    assert!(
+        replay["error"].as_str().unwrap().contains("already used"),
+        "{replay}"
+    );
+
+    // The journal names the channel.
+    let (_, audit) = call(&app, "GET", "/api/trust/audit", None, None).await;
+    let lines = audit["data"].as_array().unwrap();
+    for event in ["proof", "proof_refused"] {
+        assert!(
+            lines.iter().any(|line| line["event"] == event
+                && line["detail"].as_str().unwrap().contains("bridge channel")),
+            "{event}: {audit}"
+        );
+    }
+
+    // What hands back the seed, and every read, stays closed to a bridge token.
+    for (method, path) in [
+        ("POST", "/api/trust/proof/enroll"),
+        ("POST", "/api/trust/proof/confirm"),
+        ("POST", "/api/trust/proof/recovery-codes"),
+        ("GET", "/api/trust"),
+        ("GET", "/api/trust/audit"),
+        ("GET", "/api/trust/instance"),
+    ] {
+        let (status, refused) = call_confirm(
+            &app,
+            method,
+            path,
+            Some(token),
+            Some(&kronn::core::totp::code_at(&seed, step + 2)),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, 403, "{method} {path}: {refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("not available to a Kronn-launched agent"),
+            "{method} {path}: {refused}"
+        );
+    }
+}

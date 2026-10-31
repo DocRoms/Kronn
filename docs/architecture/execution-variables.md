@@ -75,7 +75,7 @@ durable discussion/run and project scope. Reveals are audited without storing
 the returned value.
 
 [src: file: backend/src/db/execution_variable_snapshots.rs:151-222#insert_execution_context_message] [src: file: backend/src/db/execution_variable_snapshots.rs:33-41#has_live_owner]
-[src: file: frontend/src/components/MessageBubble.tsx:1056-1086#revealExecutionVariable]
+[src: file: frontend/src/components/MessageBubble.tsx:1062-1092#revealExecutionVariable]
 
 ## Retention
 
@@ -100,5 +100,5 @@ value-free errors.
 
 [src: file: backend/src/core/execution_variables.rs:326-1013#tests]
 [src: file: backend/src/db/execution_variable_snapshots.rs:319-597#tests]
-[src: file: backend/tests/api_tests.rs:11639-11849#execution_context_http_routes_keep_values_masked_reveal_on_demand_and_audit_extension]
+[src: file: backend/tests/api_tests.rs:11719-11929#execution_context_http_routes_keep_values_masked_reveal_on_demand_and_audit_extension]
 [src: file: frontend/src/components/workflows/__tests__/ProvidedVariablesPreview.test.tsx:71-120#ProvidedVariablesPreview]

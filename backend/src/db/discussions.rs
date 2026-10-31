@@ -1041,6 +1041,11 @@ pub fn set_disc_agent_handoff_policy(
 }
 
 pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
+    // KT-1492: what the room's trust level approved is taken back with it (a
+    // trigger drops its setting on any other path that deletes it).
+    if let Err(error) = crate::db::trust::forget_scope(conn, crate::models::TrustScope::Room, id) {
+        tracing::warn!(%error, room = id, "trust grants of a deleted room were not withdrawn");
+    }
     let affected = conn.execute("DELETE FROM discussions WHERE id = ?1", params![id])?;
     Ok(affected > 0)
 }

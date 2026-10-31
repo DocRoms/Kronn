@@ -2086,8 +2086,13 @@ impl ToolExecutor for KronnToolExecutor {
                     Ok(request) => request,
                     Err(error) => return fail(call, format!("invalid Quick Exec: {error}")),
                 };
-                let Json(res) =
-                    crate::api::quick_execs::create_as(self.state.clone(), request, true).await;
+                let Json(res) = crate::api::quick_execs::create_as_in(
+                    self.state.clone(),
+                    request,
+                    true,
+                    self.trust_origin(),
+                )
+                .await;
                 if let Some(item) = &res.data {
                     crate::api::quick_execs::announce_activation(
                         &self.state,
@@ -2127,11 +2132,12 @@ impl ToolExecutor for KronnToolExecutor {
                     Ok(merged) => merged,
                     Err(error) => return fail(call, format!("invalid Quick Exec: {error}")),
                 };
-                let Json(res) = crate::api::quick_execs::update_as(
+                let Json(res) = crate::api::quick_execs::update_as_in(
                     self.state.clone(),
                     existing.id.clone(),
                     merged,
                     true,
+                    self.trust_origin(),
                 )
                 .await;
                 if let Some(item) = &res.data {
@@ -3945,6 +3951,22 @@ impl KronnToolExecutor {
         }
     }
 
+    /// The rooms and run this agent was launched from, for its trust level
+    /// (KT-1492).
+    pub(crate) fn trust_origin(&self) -> crate::db::trust::TrustOrigin {
+        crate::db::trust::TrustOrigin {
+            discussion_ids: self
+                .disc_id
+                .iter()
+                .filter(|id| !id.trim().is_empty())
+                .cloned()
+                .collect(),
+            workflow_run_id: self.workflow_run_id.clone(),
+            workflow_id: None,
+            project_id: self.project_id.clone(),
+        }
+    }
+
     async fn effective_project_id(&self) -> Option<String> {
         if self.project_id.is_some() {
             return self.project_id.clone();
@@ -4380,7 +4402,7 @@ fn merged_definition<T: serde::Serialize, R: serde::de::DeserializeOwned>(
 const ROOM_SCOPE_NOT_HERE: &str = "room_scope is for a room's own agent. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a worker reaches its task's project only.";
 
 /// Both reaches, as an agent needs them (KT-1341).
-pub(crate) const ROOM_SCOPE_MANUAL: &str = "A room has one primary project: its working directory, where what it creates lands, and the only project whose API configs and credentials it may use. A human may also grant the room other projects: read (tasks, rooms, runs, pages), write (planning only: create and edit tasks there, `project_ids` naming it), or every project. room_scope() returns the grants, the pending requests, the journal and `requestable`: the names of the registered projects not granted that you may ask for (the prompt never names them). When a call is refused as outside this room's project, ask with room_scope({project, access, reason}): it files a request the human approves, narrows or declines in the room, and grants nothing by itself; do not wait or retry, continue with what you can do. A grant never opens another project's credentials, never runs its workflows, and never reaches a workflow step or a worker posting in the room. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a room without a project writes general resources only once a human granted it « General · write ». Full doctrine: tool_manual({tool: \"workflow-architect\", section: \"Reach\"}).";
+pub(crate) const ROOM_SCOPE_MANUAL: &str = "A room has one primary project: its working directory, where what it creates lands, and the only project whose API configs and credentials it may use. A human may also grant the room other projects: read (tasks, rooms, runs, pages), write (planning only: create and edit tasks there, `project_ids` naming it), or every project. room_scope() returns the grants, the pending requests, the journal and `requestable`: the names of the registered projects not granted that you may ask for (the prompt never names them). When a call is refused as outside this room's project, ask with room_scope({project, access, reason}): it files a request the human approves, narrows or declines in the room, and grants nothing by itself, unless the human set this room, its workflow or the instance to Trusted or Full access: then a request on a registered project comes back `granted_by_trust` and is journalled. Otherwise do not wait or retry, continue with what you can do. A grant never opens another project's credentials, never runs its workflows, and never reaches a workflow step or a worker posting in the room. A workflow step reaches other projects only through its workflow's scope, which a human sets on the workflow page (Projects accessible); a room without a project writes general resources only once a human granted it « General · write ». Full doctrine: tool_manual({tool: \"workflow-architect\", section: \"Reach\"}).";
 
 /// Version reading, shared word for word with the bridge's manuals (KT-1341).
 pub(crate) const SKILL_GET_MANUAL: &str = "skill_get({skill_id}) returns the skill whole; a custom skill adds `versions`: version_index, created_at and current, newest first, without bodies. skill_get({skill_id: `custom-x@N`}) returns version N whole. Builtin skills have no versions. `custom-x@N` in the skill_ids of a step, a Quick Prompt or a discussion loads that version, frozen; the bare id follows every edit, and saving refuses a version that does not exist. A project's skill and its versions are read only where that project is in reach. Restoring a version is a human action, in the skill's version history. Pinning and shadow runs: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
@@ -5817,6 +5839,7 @@ mod tests {
 
     fn saved_exec(id: &str, project_id: Option<&str>) -> crate::models::QuickExec {
         crate::models::QuickExec {
+            approved_by_trust: None,
             id: id.to_string(),
             name: id.to_uppercase(),
             icon: "terminal".into(),
@@ -5917,6 +5940,7 @@ mod tests {
         // satisfy it and fell back to hand-built calls. Declared and
         // unsatisfiable is the same defect as an id no tool can produce.
         let stored = crate::models::QuickExec {
+            approved_by_trust: None,
             id: "qe-1".into(),
             name: "AWS logs".into(),
             icon: "⌘".into(),

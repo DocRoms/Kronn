@@ -980,6 +980,7 @@ mod tests {
             crate::db::quick_execs::insert_quick_exec(
                 conn,
                 &crate::models::QuickExec {
+                    approved_by_trust: None,
                     id: "qe-p2".into(),
                     name: "echo".into(),
                     icon: String::new(),

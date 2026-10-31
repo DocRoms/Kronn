@@ -160,6 +160,7 @@ mod tests {
 
     fn blank_step(payload: Option<serde_json::Value>) -> WorkflowStep {
         WorkflowStep {
+            exec_approved_by_trust: None,
             id: None,
             name: "json_step".to_string(),
             step_type: StepType::JsonData,

@@ -2779,6 +2779,8 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     cfg.server.auth_token = previous.server.auth_token.clone();
     cfg.server.auth_enabled = previous.server.auth_enabled;
     cfg.server.auth_strict_localhost = previous.server.auth_strict_localhost;
+    // A reset does not turn the vault protection off or back on behind the owner's back.
+    cfg.server.protect_vault_from_agents = previous.server.protect_vault_from_agents;
     cfg.server.auth_locked = previous.server.auth_locked;
     cfg.server.auth_token_session_only = previous.server.auth_token_session_only;
     // Defaults turn P2P off; the gate follows.
@@ -5038,6 +5040,7 @@ mod tests {
             ),
         ];
         let quick_exec = |id: &str, name: &str, args: Vec<&str>| crate::models::QuickExec {
+            approved_by_trust: None,
             id: id.into(),
             pinned: false,
             name: name.into(),
@@ -5136,6 +5139,7 @@ mod tests {
             .unwrap();
         let now = Utc::now();
         let qe = crate::models::QuickExec {
+            approved_by_trust: None,
             id: "qe-1".into(),
             pinned: false,
             name: "AWS inventory".into(),

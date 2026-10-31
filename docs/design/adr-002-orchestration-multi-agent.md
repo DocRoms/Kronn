@@ -428,7 +428,7 @@ Cancellation and reassignment preserve the same lineage. Cancellation first canc
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:11837-11990#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:7585-7631#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:12218-12407#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:7277-7569#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:11963-12116#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:7585-7631#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:12344-12533#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:7277-7569#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:385-482#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
@@ -514,7 +514,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   `agent_dispatch_jobs` `group_id` concurrency limit `[src: file: backend/src/db/agent_dispatch.rs:604-613#group_concurrency_limit]`
   exists for batch fan-out; orchestration dispatches enqueue with `group_id: None`.
 - **Human escalation** — `Escalated` surfaces in the parent discussion, as the workflow Human Gate does
-  with its decide endpoint `[src: file: backend/src/api/workflows.rs:5743-5930#decide_run]`, but the
+  with its decide endpoint `[src: file: backend/src/api/workflows.rs:5986-6173#decide_run]`, but the
   execution's own state machine carries the decision: the user force-approves (→ `Approved`), hands back
   with guidance (→ `Working`) `[src: file: backend/src/models/orchestration.rs:309-309#Escalated]`, or abandons
   (→ `Cancelled`, reachable from any non-terminal state) `[src: file: backend/src/models/orchestration.rs:274-283#can_transition_to]`.
@@ -561,8 +561,8 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
   explicit resume/cancel/reassign, independent timeout clocks and orphan-managed-workspace collection**
   is implemented by **KT-322** `[src: file: backend/src/api/orchestration.rs:293-393#reconcile_at_boot]`
   `[src: file: backend/src/api/orchestration.rs:684-855#start_resilience_watchdog]`
-  `[src: file: backend/src/api/orchestration.rs:11837-11990#cancel_execution]`
-  `[src: file: backend/src/api/orchestration.rs:12218-12407#reassign_execution]`.
+  `[src: file: backend/src/api/orchestration.rs:11963-12116#cancel_execution]`
+  `[src: file: backend/src/api/orchestration.rs:12344-12533#reassign_execution]`.
 - **Actor-kind schema change** (`backend`/`system`) is a shared prerequisite, surfaced in KT-317.
 - The ADR began as a decision record; KT-317–KT-322 now implement its durable aggregate,
   provisioning, review, protected integration, coordination and recovery boundaries.

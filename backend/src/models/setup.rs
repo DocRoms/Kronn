@@ -135,6 +135,14 @@ pub struct ServerConfig {
     #[serde(default)]
     #[ts(skip)]
     pub auth_strict_localhost: bool,
+    /// KT-1492 — "Protect the Kronn vault from agents". On by default: whatever a
+    /// trust level grants (a level-approved Quick Exec or Exec line, a validation
+    /// a level opened to Docker or the host) runs under an OS sandbox that hides
+    /// Kronn's data directory. Off: it runs unconfined, as the owner chose. A host
+    /// with no sandbox reports the protection unavailable and refuses nothing.
+    #[serde(default = "default_protect_vault_from_agents")]
+    #[ts(skip)]
+    pub protect_vault_from_agents: bool,
     /// Accept federation peers (inbound `/api/ws` peers, the peer HTTP routes)
     /// and dial contacts. Off by default: a peer is identified only by its
     /// invite code until pairing secrets exist (KT-1033).
@@ -347,6 +355,11 @@ impl ServerConfig {
 /// disabled" — the new safer default shipped 0.8.6 phase 4.
 fn default_summary_strategy_off() -> crate::models::SummaryStrategy {
     crate::models::SummaryStrategy::Off
+}
+
+/// Serde default for [`ServerConfig::protect_vault_from_agents`]: on.
+fn default_protect_vault_from_agents() -> bool {
+    true
 }
 
 fn default_agent_handoff_paid_limit() -> u32 {

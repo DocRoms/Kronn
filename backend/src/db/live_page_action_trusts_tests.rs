@@ -284,6 +284,7 @@ fn a_quick_exec_data_source_is_refused_until_runs_freeze_it() {
     let conn = connection();
     let now = Utc::now();
     let mut exec = crate::models::QuickExec {
+        approved_by_trust: None,
         id: "qe-move".into(),
         name: "Move".into(),
         icon: "⌨".into(),

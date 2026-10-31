@@ -121,9 +121,9 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:13-26#QueuedMessage]
 [src: file: frontend/src/hooks/useMessageQueue.ts:162-258#processingDiscsRef]
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
-[src: file: backend/src/db/discussions.rs:1305-1325#insert_user_message_with_dispatches]
+[src: file: backend/src/db/discussions.rs:1313-1333#insert_user_message_with_dispatches]
 [src: file: backend/src/db/agent_dispatch.rs:677-826#recover_after_restart]
-[src: file: backend/src/db/discussions.rs:3590-3592#DispatchInProgress]
+[src: file: backend/src/db/discussions.rs:3595-3597#DispatchInProgress]
 [src: file: backend/src/api/discussions/messaging.rs:1013-1021#DispatchInProgress]
 [src: file: backend/src/db/discussions.rs:3541-3801#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
@@ -163,14 +163,14 @@ reach the others; "parallel" keeps the fan-out above. A native reply's prose
 mention that launched nobody is annotated with its reason (already scheduled
 on the root turn, or no marker), computed from `message_targets`.
 [src: file: frontend/src/lib/agentDelegation.ts:62-149#detectDelegation]
-[src: file: backend/src/db/discussions.rs:1760-1804#native_agents_scheduled_for_root_turn]
+[src: file: backend/src/db/discussions.rs:1768-1812#native_agents_scheduled_for_root_turn]
 [src: file: backend/src/api/discussions/crud.rs:545-553#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
 [src: file: backend/src/api/discussions/crud.rs:916-920#attach_discussion_participants]
 [src: file: backend/src/api/discussions/streaming.rs:2236-2348#independent_sibling_notice]
 [src: file: backend/src/api/discussions/streaming.rs:2129-2184#discussion_at_dispatch_trigger]
 [src: file: backend/src/api/discussions/streaming.rs:2191-2226#thread_under_trigger]
-[src: file: backend/src/db/discussions.rs:2019-2043#already_scheduled]
+[src: file: backend/src/db/discussions.rs:2024-2048#already_scheduled]
 
 ## Joined agent turn (MCP)
 
@@ -188,7 +188,7 @@ transaction. Exact CLI identities create no local runner: the addressed session
 receives the Agent turn through its next poll, while every unrelated CLI skips
 it and advances its cursor. Bulk imports, historical appends, duplicates and
 appends without a live JOIN session never start a runner.
-[src: file: backend/src/db/discussions.rs:1543-1562#insert_message_with_targets_and_dispatches]
+[src: file: backend/src/db/discussions.rs:1551-1570#insert_message_with_targets_and_dispatches]
 [src: file: backend/src/api/disc_invite.rs:1698-1717#addressed_to_caller]
 
 Every verified live MCP append also records its exact author session in
@@ -270,7 +270,7 @@ Two distinctions the reason must not blur, and does not:
 - A backend restart resets a claimed durable job to pending for the boot drain.
 - A watchdog timeout is a completed failed attempt, not a restart. Its message
   names the elapsed deadline and offers an explicit retry.
-[src: file: backend/src/db/discussions.rs:1498-1541#insert_message_with_targeted_dispatch]
+[src: file: backend/src/db/discussions.rs:1506-1549#insert_message_with_targeted_dispatch]
   [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
 [src: file: backend/src/db/agent_dispatch.rs:677-826#recover_after_restart]
 [src: file: backend/src/api/discussions/streaming.rs:658-674#timeout_notice]

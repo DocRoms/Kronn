@@ -92,7 +92,7 @@ step with no recorded provenance (older runs, non-Agent steps) exposes nothing:
 `render_strict` fails on these paths rather than inventing an author from the
 current configuration.
 
-[src: file: backend/src/models/workflows.rs:2006-2100#WorkflowAgentProvenance]
+[src: file: backend/src/models/workflows.rs:2017-2111#WorkflowAgentProvenance]
 [src: file: backend/src/workflows/steps.rs:1389-1437#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/runner.rs:4813-4829#record_step_completion]
 [src: file: backend/src/agents/provenance.rs:36-101#observe_model]
