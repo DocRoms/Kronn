@@ -60,11 +60,11 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:80-109#discover_with_transport]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:95-121#discover]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:123-208#run_handshake_and_list]
-[src: file: backend/src/api/external_api_connections.rs:274-441#probe_models]
-[src: file: backend/src/api/external_api_connections.rs:1376-1406#fetch_capability_catalogue]
-[src: file: backend/src/api/external_api_connections.rs:1408-1420#catalog_declares_modality]
+[src: file: backend/src/api/external_api_connections.rs:281-448#probe_models]
+[src: file: backend/src/api/external_api_connections.rs:1383-1413#fetch_capability_catalogue]
+[src: file: backend/src/api/external_api_connections.rs:1411-1423#catalog_declares_modality]
 [src: file: backend/src/api/external_api_connections.rs:1426-1480#catalog_models_from_body]
-[src: file: backend/src/api/external_api_connections.rs:1478-1493#merge_catalog]
+[src: file: backend/src/api/external_api_connections.rs:1485-1500#merge_catalog]
 [src: file: backend/src/core/model_catalog/mod.rs:705-720#reconcile_http_catalog]
 
 ## Where OpenCode's models come from (KT-928)

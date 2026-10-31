@@ -234,11 +234,11 @@ under an unrelated agent.
   invocation. It stops the test immediately: later model errors cannot hide
   the billing failure. The form and saved connection card show a translated
   message; provider response bodies and credentials remain private.
-  [src: file: backend/src/api/external_api_connections.rs:1288-1294#PAYMENT_REQUIRED]
-  [src: file: backend/src/api/external_api_connections.rs:555-561#PAYMENT_REQUIRED]
-  [src: file: backend/src/api/external_api_connections.rs:668-670#ChatProbe]
-  [src: file: backend/src/api/external_api_connections.rs:695-715#failure_response]
-  [src: file: backend/src/api/external_api_connections.rs:810-821#assemble_tier_report]
+  [src: file: backend/src/api/external_api_connections.rs:1291-1297#PAYMENT_REQUIRED]
+  [src: file: backend/src/api/external_api_connections.rs:558-564#PAYMENT_REQUIRED]
+  [src: file: backend/src/api/external_api_connections.rs:671-673#ChatProbe]
+  [src: file: backend/src/api/external_api_connections.rs:702-722#failure_response]
+  [src: file: backend/src/api/external_api_connections.rs:816-827#assemble_tier_report]
   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:372-373#billing_error]
   [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1059#billing_error]
   Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks

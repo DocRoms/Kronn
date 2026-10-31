@@ -56,7 +56,6 @@ export const API_NAMESPACES = [
   'stats',
   'ollama',
   'comfyui',
-  'liteLlm',
   'nvidia',
   'externalApi',
   'debugApi',
@@ -121,7 +120,6 @@ interface DefaultMock {
   stats: Record<string, AnyFn>;
   ollama: Record<string, AnyFn>;
   comfyui: Record<string, AnyFn>;
-  liteLlm: Record<string, AnyFn>;
   nvidia: Record<string, AnyFn>;
   externalApi: Record<string, AnyFn>;
   media: Record<string, AnyFn>;
@@ -699,21 +697,6 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       // namespace or the mount throws.
       models: resolve({ models: [], endpoint: 'https://integrate.api.nvidia.com', has_key: false }),
       probe: resolve({ model: '', verdict: 'Usable', detail: '' }),
-    },
-
-    liteLlm: {
-      health: resolve({
-        status: 'not_configured', endpoint: 'http://localhost:4000',
-        models_count: 0, hint: null, configured: false,
-      }),
-      models: resolve({ models: [] }),
-      modelFailures: resolve({ failures: [] }),
-      forgetModelFailure: resolve(false),
-      retryModel: resolve({ healthy: true, failure: null }),
-      test: resolve({
-        ok: false, saved: false, status: 'offline',
-        endpoint: 'http://localhost:4000', models: [], hint: null,
-      }),
     },
 
     media: {

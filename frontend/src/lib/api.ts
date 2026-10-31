@@ -219,13 +219,8 @@ import type {
   OllamaModelsResponse,
   OllamaRegistryResponse,
   SetOllamaContextOverrideResponse,
-  LiteLlmHealthResponse,
   NvidiaModelsResponse,
   NvidiaProbeResponse,
-  LiteLlmModelFailuresResponse,
-  LiteLlmModelRetryResponse,
-  LiteLlmModelsResponse,
-  LiteLlmTestResponse,
   DecideRunRequest,
   DecideRunResponse,
   ResumeInterruptedRequest,
@@ -3565,19 +3560,6 @@ export const nvidia = {
   /// A real minimal invocation — the only trustworthy availability signal for
   /// this provider, since the catalogue lists models the account cannot call.
   probe: (model: string) => api<NvidiaProbeResponse>('POST', '/nvidia/probe', { model }),
-};
-
-export const liteLlm = {
-  health: () => api<LiteLlmHealthResponse>('GET', '/lite-llm/health'),
-  models: () => api<LiteLlmModelsResponse>('GET', '/lite-llm/models'),
-  modelFailures: () => api<LiteLlmModelFailuresResponse>('GET', '/lite-llm/model-failures'),
-  forgetModelFailure: (model: string) =>
-    api<boolean>('DELETE', '/lite-llm/model-failures', { model }),
-  retryModel: (model: string) =>
-    api<LiteLlmModelRetryResponse>('POST', '/lite-llm/model-failures/retry', { model }),
-  /// `api_key: null` keeps the stored credential; `''` clears it.
-  test: (body: { base_url: string; api_key: string | null }) =>
-    api<LiteLlmTestResponse>('POST', '/lite-llm/test', body),
 };
 
 // ─── External API connections (unified LiteLLM/NVIDIA/Other zone) ──────────

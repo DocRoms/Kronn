@@ -256,10 +256,13 @@ fn normalize_endpoint(raw: Option<String>) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    let base = value
-        .strip_suffix("/v1")
-        .unwrap_or(&value)
-        .trim_end_matches('/');
+    // Only a `/v1` PATH segment goes. `https://v1` ends in `/v1` too, but there
+    // it is the host; stripping it would leave the scheme alone (`https:`).
+    let base = match value.strip_suffix("/v1") {
+        Some(rest) if !rest.trim_end_matches('/').ends_with(':') => rest,
+        _ => &value,
+    }
+    .trim_end_matches('/');
     if base.is_empty() {
         None
     } else {
@@ -2243,6 +2246,61 @@ mod tests {
         // Blank/whitespace -> None, which the handlers reject as "Endpoint required".
         assert_eq!(normalize_endpoint(Some("   ".into())), None);
         assert_eq!(normalize_endpoint(None), None);
+    }
+
+    #[test]
+    fn normalize_endpoint_strips_a_final_v1_on_a_host_and_port() {
+        // KT-668: the form most docs show for a LiteLLM proxy.
+        for raw in [
+            "http://host:4000/v1",
+            "http://host:4000/v1/",
+            "  http://host:4000/v1  ",
+        ] {
+            assert_eq!(
+                normalize_endpoint(Some(raw.into())),
+                Some("http://host:4000".into()),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_endpoint_keeps_a_v1_that_is_not_the_final_segment() {
+        for raw in [
+            "https://gateway.example.com/v1beta",
+            "https://gateway.example.com/v10",
+            "https://gateway.example.com/api/v1/proxy",
+            "https://v1.example.com",
+            "https://gateway.example.com/openai/v1x",
+        ] {
+            assert_eq!(
+                normalize_endpoint(Some(raw.into())),
+                Some(raw.into()),
+                "{raw:?}"
+            );
+        }
+        // Only one `/v1` is the API prefix; a second one is the operator's path.
+        assert_eq!(
+            normalize_endpoint(Some("https://gw.example.com/v1/v1".into())),
+            Some("https://gw.example.com/v1".into())
+        );
+        // A host that is literally `v1` is not a path segment.
+        assert_eq!(
+            normalize_endpoint(Some("https://v1".into())),
+            Some("https://v1".into())
+        );
+        assert_eq!(normalize_endpoint(Some("/v1".into())), None);
+    }
+
+    #[test]
+    fn normalized_endpoint_never_doubles_v1_in_the_probe_urls() {
+        use crate::agents::chat_codec::{ChatCodec, OpenAiCodec};
+        let stored = normalize_endpoint(Some("http://host:4000/v1".into())).unwrap();
+        assert_eq!(format!("{stored}/v1/models"), "http://host:4000/v1/models");
+        assert_eq!(
+            OpenAiCodec.endpoint(&stored),
+            "http://host:4000/v1/chat/completions"
+        );
     }
 
     #[test]

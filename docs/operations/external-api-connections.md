@@ -10,7 +10,8 @@ optional Economy, Default and Reasoning models. [src: file: frontend/src/compone
 The required HTTP surface is `GET /v1/models` plus
 `POST /v1/chat/completions`. Kronn stores a base URL without a trailing `/v1`
 and appends the route itself, so an endpoint copied with or without `/v1` reaches
-the same final route. [src: file: backend/src/api/external_api_connections.rs:245-264#normalize_endpoint]
+the same final route. Only a final `/v1` path segment is removed: `/v1beta`,
+`/api/v1/proxy` and a host such as `v1.example.com` are kept. [src: file: backend/src/api/external_api_connections.rs:245-264#normalize_endpoint]
 
 ## Add and test a connection
 
@@ -28,8 +29,8 @@ the same final route. [src: file: backend/src/api/external_api_connections.rs:24
    minimal non-streaming chat request with `max_tokens: 1` to distinguish a
    valid credential from a public model catalogue. This second request reaches
    the configured provider and may be accounted for by that provider.
-   [src: file: backend/src/api/external_api_connections.rs:278-289#probe_models]
-   [src: file: backend/src/api/external_api_connections.rs:627-633#chat_probe]
+   [src: file: backend/src/api/external_api_connections.rs:281-292#probe_models]
+   [src: file: backend/src/api/external_api_connections.rs:630-636#chat_probe]
    NVIDIA and OpenRouter are exceptions: their public catalogues are not
    entitlement lists, so Kronn never probes an arbitrary first entry. OpenRouter
    first validates the key through its non-billable current-key endpoint. The
@@ -37,9 +38,9 @@ the same final route. [src: file: backend/src/api/external_api_connections.rs:24
    again invokes each unique selected model. On NVIDIA, a model-specific `404`
    keeps the catalogue available and is reported as an inaccessible model rather
    than a broken endpoint.
-   [src: file: backend/src/api/external_api_connections.rs:546-552#probe_openrouter_credential]
+   [src: file: backend/src/api/external_api_connections.rs:549-555#probe_openrouter_credential]
    [src: file: backend/src/api/external_api_connections.rs:336-358#requested_models]
-   [src: file: backend/src/api/external_api_connections.rs:527-531#http_error_hint]
+   [src: file: backend/src/api/external_api_connections.rs:530-534#http_error_hint]
 5. After a successful test, map any returned models to Economy, Default and
    Reasoning, then save. The model fields remain read-only until the current
    endpoint and credential have passed that test. Changing the endpoint, key or
@@ -55,7 +56,7 @@ returning the stored key to the browser. Editing shows a masked key state; only
 an explicit click on the eye requests the stored value. **Replace** opens a
 blank editable field, while saving without replacement preserves the current
 credential. [src: file: backend/src/api/external_api_connections.rs:1811-1817#reveal_credential]
-[src: file: backend/src/api/external_api_connections.rs:2087-2088#set_credential]
+[src: file: backend/src/api/external_api_connections.rs:2090-2091#set_credential]
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:997-1006#has_credential]
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:321-335#SecretField]
 
@@ -92,7 +93,7 @@ ready. Testing selected tiers can make billed chat requests; the credential
 check and catalogue request do not select a paid model.
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:54-61#PRESET_ENDPOINTS]
 [src: file: backend/src/api/external_api_connections.rs:213-224#validate_credential_format]
-[src: file: backend/src/api/external_api_connections.rs:541-552#probe_openrouter_credential]
+[src: file: backend/src/api/external_api_connections.rs:544-555#probe_openrouter_credential]
 
 OpenRouter remains a named external connection internally. Agent selectors show
 its display name and current tier model, and Quick Prompt comparisons persist
@@ -116,7 +117,7 @@ an edit preserves the current key, while an explicit blank value clears it.
 [src: file: backend/src/api/external_api_connections.rs:27-35#has_credential]
 [src: file: backend/src/api/external_api_connections.rs:1811-1817#reveal_credential]
 [src: file: backend/src/api/external_api_connections.rs:37-49#api_key]
-[src: file: backend/src/api/external_api_connections.rs:1764-1768#set_credential]
+[src: file: backend/src/api/external_api_connections.rs:1767-1771#set_credential]
 
 Connection keys are `ApiKey` entries of the live configuration, persisted
 encrypted with the instance key in the `stored_credentials` table since 0.14.3
@@ -207,6 +208,15 @@ stale pre-migration model names. [src: file: backend/src/api/external_api_connec
 [src: file: backend/src/db/external_api_connections.rs:21-46#sync_runtime_config]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1796-1801#onModelTiersChanged]
 
+The former standalone LiteLLM settings card (`LiteLlmCard`) and its frontend
+client were removed (KT-668): nothing mounted them, and the named connection
+above is the only UI. The `/api/lite-llm/*` backend routes (`health`, `models`,
+`test`, `model-failures`) are deliberately kept and now have no frontend caller.
+`test` is the one route that writes the legacy `agents.lite_llm.base_url` and the
+`litellm` key; `health` is also called in-process by the orchestrator. Dropping
+them is a separate decision about that legacy configuration, not dead-code
+cleanup. [src: file: backend/src/lib.rs:2173-2183]
+
 After upgrading, verify both migrated cards, run their connection tests and
 confirm the intended models for all three tiers before using them.
 
@@ -232,15 +242,15 @@ the runtime-resolution guide.
   and, when a key is supplied, the authenticated chat probe succeed. On a
   LiteLLM proxy a refused tier model is reported per tier instead of failing the
   connection.
-  [src: file: backend/src/api/external_api_connections.rs:278-289#probe_models]
-  [src: file: backend/src/api/external_api_connections.rs:386-392#probe_tier_models]
+  [src: file: backend/src/api/external_api_connections.rs:281-292#probe_models]
+  [src: file: backend/src/api/external_api_connections.rs:389-395#probe_tier_models]
 - **The test failed but the connection works:** fixed in 0.13.0. The probe used
   to send a model of its own choosing rather than one of the three the operator
   had configured, so a connection that only serves the models it was set up for
   failed a test it should have passed. The probe now chats with a configured
   model when one is set, and an HTTP failure is reported with a hint keyed to the status and the
   model actually tried — not a bare code.
-  [src: file: backend/src/api/external_api_connections.rs:1589-1607#requested_models]
+  [src: file: backend/src/api/external_api_connections.rs:1592-1610#requested_models]
   [src: file: backend/src/api/external_api_connections.rs:527-539#http_error_hint]
 - **An agent cannot find the connection to generate an image or a video:**
   fixed in 0.13.2. In a plain discussion, `agent_list`, the only place the
