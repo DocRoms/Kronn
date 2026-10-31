@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildSandboxDocument,
   createLivePageOpenLinkRelay,
@@ -26,6 +26,15 @@ const detail = {
   }],
   slug_aliases: [],
 } satisfies LivePageDetail;
+
+const originalUserActivation = Object.getOwnPropertyDescriptor(navigator, 'userActivation');
+
+// Several specs fake the reader's activation and some do not put it back: the
+// next one would then read an inactive reader it never set up.
+afterEach(() => {
+  if (originalUserActivation) Object.defineProperty(navigator, 'userActivation', originalUserActivation);
+  else Reflect.deleteProperty(navigator, 'userActivation');
+});
 
 describe('Live Page sandbox', () => {
   it('injects a network-denying CSP before authored head content', () => {

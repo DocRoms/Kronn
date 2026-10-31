@@ -294,7 +294,9 @@ describe('App', () => {
     await waitFor(() => expect(window.location.pathname).toBe(path));
     expect(window.location.search).toBe(search);
     expect(window.location.hash).toBe('');
-    expect(screen.getByTestId('dashboard')).toBeInTheDocument();
+    // The dashboard is a lazy chunk: it is only already there when an earlier
+    // spec loaded it, so wait for it rather than relying on spec order.
+    expect(await screen.findByTestId('dashboard')).toBeInTheDocument();
   });
 
   it('follows a legacy link set while the app is open', async () => {

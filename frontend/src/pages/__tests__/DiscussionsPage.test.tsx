@@ -282,6 +282,14 @@ afterEach(() => {
   localStorage.removeItem('kronn:lastPanel');
 });
 
+// Contacts is collapsed by default in the sidebar (see the V2 section migration
+// in DiscussionsPage). Specs that read the contact rows seed the expanded state
+// themselves instead of inheriting it from an earlier spec.
+const seedContactsExpanded = () => {
+  localStorage.setItem('kronn:discSidebarSectionsV2', '1');
+  localStorage.setItem('kronn:discCollapsedGroups', JSON.stringify([]));
+};
+
 const wrap = async (ui: React.ReactElement) => {
   let result: ReturnType<typeof render>;
   await act(async () => {
@@ -4611,6 +4619,7 @@ describe('DiscussionsPage', () => {
   });
 
   it('shows contacts section in sidebar when contacts exist', async () => {
+    seedContactsExpanded();
     // Mock contacts.list to return contacts
     const { contacts: contactsApi } = await import('../../lib/api');
     vi.mocked(contactsApi.list).mockResolvedValue([
@@ -4807,6 +4816,7 @@ describe('DiscussionsPage', () => {
   });
 
   it('shows delete button on each contact', async () => {
+    seedContactsExpanded();
     const { contacts: contactsApi } = await import('../../lib/api');
     vi.mocked(contactsApi.list).mockResolvedValue([
       { id: 'c1', pseudo: 'PeerAlpha', avatar_email: null, kronn_url: 'http://10.0.0.1:3456', invite_code: 'kronn:PeerAlpha@10.0.0.1:3456', status: 'accepted', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' },
@@ -5322,6 +5332,9 @@ describe('KT-1108 — live progress in the reply bubble', () => {
   beforeEach(async () => {
     const { resetLiveRuns } = await import('../../lib/agentRunProgress');
     resetLiveRuns();
+    // A snapshot a spec fed to the page must not be read by the next one.
+    vi.mocked(discussionsApi.runProgress).mockReset();
+    vi.mocked(discussionsApi.runProgress).mockResolvedValue([]);
     const { useWebSocket } = await import('../../hooks/useWebSocket');
     vi.mocked(useWebSocket).mockImplementation(onMessage => {
       send = msg => onMessage(msg);

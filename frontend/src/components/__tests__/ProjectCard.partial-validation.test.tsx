@@ -81,6 +81,12 @@ function renderCard(overrides: Partial<Record<string, unknown>> = {}) {
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
+  // What a spec replaced on the shared API mock must not reach the next one:
+  // put these back to the defaults `buildApiMock` declares.
+  const defaults = buildApiMock().projects as Record<string, ReturnType<typeof vi.fn>>;
+  for (const name of ['auditTimeline', 'revalidationPlan', 'docProvenance', 'acknowledgeDrift', 'cancelAudit'] as const) {
+    (projectsApi[name] as unknown as ReturnType<typeof vi.fn>).mockReset().mockImplementation(defaults[name].getMockImplementation()!);
+  }
   vi.mocked(projectsApi.auditStatus).mockResolvedValue(null);
   vi.mocked(projectsApi.auditResumable).mockResolvedValue(null);
 });

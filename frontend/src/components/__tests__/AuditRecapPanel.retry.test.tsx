@@ -1,5 +1,5 @@
 // KT-1169 — a recap that could not be read says so, with a button to read it again.
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
@@ -18,6 +18,12 @@ const run = {
 };
 
 describe('AuditRecapPanel — read errors', () => {
+  // Calls and queued results of the spec that ran before must not leak in.
+  beforeEach(() => {
+    vi.mocked(projectsApi.auditHistory).mockReset();
+    vi.mocked(projectsApi.auditRunSteps).mockReset();
+  });
+
   it('a failed history read is shown with "Réessayer", which reads it again', async () => {
     vi.mocked(projectsApi.auditHistory)
       .mockRejectedValueOnce(new Error('offline'))
@@ -42,6 +48,7 @@ describe('AuditRecapPanel — read errors', () => {
     expect(await screen.findByTestId('audit-recap-error')).toHaveTextContent('steps unavailable');
     fireEvent.click(screen.getByTestId('audit-recap-retry'));
     await waitFor(() => expect(screen.queryByTestId('audit-recap-error')).toBeNull());
-    expect(projectsApi.auditRunSteps).toHaveBeenCalledTimes(2);
+    // The error clears as soon as the reload starts; the steps are read again after.
+    await waitFor(() => expect(projectsApi.auditRunSteps).toHaveBeenCalledTimes(2));
   });
 });

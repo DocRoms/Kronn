@@ -93,6 +93,8 @@ function getCanonicalPageRow(title: string): HTMLElement {
 }
 
 beforeEach(() => {
+  // Call history must not carry over from the spec that ran before.
+  vi.clearAllMocks();
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: false, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   localStorage.removeItem('kronn:pageNavigation');
   localStorage.removeItem('kronn:pageCollapsedSections');

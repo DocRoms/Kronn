@@ -22,10 +22,15 @@ void cleanup;
 // for valid syntax, throws on `INVALID_SYNTAX_TRIGGER`, returns an
 // error-SVG (mermaid v11 behavior) on `ERROR_SVG_TRIGGER`. Used to
 // pin both the throw-path AND the returns-error-svg-path fallbacks.
+// The component initialises Mermaid once per module load, by whichever spec
+// renders first. Keep the configs apart from `vi.clearAllMocks()` so the spec
+// asserting on it does not depend on running first.
+const initializeConfigs = vi.hoisted(() => [] as unknown[]);
+
 vi.mock('mermaid', () => {
   return {
     default: {
-      initialize: vi.fn(),
+      initialize: vi.fn((config: unknown) => { initializeConfigs.push(config); }),
       render: vi.fn(async (id: string, src: string) => {
         if (src.includes('INVALID_SYNTAX_TRIGGER')) {
           throw new Error('Parse error on line 1: …');
@@ -58,8 +63,7 @@ describe('MermaidDiagram (0.8.3 #289)', () => {
     await waitFor(() => {
       expect(container.querySelector('.kronn-mermaid-svg svg')).not.toBeNull();
     });
-    const mermaid = (await import('mermaid')).default;
-    expect(mermaid.initialize).toHaveBeenCalledWith(expect.objectContaining({
+    expect(initializeConfigs).toContainEqual(expect.objectContaining({
       suppressErrorRendering: true,
     }));
   });

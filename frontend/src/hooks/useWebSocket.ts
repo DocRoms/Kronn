@@ -98,3 +98,12 @@ export function useWebSocket(onMessage: WsEventHandler, onConnect?: () => void, 
 }
 
 export function activeWebSocketCountForTests(): number { return socket ? 1 : 0; }
+
+/** Drops the process-wide connection and what it remembers, so a spec starts cold. */
+export function resetWebSocketForTests(): void {
+  stopSocket();
+  subscribers.clear();
+  pendingHeartbeat = null;
+  reconnectDelay = 1_000;
+  connectionState = 'connecting';
+}

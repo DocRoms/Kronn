@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { base64Url, useWebSocket } from '../useWebSocket';
+import { base64Url, resetWebSocketForTests, useWebSocket } from '../useWebSocket';
 
 // Mock API runtime configuration
 import { getApiBase, getAuthToken } from '../../lib/api';
@@ -57,12 +57,17 @@ describe('useWebSocket', () => {
     vi.useFakeTimers();
     vi.clearAllTimers();
     MockWebSocket.instances = [];
+    // The connection is process-wide: what an earlier spec left must not show here.
+    resetWebSocketForTests();
     originalWebSocket = globalThis.WebSocket;
     (globalThis as any).WebSocket = MockWebSocket;
     vi.mocked(getApiBase).mockReturnValue('');
   });
 
   afterEach(() => {
+    // Tear the connection down while the fake timers and the mock socket are
+    // still installed, so the last spec of the file leaves nothing behind.
+    resetWebSocketForTests();
     vi.clearAllTimers();
     vi.useRealTimers();
     globalThis.WebSocket = originalWebSocket;
