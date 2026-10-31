@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   launch: vi.fn(),
   cancelExecution: vi.fn(),
   reassignExecution: vi.fn(),
+  extendReviewRounds: vi.fn(),
   reviewExecution: vi.fn(),
   detectAgents: vi.fn(),
   profiles: vi.fn(),
@@ -44,6 +45,7 @@ vi.mock('../../lib/api', () => buildApiMock({
     launch: mocks.launch,
     cancelExecution: mocks.cancelExecution,
     reassignExecution: mocks.reassignExecution,
+    extendReviewRounds: mocks.extendReviewRounds,
     reviewExecution: mocks.reviewExecution,
   },
   agents: { detect: mocks.detectAgents },
@@ -475,6 +477,32 @@ describe('DiscussionPlanPanel', () => {
     await waitFor(() => expect(mocks.reassignExecution).toHaveBeenCalledWith('exec-1', {
       target: { kind: 'agent', agent_type: 'OpenCode' }, model: null, profile_id: null,
     }, 'Réassignation demandée depuis le panneau d’orchestration'));
+  });
+
+  it('extends an escalated execution at its review-round limit from the panel (KT-1345)', async () => {
+    mocks.discussionCampaign.mockResolvedValue({ run: { allowed_agents: ['Codex'] }, candidates: [], principal_attention: {} });
+    mocks.discussionLinks.mockResolvedValue([{
+      execution_id: 'exec-1', orchestration_run_id: 'run-1', task_id: 'task-1', task_reference: 'KT-1',
+      task_title: 'Build the panel', parent_discussion_id: 'disc-1', sub_discussion_id: null, status: 'Escalated',
+    }]);
+    mocks.execution.mockResolvedValue({
+      lineage: { execution: { id: 'exec-1', status: 'Escalated', attempt_no: 1, review_rounds: 4, max_review_rounds: 3, worker_agent_type: 'Codex', worker_model: null }, task_reference: 'KT-1', task_title: 'Build the panel', parent_discussion_id: 'disc-1', sub_discussion_id: null, workspace_canonical_path: null },
+      target_branch: 'main', definition_of_done: [], attempts: [], validation_runs: [], recovery: null,
+      usage: { duration_ms: 0, in_app_tokens: 0, in_app_messages: 0, in_app_breakdown: null, in_app_cost_unknown_reasons: [], in_app_cost_usd: null, in_app_cost_is_partial: false, cli_traffic_tokens: null, cli_billable_tokens: null, cli_sessions: 0, cli_sessions_measured: 0, cli_sessions_unmeasured: 0 },
+    });
+    mocks.extendReviewRounds.mockResolvedValue({ max_review_rounds: 5, reoffered_to_worker: true });
+    render(<DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />);
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Build the panel' }))[0]);
+    expect(await screen.findByTestId('orch-exec-rounds')).toHaveTextContent('4 / 3');
+    fireEvent.click(await screen.findByTestId('orch-exec-extend'));
+    expect(screen.getByTestId('orch-extend-current')).toHaveTextContent('orch.extend.current:4/3');
+    fireEvent.change(screen.getByTestId('orch-extend-by'), { target: { value: '2' } });
+    fireEvent.click(screen.getByTestId('orch-extend-confirm'));
+    await waitFor(() => expect(mocks.extendReviewRounds).toHaveBeenCalledWith(
+      'exec-1', 2, expect.stringContaining('Limite de tours'),
+    ));
+    await waitFor(() => expect(screen.queryByTestId('orch-extend-form')).not.toBeInTheDocument());
   });
 
   it('keeps a reassignment model override when its target is not changed', async () => {

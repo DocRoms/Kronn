@@ -17,7 +17,7 @@ import {
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
   Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink, Gamepad2,
-  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow, Gauge,
+  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow, Gauge, Bot,
 } from 'lucide-react';
 import { userError } from '../lib/userError';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
@@ -73,6 +73,7 @@ import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
 import { DbUsageChart } from '../components/settings/DbUsageChart';
 import { DiskSection } from '../components/settings/DiskSection';
+import { WorkersSection } from '../components/settings/WorkersSection';
 import { RunRetentionBanner, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
 import { AppLink } from '../components/AppLink';
 import { revealWhenSettled } from '../lib/revealWhenSettled';
@@ -138,6 +139,7 @@ const SETTINGS_SECTION_IDS = [
   'settings-appearance',
   'settings-voice',
   'settings-scan',
+  'settings-workers',
   'settings-user-context',
   'settings-recovery',
   'settings-server',
@@ -488,6 +490,7 @@ export function SettingsPage({
     { id: 'settings-voice', label: t('settings.voice'), icon: <Mic size={15} />, group: t('config.workspaceSettings') },
     { id: EXTERNAL_CONTENT_SECTION_ID, label: t('config.artifacts'), icon: <AppWindow size={15} /> },
     { id: 'settings-scan', label: t('config.scan'), icon: <FolderSearch size={15} /> },
+    { id: 'settings-workers', label: t('config.workers.title'), icon: <Bot size={15} /> },
     { id: 'settings-user-context', label: t('userContext.title'), icon: <FileText size={15} /> },
     { id: 'settings-recovery', label: t('settings.recovery.title'), icon: <Key size={15} />, group: t('config.systemSettings') },
     { id: 'settings-server', label: t('config.server'), icon: <Server size={15} /> },
@@ -1772,6 +1775,9 @@ export function SettingsPage({
       {/* User context — cross-project markdown notes injected into every agent.
           Lives in ~/.kronn/user-context/ on disk; this editor is the
           terminal-free entry point for operators to manage them. */}
+      {/* Workers (KT-1345): the default review-round limit */}
+      <WorkersSection t={t} />
+
       <div id="settings-user-context" className="set-card">
         <div className="set-section">
           <UserContextEditor />

@@ -11,6 +11,8 @@ export function allowedActions(
   requestChanges: boolean;
   stop: boolean;
   reassign: boolean;
+  /** Raise the review-round limit (KT-1345): any live execution. */
+  extendRounds: boolean;
 } {
   const terminal = status === 'Done' || status === 'Failed' || status === 'Cancelled';
   const reviewable = status === 'AwaitingReview';
@@ -19,6 +21,9 @@ export function allowedActions(
     requestChanges: reviewable,
     // Stopping a finished execution is not a no-op, it is a wrong idea.
     stop: !terminal,
+    // The limit is the execution's own; raising it needs no state change, and
+    // the backend re-offers an execution the limit itself had escalated.
+    extendRounds: !terminal,
     // Mirrors `reassign_execution_worker`: a live worker may be replaced, and
     // an Interrupted checkpoint may be resumed with another worker. Blocked
     // and Escalated are policy/human holds, not reassignment states.

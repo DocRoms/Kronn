@@ -78,6 +78,58 @@ describe('allowedActions', () => {
   });
 });
 
+describe('review-round limit (KT-1345)', () => {
+  const withRounds = (status: TaskExecutionStatus, rounds: number, limit: number) => detail({
+    lineage: {
+      execution: {
+        id: 'exec-1',
+        status,
+        review_rounds: rounds,
+        max_review_rounds: limit,
+        worker_agent_type: 'Ollama',
+        worker_model: null,
+        child_branch: 'kronn/task/kt-1',
+        candidate_merge_sha: null,
+        integrated_sha: null,
+      },
+      task_reference: 'KT-1',
+      task_title: 'Do the thing',
+      parent_discussion_id: 'parent-1',
+      sub_discussion_id: 'child-1',
+      workspace_canonical_path: '/tmp/wt',
+    } as never,
+  });
+
+  it('shows rounds used over the limit', () => {
+    wrap(<TaskExecutionCard detail={withRounds('AwaitingReview', 3, 3)} />);
+    expect(screen.getByTestId('orch-exec-rounds')).toHaveTextContent('3 / 3');
+  });
+
+  it('shows the unlimited sentinel as a symbol, never as 4294967295', () => {
+    wrap(<TaskExecutionCard detail={withRounds('Working', 7, 4_294_967_295)} onExtendRounds={vi.fn()} />);
+    const rounds = screen.getByTestId('orch-exec-rounds');
+    expect(rounds).toHaveTextContent('7 / ∞');
+    expect(rounds.textContent).not.toContain('4294967295');
+    // Nothing to extend when there is no cap.
+    expect(screen.queryByTestId('orch-exec-extend')).toBeNull();
+  });
+
+  it('offers to extend a live execution, escalated ones included, and never a finished one', () => {
+    const onExtendRounds = vi.fn();
+    const { unmount } = wrap(
+      <TaskExecutionCard detail={withRounds('Escalated', 4, 3)} onExtendRounds={onExtendRounds} />,
+    );
+    screen.getByTestId('orch-exec-extend').click();
+    expect(onExtendRounds).toHaveBeenCalledTimes(1);
+    unmount();
+    wrap(<TaskExecutionCard detail={withRounds('Done', 2, 3)} onExtendRounds={onExtendRounds} />);
+    expect(screen.queryByTestId('orch-exec-extend')).toBeNull();
+    expect(allowedActions('Done').extendRounds).toBe(false);
+    expect(allowedActions('Escalated').extendRounds).toBe(true);
+    expect(allowedActions('AwaitingReview').extendRounds).toBe(true);
+  });
+});
+
 describe('TaskExecutionCard', () => {
   it('says a token total is incomplete instead of presenting it as the cost', () => {
     // Sessions that never reported are unknown, not zero. A bare total drawn

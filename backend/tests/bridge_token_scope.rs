@@ -4997,3 +4997,75 @@ async fn a_bridge_token_cannot_purge_the_disk() {
     .await;
     assert_eq!(status, 200, "the operator's purge is unchanged");
 }
+
+/// KT-1345 — a task worker's token owns the execution and the child room, and the
+/// body of `task_exec_reassign` names its caller in fields the caller writes: the
+/// worker must not raise its own review-round limit by naming a live principal
+/// session. The principal's own token (it owns the parent room) still can.
+#[tokio::test]
+async fn a_worker_token_cannot_raise_its_own_review_round_limit() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO discussions(id, title, project_id, created_at, updated_at) \
+             VALUES ('room-a-child', 'room-a-child', 'p1', ?1, ?1)",
+            [&now],
+        )?;
+        conn.execute(
+            "UPDATE task_executions SET sub_discussion_id = 'room-a-child' WHERE id = 'exec-a'",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO discussion_sessions(id, disc_id, agent_type, session_id, role, status, joined_at) \
+             VALUES (902, 'room-a', 'Codex', 'sess-a', 'peer', 'active', ?1)",
+            [&now],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let limit = || async {
+        db.with_read_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT max_review_rounds FROM task_executions WHERE id = 'exec-a'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap()
+    };
+    let before = limit().await;
+    let body = json!({
+        "source_agent": "Codex",
+        "source_session_id": "sess-a",
+        "extend_review_rounds": 2,
+        "reason": "one more round",
+    });
+    let path = "/api/orchestration/tool/executions/exec-a/reassign";
+
+    let worker = mint(BridgeScope {
+        discussion_ids: vec!["room-a-child".into()],
+        task_execution_id: Some("exec-a".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let (status, envelope) =
+        call(&app, "POST", path, Some(worker.value()), Some(body.clone())).await;
+    assert!(
+        status != 200 || envelope["success"] == false,
+        "the worker's token must not extend: {status} {envelope}"
+    );
+    assert_eq!(
+        limit().await,
+        before,
+        "the worker did not raise its own limit"
+    );
+
+    let principal = bridge_for("room-a");
+    let (status, envelope) = call(&app, "POST", path, Some(principal.value()), Some(body)).await;
+    assert_eq!(status, 200, "{envelope}");
+    assert_eq!(envelope["success"], true, "{envelope}");
+    assert_eq!(limit().await, before + 2, "the principal's token extends");
+}

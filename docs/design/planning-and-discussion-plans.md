@@ -115,9 +115,9 @@ The selected view is saved per discussion in session storage. A small spinner
 on in-progress rows reflects Planning status only, not a worker heartbeat; it
 stops animating when reduced motion is requested. Background plan refreshes
 update membership and indicators without resetting the selected view.
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:839-869#plan-view-switch]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:238-247#current]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:404-437#filteredAllRelations]`
-`[src: file: frontend/src/lib/orch-panel-state.ts:47-69#readPlanOrchestrationState]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:131-136#writePlanOrchestrationState]`
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:547-551#renderProgress]` `[src: file: frontend/src/components/DiscussionPlanPanel.css:161-178#plan-task-progress]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:161-172#applyPlan]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:842-872#plan-view-switch]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:240-249#current]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:407-440#filteredAllRelations]`
+`[src: file: frontend/src/lib/orch-panel-state.ts:47-69#readPlanOrchestrationState]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:133-138#writePlanOrchestrationState]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:550-554#renderProgress]` `[src: file: frontend/src/components/DiscussionPlanPanel.css:161-178#plan-task-progress]` `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:163-174#applyPlan]`
 
 Agents may instead emit structured proposals that the UI renders as existing
 action-like cards. Initial actions are:
@@ -201,8 +201,8 @@ Runtime parity is capability-based:
 - Vibe runs without MCP to avoid its stdio hang. It therefore emits a durable
   `kronn-plan-action` proposal for human validation instead of pretending that
   a direct task write succeeded.
-  `[src: file: backend/src/api/agent_tools.rs:2130-2337#plan_get]` `[src: file: backend/src/api/agent_tools.rs:2307-2338#task_create]` `[src: file: backend/src/api/agent_tools.rs:3972-3979#actor]`
-  `[src: file: backend/src/api/agent_tools.rs:4819-4846#unwrap_api_compact_task]`
+  `[src: file: backend/src/api/agent_tools.rs:2167-2374#plan_get]` `[src: file: backend/src/api/agent_tools.rs:2365-2396#task_create]` `[src: file: backend/src/api/agent_tools.rs:4068-4075#actor]`
+  `[src: file: backend/src/api/agent_tools.rs:4936-4963#unwrap_api_compact_task]`
   `[src: file: backend/src/api/disc_prompts.rs:278-287#agent_has_native_planning]`
 
 The first release is local-only. Actor/audit metadata must still distinguish

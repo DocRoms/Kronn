@@ -32,11 +32,11 @@ references for the lifecycle actions they steer. A worker is still offered
 `task_exec_status`, but it accepts a task reference as well as an execution id,
 so a local model never has to reconstruct an opaque UUID, and it answers only
 the execution's principal or its own native worker.
-`[src: file: backend/src/api/agent_tools.rs:1612-1755#worker_room_catalogue]`
-`[src: file: backend/src/api/agent_tools.rs:2926-2950#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:4076-4098#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:2880-2909#task_exec_status]`
-`[src: file: backend/src/api/agent_tools.rs:4038-4074#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:1649-1792#worker_room_catalogue]`
+`[src: file: backend/src/api/agent_tools.rs:2994-3018#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4172-4194#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:2947-2977#task_exec_status]`
+`[src: file: backend/src/api/agent_tools.rs:4134-4170#native_execution_for_caller]`
 
 The discussion SSE path resolves this scope from the durable
 `task_executions.sub_discussion_id` lineage before it constructs the HTTP tool
@@ -169,7 +169,7 @@ or parent-milestone section: a bounded edit has neither.
 `[src: file: backend/src/api/agent_workspace_tools.rs:1693-1710#validate_range_indentation]`
 `[src: file: backend/src/agents/runner.rs:1391-1405#structural_refusal]`
 `[src: file: backend/src/agents/runner.rs:1407-1424#worker_repair_iteration_limit]`
-`[src: file: backend/src/api/orchestration.rs:9095-9160#worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:9097-9251#worker_scope]`
 
 For a pure insertion, do not make the worker reproduce a paragraph inside a
 replacement range. Use one verified anchor line:
@@ -212,8 +212,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:2572-2640#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:2691-2748#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:2646-2714#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:2765-2822#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -595,7 +595,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:4100-4128#count_arg] [src: file: backend/src/api/agent_tools.rs:3795-3838#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:4196-4224#count_arg] [src: file: backend/src/api/agent_tools.rs:3891-3934#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes

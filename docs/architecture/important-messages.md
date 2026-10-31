@@ -136,7 +136,7 @@ instead of selecting an unrelated task.
 [src: file: frontend/src/pages/DiscussionsPage.tsx:5715-5739#ImportantMessageForm]
 [src: file: frontend/src/components/ImportantMessageForm.tsx:90-104#taskRef]
 [src: file: frontend/src/pages/DiscussionsPage.tsx:1515-1545#openPlan]
-[src: file: frontend/src/components/DiscussionPlanPanel.tsx:87-90#initialTaskId]
+[src: file: frontend/src/components/DiscussionPlanPanel.tsx:88-91#initialTaskId]
 
 The publication-key field appears only inside the open form. It uses the
 existing enrolled credential and single-use proof; Settings remains the place

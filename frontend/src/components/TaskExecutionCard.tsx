@@ -1,6 +1,7 @@
 import { useT } from '../lib/I18nContext';
 import type { TaskExecutionDetail, TaskExecutionUsage } from '../types/generated';
 import { allowedActions } from '../lib/orch-actions';
+import { isUnlimitedRounds, roundsLimitLabel } from '../lib/reviewRounds';
 
 /** Tokens the CLI never reported are unknown, not zero. Rendering a total over
  *  partly-unmeasured sessions would read as "this is what it cost". */
@@ -14,6 +15,7 @@ interface Props {
   onOpen?: (subDiscussionId: string) => void;
   onStop?: () => void;
   onReassign?: () => void;
+  onExtendRounds?: () => void;
   onApprove?: () => void;
   onRequestChanges?: () => void;
 }
@@ -23,6 +25,7 @@ export function TaskExecutionCard({
   onOpen,
   onStop,
   onReassign,
+  onExtendRounds,
   onApprove,
   onRequestChanges,
 }: Props) {
@@ -122,7 +125,14 @@ export function TaskExecutionCard({
         </dd>
 
         <dt>{t('orch.exec.rounds')}</dt>
-        <dd data-testid="orch-exec-rounds">{attempts.length}</dd>
+        <dd data-testid="orch-exec-rounds">
+          {exec.review_rounds === undefined
+            ? attempts.length
+            : `${exec.review_rounds} / ${roundsLimitLabel(exec.max_review_rounds)}`}
+          {isUnlimitedRounds(exec.max_review_rounds) && (
+            <span className="orch-exec-partial"> {t('orch.exec.roundsUnlimited')}</span>
+          )}
+        </dd>
       </dl>
 
       {failing.length > 0 && (
@@ -166,6 +176,11 @@ export function TaskExecutionCard({
         {actions.stop && onStop && (
           <button type="button" data-testid="orch-exec-stop" onClick={onStop}>
             {t('orch.exec.stop')}
+          </button>
+        )}
+        {actions.extendRounds && onExtendRounds && !isUnlimitedRounds(exec.max_review_rounds) && (
+          <button type="button" data-testid="orch-exec-extend" onClick={onExtendRounds}>
+            {t('orch.exec.extendRounds')}
           </button>
         )}
         {actions.reassign && onReassign && (

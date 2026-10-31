@@ -883,8 +883,7 @@ TOOLS = [
         "name": "disc_workspace_set",
         "description": (
             "Declare or refresh THIS joined CLI session's Git worktree in the "
-            "current discussion. `workspace_path` defaults to the bridge's "
-            "current directory; Kronn reads the real branch + HEAD from Git, "
+            "current discussion. Kronn reads the real branch + HEAD from Git, "
             "so never send those fields. Optionally link a planning task with "
             "`task_ref`. The path must be a registered worktree of the "
             "discussion project's repositories, and one physical worktree "
@@ -929,7 +928,7 @@ TOOLS = [
         "name": "task_exec_prepare",
         "description": (
             "Preflight a Todo from THIS principal room without mutation. Returns `launchable` "
-            "plus stable refusal codes after readiness/worker checks. Never bypass refusal. MUST read "
+            "plus stable refusal codes. Never bypass refusal. MUST read "
             "tool_manual({tool: \"task_exec_prepare\"}) before authoring worker, scope or "
             "validations."
         ),
@@ -957,6 +956,7 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "object"},
                 },
+                "max_review_rounds": {"type": ["integer", "string"]},
             },
             "required": ["task_reference", "worker", "worker_scope_intent"],
         },
@@ -964,7 +964,7 @@ TOOLS = [
     {
         "name": "task_exec_launch",
         "description": (
-            "Launch the accepted preflight into its durable child room and SHA-pinned worktree. "
+            "Launch the accepted preflight into its durable child room and pinned worktree. "
             "Keep worker/scope unchanged; reuse idempotency_key on retry. MUST first read "
             "tool_manual({tool: \"task_exec_prepare\"})."
         ),
@@ -992,6 +992,7 @@ TOOLS = [
                     "description": "Principal-owned gates; exact item shape is in tool_manual.",
                     "items": {"type": "object"},
                 },
+                "max_review_rounds": {"type": ["integer", "string"]},
             },
             "required": ["task_reference", "worker", "worker_scope_intent"],
         },
@@ -1053,7 +1054,7 @@ TOOLS = [
         "description": (
             "Amend an execution as its principal, keeping its room and evidence. ONE change per "
             "call: `worker` reassigns an interrupted, blocked or awaiting-review one; "
-            "`validations` replaces its gates without relaunching. "
+            "`validations` replaces its gates; `extend_review_rounds` raises its round limit. "
             "See tool_manual({tool: \"task_exec_reassign\"})."
         ),
         "inputSchema": {
@@ -1072,6 +1073,7 @@ TOOLS = [
                     "description": "The COMPLETE new gate set; [] removes every gate.",
                     "items": {"type": "object"},
                 },
+                "extend_review_rounds": {"type": ["integer", "string"]},
                 "reason": {"type": "string"},
             },
             "required": ["task_execution_id", "reason"],
@@ -2507,10 +2509,8 @@ TOOLS = [
     {
         "name": "workflow_run_status",
         "description": (
-            "Read the current state of a workflow run. Returns `{run_id, "
-            "workflow_id, status, started_at, finished_at?, elapsed_ms, "
-            "current_step?, step_count, tokens_used, steps[], "
-            "expected_duration_ms?, samples, next_check?}`.\n\n"
+            "Read the current state of a workflow run (status, steps[], "
+            "tokens_used, next_check).\n\n"
             "⚠ Never read a null token count as zero — it means not measured.\n"
             "⚠ `next_check: null` means terminal (`Success`, `Failed`, "
             "`Cancelled`, `StoppedByGuard`): stop polling. Otherwise wait "
@@ -6079,6 +6079,18 @@ def _validate_task_exec_worker(worker, tool_name):
         )
 
 
+def _refuse_unknown_arguments(args, tool_name):
+    """An argument the tool does not declare is refused, never dropped: a
+    silently ignored `target_ref` once launched a worker from `main`."""
+    declared = next(t for t in TOOLS if t["name"] == tool_name)["inputSchema"]["properties"]
+    unknown = sorted(key for key in args if key not in declared)
+    if unknown:
+        raise RuntimeError(
+            f"{tool_name}: unknown argument(s) {', '.join(unknown)}; it declares "
+            f"{', '.join(sorted(declared))}. {_TASK_EXEC_MANUAL_HINT}"
+        )
+
+
 def _task_exec_request(path, body):
     """Keep compact schemas fail-closed while making shape errors self-repairing."""
     try:
@@ -6133,8 +6145,18 @@ def call_agent_list(_args):
     return _unwrap(_http("POST", "/api/orchestration/tool/workers", body))
 
 
+def _forward_review_rounds(args, body):
+    """KT-1345 — `max_review_rounds` is absent (the Settings > Workers default
+    applies) or it is sent as given. An explicit null is forwarded, not dropped
+    like an absent key: the backend refuses it, so a caller that meant a value
+    never gets the default without being told."""
+    if "max_review_rounds" in args:
+        body["max_review_rounds"] = args["max_review_rounds"]
+
+
 def call_task_exec_prepare(args):
     _require_fresh_bridge("task_exec_prepare")
+    _refuse_unknown_arguments(args, "task_exec_prepare")
     task_reference = (args.get("task_reference") or "").strip()
     worker = args.get("worker")
     if not task_reference or not isinstance(worker, dict):
@@ -6154,11 +6176,13 @@ def call_task_exec_prepare(args):
         body["worker_scope"] = worker_scope
     if args.get("validations") is not None:
         body["validations"] = args["validations"]
+    _forward_review_rounds(args, body)
     return _task_exec_request("/api/orchestration/tool/prepare", body)
 
 
 def call_task_exec_launch(args):
     _require_fresh_bridge("task_exec_launch")
+    _refuse_unknown_arguments(args, "task_exec_launch")
     task_reference = (args.get("task_reference") or "").strip()
     worker = args.get("worker")
     if not task_reference or not isinstance(worker, dict):
@@ -6177,6 +6201,7 @@ def call_task_exec_launch(args):
     for optional in ("base_rev", "idempotency_key", "validations"):
         if args.get(optional) is not None:
             body[optional] = args[optional]
+    _forward_review_rounds(args, body)
     if worker_scope is not None:
         body["worker_scope"] = worker_scope
     return _task_exec_request("/api/orchestration/tool/launch", body)
@@ -6316,23 +6341,28 @@ def call_task_exec_reassign(args):
     without relaunching. `[]` is a real request (drop every gate), so absence is
     tested with `is None`, never by truthiness."""
     _require_fresh_bridge("task_exec_reassign")
+    _refuse_unknown_arguments(args, "task_exec_reassign")
     execution_id = (args.get("task_execution_id") or "").strip()
     worker = args.get("worker")
     validations = args.get("validations")
+    extend = args.get("extend_review_rounds")
     reason = (args.get("reason") or "").strip()
     if not execution_id or not reason:
         raise RuntimeError("task_exec_reassign: task_execution_id and reason are required")
-    if (worker is None) == (validations is None):
+    if sum(value is not None for value in (worker, validations, extend)) != 1:
         raise RuntimeError(
             "task_exec_reassign makes ONE change per call: pass a typed `worker` to reassign "
-            "the execution, or the complete `validations` array ([] removes every gate) to "
-            f"replace its gates, not both and not neither. {_TASK_EXEC_MANUAL_HINT}"
+            "the execution, the complete `validations` array ([] removes every gate) to "
+            "replace its gates, or `extend_review_rounds` to raise its review limit, "
+            f"not several and not none. {_TASK_EXEC_MANUAL_HINT}"
         )
     if worker is not None:
         if not isinstance(worker, dict):
             raise RuntimeError("task_exec_reassign: `worker` must be a typed worker object")
         _validate_task_exec_worker(worker, "task_exec_reassign")
         change = {"worker": worker}
+    elif extend is not None:
+        change = {"extend_review_rounds": extend}
     else:
         if not isinstance(validations, list):
             raise RuntimeError("task_exec_reassign: `validations` must be an array")
@@ -10184,6 +10214,15 @@ TOOL_MANUALS = {
         "Launch may persist principal-owned `validations: [{command, quick_exec_id?, "
         "timeout_secs?}]`; never copy gates from the worker manifest. Reuse one idempotency key "
         "if the launch response is lost.\n\n"
+        "**Review-round limit.** `max_review_rounds` (prepare and launch) is the number of "
+        "`request_changes` rounds the execution gets before it escalates: an integer from 1 to "
+        "1000, or `\"unlimited\"` (no cap: a worker looping on a review that never converges "
+        "burns tokens until a stall, the watchdog, a campaign `token_budget` or you stop it). "
+        "Omitted, it takes Settings > Workers (default 5); prepare answers "
+        "`default_max_review_rounds` with that value. Anything else is refused, as is any "
+        "argument the tool does not declare. `task_exec_status` shows `review_rounds` as "
+        "used/limit (`unlimited` has no cap; raw JSON stores it as 4294967295). Raise the limit "
+        "of an existing execution with `task_exec_reassign({extend_review_rounds})`.\n\n"
         "**Live checks.** A DoD item that can only be proven once the code is integrated and "
         "running (a replay on a real input) is a principal live check. Only the principal of the "
         "task's execution, or a human, may declare or remove it: a worker, an HTTP agent or an "
@@ -10272,9 +10311,21 @@ TOOL_MANUALS = {
         "send-back, and once it delivered again: review that delivery instead."
     ),
     "task_exec_reassign": (
-        "Principal-only, and ONE change per call: pass either a `worker` or `validations`, "
-        "never both and never neither. The execution room, worktree, attempts and evidence "
-        "are preserved either way.\n\n"
+        "Principal-only, and ONE change per call: pass a `worker`, `validations` or "
+        "`extend_review_rounds`, never several and never none. The execution room, worktree, "
+        "attempts and evidence are preserved either way.\n\n"
+        "**`extend_review_rounds`** raises the execution's review-round limit: the number of "
+        "rounds to ADD (1 to 1000), or `\"unlimited\"` for no cap (tokens keep burning on a "
+        "review that never converges; a campaign `token_budget` still stops it). Use it when "
+        "`task_exec_status` shows `review_rounds` at its limit and the findings are real bugs "
+        "to fix, instead of an escalation followed by a reassignment. A `reason` is required "
+        "and journaled (`review_rounds_extended`). On an execution the limit already "
+        "escalated, the stored findings are posted to its worker and it is re-offered to the "
+        "SAME worker, unless the campaign's `token_budget` is spent (then `stop_reason: "
+        "token_budget_exhausted`, nothing is scheduled); otherwise only the number changes. "
+        "Refused once the execution is "
+        "Done, Failed or Cancelled, or has no cap already. The answer returns "
+        "`previous_limit`, `max_review_rounds`, `review_rounds` and `reoffered_to_worker`.\n\n"
         "**`worker`** reassigns the execution. From `AwaitingReview` it rejects the pending "
         "delivery, which stays in the attempt history, and the new worker starts "
         "the next attempt. Pass the flat typed MessageTarget copied from "
@@ -10712,7 +10763,7 @@ TOOL_MANUALS["disc_join"] = (
     + ROOM_WORK_PROTOCOL
 )
 TOOL_MANUALS["workflow_run_status"] = (
-    "`steps[]` carries, per step: name, status, started_at, duration_ms, tokens_used (number or null), tokens_status when measurement is in progress/partial/unavailable, a 200-char output excerpt, and step_type. A null token count means not measured — never zero.\n\nThe `next_check` hint adapts: projection-anchored while the run is within its average duration, fixed backoff after it overshoots.\n\nFor BATCH workflows the individual child discussions are not listed here. Call `workflow_run_discussions({run_id})` for the child `disc_id`s, then `disc_load_other` on each. For linear workflows `steps[]` is enough.\n\nFor short runs, `workflow_wait_for_completion` gets the final verdict in a single call instead of a poll loop."
+    "Returns `{run_id, workflow_id, status, started_at, finished_at?, elapsed_ms, current_step?, step_count, tokens_used, steps[], expected_duration_ms?, samples, next_check?}`.\n\n`steps[]` carries, per step: name, status, started_at, duration_ms, tokens_used (number or null), tokens_status when measurement is in progress/partial/unavailable, a 200-char output excerpt, and step_type. A null token count means not measured — never zero.\n\nThe `next_check` hint adapts: projection-anchored while the run is within its average duration, fixed backoff after it overshoots.\n\nFor BATCH workflows the individual child discussions are not listed here. Call `workflow_run_discussions({run_id})` for the child `disc_id`s, then `disc_load_other` on each. For linear workflows `steps[]` is enough.\n\nFor short runs, `workflow_wait_for_completion` gets the final verdict in a single call instead of a poll loop."
 )
 TOOL_MANUALS["workflow_trigger"] = (
     "Discovery first: `workflow_list` gives the `workflow_id`. The workflow must be enabled — a disabled draft is refused with a clear error.\n\n`next_check` has the form `{wait_seconds, reason, confidence}`. The first wait is always at least 30s, a sanity check that the run actually started. `confidence: baseline` means the average duration is reliable; `confidence: no_baseline` means this workflow has never run, so check every 60s.\n\nWhen the workflow declares manual launch variables, pass them as `variables: {name: value, …}`. Required ones must be non-empty — the same validation the UI form applies.\n\n`step_agents` changes the agent of some Agent steps for this run only: `{\"<step id or name>\": {\"agent\": \"Codex\", \"model\": \"…\", \"reasoning_effort\": \"…\"}}`. Omitted model or effort means the agent's default. The workflow is never modified; the step keeps its budget and tools. An unknown step, a non-Agent step, an agent not installed or enabled, or tools/budget the agent cannot apply is refused before the run starts."
