@@ -437,6 +437,14 @@
   text-decoration: line-through;
 }
 
+.plan-task-meta > span {
+  white-space: nowrap;
+}
+
+.plan-task-meta > span[data-status="awaiting_merge"] {
+  color: var(--kr-warning);
+}
+
 .plan-task-meta {
   display: flex;
   flex-wrap: wrap;
@@ -519,6 +527,7 @@
 }
 
 .plan-all-task-meta > span {
+  white-space: nowrap;
   padding: 1px 5px;
   border: 1px solid var(--kr-border);
   border-radius: 999px;
@@ -532,6 +541,11 @@
 .plan-all-task-meta > span[data-status="done"],
 .plan-all-task-meta > span[data-status="archived"] {
   color: var(--kr-success);
+}
+
+.plan-all-task-meta > span[data-status="awaiting_merge"] {
+  border-color: rgba(var(--kr-warning-rgb), 0.3);
+  color: var(--kr-warning);
 }
 
 .plan-all-task-meta > span[data-kind="blocked"] {

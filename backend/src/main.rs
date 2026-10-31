@@ -457,6 +457,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         tracing::info!("lane targets: {line}");
     }
     kronn::api::orchestration::start_resilience_watchdog(state.clone());
+    kronn::api::orchestration::start_merge_sweep(state.clone());
 
     // KT-289 — remove checkout directories left discoverable by terminal runs
     // from an earlier process. Run this after dispatch recovery: children owned

@@ -37,6 +37,7 @@ const fr: TranslationDict = {
   "disc.mosaic.discard": "Abandonner ce message",
   "disc.mosaic.plan": "Plan : {0}/{1} terminées",
   "disc.mosaic.planDetails": "{0} en cours · {1} prêtes · {2} bloquées · {3} idées",
+  "disc.mosaic.awaitingMerge": "{0} intégrées, en attente de fusion",
   "disc.mosaic.noPlan": "Aucune tâche active dans le plan",
   "disc.mosaic.later": "{0} pour plus tard",
 
@@ -2661,6 +2662,7 @@ const fr: TranslationDict = {
   'planning.status.in_progress': 'En cours',
   'planning.status.blocked': 'Bloquée',
   'planning.status.done': 'Terminée',
+  'planning.status.awaitingMerge': 'Intégrée dans {0} — en attente de fusion',
   'planning.status.archived': 'Archivée',
   'planning.agentProposal': 'Proposition de l’agent',
   'planning.proposalCreateMany': 'Ajouter {0} tâches au plan',

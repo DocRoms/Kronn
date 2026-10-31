@@ -60,6 +60,7 @@ import type {
 import type { ToastFn } from '../hooks/useToast';
 import './DiscussionToolPanel.css';
 import './DiscussionPlanPanel.css';
+import { awaitingMergeTitle, shortBranch } from '../lib/awaitingMerge';
 
 interface Props {
   discussionId: string;
@@ -595,6 +596,11 @@ export function DiscussionPlanPanel({
               <span>{relation.task.completed_subtasks}/{relation.task.total_subtasks}</span>
             )}
             {blocked && <span className="plan-blocked">{t('planning.blocked')}</span>}
+            {relation.task.awaiting_merge && (
+              <span data-status="awaiting_merge" title={awaitingMergeTitle(relation.task.awaiting_merge)}>
+                {t('planning.status.awaitingMerge', shortBranch(relation.task.awaiting_merge.branch))}
+              </span>
+            )}
             <TaskAssigneeChips assignees={relation.task.assignees} />
             <TaskAssigneePicker
               taskId={relation.task.id}
@@ -656,8 +662,13 @@ export function DiscussionPlanPanel({
         <span className="plan-all-task-meta">
           {renderProgress(relation.task.status)}
           <span>{relation.task.reference}</span>
-          <span data-status={relation.task.status}>
-            {t(`planning.status.${relation.task.status}`)}
+          <span
+            data-status={relation.task.awaiting_merge ? 'awaiting_merge' : relation.task.status}
+            title={relation.task.awaiting_merge ? awaitingMergeTitle(relation.task.awaiting_merge) : undefined}
+          >
+            {relation.task.awaiting_merge
+              ? t('planning.status.awaitingMerge', shortBranch(relation.task.awaiting_merge.branch))
+              : t(`planning.status.${relation.task.status}`)}
           </span>
           {relation.active_blockers.length > 0 && (
             <span data-kind="blocked">

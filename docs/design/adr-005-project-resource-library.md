@@ -243,7 +243,7 @@ checkout, and only a human publishes it
 [src: file: backend/src/workflows/run_pins.rs:33#PROJECT_PROFILE]
 [src: file: backend/src/workflows/run_pins.rs:263-283#record_project_profile]
 [src: file: backend/src/workflows/run_pins.rs:485-497#revision_fingerprint_with_profiles]
-[src: file: backend/src/core/project_profile.rs:711-730#draft_if_missing]
+[src: file: backend/src/core/project_profile.rs:739-758#draft_if_missing]
 [src: file: docs/guides/project-profile.md:166-177].
 
 ### Other resources

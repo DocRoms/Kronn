@@ -15,12 +15,12 @@ itself is stopped.
 - A validation that fails because of its environment (Docker unreachable or
   closed, a launch the sandbox refused) is not sent back to the worker: the
   execution is held with a card naming the fix, and its approval stays.
-  [src: file: backend/src/api/orchestration.rs:4877-4915#environment_cause]
+  [src: file: backend/src/api/orchestration.rs:5166-5207#environment_cause]
 - When the sandbox kept Docker closed, Kronn also posts an elevation card:
   refuse, allow for this discussion, or allow for the project. An answer that
   allows records the grant and resumes the integration on its own. Only a
   message Kronn posted counts, and no agent token can answer it.
-  [src: file: backend/src/db/orchestration.rs:3005-3060#record_docker_elevation]
+  [src: file: backend/src/db/orchestration.rs:2996-3051#record_docker_elevation]
 - A project's validations reach is a human setting, in the project's settings:
   sandbox only (default), Docker allowed (the sandbox plus the resolved Docker
   socket, nothing else), or full access (no sandbox, behind a warning).

@@ -37,6 +37,7 @@ const zh: TranslationDict = {
   "disc.mosaic.discard": "放弃此消息",
   "disc.mosaic.plan": "计划：已完成 {0}/{1}",
   "disc.mosaic.planDetails": "{0} 进行中 · {1} 就绪 · {2} 阻塞 · {3} 想法",
+  "disc.mosaic.awaitingMerge": "{0} 已集成，待合并",
   "disc.mosaic.noPlan": "计划中没有活跃任务",
   "disc.mosaic.later": "{0} 项稍后处理",
 
@@ -2633,6 +2634,7 @@ const zh: TranslationDict = {
   "planning.status.in_progress": "进行中",
   "planning.status.blocked": "已阻塞",
   "planning.status.done": "已完成",
+  "planning.status.awaitingMerge": "已集成到 {0} — 等待合并",
   "planning.status.archived": "已归档",
   "planning.agentProposal": "代理提案",
   "planning.proposalCreateMany": "将 {0} 个任务添加到计划",
