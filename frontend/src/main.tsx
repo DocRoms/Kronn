@@ -8,6 +8,7 @@ import { ThemeProvider } from './lib/ThemeContext';
 import { LayoutDensityProvider } from './lib/LayoutDensityContext';
 import { LocalIdentityProvider } from './lib/LocalIdentityContext';
 import { ThemeEffects } from './components/ThemeEffects';
+import { StrongConfirmDialog } from './components/StrongConfirmDialog';
 import { loadInitialLocale, renderBootstrapFailure } from './lib/bootstrapLocale';
 import { finishBootScreen } from './lib/bootScreen';
 import {
@@ -43,6 +44,7 @@ async function bootstrap() {
           <I18nProvider>
             <LocalIdentityProvider>
               <ThemeEffects />
+              <StrongConfirmDialog />
               {/* Router state updates are applied synchronously, like a plain
                   state change: wrapped in a transition, a navigation render
                   could be interrupted by the next one — Back right after a

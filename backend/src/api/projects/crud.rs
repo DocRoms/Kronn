@@ -15,6 +15,19 @@ use crate::AppState;
 
 use super::{enrich_audit_status, enrich_audit_status_with_runs, find_common_parent};
 
+/// KT-1496 — a project inside the Kronn data directory, or containing it, is
+/// refused whatever the enrolment: project commands run in a project and would
+/// read the vault from there. `None` when the path is fine.
+fn data_dir_refusal(path: &std::path::Path) -> Option<String> {
+    let data_dir = crate::core::config::config_dir().ok()?;
+    crate::core::strong_confirm::overlaps_data_dir(path, &data_dir).then(|| {
+        format!(
+            "A project may not be inside, or contain, the Kronn data directory ({}): it holds the vault.",
+            data_dir.display()
+        )
+    })
+}
+
 /// GET /api/projects
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Project>>> {
     // Read connection: a list must not queue behind a long write.
@@ -343,6 +356,9 @@ pub async fn add_folder(
             "Directory does not exist: {}",
             resolved.display()
         )));
+    }
+    if let Some(refusal) = data_dir_refusal(&resolved) {
+        return Json(ApiResponse::err(refusal));
     }
 
     // Auto-detect name from last path component if not provided.
@@ -1187,6 +1203,9 @@ pub async fn remap_path(
     // Validate path exists
     if !std::path::Path::new(&new_path).exists() {
         return Json(ApiResponse::err("Path does not exist".to_string()));
+    }
+    if let Some(refusal) = data_dir_refusal(std::path::Path::new(&new_path)) {
+        return Json(ApiResponse::err(refusal));
     }
 
     let lookup = id.clone();

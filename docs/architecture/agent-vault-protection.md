@@ -121,32 +121,29 @@ exactly as before.
 
 A request from `127.0.0.1` is trusted as the owner's (browser, desktop shell,
 scripts). An agent process is on that same loopback, so the routes that take over
-or destroy the vault ask a caller admitted **by its address alone** for a code of
-the strong confirmation (TOTP, `core::trust_proof`):
+or destroy the vault need a code of the strong confirmation (TOTP,
+`core::trust_proof`) once one is enrolled. KT-1496's `strong_gate` asks for it on
+every channel, loopback included (see `strong-confirmation-routes.md`):
 
 `POST` on `/api/setup/reset`, `/api/config/import`,
-`/api/config/auth-token/regenerate`, `/api/config/recovery/{set,restore,reencrypt,start-new-key}`.
-[src: file: backend/src/api/human_gate.rs:36-44#HUMAN_PROOF_ROUTES]
+`/api/config/auth-token/regenerate`, `/api/config/recovery/{set,reencrypt}`.
+[src: file: backend/src/core/strong_confirm.rs:43-79#ALWAYS]
 
-- The code goes in the `X-Kronn-Confirm` header (the same header as the trust
-  routes). The UI prompts for it when the server answers 403 `confirm_required`
-  (`sendWithConfirmation` in `frontend/src/lib/api.ts`) and sends the request again.
-- The same guards as KT-1492: single use, bound to the route (the object is
-  `vault`), journalled with the channel (`proof` / `proof_refused` in
-  `trust_audit_log`), one lockout shared by every channel.
+- The code goes in the `X-Kronn-Confirm` header, a `kronn_confirm` body field or a
+  single-use grant; the UI asks for it in `StrongConfirmDialog`.
+- One gate, one code: a second loopback-only gate (KT-1495's first version) spent
+  the code before `strong_gate` saw it, which then refused it as a replay. It was
+  removed in favour of `strong_gate` (KT-1496 review, 03/11).
 - **With no enrolment, nothing changes**: the route works as it did, and an
   unreadable record counts as no enrolment. Enrolling is what closes the door.
-- A caller with the **operator token** already holds a credential and is not asked
-  again; a wrong bearer is refused outright (it never falls back to loopback). A
-  bridge token reaches none of these routes (they are not on its list).
-- The gate sits in `auth_middleware` after the bridge gate, for a request that is
-  `local_trusted` and has no valid operator token.
-  [src: file: backend/src/lib.rs:710-815#auth_middleware]
-- Not covered by this gate: the locked-auth recovery routes, which exist for a
-  lost key and cannot verify a code encrypted under it.
+- The recovery routes carry their own proof and ask for no code
+  (`OWN_PROOF`, owner decision 03/11): a restore needs the recovery passphrase, and
+  `start-new-key` only acts while the key is absent (it refuses while the key is in
+  use), when the seed that would check a code is unreadable too.
+  [src: file: backend/src/core/strong_confirm.rs:105-114#OWN_PROOF]
 - `POST /api/config/auth-token/regenerate` is also in `DESTRUCTIVE_POSTS`
   (`lib.rs`): a remote peer is refused even while auth is off, like a reset.
-  [src: file: backend/src/lib.rs:1176-1192#DESTRUCTIVE_POSTS]
+  [src: file: backend/src/lib.rs:1231-1247#DESTRUCTIVE_POSTS]
 
 ## Files
 
@@ -155,7 +152,7 @@ the strong confirmation (TOTP, `core::trust_proof`):
 | `core/vault_guard.rs` | which launches are wrapped, the Claude rules |
 | `agents/runner.rs` `try_spawn` | the one spawn point of every native agent |
 | `agents/runner.rs` `claude_task_worker_settings` | `denyRead` and `permissions.deny` of the worker |
-| `api/human_gate.rs` | the loopback proof of the vault routes |
+| `api/strong_confirm.rs` `strong_gate` | the code of the vault routes, on every channel |
 | `acp.rs` `native_command` / `vault_confined` | a native ACP runtime is started behind the same sandbox as `try_spawn` |
 | `acp/secret_files.rs` `KRONN_SECRET_NAMES` | `recovery.key` and `trust-proof.json`; the broker refuses them for an ACP read |
 
@@ -191,4 +188,4 @@ a question that names no location inside the project).
   where they are blocked the protection is reported unavailable.
 - Real-sandbox tests need a host that can start a sandbox of its own: on a CI
   runner or a local macOS shell,
-  `cd backend && cargo nextest run --lib -E 'test(/vault_guard|human_gate/)'`.
+  `cd backend && cargo nextest run --lib -E 'test(/vault_guard/)'`.

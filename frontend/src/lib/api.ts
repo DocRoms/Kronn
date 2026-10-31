@@ -13,7 +13,7 @@ import type {
 } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
-import { getUILocale, t as translate } from './i18n';
+import type { StrongGrant } from '../types/generated';
 import type {
   AssistantConversation,
   AssistantKind,
@@ -306,6 +306,7 @@ import type {
   ProviderQuotaState,
 } from '../types/generated';
 import { ApiRequestError } from './apiRequestError';
+import { registerGrantMinter, strongFetch, withStrongConfirm } from './strongConfirm';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
 import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
@@ -725,37 +726,6 @@ async function fetchAndParseSSE(
   await parseSSEStream(res, handlers);
 }
 
-// ─── Strong confirmation of the vault routes (KT-1495) ──────────────────────
-
-const CONFIRM_HEADER = 'X-Kronn-Confirm';
-
-/** Asks the human for a code of their authenticator; `null` when they decline. */
-export type ConfirmationPrompt = () => string | null;
-
-let _confirmationPrompt: ConfirmationPrompt = () => {
-  const code = window.prompt(translate(getUILocale(), 'api.confirmCode'));
-  return code && code.trim() ? code.trim() : null;
-};
-
-/** Replace the prompt (tests, or a richer dialog). */
-export function setConfirmationPrompt(prompt: ConfirmationPrompt) {
-  _confirmationPrompt = prompt;
-}
-
-/**
- * The routes that change or hand out Kronn's own secrets answer 403
- * `confirm_required` once a confirmation is enrolled: an agent on the loopback
- * is not the owner. The human types a code, the request is sent again with it.
- */
-async function sendWithConfirmation(send: (extra: Record<string, string>) => Promise<Response>): Promise<Response> {
-  const first = await send({});
-  if (first.status !== 403) return first;
-  const body = await first.clone().json().catch(() => null) as { error_code?: string } | null;
-  if (body?.error_code !== 'confirm_required') return first;
-  const code = _confirmationPrompt();
-  return code ? send({ [CONFIRM_HEADER]: code }) : first;
-}
-
 // ─── Generic API wrapper ────────────────────────────────────────────────────
 
 interface ApiResponse<T> {
@@ -780,15 +750,17 @@ async function api<T>(
   const hasBody = body !== undefined;
   if (hasBody) headers['Content-Type'] = 'application/json';
 
-  const execute = async (): Promise<T> => {
+  const execute = async (extra: Record<string, string> = {}): Promise<T> => {
     let res: Response;
     try {
-      res = await sendWithConfirmation(extra => fetch(`${_apiBase}/api${path}`, {
+      // KT-1496's gate is handled one level up, by `withStrongConfirm` on the
+      // thrown ApiRequestError: its retry threads the grant through `extra`.
+      res = await fetch(`${_apiBase}/api${path}`, {
         method,
         headers: { ...headers, ...extra },
         body: hasBody ? JSON.stringify(body) : undefined,
         signal,
-      }));
+      });
     } catch (error) {
       if (looksLikeBackendDown(error)) reportBackendSuspect();
       throw error;
@@ -830,8 +802,26 @@ async function api<T>(
     );
   }
   if (method !== 'GET') clearSharedGets();
-  return execute();
+  // KT-1496: a route that returns a secret or destroys data asks for the strong
+  // confirmation when one is enrolled; the owner types the code in a dialog and
+  // the same request is sent again with it.
+  return withStrongConfirm(method, `/api${path}`, extra => execute(extra));
 }
+
+// KT-1496: the code the owner types buys a single-use grant for the one call
+// that asked, so the code itself never travels with the protected request.
+// Not through `api()`: a wrong code answers with the same "confirmation
+// required" code, which must reach the dialog, not open another one.
+registerGrantMinter(async (method, path, code) => {
+  const res = await fetch(`${_apiBase}/api/trust/grants`, {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ method, path, code }),
+  });
+  const json = await res.json().catch(() => null) as ApiResponse<StrongGrant> | null;
+  if (!json?.success || !json.data) throw new Error(json?.error ?? `Grant refused (HTTP ${res.status})`);
+  return json.data.grant;
+});
 
 // ─── Setup ──────────────────────────────────────────────────────────────────
 
@@ -975,20 +965,20 @@ export const config = {
    *  (it does not protect the key in use): the exported secrets then cannot be
    *  read elsewhere. */
   exportData: async (): Promise<{ blob: Blob; warning: string | null }> => {
-    const res = await fetch(`${_apiBase}/api/config/export`, {
+    const res = await strongFetch(`${_apiBase}/api/config/export`, {
       headers: authHeaders(),
-    });
+    }, '/api/config/export');
     if (!res.ok) throw new Error(`Export failed: ${res.status}`);
     return { blob: await res.blob(), warning: res.headers?.get?.('X-Kronn-Export-Warning') ?? null };
   },
   importData: async (file: File): Promise<ImportResult> => {
     const form = new FormData();
     form.append('file', file);
-    const res = await sendWithConfirmation(extra => fetch(`${_apiBase}/api/config/import`, {
+    const res = await strongFetch(`${_apiBase}/api/config/import`, {
       method: 'POST',
-      headers: { ...authHeaders(), ...extra },
+      headers: authHeaders(),
       body: form,
-    }));
+    }, '/api/config/import');
     if (!res.ok) throw new Error(`Import failed: ${res.status}`);
     const json = await res.json();
     if (json.error) throw new Error(json.error);
@@ -1912,12 +1902,12 @@ export const mcps = {
   exportBundle: async (
     request: ExportPluginBundleRequest,
   ): Promise<{ filename: string; blob: Blob }> => {
-    const response = await fetch(`${_apiBase}/api/mcps/bundles/export`, {
+    const response = await strongFetch(`${_apiBase}/api/mcps/bundles/export`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(request),
-    });
+    }, '/api/mcps/bundles/export');
     if (!response.ok) {
       let message = `Export failed (${response.status})`;
       try {

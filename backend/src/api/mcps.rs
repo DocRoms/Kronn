@@ -1384,7 +1384,45 @@ pub(crate) fn compute_orphan_env_keys(
 pub async fn update_custom_spec(
     State(state): State<AppState>,
     Path(server_id): Path<String>,
+    strong: crate::api::strong_confirm::Strong,
     Json(payload): Json<CustomApiPayload>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // KT-1496: a new base URL receives the stored credentials of this plugin.
+    let lookup = server_id.clone();
+    let stored_url = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(db::mcps::list_servers(conn)?
+                .into_iter()
+                .find(|server| server.id == lookup)
+                .and_then(|server| server.api_spec.map(|spec| spec.base_url)))
+        })
+        .await
+        .unwrap_or(None);
+    if stored_url
+        .as_deref()
+        .is_some_and(|url| !same_base_url(url, &payload.base_url))
+    {
+        if let Err(refused) = strong.require(&state).await {
+            return refused;
+        }
+    }
+    update_custom_spec_inner(state, server_id, payload)
+        .await
+        .into_response()
+}
+
+/// Whether two base URLs are the same destination for a credential.
+fn same_base_url(a: &str, b: &str) -> bool {
+    let canonical = |url: &str| url.trim().trim_end_matches('/').to_ascii_lowercase();
+    canonical(a) == canonical(b)
+}
+
+async fn update_custom_spec_inner(
+    state: AppState,
+    server_id: String,
+    payload: CustomApiPayload,
 ) -> Json<ApiResponse<UpdateCustomSpecResponse>> {
     // Hard prefix gate: only custom plugins are editable through this
     // route. Registry plugins (`api-*`, `mcp-*`) are immutable by
