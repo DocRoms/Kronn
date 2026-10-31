@@ -758,6 +758,27 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     r("GET", "/api/signals/catalog", Read, &[]),
     r("GET", "/api/conventions/agents-md-format-v1", Read, &[]),
 ];
+/// KT-1492 — the trust writes a bridge token reaches when, and only when, its
+/// request carries a strong-confirmation code (the owner may give the code to an
+/// agent for that one action). They are not in [`BRIDGE_ROUTES`] (the MCP bridge
+/// script does not call them: no MCP surface), the gate admits them on the code.
+/// Routes that hand back the authenticator seed or recovery codes are not here.
+pub const TRUST_CONFIRM_ROUTES: &[(&str, &str)] = &[
+    ("PUT", "/api/trust/instance"),
+    ("PUT", "/api/trust/workflows/{id}"),
+    ("DELETE", "/api/trust/workflows/{id}"),
+    ("PUT", "/api/trust/rooms/{id}"),
+    ("DELETE", "/api/trust/rooms/{id}"),
+    ("POST", "/api/trust/proof/disable"),
+];
+
+/// Whether this method and matched pattern is a trust write reachable with a code.
+pub fn trust_confirm_route(method: &str, pattern: &str) -> bool {
+    TRUST_CONFIRM_ROUTES
+        .iter()
+        .any(|(m, p)| m.eq_ignore_ascii_case(method) && *p == pattern)
+}
+
 /// The route a bridge token may call for this method and matched pattern.
 pub fn route_for(method: &str, pattern: &str) -> Option<&'static BridgeRoute> {
     BRIDGE_ROUTES

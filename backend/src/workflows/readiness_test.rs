@@ -420,6 +420,7 @@ fn a_native_agent_without_full_access_blocks_the_run() {
 #[test]
 fn a_saved_quick_exec_source_awaiting_approval_is_a_named_blocker() {
     let exec = |approved: Option<bool>| crate::models::QuickExec {
+        approved_by_trust: None,
         id: "qe-cw".into(),
         name: "CloudWatch — top 5xx".into(),
         icon: "🔎".into(),

@@ -8,6 +8,7 @@ import {
   useState,
   useRef,
   useMemo,
+  useCallback,
   useEffect,
   useLayoutEffect,
   memo,
@@ -360,6 +361,11 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
       ? (path, line) => projectPath(projectId, { view: 'code', file: path, line })
       : undefined,
   }), [attachments, discussionMedia, projectId, onNavigate]);
+  // A card's Settings link stays in the app on a plain click (no page load).
+  const openSettingsSection = useCallback(
+    (sectionId: string) => onNavigate('settings', { scrollTo: sectionId }),
+    [onNavigate],
+  );
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
     if (isEditing && editTextareaRef.current) {
@@ -1138,6 +1144,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                         discussionId={discussionId}
                         // A card finds its durable row by this message's id.
                         sourceMessageId={msg.id}
+                        onOpenSettingsSection={openSettingsSection}
                       />
                     </MentionDiscussionAgentContext.Provider>
                   )}
@@ -1189,6 +1196,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                           // been refused.
                           sourceMessageId={msg.id}
                           sources={lint?.sources}
+                          onOpenSettingsSection={openSettingsSection}
                         />
                       </MentionDiscussionAgentContext.Provider>
                     )
@@ -1197,6 +1205,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                       content={cleaned}
                       discussionId={discussionId}
                       sources={lint?.sources}
+                      onOpenSettingsSection={openSettingsSection}
                     />
                   )}
                 {seed && <KronnSeedToggle seed={seed} />}
@@ -2035,6 +2044,8 @@ interface MarkdownRenderContextValue {
   sources?: SourceCheck[];
   proposalFenceLines: number[];
   questionFenceLines: number[];
+  /** Opens a Settings section in this tab; a card's link keeps its address without it. */
+  onOpenSettingsSection?: (sectionId: string) => void;
 }
 
 // KT-622 — renderer functions are component TYPES, not ordinary callbacks.
@@ -2067,7 +2078,7 @@ function MarkdownPre({ children, node }: {
   children?: ReactNode;
   node?: { position?: { start?: { line?: number } } };
 }) {
-  const { discussionId, sourceMessageId, proposalFenceLines, questionFenceLines } = useContext(MarkdownRenderContext);
+  const { discussionId, sourceMessageId, proposalFenceLines, questionFenceLines, onOpenSettingsSection } = useContext(MarkdownRenderContext);
   if (discussionId) {
     // ReactMarkdown supplies <pre><code>…</code></pre>; inspect the child's
     // language class without treating an arbitrary ReactNode as an element.
@@ -2105,6 +2116,7 @@ function MarkdownPre({ children, node }: {
           source={source.trim()}
           sourceMessageId={sourceMessageId}
           fenceIndex={fenceIndex !== undefined && fenceIndex >= 0 ? fenceIndex : undefined}
+          onOpenSettingsSection={onOpenSettingsSection}
         />
       );
     }
@@ -2150,6 +2162,7 @@ export const MarkdownContent = memo(({
   sourceMessageId,
   agentMentions = false,
   sources,
+  onOpenSettingsSection,
 }: {
   content: string;
   discussionId?: string;
@@ -2157,6 +2170,7 @@ export const MarkdownContent = memo(({
   agentMentions?: boolean;
   /** The backend's citation verdicts; refreshes must not remount forms. */
   sources?: SourceCheck[];
+  onOpenSettingsSection?: (sectionId: string) => void;
 }) => {
   const proposalFenceLines = useMemo(() => {
     const lines: number[] = [];
@@ -2176,8 +2190,8 @@ export const MarkdownContent = memo(({
   }, [content]);
 
   const renderContext = useMemo(() => ({
-    discussionId, sourceMessageId, sources, proposalFenceLines, questionFenceLines,
-  }), [discussionId, sourceMessageId, sources, proposalFenceLines, questionFenceLines]);
+    discussionId, sourceMessageId, sources, proposalFenceLines, questionFenceLines, onOpenSettingsSection,
+  }), [discussionId, sourceMessageId, sources, proposalFenceLines, questionFenceLines, onOpenSettingsSection]);
 
   // Parsing every message up front is what made a 2 170-message room freeze on
   // open. Start as text, upgrade to markdown as soon as the message is near the
@@ -2287,12 +2301,14 @@ export const MessageBody = memo(({
   sourceMessageId,
   agentMentions = false,
   sources,
+  onOpenSettingsSection,
 }: {
   content: string;
   discussionId?: string;
   sourceMessageId?: string;
   agentMentions?: boolean;
   sources?: SourceCheck[];
+  onOpenSettingsSection?: (sectionId: string) => void;
 }) => {
   const segs = useMemo(() => splitInjectedContext(content), [content]);
   if (segs.length === 1 && segs[0].kind === 'text') {
@@ -2303,6 +2319,7 @@ export const MessageBody = memo(({
         sourceMessageId={sourceMessageId}
         agentMentions={agentMentions}
         sources={sources}
+        onOpenSettingsSection={onOpenSettingsSection}
       />
     );
   }
@@ -2320,6 +2337,7 @@ export const MessageBody = memo(({
                     sourceMessageId={sourceMessageId}
                     agentMentions={agentMentions}
                     sources={sources}
+                    onOpenSettingsSection={onOpenSettingsSection}
                   />
                 )
               : null),
@@ -2333,11 +2351,13 @@ const MentionAwareMessageBody = memo(({
   discussionId,
   sourceMessageId,
   sources,
+  onOpenSettingsSection,
 }: {
   content: string;
   discussionId?: string;
   sourceMessageId?: string;
   sources?: SourceCheck[];
+  onOpenSettingsSection?: (sectionId: string) => void;
 }) => {
   return (
     <MessageBody
@@ -2346,6 +2366,7 @@ const MentionAwareMessageBody = memo(({
       sourceMessageId={sourceMessageId}
       agentMentions
       sources={sources}
+      onOpenSettingsSection={onOpenSettingsSection}
     />
   );
 });

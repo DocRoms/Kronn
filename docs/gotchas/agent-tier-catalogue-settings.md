@@ -126,7 +126,7 @@ caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/components/ChatHeader.tsx:430-431#currentModel]
+[src: file: frontend/src/components/ChatHeader.tsx:431-432#currentModel]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1636-1667#changeQuickPromptAgent]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:3266-3267#currentModel]
 
@@ -321,9 +321,9 @@ clear the old override only when the persisted agent, tier or connection
 actually changes. Each setter updates its field and clears the model in the
 same SQL statement. Resending an unchanged selection preserves its override;
 ordinary title edits and historical message models remain untouched.
-[src: file: backend/src/db/discussions.rs:1105-1113#update_discussion_tier]
-[src: file: backend/src/db/discussions.rs:1153-1184#update_discussion_agent]
-[src: file: backend/src/db/discussions.rs:1199-1214#update_discussion_connection]
+[src: file: backend/src/db/discussions.rs:1113-1121#update_discussion_tier]
+[src: file: backend/src/db/discussions.rs:1161-1192#update_discussion_agent]
+[src: file: backend/src/db/discussions.rs:1207-1222#update_discussion_connection]
 
 An explicit JSON `connection_id: null` is distinct from an absent field.
 Clearing a connection is validated against the effective agent before any
@@ -334,7 +334,7 @@ merely to compare targets.
 [src: file: backend/src/models/discussions.rs:609-618#connection_id]
 [src: file: backend/src/api/discussions/crud.rs:796-826#validate_connection_target]
 [src: file: backend/src/api/discussions/crud.rs:867-891#invalidate_summary_cache]
-[src: file: backend/src/db/discussions.rs:1094-1103#get_discussion_agent]
+[src: file: backend/src/db/discussions.rs:1102-1111#get_discussion_agent]
 
 Seven isolated Router/SQLite regressions cover changed and unchanged targets,
 null versus absent, invalid-target refusal and historical answer preservation.

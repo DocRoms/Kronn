@@ -4798,6 +4798,9 @@ struct ValidationReach {
     access: crate::models::ValidationsAccess,
     /// Resolved only when the access includes Docker.
     socket: Option<Result<std::path::PathBuf, String>>,
+    /// KT-1492: the reach above was widened by a trust level, not by a human:
+    /// the validation runs under the level's sandbox, away from Kronn's data.
+    by_trust: Option<crate::models::TrustApproval>,
 }
 
 /// The project's access, widened to Docker by a grant on the discussion; a grant
@@ -4813,13 +4816,48 @@ fn widened_access(
     }
 }
 
+/// KT-1492 — the access a trust level opens on its own, and the approval to
+/// journal when it widened what the project and the discussion already gave:
+/// Trusted reaches Docker, Full access drops the sandbox. Never narrows.
+pub(crate) fn widened_by_trust(
+    access: crate::models::ValidationsAccess,
+    level: crate::models::TrustLevel,
+) -> (
+    crate::models::ValidationsAccess,
+    Option<crate::models::TrustApproval>,
+) {
+    use crate::core::trust::grants;
+    use crate::models::{TrustApproval, ValidationsAccess};
+    if access != ValidationsAccess::Full && grants(level, TrustApproval::ValidationsUnconfined) {
+        return (
+            ValidationsAccess::Full,
+            Some(TrustApproval::ValidationsUnconfined),
+        );
+    }
+    if access == ValidationsAccess::Sandbox && grants(level, TrustApproval::ValidationsDocker) {
+        return (
+            ValidationsAccess::Docker,
+            Some(TrustApproval::ValidationsDocker),
+        );
+    }
+    (access, None)
+}
+
 /// What a validation is launched with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ValidationReachLaunch {
     Sandbox,
     Docker(std::path::PathBuf),
-    /// No sandbox: a human chose full access for the project.
+    /// No lane sandbox: a human chose full access for the project.
     Host,
+    /// KT-1492: Docker, reached because a trust level said so. The lane sandbox
+    /// stays, with Kronn's data directory closed to it.
+    TrustDocker(std::path::PathBuf),
+    /// KT-1492: the host, reached because a trust level said so (Full access).
+    /// The command runs as the user, with Kronn's data directory closed to it
+    /// (`core::trust_sandbox`) when the host has a sandbox and the owner kept
+    /// the vault protection on.
+    TrustHost,
 }
 
 /// Why a validation could not run, as the human fixes it.
@@ -4837,8 +4875,8 @@ impl ValidationReach {
         use crate::models::ValidationsAccess;
         let project = project_id.map(str::to_string);
         let discussion = discussion_id.to_string();
-        let access = db
-            .with_read_conn(move |conn| {
+        let (access, by_trust) = db
+            .with_conn(move |conn| {
                 let access = match &project {
                     Some(id) => crate::db::projects::validations_access(conn, id)?,
                     None => ValidationsAccess::Sandbox,
@@ -4848,10 +4886,31 @@ impl ValidationReach {
                     &discussion,
                     DOCKER_CAPABILITY,
                 )?;
-                Ok(widened_access(access, granted))
+                let access = widened_access(access, granted);
+                // KT-1492: the room's trust level, journalled when it widens.
+                let origin = crate::db::trust::TrustOrigin::room(&discussion);
+                let trust = crate::db::trust::effective(conn, &origin)?;
+                let (widened, approval) = widened_by_trust(access, trust.level);
+                let Some(approval) = approval else {
+                    return Ok((access, None));
+                };
+                // Fails closed: with no sandbox on this host the level grants
+                // nothing, and the reach stays what the project gave.
+                let granted = crate::db::trust::grant(
+                    conn,
+                    &origin,
+                    approval,
+                    "Integration validations",
+                    project.as_deref(),
+                    None,
+                )?;
+                Ok(match granted {
+                    Some(_) => (widened, Some(approval)),
+                    None => (access, None),
+                })
             })
             .await
-            .unwrap_or(ValidationsAccess::Sandbox);
+            .unwrap_or((ValidationsAccess::Sandbox, None));
         let socket = if access == ValidationsAccess::Docker {
             Some(
                 tokio::task::spawn_blocking(crate::core::task_worker_sandbox::host_docker_socket)
@@ -4861,14 +4920,25 @@ impl ValidationReach {
         } else {
             None
         };
-        Self { access, socket }
+        Self {
+            access,
+            socket,
+            by_trust,
+        }
     }
 
     fn launch(&self) -> ValidationReachLaunch {
+        use crate::models::TrustApproval;
         use crate::models::ValidationsAccess;
-        match (self.access, &self.socket) {
-            (ValidationsAccess::Full, _) => ValidationReachLaunch::Host,
-            (ValidationsAccess::Docker, Some(Ok(path))) => {
+        match (self.access, &self.socket, self.by_trust) {
+            (ValidationsAccess::Full, _, Some(TrustApproval::ValidationsUnconfined)) => {
+                ValidationReachLaunch::TrustHost
+            }
+            (ValidationsAccess::Full, _, _) => ValidationReachLaunch::Host,
+            (ValidationsAccess::Docker, Some(Ok(path)), Some(TrustApproval::ValidationsDocker)) => {
+                ValidationReachLaunch::TrustDocker(path.clone())
+            }
+            (ValidationsAccess::Docker, Some(Ok(path)), _) => {
                 ValidationReachLaunch::Docker(path.clone())
             }
             _ => ValidationReachLaunch::Sandbox,
@@ -5089,20 +5159,60 @@ async fn run_one_validation_reaching(
     // Probing the launcher and provisioning the lane start a process and touch
     // the disk: off the async worker.
     let launch_cwd = cwd.to_path_buf();
-    let launch = tokio::task::spawn_blocking(move || match reach {
-        ValidationReachLaunch::Host => Ok(ValidationLaunch::Unconfined),
-        ValidationReachLaunch::Docker(socket) => {
-            validation_launch(&launch_cwd).map(|launch| launch.reaching(socket))
+    let reach_for_guard = reach.clone();
+    let launch = tokio::task::spawn_blocking(move || launch_for_reach(reach, &launch_cwd))
+        .await
+        .unwrap_or_else(|error| Err(format!("the sandbox check did not complete: {error}")));
+    if matches!(&reach_for_guard, ValidationReachLaunch::TrustDocker(_))
+        && crate::core::trust_sandbox::protect_vault_setting()
+    {
+        // A Docker volume naming Kronn's data directory (or a parent) would hand
+        // the daemon's root view of it to a container: refused before it runs.
+        let argv: Vec<String> = spec.command.split_whitespace().map(String::from).collect();
+        if let Some(arg) = crate::core::trust_sandbox::argv_reaches_protected(
+            &argv,
+            &crate::core::trust_sandbox::protected_dirs(),
+            cwd,
+        ) {
+            return (
+                None,
+                0,
+                format!(
+                    "refused: `{arg}` would mount Kronn's data directory (or a directory containing it) \
+                     into a container; a validation a trust level reached Docker for never does"
+                ),
+            );
         }
-        ValidationReachLaunch::Sandbox => validation_launch(&launch_cwd),
-    })
-    .await
-    .unwrap_or_else(|error| Err(format!("the sandbox check did not complete: {error}")));
+    }
     match launch {
         Ok(launch) => run_one_validation_with(spec, cwd, &launch).await,
         // Recorded like any failed validation: recovery cannot advance the
         // candidate as though the command had run.
         Err(reason) => (None, 0, format!("refused: {reason}")),
+    }
+}
+
+/// How a validation is started at `reach`. A reach a trust level opened is
+/// never started unconfined: it runs under the level's sandbox (Full access) or
+/// keeps the lane sandbox with Kronn's data directory closed (Docker), and a
+/// host with no sandbox refuses it with the reason.
+fn launch_for_reach(
+    reach: ValidationReachLaunch,
+    cwd: &std::path::Path,
+) -> Result<ValidationLaunch, String> {
+    match reach {
+        ValidationReachLaunch::Host => Ok(ValidationLaunch::Unconfined),
+        ValidationReachLaunch::Docker(socket) => {
+            validation_launch(cwd).map(|launch| launch.reaching(socket))
+        }
+        // As the user. Under the vault sandbox when the host has one and the
+        // owner kept the protection on, otherwise with the backend's rights.
+        ValidationReachLaunch::TrustHost => Ok(crate::core::trust_sandbox::confinement()
+            .map_or(ValidationLaunch::Unconfined, ValidationLaunch::Level)),
+        ValidationReachLaunch::TrustDocker(socket) => validation_launch(cwd)
+            .map(|launch| launch.reaching(socket))
+            .map(ValidationLaunch::hiding_kronn),
+        ValidationReachLaunch::Sandbox => validation_launch(cwd),
     }
 }
 
@@ -5133,6 +5243,9 @@ enum ValidationLaunch {
     /// (KT-1433), and tests that validate a scripted command in a temporary
     /// directory that is not a lane.
     Unconfined,
+    /// KT-1492: as the user, under the sandbox of what a trust level grants
+    /// (Kronn's data directory closed, the rest open).
+    Level(crate::core::trust_sandbox::LevelConfinement),
 }
 
 impl ValidationLaunch {
@@ -5144,9 +5257,22 @@ impl ValidationLaunch {
         }
     }
 
-    fn confinement(&self) -> Option<&crate::core::task_worker_sandbox::Confinement> {
+    /// KT-1492: this launch with Kronn's data directory closed to it, unless
+    /// the owner turned "Protect the Kronn vault from agents" off. A launch with
+    /// no sandbox at all has nothing to hide it with and is left as it is.
+    fn hiding_kronn(self) -> Self {
+        match self {
+            Self::Confined(confinement) if crate::core::trust_sandbox::protect_vault_setting() => {
+                Self::Confined(confinement.hiding(crate::core::trust_sandbox::protected_dirs()))
+            }
+            launch => launch,
+        }
+    }
+
+    fn confinement(&self) -> Option<&dyn crate::core::task_worker_sandbox::CommandConfinement> {
         match self {
             Self::Confined(confinement) => Some(confinement),
+            Self::Level(level) => Some(level),
             Self::Unconfined => None,
         }
     }
@@ -21732,6 +21858,9 @@ pub(crate) mod tests {
         match launch {
             Ok(ValidationLaunch::Unconfined) => {
                 panic!("the shipped launch ran a worker's tree unconfined")
+            }
+            Ok(ValidationLaunch::Level(_)) => {
+                panic!("the lane launch of a worker's tree is never the trust-level one")
             }
             Ok(ValidationLaunch::Confined(_)) => {
                 assert!(
@@ -39964,3 +40093,7 @@ pub(crate) mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "orchestration_trust_tests.rs"]
+mod orchestration_trust_tests;

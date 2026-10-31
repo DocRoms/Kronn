@@ -14,11 +14,11 @@ the usable-agent inputs supplied to the real UI consumers and assert the native
 
 Quick API and Quick Exec have no agent selector for their own execution. The
 Quick API form persists API plugin/config/endpoint fields and variables, while
-its create request has no agent field. [src: file: frontend/src/components/workflows/QuickApiForm.tsx:220-246#handleSave] [src: file: frontend/src/types/generated.ts:2603#CreateQuickApiRequest] Its direct-run handler sends only
-`{ variables }` to `quickApis.runQa`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1722-1732#handleLaunchQA] [src: file: frontend/src/types/generated.ts:8710-8721#RunQuickApiRequest]
+its create request has no agent field. [src: file: frontend/src/components/workflows/QuickApiForm.tsx:220-246#handleSave] [src: file: frontend/src/types/generated.ts:2612#CreateQuickApiRequest] Its direct-run handler sends only
+`{ variables }` to `quickApis.runQa`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1722-1732#handleLaunchQA] [src: file: frontend/src/types/generated.ts:8744-8755#RunQuickApiRequest]
 The Quick Exec form instead persists a command, arguments, timeout, output
-format, and variables; its create request likewise has no agent field. [src: file: frontend/src/components/workflows/QuickExecForm.tsx:46-66] [src: file: frontend/src/types/generated.ts:2605-2609#CreateQuickExecRequest] Its direct-run handler sends only
-`{ variables }` to `quickExecs.run`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1703-1708#handleRunQE] [src: file: frontend/src/types/generated.ts:8737#RunQuickExecRequest]
+format, and variables; its create request likewise has no agent field. [src: file: frontend/src/components/workflows/QuickExecForm.tsx:46-66] [src: file: frontend/src/types/generated.ts:2614-2618#CreateQuickExecRequest] Its direct-run handler sends only
+`{ variables }` to `quickExecs.run`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1703-1708#handleRunQE] [src: file: frontend/src/types/generated.ts:8771#RunQuickExecRequest]
 Therefore this task makes no QA/QE OpenCode-selection assertion; that absence
 comes from their UI/request/executor contracts, rather than from the `AgentType`
 enum.

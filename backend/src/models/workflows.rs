@@ -953,6 +953,12 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub exec_agent_written: Option<bool>,
+    /// KT-1492 — the approval above came from a trust level, not from a human:
+    /// the step runs under the level's OS sandbox, and lowering the level
+    /// withdraws the approval. Set by the server, never read from a request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exec_approved_by_trust: Option<bool>,
     /// KT-1017 — which of the step's lines an agent last wrote: `main`,
     /// `setup`, `stdin`, `source:<alias>`. Set by the server on save; a human
     /// edit re-attributes only the line it changed.

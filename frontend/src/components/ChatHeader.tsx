@@ -25,6 +25,7 @@ import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 import { DiscussionScopeChip } from './DiscussionScope';
+import { TrustBadge } from './TrustLevel';
 import { DiscInviteButton } from './DiscInviteButton';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 import type { AgentSwitchTarget } from './AgentSwitchPicker';
@@ -483,6 +484,8 @@ export function ChatHeader({
             onOpen={onToggleSettingsPanel}
             t={t}
           />
+          {/* KT-1492 — never folded away: the trust level in force for this room. */}
+          <TrustBadge target={{ scope: 'room', id: discussion.id }} />
           <button
             type="button"
             className="disc-chat-header-details-toggle"

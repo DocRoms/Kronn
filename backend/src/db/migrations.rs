@@ -1010,6 +1010,23 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "277_quick_exec_activation_refusals",
         include_str!("sql/277_quick_exec_activation_refusals.sql"),
     ),
+    ("278_trust_levels", include_str!("sql/278_trust_levels.sql")),
+    (
+        "279_trust_withdraw",
+        include_str!("sql/279_trust_withdraw.sql"),
+    ),
+    (
+        "280_trust_proof_events",
+        include_str!("sql/280_trust_proof_events.sql"),
+    ),
+    (
+        "281_trust_grant_rooms",
+        include_str!("sql/281_trust_grant_rooms.sql"),
+    ),
+    (
+        "282_trust_forget_settings_only",
+        include_str!("sql/282_trust_forget_settings_only.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth
@@ -1183,6 +1200,10 @@ const RENAMED_MIGRATIONS: &[(&str, &str)] = &[
     ("111_message_session_tokens", "117_message_session_tokens"),
     ("112_review_ledger", "118_review_ledger"),
     ("113_quick_exec_runs", "119_quick_exec_runs"),
+    // KT-1492: renumbered after KT-1490 took 277.
+    ("277_trust_levels", "278_trust_levels"),
+    ("278_trust_withdraw", "279_trust_withdraw"),
+    ("279_trust_proof_events", "280_trust_proof_events"),
 ];
 
 fn reconcile_renamed_migrations(conn: &Connection) -> Result<()> {
@@ -3843,6 +3864,55 @@ mod tests {
         assert!(migration_is_applied(&conn, "113_session_alias_ordinal").unwrap());
         assert!(!migration_is_applied(&conn, "114_awareness_stalled_offers").unwrap());
         assert!(!migration_is_applied(&conn, "001_initial").unwrap());
+    }
+
+    /// A development database that ran KT-1492 before its renumbering carries
+    /// the receipts `277_trust_levels`, `278_trust_withdraw` and
+    /// `279_trust_proof_events`. It must start, without replaying the SQL
+    /// (a duplicate column, a RENAME of a table that is already renamed).
+    #[test]
+    fn trust_migrations_renumbered_after_a_dev_run_are_not_replayed() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "280_trust_proof_events").unwrap();
+        for (legacy, current) in [
+            ("277_trust_levels", "278_trust_levels"),
+            ("278_trust_withdraw", "279_trust_withdraw"),
+            ("279_trust_proof_events", "280_trust_proof_events"),
+        ] {
+            let renamed = conn
+                .execute(
+                    "UPDATE _migrations SET name = ?1 WHERE name = ?2",
+                    [legacy, current],
+                )
+                .unwrap();
+            assert_eq!(renamed, 1, "{current} must have been applied");
+        }
+
+        run(&conn).expect("a database carrying the old trust names migrates cleanly");
+
+        for current in [
+            "278_trust_levels",
+            "279_trust_withdraw",
+            "280_trust_proof_events",
+        ] {
+            let receipts: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM _migrations WHERE name = ?1",
+                    [current],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(receipts, 1, "one receipt for {current}");
+        }
+        let columns: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('trust_audit_log')
+                 WHERE name IN ('object_kind', 'object_id', 'object_ref', 'active')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 4);
     }
 
     fn discussions_has_workflow_observer(conn: &Connection) -> bool {

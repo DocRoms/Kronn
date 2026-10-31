@@ -2817,6 +2817,7 @@ mod tests {
 
     fn mk_step(endpoint_path: &str) -> WorkflowStep {
         WorkflowStep {
+            exec_approved_by_trust: None,
             id: None,
             name: "fetch".into(),
             step_type: StepType::ApiCall,

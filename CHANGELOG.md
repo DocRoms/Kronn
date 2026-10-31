@@ -128,6 +128,37 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Trust levels: say "I trust my agents here" at the scope you choose, with the
+  risks spelled out, instead of approving every step. Three levels (Standard,
+  Trusted, Full access) set for the instance (Settings › Trust levels), a
+  workflow or a room; the narrowest explicit setting wins. Under Trusted, an
+  agent-written Quick Exec or workflow Exec step that passes values to a CLI
+  is active at once, a room's request to read or plan in another of your
+  projects is granted, and integration validations may reach Docker; Full
+  access also runs validations without the sandbox. Choosing a level opens a
+  risk panel listing exactly what changes and needs an explicit
+  confirmation; an active level shows a badge on the room, the workflow and
+  the settings, revocable in one click, and every approval it grants is
+  journalled ("granted by trust level X"). Everything a level approves runs
+  under an OS sandbox (macOS Seatbelt, Linux bubblewrap) that closes Kronn's
+  own data (database, encryption key, recovery key, configuration, backups)
+  and its API port to those commands and leaves the rest of your machine
+  open, as in your terminal; a host with no sandbox refuses Trusted and Full
+  access with the reason. Raising a level needs a code from an authenticator
+  app (TOTP, any app; ten single-use recovery codes; enrolled in Settings ›
+  Security), so a command an agent approved cannot raise its own level, even
+  from this machine; lowering never needs it. Lowering a level takes back
+  the approvals it granted and the journal lists them. The risk panel says
+  what stays reachable (project databases, the network, Docker, other
+  repositories, the credentials of other tools) and what stays closed. The
+  journal keeps 10 000 rows or 180 days. No level lets an agent change a trust
+  setting, skip a delete confirmation, or lends its trust to a P2P peer, and a
+  room that edits a workflow never takes that workflow's level. Elevation
+  cards keep refuse / this conversation / this project and now point to the
+  global setting. Code write on other projects and host access for agents are
+  in the policy table for Full
+  access; their gates ship with their own tickets (KT-1492, builds on
+  KT-1490, KT-1474, KT-1433).
 - Custom skills keep a version history, like Quick Prompts. Every change
   is saved as a full copy of the skill; a save that changes nothing adds
   no version, and a skill written before this release gets its current
