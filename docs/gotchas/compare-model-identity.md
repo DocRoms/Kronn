@@ -90,7 +90,7 @@ suffix bypassed entirely. The judge/improver pickers in
 The fix removes the manual `suffix` override so the Compare selector reuses
 the same catalogue+identity resolution as every other `AgentSwitchPicker`
 caller.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3543-3557#AgentCompareSelector]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3554-3568#AgentCompareSelector]
 [src: file: frontend/src/components/AgentCompareSelector.tsx:85-111#AgentSwitchPicker]
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:130-142#resolvedTier]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:13-26#resolveCatalogTier]

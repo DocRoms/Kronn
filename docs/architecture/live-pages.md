@@ -1012,7 +1012,7 @@ the full run even when the compact list already contains its id.
 [src: file: backend/src/workflows/collect_api_data_step.rs:578-599#source_id]
 [src: file: backend/src/workflows/collect_api_data_step.rs:922-965#missing_required_api_keeps_its_alias_id_and_cause]
 [src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:18-40#needsDetail]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1031-1041#focusedRun]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1033-1043#focusedRun]
 
 Rolling windows use the common run-anchored time grammar in source variables,
 for example

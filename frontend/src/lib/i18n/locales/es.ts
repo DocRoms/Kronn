@@ -1175,6 +1175,7 @@ const es: TranslationDict = {
   'automation.chip.kind': 'Tipo de automatización: {0}',
   'automation.chip.pinned': 'Fijadas',
   'automation.chip.active': 'Activas',
+  'automation.chip.disabled': 'Desactivadas',
   'automation.chip.project': 'Proyecto',
   'automation.chip.removeProject': 'Quitar el filtro de proyecto {0}',
   'automation.chip.noProjects': 'Ningún proyecto que elegir',

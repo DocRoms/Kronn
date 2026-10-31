@@ -1169,6 +1169,7 @@ const zh: TranslationDict = {
   "automation.chip.kind": "自动化类型：{0}",
   "automation.chip.pinned": "已置顶",
   "automation.chip.active": "已启用",
+  "automation.chip.disabled": "已停用",
   "automation.chip.project": "项目",
   "automation.chip.removeProject": "移除项目筛选 {0}",
   "automation.chip.noProjects": "没有可选的项目",
