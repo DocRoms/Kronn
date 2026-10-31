@@ -12,8 +12,10 @@ import type {
 } from '../types/generated';
 import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '../lib/api';
 import { datasetRecords, recordsToRows } from '../lib/live-page-csv';
-import { formatBytes } from '../lib/live-page-weight';
+import { formatBytes, pageHtmlWeight } from '../lib/live-page-weight';
+import { replayQueue } from '../lib/live-page-replay';
 import { HtmlWeightBadge } from '../components/HtmlWeightBadge';
+import { DetailHeaderShell } from '../components/DetailHeaderShell';
 import {
   buildSandboxDocument,
   hostTheme,
@@ -67,6 +69,9 @@ import {
 import '../components/DiscussionToolPanel.css';
 import './DiscussionsPage.css';
 import './PagesPage.css';
+
+// The header's Details fold, remembered for this page type (the discussion has its own).
+const ARTIFACT_HEADER_DETAILS_KEY = 'kronn:artifactHeaderDetails';
 
 const REFRESH_MS = 30_000;
 const PAGE_NAVIGATION_STORAGE_KEY = 'kronn:pageNavigation';
@@ -464,7 +469,9 @@ export function PagesPage({
     }
   }, [loadDetail, patchWorkflowRun, t]);
 
-  const enabledWorkflows = useMemo(() => linkedWorkflows.filter(workflow => workflow.enabled), [linkedWorkflows]);
+  // What the button label counts and what a click replays: one definition
+  // (`replayQueue`), so the count never promises a run the click skips.
+  const queuedWorkflows = replayQueue(linkedWorkflows, id => workflowRuns[id]?.state === 'running');
   const anyWorkflowRunning = linkedWorkflows.some(workflow => workflowRuns[workflow.id]?.state === 'running');
   // A run-all batch is global (its guard survives a Page switch), so it blocks
   // the button on every Page until it ends.
@@ -474,7 +481,7 @@ export function PagesPage({
   // disabled ones are left alone and flagged as skipped. Each workflow reports
   // its own state, and the button shows how many have finished.
   const runAllWorkflows = useAsyncGuard(async () => {
-    const queue = enabledWorkflows.filter(workflow => !workflowLocksRef.current.has(workflow.id));
+    const queue = replayQueue(linkedWorkflows, id => workflowLocksRef.current.has(id));
     if (queue.length === 0) return;
     setSkippedWorkflowIds(new Set(linkedWorkflows.filter(workflow => !workflow.enabled).map(workflow => workflow.id)));
     setRunAllProgress({ done: 0, total: queue.length });
@@ -1085,97 +1092,48 @@ export function PagesPage({
           && <div className="live-pages-notice" role="status" data-testid="artifact-export-redacted">{exportNotice.text}</div>}
         {detail ? (
           <>
-            <header className="live-pages-viewer-header collection-detail-header">
-              <div className="live-pages-title-block">
-                {editingTitle ? (
-                  <form
-                    className="live-pages-title-editor"
-                    onSubmit={(event) => { event.preventDefault(); saveTitle(); }}
-                  >
-                    <input
-                      value={titleDraft}
-                      onChange={(event) => { setTitleDraft(event.target.value); setTitleError(null); }}
-                      onKeyDown={(event) => { if (event.key === 'Escape') cancelTitleEdit(); }}
-                      aria-label={t('pages.titleInput')}
-                      maxLength={201}
-                      autoFocus
-                      disabled={savingTitle}
-                    />
-                    <button type="submit" disabled={savingTitle} aria-label={t('pages.saveTitle')} title={t('pages.saveTitle')}>
-                      {savingTitle ? <Loader2 size={14} className="spin" /> : <Save size={14} />}
-                    </button>
-                    <button type="button" onClick={cancelTitleEdit} disabled={savingTitle} aria-label={t('pages.cancelTitle')} title={t('pages.cancelTitle')}>
-                      <X size={14} />
-                    </button>
-                    {titleError && <small role="alert">{titleError}</small>}
-                  </form>
-                ) : (
-                  <div className="live-pages-title-display">
-                    <h1>{detail.title}</h1>
-                    <button type="button" onClick={startTitleEdit} aria-label={t('pages.renameTitle', detail.title)} title={t('pages.renameTitle', detail.title)}>
-                      <Pencil size={13} />
-                    </button>
-                  </div>
-                )}
-                <div className="live-pages-identity">
-                  <button
-                    type="button"
-                    className="live-pages-dataset-trigger"
-                    onClick={() => setSelectedDatasetId(selectedDataset?.id ?? detail.datasets[0]?.id ?? null)}
-                    disabled={detail.datasets.length === 0}
-                    title={t('pages.datasetStorageTitle', formatBytes(totalDatasetSize))}
-                    aria-label={t('pages.datasetStorage')}
-                  >
-                    <span>{t('pages.datasetCount', detail.datasets.length)}</span>
-                    <span className="live-pages-data-size"><Database size={11} /> {formatBytes(totalDatasetSize)}</span>
-                    <ChevronDown size={11} />
-                  </button>
-                  <HtmlWeightBadge bytes={detail.html_size_bytes} variant="header" />
-                  {detail.archived && <span className="live-pages-archived-badge"><Archive size={11} />{t('pages.archived')}</span>}
-                  <LivePageSlugEditor
-                    key={detail.id}
-                    page={detail}
-                    onSaved={(updated) => {
-                      setPages(current => current.map(item => item.id === updated.id ? updated : item));
-                      setDetail(current => current?.id === updated.id ? updated : current);
-                    }}
-                  />
-                  <CopyIdPill id={detail.id} title={t('pages.copyId', detail.title)} className="live-pages-id-pill" />
-                </div>
-              </div>
-              <div className="live-pages-header-actions">
-                <a
-                  className="live-pages-open-tab"
-                  href={standaloneLivePageUrl(detail.id)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  aria-label={t('pages.openInNewTab', detail.title)}
-                  title={t('pages.openInNewTab', detail.title)}
+            {/* KT-1344 — the discussion header's shell: the sync trigger takes the
+                invite's slot (the panel opens from the right), the secondary
+                metadata folds under Details. */}
+            <DetailHeaderShell
+              className="live-pages-viewer-header"
+              storageKey={ARTIFACT_HEADER_DETAILS_KEY}
+              detailsId="live-page-header-details"
+              detailsLabel={t('pages.headerDetails')}
+              detailsShowTitle={t('pages.headerDetailsShow')}
+              detailsHideTitle={t('pages.headerDetailsHide')}
+              toggleTestId="live-page-header-details-toggle"
+              title={editingTitle ? (
+                <form
+                  className="live-pages-title-editor"
+                  onSubmit={(event) => { event.preventDefault(); saveTitle(); }}
                 >
-                  <ExternalLink size={13} />
-                  <span className="live-pages-open-tab-label">{t('pages.openInNewTabLabel')}</span>
-                </a>
-                <button type="button" className="live-pages-header-icon" onClick={() => void updatePage(detail, { pinned: !detail.pinned })} title={detail.pinned ? t('pages.unfavorite') : t('pages.favorite')}>
-                  <Star size={14} fill={detail.pinned ? 'currentColor' : 'none'} />
-                </button>
-                <div className="live-pages-revision">
-                  <Activity size={13} /> data r{detail.data_revision} · HTML r{detail.revision.revision}
+                  <input
+                    value={titleDraft}
+                    onChange={(event) => { setTitleDraft(event.target.value); setTitleError(null); }}
+                    onKeyDown={(event) => { if (event.key === 'Escape') cancelTitleEdit(); }}
+                    aria-label={t('pages.titleInput')}
+                    maxLength={201}
+                    autoFocus
+                    disabled={savingTitle}
+                  />
+                  <button type="submit" disabled={savingTitle} aria-label={t('pages.saveTitle')} title={t('pages.saveTitle')}>
+                    {savingTitle ? <Loader2 size={14} className="spin" /> : <Save size={14} />}
+                  </button>
+                  <button type="button" onClick={cancelTitleEdit} disabled={savingTitle} aria-label={t('pages.cancelTitle')} title={t('pages.cancelTitle')}>
+                    <X size={14} />
+                  </button>
+                  {titleError && <small role="alert">{titleError}</small>}
+                </form>
+              ) : (
+                <div className="live-pages-title-display">
+                  <h1>{detail.title}</h1>
+                  <button type="button" onClick={startTitleEdit} aria-label={t('pages.renameTitle', detail.title)} title={t('pages.renameTitle', detail.title)}>
+                    <Pencil size={13} />
+                  </button>
                 </div>
-                <details className="live-pages-export-menu" data-testid="live-page-export-menu" ref={exportMenuRef}>
-                  <summary><Download size={13} />{t('pages.export')}<ChevronDown size={12} /></summary>
-                  <div className="live-pages-export-popover">
-                    <button type="button" onClick={() => void exportArtifact()} disabled={exportBusy !== null}>
-                      {exportBusy === 'json' ? <Loader2 size={13} className="spin" /> : <Braces size={13} />}{t('pages.exportArtifact')}
-                    </button>
-                    <button type="button" onClick={() => void exportPage('pdf')} disabled={exportBusy !== null}>
-                      {exportBusy === 'pdf' ? <Loader2 size={13} className="spin" /> : <FileDown size={13} />} PDF
-                    </button>
-                    <button type="button" onClick={() => void exportPage('docx')} disabled={exportBusy !== null}>
-                      {exportBusy === 'docx' ? <Loader2 size={13} className="spin" /> : <FileDown size={13} />} DOCX
-                    </button>
-                    {exportResult && <a href={exportResult.url} download={exportResult.filename} target="_blank" rel="noopener noreferrer"><ExternalLink size={12} />{exportResult.filename}</a>}
-                  </div>
-                </details>
+              )}
+              trailing={(
                 <button
                   type="button"
                   className="live-pages-refresh-trigger"
@@ -1196,20 +1154,92 @@ export function PagesPage({
                   )}
                   <PanelRight size={13} />
                 </button>
-                <button
-                  type="button"
-                  className="live-pages-editor-toggle"
-                  data-active={editingHtml}
-                  onClick={() => {
-                    setEditingHtml(value => !value);
-                    setComparisonRevisionId(null);
-                  }}
-                >
-                  {editingHtml ? <X size={13} /> : <Pencil size={13} />}
-                  {editingHtml ? t('pages.closeEditor') : t('pages.editHtml')}
-                </button>
-              </div>
-            </header>
+              )}
+              sub={(
+                <>
+                  <button
+                    type="button"
+                    className="live-pages-dataset-trigger"
+                    onClick={() => setSelectedDatasetId(selectedDataset?.id ?? detail.datasets[0]?.id ?? null)}
+                    disabled={detail.datasets.length === 0}
+                    title={t('pages.datasetStorageTitle', formatBytes(totalDatasetSize))}
+                    aria-label={t('pages.datasetStorage')}
+                  >
+                    <span>{t('pages.datasetCount', detail.datasets.length)}</span>
+                    <span className="live-pages-data-size"><Database size={11} /> {formatBytes(totalDatasetSize)}</span>
+                    <ChevronDown size={11} />
+                  </button>
+                  {/* A heavy Page is a warning, not a figure: it stays on the row. */}
+                  {pageHtmlWeight(detail.html_size_bytes) !== 'ok' && (
+                    <HtmlWeightBadge bytes={detail.html_size_bytes} variant="header" />
+                  )}
+                  {detail.archived && <span className="live-pages-archived-badge"><Archive size={11} />{t('pages.archived')}</span>}
+                  <div className="live-pages-header-actions">
+                    <a
+                      className="live-pages-open-tab"
+                      href={standaloneLivePageUrl(detail.id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={t('pages.openInNewTab', detail.title)}
+                      title={t('pages.openInNewTab', detail.title)}
+                    >
+                      <ExternalLink size={13} />
+                      <span className="live-pages-open-tab-label">{t('pages.openInNewTabLabel')}</span>
+                    </a>
+                    <button type="button" className="live-pages-header-icon" onClick={() => void updatePage(detail, { pinned: !detail.pinned })} title={detail.pinned ? t('pages.unfavorite') : t('pages.favorite')}>
+                      <Star size={14} fill={detail.pinned ? 'currentColor' : 'none'} />
+                    </button>
+                    <details className="live-pages-export-menu" data-testid="live-page-export-menu" ref={exportMenuRef}>
+                      <summary aria-label={t('pages.export')}><Download size={13} /><span className="live-pages-action-label">{t('pages.export')}</span><ChevronDown size={12} /></summary>
+                      <div className="live-pages-export-popover">
+                        <button type="button" onClick={() => void exportArtifact()} disabled={exportBusy !== null}>
+                          {exportBusy === 'json' ? <Loader2 size={13} className="spin" /> : <Braces size={13} />}{t('pages.exportArtifact')}
+                        </button>
+                        <button type="button" onClick={() => void exportPage('pdf')} disabled={exportBusy !== null}>
+                          {exportBusy === 'pdf' ? <Loader2 size={13} className="spin" /> : <FileDown size={13} />} PDF
+                        </button>
+                        <button type="button" onClick={() => void exportPage('docx')} disabled={exportBusy !== null}>
+                          {exportBusy === 'docx' ? <Loader2 size={13} className="spin" /> : <FileDown size={13} />} DOCX
+                        </button>
+                        {exportResult && <a href={exportResult.url} download={exportResult.filename} target="_blank" rel="noopener noreferrer"><ExternalLink size={12} />{exportResult.filename}</a>}
+                      </div>
+                    </details>
+                    <button
+                      type="button"
+                      className="live-pages-editor-toggle"
+                      data-active={editingHtml}
+                      aria-label={editingHtml ? t('pages.closeEditor') : t('pages.editHtml')}
+                      onClick={() => {
+                        setEditingHtml(value => !value);
+                        setComparisonRevisionId(null);
+                      }}
+                    >
+                      {editingHtml ? <X size={13} /> : <Pencil size={13} />}
+                      <span className="live-pages-action-label">{editingHtml ? t('pages.closeEditor') : t('pages.editHtml')}</span>
+                    </button>
+                  </div>
+                </>
+              )}
+              details={(
+                <>
+                  {pageHtmlWeight(detail.html_size_bytes) === 'ok' && (
+                    <HtmlWeightBadge bytes={detail.html_size_bytes} variant="header" />
+                  )}
+                  <div className="live-pages-revision">
+                    <Activity size={13} /> data r{detail.data_revision} · HTML r{detail.revision.revision}
+                  </div>
+                  <LivePageSlugEditor
+                    key={detail.id}
+                    page={detail}
+                    onSaved={(updated) => {
+                      setPages(current => current.map(item => item.id === updated.id ? updated : item));
+                      setDetail(current => current?.id === updated.id ? updated : current);
+                    }}
+                  />
+                  <CopyIdPill id={detail.id} title={t('pages.copyId', detail.title)} className="live-pages-id-pill" />
+                </>
+              )}
+            />
             <div className="live-pages-relations">
               <LivePageTrustedActions trusts={pageActionTrusts} onChanged={reloadPageActionTrusts} />
               <LivePageResources pageId={detail.id} onNavigateWorkflow={onNavigateWorkflow ? workflowId => onNavigateWorkflow(workflowId) : undefined} />
@@ -1398,17 +1428,25 @@ export function PagesPage({
                   type="button"
                   className="live-pages-sync-run-all"
                   onClick={() => void runAllWorkflows()}
-                  disabled={enabledWorkflows.length === 0 || anyWorkflowRunning || runAllBusy}
-                  title={enabledWorkflows.length === 0
-                    ? t('pages.runAllWorkflowsNone')
-                    : runAllBusy
-                      ? t('pages.runAllWorkflowsBusy')
-                      : t('pages.runAllWorkflowsTitle', enabledWorkflows.length)}
+                  disabled={queuedWorkflows.length === 0 || anyWorkflowRunning || runAllBusy}
+                  title={runAllBusy
+                    ? t('pages.runAllWorkflowsBusy')
+                    : anyWorkflowRunning
+                      ? t('pages.runAllWorkflowsRunning')
+                      : queuedWorkflows.length === 0
+                        ? t('pages.runAllWorkflowsNone')
+                        : t('pages.runAllWorkflowsTitle', queuedWorkflows.length)}
                 >
                   {anyWorkflowRunning || runAllBusy ? <Loader2 size={12} className="spin" /> : <Play size={12} />}
                   {runAllProgress && anyWorkflowRunning
                     ? t('pages.runAllProgress', runAllProgress.done, runAllProgress.total)
-                    : t('pages.runAllWorkflows')}
+                    : anyWorkflowRunning || runAllBusy
+                      ? t('pages.runAllWorkflowsReplaying')
+                      : queuedWorkflows.length === 0
+                        ? t('pages.runAllWorkflows')
+                        : queuedWorkflows.length === 1
+                          ? t('pages.runAllWorkflowsOne', 1)
+                          : t('pages.runAllWorkflowsMany', queuedWorkflows.length)}
                 </button>
               </header>
               {linkedWorkflows.length > 0 ? (

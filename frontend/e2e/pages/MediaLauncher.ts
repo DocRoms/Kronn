@@ -1,15 +1,9 @@
 import { expect, type Page } from '@playwright/test';
+import { openDiscussionPanel } from './DiscussionPanels';
 
-/** Open the discussion's Assets panel through the real panel rail. */
+/** Open the discussion's Assets panel: the header's « Détails » button, then the rail. */
 export async function openAssetsPanel(page: Page) {
-  const rail = page.getByTestId('panel-switcher');
-  const toggle = rail.getByTestId('panel-open-toggle');
-  if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
-  const assets = rail.locator('[data-panel="assets"]');
-  await expect(assets).toBeVisible();
-  // Opening the rail restores the last panel; clicking it again would close it.
-  if (await assets.getAttribute('aria-expanded') !== 'true') await assets.click();
-  await expect(assets).toHaveAttribute('aria-expanded', 'true');
+  await openDiscussionPanel(page, 'assets');
 
   const panel = page.getByRole('complementary', { name: 'Assets' });
   await expect(panel).toBeVisible();

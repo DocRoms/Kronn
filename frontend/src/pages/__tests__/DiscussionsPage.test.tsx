@@ -87,6 +87,13 @@ vi.mock('../../lib/api', () => ({
     questions: vi.fn().mockResolvedValue({ questions: [], pending_count: 0 }),
     importantMessages: vi.fn().mockResolvedValue({ items: [], total: 0, total_all: 0 }),
     answerQuestion: vi.fn(),
+    // KT-1344 — Details opens the settings panel, which reads these on mount.
+    agentHandoffMode: vi.fn().mockResolvedValue({
+      global_enabled: false, disabled: false, unlimited_override: false,
+      effective_enabled: false, paid_limit: 1,
+    }),
+    executionVariableRetention: vi.fn().mockResolvedValue({ global_days: 30, override_days: null, effective_days: 30 }),
+    workspaces: vi.fn().mockResolvedValue([]),
   },
   projects: {
     list: vi.fn().mockResolvedValue([]),
@@ -232,7 +239,6 @@ import { DiscussionsPage } from '../DiscussionsPage';
 import { clearImportantMessages } from '../../lib/importantMessages';
 import { resetDiscussionQuestions } from '../../lib/discussionQuestions';
 import { discardImportantDraft } from '../../lib/importantMessageDraft';
-import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
 import type { ActiveAgentDispatch, ActiveWorkflowStep, AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun, WsMessage } from '../../types/generated';
 import type { ExternalApiConnectionView } from '../../lib/api';
 import type { ToastFn } from '../../hooks/useToast';
@@ -279,7 +285,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
   // KT-581 — the page remembers which panel was last open, and the test store
   // is shared across specs in this file.
-  localStorage.removeItem('kronn:lastPanel');
 });
 
 // Contacts is collapsed by default in the sidebar (see the V2 section migration
@@ -394,10 +399,10 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
 });
 
 // KT-581 — the panel buttons left the header for a switcher that sits above
-// the open panel. Reaching one now means opening the column first, which is
-// what a reader does too.
+// the open panel. Reaching one now means opening the column first, from the
+// header's Details button, which is what a reader does too.
 const openPanel = async (name: RegExp) => {
-  const opener = await screen.findByTestId('panel-open-toggle');
+  const opener = await screen.findByTestId('disc-header-details-btn');
   if (opener.getAttribute('aria-expanded') !== 'true') fireEvent.click(opener);
   fireEvent.click(await screen.findByRole('button', { name }));
 };
@@ -770,19 +775,6 @@ describe('DiscussionsPage', () => {
     expect(refetchDiscussions).toHaveBeenCalled();
   });
 
-  it('finds a rendered occurrence even when Markdown splits it across text nodes', () => {
-    const root = document.createElement('div');
-    root.append('foo ');
-    const strong = document.createElement('strong');
-    strong.textContent = 'bar';
-    root.append(strong, ' baz');
-
-    const ranges = findRenderedTextRanges(root, 'foo bar');
-
-    expect(ranges).toHaveLength(1);
-    expect(ranges[0].toString()).toBe('foo bar');
-  });
-
   it('renders without crashing with minimal props', async () => {
     await wrap(
       <DiscussionsPage
@@ -851,7 +843,7 @@ describe('DiscussionsPage', () => {
     // KT-581 — the panels open from one header control, and the switcher above
     // the open panel moves between them. What this test guards is unchanged:
     // opening one closes the other.
-    fireEvent.click(await screen.findByTestId('panel-open-toggle'));
+    fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
     const terminalButton = await screen.findByRole('button', { name: 'Terminal' });
     expect(terminalButton).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(terminalButton);
@@ -1974,7 +1966,7 @@ describe('DiscussionsPage', () => {
     await waitFor(() => expect(discussionsApi.listContextFiles).toHaveBeenCalledWith('d1'));
     // The Assets entry is also where a first media generation starts, so an
     // empty discussion must keep it discoverable instead of hiding it.
-    fireEvent.click(await screen.findByTestId('panel-open-toggle'));
+    fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
     expect(screen.getByRole('button', { name: /Parcourir tous les assets.*0/ })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: /Discussion d2 —/ }));
     await waitFor(() => expect(discussionsApi.listContextFiles).toHaveBeenCalledWith('d2'));
@@ -2168,7 +2160,7 @@ describe('DiscussionsPage', () => {
       />
     );
 
-    fireEvent.click(await screen.findByTestId('panel-open-toggle'));
+    fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
     const assetsButton = await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ });
     fireEvent.click(assetsButton);
     expect(screen.getByRole('complementary', { name: 'Assets' })).toBeInTheDocument();
@@ -2475,10 +2467,8 @@ describe('DiscussionsPage', () => {
       />,
     );
     await waitFor(() => expect(planningApi.proposals).toHaveBeenCalledTimes(1));
-    // KT-581 — the strip is always present (it holds the control that opens
-    // the column), but its panel icons only appear once one is open.
-    expect(container.querySelector('[data-testid="panel-switcher"]'))
-      .toHaveAttribute('data-open', 'false');
+    // KT-1344 — the strip exists only while a panel is open.
+    expect(container.querySelector('[data-testid="panel-switcher"]')).toBeNull();
 
     await act(async () => {
       rerender(
@@ -2507,11 +2497,11 @@ describe('DiscussionsPage', () => {
     expect(planningApi.proposals).toHaveBeenCalledTimes(2);
   });
 
-  /// KT-596 — closed, the strip's column reserved its width down the whole
-  /// height of the conversation for two buttons sitting at the top of it. It
-  /// now leaves the flex row and floats over the corner, so the thread gets
-  /// that width back; opening a panel puts it back in the row, above it.
-  it('floats the panel strip when nothing is open and returns it to the row when a panel opens', async () => {
+  /// KT-1344 — closed, the page carries no strip at all: the way in is the
+  /// header's Details button, which opens the side panel on its settings tab.
+  /// The floating open control and the in-room search that shared its corner
+  /// are gone.
+  it('opens the side panel on its settings tab from the header, with no floating controls', async () => {
     const discussion = makeListDiscussion('d1', 1);
     vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
 
@@ -2531,17 +2521,21 @@ describe('DiscussionsPage', () => {
       />,
     );
 
-    const column = container.querySelector('.disc-utility-col')!;
-    const row = container.querySelector('.disc-messages-git-row')!;
-    expect(column).toHaveAttribute('data-floating', 'true');
-    // The search bar is the one row the floating strip overlaps, so it is the
-    // only thing that has to reserve its width.
-    expect(row).toHaveAttribute('data-rail-floating', 'true');
+    const details = await screen.findByTestId('disc-header-details-btn');
+    expect(details).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByTestId('panel-switcher')).toBeNull();
+    expect(screen.queryByTestId('panel-open-toggle')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Rechercher dans les messages' })).toBeNull();
+    expect(container.querySelector('.disc-message-search')).toBeNull();
+    expect(container.querySelector('.disc-chat-header-details')).toBeNull();
 
-    fireEvent.click(await screen.findByTestId('panel-open-toggle'));
+    fireEvent.click(details);
 
-    await waitFor(() => expect(column).toHaveAttribute('data-floating', 'false'));
-    expect(row).toHaveAttribute('data-rail-floating', 'false');
+    expect(await screen.findByRole('complementary', { name: 'Réglages de la discussion' }))
+      .toBeInTheDocument();
+    expect(screen.getByTestId('disc-details-section')).toBeInTheDocument();
+    expect(screen.getByTestId('disc-header-details-btn')).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByTestId('panel-switcher')).toBeInTheDocument();
   });
 
   it('refetches and reloads on kronn:discussion-updated (auto-skill activation)', async () => {
@@ -3094,27 +3088,9 @@ describe('DiscussionsPage', () => {
     const layout = installGrowingLayout('[data-message-id="m3"]');
     try {
       await renderThread(disc);
-      fireEvent.click(await screen.findByTestId('panel-open-toggle'));
+      fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
       fireEvent.click(await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ }));
       await layout.clickWhileGrowing(screen.getByRole('button', { name: /Aller au message contenant source\.csv/ }));
-      layout.expectTargetCentred();
-    } finally {
-      layout.restore();
-    }
-  });
-
-  it('reaches the next search match in one click while rows above are still laying out', async () => {
-    const disc = longThread('d-search-jump', i => (i === 3 || i === 5 ? `zebra ${i}` : null));
-    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
-    const layout = installGrowingLayout('[data-message-id="m5"]');
-    try {
-      await renderThread(disc);
-      fireEvent.click(await screen.findByRole('button', { name: 'Rechercher dans les messages' }));
-      const input = await screen.findByRole('searchbox', { name: 'Rechercher dans cette discussion…' });
-      fireEvent.change(input, { target: { value: 'zebra' } });
-      await waitFor(() => expect(screen.getByText('1 / 2')).toBeTruthy());
-      await layout.clickWhileGrowing(screen.getByRole('button', { name: 'Occurrence suivante' }));
-      expect(screen.getByText('2 / 2')).toBeTruthy();
       layout.expectTargetCentred();
     } finally {
       layout.restore();
@@ -4242,72 +4218,6 @@ describe('DiscussionsPage', () => {
     // Should find copy buttons (title attribute)
     const copyBtns = document.querySelectorAll('[title="Copier le message"]');
     expect(copyBtns.length).toBeGreaterThanOrEqual(1);
-  });
-
-  it('searches rendered message bodies and navigates every occurrence', async () => {
-    const fullDisc: Discussion = {
-      ...makeListDiscussion('d-search-messages', 2),
-      messages: [
-        {
-          id: 'search-user',
-          role: 'User',
-          channel: 'main',
-          content: `${'contenu long '.repeat(1_000)}Alpha dans le premier message.`,
-          agent_type: null,
-          timestamp: '2026-01-01T00:00:00Z',
-          tokens_used: 0,
-          auth_mode: null,
-        },
-        {
-          id: 'search-agent',
-          role: 'Agent',
-          channel: 'main',
-          content: 'alpha puis **alpha** dans la réponse',
-          agent_type: 'ClaudeCode',
-          timestamp: '2026-01-01T00:00:05Z',
-          tokens_used: 20,
-          auth_mode: null,
-        },
-      ],
-    };
-    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
-
-    await wrap(
-      <DiscussionsPage
-        projects={[]}
-        agents={[]}
-        allDiscussions={[makeListDiscussion('d-search-messages', 2)]}
-        configLanguage="fr"
-        agentAccess={null}
-        refetchDiscussions={noop}
-        refetchProjects={noop}
-        onNavigate={noop}
-        toast={toastFn}
-        initialActiveDiscussionId="d-search-messages"
-        {...liftedProps()}
-      />,
-    );
-
-    const openSearch = await screen.findByRole('button', { name: 'Rechercher dans les messages' });
-    fireEvent.click(openSearch);
-    const input = await screen.findByRole('searchbox', { name: 'Rechercher dans cette discussion…' });
-    fireEvent.change(input, { target: { value: 'alpha' } });
-
-    await waitFor(() => expect(screen.getByText('1 / 3')).toBeTruthy());
-    expect(document.querySelector('[data-message-id="search-user"]')?.getAttribute('data-search-current')).toBe('true');
-
-    fireEvent.click(screen.getByRole('button', { name: 'Occurrence suivante' }));
-    await waitFor(() => expect(screen.getByText('2 / 3')).toBeTruthy());
-    expect(document.querySelector('[data-message-id="search-agent"]')?.getAttribute('data-search-current')).toBe('true');
-
-    fireEvent.keyDown(input, { key: 'Enter' });
-    await waitFor(() => expect(screen.getByText('3 / 3')).toBeTruthy());
-    fireEvent.keyDown(input, { key: 'Enter' });
-    await waitFor(() => expect(screen.getByText('1 / 3')).toBeTruthy());
-
-    fireEvent.change(input, { target: { value: 'aucune occurrence ici' } });
-    await waitFor(() => expect(screen.getByText('Aucun résultat')).toBeTruthy());
-    expect(document.querySelector('[data-search-current="true"]')).toBeNull();
   });
 
   it('opens an Artifact source link at its exact message after loading the discussion', async () => {

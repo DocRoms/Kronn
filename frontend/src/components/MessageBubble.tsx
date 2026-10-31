@@ -322,9 +322,7 @@ export interface MessageBubbleProps {
   /** F15+ — a federated attachment is announced but its binary hasn't been
    *  fetched/linked yet → show a "downloading…" placeholder until it lands. */
   pendingAttachment?: boolean;
-  /** Current-discussion search state. The row attributes provide the
-   * visual fallback when the CSS Custom Highlight API is unavailable. */
-  isSearchMatch?: boolean;
+  /** The message a search result or deep link points at. */
   isSearchCurrent?: boolean;
   replyTarget?: DiscussionMessage | null;
   /** Messages that durably answer this one. Rendered as compact backlinks in
@@ -343,7 +341,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   const { msg, workflowStep, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, defaultAgentAlias, targetConnectionAliases = {}, summaryCache, language, sending, editingText, hasFullAccess,
     defaultTargets = [],
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, actions = [], onActionChanged, onOpenActionDiscussion, attachments, discussionMedia, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], inertMentions = [], t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, actions = [], onActionChanged, onOpenActionDiscussion, attachments, discussionMedia, pendingAttachment, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], inertMentions = [], t } = props;
   const [fileOpenRequest, setFileOpenRequest] = useState<{ assetId: string; nonce: number } | null>(null);
   const fileLinkContext = useMemo<MessageFileLinkContextValue>(() => ({
     attachments: discussionMedia ?? attachments,
@@ -699,7 +697,6 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
       data-role={visualRole}
       data-target-agent={msg.target_agent ?? undefined}
       data-message-id={msg.id}
-      data-search-match={isSearchMatch || undefined}
       data-search-current={isSearchCurrent || undefined}
     >
       <div

@@ -60,7 +60,6 @@ import { findLastAgentMessage } from '../lib/discussionHelpers';
 import { saveDraft } from '../lib/chat-drafts';
 import { clearReplyDraft, loadReplyDraft, saveReplyDraft } from '../lib/chat-reply-drafts';
 import { publishMessageSendSettled } from '../lib/messageSendLifecycle';
-import { findRenderedTextRanges } from '../lib/discussionMessageSearch';
 import { triggerDownload } from '../lib/downloadBlob';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
@@ -71,7 +70,7 @@ import {
   ChevronRight, Cpu, Loader2,
   MessageSquare, AlertTriangle,
   ShieldCheck, Check, Rocket, Play, Zap,
-  Menu, X, Clock, ExternalLink, Search, ChevronUp, ChevronDown, WifiOff, Square,
+  Menu, X, Clock, ExternalLink, WifiOff, Square,
   Images,
   NotebookPen,
   GitBranch,
@@ -338,34 +337,11 @@ function StreamingAgentReplyBubble({
   );
 }
 
-interface MessageSearchMatch {
-  messageId: string;
-}
-
 interface GlobalSearchTarget {
   discussionId: string;
   messageId: string;
   /** An element inside the message to centre instead of the whole row. */
   anchorSelector?: string;
-}
-
-type HighlightRegistry = {
-  set: (name: string, value: unknown) => void;
-  delete: (name: string) => void;
-};
-
-const SEARCH_HIGHLIGHT_NAME = 'kronn-message-search';
-const SEARCH_CURRENT_HIGHLIGHT_NAME = 'kronn-message-search-current';
-
-function cssHighlightRegistry(): HighlightRegistry | null {
-  const css = globalThis.CSS as typeof CSS & { highlights?: HighlightRegistry };
-  return css?.highlights ?? null;
-}
-
-function highlightConstructor(): (new (...ranges: Range[]) => unknown) | null {
-  return (globalThis as typeof globalThis & {
-    Highlight?: new (...ranges: Range[]) => unknown;
-  }).Highlight ?? null;
 }
 
 export interface DiscussionsPageProps {
@@ -573,7 +549,6 @@ export function DiscussionsPage({
   // through the page's single existing socket subscription instead of
   // opening a second one of its own.
 
-  const [showMessageSearch, setShowMessageSearch] = useState(false);
   const [showDiscussionNotes, setShowDiscussionNotes] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:showDiscussionNotes') !== 'false'; } catch { return true; }
   });
@@ -615,12 +590,6 @@ export function DiscussionsPage({
     initialActiveDiscussionId && initialMessageId ? { discussionId: initialActiveDiscussionId, messageId: initialMessageId } : null);
   const globalSearchTargetRef = useRef<GlobalSearchTarget | null>(globalSearchTarget);
   const [replyToMessageId, setReplyToMessageId] = useState<string | null>(null);
-  const [messageSearchQuery, setMessageSearchQuery] = useState('');
-  const deferredMessageSearchQuery = useDeferredValue(messageSearchQuery.trim());
-  const [messageSearchMatches, setMessageSearchMatches] = useState<MessageSearchMatch[]>([]);
-  const [messageSearchIndex, setMessageSearchIndex] = useState(0);
-  const messageSearchInputRef = useRef<HTMLInputElement>(null);
-  const messageSearchRangesRef = useRef<Range[]>([]);
   // Loaded for the plan panel itself. Its completed/total pair used to be
   // shown in the header button too; the panel shows it, so the switcher does
   // not repeat it — one number, one place.
@@ -699,9 +668,6 @@ export function DiscussionsPage({
   // already lived in this file (Escape closes them all), and splitting it in
   // two is how the two halves drift apart.
   type PanelId = 'plan' | 'assets' | 'notes' | 'git' | 'terminal' | 'settings';
-  const anyPanelOpen =
-    showGitPanel || showTerminalPanel || showPlanPanel || showSettingsPanel || showAssetsPanel
-    || showNotesPanel;
   // Same rule the header used: a terminal is only offered when at least one
   // agent may actually run commands.
   const terminalEnabled = agentAccess != null && [
@@ -724,22 +690,7 @@ export function DiscussionsPage({
     setShowSettingsPanel(target === 'settings');
     setShowAssetsPanel(target === 'assets');
     setShowNotesPanel(target === 'notes');
-    if (target) {
-      // Reopening the column lands on whatever was last read, not always on
-      // the plan: someone who works in Files does not want to re-pick it.
-      try { localStorage.setItem('kronn:lastPanel', target); } catch { /* non-fatal */ }
-    }
   }, []);
-  const openLastPanel = useCallback(() => {
-    if (anyPanelOpen) {
-      openOnlyPanel(null);
-      return;
-    }
-    let last: string | null = null;
-    try { last = localStorage.getItem('kronn:lastPanel'); } catch { /* non-fatal */ }
-    const known: PanelId[] = ['plan', 'assets', 'notes', 'git', 'terminal', 'settings'];
-    openOnlyPanel(known.includes(last as PanelId) ? (last as PanelId) : 'plan');
-  }, [anyPanelOpen, openOnlyPanel]);
 
   useEffect(() => {
     if (!showGitPanel && !showTerminalPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel
@@ -785,31 +736,6 @@ export function DiscussionsPage({
     setShowGitPanel(true);
   }, [activeDiscussionId, pendingGitWorkspace]);
 
-  const clearMessageSearchHighlights = useCallback(() => {
-    const registry = cssHighlightRegistry();
-    registry?.delete(SEARCH_HIGHLIGHT_NAME);
-    registry?.delete(SEARCH_CURRENT_HIGHLIGHT_NAME);
-    messageSearchRangesRef.current = [];
-  }, []);
-
-  const closeMessageSearch = useCallback(() => {
-    setShowMessageSearch(false);
-    setMessageSearchQuery('');
-    setMessageSearchMatches([]);
-    setMessageSearchIndex(0);
-    clearMessageSearchHighlights();
-  }, [clearMessageSearchHighlights]);
-
-  useEffect(() => {
-    const frame = requestAnimationFrame(closeMessageSearch);
-    return () => cancelAnimationFrame(frame);
-  }, [activeDiscussionId, closeMessageSearch]);
-
-  useEffect(() => {
-    if (!showMessageSearch) return;
-    const frame = requestAnimationFrame(() => messageSearchInputRef.current?.focus());
-    return () => cancelAnimationFrame(frame);
-  }, [showMessageSearch]);
   // 0.8.3 (#280) — flag set when an audit is running on the same
   // project as the active discussion. Drives the banner that warns
   // the user "MCPs are temporarily filtered for audit perf — re-run
@@ -1206,32 +1132,6 @@ export function DiscussionsPage({
   // the buttons stay out of the way on short discussions.
   const [scrolledFromTop, setScrolledFromTop] = useState(false);
 
-  useEffect(() => {
-    const registry = cssHighlightRegistry();
-    const HighlightCtor = highlightConstructor();
-    registry?.delete(SEARCH_CURRENT_HIGHLIGHT_NAME);
-    const range = messageSearchRangesRef.current[messageSearchIndex];
-    if (registry && HighlightCtor && range) {
-      registry.set(SEARCH_CURRENT_HIGHLIGHT_NAME, new HighlightCtor(range));
-    }
-    const match = messageSearchMatches[messageSearchIndex];
-    const container = messagesContainerRef.current;
-    if (!match || !container) return;
-    return pinScrollTarget(container, () => Array.from(
-      container.querySelectorAll<HTMLElement>('[data-message-id]'),
-    ).find(row => row.dataset.messageId === match.messageId) ?? null);
-  }, [messageSearchIndex, messageSearchMatches]);
-
-  useEffect(() => () => clearMessageSearchHighlights(), [clearMessageSearchHighlights]);
-
-  const moveMessageSearch = useCallback((direction: 1 | -1) => {
-    setStickToBottom(false);
-    setMessageSearchIndex(previous => {
-      if (messageSearchMatches.length === 0) return 0;
-      return (previous + direction + messageSearchMatches.length) % messageSearchMatches.length;
-    });
-  }, [messageSearchMatches.length]);
-
   // Persist sidebar collapse state to localStorage
   useEffect(() => {
     safeSetItem('kronn:discCollapsedGroups', JSON.stringify([...collapsedDiscGroups]));
@@ -1411,53 +1311,6 @@ export function DiscussionsPage({
       if (clearTimer !== null) window.clearTimeout(clearTimer);
     };
   }, [activeDiscussion?.id, activeDiscussion?.messages.length, globalSearchTarget]);
-
-  // Search the rendered message bodies rather than the raw Markdown source:
-  // `foo **bar**` is displayed as "foo bar" and must be found as such. The
-  // Custom Highlight API paints matches without replacing React-owned DOM.
-  useEffect(() => {
-    clearMessageSearchHighlights();
-    if (!showMessageSearch || !deferredMessageSearchQuery) {
-      const clearFrame = requestAnimationFrame(() => {
-        setMessageSearchMatches([]);
-        setMessageSearchIndex(0);
-      });
-      return () => cancelAnimationFrame(clearFrame);
-    }
-
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    const ranges: Range[] = [];
-    const matches: MessageSearchMatch[] = [];
-    container.querySelectorAll<HTMLElement>('[data-message-id]').forEach(row => {
-      const messageId = row.dataset.messageId;
-      const content = row.querySelector<HTMLElement>('[data-message-search-content]');
-      if (!messageId || !content) return;
-      const rowRanges = findRenderedTextRanges(content, deferredMessageSearchQuery);
-      rowRanges.forEach(range => {
-        ranges.push(range);
-        matches.push({ messageId });
-      });
-    });
-
-    messageSearchRangesRef.current = ranges;
-    const stateFrame = requestAnimationFrame(() => {
-      setMessageSearchMatches(matches);
-      setMessageSearchIndex(previous => Math.min(previous, Math.max(matches.length - 1, 0)));
-    });
-
-    const registry = cssHighlightRegistry();
-    const HighlightCtor = highlightConstructor();
-    if (registry && HighlightCtor && ranges.length > 0) {
-      registry.set(SEARCH_HIGHLIGHT_NAME, new HighlightCtor(...ranges));
-    }
-    return () => cancelAnimationFrame(stateFrame);
-  }, [
-    activeDiscussion?.messages,
-    clearMessageSearchHighlights,
-    deferredMessageSearchQuery,
-    showMessageSearch,
-  ]);
 
   useEffect(() => {
     if (!activeDiscussionId) return;
@@ -4001,8 +3854,6 @@ export function DiscussionsPage({
         // points at, is never folded away.
         const forceVisibleIds = new Set<string>();
         if (globalSearchTarget?.messageId) forceVisibleIds.add(globalSearchTarget.messageId);
-        const currentSearchMatch = messageSearchMatches[messageSearchIndex]?.messageId;
-        if (currentSearchMatch) forceVisibleIds.add(currentSearchMatch);
         const items = foldOrchestrationRuns(
           groupMessagesWithToolFold(msgs, { isAutoPrompt }),
           {
@@ -4226,11 +4077,7 @@ export function DiscussionsPage({
                 actions={discussionActionsByMessageId.get(msg.id) ?? EMPTY_ACTIONS}
                 onActionChanged={handleDiscussionActionChanged}
                 onOpenActionDiscussion={stableOpenActionDiscussion}
-                isSearchMatch={messageSearchMatches.some(match => match.messageId === msg.id)}
-                isSearchCurrent={
-                  messageSearchMatches[messageSearchIndex]?.messageId === msg.id
-                  || globalSearchTarget?.messageId === msg.id
-                }
+                isSearchCurrent={globalSearchTarget?.messageId === msg.id}
                 replyTarget={msg.reply_to_message_id
                   ? messagesById.get(msg.reply_to_message_id) ?? null
                   : null}
@@ -4251,7 +4098,7 @@ export function DiscussionsPage({
     globalSearchTarget, handleDiscussionActionChanged, handleMsgCopy, handleMsgDelete, handleMsgEditCancel,
     handleMsgEditStart, handleMsgExpandSummary, handleMsgReply, handleMsgTts, handleReplyNavigate,
     handleRetryAgentDispatch, handleStopDispatch, hasFullAccess, locale, mediaJobsByMessage,
-    messageSearchIndex, messageSearchMatches, stableNavigate, openMediaAsset, retryMediaGeneration, orchState, pendingFileMsgIds,
+    stableNavigate, openMediaAsset, retryMediaGeneration, orchState, pendingFileMsgIds,
     pendingReplySlots, recoveryAgentLabel, replyIds, resilientStreamingText, sending, sendingElapsed, streamLost,
     showLogs, stableEditMessage, stableLaunchQp, stableOpenActionDiscussion, stableRetry,
     stoppingDispatchIds, t, transcriptIndex, ttsPlayingMsgId, ttsState, visibleStreamingReply,
@@ -4569,14 +4416,13 @@ export function DiscussionsPage({
           <>
             <ChatHeader
               discussion={activeDiscussion}
-              projects={projects}
               agents={agents}
               modelTiers={agentAccess?.model_tiers}
               externalConnections={externalConnections}
               isMobile={isMobile}
               sending={sending}
-              onRequestTestMode={() => { void handleRequestTestMode(activeDiscussion.id); }}
-              onToggleSettingsPanel={() => openOnlyPanel('settings', {
+              settingsPanelOpen={showSettingsPanel}
+              onOpenDetails={() => openOnlyPanel('settings', {
                 plan: showPlanPanel,
                 assets: showAssetsPanel,
                 notes: showNotesPanel,
@@ -4593,73 +4439,8 @@ export function DiscussionsPage({
             />
 
             {/* Messages + one shared utility panel side by side */}
-            <div className="disc-messages-git-row" data-rail-floating={!anyPanelOpen} data-search-open={showMessageSearch}>
+            <div className="disc-messages-git-row">
             <div className="disc-messages-col" data-replying={!!replyTarget}>
-            {/* KT-581 — first in the column, so it opens level with the panel
-              *  strip rather than a few banners lower: the two controls belong
-              *  to the same row of the interface. */}
-            {showMessageSearch && (
-              <div className="disc-message-search" role="search" data-testid="disc-message-search">
-                <Search size={14} aria-hidden="true" />
-                <input
-                  ref={messageSearchInputRef}
-                  type="search"
-                  value={messageSearchQuery}
-                  onChange={event => {
-                    setMessageSearchQuery(event.target.value);
-                    setMessageSearchIndex(0);
-                    setStickToBottom(false);
-                  }}
-                  onKeyDown={event => {
-                    if (event.key === 'Escape') {
-                      event.preventDefault();
-                      closeMessageSearch();
-                    } else if (event.key === 'Enter') {
-                      event.preventDefault();
-                      moveMessageSearch(event.shiftKey ? -1 : 1);
-                    }
-                  }}
-                  placeholder={t('disc.messageSearch.placeholder')}
-                  aria-label={t('disc.messageSearch.placeholder')}
-                />
-                <span className="disc-message-search-position" aria-live="polite">
-                  {deferredMessageSearchQuery
-                    ? messageSearchMatches.length > 0
-                      ? `${messageSearchIndex + 1} / ${messageSearchMatches.length}`
-                      : t('disc.messageSearch.empty')
-                    : t('disc.messageSearch.hint')}
-                </span>
-                <div className="disc-message-search-nav">
-                  <button
-                    type="button"
-                    onClick={() => moveMessageSearch(-1)}
-                    disabled={messageSearchMatches.length === 0}
-                    title={t('disc.messageSearch.previous')}
-                    aria-label={t('disc.messageSearch.previous')}
-                  >
-                    <ChevronUp size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => moveMessageSearch(1)}
-                    disabled={messageSearchMatches.length === 0}
-                    title={t('disc.messageSearch.next')}
-                    aria-label={t('disc.messageSearch.next')}
-                  >
-                    <ChevronDown size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={closeMessageSearch}
-                    title={t('disc.messageSearch.close')}
-                    aria-label={t('disc.messageSearch.close')}
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              </div>
-            )}
-
             {realtimeReconnecting && (
               <div className="disc-realtime-status" role="status" aria-live="polite">
                 <WifiOff size={14} aria-hidden="true" />
@@ -5740,29 +5521,14 @@ export function DiscussionsPage({
 
             </div>{/* end messages column */}
 
-            <div className="disc-utility-col" data-floating={!anyPanelOpen}>
+            <div className="disc-utility-col">
             {/* KT-581 — switching panels, above the panel being switched.
               *  Each panel draws its own header, so putting these icons in the
               *  discussion header too showed every one of them twice. */}
             <DiscussionPanelSwitcher
               groupLabel={t('disc.panelRail.group')}
-              openLabel={t('disc.panelRail.open')}
               closeLabel={t('disc.panelRail.close')}
-              onToggleColumn={openLastPanel}
-              leading={(
-                <button
-                  type="button"
-                  className="disc-panel-switcher-item"
-                  data-active={showMessageSearch}
-                  onClick={() => setShowMessageSearch(open => !open)}
-                  title={t('disc.messageSearch.open')}
-                  aria-label={t('disc.messageSearch.open')}
-                  aria-expanded={showMessageSearch}
-                  data-action="search"
-                >
-                  <Search size={14} />
-                </button>
-              )}
+              onToggleColumn={() => openOnlyPanel(null)}
               actions={[
                 {
                   id: 'export',
@@ -5936,6 +5702,7 @@ export function DiscussionsPage({
                 mcpIncompatibilities={mcpIncompatibilities}
                 contacts={contactsList}
                 onClose={() => setShowSettingsPanel(false)}
+                onRequestTestMode={() => { void handleRequestTestMode(activeDiscussion.id); }}
                 onDiscussionUpdated={handleDiscussionUpdated}
                 onShare={async (contactIds) => {
                   try {

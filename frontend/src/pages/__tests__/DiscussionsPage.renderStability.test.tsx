@@ -268,7 +268,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
   // KT-581 — the page remembers which panel was last open, and the test store
   // is shared across specs in this file.
-  localStorage.removeItem('kronn:lastPanel');
 });
 
 const wrap = async (ui: React.ReactElement) => {
