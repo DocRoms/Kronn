@@ -84,16 +84,16 @@ describe('tour anchors exist in the app', () => {
     expect(conditional, 'anchor on the container, not on a list row').toEqual([]);
   });
 
-  it('opens the collapsed header details before requiring the copyable-ID anchor', () => {
+  it('opens the side panel on its details before requiring the copyable-ID anchor', () => {
     const step = TOUR_STEPS.find(candidate => candidate.id === 'copyable-ids');
     expect(step?.optionalWhenMissing).not.toBe(true);
 
     document.body.innerHTML = [
-      '<button data-testid="disc-header-details-toggle" aria-expanded="false"></button>',
+      '<button data-testid="disc-header-details-btn" aria-expanded="false"></button>',
       '<button data-tour-id="message-id-pill"></button>',
     ].join('');
     const disclosure = document.querySelector<HTMLElement>(
-      '[data-testid="disc-header-details-toggle"]',
+      '[data-testid="disc-header-details-btn"]',
     )!;
     disclosure.addEventListener('click', () => {
       disclosure.setAttribute('aria-expanded', 'true');

@@ -59,6 +59,17 @@
   font-weight: 650;
 }
 
+.disc-settings-details-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.disc-settings-details-row + .disc-settings-details-row {
+  margin-top: 8px;
+}
+
 .disc-settings-section-head {
   display: flex;
   align-items: center;

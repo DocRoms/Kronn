@@ -2300,6 +2300,39 @@ button.disc-contact-open {
   color: var(--kr-accent);
 }
 
+/* The discussion's Details opens the side panel, so it is a button of the same
+   weight as the invite above it rather than the small fold toggle. */
+.disc-chat-header-details-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  margin-left: auto;
+  min-height: 26px;
+  padding: 3px 10px;
+  font-size: var(--kr-fs-sm);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.disc-chat-header-details-btn:hover {
+  border-color: var(--kr-border-strong);
+  color: var(--kr-text-primary);
+}
+
+.disc-chat-header-details-btn:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.disc-chat-header-details-btn[aria-expanded='true'] {
+  border-color: var(--kr-accent);
+  color: var(--kr-accent);
+}
+
 /* The chevron points at what the button does: down to open the row, up once
    the row is open and the click would close it. */
 .disc-chat-header-details-toggle svg {
@@ -2973,85 +3006,6 @@ button.disc-contact-open {
   padding: 0 var(--kr-sp-2);
 }
 
-/* Current-discussion full-text search. Kept outside the scrolling message
- * list so navigation controls remain reachable in long conversations. */
-.disc-message-search {
-  min-height: 38px;
-  padding: 5px 12px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  border-bottom: 1px solid var(--kr-border);
-  background: var(--kr-bg-surface);
-  color: var(--kr-text-tertiary);
-}
-
-.disc-message-search input {
-  flex: 1;
-  min-width: 80px;
-  max-width: 560px;
-  padding: 5px 8px;
-  border: 1px solid var(--kr-border);
-  border-radius: var(--kr-r-sm);
-  background: var(--kr-bg-base);
-  color: var(--kr-text-primary);
-  font: inherit;
-  font-size: var(--kr-fs-sm);
-  outline: none;
-}
-
-.disc-message-search input:focus {
-  border-color: var(--kr-accent-border);
-  box-shadow: 0 0 0 2px rgba(var(--kr-accent-rgb), 0.09);
-}
-
-.disc-message-search-position {
-  min-width: 64px;
-  font-size: var(--kr-fs-xs);
-  color: var(--kr-text-tertiary);
-  text-align: right;
-  white-space: nowrap;
-}
-
-.disc-message-search-nav {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.disc-message-search-nav button {
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: var(--kr-r-sm);
-  background: transparent;
-  color: var(--kr-text-secondary);
-  cursor: pointer;
-}
-
-.disc-message-search-nav button:hover:not(:disabled) {
-  color: var(--kr-accent-ink);
-  background: var(--kr-bg-hover);
-}
-
-.disc-message-search-nav button:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-
-::highlight(kronn-message-search) {
-  color: inherit;
-  background: rgba(var(--kr-warning-rgb), 0.35);
-}
-
-::highlight(kronn-message-search-current) {
-  color: inherit;
-  background: rgba(var(--kr-warning-rgb), 0.78);
-}
-
 /* Streaming chunk renderer — uses MarkdownContent so headings/code/tables
    appear progressively, not just at the end of the stream. */
 .disc-streaming-md {
@@ -3219,21 +3173,6 @@ button.disc-contact-open {
   /* KT-596 — the anchor for the panel strip when it floats instead of holding
      a column of its own. */
   position: relative;
-}
-
-/* The strip's own width: two 28px controls, the 2px between them and the
-   strip's 2px of padding either side, plus its border. Declared once here
-   because the topmost controls must reserve its footprint, not the thread. */
-.disc-messages-git-row[data-rail-floating='true'] {
-  --disc-rail-w: 63px;
-}
-
-/* When search is closed, the arbitration banner can be the topmost row. Keep
-   its reveal button outside the floating controls without restoring a gutter
-   along the full conversation. With search open, the banner is below the rail. */
-.disc-messages-git-row[data-rail-floating='true'][data-search-open='false'] .disc-question-banner,
-.disc-messages-git-row[data-rail-floating='true'] .disc-message-search {
-  padding-right: calc(var(--disc-rail-w) + var(--kr-sp-3));
 }
 
 .disc-plan-btn {
@@ -3543,13 +3482,59 @@ button.disc-contact-open {
   justify-content: flex-start;
 }
 
-.disc-msg-row[data-search-match="true"] .disc-msg-bubble {
-  border-color: rgba(var(--kr-warning-rgb), 0.38);
-}
-
 .disc-msg-row[data-search-current="true"] .disc-msg-bubble {
   border-color: rgba(var(--kr-warning-rgb), 0.88);
   box-shadow: 0 0 0 2px rgba(var(--kr-warning-rgb), 0.16), var(--kr-shadow-sm);
+}
+
+.disc-reply-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  margin: 4px 0 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-left: 2px solid var(--kr-accent);
+  border-radius: 0 var(--kr-r-sm) var(--kr-r-sm) 0;
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-tertiary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.disc-reply-header:hover:not(:disabled) {
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-ink);
+}
+
+.disc-reply-header code {
+  flex-shrink: 0;
+  padding: 1px 4px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-secondary);
+  font-size: 10px;
+}
+
+.disc-reply-header[data-missing="true"] {
+  border-left-color: var(--kr-text-ghost);
+  opacity: 0.7;
+  cursor: default;
+}
+
+.disc-reply-action {
+  gap: 4px;
+  padding: 2px 6px;
+  color: var(--kr-text-dim);
+  font-size: 10px;
+}
+
+.disc-tool-calls-group[data-search-current="true"] {
+  border-radius: var(--kr-r-sm);
+  box-shadow: 0 0 0 2px rgba(var(--kr-warning-rgb), 0.32);
 }
 
 .disc-reply-header {

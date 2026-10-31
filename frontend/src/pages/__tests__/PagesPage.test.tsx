@@ -87,6 +87,13 @@ import { HtmlCodeEditor, HtmlRevisionDiff } from '../../components/HtmlCodeEdito
 import { PagesPage } from '../PagesPage';
 import { triggerDownload } from '../../lib/downloadBlob';
 
+const HEADER_DETAILS_KEY = 'kronn:artifactHeaderDetails';
+
+function openHeaderDetails() {
+  const toggle = screen.getByTestId('live-page-header-details-toggle');
+  if (toggle.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle);
+}
+
 function getCanonicalPageRow(title: string): HTMLElement {
   const section = document.querySelector('.disc-sidebar-projects') as HTMLElement;
   return within(section).getByLabelText(new RegExp(`pages\\.(?:open|select):${title}`));
@@ -98,6 +105,7 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: false, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   localStorage.removeItem('kronn:pageNavigation');
   localStorage.removeItem('kronn:pageCollapsedSections');
+  localStorage.removeItem(HEADER_DETAILS_KEY);
   linkRelay.connect.mockClear();
   linkRelay.dispose.mockClear();
   actionRelay.onAction = null;
@@ -133,6 +141,7 @@ beforeEach(() => {
 afterEach(() => {
   localStorage.removeItem('kronn:pageNavigation');
   localStorage.removeItem('kronn:pageCollapsedSections');
+  localStorage.removeItem(HEADER_DETAILS_KEY);
   vi.unstubAllGlobals();
 });
 
@@ -201,6 +210,8 @@ describe('PagesPage', () => {
 
   it('shows a light page in green without a list badge', async () => {
     render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    openHeaderDetails();
     const pill = await screen.findByLabelText('pages.htmlWeight.ok:31 B');
     expect(pill).toHaveAttribute('data-weight', 'ok');
     expect(document.querySelector('.live-pages-weight-badge')).toBeNull();
@@ -337,14 +348,16 @@ describe('PagesPage', () => {
       .toHaveClass('collection-detail-header');
   });
 
-  it('keeps the Page id in the title block, apart from the header buttons, with wrapping rules (KT-1141)', async () => {
+  it('keeps the Page id in the Details fold, apart from the header buttons, with wrapping rules (KT-1141, KT-1344)', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
     const header = document.querySelector('.live-pages-viewer-header')!;
-    const idPill = header.querySelector('.live-pages-identity .copy-id-pill');
+    // Folded: the id is not on the header until Details opens.
+    expect(header.querySelector('.copy-id-pill')).toBeNull();
+    openHeaderDetails();
+    const idPill = header.querySelector('.disc-chat-header-details .copy-id-pill');
     expect(idPill).toHaveClass('live-pages-id-pill');
     expect(idPill).toHaveAttribute('title', expect.stringContaining('pages.copyId'));
-    expect(idPill!.closest('.live-pages-title-block')).not.toBeNull();
     expect(idPill!.closest('.live-pages-header-actions')).toBeNull();
     expect(header.querySelector('.live-pages-header-actions .live-pages-open-tab-label')).not.toBeNull();
 
@@ -352,11 +365,11 @@ describe('PagesPage', () => {
     // Joins every unindented block whose selector line ends with this selector.
     const rule = (selector: string) => [...css.matchAll(new RegExp(`(?:^|\\n)${selector.replace(/[.*]/g, '\\$&')}\\s*\\{([^}]*)\\}`, 'g'))]
       .map(match => match[1]).join(';');
-    expect(rule('.live-pages-viewer-header')).toContain('flex-wrap: wrap');
-    expect(rule('.live-pages-title-block')).toContain('min-width: 0');
+    expect(rule('.live-pages-viewer-header .disc-chat-header-sub')).toContain('flex-wrap: wrap');
+    expect(rule('.live-pages-viewer-header .disc-chat-header-details')).toContain('flex-wrap: wrap');
     expect(rule('.live-pages-header-actions')).toContain('flex: 0 1 auto');
     expect(rule('.live-pages-id-pill span')).toContain('text-overflow: ellipsis');
-    expect(css).toMatch(/@container live-page-viewer \(max-width: 480px\)[^@]*\.live-pages-open-tab-label \{ display: none; \}/);
+    expect(css).toMatch(/@container live-page-viewer \(max-width: 640px\)[^@]*\.live-pages-open-tab-label \{ display: none; \}/);
   });
 
   it('uses the shared Discussions-style search with shortcut and inline clear', async () => {
@@ -553,6 +566,7 @@ describe('PagesPage', () => {
     expect(standaloneLink).toHaveAttribute('href', `${window.location.origin}/standalone/pages/page-1`);
     expect(standaloneLink).toHaveAttribute('target', '_blank');
     expect(standaloneLink).toHaveAttribute('rel', 'noopener noreferrer');
+    openHeaderDetails();
     expect(screen.getByText('data r3 · HTML r2')).toBeInTheDocument();
     const refreshTrigger = screen.getByTestId('live-page-refresh-menu');
     expect(refreshTrigger).toHaveAttribute('aria-expanded', 'false');
@@ -940,7 +954,7 @@ describe('PagesPage', () => {
     render(<PagesPage />);
     fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
 
-    fireEvent.click(screen.getByRole('button', { name: 'pages.runAllWorkflows' }));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.runAllWorkflowsMany:2' }));
 
     await waitFor(() => expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(2));
     const launched = vi.mocked(workflowsApi.triggerStream).mock.calls.map(call => call[0]);
@@ -964,7 +978,7 @@ describe('PagesPage', () => {
     vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
     render(<PagesPage />);
     fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
-    const button = screen.getByRole('button', { name: 'pages.runAllWorkflows' });
+    const button = screen.getByRole('button', { name: 'pages.runAllWorkflowsMany:2' });
 
     act(() => { button.click(); button.click(); });
 
@@ -986,7 +1000,7 @@ describe('PagesPage', () => {
     act(() => { single.click(); single.click(); });
     expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(1);
 
-    const runAll = screen.getByRole('button', { name: 'pages.runAllWorkflows' });
+    const runAll = screen.getByRole('button', { name: 'pages.runAllWorkflowsReplaying' });
     expect(runAll).toBeDisabled();
     act(() => { runAll.click(); });
     expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(1);
@@ -1004,13 +1018,13 @@ describe('PagesPage', () => {
     }));
     render(<PagesPage />);
     fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
-    fireEvent.click(screen.getByRole('button', { name: 'pages.runAllWorkflows' }));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.runAllWorkflowsMany:2' }));
     expect(screen.getByRole('button', { name: 'pages.runAllProgress:0,2' })).toBeInTheDocument();
 
     await act(async () => { finish['wf-1'](); });
     expect(screen.getByRole('button', { name: 'pages.runAllProgress:1,2' })).toBeInTheDocument();
     await act(async () => { finish['wf-2'](); });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'pages.runAllWorkflows' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'pages.runAllWorkflowsMany:2' })).toBeEnabled());
 
     fireEvent.click(screen.getByLabelText('pages.runLinkedWorkflow:Adobe cron'));
     expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(3);
@@ -1055,16 +1069,52 @@ describe('PagesPage', () => {
     vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
     render(<PagesPage />);
     fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
-    fireEvent.click(await screen.findByRole('button', { name: 'pages.runAllWorkflows' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'pages.runAllWorkflowsMany:2' }));
     expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(2);
 
     fireEvent.click(getCanonicalPageRow('Other Page'));
     await screen.findByLabelText('pages.runLinkedWorkflow:Other cron');
-    const runAll = screen.getByRole('button', { name: 'pages.runAllWorkflows' });
+    const runAll = screen.getByRole('button', { name: 'pages.runAllWorkflowsReplaying' });
     expect(runAll).toBeDisabled();
     expect(runAll).toHaveAttribute('title', 'pages.runAllWorkflowsBusy');
     fireEvent.click(runAll);
     expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps "Run all" on the busy reason, not the empty-queue one, while the batch runs on the current Page', async () => {
+    vi.mocked(pagesApi.workflows).mockResolvedValue([
+      { id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] },
+      { id: 'wf-2', name: 'Jira cron', enabled: true, step_names: ['publish'] },
+    ]);
+    vi.mocked(workflowsApi.triggerStream).mockClear();
+    vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
+    render(<PagesPage />);
+    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByRole('button', { name: 'pages.runAllWorkflowsMany:2' }));
+    expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(2);
+
+    const runAll = screen.getByRole('button', { name: 'pages.runAllProgress:0,2' });
+    expect(runAll).toBeDisabled();
+    expect(runAll).toHaveAttribute('title', 'pages.runAllWorkflowsBusy');
+  });
+
+  it('keeps "Run all" on the in-progress reason, not the empty-queue one, while a single workflow runs on the current Page', async () => {
+    vi.mocked(pagesApi.workflows).mockResolvedValue([
+      { id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] },
+    ]);
+    vi.mocked(workflowsApi.triggerStream).mockClear();
+    vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
+    render(<PagesPage />);
+    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByLabelText('pages.runLinkedWorkflow:Adobe cron'));
+    expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(1);
+
+    // The running workflow leaves the replay queue (0 queued) but the button
+    // must say a run is in progress, not that nothing is enabled.
+    // The label itself says so too ("Replay in progress…"), not only the tooltip.
+    const runAll = screen.getByRole('button', { name: 'pages.runAllWorkflowsReplaying' });
+    expect(runAll).toBeDisabled();
+    expect(runAll).toHaveAttribute('title', 'pages.runAllWorkflowsRunning');
   });
 
   it('one Escape closes the Export popover first, the next one the Sync panel', async () => {
@@ -1439,5 +1489,133 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
     }).not.toThrow();
     expect(screen.getByTestId('live-page-export-menu')).not.toHaveAttribute('open');
     expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
+  });
+
+  describe('header shared with the discussion (KT-1344)', () => {
+    it('puts Sync in the right-hand slot of the title row, as the invite is in the discussion header', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const header = document.querySelector('.live-pages-viewer-header')!;
+      expect(header).toHaveClass('disc-chat-header', 'collection-detail-header');
+      const top = header.querySelector('.disc-chat-header-top')!;
+      const slot = top.querySelector('.disc-chat-header-invite')!;
+      const trigger = screen.getByTestId('live-page-refresh-menu');
+      expect(slot).toContainElement(trigger);
+      // Title first, the Sync slot after it: the panel opens from the right.
+      const children = [...top.children];
+      expect(children.indexOf(top.querySelector('.disc-chat-header-title')!)).toBeLessThan(children.indexOf(slot));
+      // Nothing else of the Sync trigger is left among the row-2 actions.
+      expect(header.querySelector('.disc-chat-header-sub')).not.toContainElement(trigger);
+    });
+
+    it('keeps the Details toggle at the end of the second row, folded by default', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const sub = document.querySelector('.disc-chat-header-sub')!;
+      const toggle = screen.getByTestId('live-page-header-details-toggle');
+      expect(sub.lastElementChild).toBe(toggle);
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      expect(toggle).toHaveAttribute('aria-controls', 'live-page-header-details');
+      expect(toggle).toHaveAttribute('title', 'pages.headerDetailsShow');
+      expect(document.getElementById('live-page-header-details')).toBeNull();
+    });
+
+    it('unfolds the third line with the secondary metadata, and folds it back', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const toggle = screen.getByTestId('live-page-header-details-toggle');
+
+      fireEvent.click(toggle);
+      const third = document.getElementById('live-page-header-details')!;
+      expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      expect(toggle).toHaveAttribute('title', 'pages.headerDetailsHide');
+      expect(third).toHaveClass('disc-chat-header-details');
+      expect(third).toHaveTextContent('data r3 · HTML r2');
+      expect(third.querySelector('.live-pages-id-pill')).not.toBeNull();
+      expect(third.querySelector('.live-page-slug-pill')).not.toBeNull();
+
+      fireEvent.click(toggle);
+      expect(document.getElementById('live-page-header-details')).toBeNull();
+    });
+
+    it('remembers the fold for Artifacts, apart from the discussion header', async () => {
+      const first = render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      fireEvent.click(screen.getByTestId('live-page-header-details-toggle'));
+      expect(localStorage.getItem(HEADER_DETAILS_KEY)).toBe('1');
+      expect(localStorage.getItem('kronn:discHeaderDetails')).not.toBe('1');
+      first.unmount();
+
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      expect(screen.getByTestId('live-page-header-details-toggle')).toHaveAttribute('aria-expanded', 'true');
+      expect(document.getElementById('live-page-header-details')).not.toBeNull();
+    });
+
+    it('keeps a heavy Page warning on the visible row instead of the fold', async () => {
+      vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, html_size_bytes: 5 * 1024 * 1024 });
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const warning = await screen.findByLabelText(/pages\.htmlWeight\.veryHeavy/);
+      expect(warning.closest('.disc-chat-header-sub')).not.toBeNull();
+    });
+
+    it('returns focus to the Sync trigger when the panel closes from its close button', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const trigger = screen.getByTestId('live-page-refresh-menu');
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByRole('button', { name: 'pages.closeSyncPanel' }));
+      expect(document.activeElement).toBe(trigger);
+    });
+  });
+
+  describe('"Sync the N workflows" count (KT-1344)', () => {
+    const wf = (id: string, enabled = true) => ({ id, name: id, enabled, step_names: ['publish'] });
+
+    it('reads the plain label, disabled with a reason, when nothing can be replayed', async () => {
+      vi.mocked(pagesApi.workflows).mockResolvedValue([wf('wf-3', false)]);
+      render(<PagesPage />);
+      fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+      const button = screen.getByRole('button', { name: 'pages.runAllWorkflows' });
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute('title', 'pages.runAllWorkflowsNone');
+    });
+
+    it('reads the singular label for one workflow', async () => {
+      vi.mocked(pagesApi.workflows).mockResolvedValue([wf('wf-1'), wf('wf-3', false)]);
+      render(<PagesPage />);
+      fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+      const button = screen.getByRole('button', { name: 'pages.runAllWorkflowsOne:1' });
+      expect(button).toBeEnabled();
+    });
+
+    it('counts the queue run-all replays: enabled workflows only, and launches exactly that many', async () => {
+      vi.mocked(pagesApi.workflows).mockResolvedValue([wf('wf-1'), wf('wf-2'), wf('wf-3', false), wf('wf-4')]);
+      vi.mocked(workflowsApi.triggerStream).mockClear();
+      vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
+      render(<PagesPage />);
+      fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+
+      fireEvent.click(screen.getByRole('button', { name: 'pages.runAllWorkflowsMany:3' }));
+
+      expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(workflowsApi.triggerStream).mock.calls.map(call => call[0])).toEqual(['wf-1', 'wf-2', 'wf-4']);
+      expect(screen.getByRole('button', { name: 'pages.runAllProgress:0,3' })).toBeDisabled();
+    });
+
+    it('follows the links when the Page changes', async () => {
+      const otherPage = { ...page, id: 'page-2', title: 'Other Page', slug: 'other-page' };
+      vi.mocked(pagesApi.list).mockResolvedValue([page, otherPage]);
+      vi.mocked(pagesApi.get).mockImplementation(async id => id === page.id ? detail : { ...detail, ...otherPage });
+      vi.mocked(pagesApi.workflows).mockImplementation(async id => id === page.id
+        ? [wf('wf-1'), wf('wf-2')] : [wf('wf-5')]);
+      render(<PagesPage />);
+      fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+      expect(await screen.findByRole('button', { name: 'pages.runAllWorkflowsMany:2' })).toBeInTheDocument();
+
+      fireEvent.click(getCanonicalPageRow('Other Page'));
+      expect(await screen.findByRole('button', { name: 'pages.runAllWorkflowsOne:1' })).toBeInTheDocument();
+    });
   });
 });

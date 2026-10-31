@@ -65,6 +65,8 @@ function renderHeader(options: {
   sending?: boolean;
   onAgentSwitch?: (agent: AgentType) => void;
   onDiscussionUpdated?: () => void;
+  onOpenDetails?: () => void;
+  settingsPanelOpen?: boolean;
   toast?: ToastFn;
   modelTiers?: ModelTiersConfig;
   discussion?: Discussion;
@@ -77,7 +79,6 @@ function renderHeader(options: {
   render(
     <ChatHeader
       discussion={options.discussion ?? makeDiscussion()}
-      projects={[]}
       agents={[
         makeAgent('ClaudeCode'),
         makeAgent('Codex'),
@@ -87,7 +88,8 @@ function renderHeader(options: {
       externalConnections={options.externalConnections}
       isMobile={false}
       sending={sending}
-      onRequestTestMode={noop}
+      onOpenDetails={options.onOpenDetails ?? noop}
+      settingsPanelOpen={options.settingsPanelOpen}
       onToggleSidebar={noop}
       onDiscussionUpdated={onDiscussionUpdated}
       onAgentSwitch={onAgentSwitch}
@@ -96,43 +98,6 @@ function renderHeader(options: {
     />,
   );
   return { onAgentSwitch, onDiscussionUpdated, toast };
-}
-
-function renderNarrow() {
-  return render(
-    <ChatHeader
-      discussion={makeDiscussion()}
-      projects={[]}
-      agents={[makeAgent('ClaudeCode')]}
-      isMobile
-      sending={false}
-      onRequestTestMode={noop}
-      onToggleSidebar={noop}
-      onDiscussionUpdated={vi.fn()}
-      onAgentSwitch={vi.fn()}
-      toast={vi.fn<ToastFn>()}
-      t={t}
-    />,
-  );
-}
-
-function renderWithHandle() {
-  const view = render(
-    <ChatHeader
-      discussion={makeDiscussion()}
-      projects={[]}
-      agents={[makeAgent('ClaudeCode')]}
-      isMobile={false}
-      sending={false}
-      onRequestTestMode={noop}
-      onToggleSidebar={noop}
-      onDiscussionUpdated={vi.fn()}
-      onAgentSwitch={vi.fn()}
-      toast={vi.fn<ToastFn>()}
-      t={t}
-    />,
-  );
-  return view;
 }
 
 describe('ChatHeader — shared agent switcher', () => {
@@ -152,10 +117,8 @@ describe('ChatHeader — shared agent switcher', () => {
     expect(document.querySelector('.disc-chat-header')).toHaveClass('collection-detail-header');
     const title = document.querySelector('.disc-chat-header-title-text');
     const edit = screen.getByRole('button', { name: 'disc.editTitle' });
-    const id = screen.getByRole('button', { name: 'disc.idPillTooltip' });
 
     expect(title?.nextElementSibling).toBe(edit);
-    expect(edit.nextElementSibling).toBe(id);
     expect(edit.closest('.disc-chat-header-title')).not.toBeNull();
     expect(edit.closest('.disc-chat-header-invite')).toBeNull();
   });
@@ -307,40 +270,6 @@ describe('ChatHeader — shared agent switcher', () => {
     expect(trigger).toHaveAttribute('title', 'disc.switchAgentAndTier · disc.tier.default · explicit-disc-model');
   });
 
-  it('shows declared joined-CLI worktrees in the discussion header', async () => {
-    vi.mocked(discussionsApi.workspaces).mockResolvedValue([{
-      id: 'workspace-1',
-      disc_id: 'disc-agent-switch',
-      session_pk: 42,
-      session_agent_type: 'Codex',
-      task_id: 'task-140',
-      task_reference: 'KT-140',
-      project_id: 'project-1',
-      workspace_path: '/tmp/kronn-kt140',
-      canonical_path: '/tmp/kronn-kt140',
-      branch: 'feature/kt140',
-      head_sha: 'abc123',
-      ownership: 'external',
-      state: 'attached',
-      parent_discussion_id: null,
-      base_sha: null,
-      task_execution_id: null,
-      created_at: '2026-01-01',
-      updated_at: '2026-01-01',
-    }]);
-
-    renderHeader();
-
-    // KT-581 — declared worktrees are part of the folded details row now.
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('disc-header-details-toggle'));
-    });
-
-    expect(await screen.findByText('feature/kt140')).toBeInTheDocument();
-    expect(screen.getByText('KT-140')).toBeInTheDocument();
-    expect(screen.getByText('Codex')).toBeInTheDocument();
-  });
-
   it('keeps the choices open and reports the API error', async () => {
     vi.mocked(discussionsApi.update).mockRejectedValue(new Error('offline'));
     const { toast, onAgentSwitch } = renderHeader();
@@ -422,19 +351,12 @@ describe('ChatHeader — shared agent switcher', () => {
     );
     expect(onAgentSwitch).not.toHaveBeenCalled();
   });
-  /// KT-581 — the header was reading as three rows. Two now, with the third
-  /// behind a toggle. These pin the placement Romuald asked for, because a
-  /// later change that quietly puts a control back on its own row is exactly
-  /// the regression the rework was for.
-  describe('three-row layout', () => {
-    beforeEach(() => {
-      try { localStorage.removeItem('kronn:discHeaderDetails'); } catch { /* jsdom */ }
-    });
-
-    afterEach(() => {
-      try { localStorage.removeItem('kronn:discHeaderDetails'); } catch { /* jsdom */ }
-    });
-
+  /// KT-581 — the header was reading as three rows. KT-1344 — it is two now:
+  /// the third row was a fold repeating the side panel, so "Details" opens that
+  /// panel instead. These pin the placement, because a later change that
+  /// quietly puts a control back on its own row is exactly the regression the
+  /// rework was for.
+  describe('two-row layout', () => {
     it('puts the invite on the title row, not on a row of its own', () => {
       renderHeader();
       const invite = document.querySelector('.disc-participants-invite-btn');
@@ -450,66 +372,42 @@ describe('ChatHeader — shared agent switcher', () => {
       });
     });
 
-    it('keeps the details row folded until the toggle is clicked', async () => {
+    it('has one Details button, on row 2, with the open-side-panel icon', () => {
       renderHeader();
+      const buttons = screen.getAllByTestId('disc-header-details-btn');
+      expect(buttons).toHaveLength(1);
+      const button = buttons[0];
+      expect(button.closest('.disc-chat-header-sub')).not.toBeNull();
+      expect(button).toHaveTextContent('disc.headerDetails');
+      expect(button.querySelector('svg.lucide-panel-right-open')).not.toBeNull();
+    });
+
+    it('opens the side panel instead of unfolding a third row', () => {
+      const onOpenDetails = vi.fn();
+      renderHeader({ onOpenDetails });
+      fireEvent.click(screen.getByTestId('disc-header-details-btn'));
+      expect(onOpenDetails).toHaveBeenCalledTimes(1);
       expect(document.querySelector('.disc-chat-header-details')).toBeNull();
-
-      const toggle = screen.getByTestId('disc-header-details-toggle');
-      expect(toggle.getAttribute('aria-expanded')).toBe('false');
-      await act(async () => { fireEvent.click(toggle); });
-
-      const details = document.querySelector('.disc-chat-header-details');
-      expect(details).not.toBeNull();
-      expect(toggle.getAttribute('aria-expanded')).toBe('true');
-      // The project name and the cost figures live in the fold now.
-      expect(details!.querySelector('.disc-chat-context-project')).not.toBeNull();
+      expect(screen.queryByTestId('disc-header-details-toggle')).toBeNull();
     });
 
-    it('remembers the fold across mounts', async () => {
-      const { unmount } = renderWithHandle();
-      await act(async () => {
-        fireEvent.click(screen.getByTestId('disc-header-details-toggle'));
-      });
-      unmount();
+    it('reads as expanded while the panel is showing', () => {
+      renderHeader({ settingsPanelOpen: true });
+      expect(screen.getByTestId('disc-header-details-btn')).toHaveAttribute('aria-expanded', 'true');
+    });
 
+    it('keeps the details out of the header: no id pill, no project, no worktree', () => {
       renderHeader();
-      expect(document.querySelector('.disc-chat-header-details')).not.toBeNull();
-      expect(screen.getByTestId('disc-header-details-toggle').getAttribute('aria-expanded'))
-        .toBe('true');
+      expect(document.querySelector('.disc-id-pill')).toBeNull();
+      expect(document.querySelector('.disc-chat-context-project')).toBeNull();
+      expect(document.querySelector('.disc-worktree-badge')).toBeNull();
     });
 
-    /// At 400px the id pill and the session binding took 230px of the title
-    /// row between them, and the title — the one element that has to give way —
-    /// was left with zero. They belong to the fold on a narrow screen.
-    it('moves the id pill and the session binding into the fold on a narrow screen', async () => {
-      renderNarrow();
-      expect(document.querySelector('.disc-chat-header-top .disc-id-pill')).toBeNull();
-
-      await act(async () => {
-        fireEvent.click(screen.getByTestId('disc-header-details-toggle'));
-      });
-      const fold = document.querySelector('.disc-chat-header-details')!;
-      expect(fold.querySelector('.disc-id-pill')).not.toBeNull();
-    });
-
-    it('keeps them on the title row on a wide screen', () => {
-      renderHeader();
-      expect(document.querySelector('.disc-chat-header-top .disc-id-pill')).not.toBeNull();
-    });
-
-    /// The strip and the search bar sit on one row. The strip's border only
-    /// exists while a panel is open, so without a reserved pixel the two are
-    /// level in one state and off by one in the other.
-    it('reserves the strip border pixel in both states', () => {
-      const css = readFileSync('src/components/DiscussionPanelSwitcher.css', 'utf8');
-      const base = css.match(/\.disc-panel-switcher \{([^}]*)\}/g)?.join('') ?? '';
-      expect(base).toContain('border-bottom: 1px solid transparent');
-    });
-
-    it('pins the details toggle to the right of row 2', () => {
+    it('makes the Details button the same weight as the invite, pinned right', () => {
       const css = readFileSync('src/pages/DiscussionsPage.css', 'utf8');
-      const rule = css.match(/\.disc-chat-header-details-toggle\s*\{([^}]*)\}/)?.[1] ?? '';
+      const rule = css.match(/\.disc-chat-header-details-btn\s*\{([^}]*)\}/)?.[1] ?? '';
       expect(rule).toContain('margin-left: auto');
+      expect(rule).toContain('border: 1px solid');
     });
   });
 });

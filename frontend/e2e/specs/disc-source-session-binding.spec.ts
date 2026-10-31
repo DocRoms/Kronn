@@ -7,6 +7,7 @@
 
 import { expect, test } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
+import { openDiscussionPanel } from '../pages/DiscussionPanels';
 
 const title = `Session binding PW ${Date.now()}`;
 const sessionId = `claude-ui-${Date.now()}`;
@@ -53,6 +54,9 @@ test('displays, copies and unlinks an automatically bound offline Claude session
   await dashboard.goto();
   await dashboard.openDiscussion(discId);
 
+  // The binding is one of the details the header's « Détails » button opens in
+  // the side panel (« Paramètres »), no longer a chip in the header row.
+  await openDiscussionPanel(page);
   await page.getByRole('button', { name: /ClaudeCode · claude-u/ }).click();
   const dialog = page.getByRole('dialog', { name: 'Session CLI liée' });
 

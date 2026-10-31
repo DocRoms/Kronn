@@ -3,7 +3,7 @@
 // regression of the UX fix added alongside the disc_prompts worktree notice.
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock());
@@ -51,11 +51,10 @@ function renderHeader(
   return render(
     <ChatHeader
       discussion={disc}
-      projects={[]}
       agents={[]}
       isMobile={false}
       sending={false}
-      onRequestTestMode={noop}
+      onOpenDetails={noop}
       onToggleSidebar={noop}
       onDiscussionUpdated={noop}
       onAgentSwitch={noop}
@@ -81,22 +80,6 @@ describe('ChatHeader — pending files badge', () => {
     expect(screen.getByText('contextHelp.discussion.mcp')).toBeInTheDocument();
   });
 
-  it('shows copied feedback on the discussion ID pill while copying the full ID', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, 'clipboard', {
-      value: { writeText },
-      configurable: true,
-    });
-    const id = '12345678-90ab-cdef-1234-567890abcdef';
-    const { container } = renderHeader(0, makeDiscussion({ id }));
-    const pill = container.querySelector<HTMLButtonElement>('.disc-id-pill');
-
-    fireEvent.click(pill!);
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(id));
-    expect(pill?.getAttribute('data-copied')).toBe('true');
-    expect(pill?.querySelector('svg')).not.toBeNull();
-  });
-
   // KT-581 — the pending-file badge, its cap and its tooltip moved with the
   // panels themselves: they are asserted in DiscussionPanelSwitcher's spec.
   // What stays here is what the header still owns.
@@ -113,8 +96,8 @@ describe('ChatHeader — pending files badge', () => {
   it('carries no action either — export and delete moved with the panels', () => {
     renderHeader(0);
     // The header describes the discussion; it no longer performs anything on
-    // it. Search, export and delete all live in the panel column's strip.
-    expect(screen.queryByRole('button', { name: 'disc.messageSearch.open' })).toBeNull();
+    // it. Export and delete live in the panel column's strip; the in-room
+    // search is gone, the discussion search covers the whole content.
     expect(screen.queryByRole('button', { name: 'disc.portability.export' })).toBeNull();
   });
 });

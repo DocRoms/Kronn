@@ -287,7 +287,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:567-579#exportDatasetCsv]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:574-586#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 

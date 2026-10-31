@@ -58,11 +58,10 @@ describe('discussion portability UI', () => {
     render(
       <ChatHeader
         discussion={discussion}
-        projects={[]}
         agents={[]}
         isMobile={false}
         sending={false}
-        onRequestTestMode={noop}
+        onOpenDetails={noop}
         onToggleSidebar={noop}
         onDiscussionUpdated={noop}
         onAgentSwitch={noop}

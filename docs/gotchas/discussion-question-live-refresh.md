@@ -10,13 +10,12 @@ locally recorded answer cannot overwrite it.
 
 [src: file: frontend/src/lib/discussionQuestions.ts:33-143]
 [src: file: frontend/src/components/DiscussionQuestionBanner.tsx:14-25]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4781-4785#DiscussionQuestionBanner]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4562-4566#DiscussionQuestionBanner]
 
-When the panel rail floats and message search is closed, the arbitration
-banner reserves the rail's horizontal footprint for its reveal button. Opening
-search moves the banner below the rail; the thread itself keeps its full width.
-The browser regression checks hit testing at 360 px and 1200 px with both
-search states, without opening a real discussion or answering its arbitration.
+Nothing floats over the conversation any more (KT-1344): the panel rail lives
+in the side panel's own column and the in-conversation search was removed, so
+the arbitration banner keeps its reveal button inside the conversation column.
+The browser regression checks hit testing at 360 px and 1200 px, without opening
+a real discussion or answering its arbitration.
 
-[src: file: frontend/src/pages/DiscussionsPage.css:3231-3237]
-[src: file: frontend/e2e/specs/discussion-question-layout.spec.ts:13-49]
+[src: file: frontend/e2e/specs/discussion-question-layout.spec.ts:16-42]
