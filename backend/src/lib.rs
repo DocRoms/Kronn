@@ -987,6 +987,53 @@ async fn trust_confirm_gate(
     .await
 }
 
+/// KT-1496 — a bridge-token request on a protected route (one that returns a
+/// secret or destroys data) outside the bridge list: refused unless it carries
+/// a code or a grant, which the strong gate then verifies and spends for that
+/// one action. Nothing enrolled, nothing accepted: the gate refuses it there.
+async fn strong_code_gate(
+    grant: &std::sync::Arc<crate::core::bridge_token::BridgeGrant>,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let (mut parts, body) = request.into_parts();
+    let declared_small = parts
+        .headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_none_or(|size| size <= 1024 * 1024);
+    let (presented, body) = if declared_small {
+        crate::api::strong_confirm::presented_by(&parts, body).await
+    } else {
+        (
+            crate::api::strong_confirm::Presented::from_headers(&parts.headers),
+            body,
+        )
+    };
+    if presented.is_empty() {
+        return bridge_refusal(
+            StatusCode::FORBIDDEN,
+            "this route is not available to a Kronn-launched agent's bridge token without the owner's strong-confirmation code: send it in the X-Kronn-Confirm header or a `kronn_confirm` field",
+        );
+    }
+    parts
+        .extensions
+        .insert(crate::core::bridge_token::BridgeCaller {
+            token_id: grant.id.clone(),
+            project: None,
+            own_discussions: grant.own_discussions(),
+            own_run: grant.scope.workflow_run_id.clone(),
+            agent: grant.scope.agent.clone(),
+        });
+    parts
+        .extensions
+        .insert(crate::api::strong_confirm::BridgeCodePass);
+    parts.extensions.insert(presented);
+    next.run(axum::extract::Request::from_parts(parts, body))
+        .await
+}
+
 /// Admit a bridge-token request only on its positive list and its scope.
 async fn bridge_gate(
     state: &AppState,
@@ -1014,6 +1061,14 @@ async fn bridge_gate(
     // and object, journalled as the bridge channel, lockout after 5 failures).
     if bridge_token::trust_confirm_route(&method, &pattern) {
         return trust_confirm_gate(&grant, request, next).await;
+    }
+    // KT-1496: a route that returns a secret or destroys data is reachable the
+    // same way (the code is the proof), for that one action.
+    if bridge_token::route_for(&method, &pattern).is_none()
+        && crate::core::strong_confirm::protection(&method, &pattern)
+            != crate::core::strong_confirm::Protection::Open
+    {
+        return strong_code_gate(&grant, request, next).await;
     }
     let Some(route) = bridge_token::route_for(&method, &pattern) else {
         tracing::warn!(target: "kronn::bridge_token", token = %grant.id, %method, route = %pattern,
@@ -1743,6 +1798,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // write only with the owner's confirmation code (`trust_confirm_gate`).
         .route("/api/trust", get(api::trust::overview))
         .route("/api/trust/audit", get(api::trust::audit))
+        .route("/api/trust/grants", post(api::strong_confirm::mint_grant))
         .route("/api/trust/proof", get(api::trust::get_proof))
         .route("/api/trust/proof/enroll", post(api::trust::enroll_proof))
         .route("/api/trust/proof/confirm", post(api::trust::confirm_proof))
@@ -3413,6 +3469,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .layer(build_cors(&domain, port))
         .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span));
 
+    // KT-1496: inside the auth layer, so a request reaches it already admitted.
+    router = router.route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        api::strong_confirm::strong_gate,
+    ));
     if enable_auth {
         router = router.route_layer(middleware::from_fn_with_state(
             state.clone(),

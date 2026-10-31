@@ -1062,8 +1062,16 @@ pub async fn preview_plugin_bundle(
 /// POST /api/mcps/bundles/export
 pub async fn export_plugin_bundle(
     State(state): State<AppState>,
+    strong: crate::api::strong_confirm::Strong,
     Json(request): Json<ExportPluginBundleRequest>,
 ) -> Response {
+    // KT-1496: values leave under a passphrase the caller chooses, which is the
+    // same as handing them over in clear.
+    if request.include_values {
+        if let Err(refused) = strong.require(&state).await {
+            return refused;
+        }
+    }
     let instance_secret = match state.config.read().await.encryption_secret.clone() {
         Some(secret) => secret,
         None => {

@@ -76,6 +76,7 @@ pub mod shared_runs;
 pub mod signal_catalog;
 pub mod skills;
 pub mod stats;
+pub mod strong_confirm;
 pub mod themes;
 pub mod trust;
 pub mod ui_preferences;

@@ -201,6 +201,7 @@ export function TrustProofSection({ toast }: { toast?: ToastFn }) {
           <p className="set-meta" data-testid="trust-proof-status">
             {status.pending ? t('trust.proof.statusPending') : t('trust.proof.statusNone')}
           </p>
+          <p className="set-meta" data-testid="trust-proof-suggest">{t('trust.proof.suggest')}</p>
           {adminField}
           <div className="trust-actions">
             <button

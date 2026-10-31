@@ -84,13 +84,23 @@ pub async fn create(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     marker: crate::core::bridge_token::AgentMark,
+    strong: crate::api::strong_confirm::Strong,
     Json(request): Json<CreateQuickExecRequest>,
-) -> Json<ApiResponse<QuickExec>> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     let by_agent = crate::core::bridge_token::agent_authored(&bridge, &marker);
+    // KT-1496: the human approval flag is the human's. A caller that is not an
+    // agent (whose flag is dropped below) and sets it asks for the proof, so a
+    // token-less agent on this machine cannot approve its own command.
+    if !by_agent && request.unmodelled_args_approved == Some(true) {
+        if let Err(refused) = strong.require(&state).await {
+            return refused;
+        }
+    }
     let origin = origin_of(&bridge);
     let response = create_as_in(state.clone(), request, by_agent, origin).await;
     announce_from_agent(&state, bridge.as_ref(), marker.as_ref(), &response.0).await;
-    response
+    response.into_response()
 }
 
 /// The launch behind a bridge token, for the trust level it runs under.
@@ -312,13 +322,36 @@ pub async fn update(
     Path(id): Path<String>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     marker: crate::core::bridge_token::AgentMark,
+    strong: crate::api::strong_confirm::Strong,
     Json(request): Json<CreateQuickExecRequest>,
-) -> Json<ApiResponse<QuickExec>> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     let by_agent = crate::core::bridge_token::agent_authored(&bridge, &marker);
+    // KT-1496: see `create`. Saving the very line a human already approved, with
+    // its approval kept, asks for nothing: the proof is for giving an approval.
+    if !by_agent && request.unmodelled_args_approved == Some(true) {
+        let lookup = id.clone();
+        let approved_line = state
+            .db
+            .with_read_conn(move |conn| crate::db::quick_execs::get_quick_exec(conn, &lookup))
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|existing| {
+                existing.unmodelled_args_approved == Some(true)
+                    && existing.command == request.command.trim()
+                    && existing.args == request.args
+            });
+        if !approved_line {
+            if let Err(refused) = strong.require(&state).await {
+                return refused;
+            }
+        }
+    }
     let origin = origin_of(&bridge);
     let response = update_as_in(state.clone(), id, request, by_agent, origin).await;
     announce_from_agent(&state, bridge.as_ref(), marker.as_ref(), &response.0).await;
-    response
+    response.into_response()
 }
 
 /// Update a Quick Exec; see [`create_as`] for `by_agent`.
@@ -1660,8 +1693,7 @@ mod tests {
             .unwrap()
         };
         // An agent's save goes through, unapproved and named as waiting.
-        let Json(by_bridge) =
-            create(State(state.clone()), bridge(), None, Json(clone(&approved))).await;
+        let Json(by_bridge) = create_as(state.clone(), clone(&approved), bridge().is_some()).await;
         let Json(by_tools) = create_as(state.clone(), clone(&approved), true).await;
         for saved in [by_bridge, by_tools] {
             assert!(saved.success, "{:?}", saved.error);
@@ -1673,7 +1705,7 @@ mod tests {
             );
             assert_eq!(item.agent_written, Some(true));
         }
-        let Json(by_human) = create(State(state.clone()), None, None, Json(clone(&approved))).await;
+        let Json(by_human) = create_as(state.clone(), clone(&approved), false).await;
         assert!(by_human.success, "{:?}", by_human.error);
         let id = by_human.data.unwrap().id;
 
@@ -1685,14 +1717,7 @@ mod tests {
         assert_eq!(kept.data.unwrap().unmodelled_args_approved, Some(true));
         let mut changed = clone(&approved);
         changed.args = vec!["s3".into(), "rm".into(), "{{bucket}}".into()];
-        let Json(dropped) = update(
-            State(state.clone()),
-            Path(id),
-            bridge(),
-            None,
-            Json(changed),
-        )
-        .await;
+        let Json(dropped) = update_as(state.clone(), id, changed, bridge().is_some()).await;
         let dropped = dropped.data.expect("saved, waiting for a human");
         assert_eq!(
             dropped.unmodelled_args_approved, None,
@@ -1807,13 +1832,11 @@ mod tests {
     async fn an_agent_saves_an_unmodelled_cli_inactive_on_every_path() {
         let state = state();
         room(&state, "room-1").await;
-        let Json(by_bridge) = create(
-            State(state.clone()),
-            bridge_in("room-1"),
-            None,
-            Json(purge_line()),
-        )
-        .await;
+        // The handler's body without its proof gate (an agent's save asks for none).
+        let bridge = bridge_in("room-1");
+        let Json(by_bridge) =
+            create_as_in(state.clone(), purge_line(), true, origin_of(&bridge)).await;
+        announce_from_agent(&state, bridge.as_ref(), None, &by_bridge).await;
         let Json(by_tools) = create_as(state.clone(), purge_line(), true).await;
         let Json(seed) = create_as(state.clone(), request("fastly"), true).await;
         let seed = seed.data.expect("a line without a value is saved");

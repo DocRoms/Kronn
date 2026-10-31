@@ -103,6 +103,8 @@ mod reasoning_effort_runtime;
 mod room_reaches_the_agent_e2e;
 #[path = "rooted_io_umask.rs"]
 mod rooted_io_umask;
+#[path = "strong_confirm_gate.rs"]
+mod strong_confirm_gate;
 #[path = "workflow_agent_launch_policy.rs"]
 mod workflow_agent_launch_policy;
 #[path = "workflow_read_only_repos_probe.rs"]

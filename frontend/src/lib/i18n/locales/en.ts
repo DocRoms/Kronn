@@ -7219,6 +7219,12 @@ End with [SIGNAL: OK].`,
   "trust.proof.renew": "New recovery codes",
   "trust.proof.disable": "Disable",
   "trust.proof.reset": "Lost your authenticator and your recovery codes? With access to this machine outside Kronn, stop Kronn and delete trust-proof.json and trust-proof-lock.json from the data directory (docs/architecture/trust-levels.md).",
+  "strongConfirm.title": "Confirm with your authenticator",
+  "strongConfirm.why": "This action returns a secret, operates on your instance or deletes something that cannot come back, so Kronn asks for the code of your authenticator. The code works once, for this action only.",
+  "strongConfirm.action": "Action: {0}",
+  "strongConfirm.label": "Current code (or a recovery code)",
+  "strongConfirm.confirm": "Confirm",
+  "trust.proof.suggest": "Without an authenticator, anything running on this machine can read your secrets or delete your data through Kronn's local API. Set one up and these actions will ask for its code.",
   "trust.audit.withdrawn": "withdrawn",
 };
 
