@@ -1152,12 +1152,7 @@ pub fn set_orchestration_control_state(
             let unfinished = plan
                 .active
                 .iter()
-                .filter(|relation| {
-                    !matches!(
-                        relation.task.status,
-                        PlanningTaskStatus::Done | PlanningTaskStatus::Archived
-                    )
-                })
+                .filter(|relation| !relation.task.satisfies_dependents())
                 .count();
             if unfinished > 0 {
                 bail!(
@@ -5480,8 +5475,16 @@ pub enum IntegrationStep<'a> {
     /// Validating → Applying. Pins the backup ref, written before the parent moves:
     /// after this point the parent can change, and the ref is how it comes back.
     ApplyArmed { backup_ref: &'a str },
-    /// Applying → Done. Records what the parent actually became.
+    /// Applying → Done. Records what the parent actually became, and completes
+    /// the plan task: the delivery reached the default branch.
     Integrated { integrated_sha: &'a str },
+    /// Applying → Done, like [`Self::Integrated`], but the target is a campaign or
+    /// feature branch (KT-1519): the execution is done, the plan task is not — it
+    /// stays open, integrated and awaiting the merge into the default branch.
+    IntegratedAwaitingMerge {
+        integrated_sha: &'a str,
+        branch: &'a str,
+    },
 }
 
 impl IntegrationStep<'_> {
@@ -5494,7 +5497,7 @@ impl IntegrationStep<'_> {
             Self::CandidateBuilt { .. } => Integrating,
             Self::ValidationsStarted => Integrating,
             Self::ApplyArmed { .. } => Validating,
-            Self::Integrated { .. } => Applying,
+            Self::Integrated { .. } | Self::IntegratedAwaitingMerge { .. } => Applying,
         }
     }
 
@@ -5506,7 +5509,7 @@ impl IntegrationStep<'_> {
             Self::CandidateBuilt { .. } => None,
             Self::ValidationsStarted => Some(Validating),
             Self::ApplyArmed { .. } => Some(Applying),
-            Self::Integrated { .. } => Some(Done),
+            Self::Integrated { .. } | Self::IntegratedAwaitingMerge { .. } => Some(Done),
         }
     }
 }
@@ -5656,7 +5659,8 @@ pub fn commit_integration_checkpoint(
                 params![exec_id, backup_ref, now],
             )?;
         }
-        IntegrationStep::Integrated { integrated_sha } => {
+        IntegrationStep::Integrated { integrated_sha }
+        | IntegrationStep::IntegratedAwaitingMerge { integrated_sha, .. } => {
             tx.execute(
                 "UPDATE task_executions SET integrated_sha = ?2, updated_at = ?3 WHERE id = ?1",
                 params![exec_id, integrated_sha, now],
@@ -5671,7 +5675,19 @@ pub fn commit_integration_checkpoint(
             // still has an unticked worker item (the transaction rolls back).
             let verified = approved_dod_evidence(&tx, exec_id)?;
             crate::db::planning::tick_verified_dod_within_tx(&tx, &task_id, &verified, actor)?;
-            if !crate::db::planning::mark_task_done_within_tx(&tx, &task_id, actor)? {
+            let completed = match step {
+                IntegrationStep::IntegratedAwaitingMerge { branch, .. } => {
+                    crate::db::planning::mark_task_awaiting_merge_within_tx(
+                        &tx,
+                        &task_id,
+                        branch,
+                        integrated_sha,
+                        actor,
+                    )?
+                }
+                _ => crate::db::planning::mark_task_done_within_tx(&tx, &task_id, actor)?,
+            };
+            if !completed {
                 return Ok(IntegrationCheckpointOutcome::TaskNotCompletable);
             }
         }

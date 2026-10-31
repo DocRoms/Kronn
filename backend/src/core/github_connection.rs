@@ -376,6 +376,120 @@ pub fn apply_launch_env(cmd: &mut std::process::Command, github_env: &[(String, 
     cmd.envs(github_env.iter().map(|(name, value)| (name, value)));
 }
 
+// ─── Work merged on GitHub ──────────────────────────────────────────────────
+
+/// KT-1519 — the GitHub issue (or pull request) numbers a task claims as its own
+/// work: its `github-N` tags, which the board sync and the task creation put on
+/// the task the item was made for. Sorted, without duplicates. A link is a
+/// reference, not a claim: a follow-up that points at an earlier closed issue
+/// must not close with it ([`linked_pull_numbers`] reads the links).
+pub fn tagged_work_item_numbers(tags: &[String]) -> Vec<u64> {
+    let mut numbers: Vec<u64> = tags
+        .iter()
+        .filter_map(|tag| {
+            let tag = tag.trim();
+            let head = tag.get(..7)?;
+            head.eq_ignore_ascii_case("github-")
+                .then(|| tag[7..].parse::<u64>().ok())
+                .flatten()
+        })
+        .collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    numbers
+}
+
+/// KT-1519 — the pull-request numbers a task links on the repository `slug`
+/// (`…/pull/N`). Only a candidate: [`pull_request_landed`] checks that the pull
+/// request is the one that carries the task's branch. Issue links are ignored.
+pub fn linked_pull_numbers(slug: &str, link_urls: &[String]) -> Vec<u64> {
+    let prefix = format!("https://github.com/{}/", slug.to_ascii_lowercase());
+    let mut numbers: Vec<u64> = link_urls
+        .iter()
+        .filter_map(|url| {
+            let lowered = url.trim().to_ascii_lowercase();
+            let rest = lowered.strip_prefix(&prefix)?;
+            let mut parts = rest.split('/');
+            if parts.next() != Some("pull") {
+                return None;
+            }
+            let digits: String = parts
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse::<u64>().ok()
+        })
+        .collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    numbers
+}
+
+/// KT-1519 — whether GitHub says issue or pull request `number` of `slug` is
+/// finished: an issue that was closed (not as « not planned »), or a pull request
+/// that was merged. `None` when GitHub cannot say (unreachable, refused, unknown
+/// number): the caller keeps the task awaiting its merge. A squash or rebase merge
+/// leaves the integrated commit unreachable from the default branch, so this is
+/// the only signal such a merge gives.
+pub async fn work_item_landed(
+    api_base: &str,
+    token: &str,
+    slug: &str,
+    number: u64,
+) -> Option<bool> {
+    let client = http_client();
+    let response = request(
+        &client,
+        &format!("{api_base}/repos/{slug}/issues/{number}"),
+        token,
+    )
+    .send()
+    .await
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = response.json().await.ok()?;
+    if body["state"].as_str() != Some("closed") {
+        return Some(false);
+    }
+    if body.get("pull_request").is_some_and(|pr| !pr.is_null()) {
+        return Some(!body["pull_request"]["merged_at"].is_null());
+    }
+    Some(body["state_reason"].as_str() != Some("not_planned"))
+}
+
+/// KT-1519 — whether pull request `number` of `slug` was merged *and* carried
+/// `branch` as its head: a task links pull requests for reference too, and only
+/// the one that brought its own branch in says the task shipped. `None` when
+/// GitHub cannot say.
+pub async fn pull_request_landed(
+    api_base: &str,
+    token: &str,
+    slug: &str,
+    number: u64,
+    branch: &str,
+) -> Option<bool> {
+    let client = http_client();
+    let response = request(
+        &client,
+        &format!("{api_base}/repos/{slug}/pulls/{number}"),
+        token,
+    )
+    .send()
+    .await
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = response.json().await.ok()?;
+    let merged = body["merged"].as_bool().unwrap_or(false) || !body["merged_at"].is_null();
+    let head = body["head"]["ref"].as_str().unwrap_or_default();
+    Some(merged && head == branch.strip_prefix("refs/heads/").unwrap_or(branch))
+}
+
 // ─── Scope read from GitHub ─────────────────────────────────────────────────
 
 /// `KRONN_GITHUB_API_BASE` lets tests point at a stub; GitHub otherwise.

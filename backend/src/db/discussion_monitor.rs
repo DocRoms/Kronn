@@ -133,7 +133,7 @@ pub fn preview(conn: &Connection, id: &str) -> Result<Option<DiscussionMonitorPr
 
 /// Aggregate in SQLite: at most six rows, without task descriptions, events,
 /// DoD or dependency hydration. Keep precedence aligned with get_discussion_plan.
-fn plan_stats(conn: &Connection, id: &str) -> Result<PlanningPlanStats> {
+pub(crate) fn plan_stats(conn: &Connection, id: &str) -> Result<PlanningPlanStats> {
     let mut statement = conn.prepare(
         "SELECT CASE
             WHEN relation.placement = 'later' THEN 'later'
@@ -142,7 +142,10 @@ fn plan_stats(conn: &Connection, id: &str) -> Result<PlanningPlanStats> {
                 SELECT 1 FROM planning_task_blockers b
                 JOIN planning_tasks blocker ON blocker.id = b.blocker_task_id
                 WHERE b.task_id = task.id AND blocker.status NOT IN ('done', 'archived')
+                  AND blocker.awaiting_merge_branch IS NULL
             ) THEN 'blocked'
+            WHEN task.status = 'in_progress' AND task.awaiting_merge_branch IS NOT NULL
+                THEN 'awaiting_merge'
             WHEN task.status = 'in_progress' THEN 'in_progress'
             WHEN task.status = 'idea' THEN 'ideas'
             ELSE 'ready' END AS bucket, COUNT(*)
@@ -160,6 +163,7 @@ fn plan_stats(conn: &Connection, id: &str) -> Result<PlanningPlanStats> {
             "later" => stats.later = count,
             "done" => stats.done = count,
             "blocked" => stats.blocked = count,
+            "awaiting_merge" => stats.awaiting_merge = count,
             "in_progress" => stats.in_progress = count,
             "ideas" => stats.ideas = count,
             _ => stats.ready = count,

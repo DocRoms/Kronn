@@ -8,7 +8,7 @@ exact CLI never accepted the KT-328 control offer, or its re-offer after a
 review round — had no path back to the principal: `task_exec_reassign` failed
 with "Blocked, not a resumable worker state", stranding real work (checkout,
 history, attempts, budget) behind a worker that never showed up.
-[src: file: backend/src/db/orchestration.rs:7327-7352#resumable_worker_state]
+[src: file: backend/src/db/orchestration.rs:7348-7373#resumable_worker_state]
 
 The gate now also accepts a `Blocked` row whose `blocked_reason_code` is
 exactly `AwaitingWorkerAcceptance` — the ONE hold where the worker process
@@ -20,7 +20,7 @@ a review round, so a redirect here can also be reclaiming an attempt with
 real prior review history, not only a brand-new one. Every other `Blocked`
 reason (`WorkerSessionCommittedElsewhere`, or an `Applying`-origin
 infra/dirty-main hold) still falls through to the refusal.
-[src: file: backend/src/db/orchestration.rs:7337-7352#AwaitingWorkerAcceptance]
+[src: file: backend/src/db/orchestration.rs:7358-7373#AwaitingWorkerAcceptance]
 
 Before doing anything else, the function resumes the checkpoint the ADR §3
 state machine actually allows: `Blocked` clears back ONLY to
@@ -36,8 +36,8 @@ acceptance. A second, sequential reassignment call against the same row loses
 the CAS inside that same `transition_execution` and is refused the ordinary
 way ("not a resumable worker state") rather than silently double-applying —
 this is NOT a test of two simultaneous callers racing each other.
-[src: file: backend/src/db/orchestration.rs:7353-7387#Provisioning]
-[src: file: backend/src/db/orchestration.rs:7461#cancel_live_offers_for_execution]
+[src: file: backend/src/db/orchestration.rs:7374-7408#Provisioning]
+[src: file: backend/src/db/orchestration.rs:7477#cancel_live_offers_for_execution]
 
 The caller decides what Provisioning becomes next, exactly like the initial
 launch: a native worker dispatches straight to `Working` (added to the
@@ -45,8 +45,8 @@ existing `Interrupted | ChangesRequested | Escalated` resume match), while a
 CLI target reuses the pre-existing generic "not-Interrupted → Interrupted,
 then open a fresh `cli_reassignment` offer" path unchanged — no per-status
 branch was needed there.
-[src: file: backend/src/api/orchestration.rs:12167-12185#Provisioning]
-[src: file: backend/src/api/orchestration.rs:12343-12367#cli_reassignment]
+[src: file: backend/src/api/orchestration.rs:12418-12436#Provisioning]
+[src: file: backend/src/api/orchestration.rs:12594-12618#cli_reassignment]
 
 Regression coverage, and exactly what each layer proves:
 
@@ -69,14 +69,14 @@ Regression coverage, and exactly what each layer proves:
   cancellation. Every execution field must equal the pre-call snapshot and
   the old offer must remain `pending`. This proves checkpoint rollback at the
   CLI-origin restoration boundary, not a later API failure after cancellation.
-  [src: file: backend/src/api/orchestration.rs:38634-38734#native_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_through_dispatch]
-  [src: file: backend/src/api/orchestration.rs:38842-38931#native_reassignment_from_blocked_awaiting_acceptance_rolls_back_when_child_room_vanished]
+  [src: file: backend/src/api/orchestration.rs:39460-39560#native_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_through_dispatch]
+  [src: file: backend/src/api/orchestration.rs:39668-39757#native_reassignment_from_blocked_awaiting_acceptance_rolls_back_when_child_room_vanished]
 - API-layer `task_exec_reassign` (CLI target): the same fixture redirected to
   a different joined CLI session opens a genuinely fresh offer (distinct id,
   correct target session) after the `Blocked`→`Provisioning`→`Interrupted`
   checkpoint sequence, the OLD offer's late accept is refused, and accepting
   the NEW offer reaches `Working`.
-  [src: file: backend/src/api/orchestration.rs:38736-38839#cli_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_with_a_fresh_offer]
+  [src: file: backend/src/api/orchestration.rs:39562-39665#cli_reassignment_resumes_a_blocked_awaiting_cli_acceptance_execution_with_a_fresh_offer]
 
 None of this is a proof of concurrent-call idempotence for the API handlers —
 the "second call loses the CAS" coverage is a sequential DB-layer race check

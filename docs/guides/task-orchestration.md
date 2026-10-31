@@ -135,10 +135,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:9114-9118#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:9168-9217#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:7821-7845#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:33540-33641#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:9370-9374#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:9424-9473#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:8072-8096#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:34366-34467#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -222,6 +222,8 @@ it: a worker's own session, an HTTP agent and an anonymous agent are refused.
   principal evidence for it. Every other DoD item keeps the rules above.
 - Approve integrates normally. The execution ends `Done`, but the plan task
   stays `in_progress` with the item listed as `live_checks` on its summary.
+  (Integration into a campaign or feature branch keeps the task open anyway:
+  see « Integrated into a feature branch » below.)
 - The principal runs the check, then ticks it with `task_update_dod`
   (`completed: true` and non-empty `evidence`). A bare tick is refused, as is
   ticking it through a `definition_of_done` replace, and downgrading it to a
@@ -301,7 +303,8 @@ restore the item on this task before carrying it.
 ### The Definition of Done after an integration
 
 An approve that integrates ticks the DoD items it verified, in the same
-transaction that marks the task `done`. An item the principal named in
+transaction that marks the task `done` (integration into the default branch) or
+integrated and awaiting its merge (any other branch, below). An item the principal named in
 `dod_verifications` carries the principal's evidence; one it did not name (a
 human approve supplies none) carries the worker's own `dod_status` evidence.
 The evidence is stored on the item (`evidence` on the DoD item) and shown with
@@ -332,6 +335,56 @@ What a later manual write does to the evidence of a worker item:
 
 Only the integration path enforces the guard; a task a human sets to `done` in
 the Planning page is not checked.
+
+### Integrated into a feature branch
+
+`done` means the change reached the default branch. An integration into any
+other target (a campaign branch such as `autocode/kt-1495`, a review branch)
+ends the execution `Done` but leaves the plan task `in_progress`, **integrated
+and awaiting the merge**: the summary carries `awaiting_merge` (the branch and
+the integrated commit), and the planning page, the board and the discussion plan
+show « Intégrée dans <branche> — en attente de fusion » instead of `done`; the
+Planning list and the project Tasks panel carry it too (`list_tasks` builds each
+row with the same summary), and the plan counters (`stats`, and the discussion
+monitor's) count it in an `awaiting_merge` bucket apart from `in_progress` and
+`done`. The
+branch name is shortened in the pill and complete on its title. A repository
+with no discoverable default branch has no other branch to tell apart from it:
+there the integration closes the task.
+
+An awaiting-merge task is **satisfied** as a blocker: the next task of the
+campaign builds on that branch, so it launches (preflight, launch boundary and
+the start checkpoint), the plan and the monitor counters stop counting it
+blocked, and the campaign completes once every active task is done or awaiting
+its merge. One rule serves them all: `PlanningTaskSummary::satisfies_dependents`.
+
+The task closes (`done`, `via: orchestration_integration`) when any of these
+holds, checked at boot, after every integration into the default branch and
+every five minutes:
+
+- the integrated commit is an ancestor of the default branch, local or the
+  fetched `origin/<default>` (after a GitHub merge only the latter moves until a
+  pull);
+- GitHub reports the task's own work item done: the issue its `github-N` tag
+  names is closed (not as « not planned »), or that number is a merged pull
+  request; or a pull request the task links (`…/pull/N` of the project's
+  repository) was merged **from the branch the task was integrated into**. A
+  link to an earlier issue or to a pull request from another branch is a
+  reference and never closes the task. A squash merge, how this repository
+  merges, never makes the integrated commit an ancestor, so this is its only
+  signal. It needs the machine's GitHub token; without it, or when GitHub does
+  not answer, the task stays awaiting;
+- a human closes it from the planning page.
+
+The sweep reads Git with `git merge-base --is-ancestor` off the async executor.
+The periodic sweep (and the one right after boot) first fetches the default
+branch from `origin` (30 s at most, no prompt, best effort), because a merge
+made on the remote moves nothing in the host checkout otherwise; the sweep that
+follows an integration into the default branch does not, its own ref has just
+moved. A task that owes a `post_integration` live check when its branch is
+merged leaves the wait once (one `integrated_pending_live_check` event) and
+stays `in_progress` on the check alone; a live check ticked before the merge
+lets the merge close the task.
 
 ## Stop or reassign
 

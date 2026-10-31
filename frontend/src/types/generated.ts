@@ -6799,6 +6799,19 @@ export type PlanningAssigneeRole = "owner" | "reviewer";
 export type PlanningAssigneeSource = "manual" | "execution";
 
 /**
+ * KT-1519 — where an integrated task's change waits for the merge.
+ */
+export type PlanningAwaitingMerge = {
+/**
+ * The non-default branch the delivery was integrated into.
+ */
+branch: string,
+/**
+ * The integrated commit; the task closes once the default branch holds it.
+ */
+sha: string, };
+
+/**
  * KT-30 — minimal, read-only dependency reference for the plan projection.
  * Just enough to render a blocked task's active blockers (and, later, the
  * dependency neighbourhood) WITHOUT loading each blocker's full detail. Never
@@ -6849,16 +6862,19 @@ export type PlanningPlacement = "active" | "later";
 /**
  * KT-30 — bucketed counts over the ACTIVE relations of a discussion plan,
  * under a strict precedence so every Active task lands in exactly one bucket:
- * `done` > `blocked` > `in_progress` > `ideas` > `ready`. The five Active
- * buckets sum to `DiscussionPlan::total_active`; `later` is the separate Later
+ * `done` > `blocked` > `awaiting_merge` > `in_progress` > `ideas` > `ready`. The
+ * six Active buckets sum to `DiscussionPlan::total_active`; `later` is the separate Later
  * count.
  *
  * `ready` is exactly the `actionable` relations — a `Todo` with no active
  * blocker — so a UI "X ready" label never overcounts. A nascent `Idea` (not
  * yet started, not actionable) has its own `ideas` bucket rather than
  * inflating `ready`.
+ *
+ * `awaiting_merge` (KT-1519) holds the open tasks whose change is integrated
+ * into a feature branch that is not merged yet: finished work, but not `done`.
  */
-export type PlanningPlanStats = { ready: number, blocked: number, in_progress: number, ideas: number, done: number, later: number, };
+export type PlanningPlanStats = { ready: number, blocked: number, in_progress: number, awaiting_merge: number, ideas: number, done: number, later: number, };
 
 /**
  * A durable proposal: one `kronn-plan-action` fence from an Agent message.
@@ -6891,7 +6907,12 @@ assignees: Array<PlanningAssignee>,
  * KT-1254 — unticked post-integration DoD items: the principal's live
  * checks still owed on this task.
  */
-live_checks?: Array<PlanningLiveCheck>, created_at: string, updated_at: string, };
+live_checks?: Array<PlanningLiveCheck>,
+/**
+ * KT-1519 — the delivery is integrated into a branch that is not the
+ * default branch: the task is not `done`, it awaits that branch's merge.
+ */
+awaiting_merge?: PlanningAwaitingMerge | null, created_at: string, updated_at: string, };
 
 export type PlanningTaskEvent = { id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
@@ -6933,7 +6954,12 @@ assignees: Array<PlanningAssignee>,
  * KT-1254 — unticked post-integration DoD items: the principal's live
  * checks still owed on this task.
  */
-live_checks?: Array<PlanningLiveCheck>, created_at: string, updated_at: string, };
+live_checks?: Array<PlanningLiveCheck>,
+/**
+ * KT-1519 — the delivery is integrated into a branch that is not the
+ * default branch: the task is not `done`, it awaits that branch's merge.
+ */
+awaiting_merge?: PlanningAwaitingMerge | null, created_at: string, updated_at: string, };
 
 export type PlanningWorkspaceSummary = { id: string, disc_id: string, branch: string, state: string, ownership: string, session_agent_type: string | null, };
 

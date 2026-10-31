@@ -184,7 +184,7 @@ Writes are separate tools with narrow schemas. Lists are compact by default and
 full content is returned only for an explicitly requested task.
 `task_update_dod(task_id, dod_id, completed)` is the preferred narrow write for
 checkbox progress. Delta timestamps are compared numerically as RFC3339
-instants, independent of `Z`/offset spelling and fractional precision. `[src: file: backend/src/db/planning.rs:2734-2782#task_changes]` Agents are
+instants, independent of `Z`/offset spelling and fractional precision. `[src: file: backend/src/db/planning.rs:2895-2943#task_changes]` Agents are
 taught this contract in the same prompt/instruction layer that advertises the
 discussion-history tools `disc_meta`, `disc_get_message` and `disc_summarize`:
 the delayed history notice also lists the Planning reads and says how to write (a direct `task_create`, or a `kronn-plan-action` proposal). `[src: file: backend/src/api/disc_prompts.rs:569-599#introspection_notice]`
@@ -248,7 +248,7 @@ assignees. The role is optional (`owner` | `reviewer`).
    tasks, quick creation/completion and direct navigation to each task's global
    Planning detail without duplicating task state.
    `[src: file: frontend/src/components/ProjectCard.tsx:2439-2450#ProjectTasksPanel]` `[src: file: frontend/src/components/ProjectTasksPanel.tsx:88-121#createTask]`
-   `[src: file: frontend/src/components/ProjectTasksPanel.tsx:160-169#onOpenPlanning]` `[src: file: frontend/src/routes/ProjectsRoute.tsx:51-58#toPlanningTask]`
+   `[src: file: frontend/src/components/ProjectTasksPanel.tsx:167-176#onOpenPlanning]` `[src: file: frontend/src/routes/ProjectsRoute.tsx:51-58#toPlanningTask]`
 7. **Deferred delegation** — task-to-discussion briefing and agent launch only
    after the task workflow is proven manually.
 

@@ -12,7 +12,7 @@ vi.mock('../../lib/I18nContext', () => ({ useT: () => ({ t: (key: string, ...arg
 const preview = (title: string, overrides: Partial<DiscussionMonitorPreview> = {}): DiscussionMonitorPreview => ({
   title, shared_id: null, agent: 'Codex', connection_name: null, awaiting_agent: false, agent_running: false,
   progress_phase: null, pending_question_count: 0, updated_at: '2026-09-23T10:00:00Z',
-  plan: { done: 2, in_progress: 1, ready: 2, blocked: 1, ideas: 0, later: 3 },
+  plan: { done: 2, in_progress: 1, awaiting_merge: 0, ready: 2, blocked: 1, ideas: 0, later: 3 },
   messages: [{ id: 'm', role: 'Agent', channel: 'main', content: '**Hello** ![diagram](https://example.invalid/image.png)',
     truncated: false, agent_type: 'Codex', model: 'served-model', author_pseudo: null, author_cli_ordinal: 2, timestamp: '2026-09-23T10:00:00Z' }],
   partial_response: null, ...overrides,
@@ -52,6 +52,13 @@ describe('discussion mosaic', () => {
     expect(alpha.getByRole('link', { name: 'Alpha' })).toHaveAttribute('target', '_blank');
     expect(within(screen.getByRole('article', { name: 'b' })).getByRole('alert')).toHaveTextContent('disc.mosaic.notFound');
     view.unmount(); expect(document.title).toBe(previous);
+  });
+  it('counts a task integrated into a feature branch apart from running and done, and shows the wait', () => {
+    monitor([{ id: 'a', preview: preview('Alpha', { plan: { done: 1, in_progress: 0, awaiting_merge: 2, ready: 0, blocked: 0, ideas: 0, later: 0 } }), error: null }]);
+    render(<StandaloneDiscussionMosaic discussionIds={['a']} layout="two-columns" onLayoutChange={vi.fn()} />);
+    const alpha = within(screen.getByRole('article', { name: 'Alpha' }));
+    expect(alpha.getByText('disc.mosaic.plan:1,3')).toBeInTheDocument();
+    expect(alpha.getByText('disc.mosaic.awaitingMerge:2')).toBeInTheDocument();
   });
   it('preserves independent scroll positions, resumes following and hands the chosen layout to its address', () => {
     const first = preview('Alpha'); const second = preview('Beta');
