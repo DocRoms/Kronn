@@ -11,6 +11,24 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Fixed
+
+- A task is no longer marked `done` when its delivery is integrated into a
+  campaign or feature branch that has not reached the default branch yet
+  (KT-1519). It stays `in_progress`, integrated and awaiting the merge; the
+  planning page, the board and the discussion plan say « Intégrée dans
+  <branche> — en attente de fusion ». The next task of the campaign still
+  launches on top of it, and a campaign whose tasks are all integrated
+  completes. The task closes when the default branch holds the integrated commit
+  (local or `origin/<default>`, which the sweep fetches first), when GitHub
+  reports the pull request that merged its branch, or its own `github-N` issue
+  closed (a squash merge never makes the commit reachable; an issue or pull
+  request the task merely links proves nothing), or when a human closes it;
+  Kronn checks at boot, after each integration into the default branch and every
+  five minutes (migration 283). The Planning list, the project Tasks panel and
+  the discussion monitor show the wait too: the plan counters have an
+  `awaiting_merge` bucket apart from `in_progress` and `done`.
+
 ### Changed
 
 - An agent can now save a Quick Exec or an Exec line that passes run values to
