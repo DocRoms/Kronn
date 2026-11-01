@@ -15,7 +15,7 @@ itself is stopped.
 - A validation that fails because of its environment (Docker unreachable or
   closed, a launch the sandbox refused) is not sent back to the worker: the
   execution is held with a card naming the fix, and its approval stays.
-  [src: file: backend/src/api/orchestration.rs:4877-4915#environment_cause]
+  [src: file: backend/src/api/orchestration.rs:4947-4985#environment_cause]
 - When the sandbox kept Docker closed, Kronn also posts an elevation card:
   refuse, allow for this discussion, or allow for the project. An answer that
   allows records the grant and resumes the integration on its own. Only a
@@ -28,7 +28,7 @@ itself is stopped.
 - The socket comes from `DOCKER_HOST` (Unix only), then `docker context
   inspect`, then the known OrbStack, Docker Desktop, Colima and `/var/run`
   paths. A TCP endpoint is refused.
-  [src: file: backend/src/core/task_worker_sandbox.rs:439-455#host_docker_socket]
+  [src: file: backend/src/core/task_worker_sandbox.rs:481-497#host_docker_socket]
 
 The Docker socket carries the host's rights: allow it only for a project whose
 validations you trust.

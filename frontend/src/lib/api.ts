@@ -7,6 +7,10 @@ import type {
   RevokeDiscussionProjectRequest, RevokeWorkflowScopeRequest, SetWorkflowScopeRequest, WorkflowScope,
 } from '../types/generated';
 import type { DocProvenanceReport } from '../types/generated';
+import type {
+  SetTrustRequest, TrustAuditEntry, TrustEnrolment, TrustOverview, TrustProofView, TrustRecoveryCodes,
+  TrustScopeView,
+} from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
@@ -4277,4 +4281,39 @@ export const publicationCredentials = {
    *  captured proof cannot be aimed at another discussion or another card. */
   proof: (grant: string, discussion_id: string, content: string) =>
     api<string>('POST', '/human-credentials/proof', { grant, discussion_id, content }),
+};
+
+// ─── Trust levels (KT-1492) ────────────────────────────────────────────────
+
+const trustScopePath = (scope: 'room' | 'workflow', id: string) =>
+  `/trust/${scope === 'room' ? 'rooms' : 'workflows'}/${encodeURIComponent(id)}`;
+
+export const trust = {
+  /** The instance level and the policy table the risk panel lists. */
+  overview: () => api<TrustOverview>('GET', '/trust'),
+  /** What the levels granted on their own, newest first. */
+  audit: (limit = 100) => api<TrustAuditEntry[]>('GET', `/trust/audit?limit=${limit}`),
+  instance: () => api<TrustScopeView>('GET', '/trust/instance'),
+  /** Raising above Standard needs `acknowledged_risks`: the risk panel's confirmation. */
+  setInstance: (request: SetTrustRequest) => api<TrustScopeView>('PUT', '/trust/instance', request),
+  get: (scope: 'room' | 'workflow', id: string) => api<TrustScopeView>('GET', trustScopePath(scope, id)),
+  set: (scope: 'room' | 'workflow', id: string, request: SetTrustRequest) =>
+    api<TrustScopeView>('PUT', trustScopePath(scope, id), request),
+  /** The room or workflow follows the wider setting again. */
+  clear: (scope: 'room' | 'workflow', id: string) =>
+    api<TrustScopeView>('DELETE', trustScopePath(scope, id)),
+  /** The strong confirmation (authenticator) raising a level needs. */
+  proof: () => api<TrustProofView>('GET', '/trust/proof'),
+  /** Issue a seed. The first enrolment needs the Kronn admin secret (the human-admin-secret file);
+   *  replacing a confirmed enrolment needs a proof of the current one too. */
+  enrolProof: (proof?: string, adminSecret?: string) =>
+    api<TrustEnrolment>('POST', '/trust/proof/enroll', { proof, admin_secret: adminSecret }),
+  /** The first code of the authenticator: turns the enrolment on, returns the recovery codes once. */
+  confirmProof: (code: string, adminSecret?: string) =>
+    api<TrustRecoveryCodes>('POST', '/trust/proof/confirm', { code, admin_secret: adminSecret }),
+  renewRecoveryCodes: (proof: string) =>
+    api<TrustRecoveryCodes>('POST', '/trust/proof/recovery-codes', { proof }),
+  /** Disable the enrolment with a proof of it; a pending one (no first code yet) is cancelled with the admin secret. */
+  disableProof: (proof?: string, adminSecret?: string) =>
+    api<TrustProofView>('POST', '/trust/proof/disable', { proof, admin_secret: adminSecret }),
 };

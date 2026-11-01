@@ -236,7 +236,7 @@ describe('WorkflowDetail — focused steps pipeline', () => {
 
     fireEvent.click(ids[1]);
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('22222222-2222-4222-8222-222222222222'));
-    expect(ids[1]).toHaveAttribute('data-copied', 'true');
+    await waitFor(() => expect(ids[1]).toHaveAttribute('data-copied', 'true'));
   });
 
   it('keeps the selected step ID visible in the expanded step card', () => {

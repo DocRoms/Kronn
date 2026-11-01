@@ -109,7 +109,7 @@ rows too: an untargeted agent turn replying to this session's message is
 do not poll. A punctual agent is also told it is a one-off, not the
 joined CLI of its provider, whose turns its transcript labels with
 the CLI alias.
-[src: file: backend/src/db/discussions.rs:2086-2089#reply_author]
+[src: file: backend/src/db/discussions.rs:2091-2094#reply_author]
 [src: file: backend/src/api/disc_invite.rs:1979-1999#addressed_to_session]
 [src: file: backend/src/api/disc_invite.rs:1708-1718#addressed_to_caller]
 [src: file: backend/scripts/disc-introspection-mcp.py:11224-11234#attention_required]
@@ -146,7 +146,7 @@ context the short alias stays free (both identities may be wanted).
   belongs to the configured discussion agent, whatever the CLI presence
   (target identity, not presence, decides ownership); the turn reaches the
   joined CLIs as awareness and is marked for their one-shot catch-up.
-  [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn] [src: file: backend/src/db/discussions.rs:2216-2227#native_fallback_candidate]
+  [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn] [src: file: backend/src/db/discussions.rs:2221-2232#native_fallback_candidate]
 - **Reload**: a bridge reload re-attaches the durable session through
   the 0600 resume credential (`/peer-resume`, no token). A CLI whose
   native identity rotated (fresh session id) needs one `disc_join` with

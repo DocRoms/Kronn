@@ -2,7 +2,7 @@
 
 **Server:** `kronn-internal` (Python stdio bridge — `backend/scripts/disc-introspection-mcp.py`)
 **Source:** This repo. Auto-injected by Kronn into every supported CLI's MCP config (`.mcp.json`, `~/.codex/config.toml`, `.gemini/settings.json`, `.kiro/settings/mcp.json`, `.vibe/config.toml`).
-**Auth:** stdio itself is unauthenticated (local pipe), but the bridge authenticates to the Kronn backend over `KRONN_BACKEND_URL` (default `http://127.0.0.1:3140`). A Kronn-launched agent receives a **bridge token** in `KRONN_BRIDGE_TOKEN`: minted per launch, in memory only, bound to that launch's discussion (or task execution, or workflow run) and its project, revoked when the launch ends and lost on backend restart. The bridge sends it as `Authorization: Bearer`; it opens only the routes the bridge calls (`BRIDGE_ROUTES`), only for resources in its scope, and never a secret-class route. The agent never holds Kronn's admin token. A host session outside Kronn may still export `KRONN_AUTH_TOKEN` in its own shell; the bridge falls back to it. A loopback request without any token keeps the local-trust bypass (the per-action human proof is deferred to 0.15). `[src: file: backend/src/core/bridge_token.rs:1-17#BRIDGE_ROUTES]` `[src: file: backend/scripts/disc-introspection-mcp.py:2847-2850#_bearer_token]`
+**Auth:** stdio itself is unauthenticated (local pipe), but the bridge authenticates to the Kronn backend over `KRONN_BACKEND_URL` (default `http://127.0.0.1:3140`). A Kronn-launched agent receives a **bridge token** in `KRONN_BRIDGE_TOKEN`: minted per launch, in memory only, bound to that launch's discussion (or task execution, or workflow run) and its project, revoked when the launch ends and lost on backend restart. The bridge sends it as `Authorization: Bearer`; it opens only the routes the bridge calls (`BRIDGE_ROUTES`), only for resources in its scope, and never a secret-class route. The agent never holds Kronn's admin token. A host session outside Kronn may still export `KRONN_AUTH_TOKEN` in its own shell; the bridge falls back to it. A loopback request without any token keeps the local-trust bypass (the per-action human proof is deferred to 0.15). Raising a trust level is the exception: it needs a TOTP proof even from loopback (`docs/architecture/trust-levels.md`). `[src: file: backend/src/core/bridge_token.rs:1-17#BRIDGE_ROUTES]` `[src: file: backend/scripts/disc-introspection-mcp.py:2847-2850#_bearer_token]`
 
 ## Human arbitration cards
 
@@ -100,7 +100,7 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
-`[src: file: backend/src/lib.rs:2695-2743#decline]`
+`[src: file: backend/src/lib.rs:2792-2840#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:655-770#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
@@ -424,7 +424,7 @@ close the task.
 Delivery refuses a commit whose `Signed-off-by`, `Co-Authored-By` or similar
 identity trailer names anyone but the repository's git identity; a CLI worker
 commits with `git commit -s` and never writes such a line by hand.
-`[src: file: backend/src/api/orchestration.rs:6768-6808#validate_delivery_identity_trailers]`
+`[src: file: backend/src/api/orchestration.rs:6898-6938#validate_delivery_identity_trailers]`
 The principal is either a CLI session joined to the room or the room's own
 native agent during its turn. For the latter Kronn injects
 `KRONN_ROOM_AGENT_CONTEXT` (room, provider, running dispatch, trigger message)
@@ -471,7 +471,7 @@ before anything is created, so a bad gate is no longer found at integration,
 after the worker delivered and the review passed. The contract is served by
 `tool_manual({tool: "task_exec_prepare"})`.
 `[src: file: backend/src/core/quick_exec.rs:50-66#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:302-349#check_command_line]`
-`[src: file: backend/src/api/orchestration.rs:10093-10103#validations_refusal]`
+`[src: file: backend/src/api/orchestration.rs:10219-10229#validations_refusal]`
 
 To correct the gates of an execution that already exists, the principal calls
 `task_exec_reassign({task_execution_id, validations, reason})` — `validations`
@@ -489,7 +489,7 @@ because that tool is already the principal's amendment of a live execution:
 principal-only, reason-journaled, room and evidence kept. `task_exec_review` would
 have let a self-reviewing worker weaken its own gates and ties the swap to the
 persisted `ReviewDecision v1`; `task_exec_prepare` is documented as mutation-free.
-`[src: file: backend/src/api/orchestration.rs:12571-12582#ExecutionAmendment]`
+`[src: file: backend/src/api/orchestration.rs:12697-12708#ExecutionAmendment]`
 
 The worker brief of a worker with a shell says who runs which gates: the worker
 runs the TARGETED tests, the long validations the principal persisted are played
@@ -506,9 +506,9 @@ decision, or an approved integration held on a coded cause. The principal may th
 the parent checkout and recorded SHAs, refuses dirty or unrelated states, and
 returns the existing terminal result when the same successful resume is
 retried. The tool cannot advance provisioning- or review-owned checkpoints.
-[src: file: backend/src/api/orchestration.rs:14050-14103#compact_next_action]
-[src: file: backend/src/api/orchestration.rs:11133-11241#resume_blocked_apply]
-[src: file: backend/src/api/orchestration.rs:14400-14444#task_exec_resume]
+[src: file: backend/src/api/orchestration.rs:14176-14229#compact_next_action]
+[src: file: backend/src/api/orchestration.rs:11259-11367#resume_blocked_apply]
+[src: file: backend/src/api/orchestration.rs:14526-14570#task_exec_resume]
 [src: file: backend/scripts/disc-introspection-mcp.py:6221-6299#call_task_exec_status]
 
 An approved delivery the integration sends back (a red validation, a merge
@@ -525,7 +525,7 @@ candidate are not run again. The relaunched worker is stood down first, and the
 call is refused once the worker committed or left changes since the send-back,
 or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
 the re-validation does not rewind the attempt the send-back opened.
-[src: file: backend/src/api/orchestration.rs:4656-4793#send_back] [src: file: backend/src/api/orchestration.rs:11268-11345#revalidate_sent_back_execution]
+[src: file: backend/src/api/orchestration.rs:4656-4793#send_back] [src: file: backend/src/api/orchestration.rs:11394-11471#revalidate_sent_back_execution]
 [src: file: backend/src/db/orchestration.rs:4561-4634#reopen_approval_after_rework]
 
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
@@ -557,7 +557,7 @@ integration refusal, campaign pause, undelivered worker, terminal state)
 address the joined CLI that last launched, reviewed, resumed or reassigned it
 while that session remains in the room, so its `disc_wait_for_peer` wakes on
 them; without such a session they address the room's configured agent.
-`[src: file: backend/src/api/orchestration.rs:13931-13983#EXEC_WAIT_DEFAULT_SECS]`
+`[src: file: backend/src/api/orchestration.rs:14057-14109#EXEC_WAIT_DEFAULT_SECS]`
 `[src: file: backend/src/db/orchestration.rs:5204-5246#pin_principal_cli_session]`
 
 When the worker identity is not already known, call `agent_list()` first and
@@ -575,7 +575,7 @@ catalogue, and no agent could delegate to it or learn that image and video
 generation existed at all. `media` lists one entry per configured model and
 stays absent otherwise, so reading it is enough — an agent is never told about a
 modality the generation request would then refuse.
-[src: file: backend/src/api/orchestration.rs:13528-13552#MediaModality]
+[src: file: backend/src/api/orchestration.rs:13654-13678#MediaModality]
 
 `agent_list` answers in every discussion, a room or not (0.13.2). Reading the
 catalogue is not a delegation: nothing in it is secret or scoped to one party.
@@ -689,9 +689,9 @@ event rows separately persist `actor_session_id` (the CLI session id, or
 of the same provider remain distinguishable in the audit trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5757-5772#_task_exec_identity]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5852-5861#_task_exec_principal]`
-`[src: file: backend/src/api/orchestration.rs:12609-12619#principal_cli_is_authorized]`
-`[src: file: backend/src/api/orchestration.rs:12743-12781#room_agent_is_authorized]`
-`[src: file: backend/src/api/agent_tools.rs:4039-4075#native_execution_for_caller]`
+`[src: file: backend/src/api/orchestration.rs:12735-12745#principal_cli_is_authorized]`
+`[src: file: backend/src/api/orchestration.rs:12869-12907#room_agent_is_authorized]`
+`[src: file: backend/src/api/agent_tools.rs:4061-4097#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`
 
 For a native HTTP worker, the execution id is also server-derived. The executor
@@ -701,7 +701,7 @@ worker schema contains no execution-id field; if a client nevertheless injects
 one, it has no influence. The regression test uses two real concurrent
 executions and forges B's valid id in worker A's call to prove that A remains
 the only target.
-`[src: file: backend/src/api/agent_tools.rs:4076-4098#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4098-4120#native_worker_execution_for_trusted_dispatch]`
 `[src: file: backend/src/api_tests.rs:7002-7141#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
@@ -720,16 +720,16 @@ to the other executions it coordinates while it works on the accepted execution.
 Both identity values are derived by the trusted bridge and absent from the tool's
 input schema — the model supplies only `offer_id`; there is no fallback to
 agent-type/alias matching or any other permissive resolution if either is missing.
-[src: file: backend/src/api/orchestration.rs:5704-6046#accept_worker_offer_and_attach]
-[src: file: backend/src/api/orchestration.rs:5835-5853#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:5703-5759#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:5830-6172#accept_worker_offer_and_attach]
+[src: file: backend/src/api/orchestration.rs:5961-5979#worker_cli_session_id]
+[src: file: backend/src/api/orchestration.rs:5829-5885#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6350-6396#call_task_exec_accept_worker_offer]
 
 `task_exec_deliver` does not perform a room return: the execution transitions to
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration.rs:29274-29404#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration.rs:29403-29533#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:75-188#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,
@@ -740,7 +740,7 @@ and fails the request explicitly (`source_agent, source_session_id, and
 source_binding_session_id are required`), not silently with a stale or wrong
 attach. If `task_exec_accept_worker_offer` refuses this way, reconnect the
 `kronn-internal` MCP server for that session before retrying.
-`[src: file: backend/src/api/orchestration.rs:5703-5759#source_binding_session_id]`
+`[src: file: backend/src/api/orchestration.rs:5829-5885#source_binding_session_id]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:6342-6367#source_binding_session_id]`
 
 `task_exec_reassign(reason)` persists the reason and includes it verbatim in
@@ -1043,7 +1043,7 @@ atomic save.
 Reads are bounded on the server: `workflow_runs` returns at most 500 lean
 summaries, and `workflow_run_get` truncates step outputs. `task_list`,
 `disc_list` and `disc_search` take `limit` (and `cursor` where offered).
-[src: file: backend/src/db/workflows.rs:1296-1299#MAX_RUNS_UNPAGINATED]
+[src: file: backend/src/db/workflows.rs:1303-1306#MAX_RUNS_UNPAGINATED]
 [src: file: backend/scripts/disc-introspection-mcp.py:8459-8493#call_workflow_runs]
 [src: file: backend/scripts/disc-introspection-mcp.py:4775-4788#call_task_list]
 
@@ -1082,7 +1082,7 @@ summaries, and `workflow_run_get` truncates step outputs. `task_list`,
 
 Every discussion message exposes the same `#xxxxxxxx` header pill as discussions
 and workflows; clicking it copies the full stable message UUID.
-[src: file: frontend/src/components/MessageBubble.tsx:493-502#copyMessageId] [src: file: frontend/src/components/MessageBubble.tsx:989-1000#messageShortLabel]
+[src: file: frontend/src/components/MessageBubble.tsx:499-508#copyMessageId] [src: file: frontend/src/components/MessageBubble.tsx:989-1000#messageShortLabel]
 `disc_get_message` accepts that UUID, the compact `MSG-xxxxxxxx` reference
 returned by the API, or the existing positive/negative `idx`. Pass `before`
 and/or `after` (0–10) to retrieve only the nearby messages needed for context:
@@ -1135,7 +1135,7 @@ other visible timeline message.
 [src: file: backend/src/api/disc_invite.rs:121-123#note_count] [src: file: backend/src/api/disc_invite.rs:394-399#note_count]
 [src: file: backend/src/api/disc_source.rs:1785-1872#disc_load_other]
 [src: file: backend/src/api/discussions/messaging.rs:441-518#MessageChannel]
-[src: file: backend/src/db/discussions.rs:1425-1465#insert_note_message]
+[src: file: backend/src/db/discussions.rs:1433-1473#insert_note_message]
 
 A workflow Agent step receives its rendered `prompt_template` separately from
 the room transcript. A workflow may therefore inject a launch variable into
@@ -1149,7 +1149,7 @@ Discussion creation currently persists an initial `User`/`main` message even
 when `initial_prompt` is empty and `no_agent` is true. An empty opening bubble
 therefore does not prove that a later workflow Agent step received an empty
 prompt; inspect the workflow input separately.
-[src: file: backend/src/api/discussions/crud.rs:557-580#initial_message]
+[src: file: backend/src/api/discussions/crud.rs:554-577#initial_message]
 [src: file: backend/src/api/discussions/crud.rs:630-647]
 
 ## Multi-agent collab — required protocol

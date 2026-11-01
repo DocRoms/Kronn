@@ -481,6 +481,9 @@ pub fn delete_batch_run_with_discussions(
             n_discs += conn.execute("DELETE FROM discussions WHERE id = ?1", [judge_id])?;
         }
         conn.execute("DELETE FROM workflow_runs WHERE id = ?1", params![run_id])?;
+        // KT-1492: the deleted rooms' settings are gone (trigger); what their
+        // levels approved is taken back before the commit, or not at all.
+        crate::db::trust::withdraw(conn, "Kronn (batch run rooms deleted)")?;
         Ok(n_discs)
     })();
 
@@ -1229,8 +1232,13 @@ fn write_workflow(conn: &Connection, wf: &Workflow, keep_disabled: bool) -> Resu
 }
 
 pub fn delete_workflow(conn: &Connection, id: &str) -> Result<()> {
-    conn.execute("DELETE FROM workflows WHERE id = ?1", params![id])?;
-    Ok(())
+    // KT-1492: what the workflow's trust level approved is taken back in the
+    // same transaction (the trigger drops its setting on every path that
+    // deletes it).
+    crate::db::trust::delete_and_withdraw(conn, "Kronn (the workflow was deleted)", |conn| {
+        conn.execute("DELETE FROM workflows WHERE id = ?1", params![id])?;
+        Ok(())
+    })
 }
 
 /// Runs that forbid deleting their workflow: the delete cascades to every run

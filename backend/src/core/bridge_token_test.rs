@@ -1322,3 +1322,65 @@ fn no_comfyui_route_accepts_a_bridge_token() {
         .iter()
         .all(|route| !route.pattern.starts_with("/api/comfyui")));
 }
+
+/// KT-1492: no trust level, not even Full access, returns a credential to an
+/// agent. The strip takes no trust input, so nothing can switch it off.
+#[test]
+fn credential_fields_are_stripped_at_any_depth_whatever_the_trust_level() {
+    let mut inner = serde_json::Map::new();
+    inner.insert("token_override".into(), json!("x"));
+    let mut project = serde_json::Map::new();
+    project.insert("name".into(), json!("p"));
+    project.insert("token_override".into(), json!("ghp-other"));
+    project.insert("nested".into(), serde_json::Value::Object(inner));
+    let mut top = serde_json::Map::new();
+    top.insert("token_override".into(), json!("ghp-raw"));
+    top.insert(
+        "projects".into(),
+        json!([serde_json::Value::Object(project)]),
+    );
+    let mut value = serde_json::Value::Object(top);
+    strip_credentials(&mut value);
+    let text = value.to_string();
+    assert!(!text.contains("token_override"), "{text}");
+    assert!(!text.contains("ghp-"), "{text}");
+}
+
+/// KT-1492: no route of the bridge list reads or changes a trust level, so the
+/// MCP bridge script gains no surface.
+#[test]
+fn no_bridge_route_reaches_a_trust_level() {
+    assert!(BRIDGE_ROUTES
+        .iter()
+        .all(|route| !route.pattern.starts_with("/api/trust")));
+}
+
+/// KT-1492: a bridge token reaches a trust write only through the routes that
+/// answer with no secret, and the gate admits them on a confirmation code.
+#[test]
+fn a_bridge_token_reaches_only_the_trust_writes_that_hand_back_no_secret() {
+    for (method, pattern) in [
+        ("PUT", "/api/trust/instance"),
+        ("PUT", "/api/trust/rooms/{id}"),
+        ("DELETE", "/api/trust/rooms/{id}"),
+        ("PUT", "/api/trust/workflows/{id}"),
+        ("DELETE", "/api/trust/workflows/{id}"),
+        ("POST", "/api/trust/proof/disable"),
+    ] {
+        assert!(trust_confirm_route(method, pattern), "{method} {pattern}");
+        assert!(route_for(method, pattern).is_none());
+    }
+    for (method, pattern) in [
+        // They hand back the seed or the recovery codes: the reply would reach a model.
+        ("POST", "/api/trust/proof/enroll"),
+        ("POST", "/api/trust/proof/confirm"),
+        ("POST", "/api/trust/proof/recovery-codes"),
+        // Reads stay human.
+        ("GET", "/api/trust"),
+        ("GET", "/api/trust/audit"),
+        ("GET", "/api/trust/instance"),
+        ("GET", "/api/trust/proof"),
+    ] {
+        assert!(!trust_confirm_route(method, pattern), "{method} {pattern}");
+    }
+}

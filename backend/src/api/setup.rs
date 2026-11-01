@@ -1976,6 +1976,7 @@ async fn distrust_foreign_approvals(
         }
         for item in &mut quick_execs {
             item.unmodelled_args_approved = None;
+            item.approved_by_trust = None;
             item.agent_written =
                 crate::api::quick_execs::needs_agent_approval(&item.command, &item.args)
                     .then_some(true);
@@ -2448,6 +2449,12 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
                     tracing::warn!("Import learning rejection error: {e}");
                 }
             }
+            // KT-1492: rooms and workflows the import replaced lost their trust
+            // settings (trigger); what their levels approved is taken back in
+            // the same transaction: a failed withdrawal rolls the import back.
+            if !stmts.is_empty() {
+                crate::db::trust::withdraw(&tx, "Kronn (imported rooms and workflows)")?;
+            }
             tx.commit()?;
             Ok((pruned, dropped_github))
         })
@@ -2779,6 +2786,8 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     cfg.server.auth_token = previous.server.auth_token.clone();
     cfg.server.auth_enabled = previous.server.auth_enabled;
     cfg.server.auth_strict_localhost = previous.server.auth_strict_localhost;
+    // A reset does not turn the vault protection off or back on behind the owner's back.
+    cfg.server.protect_vault_from_agents = previous.server.protect_vault_from_agents;
     cfg.server.auth_locked = previous.server.auth_locked;
     cfg.server.auth_token_session_only = previous.server.auth_token_session_only;
     // Defaults turn P2P off; the gate follows.
@@ -4392,6 +4401,110 @@ mod tests {
         );
     }
 
+    /// KT-1492 (Gemini review): an import that replaces the workflows drops the
+    /// trust setting of the ones it removes (trigger), and what their level
+    /// approved is taken back in the same transaction, not at the next revoke.
+    #[tokio::test]
+    async fn an_import_that_replaces_a_workflow_withdraws_what_its_level_approved() {
+        use crate::models::TrustApproval;
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let cfg = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = crate::AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let now = chrono::Utc::now();
+        state
+            .db
+            .with_conn(move |conn| {
+                for id in ["gone", "arriving"] {
+                    conn.execute(
+                        "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at) \
+                         VALUES (?1, ?1, ?3, '[]', ?2, ?2)",
+                        rusqlite::params![id, now.to_rfc3339(), r#"{"type":"Manual"}"#],
+                    )?;
+                }
+                // A fixture row: only the human routes set a level, and the
+                // guard in `core::trust` keeps this file from calling them.
+                conn.execute(
+                    "INSERT INTO trust_settings (scope, scope_id, level, set_by, set_at) \
+                     VALUES ('workflow', 'gone', 'trusted', 'Romu', ?1)",
+                    [now.to_rfc3339()],
+                )?;
+                crate::db::quick_execs::insert_quick_exec(
+                    conn,
+                    &crate::models::QuickExec {
+                        id: "qe1".into(),
+                        name: "exec".into(),
+                        icon: "x".into(),
+                        description: String::new(),
+                        project_id: None,
+                        command: "aws".into(),
+                        args: vec!["s3".into(), "{{bucket}}".into()],
+                        timeout_secs: 30,
+                        output_format: crate::models::CollectQuickExecOutputFormat::Json,
+                        variables: vec![],
+                        pinned: false,
+                        unmodelled_args_approved: Some(true),
+                        agent_written: Some(true),
+                        approved_by_trust: Some(true),
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                crate::db::trust::grant(
+                    conn,
+                    &crate::db::trust::TrustOrigin::workflow("gone"),
+                    TrustApproval::QuickExecLine,
+                    "exec",
+                    None,
+                    Some(crate::db::trust::TrustObject::quick_exec("qe1")),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // The archive carries one workflow, "arriving", taken out of the local
+        // database first as an export from elsewhere would hold it.
+        let arriving = state
+            .db
+            .with_conn(|conn| {
+                let workflow = crate::db::workflows::get_workflow(conn, "arriving")?
+                    .ok_or_else(|| anyhow::anyhow!("the arriving workflow was inserted"))?;
+                conn.execute("DELETE FROM workflows WHERE id = 'arriving'", [])?;
+                Ok(workflow)
+            })
+            .await
+            .unwrap();
+        let mut export = empty_export();
+        export.workflows = vec![arriving];
+        do_import_db(&state, &export).await.expect("import");
+
+        let (approval, active) = state
+            .db
+            .with_conn(|conn| {
+                let row = crate::db::quick_execs::get_quick_exec(conn, "qe1")?
+                    .ok_or_else(|| anyhow::anyhow!("the quick exec is still stored"))?;
+                let active: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM trust_audit_log WHERE event = 'grant' AND active = 1",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok((
+                    (row.unmodelled_args_approved, row.approved_by_trust),
+                    active,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            approval,
+            (None, None),
+            "the approval went with the workflow"
+        );
+        assert_eq!(active, 0);
+    }
+
     // ─── import_clear_statements (I10: selective clear, no downgrade wipe) ────
 
     fn empty_export() -> crate::models::db::DbExport {
@@ -4947,6 +5060,64 @@ mod tests {
         assert!(!sealed, "a backup sealed elsewhere is foreign");
     }
 
+    /// Gemini review: the "approved by a trust level" mark is the server's. An
+    /// archive this instance did not seal cannot carry it in; one it sealed
+    /// keeps it, since the seal covers the mark.
+    #[tokio::test]
+    async fn only_a_sealed_backup_keeps_the_trust_marks() {
+        let state = test_state();
+        state.config.write().await.encryption_secret = Some("instance-secret".into());
+        let workflow: Workflow = serde_json::from_value(serde_json::json!({
+            "id": "wf", "name": "plan", "project_id": null, "trigger": {"type": "Manual"},
+            "exec_allowlist": ["terraform"], "actions": [],
+            "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+            "workspace_config": null, "concurrency_limit": null, "enabled": true,
+            "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+            "steps": [{"name": "plan", "step_type": {"type": "Exec"}, "exec_command": "terraform",
+                       "exec_args": ["plan", "{{x}}"], "exec_unmodelled_args_approved": true,
+                       "exec_approved_by_trust": true}]
+        }))
+        .unwrap();
+        let now = Utc::now();
+        let quick_exec = crate::models::QuickExec {
+            id: "qe".into(),
+            name: "aws".into(),
+            icon: "x".into(),
+            description: String::new(),
+            project_id: None,
+            command: "aws".into(),
+            args: vec!["s3".into(), "{{bucket}}".into()],
+            timeout_secs: 30,
+            output_format: crate::models::CollectQuickExecOutputFormat::Json,
+            variables: vec![],
+            pinned: false,
+            unmodelled_args_approved: Some(true),
+            agent_written: Some(true),
+            approved_by_trust: Some(true),
+            created_at: now,
+            updated_at: now,
+        };
+        let mut data = empty_export();
+        data.workflows = vec![workflow];
+        data.quick_execs = vec![quick_exec];
+
+        let (workflows, quick_execs, sealed) = distrust_foreign_approvals(&state, &data).await;
+        assert!(!sealed);
+        assert_eq!(workflows[0].steps[0].exec_approved_by_trust, None);
+        assert_eq!(quick_execs[0].approved_by_trust, None);
+        assert_eq!(quick_execs[0].unmodelled_args_approved, None);
+
+        data.trust_seal = Some(approvals_seal(
+            "instance-secret",
+            &data.workflows,
+            &data.quick_execs,
+        ));
+        let (workflows, quick_execs, sealed) = distrust_foreign_approvals(&state, &data).await;
+        assert!(sealed);
+        assert_eq!(workflows[0].steps[0].exec_approved_by_trust, Some(true));
+        assert_eq!(quick_execs[0].approved_by_trust, Some(true));
+    }
+
     fn test_state() -> AppState {
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
         let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
@@ -5038,6 +5209,7 @@ mod tests {
             ),
         ];
         let quick_exec = |id: &str, name: &str, args: Vec<&str>| crate::models::QuickExec {
+            approved_by_trust: None,
             id: id.into(),
             pinned: false,
             name: name.into(),
@@ -5136,6 +5308,7 @@ mod tests {
             .unwrap();
         let now = Utc::now();
         let qe = crate::models::QuickExec {
+            approved_by_trust: None,
             id: "qe-1".into(),
             pinned: false,
             name: "AWS inventory".into(),

@@ -88,6 +88,25 @@ fn exec_child(
     command
 }
 
+/// KT-1492 — the program and arguments a step starts. A line a trust level
+/// approved (not a human) runs under that level's OS sandbox, which closes
+/// Kronn's data directory to it (the network and the API port stay open). When
+/// the host has no sandbox, or the owner turned "Protect the Kronn vault from
+/// agents" off, it runs as it would for a human: a level refuses nothing for
+/// that. Any other step is unchanged.
+pub(crate) fn confined_for_level(
+    step: &WorkflowStep,
+    program: &str,
+    args: &[String],
+) -> (String, Vec<String>) {
+    if step.exec_approved_by_trust == Some(true) {
+        if let Some(confinement) = crate::core::trust_sandbox::confinement() {
+            return confinement.wrap(program, args);
+        }
+    }
+    (program.to_string(), args.to_vec())
+}
+
 /// The main command of a step running approved repository scripts (KT-918):
 /// it is told where the worktree is, since its cwd is the approved copy.
 fn approved_script_child(
@@ -574,8 +593,9 @@ async fn execute_exec_step_inner(
             setup_argc = setup_args.len(),
             "executing setup phase"
         );
-        let mut sc = exec_child(setup_cmd, github_env, &ctx.refs_env());
-        sc.args(&setup_args)
+        let (setup_program, setup_launch_args) = confined_for_level(step, setup_cmd, &setup_args);
+        let mut sc = exec_child(&setup_program, github_env, &ctx.refs_env());
+        sc.args(&setup_launch_args)
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -703,13 +723,12 @@ async fn execute_exec_step_inner(
             );
         }
     }
+    let (program, launch_args) = confined_for_level(step, raw_command, &rendered_args);
     let mut cmd = match approved_copy.as_deref() {
-        Some(copy) => {
-            approved_script_child(raw_command, github_env, &ctx.refs_env(), work_dir, copy)
-        }
-        None => exec_child(raw_command, github_env, &ctx.refs_env()),
+        Some(copy) => approved_script_child(&program, github_env, &ctx.refs_env(), work_dir, copy),
+        None => exec_child(&program, github_env, &ctx.refs_env()),
     };
-    cmd.args(&rendered_args)
+    cmd.args(&launch_args)
         .current_dir(approved_copy.as_deref().unwrap_or(Path::new(work_dir)))
         .stdin(if stdin_bytes.is_some() {
             std::process::Stdio::piped()
@@ -1147,6 +1166,7 @@ mod tests {
         timeout_secs: Option<u32>,
     ) -> WorkflowStep {
         WorkflowStep {
+            exec_approved_by_trust: None,
             id: None,
             name: name.into(),
             step_type: StepType::Exec,
@@ -2325,3 +2345,7 @@ mod tests {
         assert!(refused.result.output.contains("no home project"));
     }
 }
+
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "exec_step_trust_tests.rs"]
+mod exec_step_trust_tests;

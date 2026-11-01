@@ -77,6 +77,7 @@ export const API_NAMESPACES = [
   'runsApi',
   'diskApi',
   'modelCatalogApi',
+  'trust',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -139,6 +140,7 @@ interface DefaultMock {
   runsApi: Record<string, AnyFn>;
   diskApi: Record<string, AnyFn>;
   modelCatalogApi: Record<string, AnyFn>;
+  trust: Record<string, AnyFn>;
   measuredRatio: AnyFn;
 }
 
@@ -877,6 +879,20 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       createManual: resolve(null),
       updateManual: resolve(null),
       deleteManual: resolve(undefined),
+    },
+    trust: {
+      overview: resolve(null),
+      audit: resolve([]),
+      instance: resolve(null),
+      setInstance: resolve(null),
+      get: resolve(null),
+      set: resolve(null),
+      clear: resolve(null),
+      proof: resolve(null),
+      enrolProof: resolve(null),
+      confirmProof: resolve(null),
+      renewRecoveryCodes: resolve(null),
+      disableProof: resolve(null),
     },
     measuredRatio: vi.fn(() => null),
   };
