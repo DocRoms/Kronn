@@ -128,6 +128,7 @@ pub mod skills;
 pub mod sse_limits;
 pub mod stack_consistency;
 pub mod static_context;
+pub mod strong_confirm;
 pub mod tailscale;
 pub mod task_worker_env;
 pub mod task_worker_lane_warm;

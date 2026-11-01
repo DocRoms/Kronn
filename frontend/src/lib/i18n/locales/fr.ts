@@ -7232,6 +7232,12 @@ Termine par [SIGNAL: OK].`,
   "trust.proof.renew": "Nouveaux codes de récupération",
   "trust.proof.disable": "Désactiver",
   "trust.proof.reset": "Authentificateur et codes de récupération perdus ? Avec un accès à cette machine hors de Kronn, arrête Kronn et supprime trust-proof.json et trust-proof-lock.json du dossier de données (docs/architecture/trust-levels.md).",
+  "strongConfirm.title": "Confirmer avec ton authentificateur",
+  "strongConfirm.why": "Cette action renvoie un secret, agit sur ton instance ou supprime quelque chose d'irrécupérable : Kronn demande donc le code de ton authentificateur. Le code ne sert qu'une fois, pour cette seule action.",
+  "strongConfirm.action": "Action : {0}",
+  "strongConfirm.label": "Code actuel (ou un code de récupération)",
+  "strongConfirm.confirm": "Confirmer",
+  "trust.proof.suggest": "Sans authentificateur, tout ce qui tourne sur cette machine peut lire tes secrets ou supprimer tes données via l'API locale de Kronn. Configures-en un : ces actions demanderont son code.",
   "trust.audit.withdrawn": "retiré",
 };
 

@@ -9985,6 +9985,33 @@ export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "
  */
 export type StoredRun = { id: string, template_id: string | null, spec_fingerprint: string, head_sha: string | null, status: QuickExecStatus, exit_code: number | null, summary: string, failed_tests: Array<string>, artifact_path: string | null, findings_complete: boolean, duration_ms: number, created_at: string, };
 
+/**
+ * A single-use grant for the one call it names.
+ */
+export type StrongGrant = {
+/**
+ * Sent as `X-Kronn-Grant` on the protected call.
+ */
+grant: string, expires_in_secs: number, };
+
+/**
+ * A code, to exchange for a grant on one route and one object.
+ */
+export type StrongGrantRequest = {
+/**
+ * The HTTP method of the protected call, e.g. `DELETE`.
+ */
+method: string,
+/**
+ * The path of the protected call, e.g. `/api/mcps/configs/abc/reveal`.
+ */
+path: string,
+/**
+ * The current code of the authenticator, or a recovery code. The
+ * `X-Kronn-Confirm` header works as well.
+ */
+code?: string | null, };
+
 export type Summariser = "cargo_test" | "clippy" | "tsc" | "vitest" | "generic" | "collected";
 
 export type SummarizeRequest = {

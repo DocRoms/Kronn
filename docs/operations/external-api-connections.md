@@ -56,7 +56,7 @@ returning the stored key to the browser. Editing shows a masked key state; only
 an explicit click on the eye requests the stored value. **Replace** opens a
 blank editable field, while saving without replacement preserves the current
 credential. [src: file: backend/src/api/external_api_connections.rs:1811-1817#reveal_credential]
-[src: file: backend/src/api/external_api_connections.rs:2090-2091#set_credential]
+[src: file: backend/src/api/external_api_connections.rs:2121-2122#set_credential]
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:997-1006#has_credential]
 [src: file: frontend/src/components/settings/ExternalApiSection.tsx:321-335#SecretField]
 
@@ -133,7 +133,7 @@ copy of the configuration and saves it. If that save fails, the failure is
 logged and the API returns an error saying the connection was removed but its
 key was not; the live configuration keeps the key, which must then be deleted
 from the API keys.
-[src: file: backend/src/api/external_api_connections.rs:2105-2129#delete]
+[src: file: backend/src/api/external_api_connections.rs:2136-2160#delete]
 
 ## Use in a discussion
 
@@ -204,7 +204,7 @@ their endpoint and Economy, Default and Reasoning models. Saving either card
 immediately refreshes the global agent selectors, and startup projects any
 previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
-stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2086-2090#sync_runtime_config]
+stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2117-2121#sync_runtime_config]
 [src: file: backend/src/db/external_api_connections.rs:21-46#sync_runtime_config]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1796-1801#onModelTiersChanged]
 

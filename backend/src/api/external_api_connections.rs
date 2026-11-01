@@ -1949,7 +1949,38 @@ pub async fn create(
 pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    strong: crate::api::strong_confirm::Strong,
     Json(req): Json<UpsertConnectionRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // KT-1496: a new endpoint receives the stored API key of this connection.
+    let lookup = id.clone();
+    let stored = state
+        .db
+        .with_read_conn(move |conn| store::get(conn, &lookup))
+        .await
+        .ok()
+        .flatten();
+    let destination = |url: Option<String>| {
+        url.map(|url| url.trim().trim_end_matches('/').to_ascii_lowercase())
+            .filter(|url| !url.is_empty())
+    };
+    let changed = stored.is_some_and(|stored| {
+        destination(normalize_endpoint(req.endpoint.clone())) != destination(stored.endpoint)
+            || destination(req.media_endpoint.clone()) != destination(stored.media_endpoint)
+    });
+    if changed {
+        if let Err(refused) = strong.require(&state).await {
+            return refused;
+        }
+    }
+    update_inner(state, id, req).await.into_response()
+}
+
+async fn update_inner(
+    state: AppState,
+    id: String,
+    req: UpsertConnectionRequest,
 ) -> Json<ApiResponse<ConnectionView>> {
     if req.api_key.is_some() {
         if let Err(locked) = crate::core::credential_store::refuse_credential_change() {

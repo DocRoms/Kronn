@@ -7219,6 +7219,12 @@ Termina con [SIGNAL: OK].`,
   "trust.proof.renew": "Nuevos códigos de recuperación",
   "trust.proof.disable": "Desactivar",
   "trust.proof.reset": "¿Perdiste el autenticador y los códigos de recuperación? Con acceso a esta máquina fuera de Kronn, detén Kronn y borra trust-proof.json y trust-proof-lock.json del directorio de datos (docs/architecture/trust-levels.md).",
+  "strongConfirm.title": "Confirma con tu autenticador",
+  "strongConfirm.why": "Esta acción devuelve un secreto, actúa sobre tu instancia o borra algo que no se puede recuperar, por eso Kronn pide el código de tu autenticador. El código sirve una sola vez, solo para esta acción.",
+  "strongConfirm.action": "Acción: {0}",
+  "strongConfirm.label": "Código actual (o un código de recuperación)",
+  "strongConfirm.confirm": "Confirmar",
+  "trust.proof.suggest": "Sin un autenticador, cualquier cosa que se ejecute en esta máquina puede leer tus secretos o borrar tus datos a través de la API local de Kronn. Configura uno y estas acciones pedirán su código.",
   "trust.audit.withdrawn": "retirado",
 };
 

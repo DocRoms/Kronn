@@ -7009,6 +7009,12 @@ const zh: TranslationDict = {
   "trust.proof.renew": "新的恢复代码",
   "trust.proof.disable": "停用",
   "trust.proof.reset": "验证器和恢复代码都丢失了？在 Kronn 之外访问这台机器，停止 Kronn 并删除数据目录中的 trust-proof.json 和 trust-proof-lock.json（docs/architecture/trust-levels.md）。",
+  "strongConfirm.title": "用验证器确认",
+  "strongConfirm.why": "此操作会返回密钥、操作你的实例或删除无法恢复的内容，因此 Kronn 需要你的验证器代码。该代码只能使用一次，仅对此操作有效。",
+  "strongConfirm.action": "操作：{0}",
+  "strongConfirm.label": "当前代码（或恢复代码）",
+  "strongConfirm.confirm": "确认",
+  "trust.proof.suggest": "没有验证器时，这台机器上运行的任何程序都可以通过 Kronn 的本地 API 读取你的密钥或删除你的数据。设置一个验证器后，这些操作将要求输入其代码。",
   "trust.audit.withdrawn": "已撤回",
 };
 
