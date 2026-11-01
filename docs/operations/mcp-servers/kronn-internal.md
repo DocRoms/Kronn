@@ -1149,7 +1149,7 @@ Discussion creation currently persists an initial `User`/`main` message even
 when `initial_prompt` is empty and `no_agent` is true. An empty opening bubble
 therefore does not prove that a later workflow Agent step received an empty
 prompt; inspect the workflow input separately.
-[src: file: backend/src/api/discussions/crud.rs:517-540#initial_message]
+[src: file: backend/src/api/discussions/crud.rs:557-580#initial_message]
 [src: file: backend/src/api/discussions/crud.rs:630-647]
 
 ## Multi-agent collab — required protocol

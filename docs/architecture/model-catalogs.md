@@ -150,7 +150,7 @@ that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1131-1162#retained_claude_model]
 [src: file: backend/src/api/discussions/streaming.rs:4150-4196#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:1884-1969#preflight_resolve]
-[src: file: backend/src/workflows/steps.rs:1174-1227#preflight_workflow_launch]
+[src: file: backend/src/workflows/steps.rs:1195-1248#preflight_workflow_launch]
 
 A comparison's TARGET decides which connection its run uses (KT-672). A row
 that names a connection uses it; a row on another agent uses none, even when
@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:755-785#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:767-797#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -257,8 +257,8 @@ was formerly inert; ignoring it silently would claim a setting was applied
 when it was not. QPs with no effort or only whitespace keep the old behavior.
 [src: file: backend/src/db/discussion_effort.rs:9-54#UnresolvedQuickPromptEffort]
 [src: file: backend/src/db/sql/176_discussion_effort_snapshots.sql:1-8#discussion_effort_snapshots]
-[src: file: backend/src/api/discussions/crud.rs:616-638#capture]
-[src: file: backend/src/api/discussions/crud.rs:743-751#UnresolvedQuickPromptEffort]
+[src: file: backend/src/api/discussions/crud.rs:646-668#capture]
+[src: file: backend/src/api/discussions/crud.rs:785-793#UnresolvedQuickPromptEffort]
 [src: file: backend/src/api/discussions/streaming.rs:4106-4159#for_run]
 [src: file: backend/src/db/discussion_effort.rs:56-76#for_run]
 

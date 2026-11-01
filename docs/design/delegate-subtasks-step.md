@@ -53,7 +53,7 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
 - **Workflow side.** `on_result` routes on a `[SIGNAL: X]` line among the last
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
-  `[src: file: backend/src/workflows/steps.rs:2044-2078#evaluate_conditions]`
+  `[src: file: backend/src/workflows/steps.rs:2062-2096#evaluate_conditions]`
   `[src: file: backend/src/models/workflows.rs:1039-1043#room_id]`
   `[src: file: backend/src/workflows/sub_workflow_step.rs:812-829#record_foreach_done]`
 

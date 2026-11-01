@@ -196,8 +196,8 @@ under an unrelated agent.
   [src: file: backend/src/api/discussions/orchestration.rs:814-822#checked_launch_connection]
   [src: file: backend/src/api/discussions/orchestration.rs:710-718#checked_launch_connection]
   [src: file: backend/src/api/discussions/orchestration.rs:1049-1057#checked_launch_connection]
-  [src: file: backend/src/workflows/steps.rs:1132-1172#resolve_step_connection]
-  [src: file: backend/src/workflows/steps.rs:1174-1227#preflight_workflow_launch]
+  [src: file: backend/src/workflows/steps.rs:1153-1193#resolve_step_connection]
+  [src: file: backend/src/workflows/steps.rs:1195-1248#preflight_workflow_launch]
 - **Mid-thread `@mention` autocomplete doesn't suggest connection aliases.**
   The composer's autocomplete only lists built-in agents; typing a
   connection's exact alias (e.g. `@groq`) still dispatches correctly — the
