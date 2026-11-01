@@ -177,9 +177,15 @@ fn steps(path: &Path) -> impl Iterator<Item = Step> + '_ {
 
 /// Files Kronn itself writes that hold the encryption key, credentials or
 /// decrypted MCP environments.
-const KRONN_SECRET_NAMES: [&str; 8] = [
+const KRONN_SECRET_NAMES: [&str; 10] = [
     "encryption_key",
+    // The recovery passphrase wrap of the key (KT-1495). The `.key` suffix
+    // already matched it by luck; the name is listed so a rename of the rule
+    // cannot drop it.
+    "recovery.key",
     "human-admin-secret",
+    // The TOTP seed and recovery digests of the strong confirmation (KT-1492).
+    "trust-proof.json",
     "secrets.toml",
     ".mcp.json",
     "kronn.db",
@@ -301,6 +307,8 @@ mod tests {
             "/home/u/.config/kronn/config.toml",
             "/Users/u/Library/Application Support/com.kronn.kronn/config.toml",
             "/data/human-admin-secret",
+            "/data/recovery.key",
+            "/data/trust-proof.json",
             "/data/secrets.toml",
             "/data/kronn.db",
             "/data/kronn.db-wal",

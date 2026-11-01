@@ -50,7 +50,7 @@ the permissive container marker from workers.
 [src: file: backend/src/agents/runner.rs:4889-4917#adapter_task_worker_args]
 [src: file: backend/src/agents/runner.rs:3751-3769#task_worker_route_policy]
 [src: file: backend/src/agents/runner.rs:4348#acp_resume_id]
-[src: file: backend/src/agents/runner.rs:13913-13923#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:13971-13981#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/tests/adapter_worker_policy.rs:335-446#worker]
 
 Each adapter permits one active prompt at a time; sequential turns still resume
@@ -114,7 +114,7 @@ to the displayed reply. Thought, tool-content and unknown labelled updates do
 not become answer text; tool and usage events still follow their own paths.
 Older runtimes with unlabelled content retain their compatibility path.
 An echo without an agent message therefore supplies no answer text.
-[src: file: backend/src/acp.rs:1453-1460#is_answer]
+[src: file: backend/src/acp.rs:1473-1480#is_answer]
 [ACP session updates](https://agentclientprotocol.com/protocol/v1/prompt-turn#session-updates)
 
 Native tool banners retain the reported tool name, a bounded redacted input
@@ -151,7 +151,7 @@ subject to that filter. A permission request for a runtime-registered Kronn
 tool may read or write with `full_access=false`, but must still identify the
 bound protocol session and an authorized server/tool. Missing or ambiguous
 identity remains refused; registration does not grant filesystem access.
-[src: file: backend/src/acp.rs:1531-1570#native_session_mcp_servers]
+[src: file: backend/src/acp.rs:1554-1593#native_session_mcp_servers]
 [src: file: backend/src/acp/permission_broker.rs:577-585#trusted_internal_call]
 
 A native agent's `disc_append` can carry its runtime session id without having
@@ -219,7 +219,7 @@ project path never reuses that identifier.
   (`OPENCODE_CONFIG_CONTENT`) that denies the real environment files, allows the
   templates and keeps a refusal from ending the turn. See
   [auditing with an ACP agent](../architecture/audit-acp-agents.md).
-  [src: file: backend/src/acp/secret_files.rs:51-86#is_secret_file] [src: file: backend/src/acp/secret_files.rs:205-227#opencode_config_content]
+  [src: file: backend/src/acp/secret_files.rs:51-86#is_secret_file] [src: file: backend/src/acp/secret_files.rs:211-233#opencode_config_content]
 - **Filesystem / terminal:** Kronn has not bound a scoped executor for
   `fs/*`/`terminal/*` yet. Every such request — from any agent — gets a
   spec-correct JSON-RPC error (`-32001` "capability not granted"), never a

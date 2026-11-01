@@ -305,7 +305,7 @@ This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3359-3364#is_http_chat_agent]
 [src: file: backend/src/agents/runner.rs:4277-4298#start_ollama_http_with_idle]
 [src: file: backend/src/agents/runner.rs:4496-4509#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:13213-13222#Ollama]
+[src: file: backend/src/agents/runner.rs:13240-13249#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's
