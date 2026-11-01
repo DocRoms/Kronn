@@ -9711,6 +9711,139 @@ Suite de la réponse.";
         );
     }
 
+    /// KT-1495 — a full-access Claude launch (and so every audit) refuses its
+    /// Read, Edit and Write tools the Kronn data directory; the bypass flag does
+    /// not lift a deny rule.
+    #[test]
+    #[serial_test::serial]
+    fn a_full_access_claude_launch_denies_the_data_dir_to_its_file_tools() {
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::ClaudeCode, "test prompt", true, "", None);
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        let at = args.iter().position(|arg| arg == "--settings").unwrap();
+        let data = crate::core::config::config_dir().unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&args[at + 1]).unwrap();
+        for tool in ["Read", "Edit", "Write"] {
+            let rule = format!("{tool}(/{}/**)", data.to_string_lossy());
+            assert!(
+                settings["permissions"]["deny"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r == &rule),
+                "{rule}"
+            );
+        }
+        // The prompt is still the last argument.
+        assert_eq!(args.last().map(String::as_str), Some("test prompt"));
+        // The rules are no sandbox: the launch is still wrapped from outside.
+        assert_eq!(
+            crate::core::vault_guard::launch_sandbox("claude", None, &args),
+            crate::core::vault_guard::LaunchSandbox::None
+        );
+    }
+
+    /// KT-1495 — the owner turned the vault protection off: no rule bridles the CLI.
+    #[test]
+    #[serial_test::serial]
+    fn with_the_vault_protection_off_a_claude_launch_carries_no_rule() {
+        crate::core::trust_sandbox::set_protect_vault(false);
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::ClaudeCode, "test prompt", true, "", None);
+        crate::core::trust_sandbox::set_protect_vault(true);
+        assert!(!args.contains(&"--settings".to_string()), "{args:?}");
+    }
+
+    /// KT-1495 — `allowRead` of the worker is additive; the data directory is
+    /// denied inside its own sandbox, which stays the wrapper of that launch.
+    #[test]
+    #[serial_test::serial]
+    fn a_claude_task_worker_denies_the_data_dir_inside_its_own_sandbox() {
+        let worktree = tempfile::tempdir().unwrap();
+        let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "test prompt",
+            true,
+            "worker context",
+            None,
+            None,
+            true,
+            Some(worktree.path()),
+            None,
+        );
+        let at = args.iter().position(|arg| arg == "--settings").unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&args[at + 1]).unwrap();
+        let data = crate::core::config::config_dir().unwrap();
+        let denied = settings["sandbox"]["filesystem"]["denyRead"]
+            .as_array()
+            .unwrap();
+        assert!(denied
+            .iter()
+            .any(|dir| dir == data.to_string_lossy().as_ref()));
+        assert_eq!(settings["sandbox"]["failIfUnavailable"], true);
+        let rule = format!("Read(/{}/**)", data.to_string_lossy());
+        assert!(settings["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == &rule));
+        assert_eq!(
+            crate::core::vault_guard::launch_sandbox("claude", None, &args),
+            crate::core::vault_guard::LaunchSandbox::Own,
+            "Seatbelt cannot be applied inside Claude's own sandbox"
+        );
+        // The fail-closed fallback (a worktree that cannot be resolved) too.
+        let (_, _, fallback, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "p",
+            false,
+            "",
+            None,
+            None,
+            true,
+            Some(std::path::Path::new("/definitely/not/a/worktree")),
+            None,
+        );
+        let at = fallback.iter().position(|arg| arg == "--settings").unwrap();
+        let fallback: serde_json::Value = serde_json::from_str(&fallback[at + 1]).unwrap();
+        assert!(!fallback["sandbox"]["filesystem"]["denyRead"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    /// KT-1495 — Codex in full access and in an audit runs `danger-full-access`:
+    /// no sandbox of its own, so Kronn's wraps it. Its read-only and
+    /// workspace-write sandboxes are replaced by an equivalent one of Kronn's.
+    #[test]
+    fn a_full_access_codex_launch_is_wrapped_and_the_others_are_replaced() {
+        use crate::core::vault_guard::{CodexMode, LaunchSandbox};
+        let (_, _, full, _, _, _) =
+            super::super::agent_command(&AgentType::Codex, "p", true, "", None);
+        assert!(full.contains(&"--sandbox=danger-full-access".to_string()));
+        assert_eq!(
+            crate::core::vault_guard::launch_sandbox("codex", None, &full),
+            LaunchSandbox::None
+        );
+        let worktree = tempfile::tempdir().unwrap();
+        let (_, _, worker, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::Codex,
+            "p",
+            false,
+            "",
+            None,
+            None,
+            true,
+            Some(worktree.path()),
+            None,
+        );
+        assert!(worker.contains(&"--sandbox=workspace-write".to_string()));
+        assert_eq!(
+            crate::core::vault_guard::launch_sandbox("codex", None, &worker),
+            LaunchSandbox::Codex(CodexMode::WorkspaceWrite)
+        );
+    }
+
     #[test]
     fn claude_task_worker_uses_fail_closed_workspace_sandbox() {
         let worktree = tempfile::tempdir().unwrap();
@@ -10862,13 +10995,13 @@ Suite de la réponse.";
     #[cfg(unix)]
     #[tokio::test]
     async fn the_memory_switch_is_only_set_for_claude_code() {
-        // Another CLI inherits the parent's value untouched: Kronn neither sets
-        // nor clears it (a session launched by Kronn already carries it).
-        let inherited = crate::core::child_env::var("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
-            .unwrap_or_else(|_| "unset".into());
+        // Another CLI never sees it: Kronn does not set it, and the child
+        // environment is built, not inherited (`core::child_env`), so the value
+        // of the process running the test (a Claude session sets it) does not
+        // reach the child either.
         assert_eq!(
             auto_memory_switch_seen_by("codex", Some("disc"), None, None, None).await,
-            inherited
+            "unset"
         );
     }
 

@@ -7219,6 +7219,10 @@ Termina con [SIGNAL: OK].`,
   "trust.proof.renew": "Nuevos códigos de recuperación",
   "trust.proof.disable": "Desactivar",
   "trust.proof.reset": "¿Perdiste el autenticador y los códigos de recuperación? Con acceso a esta máquina fuera de Kronn, detén Kronn y borra trust-proof.json y trust-proof-lock.json del directorio de datos (docs/architecture/trust-levels.md).",
+  "api.confirmCode": "Introduce un código de tu aplicación de autenticación (o un código de recuperación) para confirmar esta acción sobre los secretos de Kronn:",
+  "trust.vault.active": "La bóveda de Kronn está cerrada a los agentes: los procesos de agente que lanza Kronn no pueden leer ni escribir su carpeta de datos (clave de cifrado, base de datos, configuración). La API de Kronn y la red siguen accesibles.",
+  "trust.vault.unavailable": "La protección de la bóveda de Kronn no está disponible en esta máquina ({0}). Los agentes funcionan como antes y pueden leer la carpeta de datos de Kronn. No se rechaza nada por ello.",
+  "trust.vault.off": "La protección de la bóveda de Kronn está desactivada en la configuración (protect_vault_from_agents = false). Los agentes funcionan como antes y pueden leer la carpeta de datos de Kronn.",
   "trust.audit.withdrawn": "retirado",
 };
 

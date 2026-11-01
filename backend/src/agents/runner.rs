@@ -12284,9 +12284,13 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             "filesystem": {
                 "allowWrite": lane.write_roots(),
                 "allowRead": lane.read_roots(&caches),
+                // KT-1495 — the Kronn data directory: `allowRead` is additive, so
+                // without this the worker's shell reads the keys and the database.
+                "denyRead": crate::core::vault_guard::claude_sandbox_deny_read(),
             },
             "network": { "allowLocalBinding": true }
-        }
+        },
+        "permissions": { "deny": crate::core::vault_guard::claude_permission_deny() }
     }))
     .map_err(|error| format!("Unable to encode the Claude task-worker sandbox policy: {error}"))
 }
@@ -12959,7 +12963,21 @@ fn agent_command_with_task_worker_policy(
                         // Production task-worker launches always provide the
                         // managed worktree. This invalid path keeps direct
                         // builder calls fail-closed and deterministic.
-                        r#"{"sandbox":{"enabled":true,"failIfUnavailable":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false,"excludedCommands":[],"filesystem":{"allowWrite":[]}}}"#.into()
+                        serde_json::json!({
+                            "sandbox": {
+                                "enabled": true,
+                                "failIfUnavailable": true,
+                                "autoAllowBashIfSandboxed": true,
+                                "allowUnsandboxedCommands": false,
+                                "excludedCommands": [],
+                                "filesystem": {
+                                    "allowWrite": [],
+                                    "denyRead": crate::core::vault_guard::claude_sandbox_deny_read(),
+                                }
+                            },
+                            "permissions": { "deny": crate::core::vault_guard::claude_permission_deny() }
+                        })
+                        .to_string()
                     });
                 args.push(settings);
                 // Task workers need repository I/O, not nested agents,
@@ -12978,6 +12996,15 @@ fn agent_command_with_task_worker_policy(
                 // `--print` cannot ask, so Kronn's own tools must be allowed up front.
                 // The `=` form matters: a variadic flag followed by a space eats the prompt.
                 args.push("--allowedTools=mcp__kronn-internal".into());
+            }
+            // KT-1495 — the Read, Edit and Write tools refuse the Kronn data
+            // directory, in full access too (a deny rule outranks the mode). A task
+            // worker carries the same rules in its own settings above.
+            if !task_worker {
+                if let Some(settings) = crate::core::vault_guard::claude_vault_settings() {
+                    args.push("--settings".into());
+                    args.push(settings);
+                }
             }
             // Inject MCP context via --append-system-prompt (separate from user prompt)
             if !mcp_context.is_empty() {
@@ -13777,6 +13804,36 @@ pub(crate) fn try_spawn(
 
     tracing::debug!("Agent argv: {} {}", final_cmd, loggable_argv(&final_args));
 
+    // KT-1495 — every native agent process loses the Kronn data directory (and
+    // only that) to an OS sandbox: its own shell and file tools could otherwise
+    // read the keys and the database whatever Kronn's gates say. A host with no
+    // sandbox, or the owner's setting off, leaves the launch exactly as it was.
+    let (final_cmd, final_args) = if runs_in_wsl || resolved_via_wsl {
+        (final_cmd, final_args)
+    } else {
+        let roots = crate::core::vault_guard::LaunchRoots::discover(
+            Path::new(&effective_work_dir),
+            npx_package.is_some() && cmd_name != binary,
+        );
+        let (program, wrapped_args, outcome) = crate::core::vault_guard::wrap_launch(
+            crate::core::vault_guard::launch_confinement().as_ref(),
+            crate::core::vault_guard::launch_sandbox(binary, npx_package, args),
+            &roots,
+            final_cmd,
+            final_args,
+        );
+        match outcome {
+            crate::core::vault_guard::Confined::Unchanged(why) => {
+                tracing::debug!("Kronn vault not sandboxed for this launch: {why}");
+            }
+            crate::core::vault_guard::Confined::Replaced => {
+                tracing::debug!("Codex's own sandbox replaced by Kronn's, vault hidden");
+            }
+            crate::core::vault_guard::Confined::Wrapped => {}
+        }
+        (program, wrapped_args)
+    };
+
     let route = crate::core::child_env::ChildRoute::Agent(
         crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key),
     );
@@ -14467,6 +14524,11 @@ mod runner_test;
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "runner_idle_test.rs"]
 mod runner_idle_test;
+
+/// KT-1495 — live, opt-in (`KRONN_LIVE_VAULT_PROBE=1`): see the module doc.
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "vault_probe_test.rs"]
+mod vault_probe_test;
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "runner_vision_test.rs"]

@@ -13,6 +13,7 @@ import type {
 } from '../types/generated';
 import type { TemplateReinstallRequest, TemplateReinstallPlan, TemplateReinstallReport, MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
+import { getUILocale, t as translate } from './i18n';
 import type {
   AssistantConversation,
   AssistantKind,
@@ -724,6 +725,37 @@ async function fetchAndParseSSE(
   await parseSSEStream(res, handlers);
 }
 
+// ─── Strong confirmation of the vault routes (KT-1495) ──────────────────────
+
+const CONFIRM_HEADER = 'X-Kronn-Confirm';
+
+/** Asks the human for a code of their authenticator; `null` when they decline. */
+export type ConfirmationPrompt = () => string | null;
+
+let _confirmationPrompt: ConfirmationPrompt = () => {
+  const code = window.prompt(translate(getUILocale(), 'api.confirmCode'));
+  return code && code.trim() ? code.trim() : null;
+};
+
+/** Replace the prompt (tests, or a richer dialog). */
+export function setConfirmationPrompt(prompt: ConfirmationPrompt) {
+  _confirmationPrompt = prompt;
+}
+
+/**
+ * The routes that change or hand out Kronn's own secrets answer 403
+ * `confirm_required` once a confirmation is enrolled: an agent on the loopback
+ * is not the owner. The human types a code, the request is sent again with it.
+ */
+async function sendWithConfirmation(send: (extra: Record<string, string>) => Promise<Response>): Promise<Response> {
+  const first = await send({});
+  if (first.status !== 403) return first;
+  const body = await first.clone().json().catch(() => null) as { error_code?: string } | null;
+  if (body?.error_code !== 'confirm_required') return first;
+  const code = _confirmationPrompt();
+  return code ? send({ [CONFIRM_HEADER]: code }) : first;
+}
+
 // ─── Generic API wrapper ────────────────────────────────────────────────────
 
 interface ApiResponse<T> {
@@ -751,12 +783,12 @@ async function api<T>(
   const execute = async (): Promise<T> => {
     let res: Response;
     try {
-      res = await fetch(`${_apiBase}/api${path}`, {
+      res = await sendWithConfirmation(extra => fetch(`${_apiBase}/api${path}`, {
         method,
-        headers,
+        headers: { ...headers, ...extra },
         body: hasBody ? JSON.stringify(body) : undefined,
         signal,
-      });
+      }));
     } catch (error) {
       if (looksLikeBackendDown(error)) reportBackendSuspect();
       throw error;
@@ -949,11 +981,11 @@ export const config = {
   importData: async (file: File): Promise<ImportResult> => {
     const form = new FormData();
     form.append('file', file);
-    const res = await fetch(`${_apiBase}/api/config/import`, {
+    const res = await sendWithConfirmation(extra => fetch(`${_apiBase}/api/config/import`, {
       method: 'POST',
-      headers: authHeaders(),
+      headers: { ...authHeaders(), ...extra },
       body: form,
-    });
+    }));
     if (!res.ok) throw new Error(`Import failed: ${res.status}`);
     const json = await res.json();
     if (json.error) throw new Error(json.error);

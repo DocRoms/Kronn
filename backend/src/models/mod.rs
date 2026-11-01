@@ -174,6 +174,9 @@ pub enum ApiErrorCode {
     UnreachableModel,
     /// No audit starts without a briefing (KT-1192).
     BriefingRequired,
+    /// The route changes or hands out Kronn's own secrets: it needs a code of
+    /// the strong confirmation (`X-Kronn-Confirm`) once one is enrolled (KT-1495).
+    ConfirmRequired,
 }
 
 impl ApiErrorCode {
@@ -185,6 +188,7 @@ impl ApiErrorCode {
             ApiErrorCode::Internal => "internal",
             ApiErrorCode::UnreachableModel => "unreachable_model",
             ApiErrorCode::BriefingRequired => "briefing_required",
+            ApiErrorCode::ConfirmRequired => "confirm_required",
         }
     }
 }

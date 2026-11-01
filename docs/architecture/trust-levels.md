@@ -120,6 +120,11 @@ reaches the route and is refused for want of a code (see below).
 
 ### Protect the Kronn vault from agents
 
+Since KT-1495 the same sandbox closes the data directory to **every native agent
+process**, not only to what a level granted: see
+[agent-vault-protection.md](agent-vault-protection.md) for what each runtime can
+and cannot read.
+
 A setting, `server.protect_vault_from_agents` in `config.toml`, **on by default**.
 It has three states (`trust_sandbox::VaultProtection`):
 

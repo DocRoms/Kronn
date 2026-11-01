@@ -259,7 +259,7 @@ of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs:282-295#tool_stall_reason]
 [src: file: backend/src/agents/runner.rs:5580-5588#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5686-5701#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
-[src: file: backend/src/acp.rs:1480-1494#ToolCallEnded] [src: file: backend/src/acp.rs:522-527#Activity]
+[src: file: backend/src/acp.rs:1500-1514#ToolCallEnded] [src: file: backend/src/acp.rs:522-527#Activity]
 
 **Input validation**: title ≤ 500 chars, content ≤ 100KB, workflow ≤ 20 steps, workflow name ≤ 200 chars.
 

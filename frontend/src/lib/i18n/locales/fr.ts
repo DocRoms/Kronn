@@ -7232,6 +7232,10 @@ Termine par [SIGNAL: OK].`,
   "trust.proof.renew": "Nouveaux codes de récupération",
   "trust.proof.disable": "Désactiver",
   "trust.proof.reset": "Authentificateur et codes de récupération perdus ? Avec un accès à cette machine hors de Kronn, arrête Kronn et supprime trust-proof.json et trust-proof-lock.json du dossier de données (docs/architecture/trust-levels.md).",
+  "api.confirmCode": "Entre un code de ton application d'authentification (ou un code de récupération) pour confirmer cette action sur les secrets de Kronn :",
+  "trust.vault.active": "Le coffre de Kronn est fermé aux agents : les processus d'agent lancés par Kronn ne peuvent ni lire ni écrire son dossier de données (clé de chiffrement, base, configuration). L'API de Kronn et le réseau restent accessibles.",
+  "trust.vault.unavailable": "La protection du coffre de Kronn est indisponible sur cette machine ({0}). Les agents tournent comme avant et peuvent lire le dossier de données de Kronn. Rien n'est refusé pour autant.",
+  "trust.vault.off": "La protection du coffre de Kronn est désactivée dans la configuration (protect_vault_from_agents = false). Les agents tournent comme avant et peuvent lire le dossier de données de Kronn.",
   "trust.audit.withdrawn": "retiré",
 };
 

@@ -89,6 +89,7 @@ export const API_TOP_LEVEL_FNS = [
   'getApiBase',
   'fetchHealth',
   'measuredRatio',
+  'setConfirmationPrompt',
 ] as const;
 
 interface DefaultMock {
@@ -142,6 +143,7 @@ interface DefaultMock {
   modelCatalogApi: Record<string, AnyFn>;
   trust: Record<string, AnyFn>;
   measuredRatio: AnyFn;
+  setConfirmationPrompt: AnyFn;
 }
 
 /**
@@ -895,6 +897,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       disableProof: resolve(null),
     },
     measuredRatio: vi.fn(() => null),
+    setConfirmationPrompt: vi.fn(),
   };
 
   // Shallow-merge overrides onto base (namespace by namespace).

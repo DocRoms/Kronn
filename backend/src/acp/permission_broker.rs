@@ -1504,6 +1504,11 @@ mod tests {
             ".env.local",
             "config/.env.production",
             "tls/server.key",
+            // KT-1495: the files of the Kronn vault itself.
+            "kronn/recovery.key",
+            "kronn/encryption_key",
+            "kronn/kronn.db",
+            "kronn/human-admin-secret",
         ] {
             // `full_access` widens what an agent may do, never what it may read
             // of a secret.

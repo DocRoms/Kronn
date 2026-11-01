@@ -804,6 +804,19 @@ async fn auth_middleware(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
+    // KT-1495: an agent process is on this same loopback and only has to leave
+    // its bridge token out to be taken for the owner. The routes that take over
+    // or destroy the vault therefore ask a caller admitted by its address alone
+    // for a code of the strong confirmation (once one is enrolled). The operator
+    // token is a credential of its own and is not asked again.
+    if local_trusted && !has_valid_token {
+        if let api::human_gate::Verdict::Refused(response) =
+            api::human_gate::check(&state, &headers, request.method(), request.uri().path()).await
+        {
+            return Ok(response);
+        }
+    }
+
     if auth_allows(
         request.method(),
         request.uri().path(),
@@ -1170,6 +1183,8 @@ async fn scope_bridge_response(
 const DESTRUCTIVE_POSTS: &[&str] = &[
     "/api/setup/reset",
     "/api/config/import",
+    // Replaces the credential every remote caller presents (KT-1495).
+    "/api/config/auth-token/regenerate",
     "/api/config/recovery/set",
     "/api/config/recovery/restore",
     "/api/config/recovery/reencrypt",
@@ -3762,6 +3777,43 @@ mod auth_tests {
             }
         }
         assert!(!super::is_destructive(&Method::GET, "/api/trust"));
+    }
+
+    /// KT-1495: replacing the auth token locks every other caller out and hands
+    /// the credential to whoever asked; it is gated like a reset (it was the one
+    /// vault route that a remote peer could reach while auth was off).
+    #[test]
+    fn regenerating_the_auth_token_is_a_destructive_post() {
+        const REGENERATE: &str = "/api/config/auth-token/regenerate";
+        assert!(super::is_destructive(&Method::POST, REGENERATE));
+        assert!(
+            !auth_allows(&Method::POST, REGENERATE, false, true, false, false),
+            "a remote peer without a token, auth off"
+        );
+        assert!(
+            !auth_allows(&Method::POST, REGENERATE, false, false, false, false),
+            "…and with no token configured at all"
+        );
+        assert!(auth_allows(
+            &Method::POST,
+            REGENERATE,
+            false,
+            true,
+            true,
+            false
+        ));
+        assert!(auth_allows(
+            &Method::POST,
+            REGENERATE,
+            false,
+            true,
+            false,
+            true
+        ));
+        assert!(
+            crate::core::bridge_token::route_for("POST", REGENERATE).is_none(),
+            "no bridge token reaches it"
+        );
     }
 
     #[test]

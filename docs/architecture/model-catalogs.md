@@ -129,7 +129,7 @@ session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
 [src: file: backend/src/agents/runner.rs:5529-5583#offers_model_catalogue]
-[src: file: backend/src/acp.rs:1875-1884#offers_model_catalogue]
+[src: file: backend/src/acp.rs:1895-1904#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1886-1917#select_model]
 
 ## Launch safety and UI
@@ -218,7 +218,7 @@ is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
 [src: file: backend/src/agents/runner.rs:12902-12919#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:12998-13029#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13025-13056#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
 [src: file: backend/src/agents/runner.rs:4889-4917#adapter_task_worker_args]
