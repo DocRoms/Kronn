@@ -301,8 +301,26 @@ pub struct PlanningTaskSummary {
     /// checks still owed on this task.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub live_checks: Vec<PlanningLiveCheck>,
+    /// KT-1519 — the delivery is integrated into a branch that is not the
+    /// default branch: the task is not `done`, it awaits that branch's merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_merge: Option<PlanningAwaitingMerge>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl PlanningTaskSummary {
+    /// KT-1519 — the task no longer holds its dependents back: it is done or
+    /// archived, or integrated into a campaign branch (awaiting its merge) that
+    /// the next task builds on. One rule for the plan, launch and campaign
+    /// reads; the SQL twins exclude a blocker that is `in_progress` with an
+    /// `awaiting_merge_branch` (the only state `awaiting_merge` is read in).
+    pub fn satisfies_dependents(&self) -> bool {
+        matches!(
+            self.status,
+            PlanningTaskStatus::Done | PlanningTaskStatus::Archived
+        ) || self.awaiting_merge.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -352,6 +370,16 @@ impl PlanningDodVerification {
             Self::Worker
         }
     }
+}
+
+/// KT-1519 — where an integrated task's change waits for the merge.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PlanningAwaitingMerge {
+    /// The non-default branch the delivery was integrated into.
+    pub branch: String,
+    /// The integrated commit; the task closes once the default branch holds it.
+    pub sha: String,
 }
 
 /// KT-1254 — a pending principal live check, as the plan shows it.
@@ -439,20 +467,24 @@ pub struct PlanningDependencySummary {
 
 /// KT-30 — bucketed counts over the ACTIVE relations of a discussion plan,
 /// under a strict precedence so every Active task lands in exactly one bucket:
-/// `done` > `blocked` > `in_progress` > `ideas` > `ready`. The five Active
-/// buckets sum to `DiscussionPlan::total_active`; `later` is the separate Later
+/// `done` > `blocked` > `awaiting_merge` > `in_progress` > `ideas` > `ready`. The
+/// six Active buckets sum to `DiscussionPlan::total_active`; `later` is the separate Later
 /// count.
 ///
 /// `ready` is exactly the `actionable` relations — a `Todo` with no active
 /// blocker — so a UI "X ready" label never overcounts. A nascent `Idea` (not
 /// yet started, not actionable) has its own `ideas` bucket rather than
 /// inflating `ready`.
+///
+/// `awaiting_merge` (KT-1519) holds the open tasks whose change is integrated
+/// into a feature branch that is not merged yet: finished work, but not `done`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PlanningPlanStats {
     pub ready: u32,
     pub blocked: u32,
     pub in_progress: u32,
+    pub awaiting_merge: u32,
     pub ideas: u32,
     pub done: u32,
     pub later: u32,

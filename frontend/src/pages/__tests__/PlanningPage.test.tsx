@@ -144,6 +144,38 @@ describe('PlanningPage', () => {
     expect(await findCanonicalTaskRow('Old task')).toBeInTheDocument();
   });
 
+  it('puts the awaiting-merge chip on its own line under the meta row, with the full branch on its title', async () => {
+    const branch = 'autocode/campaign/kt-1519-tasks-are-marked-done-too-early';
+    mocks.list.mockResolvedValue(listPage([
+      summary({ id: 'awaiting', reference: 'KT-1519', title: 'Integrated task', status: 'in_progress', awaiting_merge: { branch, sha: '0123456789abcdef' } }),
+    ]));
+    const { container } = render(
+      <PlanningPage projects={[]} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />,
+    );
+    await findCanonicalTaskRow('Integrated task');
+    const chip = container.querySelector('.planning-sidebar-awaiting') as HTMLElement;
+    expect(chip).not.toBeNull();
+    expect(chip.getAttribute('data-status')).toBe('awaiting_merge');
+    expect(chip.getAttribute('title')).toBe(`${branch} @ 01234567`);
+    expect(chip.textContent).toMatch(/^planning\.status\.awaitingMerge:….*done-too-early$/);
+    // Not a child of the meta row (which holds the reference): it follows it, so
+    // the reference can never wrap around the chip.
+    const meta = container.querySelector('.disc-item-meta') as HTMLElement;
+    expect(meta.contains(chip)).toBe(false);
+    expect(meta.nextElementSibling).toBe(chip);
+    expect(meta.querySelector('.planning-ref')?.textContent).toBe('KT-1519');
+    expect(meta.querySelector('.planning-status')).toBeNull();
+  });
+
+  it('keeps the plain status pill in the meta row for a task that is not awaiting a merge', async () => {
+    const { container } = render(
+      <PlanningPage projects={[]} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />,
+    );
+    await findCanonicalTaskRow('Upgrade PHP');
+    expect(container.querySelector('.planning-sidebar-awaiting')).toBeNull();
+    expect(container.querySelector('.disc-item-meta .planning-status')).not.toBeNull();
+  });
+
   it('renders the planning empty state through the real page adapter', async () => {
     mocks.list.mockResolvedValueOnce(listPage([]));
     render(<PlanningPage projects={[]} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);

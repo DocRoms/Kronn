@@ -7342,3 +7342,238 @@ fn a_refusal_or_a_look_alike_card_grants_nothing() {
         crate::models::ValidationsAccess::Sandbox
     );
 }
+
+fn task_row(conn: &Connection, task_id: &str) -> (String, Option<String>, Option<String>) {
+    conn.query_row(
+        "SELECT status, awaiting_merge_branch, awaiting_merge_sha \
+         FROM planning_tasks WHERE id = ?1",
+        [task_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .unwrap()
+}
+
+fn close_on_merge(conn: &Connection, task_id: &str) -> bool {
+    let tx = conn.unchecked_transaction().unwrap();
+    let closed =
+        crate::db::planning::close_awaiting_merge_within_tx(&tx, task_id, &backend_actor())
+            .unwrap();
+    tx.commit().unwrap();
+    closed
+}
+
+/// KT-1519: an integration into a campaign or feature branch completes the
+/// execution but leaves the task open, integrated and awaiting the merge; the
+/// merge into the default branch closes it.
+#[test]
+fn an_integration_into_a_feature_branch_leaves_the_task_open_until_the_merge() {
+    let conn = setup();
+    let (exec, _) = applying_with_dod(&conn, "t-feature", 910, &[]);
+    let landed = commit_integration_checkpoint(
+        &conn,
+        &exec,
+        IntegrationStep::IntegratedAwaitingMerge {
+            integrated_sha: INTEGRATED,
+            branch: "autocode/kt-1495",
+        },
+        &backend_actor(),
+    )
+    .unwrap();
+    assert_eq!(
+        landed,
+        IntegrationCheckpointOutcome::Committed {
+            status: TaskExecutionStatus::Done
+        }
+    );
+    assert_eq!(
+        get_task_execution(&conn, &exec).unwrap().unwrap().status,
+        TaskExecutionStatus::Done
+    );
+    assert_eq!(
+        task_row(&conn, "t-feature"),
+        (
+            "in_progress".to_string(),
+            Some("autocode/kt-1495".to_string()),
+            Some(INTEGRATED.to_string())
+        ),
+        "integrated into a feature branch is not done"
+    );
+    let summary = crate::db::planning::get_task(&conn, "t-feature")
+        .unwrap()
+        .unwrap()
+        .summary;
+    let awaiting = summary.awaiting_merge.expect("the plan shows the wait");
+    assert_eq!(awaiting.branch, "autocode/kt-1495");
+    assert_eq!(awaiting.sha, INTEGRATED);
+    conn.execute(
+        "INSERT INTO planning_task_projects (task_id, project_id) VALUES ('t-feature', 'p1')",
+        [],
+    )
+    .unwrap();
+    let listed = crate::db::planning::list_awaiting_merge(&conn, "p1").unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].task_id, "t-feature");
+    assert_eq!(listed[0].sha, INTEGRATED);
+    assert!(
+        crate::db::planning::list_awaiting_merge(&conn, "other")
+            .unwrap()
+            .is_empty(),
+        "another project's sweep never sees this task"
+    );
+
+    // The merge reached the default branch.
+    assert!(close_on_merge(&conn, "t-feature"));
+    assert_eq!(
+        task_row(&conn, "t-feature"),
+        ("done".to_string(), None, None)
+    );
+    assert!(crate::db::planning::list_awaiting_merge(&conn, "p1")
+        .unwrap()
+        .is_empty());
+    assert!(
+        !close_on_merge(&conn, "t-feature"),
+        "closing is idempotent: a done task is left alone"
+    );
+}
+
+/// KT-1519: a campaign is complete once every active task is done or integrated
+/// and awaiting its merge; an in-progress task that is not integrated is not.
+#[test]
+fn a_campaign_completes_with_a_task_awaiting_its_merge_but_not_with_an_unfinished_one() {
+    let conn = setup();
+    seed_plan_task(&conn, "t-integrated", 1031, 0, "active");
+    seed_plan_task(&conn, "t-working", 1032, 1, "active");
+    let run = campaign(&conn, 1, 1);
+    let complete = |conn: &Connection| {
+        set_orchestration_control_state(
+            conn,
+            &run.id,
+            OrchestrationControlState::Completed,
+            Some("done"),
+            &backend_actor(),
+        )
+    };
+    conn.execute(
+        "UPDATE planning_tasks SET status = 'in_progress' \
+         WHERE id IN ('t-integrated', 't-working')",
+        [],
+    )
+    .unwrap();
+    // The delivery proved its Definition of Done before it was integrated.
+    conn.execute(
+        "UPDATE planning_task_dod_items SET completed = 1 WHERE task_id = 't-integrated'",
+        [],
+    )
+    .unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    assert!(crate::db::planning::mark_task_awaiting_merge_within_tx(
+        &tx,
+        "t-integrated",
+        "autocode/kt-1495",
+        INTEGRATED,
+        &backend_actor(),
+    )
+    .unwrap());
+    tx.commit().unwrap();
+    assert!(
+        complete(&conn).is_err(),
+        "a task still being worked on is unfinished"
+    );
+    conn.execute(
+        "UPDATE planning_tasks SET status = 'done' WHERE id = 't-working'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        complete(&conn).unwrap().control_state,
+        OrchestrationControlState::Completed
+    );
+}
+
+/// KT-1519: an integration into the default branch closes the task at once.
+#[test]
+fn an_integration_into_the_default_branch_closes_the_task() {
+    let conn = setup();
+    let (exec, _) = applying_with_dod(&conn, "t-default", 911, &[]);
+    commit_integration_checkpoint(
+        &conn,
+        &exec,
+        IntegrationStep::Integrated {
+            integrated_sha: INTEGRATED,
+        },
+        &backend_actor(),
+    )
+    .unwrap();
+    assert_eq!(
+        task_row(&conn, "t-default"),
+        ("done".to_string(), None, None)
+    );
+}
+
+/// KT-1519: a live check ticked while the change still waits for its merge does
+/// not close the task; the merge then closes it.
+#[test]
+fn a_live_check_does_not_close_a_task_that_awaits_its_merge() {
+    let conn = setup();
+    let (exec, _) = applying_with_dod(
+        &conn,
+        "t-feature-live",
+        912,
+        &[("dod-live", "Smoke test on main", false)],
+    );
+    conn.execute(
+        "UPDATE planning_task_dod_items SET verification = 'post_integration' \
+         WHERE id = 'dod-live'",
+        [],
+    )
+    .unwrap();
+    commit_integration_checkpoint(
+        &conn,
+        &exec,
+        IntegrationStep::IntegratedAwaitingMerge {
+            integrated_sha: INTEGRATED,
+            branch: "autocode/kt-1496",
+        },
+        &backend_actor(),
+    )
+    .unwrap();
+    crate::db::planning::update_dod_item(
+        &conn,
+        "t-feature-live",
+        "dod-live",
+        &crate::models::UpdatePlanningDodItemRequest {
+            completed: true,
+            evidence: Some("checked".to_string()),
+            actor: crate::models::PlanningActor::default(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        task_row(&conn, "t-feature-live").0,
+        "in_progress",
+        "the live check alone does not close an unmerged task"
+    );
+    assert!(close_on_merge(&conn, "t-feature-live"));
+    assert_eq!(task_row(&conn, "t-feature-live").0, "done");
+}
+
+/// KT-1519: a human closing an awaiting-merge task by hand drops the marker.
+#[test]
+fn a_human_close_of_an_awaiting_merge_task_drops_the_marker() {
+    let conn = setup();
+    let (exec, _) = applying_with_dod(&conn, "t-human", 913, &[]);
+    commit_integration_checkpoint(
+        &conn,
+        &exec,
+        IntegrationStep::IntegratedAwaitingMerge {
+            integrated_sha: INTEGRATED,
+            branch: "autocode/kt-1495",
+        },
+        &backend_actor(),
+    )
+    .unwrap();
+    let request: crate::models::UpdatePlanningTaskRequest =
+        serde_json::from_value(serde_json::json!({ "status": "done" })).unwrap();
+    crate::db::planning::update_task(&conn, "t-human", &request).unwrap();
+    assert_eq!(task_row(&conn, "t-human"), ("done".to_string(), None, None));
+}

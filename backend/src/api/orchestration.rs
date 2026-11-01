@@ -526,6 +526,9 @@ async fn reconcile_at_boot_with_agents(
         });
     for project in projects {
         let repo = scanner::resolve_host_path(&project.path);
+        // KT-1519 — a feature branch merged while Kronn was down or by a PR
+        // outside it: its integrated tasks close now.
+        close_merged_awaiting_tasks(&state.db, &project.id, &repo, false).await;
         if !repo.join("target").is_dir() {
             continue;
         }
@@ -3324,13 +3327,18 @@ async fn land_integration(
     child_path: &str,
     integrated: String,
 ) -> Result<IntegrationOutcome, ProvisionError> {
-    if let Err(error) = checkpoint(
-        db,
-        &execution.id,
-        CheckpointStep::Integrated(integrated.clone()),
-    )
-    .await
-    {
+    // KT-1519 — only the default branch completes the task; a campaign or
+    // feature branch leaves it integrated, awaiting the merge.
+    let feature_branch = run
+        .target_branch
+        .clone()
+        .filter(|branch| !crate::core::project_profile::is_default_branch(repo, branch));
+    let into_default = feature_branch.is_none();
+    let step = match feature_branch {
+        Some(branch) => CheckpointStep::IntegratedAwaitingMerge(integrated.clone(), branch),
+        None => CheckpointStep::Integrated(integrated.clone()),
+    };
+    if let Err(error) = checkpoint(db, &execution.id, step).await {
         let reason = format!("integrated Git state could not be checkpointed: {error:?}");
         if let Err(interrupt_error) = interrupt_recovered_apply(db, &execution.id, &reason).await {
             tracing::warn!(
@@ -3346,8 +3354,255 @@ async fn land_integration(
     // behind (KT-1316). Publication is total and idempotent.
     publish_accepted_delivery_or_warn(db, execution).await;
     cleanup_integrated_execution(db, execution, repo, child_path, &integrated).await?;
+    if into_default {
+        // Tasks integrated earlier into a feature branch may have reached the
+        // default branch with this landing.
+        if let Some(project_id) = integration_project_id(db, execution, run).await {
+            close_merged_awaiting_tasks(db, &project_id, repo, false).await;
+        }
+    }
     advance_campaign_after_integration(db, run).await;
     Ok(IntegrationOutcome::Integrated { sha: integrated })
+}
+
+/// The project an integration landed in: the run's, else the one the task
+/// belongs to.
+async fn integration_project_id(
+    db: &Database,
+    execution: &TaskExecution,
+    run: &crate::models::OrchestrationRun,
+) -> Option<String> {
+    if let Some(project_id) = run.project_id.clone() {
+        return Some(project_id);
+    }
+    let task_id = execution.task_id.clone();
+    db.with_conn(move |conn| {
+        Ok(crate::db::planning::get_task(conn, &task_id)?
+            .and_then(|task| task.summary.project_ids.into_iter().next()))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// How the sweep asks GitHub about a task's issue or pull request.
+pub(crate) struct GithubLookup {
+    pub(crate) api_base: String,
+    pub(crate) token: zeroize::Zeroizing<String>,
+}
+
+/// KT-1519 — close every task of `project_id` integrated into a feature branch
+/// whose change the default branch now holds. Two signals, because a squash
+/// merge (how this repository merges) leaves the integrated commit unreachable:
+/// the commit is an ancestor of the default branch (local or fetched
+/// `origin/<default>`), or GitHub reports the task's own issue (`github-N` tag)
+/// closed or the pull request it links merged from the task's branch. Best effort
+/// and idempotent: a task GitHub cannot be asked about stays awaiting.
+///
+/// `refresh_origin` first fetches the default branch from `origin`: after a merge
+/// on the remote nothing else moves `refs/remotes/origin/<default>` in the host
+/// checkout. The landing path passes `false` (its own ref has just moved).
+pub(crate) async fn close_merged_awaiting_tasks(
+    db: &Database,
+    project_id: &str,
+    repo: &std::path::Path,
+    refresh_origin: bool,
+) {
+    let pid = project_id.to_string();
+    let awaiting = match db
+        .with_conn(move |conn| crate::db::planning::list_awaiting_merge(conn, &pid))
+        .await
+    {
+        Ok(awaiting) => awaiting,
+        Err(error) => {
+            tracing::warn!(%error, "could not list tasks awaiting a merge");
+            return;
+        }
+    };
+    if awaiting.is_empty() {
+        return;
+    }
+    if refresh_origin {
+        fetch_default_branch(repo).await;
+    }
+    let github = if awaiting
+        .iter()
+        .any(|task| !task.tags.is_empty() || !task.link_urls.is_empty())
+    {
+        crate::core::github_connection::machine_token()
+            .await
+            .map(|(token, _)| GithubLookup {
+                api_base: crate::core::github_connection::api_base(),
+                token,
+            })
+    } else {
+        None
+    };
+    close_merged_awaiting_tasks_with(db, repo, awaiting, github.as_ref()).await;
+}
+
+const DEFAULT_BRANCH_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Bring `refs/remotes/origin/<default>` up to date. A repository without
+/// `origin`, or offline, keeps what it has: the sweep is best effort.
+async fn fetch_default_branch(repo: &std::path::Path) {
+    let probe_repo = repo.to_path_buf();
+    let name = tokio::task::spawn_blocking(move || {
+        crate::core::project_profile::default_branch_refs(&probe_repo)
+            .into_iter()
+            .next()
+            .map(|full| {
+                full.strip_prefix("refs/heads/")
+                    .or_else(|| full.strip_prefix("refs/remotes/origin/"))
+                    .unwrap_or(&full)
+                    .to_string()
+            })
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(name) = name else {
+        return;
+    };
+    if let Err(reason) = crate::workflows::workspace::fetch_remote_branch(
+        repo,
+        "origin",
+        &name,
+        DEFAULT_BRANCH_FETCH_TIMEOUT,
+    )
+    .await
+    {
+        tracing::debug!(%reason, "default branch not refreshed before the merge sweep");
+    }
+}
+
+pub(crate) async fn close_merged_awaiting_tasks_with(
+    db: &Database,
+    repo: &std::path::Path,
+    awaiting: Vec<crate::db::planning::AwaitingMergeTask>,
+    github: Option<&GithubLookup>,
+) {
+    // Git is synchronous: keep it off the async executor.
+    let probe_repo = repo.to_path_buf();
+    let probe = awaiting.clone();
+    let probed = tokio::task::spawn_blocking(move || {
+        let refs = crate::core::project_profile::default_branch_refs(&probe_repo);
+        let reached: Vec<bool> = probe
+            .iter()
+            .map(|task| {
+                refs.iter().any(|default_ref| {
+                    worktree::is_ancestor(&probe_repo, &task.sha, default_ref).unwrap_or(false)
+                })
+            })
+            .collect();
+        let slug = crate::core::github_connection::git_remote_urls(&probe_repo)
+            .iter()
+            .find_map(|url| crate::core::github_connection::github_repo_slug(url));
+        (reached, slug)
+    })
+    .await;
+    let Ok((reached, slug)) = probed else {
+        tracing::warn!("merge probe of the awaiting tasks did not complete");
+        return;
+    };
+    let mut merged: Vec<String> = Vec::new();
+    for (task, reached) in awaiting.iter().zip(reached) {
+        if reached {
+            merged.push(task.task_id.clone());
+            continue;
+        }
+        let (Some(github), Some(slug)) = (github, slug.as_deref()) else {
+            continue;
+        };
+        if github_says_landed(github, slug, task).await {
+            merged.push(task.task_id.clone());
+        }
+    }
+    if merged.is_empty() {
+        return;
+    }
+    let result = db
+        .with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            for task_id in &merged {
+                crate::db::planning::close_awaiting_merge_within_tx(
+                    &tx,
+                    task_id,
+                    &backend_actor(),
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await;
+    if let Err(error) = result {
+        tracing::warn!(%error, "could not close tasks merged into the default branch");
+    }
+}
+
+/// Whether GitHub reports `task` shipped: the issue its `github-N` tag claims is
+/// closed (or that pull request merged), or a pull request it links was merged
+/// from the very branch the task was integrated into. Any other number the task
+/// mentions is a reference and proves nothing.
+async fn github_says_landed(
+    github: &GithubLookup,
+    slug: &str,
+    task: &crate::db::planning::AwaitingMergeTask,
+) -> bool {
+    for number in crate::core::github_connection::tagged_work_item_numbers(&task.tags) {
+        let landed = crate::core::github_connection::work_item_landed(
+            &github.api_base,
+            &github.token,
+            slug,
+            number,
+        )
+        .await;
+        if landed == Some(true) {
+            return true;
+        }
+    }
+    for number in crate::core::github_connection::linked_pull_numbers(slug, &task.link_urls) {
+        let landed = crate::core::github_connection::pull_request_landed(
+            &github.api_base,
+            &github.token,
+            slug,
+            number,
+            &task.branch,
+        )
+        .await;
+        if landed == Some(true) {
+            return true;
+        }
+    }
+    false
+}
+
+const MERGE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// KT-1519 — runtime counterpart of the boot sweep: a feature branch merged on
+/// GitHub (a squash merge never reaches Kronn's own integration path) closes its
+/// awaiting tasks within minutes, not at the next restart.
+pub fn start_merge_sweep(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(MERGE_SWEEP_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick is immediate: the boot reconciliation only looks at
+        // local refs, this sweep also refreshes `origin` (in the background).
+        loop {
+            interval.tick().await;
+            let projects = match state.db.with_conn(crate::db::projects::list_projects).await {
+                Ok(projects) => projects,
+                Err(error) => {
+                    tracing::warn!(%error, "merge sweep could not list projects");
+                    continue;
+                }
+            };
+            for project in projects {
+                let repo = scanner::resolve_host_path(&project.path);
+                close_merged_awaiting_tasks(&state.db, &project.id, &repo, true).await;
+            }
+        }
+    });
 }
 
 /// Consume one durable boot-recovery decision for the integration saga. Every
@@ -3714,7 +3969,7 @@ async fn interrupt_recovered_apply(
 /// exists. A launch failure never rewrites the already-integrated result: it
 /// parks the campaign durably for inspection instead.
 async fn advance_campaign_after_integration(db: &Database, run: &crate::models::OrchestrationRun) {
-    use crate::models::{OrchestrationControlState, OrchestrationRunKind, PlanningTaskStatus};
+    use crate::models::{OrchestrationControlState, OrchestrationRunKind};
 
     if run.kind != OrchestrationRunKind::Campaign
         || run.control_state != OrchestrationControlState::Running
@@ -3732,12 +3987,10 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
                 .find(|candidate| candidate.launchable)
                 .map(|candidate| candidate.task.reference);
             let plan = crate::db::planning::get_discussion_plan(conn, &current.discussion_id)?;
-            let all_active_done = plan.active.iter().all(|relation| {
-                matches!(
-                    relation.task.status,
-                    PlanningTaskStatus::Done | PlanningTaskStatus::Archived
-                )
-            });
+            let all_active_done = plan
+                .active
+                .iter()
+                .all(|relation| relation.task.satisfies_dependents());
             Ok((current, attention, next, all_active_done))
         })
         .await;
@@ -4422,6 +4675,8 @@ enum CheckpointStep {
     Validating,
     Armed(String),
     Integrated(String),
+    /// KT-1519 — landed on this non-default branch: the task awaits the merge.
+    IntegratedAwaitingMerge(String, String),
 }
 
 /// Commit one saga checkpoint, mapping a lost race to an internal error: the caller
@@ -4445,6 +4700,12 @@ async fn checkpoint(
                 CheckpointStep::Integrated(sha) => IntegrationStep::Integrated {
                     integrated_sha: sha,
                 },
+                CheckpointStep::IntegratedAwaitingMerge(sha, branch) => {
+                    IntegrationStep::IntegratedAwaitingMerge {
+                        integrated_sha: sha,
+                        branch,
+                    }
+                }
             };
             commit_integration_checkpoint(conn, &id, step, &backend_actor())
         })
@@ -8333,12 +8594,7 @@ fn begin_provisioning(
         let active_blockers = task
             .blockers
             .iter()
-            .filter(|b| {
-                !matches!(
-                    b.status,
-                    PlanningTaskStatus::Done | PlanningTaskStatus::Archived
-                )
-            })
+            .filter(|b| !b.satisfies_dependents())
             .count();
         if active_blockers > 0 {
             return Ok(Err(ProvisionError::NotLaunchable(format!(
@@ -10161,12 +10417,7 @@ pub(crate) fn prepare_task_execution(
     let active_blockers = task
         .blockers
         .iter()
-        .filter(|blocker| {
-            !matches!(
-                blocker.status,
-                PlanningTaskStatus::Done | PlanningTaskStatus::Archived
-            )
-        })
+        .filter(|blocker| !blocker.satisfies_dependents())
         .count();
     if active_blockers > 0 {
         reasons.push(preparation_reason(
@@ -22079,6 +22330,14 @@ pub(crate) mod tests {
         assert_eq!(target.as_deref(), Some(parent_tip.as_str()));
         assert_eq!(merge.as_deref(), Some(sha.as_str()));
         assert_eq!(integrated.as_deref(), Some(sha.as_str()));
+        // KT-1519 — `main` is the default branch: the integration closes the task.
+        let tid = task_ref.clone();
+        let task = db
+            .with_conn(move |conn| Ok(crate::db::planning::get_task(conn, &tid)?.expect("task")))
+            .await
+            .unwrap();
+        assert_eq!(task.summary.status, crate::models::PlanningTaskStatus::Done);
+        assert!(task.summary.awaiting_merge.is_none());
         let backup = backup.expect("a backup ref must have been armed");
         assert_eq!(
             worktree::resolve_commit(repo.path(), &backup).unwrap(),
@@ -23509,6 +23768,573 @@ pub(crate) mod tests {
         assert_eq!(done.status, TaskExecutionStatus::Done);
         assert_eq!(done.integrated_sha.as_deref(), Some(sha.as_str()));
         assert_eq!(done.blocked_reason_code, None);
+
+        // KT-1519 — `review-target` is not the default branch: the execution is
+        // done, the task is integrated and awaits the merge, not done.
+        let task_id = done.task_id.clone();
+        async fn task_state(db: &Database, task_id: String) -> crate::models::PlanningTaskSummary {
+            db.with_conn(move |conn| {
+                Ok(crate::db::planning::get_task(conn, &task_id)?
+                    .expect("task exists")
+                    .summary)
+            })
+            .await
+            .unwrap()
+        }
+        let open = task_state(&db, task_id.clone()).await;
+        assert_eq!(open.status, crate::models::PlanningTaskStatus::InProgress);
+        let awaiting = open.awaiting_merge.expect("integrated, awaiting the merge");
+        assert_eq!(awaiting.branch, "review-target");
+        assert_eq!(awaiting.sha, sha);
+
+        // Not merged yet: the sweep leaves it open.
+        close_merged_awaiting_tasks(&db, "proj-1", repo.path(), false).await;
+        assert_eq!(
+            task_state(&db, task_id.clone()).await.status,
+            crate::models::PlanningTaskStatus::InProgress
+        );
+
+        // The branch reaches the default branch: the task closes.
+        let merge = std::process::Command::new("git")
+            .args(["merge", "--ff-only", "review-target"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(merge.status.success(), "{merge:?}");
+        close_merged_awaiting_tasks(&db, "proj-1", repo.path(), false).await;
+        let closed = task_state(&db, task_id).await;
+        assert_eq!(closed.status, crate::models::PlanningTaskStatus::Done);
+        assert!(closed.awaiting_merge.is_none());
+    }
+
+    async fn task_summary(db: &Database, task_id: &str) -> crate::models::PlanningTaskSummary {
+        let task_id = task_id.to_string();
+        db.with_conn(move |conn| {
+            Ok(crate::db::planning::get_task(conn, &task_id)?
+                .expect("task exists")
+                .summary)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A task of `proj-1` integrated into `branch` at `sha` and awaiting the
+    /// merge, named after GitHub issue `issue` when given.
+    async fn awaiting_merge_task(
+        db: &Database,
+        title: &str,
+        branch: &str,
+        sha: &str,
+        issue: Option<u64>,
+    ) -> String {
+        let (title, branch, sha) = (title.to_string(), branch.to_string(), sha.to_string());
+        db.with_conn(move |conn| {
+            let id = create_todo_task(conn, "proj-1", &title).summary.id;
+            conn.execute(
+                "UPDATE planning_tasks SET status = 'in_progress' WHERE id = ?1",
+                [&id],
+            )?;
+            if let Some(issue) = issue {
+                conn.execute(
+                    "INSERT INTO planning_task_tags (task_id, tag) VALUES (?1, ?2)",
+                    rusqlite::params![id, format!("github-{issue}")],
+                )?;
+            }
+            assert!(crate::db::planning::mark_task_awaiting_merge_within_tx(
+                conn,
+                &id,
+                &branch,
+                &sha,
+                &backend_actor()
+            )?);
+            Ok(id)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// One GitHub answer for every request, served on loopback.
+    async fn stub_github(body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = [0u8; 2048];
+                let _ = socket.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        base
+    }
+
+    async fn sweep_with(db: &Database, repo: &Path, github: Option<&GithubLookup>) {
+        let awaiting = db
+            .with_conn(|conn| crate::db::planning::list_awaiting_merge(conn, "proj-1"))
+            .await
+            .unwrap();
+        close_merged_awaiting_tasks_with(db, repo, awaiting, github).await;
+    }
+
+    fn stub_lookup(api_base: String) -> GithubLookup {
+        GithubLookup {
+            api_base,
+            token: zeroize::Zeroizing::new("test-token".into()),
+        }
+    }
+
+    /// Commit `side.txt` on a new branch off `main` and come back to `main`:
+    /// the returned commit is one the default branch does not contain.
+    fn commit_on_side_branch(repo: &Path, branch: &str) -> String {
+        assert!(git(repo, &["checkout", "-q", "-b", branch])
+            .status
+            .success());
+        std::fs::write(repo.join("side.txt"), "x").unwrap();
+        assert!(git(repo, &["add", "."]).status.success());
+        assert!(git(repo, &["commit", "-q", "-m", "side"]).status.success());
+        let sha = git_rev(repo, "HEAD");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        sha
+    }
+
+    /// KT-1519: a squash merge never makes the integrated commit reachable from
+    /// the default branch; GitHub saying the task's pull request merged (or its
+    /// issue closed) is what closes the task.
+    #[tokio::test]
+    async fn a_squash_merged_task_closes_through_its_github_issue() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        seed(&db, repo.path()).await;
+        assert!(git(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/widgets.git"
+            ]
+        )
+        .status
+        .success());
+        let sha = commit_on_side_branch(repo.path(), "autocode/kt-7");
+        let task = awaiting_merge_task(&db, "squashed", "autocode/kt-7", &sha, Some(7)).await;
+        let untouched = awaiting_merge_task(&db, "no issue", "autocode/kt-7", &sha, None).await;
+
+        let still_open = stub_github(r#"{"state":"open"}"#).await;
+        sweep_with(&db, repo.path(), Some(&stub_lookup(still_open))).await;
+        assert!(task_summary(&db, &task).await.awaiting_merge.is_some());
+
+        let rejected = stub_github(r#"{"state":"closed","state_reason":"not_planned"}"#).await;
+        sweep_with(&db, repo.path(), Some(&stub_lookup(rejected))).await;
+        assert!(
+            task_summary(&db, &task).await.awaiting_merge.is_some(),
+            "an issue closed as not planned shipped nothing"
+        );
+
+        let unmerged_pr =
+            stub_github(r#"{"state":"closed","pull_request":{"merged_at":null}}"#).await;
+        sweep_with(&db, repo.path(), Some(&stub_lookup(unmerged_pr))).await;
+        assert!(
+            task_summary(&db, &task).await.awaiting_merge.is_some(),
+            "a pull request closed without a merge shipped nothing"
+        );
+
+        sweep_with(&db, repo.path(), None).await;
+        assert!(
+            task_summary(&db, &task).await.awaiting_merge.is_some(),
+            "without GitHub the squash merge cannot be seen"
+        );
+
+        let merged = stub_github(
+            r#"{"state":"closed","pull_request":{"merged_at":"2026-10-30T10:00:00Z"}}"#,
+        )
+        .await;
+        sweep_with(&db, repo.path(), Some(&stub_lookup(merged))).await;
+        let closed = task_summary(&db, &task).await;
+        assert_eq!(closed.status, crate::models::PlanningTaskStatus::Done);
+        assert!(closed.awaiting_merge.is_none());
+        assert!(
+            task_summary(&db, &untouched).await.awaiting_merge.is_some(),
+            "a task naming no GitHub item is not closed by someone else's merge"
+        );
+    }
+
+    /// KT-1519: after a GitHub merge only the fetched `origin/<default>` moves;
+    /// the local default branch stays behind until a pull.
+    #[tokio::test]
+    async fn a_merge_seen_only_on_the_fetched_origin_default_branch_closes_the_task() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        seed(&db, repo.path()).await;
+        let sha = commit_on_side_branch(repo.path(), "autocode/kt-8");
+        let task = awaiting_merge_task(&db, "fetched", "autocode/kt-8", &sha, None).await;
+
+        sweep_with(&db, repo.path(), None).await;
+        assert!(task_summary(&db, &task).await.awaiting_merge.is_some());
+
+        assert!(git(
+            repo.path(),
+            &["update-ref", "refs/remotes/origin/main", &sha]
+        )
+        .status
+        .success());
+        assert_ne!(
+            git_rev(repo.path(), "main"),
+            sha,
+            "the local branch is behind"
+        );
+        sweep_with(&db, repo.path(), None).await;
+        assert_eq!(
+            task_summary(&db, &task).await.status,
+            crate::models::PlanningTaskStatus::Done
+        );
+    }
+
+    async fn link_task(db: &Database, task_id: &str, url: &str) {
+        let (task_id, url) = (task_id.to_string(), url.to_string());
+        db.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO planning_task_links (id, task_id, label, url, position)
+                 VALUES (?1, ?2, 'ref', ?3, 0)",
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), task_id, url],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-1519: a link is a reference. A follow-up that links an earlier closed
+    /// issue or an earlier merged pull request (from another branch) must stay
+    /// open until its own branch is merged; the pull request that merged *its*
+    /// branch closes it.
+    #[tokio::test]
+    async fn a_task_linking_an_earlier_merged_item_is_not_closed_by_it() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        seed(&db, repo.path()).await;
+        assert!(git(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/widgets.git"
+            ]
+        )
+        .status
+        .success());
+        let sha = commit_on_side_branch(repo.path(), "autocode/kt-1500");
+        let follow_up = awaiting_merge_task(&db, "follow-up", "autocode/kt-1500", &sha, None).await;
+        link_task(
+            &db,
+            &follow_up,
+            "https://github.com/acme/widgets/issues/433",
+        )
+        .await;
+        link_task(&db, &follow_up, "https://github.com/acme/widgets/pull/400").await;
+
+        let earlier_work = stub_github(
+            r#"{"state":"closed","state_reason":"completed","merged":true,
+                "pull_request":{"merged_at":"2026-10-01T10:00:00Z"},
+                "head":{"ref":"autocode/kt-1"}}"#,
+        )
+        .await;
+        sweep_with(&db, repo.path(), Some(&stub_lookup(earlier_work))).await;
+        let open = task_summary(&db, &follow_up).await;
+        assert_eq!(open.status, crate::models::PlanningTaskStatus::InProgress);
+        assert!(
+            open.awaiting_merge.is_some(),
+            "an earlier closed issue or merged pull request says nothing about this branch"
+        );
+
+        let its_own = stub_github(
+            r#"{"state":"closed","merged":true,
+                "pull_request":{"merged_at":"2026-10-31T10:00:00Z"},
+                "head":{"ref":"autocode/kt-1500"}}"#,
+        )
+        .await;
+        sweep_with(&db, repo.path(), Some(&stub_lookup(its_own))).await;
+        assert_eq!(
+            task_summary(&db, &follow_up).await.status,
+            crate::models::PlanningTaskStatus::Done
+        );
+    }
+
+    /// KT-1519: a merge made on the remote moves nothing in the host checkout until
+    /// something fetches, so the sweep fetches the default branch itself — and the
+    /// landing path, whose own ref just moved, does not.
+    #[tokio::test]
+    async fn the_sweep_fetches_origin_to_see_a_merge_made_on_the_remote() {
+        let repo = init_repo();
+        let origin = tempfile::Builder::new()
+            .prefix("kronn-origin-")
+            .tempdir()
+            .unwrap();
+        assert!(git(origin.path(), &["init", "-q", "--bare", "-b", "main"])
+            .status
+            .success());
+        let url = origin.path().to_str().unwrap();
+        assert!(git(repo.path(), &["remote", "add", "origin", url])
+            .status
+            .success());
+        assert!(git(repo.path(), &["push", "-q", "origin", "main"])
+            .status
+            .success());
+        let db = Database::open_in_memory().unwrap();
+        seed(&db, repo.path()).await;
+        let sha = commit_on_side_branch(repo.path(), "autocode/kt-9");
+        let task = awaiting_merge_task(&db, "remote merge", "autocode/kt-9", &sha, None).await;
+
+        // The branch is merged on the remote (a plain merge commit keeps the
+        // sha reachable); the host checkout has fetched nothing since.
+        assert!(git(
+            repo.path(),
+            &[
+                "push",
+                "-q",
+                "origin",
+                "autocode/kt-9:refs/heads/autocode/kt-9"
+            ]
+        )
+        .status
+        .success());
+        assert!(git(origin.path(), &["update-ref", "refs/heads/main", &sha])
+            .status
+            .success());
+        assert_ne!(git_rev(repo.path(), "refs/remotes/origin/main"), sha);
+
+        close_merged_awaiting_tasks(&db, "proj-1", repo.path(), false).await;
+        assert!(
+            task_summary(&db, &task).await.awaiting_merge.is_some(),
+            "without a fetch the remote merge is invisible"
+        );
+        close_merged_awaiting_tasks(&db, "proj-1", repo.path(), true).await;
+        assert_eq!(git_rev(repo.path(), "refs/remotes/origin/main"), sha);
+        assert_eq!(
+            task_summary(&db, &task).await.status,
+            crate::models::PlanningTaskStatus::Done
+        );
+    }
+
+    /// KT-1519: landing on the default branch sweeps the tasks integrated earlier
+    /// into a feature branch that the default branch now holds; landing on a
+    /// feature branch does not.
+    #[tokio::test]
+    async fn landing_on_the_default_branch_sweeps_the_awaiting_tasks_a_feature_landing_does_not() {
+        for into_default in [true, false] {
+            let repo = init_repo();
+            let db = Database::open_in_memory().unwrap();
+            let (execution, _, _) = approved_execution_with_commit(
+                &db,
+                repo.path(),
+                "sweep-after-landing",
+                "worker.txt",
+                "validated",
+                vec![],
+            )
+            .await;
+            if !into_default {
+                pin_unchecked_out_target(&db, repo.path(), &execution).await;
+            }
+            // Integrated earlier into a branch the default branch already holds.
+            let held = git_rev(repo.path(), "main");
+            let earlier = awaiting_merge_task(&db, "earlier", "autocode/kt-1", &held, None).await;
+
+            let outcome = run_integration(&db, &execution.id).await.unwrap();
+            assert!(matches!(outcome, IntegrationOutcome::Integrated { .. }));
+            let earlier = task_summary(&db, &earlier).await;
+            if into_default {
+                assert_eq!(earlier.status, crate::models::PlanningTaskStatus::Done);
+                assert!(earlier.awaiting_merge.is_none());
+            } else {
+                assert_eq!(
+                    earlier.status,
+                    crate::models::PlanningTaskStatus::InProgress
+                );
+                assert!(earlier.awaiting_merge.is_some());
+            }
+        }
+    }
+
+    /// KT-1519: a task integrated into a campaign branch awaits its merge; the
+    /// next task, which builds on that branch, launches (preflight and launch
+    /// boundary alike) instead of being held back by it.
+    #[tokio::test]
+    async fn a_task_awaiting_its_merge_no_longer_blocks_the_next_launch() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (first_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let second_ref = {
+            let first_ref = first_ref.clone();
+            db.with_conn(move |conn| {
+                let second = create_todo_task(conn, "proj-1", "Seconde");
+                crate::db::planning::add_blocker(
+                    conn,
+                    &second.summary.reference,
+                    &crate::models::AddPlanningBlockerRequest {
+                        blocker_task_id: first_ref,
+                        actor: test_actor(),
+                    },
+                )?;
+                Ok(second.summary.reference)
+            })
+            .await
+            .unwrap()
+        };
+        for task_reference in [&first_ref, &second_ref] {
+            let task_reference = task_reference.clone();
+            let parent_id = parent_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::planning::link_discussion(
+                    conn,
+                    &task_reference,
+                    &crate::models::LinkPlanningDiscussionRequest {
+                        discussion_id: parent_id,
+                        placement: Default::default(),
+                        is_primary: true,
+                        position: None,
+                        actor: test_actor(),
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        }
+        let worker = native_worker();
+        let preflight = |db: std::sync::Arc<Database>| {
+            let (second_ref, parent_id, worker) =
+                (second_ref.clone(), parent_id.clone(), worker.clone());
+            async move {
+                db.with_conn(move |conn| {
+                    prepare_task_execution(conn, &second_ref, &parent_id, &worker)
+                })
+                .await
+                .unwrap()
+            }
+        };
+        let launch = |db: std::sync::Arc<Database>, key: &'static str| {
+            let input = ProvisionInput {
+                task_reference: second_ref.clone(),
+                parent_discussion_id: parent_id.clone(),
+                worker: worker.clone(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some(key.into()),
+            };
+            async move { provision_single_task_execution(&db, input).await }
+        };
+
+        // The blocker is only in progress: both gates refuse.
+        let first_id = task_summary(&db, &first_ref).await.id;
+        let id = first_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE planning_tasks SET status = 'in_progress' WHERE id = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let held = preflight(db.clone()).await;
+        assert!(!held.launchable);
+        assert!(held.reasons.iter().any(|r| r.code == "active_blockers"));
+        assert!(launch(db.clone(), "blocked").await.is_err());
+
+        // Integrated into a campaign branch: awaiting the merge satisfies it.
+        db.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            assert!(crate::db::planning::mark_task_awaiting_merge_within_tx(
+                &tx,
+                &first_id,
+                "autocode/kt-1",
+                "abc123",
+                &backend_actor(),
+            )?);
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let open = preflight(db.clone()).await;
+        assert!(
+            !open.reasons.iter().any(|r| r.code == "active_blockers"),
+            "{:#?}",
+            open.reasons
+        );
+        launch(db.clone(), "unblocked")
+            .await
+            .expect("the next task launches once the blocker is integrated");
+    }
+
+    /// KT-1519: a campaign whose last task is integrated into a feature branch
+    /// completes (that task awaits its merge, nothing is left to run).
+    #[tokio::test]
+    async fn a_campaign_completes_when_its_tasks_are_integrated_awaiting_their_merge() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let [(first, _), (second, _)] = campaign_with_two_approvals(
+            &db,
+            repo.path(),
+            vec![],
+            [&[("first.txt", "first")], &[("second.txt", "second")]],
+        )
+        .await;
+        assert!(git(repo.path(), &["branch", "campaign-branch", "main"])
+            .status
+            .success());
+        let run_id = first.orchestration_run_id.clone();
+        let id = run_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET target_branch = 'campaign-branch' WHERE id = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let control_state = |db: std::sync::Arc<Database>| {
+            let id = run_id.clone();
+            async move {
+                db.with_conn(move |conn| {
+                    Ok(crate::db::orchestration::get_orchestration_run(conn, &id)?
+                        .unwrap()
+                        .control_state)
+                })
+                .await
+                .unwrap()
+            }
+        };
+
+        let landed = run_integration(&db, &first.id).await.unwrap();
+        assert!(matches!(landed, IntegrationOutcome::Integrated { .. }));
+        assert_eq!(
+            control_state(db.clone()).await,
+            crate::models::OrchestrationControlState::Running,
+            "a task is still to integrate"
+        );
+        let landed = run_integration(&db, &second.id).await.unwrap();
+        assert!(matches!(landed, IntegrationOutcome::Integrated { .. }));
+        assert!(task_summary(&db, &first.task_id)
+            .await
+            .awaiting_merge
+            .is_some());
+        assert!(task_summary(&db, &second.task_id)
+            .await
+            .awaiting_merge
+            .is_some());
+        assert_eq!(
+            control_state(db.clone()).await,
+            crate::models::OrchestrationControlState::Completed
+        );
     }
 
     #[tokio::test]

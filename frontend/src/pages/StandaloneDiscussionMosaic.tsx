@@ -48,7 +48,7 @@ const DiscussionTile = memo(function DiscussionTile({ id, item, error, selected,
     if (follow && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
   }, [preview, follow]);
   const plan = preview?.plan;
-  const total = plan ? plan.done + plan.ready + plan.blocked + plan.in_progress + plan.ideas : 0;
+  const total = plan ? plan.done + plan.ready + plan.blocked + plan.in_progress + plan.awaiting_merge + plan.ideas : 0;
   const status = preview?.pending_question_count ? t('disc.mosaic.question')
     : preview?.progress_phase === 'upstream_wait' ? t('disc.mosaic.upstream')
       : preview?.agent_running ? t('disc.mosaic.running')
@@ -75,6 +75,7 @@ const DiscussionTile = memo(function DiscussionTile({ id, item, error, selected,
         <progress value={plan.done} max={total} aria-label={t('disc.mosaic.plan', plan.done, total)} />
         <span>{t('disc.mosaic.planDetails', plan.in_progress, plan.ready, plan.blocked, plan.ideas)}</span>
       </> : <span>{t('disc.mosaic.noPlan')}</span>}
+      {plan.awaiting_merge > 0 && <span>{t('disc.mosaic.awaitingMerge', plan.awaiting_merge)}</span>}
       {plan.later > 0 && <span>{t('disc.mosaic.later', plan.later)}</span>}
     </div>}
     <div ref={scroll} className="discussion-mosaic-scroll" tabIndex={0} aria-label={t('disc.mosaic.messages', preview?.title || id)}

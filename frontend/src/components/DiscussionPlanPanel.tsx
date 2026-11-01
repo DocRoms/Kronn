@@ -60,6 +60,7 @@ import type {
 import type { ToastFn } from '../hooks/useToast';
 import './DiscussionToolPanel.css';
 import './DiscussionPlanPanel.css';
+import { awaitingMergeTitle, shortBranch } from '../lib/awaitingMerge';
 
 interface Props {
   discussionId: string;
@@ -544,7 +545,9 @@ export function DiscussionPlanPanel({
     void refresh(true);
   };
 
-  const renderProgress = (status: PlanningTaskStatus) => status === 'in_progress' ? (
+  // An integrated task awaiting its merge is no longer being worked on: its
+  // warning chip stands in for the in-progress indicator.
+  const renderProgress = (task: PlanningTaskSummary) => task.status === 'in_progress' && !task.awaiting_merge ? (
     <span className="plan-task-progress" role="img" aria-label={t('planning.status.in_progress')}>
       <Loader2 size={12} aria-hidden="true" />
     </span>
@@ -584,7 +587,7 @@ export function DiscussionPlanPanel({
             <span className="plan-task-title">{relation.task.title}</span>
           </button>
           <span className="plan-task-meta">
-            {renderProgress(relation.task.status)}
+            {renderProgress(relation.task)}
             <CopyIdPill
               id={relation.task.id}
               label={relation.task.reference}
@@ -595,6 +598,11 @@ export function DiscussionPlanPanel({
               <span>{relation.task.completed_subtasks}/{relation.task.total_subtasks}</span>
             )}
             {blocked && <span className="plan-blocked">{t('planning.blocked')}</span>}
+            {relation.task.awaiting_merge && (
+              <span data-status="awaiting_merge" title={awaitingMergeTitle(relation.task.awaiting_merge)}>
+                {t('planning.status.awaitingMerge', shortBranch(relation.task.awaiting_merge.branch))}
+              </span>
+            )}
             <TaskAssigneeChips assignees={relation.task.assignees} />
             <TaskAssigneePicker
               taskId={relation.task.id}
@@ -654,10 +662,15 @@ export function DiscussionPlanPanel({
       <div className="plan-all-task-content" data-selected={selected}>
         <span className="plan-all-task-title">{relation.task.title}</span>
         <span className="plan-all-task-meta">
-          {renderProgress(relation.task.status)}
+          {renderProgress(relation.task)}
           <span>{relation.task.reference}</span>
-          <span data-status={relation.task.status}>
-            {t(`planning.status.${relation.task.status}`)}
+          <span
+            data-status={relation.task.awaiting_merge ? 'awaiting_merge' : relation.task.status}
+            title={relation.task.awaiting_merge ? awaitingMergeTitle(relation.task.awaiting_merge) : undefined}
+          >
+            {relation.task.awaiting_merge
+              ? t('planning.status.awaitingMerge', shortBranch(relation.task.awaiting_merge.branch))
+              : t(`planning.status.${relation.task.status}`)}
           </span>
           {relation.active_blockers.length > 0 && (
             <span data-kind="blocked">

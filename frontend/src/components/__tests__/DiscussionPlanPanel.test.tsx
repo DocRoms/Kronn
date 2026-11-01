@@ -116,7 +116,7 @@ function plan(overrides: Partial<DiscussionPlan> = {}): DiscussionPlan {
     later: [],
     completed_active: 0,
     total_active: 1,
-    stats: { ready: 1, blocked: 0, in_progress: 0, ideas: 0, done: 0, later: 0 },
+    stats: { ready: 1, blocked: 0, in_progress: 0, awaiting_merge: 0, ideas: 0, done: 0, later: 0 },
     ...overrides,
   };
 }
@@ -174,6 +174,55 @@ describe('DiscussionPlanPanel', () => {
     expect(screen.getAllByText('KT-1')).toHaveLength(2);
     expect(screen.getByText('planning.progress:0/1')).toBeInTheDocument();
     expect(screen.getAllByTitle('planning.copyTaskId:KT-1')).toHaveLength(2);
+  });
+
+  it('shows a task integrated into a feature branch as awaiting its merge, not as done', async () => {
+    const active = [
+      relation({
+        id: 'awaiting', title: 'Integrated task', status: 'in_progress',
+        awaiting_merge: { branch: 'autocode/kt-1495', sha: 'abc123' },
+      }),
+      relation({ id: 'plain', title: 'Plain task', status: 'in_progress' }),
+    ];
+    mocks.discussionPlan.mockResolvedValue(plan({ primary_objective: null, active }));
+    render(<DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />);
+
+    await screen.findByText('Integrated task');
+    expect(screen.getAllByText('planning.status.awaitingMerge:autocode/kt-1495').length).toBeGreaterThan(0);
+    expect(screen.queryByText('planning.status.done')).not.toBeInTheDocument();
+    expect(screen.getAllByText('planning.status.in_progress').length).toBeGreaterThan(0);
+  });
+
+  it('replaces the in-progress indicator with the awaiting-merge chip instead of adding to it', async () => {
+    const active = [
+      relation({
+        id: 'awaiting', title: 'Integrated task', status: 'in_progress',
+        awaiting_merge: { branch: 'autocode/kt-1495', sha: 'abc123' },
+      }),
+    ];
+    mocks.discussionPlan.mockResolvedValue(plan({ primary_objective: null, active }));
+    const { container } = render(<DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />);
+
+    await screen.findByText('Integrated task');
+    expect(screen.getAllByText('planning.status.awaitingMerge:autocode/kt-1495').length).toBeGreaterThan(0);
+    expect(container.querySelector('.plan-task-progress')).toBeNull();
+  });
+
+  it('cuts a long branch name in the awaiting-merge pill and keeps the full name on its title', async () => {
+    const branch = 'autocode/campaign/kt-1519-tasks-are-marked-done-too-early';
+    const active = [
+      relation({
+        id: 'awaiting', title: 'Integrated task', status: 'in_progress',
+        awaiting_merge: { branch, sha: '0123456789abcdef' },
+      }),
+    ];
+    mocks.discussionPlan.mockResolvedValue(plan({ primary_objective: null, active }));
+    render(<DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />);
+
+    await screen.findByText('Integrated task');
+    expect(screen.queryByText(`planning.status.awaitingMerge:${branch}`)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/^planning\.status\.awaitingMerge:….*done-too-early$/).length).toBeGreaterThan(0);
+    expect(screen.getAllByTitle(`${branch} @ 01234567`).length).toBeGreaterThan(0);
   });
 
   it('opens the explicit linked task even when browser storage is unavailable', async () => {
@@ -347,7 +396,7 @@ describe('DiscussionPlanPanel', () => {
     mocks.discussionPlan.mockResolvedValue(plan({
       primary_objective: activeTask,
       active: [relation({ status: 'in_progress' }, { is_primary: true, actionable: false })],
-      stats: { ready: 0, blocked: 0, in_progress: 1, ideas: 0, done: 0, later: 0 },
+      stats: { ready: 0, blocked: 0, in_progress: 1, awaiting_merge: 0, ideas: 0, done: 0, later: 0 },
     }));
     mocks.get.mockResolvedValue(detail({
       status: 'in_progress',
@@ -657,6 +706,7 @@ describe('DiscussionPlanPanel', () => {
         ready: 7,
         blocked: 3,
         in_progress: 4,
+        awaiting_merge: 0,
         ideas: 1,
         done: 3,
         later: 6,
@@ -729,12 +779,12 @@ describe('DiscussionPlanPanel', () => {
       .mockResolvedValueOnce(plan({
         primary_objective: null,
         active: [waiting],
-        stats: { ready: 0, blocked: 1, in_progress: 0, ideas: 0, done: 0, later: 0 },
+        stats: { ready: 0, blocked: 1, in_progress: 0, awaiting_merge: 0, ideas: 0, done: 0, later: 0 },
       }))
       .mockResolvedValue(plan({
         primary_objective: null,
         active: [unblocked],
-        stats: { ready: 1, blocked: 0, in_progress: 0, ideas: 0, done: 0, later: 0 },
+        stats: { ready: 1, blocked: 0, in_progress: 0, awaiting_merge: 0, ideas: 0, done: 0, later: 0 },
       }));
 
     render(
@@ -784,7 +834,7 @@ describe('DiscussionPlanPanel', () => {
       primary_objective: null,
       active: [parent, child, orphan],
       total_active: 3,
-      stats: { ready: 3, blocked: 0, in_progress: 0, ideas: 0, done: 0, later: 0 },
+      stats: { ready: 3, blocked: 0, in_progress: 0, awaiting_merge: 0, ideas: 0, done: 0, later: 0 },
     }));
 
     render(
@@ -837,7 +887,7 @@ describe('DiscussionPlanPanel', () => {
     mocks.discussionPlan.mockResolvedValue(plan({
       active: [relation({}, { is_primary: true }), internal],
       total_active: 2,
-      stats: { ready: 2, blocked: 0, in_progress: 0, ideas: 0, done: 0, later: 0 },
+      stats: { ready: 2, blocked: 0, in_progress: 0, awaiting_merge: 0, ideas: 0, done: 0, later: 0 },
     }));
     mocks.get
       .mockResolvedValueOnce(selectedDetail)
@@ -972,7 +1022,7 @@ describe('DiscussionPlanPanel', () => {
         primary_objective: null,
         active: [...current, relation({ title: 'Unstarted task' })],
         later: [later, relation({ id: 'later-todo', title: 'Later todo' }, { placement: 'later' })],
-        stats: { ready: 1, blocked: 1, in_progress: 3, ideas: 0, done: 0, later: 2 },
+        stats: { ready: 1, blocked: 1, in_progress: 3, awaiting_merge: 0, ideas: 0, done: 0, later: 2 },
       }));
       render(<DiscussionPlanPanel discussionId="disc-1" onClose={vi.fn()} toast={vi.fn()} />);
       fireEvent.click(await screen.findByLabelText('planning.filterBlocked'));
@@ -1070,7 +1120,7 @@ describe('DiscussionPlanPanel', () => {
       later: [later],
       total_active: 3,
       completed_active: 1,
-      stats: { ready: 1, blocked: 1, in_progress: 0, ideas: 0, done: 1, later: 1 },
+      stats: { ready: 1, blocked: 1, in_progress: 0, awaiting_merge: 0, ideas: 0, done: 1, later: 1 },
     }));
 
     const { container } = render(
