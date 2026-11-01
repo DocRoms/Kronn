@@ -344,7 +344,8 @@ export function AgentsSection({
 
   useEffect(() => {
     let active = true;
-    usageApi.get('monthly')
+    // Whole history: the per-model average needs every month, not only this one.
+    usageApi.get('monthly', { history: true })
       .then(report => {
         if (active && report.rows.length > 0) setUsageReport(report);
       })

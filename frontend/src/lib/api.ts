@@ -3408,9 +3408,11 @@ export const rtk = {
 export const usage = {
   /** 0.8.7 — global usage/cost report across the detected CLIs (Claude /
    *  Codex / Gemini …). `period` = daily | weekly | monthly. Real token +
-   *  cache breakdown, not Kronn's rough estimate. */
-  get: (period: 'daily' | 'weekly' | 'monthly' = 'daily') =>
-    api<UsageReport>('GET', `/usage?period=${period}`),
+   *  cache breakdown, not Kronn's rough estimate. By default the report
+   *  covers the current day / week / month; `history` reads the whole log
+   *  history, for callers that average over time. */
+  get: (period: 'daily' | 'weekly' | 'monthly' = 'daily', opts?: { history?: boolean }) =>
+    api<UsageReport>('GET', `/usage?period=${period}${opts?.history ? '&history=true' : ''}`),
 };
 
 // ─── Ollama (local LLM) ────────────────────────────────────────────────────

@@ -17,9 +17,3 @@ export function formatPeriod(kind: string, period: string, locale: string): stri
   }
   return period;
 }
-
-const ROWS_PER_PAGE: Record<string, number> = { daily: 30, weekly: 15, monthly: 12 };
-
-export function rowsPerPage(kind: string): number {
-  return ROWS_PER_PAGE[kind] ?? 30;
-}
