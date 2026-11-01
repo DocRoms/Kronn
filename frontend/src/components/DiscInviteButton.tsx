@@ -152,14 +152,14 @@ export function DiscInviteButton({ discId, toast, t, onInvited }: DiscInviteButt
     <>
       <button
         type="button"
-        className="disc-participants-invite-btn"
+        className="disc-participants-invite-btn disc-chat-header-btn disc-chat-header-btn--primary"
         onClick={handleInvite}
         disabled={inviting}
         title={t('disc.invitePeerTooltip')}
         aria-label={t('disc.invitePeerTooltip')}
       >
-        <UserPlus size={11} />
-        {t('disc.invitePeer')}
+        <UserPlus size={13} />
+        <span>{t('disc.invitePeer')}</span>
       </button>
 
       {showModal && invite && (

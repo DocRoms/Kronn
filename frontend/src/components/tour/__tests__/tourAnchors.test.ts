@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TOUR_STEPS } from '../tourSteps';
 
 /**
@@ -84,29 +84,25 @@ describe('tour anchors exist in the app', () => {
     expect(conditional, 'anchor on the container, not on a list row').toEqual([]);
   });
 
-  it('opens the side panel on its details before requiring the copyable-ID anchor', () => {
+  it('anchors the copyable-ID step on the id next to the title, without opening any panel', () => {
     const step = TOUR_STEPS.find(candidate => candidate.id === 'copyable-ids');
     expect(step?.optionalWhenMissing).not.toBe(true);
+    expect(step?.selector).toBe('[data-tour-id="discussion-id-pill"]');
 
     document.body.innerHTML = [
       '<button data-testid="disc-header-details-btn" aria-expanded="false"></button>',
+      '<button data-tour-id="discussion-id-pill"></button>',
       '<button data-tour-id="message-id-pill"></button>',
     ].join('');
-    const disclosure = document.querySelector<HTMLElement>(
-      '[data-testid="disc-header-details-btn"]',
-    )!;
-    disclosure.addEventListener('click', () => {
-      disclosure.setAttribute('aria-expanded', 'true');
-      document.body.insertAdjacentHTML(
-        'beforeend',
-        '<button data-tour-id="discussion-id-pill"></button>',
-      );
-    });
+    const details = document.querySelector<HTMLElement>('[data-testid="disc-header-details-btn"]')!;
+    const onClick = vi.fn();
+    details.addEventListener('click', onClick);
 
     step?.beforeStep?.();
 
-    expect(disclosure).toHaveAttribute('aria-expanded', 'true');
-    expect(document.querySelector('[data-tour-id="discussion-id-pill"]')).not.toBeNull();
+    expect(onClick).not.toHaveBeenCalled();
+    expect(details).toHaveAttribute('aria-expanded', 'false');
+    expect(document.querySelector('[data-tour-current-message-id="true"]')).not.toBeNull();
   });
 
   it('teaches every Automation category in the same order as the sidebar', () => {

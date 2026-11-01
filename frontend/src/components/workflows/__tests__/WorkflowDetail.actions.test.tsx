@@ -200,6 +200,15 @@ describe('WorkflowDetail — header actions', () => {
     expect(pill?.querySelector('svg')).not.toBeNull();
   });
 
+  it('keeps the workflow ID pill right next to the title, never behind a fold (KT-1530)', () => {
+    const { container } = renderDetail({ workflow: mkWorkflow({ id: '12345678-90ab-cdef-1234-567890abcdef' }) });
+    const heading = container.querySelector('.wf-detail-heading')!;
+    expect(heading.querySelector('h2')).not.toBeNull();
+    const pill = heading.querySelector('.wf-id-pill');
+    expect(pill).toHaveTextContent('#12345678');
+    expect(pill!.previousElementSibling).toBe(heading.querySelector('h2'));
+  });
+
   it('renders the workflow name and the Manual trigger label', () => {
     const { container } = renderDetail();
     expect(screen.getByText('Ticket Autopilot')).toBeInTheDocument();

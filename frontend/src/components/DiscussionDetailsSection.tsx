@@ -1,12 +1,13 @@
 // KT-1344 — what the discussion header's third row used to fold.
 //
 // The header's "Details" button opens the side panel on its settings tab, so
-// the id, the cost, the project and the worktree state live there: one place
-// for the details instead of a fold that repeated the panel. The session
+// the cost, the project and the worktree state live there: one place for the
+// details instead of a fold that repeated the panel. (The copyable id is not
+// among them — KT-1530 put it back next to the title.) The session
 // worktrees are polled here, while the section is on screen, rather than by a
 // header that no longer shows them.
-import { useEffect, useRef, useState } from 'react';
-import { Check, FlaskConical, GitBranch, Info, Lock, Unlock } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { FlaskConical, GitBranch, Info, Lock, Unlock } from 'lucide-react';
 import { discussions as discussionsApi } from '../lib/api';
 import type { Discussion, DiscussionWorkspace, Project } from '../types/generated';
 import type { ToastFn } from '../hooks/useToast';
@@ -26,13 +27,7 @@ export interface DiscussionDetailsSectionProps {
 export function DiscussionDetailsSection({
   discussion, projects, onRequestTestMode, onDiscussionUpdated, toast, t,
 }: DiscussionDetailsSectionProps) {
-  const [isDiscIdCopied, setIsDiscIdCopied] = useState(false);
   const [sessionWorkspaces, setSessionWorkspaces] = useState<DiscussionWorkspace[]>([]);
-  const discIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => () => {
-    if (discIdResetTimer.current) clearTimeout(discIdResetTimer.current);
-  }, []);
 
   useEffect(() => {
     let current = true;
@@ -64,19 +59,6 @@ export function DiscussionDetailsSection({
     };
   }, [discussion.id]);
 
-  const copyDiscussionId = async () => {
-    try {
-      await navigator.clipboard.writeText(discussion.id);
-      setIsDiscIdCopied(true);
-      if (discIdResetTimer.current) clearTimeout(discIdResetTimer.current);
-      discIdResetTimer.current = setTimeout(() => setIsDiscIdCopied(false), 1500);
-      toast(t('disc.idCopied'), 'success');
-    } catch {
-      setIsDiscIdCopied(false);
-      toast(t('disc.idCopyFailed'), 'error');
-    }
-  };
-
   const isolatedBranch = discussion.workspace_mode === 'Isolated' && discussion.worktree_branch;
 
   return (
@@ -86,25 +68,8 @@ export function DiscussionDetailsSection({
     >
       <h3>{t('disc.headerDetails')}</h3>
       <div className="disc-settings-details-row">
-        {/* 0.8.5 — short disc-id pill. Surfaces the id so a user reading an
-            agent summary like "Disc 3 — 04a9c927" can click → copy the full
-            UUID and paste it anywhere (next disc, linked-issue field, Slack
-            message…). Sidebar search also matches id prefix. */}
-        <button
-          type="button"
-          className="disc-id-pill"
-          data-tour-id="discussion-id-pill"
-          data-copied={isDiscIdCopied}
-          onClick={(e) => {
-            e.stopPropagation();
-            void copyDiscussionId();
-          }}
-          title={t('disc.idPillTooltip', discussion.id)}
-          aria-label={t('disc.idPillTooltip', discussion.id)}
-        >
-          {isDiscIdCopied ? <Check size={8} /> : null}
-          #{discussion.id.slice(0, 8)}
-        </button>
+        {/* The copyable id is NOT here: it sits next to the title in the header
+            (KT-1530), one click away at all times. */}
         <DiscussionSessionBinding discussionId={discussion.id} toast={toast} t={t} />
       </div>
       <div className="disc-settings-details-row">

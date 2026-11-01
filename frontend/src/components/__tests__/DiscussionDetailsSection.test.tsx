@@ -5,7 +5,7 @@
  * guard did not change, only where it is rendered.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock());
@@ -64,26 +64,10 @@ function renderSection(
 }
 
 describe('DiscussionDetailsSection', () => {
-  it('shows copied feedback on the discussion ID pill while copying the full ID', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, 'clipboard', {
-      value: { writeText },
-      configurable: true,
-    });
-    const id = '12345678-90ab-cdef-1234-567890abcdef';
-    const { container } = renderSection(makeDiscussion({ id }));
-    const pill = container.querySelector<HTMLButtonElement>('.disc-id-pill');
-    expect(pill).toHaveTextContent('#12345678');
-
-    fireEvent.click(pill!);
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(id));
-    expect(pill?.getAttribute('data-copied')).toBe('true');
-    expect(pill?.querySelector('svg')).not.toBeNull();
-  });
-
-  it('keeps the tour anchor on the id pill', () => {
+  it('does not carry the discussion id: it sits next to the title in the header (KT-1530)', () => {
     const { container } = renderSection();
-    expect(container.querySelector('[data-tour-id="discussion-id-pill"]')).not.toBeNull();
+    expect(container.querySelector('.disc-id-pill')).toBeNull();
+    expect(container.querySelector('[data-tour-id="discussion-id-pill"]')).toBeNull();
   });
 
   it('names the project, or the general scope when there is none', () => {

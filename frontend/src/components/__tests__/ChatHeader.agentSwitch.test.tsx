@@ -364,6 +364,17 @@ describe('ChatHeader — shared agent switcher', () => {
       expect(invite!.closest('.disc-chat-header-top')).not.toBeNull();
     });
 
+    it('pairs Invite (green, primary) and Details side by side, Details at the far right (KT-1530)', () => {
+      renderHeader();
+      const group = document.querySelector('.disc-chat-header-top .disc-chat-header-buttons')!;
+      const invite = document.querySelector('.disc-participants-invite-btn')!;
+      const details = screen.getByTestId('disc-header-details-btn');
+      expect([...group.children]).toEqual([invite, details]);
+      expect(invite).toHaveClass('disc-chat-header-btn', 'disc-chat-header-btn--primary');
+      expect(details).toHaveClass('disc-chat-header-btn');
+      expect(details).not.toHaveClass('disc-chat-header-btn--primary');
+    });
+
     it('gives the agent on/off control the first position on row 2', async () => {
       renderHeader();
       const sub = document.querySelector('.disc-chat-header-sub')!;
@@ -372,12 +383,13 @@ describe('ChatHeader — shared agent switcher', () => {
       });
     });
 
-    it('has one Details button, on row 2, with the open-side-panel icon', () => {
+    it('has one Details button, on the title row, with the open-side-panel icon', () => {
       renderHeader();
       const buttons = screen.getAllByTestId('disc-header-details-btn');
       expect(buttons).toHaveLength(1);
       const button = buttons[0];
-      expect(button.closest('.disc-chat-header-sub')).not.toBeNull();
+      expect(button.closest('.disc-chat-header-top')).not.toBeNull();
+      expect(button.closest('.disc-chat-header-sub')).toBeNull();
       expect(button).toHaveTextContent('disc.headerDetails');
       expect(button.querySelector('svg.lucide-panel-right-open')).not.toBeNull();
     });
@@ -396,18 +408,28 @@ describe('ChatHeader — shared agent switcher', () => {
       expect(screen.getByTestId('disc-header-details-btn')).toHaveAttribute('aria-expanded', 'true');
     });
 
-    it('keeps the details out of the header: no id pill, no project, no worktree', () => {
+    it('keeps the id next to the title, and the other details out of the header', () => {
       renderHeader();
-      expect(document.querySelector('.disc-id-pill')).toBeNull();
+      const pill = document.querySelector('.disc-id-pill');
+      expect(pill).not.toBeNull();
+      expect(pill!.closest('.disc-chat-header-title')).not.toBeNull();
+      expect(pill).toHaveAttribute('data-tour-id', 'discussion-id-pill');
       expect(document.querySelector('.disc-chat-context-project')).toBeNull();
       expect(document.querySelector('.disc-worktree-badge')).toBeNull();
     });
 
-    it('makes the Details button the same weight as the invite, pinned right', () => {
+    it('gives both header buttons one size, the primary one in the green success tokens', () => {
       const css = readFileSync('src/pages/DiscussionsPage.css', 'utf8');
-      const rule = css.match(/\.disc-chat-header-details-btn\s*\{([^}]*)\}/)?.[1] ?? '';
-      expect(rule).toContain('margin-left: auto');
-      expect(rule).toContain('border: 1px solid');
+      const rule = (selector: string) => css.match(new RegExp(`${selector.replace(/[.\\-]/g, '\\$&')}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+      const base = rule('.disc-chat-header-btn');
+      expect(base).toContain('min-height: 30px');
+      expect(base).toContain('border: 1px solid');
+      // Not a per-button size: the details button adds colours only.
+      expect(rule('.disc-chat-header-details-btn')).toBe('');
+      const primary = rule('.disc-chat-header-btn--primary');
+      expect(primary).toContain('var(--kr-success)');
+      expect(primary).toContain('var(--kr-on-success)');
+      expect(primary).not.toMatch(/#[0-9a-f]{3,6}\b|rgb\(/i);
     });
   });
 });
