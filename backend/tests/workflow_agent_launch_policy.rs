@@ -307,9 +307,15 @@ async fn artifacts_directory_is_read_only(fixture: &mut Fixture) {
     assert!(!claude.contains(&"--dangerously-skip-permissions".to_string()));
     let settings: serde_json::Value =
         serde_json::from_str(value_after(&claude, "--settings").unwrap()).unwrap();
+    // The read-only rule first, then the Kronn data-dir rules (KT-1495) in the
+    // same document: a second `--settings` flag would not be merged by Claude.
+    let mut expected = vec![format!("Edit(/{}/**)", artifacts.display())];
+    expected.extend(kronn::core::vault_guard::claude_permission_deny());
+    assert_eq!(settings["permissions"]["deny"], serde_json::json!(expected));
     assert_eq!(
-        settings["permissions"]["deny"],
-        serde_json::json!([format!("Edit(/{}/**)", artifacts.display())])
+        claude.iter().filter(|arg| *arg == "--settings").count(),
+        1,
+        "one settings document: {claude:?}"
     );
     assert_eq!(
         settings["sandbox"]["filesystem"]["denyWrite"],

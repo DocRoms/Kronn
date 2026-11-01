@@ -836,6 +836,21 @@ fn native_family(agent: AcpAgent) -> crate::core::child_env::AgentFamily {
     }
 }
 
+/// `program args` behind the vault sandbox, or unchanged when the owner turned
+/// the protection off or the host has none (never an error: nothing that works
+/// today is refused).
+fn vault_confined(program: &str, args: &[&str]) -> (String, Vec<String>) {
+    let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    let (program, args, _) = crate::core::vault_guard::wrap_launch(
+        crate::core::vault_guard::launch_confinement().as_ref(),
+        crate::core::vault_guard::LaunchSandbox::None,
+        &crate::core::vault_guard::LaunchRoots::default(),
+        program.to_owned(),
+        args,
+    );
+    (program, args)
+}
+
 /// The subprocess of a native ACP session: its command, working directory and
 /// the environment Kronn builds for it.
 fn native_command(
@@ -848,8 +863,13 @@ fn native_command(
     use crate::core::child_env;
     let family = native_family(agent);
     let route = child_env::ChildRoute::Agent(family);
-    let mut command = crate::core::cmd::async_cmd(program, route);
-    command.args(args).current_dir(cwd);
+    // KT-1495 — a native runtime loses the Kronn data directory (and only that)
+    // to the OS sandbox, like every other agent launch (`runner::try_spawn`).
+    // The arguments appended later (the bridge declaration) land after the
+    // program's own, behind the launcher.
+    let (program, args) = vault_confined(program, args);
+    let mut command = crate::core::cmd::async_cmd(&program, route);
+    command.args(&args).current_dir(cwd);
     child_env::reset(command.as_std_mut(), route);
     // Under Docker, the MCP values the project's MCP files refer to (KT-964).
     crate::core::mcp_secret_refs::apply_to(&mut command, std::path::Path::new(cwd));
@@ -2240,6 +2260,45 @@ mod tests {
         let env = command_env(&command);
         assert_eq!(env["GH_TOKEN"], "project-gh");
         assert_eq!(env["COPILOT_GITHUB_TOKEN"], "project-gh");
+    }
+
+    /// KT-1495 — a native ACP runtime is started behind the vault sandbox, like
+    /// every other agent launch, and keeps its own arguments (the bridge ones
+    /// appended afterwards land behind them). Off the sandbox, or on a host with
+    /// none, the launch is exactly what it was.
+    #[test]
+    #[serial_test::serial]
+    fn a_native_runtime_starts_behind_the_vault_sandbox_and_keeps_its_arguments() {
+        let stubs = tempfile::tempdir().unwrap();
+        let stub = agent_stub(stubs.path(), "gemini", "exit 0");
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path().to_string_lossy().into_owned();
+
+        // No wrap unless the vault tests opt in: the command is the program.
+        let command = native_command(
+            AcpAgent::GeminiCli,
+            &stub,
+            &["--acp"],
+            &cwd,
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(command.as_std().get_program(), stub.as_str());
+
+        assert_eq!(
+            vault_confined(&stub, &["--acp"]),
+            (stub.clone(), vec!["--acp".to_string()])
+        );
+        crate::core::vault_guard::set_test_wrap(true);
+        let wrapped = vault_confined(&stub, &["--acp"]);
+        crate::core::vault_guard::set_test_wrap(false);
+        match crate::core::trust_sandbox::confinement() {
+            Some(confinement) => {
+                assert_eq!(wrapped.0, confinement.mechanism().launcher());
+                assert_eq!(wrapped.1[wrapped.1.len() - 2..], [stub.as_str(), "--acp"]);
+            }
+            None => assert_eq!(wrapped, (stub.clone(), vec!["--acp".to_string()])),
+        }
     }
 
     #[test]

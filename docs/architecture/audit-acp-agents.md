@@ -39,12 +39,12 @@ One refused read therefore ended the whole audit step.
 The decision has to be made inside OpenCode, by pattern, before any question is
 asked. Kronn starts `opencode acp` with an inline configuration
 (`OPENCODE_CONFIG_CONTENT`, merged after the user's and the project's own files)
-[src: file: backend/src/acp.rs:881-894#apply_opencode_policy]:
+[src: file: backend/src/acp.rs:901-914#apply_opencode_policy]:
 
 - `permission.read` denies `*.env` and `*.env.*`, then allows the four template
   suffixes (`*.env.<suffix>` and `*.env.*.<suffix>`). OpenCode honours the last
   matching rule, in the order written, so the allows follow the deny — a test
-  pins that order [src: file: backend/src/acp/secret_files.rs:337-371#the_opencode_config_denies_real_env_files_and_allows_templates_in_that_order]. A denial is not a
+  pins that order [src: file: backend/src/acp/secret_files.rs:346-380#the_opencode_config_denies_real_env_files_and_allows_templates_in_that_order]. A denial is not a
   question put to Kronn: OpenCode hands its model an error as the tool's answer
   and the turn goes on.
 - `experimental.continue_loop_on_deny` is `true`, so a refusal the broker does
@@ -87,7 +87,7 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
    [src: file: backend/src/agents/runner.rs:5305-5307#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:5747-5766#task_cancel] [src: file: backend/src/agents/runner.rs:5831-5837#shutdown].
 3. The process is started as its own process group, and shutdown kills the
    group, so what the agent started — a shell command, an MCP server — stops
-   with it [src: file: backend/src/acp.rs:994-998#process_group] [src: file: backend/src/acp.rs:780-793#kill_process_group] [src: file: backend/src/acp.rs:1795-1803#shutdown].
+   with it [src: file: backend/src/acp.rs:1014-1018#process_group] [src: file: backend/src/acp.rs:780-793#kill_process_group] [src: file: backend/src/acp.rs:1815-1823#shutdown].
 4. The pipeline waits on the lifeline, which exits only after that shutdown, so
    the audit is finalised as `Cancelled` once the agent is really gone. This is
    also why the lifeline's PID is **not** killed: doing it ended the wait early
@@ -116,7 +116,7 @@ Every ACP step was recorded at 0 tokens, per step and per run. Now:
   runtime puts them on the `session/prompt` response — OpenCode sends
   `inputTokens`, `outputTokens`, `cachedReadTokens`, `cachedWriteTokens`, which
   the ACP host now keeps apart instead of dropping the cache
-  [src: file: backend/src/acp.rs:1394-1417#usage_from_prompt_result]. The counters are read as the stream goes and
+  [src: file: backend/src/acp.rs:1414-1437#usage_from_prompt_result]. The counters are read as the stream goes and
   once more when it ends, because ACP reports them with the end of the turn.
 - **What is recorded.** `audit_run_steps` keeps `input_tokens`, `output_tokens`,
   `cache_read_tokens` and `cache_write_tokens` (migration 205), and
@@ -145,7 +145,7 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:14139-14145#total_cost_usd] [src: file: backend/src/agents/runner.rs:5732-5734#usd_micros] [src: file: backend/src/agents/runner.rs:9900-9906#cost_usd_micros].
+  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:14197-14203#total_cost_usd] [src: file: backend/src/agents/runner.rs:5732-5734#usd_micros] [src: file: backend/src/agents/runner.rs:9900-9906#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost
