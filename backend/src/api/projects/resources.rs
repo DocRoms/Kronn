@@ -2726,6 +2726,7 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let base = QuickExec {
+            approved_by_trust: None,
             id: "qe-1".into(),
             name: "Lint".into(),
             icon: "terminal".into(),
@@ -2854,6 +2855,7 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let exec = QuickExec {
+            approved_by_trust: None,
             id: "qe-1".into(),
             name: "Lint".into(),
             icon: "terminal".into(),
@@ -2972,6 +2974,7 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let exec = QuickExec {
+            approved_by_trust: None,
             id: "qe-1".into(),
             name: "Lint".into(),
             icon: "terminal".into(),
@@ -3080,6 +3083,7 @@ mod tests {
         std::fs::write(dir.join("index.html"), "<p>old</p>\n").unwrap();
         let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         let exec = QuickExec {
+            approved_by_trust: None,
             id: "qe-1".into(),
             name: "Lint".into(),
             icon: "terminal".into(),
@@ -3430,6 +3434,7 @@ mod tests {
     fn sample_exec(project_id: &str) -> QuickExec {
         let timestamp = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
         QuickExec {
+            approved_by_trust: None,
             id: "qe-1".into(),
             name: "Lint".into(),
             icon: "terminal".into(),

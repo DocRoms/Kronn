@@ -176,7 +176,11 @@ fn admin_secret_matches(conn: &Connection, secret: &Secret) -> Result<bool> {
         )
         .optional()?;
     // Absent bootstrap authenticates nothing — it must not read as "no check".
-    Ok(stored.is_some_and(|hash| hash == secret.hash()))
+    // Constant time: the stored hash is compared as digests, never with `==`.
+    Ok(crate::core::bridge_token::operator_token_matches(
+        stored.as_deref(),
+        &secret.hash(),
+    ))
 }
 
 /// Does this secret authenticate as the ADMIN, and only the admin?

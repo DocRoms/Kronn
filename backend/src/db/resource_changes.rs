@@ -180,6 +180,7 @@ mod tests {
     fn exec() -> crate::models::QuickExec {
         let timestamp = chrono::Utc::now();
         crate::models::QuickExec {
+            approved_by_trust: None,
             id: "qe-1".into(),
             name: "Lint".into(),
             icon: "terminal".into(),

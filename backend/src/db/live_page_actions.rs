@@ -1422,6 +1422,7 @@ mod tests {
         crate::db::quick_execs::insert_quick_exec(
             conn,
             &QuickExec {
+                approved_by_trust: None,
                 id: "qe-1".into(),
                 name: "Collect logs".into(),
                 icon: "⌨".into(),
@@ -1458,6 +1459,7 @@ mod tests {
         crate::db::quick_execs::insert_quick_exec(
             conn,
             &QuickExec {
+                approved_by_trust: None,
                 id: "qe-2".into(),
                 name: "Restart service".into(),
                 icon: "⌨".into(),
@@ -1791,6 +1793,7 @@ mod tests {
         crate::db::quick_execs::insert_quick_exec(
             &conn,
             &QuickExec {
+                approved_by_trust: None,
                 id: "qe-env".into(),
                 name: "Push status".into(),
                 icon: "⌨".into(),
@@ -1860,6 +1863,7 @@ mod tests {
         crate::db::quick_execs::insert_quick_exec(
             &conn,
             &QuickExec {
+                approved_by_trust: None,
                 id: "qe-locked".into(),
                 name: "Push status".into(),
                 icon: "⌨".into(),

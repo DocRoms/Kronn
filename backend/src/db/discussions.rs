@@ -1041,7 +1041,12 @@ pub fn set_disc_agent_handoff_policy(
 }
 
 pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
-    let affected = conn.execute("DELETE FROM discussions WHERE id = ?1", params![id])?;
+    // KT-1492: what the room's trust level approved is taken back in the same
+    // transaction (the trigger drops its setting on every path that deletes it).
+    let affected =
+        crate::db::trust::delete_and_withdraw(conn, "Kronn (the room was deleted)", |conn| {
+            Ok(conn.execute("DELETE FROM discussions WHERE id = ?1", params![id])?)
+        })?;
     Ok(affected > 0)
 }
 

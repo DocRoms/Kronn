@@ -320,6 +320,7 @@ mod tests {
             auth_locked: false,
             auth_token_session_only: false,
             auth_strict_localhost: false,
+            protect_vault_from_agents: true,
             p2p_enabled: false,
             frontend_origins: vec![],
             failure_notify_url: None,

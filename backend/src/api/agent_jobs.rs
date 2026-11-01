@@ -633,6 +633,7 @@ mod tests {
     #[test]
     fn a_background_quick_exec_gets_the_exec_checks() {
         let quick = |command: &str, args: &[&str], approved: bool| crate::models::QuickExec {
+            approved_by_trust: None,
             id: "qe".into(),
             name: "job".into(),
             icon: String::new(),

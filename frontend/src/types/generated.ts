@@ -2351,6 +2351,15 @@ export type ConfirmDocsRequest = {
  */
 docs?: Array<string>, };
 
+/**
+ * The first code of an authenticator, to confirm the enrolment.
+ */
+export type ConfirmTrustProofRequest = { code: string,
+/**
+ * The human-admin secret, as for starting the enrolment.
+ */
+admin_secret?: string | null, };
+
 export type Contact = { id: string, pseudo: string, avatar_email: string | null, kronn_url: string, invite_code: string, status: string, created_at: string, updated_at: string, };
 
 export type ContextAudit = { files: Array<InstructionFile>, per_agent: Array<AgentContext>, proposal: Array<TierMove>, findings: Array<AuditFinding>,
@@ -4215,6 +4224,19 @@ export type DriftSection = { ai_file: string, audit_step: number, changed_source
  * Gone paths the doc's prose names, none accepted yet (KT-1168).
  */
 missing_paths: Array<VanishedPaths>, };
+
+/**
+ * The level in force for a room or a workflow, and where it comes from.
+ */
+export type EffectiveTrust = { level: TrustLevel,
+/**
+ * The scope whose setting won; `Instance` for the default too.
+ */
+source: TrustScope, source_id?: string,
+/**
+ * A human set it (false: the Standard default).
+ */
+explicit: boolean, };
 
 /**
  * `POST /api/config/embed-origins`: origins to allow and to revoke, applied
@@ -6212,6 +6234,12 @@ domain: string | null,
 detected_ips: Array<DetectedIp>, };
 
 /**
+ * What no level ever covers. These are not approvals a level can grant: the
+ * policy table has no row for them, and each is held by its own gate.
+ */
+export type NeverCovered = "credentials" | "trust_settings" | "destructive_confirmations" | "peer_inheritance";
+
+/**
  * Configuration for a `StepType::Notify` webhook step. Rendered at run-time
  * (URL + body support template expressions like `{{previous_step.summary}}`).
  */
@@ -7664,7 +7692,16 @@ unmodelled_args_approved?: boolean,
  * KT-1017 — an agent last wrote this command line: any value it carries
  * needs a human's approval. Set by the server on save.
  */
-agent_written?: boolean, created_at: string, updated_at: string, };
+agent_written?: boolean,
+/**
+ * KT-1492 — the approval above came from a trust level, not from a human:
+ * the line runs under the level's OS sandbox, and lowering the level
+ * withdraws the approval. Set by the server only. It is (de)serialized
+ * because an export carries and seals it, so every route that takes a
+ * `QuickExec` from outside (an unsealed import, a bundle, a create or an
+ * update) overwrites it; a request body never decides it.
+ */
+approved_by_trust?: boolean, created_at: string, updated_at: string, };
 
 export type QuickExecDiagnostics = {
 /**
@@ -9329,6 +9366,27 @@ recovery_code: string, };
 
 export type SetScanPathsRequest = { paths: Array<string>, };
 
+/**
+ * PUT /api/trust/...
+ */
+export type SetTrustRequest = { level: TrustLevel,
+/**
+ * The human read the risk panel and confirmed. Required above Standard.
+ */
+acknowledged_risks?: boolean,
+/**
+ * The human read that the Kronn vault is not protected on this machine (no
+ * sandbox, or the protection turned off in the config) and still chose the
+ * level. Required to raise a level while the vault is unprotected.
+ */
+acknowledged_vault_unprotected?: boolean,
+/**
+ * The strong confirmation (authenticator code or recovery code). Required
+ * above Standard; lowering never needs it. The `X-Kronn-Confirm` header
+ * carries it as well, on any channel.
+ */
+proof?: string | null, };
+
 export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agents_detected: Array<AgentDetection>, scan_paths_set: boolean, repos_detected: Array<DetectedRepo>, default_scan_path: string | null,
 /**
  * Paths actually scanned, exposed to diagnose empty results and missing mounts.
@@ -10798,6 +10856,152 @@ project_id?: string,
 step_agents?: { [key in string]: StepAgentOverride }, };
 
 /**
+ * An approval a trust level may grant on its own. Anything that is not here
+ * is never covered by any level (see [`NeverCovered`]).
+ */
+export type TrustApproval = "quick_exec_line" | "exec_step_line" | "room_scope_read" | "room_scope_plan" | "validations_docker" | "code_write_other_project" | "validations_unconfined" | "host_access";
+
+/**
+ * One journal line.
+ */
+export type TrustAuditEntry = { id: string, at: string,
+/**
+ * `grant` (an approval granted on its own), `setting` (a level changed) or
+ * `withdrawn` (a grant taken back because its level was lowered), `proof`
+ * (a confirmation code was spent on a call) or `proof_refused` (a code was
+ * wrong, missing or already used). Both name the channel: ui, http, bridge.
+ */
+event: string, approval?: TrustApproval, level: TrustLevel, source: TrustScope, source_id?: string, discussion_id?: string, workflow_id?: string, project_id?: string, subject: string, detail: string,
+/**
+ * What the grant approved: `quick_exec`, `workflow_step`, `room_scope_grant`.
+ */
+object_kind?: string, object_id?: string,
+/**
+ * A step name, or the room of a scope grant.
+ */
+object_ref?: string,
+/**
+ * The object still holds the approval: lowering the level withdraws it.
+ */
+active: boolean, };
+
+/**
+ * One row of the policy table, as the risk panel lists it.
+ */
+export type TrustEffect = { approval: TrustApproval,
+/**
+ * The lowest level that grants it.
+ */
+from_level: TrustLevel,
+/**
+ * Whether a gate in this build consults the table for it. `false`: the
+ * approval is in the policy, its gate ships with another ticket.
+ */
+enforced: boolean, };
+
+/**
+ * The seed an authenticator app takes, shown once at enrolment.
+ */
+export type TrustEnrolment = {
+/**
+ * The base32 key, for a manual entry.
+ */
+secret: string,
+/**
+ * The `otpauth://` URI a QR code carries.
+ */
+uri: string, };
+
+/**
+ * How far approvals that only protect the user from their own agents are
+ * granted automatically. Ordered: each level includes the one before.
+ */
+export type TrustLevel = "standard" | "trusted" | "full";
+
+/**
+ * GET /api/trust
+ */
+export type TrustOverview = { instance: TrustSetting, effects: Array<TrustEffect>, never_covered: Array<NeverCovered>, sandbox: TrustSandboxView, proof: TrustProofView, };
+
+/**
+ * A proof of the strong confirmation: the authenticator's current code, or a
+ * recovery code. Needed to disable the confirmation or renew its recovery codes.
+ */
+export type TrustProofRequest = { proof?: string | null,
+/**
+ * The human-admin secret (the `human-admin-secret` file in the Kronn data
+ * directory). Needed to start the first enrolment: until a code is
+ * enrolled it proves nothing, so the root of trust is the file.
+ */
+admin_secret?: string | null, };
+
+/**
+ * The state of the strong confirmation (TOTP) that raising a level needs.
+ */
+export type TrustProofView = {
+/**
+ * A confirmed enrolment exists.
+ */
+enrolled: boolean,
+/**
+ * A seed was issued but its first code was not confirmed yet.
+ */
+pending: boolean, recovery_codes_left: number,
+/**
+ * Seconds left of a lockout (5 wrong codes lock it, 60 s then longer); 0 when open.
+ */
+locked_for_secs: number, };
+
+/**
+ * Ten single-use recovery codes, shown once: only their digests are kept.
+ */
+export type TrustRecoveryCodes = { codes: Array<string>, };
+
+/**
+ * The protection of Kronn's vault from what a level grants: the data directory
+ * is hidden from level-approved commands when the host has a sandbox (macOS
+ * Seatbelt, Linux bubblewrap) and the owner kept "Protect the Kronn vault from
+ * agents" on. Without it a level is still allowed; the panel names the missing
+ * protection and raising it needs an acknowledgement of that.
+ */
+export type TrustSandboxView = {
+/**
+ * The host can apply a sandbox.
+ */
+available: boolean,
+/**
+ * Why not, when `available` is false.
+ */
+reason?: string,
+/**
+ * The "Protect the Kronn vault from agents" setting (on by default).
+ */
+protect_vault: boolean,
+/**
+ * The vault is protected: `available` and `protect_vault`.
+ */
+protected: boolean,
+/**
+ * The sentence naming the missing protection, when `protected` is false.
+ */
+missing?: string, };
+
+/**
+ * Where a trust level is set. Narrowest wins: room, workflow, instance.
+ */
+export type TrustScope = "instance" | "workflow" | "room";
+
+/**
+ * A scope's own setting and the level in force there.
+ */
+export type TrustScopeView = { setting: TrustSetting, effective: EffectiveTrust, };
+
+/**
+ * The one setting of a scope, if a human set it.
+ */
+export type TrustSetting = { scope: TrustScope, scope_id?: string, level?: TrustLevel, set_by?: string, set_at?: string, };
+
+/**
  * A doc whose every section is unanchored, and when an agent pass last
  * re-read it (KT-1292).
  */
@@ -12212,6 +12416,15 @@ exec_unmodelled_args_approved?: boolean,
  * read from the request.
  */
 exec_agent_written?: boolean,
+/**
+ * KT-1492 — the approval above came from a trust level, not from a human:
+ * the step runs under the level's OS sandbox, and lowering the level
+ * withdraws the approval. Set by the server only. It is (de)serialized
+ * because it is stored with the step and sealed in exports, so every
+ * route that takes a step from outside (create, update, import, bundle)
+ * overwrites it from the stored workflow; a request body never decides it.
+ */
+exec_approved_by_trust?: boolean,
 /**
  * KT-1017 — which of the step's lines an agent last wrote: `main`,
  * `setup`, `stdin`, `source:<alias>`. Set by the server on save; a human

@@ -583,3 +583,279 @@ fn a_grant_on_a_deleted_project_reaches_nothing_and_a_general_room_reaches_no_pr
     assert_eq!(room_reach(&conn, "general").unwrap(), RoomReach::default());
     assert_eq!(room_reach(&conn, "missing").unwrap(), RoomReach::default());
 }
+
+// ── KT-1492: a room's trust level decides its scope requests ─────────────
+
+fn trust(
+    conn: &Connection,
+    scope: crate::models::TrustScope,
+    id: Option<&str>,
+    level: crate::models::TrustLevel,
+) {
+    crate::db::trust::set_level(conn, scope, id, level, "Romu").unwrap();
+}
+
+fn ask(
+    conn: &Connection,
+    project: &str,
+    access: ScopeAccess,
+) -> (Filed, Option<crate::models::TrustLevel>) {
+    file_request_with_trust(
+        conn,
+        "room",
+        Some(project),
+        project,
+        access,
+        "needed",
+        "@claude",
+    )
+    .unwrap()
+}
+
+fn grants_logged(
+    conn: &Connection,
+    approval: crate::models::TrustApproval,
+) -> Vec<crate::models::TrustAuditEntry> {
+    crate::db::trust::audit_entries(conn, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.event == "grant" && entry.approval == Some(approval))
+        .collect()
+}
+
+/// Autoreview 🟡 3: a scope grant a level gave is revoked when the level is
+/// lowered, and the journal lists the grant that was taken back.
+#[test]
+fn lowering_the_level_revokes_the_scope_grants_it_gave() {
+    use crate::models::{TrustApproval, TrustLevel, TrustScope};
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Trusted);
+    ask(&conn, "p2", ScopeAccess::Read);
+    ask(&conn, "p3", ScopeAccess::Write);
+    // A grant a human gave stays.
+    grant(
+        &conn,
+        "room",
+        None,
+        ScopeAccess::Read,
+        ScopeGrantSource::All,
+        "romu",
+    )
+    .unwrap();
+    assert!(granted_projects(&conn, &room())
+        .unwrap()
+        .read
+        .contains("p2"));
+    let journal = grants_logged(&conn, TrustApproval::RoomScopeRead);
+    assert_eq!(journal[0].object_kind.as_deref(), Some("room_scope_grant"));
+    assert_eq!(journal[0].object_ref.as_deref(), Some("room"));
+
+    let withdrawn = crate::db::trust::set_level(
+        &conn,
+        TrustScope::Instance,
+        None,
+        TrustLevel::Standard,
+        "Romu",
+    )
+    .unwrap();
+
+    assert_eq!(withdrawn.len(), 2);
+    let after = granted_projects(&conn, &room()).unwrap();
+    assert!(!after.read.contains("p2") && !after.write.contains("p3"));
+    assert_eq!(
+        after.all,
+        Some(ScopeAccess::Read),
+        "the human's grant of every project stayed"
+    );
+    let taken_back: Vec<_> = crate::db::trust::audit_entries(&conn, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.event == "withdrawn")
+        .collect();
+    assert_eq!(taken_back.len(), 2);
+    assert!(taken_back
+        .iter()
+        .all(|entry| entry.object_kind.as_deref() == Some("room_scope_grant")));
+}
+
+#[test]
+fn under_standard_a_scope_request_stays_pending() {
+    let conn = connection();
+    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Read);
+    assert!(matches!(filed, Filed::New(_)));
+    assert_eq!(granted, None);
+    assert!(granted_projects(&conn, &room()).unwrap().read.is_empty());
+}
+
+#[test]
+fn under_trusted_a_read_request_on_a_registered_project_is_granted_and_journalled() {
+    use crate::models::{TrustApproval, TrustLevel, TrustScope};
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Trusted);
+    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Read);
+    assert_eq!(granted, Some(TrustLevel::Trusted));
+    let Filed::New(request) = filed else {
+        panic!("filed")
+    };
+    assert!(granted_projects(&conn, &room())
+        .unwrap()
+        .read
+        .contains("p2"));
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM discussion_scope_requests WHERE id = ?1",
+            [&request.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "approved");
+    let entries = grants_logged(&conn, TrustApproval::RoomScopeRead);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].project_id.as_deref(), Some("p2"));
+    assert_eq!(entries[0].discussion_id.as_deref(), Some("room"));
+    // The room sees who granted, where it works.
+    let receipt: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE discussion_id = 'room' AND content LIKE '%granted read%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        receipt.contains("trust level trusted granted read access"),
+        "{receipt}"
+    );
+    // A grant never opens another project's credentials.
+    assert!(
+        receipt.contains("credentials and API configs stay this room's own project's"),
+        "{receipt}"
+    );
+}
+
+#[test]
+fn under_trusted_a_planning_request_is_granted_as_write_never_wider_than_asked() {
+    use crate::models::{TrustApproval, TrustLevel, TrustScope};
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Trusted);
+    let (_, granted) = ask(&conn, "p3", ScopeAccess::Write);
+    assert!(granted.is_some());
+    let reach = granted_projects(&conn, &room()).unwrap();
+    assert!(reach.write.contains("p3"));
+    assert!(
+        reach.all.is_none(),
+        "a project request never opens every project"
+    );
+    assert_eq!(grants_logged(&conn, TrustApproval::RoomScopePlan).len(), 1);
+    // A request for read access is granted for read, not write.
+    let (_, _) = ask(&conn, "p2", ScopeAccess::Read);
+    assert!(!granted_projects(&conn, &room())
+        .unwrap()
+        .write
+        .contains("p2"));
+}
+
+/// Gemini review: a request filed under Standard, then the owner raises the
+/// room to Trusted instead of clicking the card. The agent's retry returns the
+/// pending request and the level must decide it, as asked (a read stays a read).
+#[test]
+fn a_request_pending_before_the_level_was_raised_is_granted_on_the_retry() {
+    use crate::models::{TrustApproval, TrustLevel, TrustScope};
+    let conn = connection();
+    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Read);
+    assert!(matches!(filed, Filed::New(_)));
+    assert_eq!(granted, None);
+    // A retry that is still not covered stays pending.
+    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Read);
+    assert!(matches!(filed, Filed::AlreadyPending(_)));
+    assert_eq!(granted, None);
+    assert!(granted_projects(&conn, &room()).unwrap().read.is_empty());
+
+    trust(&conn, TrustScope::Room, Some("room"), TrustLevel::Trusted);
+    // The retry asks for write, but the pending card asks for read: read it is.
+    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Write);
+    let Filed::AlreadyPending(request) = filed else {
+        panic!("the retry returns the pending request: {filed:?}");
+    };
+    assert_eq!(request.access, ScopeAccess::Read);
+    assert_eq!(granted, Some(TrustLevel::Trusted));
+    let reach = granted_projects(&conn, &room()).unwrap();
+    assert!(reach.read.contains("p2") && !reach.write.contains("p2"));
+    assert_eq!(grants_logged(&conn, TrustApproval::RoomScopeRead).len(), 1);
+    assert!(grants_logged(&conn, TrustApproval::RoomScopePlan).is_empty());
+    // Lowering the level takes the grant back, like any level grant.
+    trust(&conn, TrustScope::Room, Some("room"), TrustLevel::Standard);
+    assert!(granted_projects(&conn, &room()).unwrap().read.is_empty());
+}
+
+/// Review: a write card filed under Standard, then the level is raised and the
+/// agent retries for read only. The level grants what this call asks for (read),
+/// not the wider card, and the reply says read.
+#[test]
+fn a_retry_for_read_on_a_pending_write_card_is_granted_read_only() {
+    use crate::models::{TrustApproval, TrustLevel, TrustScope};
+    let conn = connection();
+    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Write);
+    assert!(matches!(filed, Filed::New(_)));
+    assert_eq!(granted, None);
+
+    trust(&conn, TrustScope::Room, Some("room"), TrustLevel::Trusted);
+    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Read);
+    let Filed::AlreadyPending(request) = filed else {
+        panic!("the retry returns the pending request: {filed:?}");
+    };
+    assert_eq!(
+        request.access,
+        ScopeAccess::Write,
+        "the card asked for write"
+    );
+    assert_eq!(request.granted_access, Some(ScopeAccess::Read));
+    assert_eq!(granted, Some(TrustLevel::Trusted));
+    let reach = granted_projects(&conn, &room()).unwrap();
+    assert!(reach.read.contains("p2") && !reach.write.contains("p2"));
+    assert_eq!(grants_logged(&conn, TrustApproval::RoomScopeRead).len(), 1);
+    assert!(grants_logged(&conn, TrustApproval::RoomScopePlan).is_empty());
+}
+
+#[test]
+fn a_name_that_matches_no_project_stays_pending_whatever_the_level() {
+    use crate::models::{TrustLevel, TrustScope};
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Full);
+    let (filed, granted) = file_request_with_trust(
+        &conn,
+        "room",
+        None,
+        "someone-elses-secret-project",
+        ScopeAccess::Read,
+        "x",
+        "@claude",
+    )
+    .unwrap();
+    assert!(matches!(filed, Filed::New(_)));
+    assert_eq!(granted, None);
+}
+
+#[test]
+fn a_room_set_to_standard_asks_even_under_a_full_instance() {
+    use crate::models::{TrustLevel, TrustScope};
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Full);
+    trust(&conn, TrustScope::Room, Some("room"), TrustLevel::Standard);
+    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Read);
+    assert!(matches!(filed, Filed::New(_)));
+    assert_eq!(granted, None);
+    assert!(granted_projects(&conn, &room()).unwrap().read.is_empty());
+}
+
+#[test]
+fn a_trust_level_never_opens_every_project_or_the_general_resources() {
+    use crate::models::{TrustLevel, TrustScope};
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Full);
+    // Every-project and general write keep their typed confirmation: the only
+    // thing a level decides is a request for one registered project.
+    let (_, _) = ask(&conn, "p2", ScopeAccess::Write);
+    let reach = granted_projects(&conn, &room()).unwrap();
+    assert!(reach.all.is_none());
+    assert!(!reach.general);
+}

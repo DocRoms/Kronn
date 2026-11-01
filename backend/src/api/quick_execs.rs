@@ -9,6 +9,7 @@ use axum::{
 use chrono::Utc;
 use uuid::Uuid;
 
+use crate::db::trust::TrustOrigin;
 use crate::models::*;
 use crate::workflows::template::{extract_step_envelope, TemplateContext};
 use crate::AppState;
@@ -86,17 +87,168 @@ pub async fn create(
     Json(request): Json<CreateQuickExecRequest>,
 ) -> Json<ApiResponse<QuickExec>> {
     let by_agent = crate::core::bridge_token::agent_authored(&bridge, &marker);
-    let response = create_as(state.clone(), request, by_agent).await;
+    let origin = origin_of(&bridge);
+    let response = create_as_in(state.clone(), request, by_agent, origin).await;
     announce_from_agent(&state, bridge.as_ref(), marker.as_ref(), &response.0).await;
     response
 }
 
+/// The launch behind a bridge token, for the trust level it runs under.
+fn origin_of(
+    bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+) -> TrustOrigin {
+    bridge
+        .as_ref()
+        .map(|axum::Extension(caller)| TrustOrigin::from_caller(caller))
+        .unwrap_or_default()
+}
+
+/// A level's approval of a Quick Exec, not yet journalled: it is granted in the
+/// very transaction that saves the line ([`store_quick_exec`]).
+pub(crate) struct PendingGrant {
+    pub(crate) origin: TrustOrigin,
+    pub(crate) subject: String,
+    pub(crate) project_id: Option<String>,
+}
+
+/// Why a save that counted on a level was refused.
+pub(crate) const TRUST_CHANGED: &str =
+    "The trust level changed while the Quick Exec was being saved: it \
+     was not saved. Save it again.";
+
+/// KT-1492 — under Trusted, a line an agent wrote that passes values to a CLI is
+/// active at once. Under Standard, or when the setting cannot be read, it waits
+/// for a human as before. This only reads the level, so the line can be
+/// validated as approved; the grant is journalled by [`store_quick_exec`] in the
+/// transaction that saves the line, and the level is read again there.
+async fn approve_by_trust(
+    state: &AppState,
+    name: &str,
+    project_id: Option<&str>,
+    agent_written: Option<bool>,
+    approved: &mut Option<bool>,
+    by_trust: &mut Option<bool>,
+    origin: &TrustOrigin,
+) -> Option<PendingGrant> {
+    if agent_written != Some(true) || *approved == Some(true) {
+        return None;
+    }
+    let level_origin = origin.clone();
+    let granted = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::trust::level_grants(conn, &level_origin, TrustApproval::QuickExecLine)
+        })
+        .await;
+    match granted {
+        Ok(Some(_)) => {
+            // The line is active at once, and runs under the level's sandbox.
+            *approved = Some(true);
+            *by_trust = Some(true);
+            Some(PendingGrant {
+                origin: origin.clone(),
+                subject: format!("Quick Exec \u{ab} {} \u{bb}", name.trim()),
+                project_id: project_id.map(str::to_owned),
+            })
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "trust level unreadable: the Quick Exec waits for a human");
+            None
+        }
+    }
+}
+
+/// An update that keeps the approval a level gave an unchanged line copies it
+/// from the row as it was read, before the save. Checked here against the row
+/// as it is stored now, on the write connection: if the level took the approval
+/// back meanwhile (or the line changed), the stale mark is not written back.
+/// A human's own approval of that very line, given since, is kept.
+fn keep_only_a_live_trust_approval(conn: &rusqlite::Connection, saved: &mut QuickExec) {
+    if saved.approved_by_trust != Some(true) {
+        return;
+    }
+    // A row that cannot be read counts as gone: the approval is not kept.
+    let current = crate::db::quick_execs::get_quick_exec(conn, &saved.id)
+        .ok()
+        .flatten()
+        .filter(|row| row.command == saved.command && row.args == saved.args);
+    if current
+        .as_ref()
+        .is_some_and(|row| row.approved_by_trust == Some(true))
+    {
+        return;
+    }
+    saved.approved_by_trust = None;
+    saved.unmodelled_args_approved = current
+        .and_then(|row| row.unmodelled_args_approved)
+        .filter(|approved| *approved);
+}
+
+/// Save a Quick Exec. With a `pending` grant, the level is consulted, the grant
+/// journalled and the line written as one unit on the one database connection:
+/// a level lowered meanwhile either comes first (the save is refused, nothing is
+/// approved) or after (it withdraws the approval this save gave). An update
+/// that only retains an earlier approval re-reads it on that same connection
+/// first ([`keep_only_a_live_trust_approval`]).
+pub(crate) async fn store_quick_exec(
+    state: &AppState,
+    item: &QuickExec,
+    insert: bool,
+    pending: Option<PendingGrant>,
+) -> Result<(), String> {
+    let mut saved = item.clone();
+    let stored = state
+        .db
+        .with_conn(move |conn| {
+            if !insert && pending.is_none() {
+                keep_only_a_live_trust_approval(conn, &mut saved);
+            }
+            let write = |conn: &rusqlite::Connection| {
+                if insert {
+                    crate::db::quick_execs::insert_quick_exec(conn, &saved)
+                } else {
+                    crate::db::quick_execs::update_quick_exec(conn, &saved)
+                }
+            };
+            match pending {
+                None => write(conn).map(|()| true),
+                Some(grant) => crate::db::trust::grant_and_write(
+                    conn,
+                    &grant.origin,
+                    TrustApproval::QuickExecLine,
+                    &grant.subject,
+                    grant.project_id.as_deref(),
+                    crate::db::trust::TrustObject::quick_exec(&saved.id),
+                    write,
+                ),
+            }
+        })
+        .await;
+    match stored {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(TRUST_CHANGED.to_string()),
+        Err(error) => Err(format!("DB error: {error}")),
+    }
+}
+
 /// Create a Quick Exec. `by_agent` (bridge token or Kronn agent tools) drops
 /// any approval of unmodelled programs: only a human gives one (KT-1017).
+#[cfg(test)]
 pub(crate) async fn create_as(
+    state: AppState,
+    request: CreateQuickExecRequest,
+    by_agent: bool,
+) -> Json<ApiResponse<QuickExec>> {
+    create_as_in(state, request, by_agent, TrustOrigin::default()).await
+}
+
+/// [`create_as`] for an agent launched from the rooms and run of `origin`.
+pub(crate) async fn create_as_in(
     state: AppState,
     mut request: CreateQuickExecRequest,
     by_agent: bool,
+    origin: TrustOrigin,
 ) -> Json<ApiResponse<QuickExec>> {
     if by_agent {
         request.unmodelled_args_approved = None;
@@ -107,12 +259,27 @@ pub(crate) async fn create_as(
     let agent_written =
         (by_agent && needs_agent_approval(&request.command, &request.args)).then_some(true);
     drop_stale_approval(&mut request, agent_written);
+    let id = Uuid::new_v4().to_string();
+    let mut approved_by_trust = None;
+    let mut pending = None;
+    if by_agent {
+        pending = approve_by_trust(
+            &state,
+            &request.name,
+            request.project_id.as_deref(),
+            agent_written,
+            &mut request.unmodelled_args_approved,
+            &mut approved_by_trust,
+            &origin,
+        )
+        .await;
+    }
     if let Some(error) = inline_code_error(&request, agent_written) {
         return Json(ApiResponse::err(error));
     }
     let now = Utc::now();
     let item = QuickExec {
-        id: Uuid::new_v4().to_string(),
+        id,
         name: request.name.trim().to_string(),
         icon: request.icon.unwrap_or_else(|| "⌘".to_string()),
         description: request.description,
@@ -127,20 +294,16 @@ pub(crate) async fn create_as(
             .unmodelled_args_approved
             .filter(|approved| *approved),
         agent_written,
+        approved_by_trust,
         created_at: now,
         updated_at: now,
     };
-    let saved = item.clone();
-    match state
-        .db
-        .with_conn(move |conn| crate::db::quick_execs::insert_quick_exec(conn, &saved))
-        .await
-    {
+    match store_quick_exec(&state, &item, true, pending).await {
         Ok(()) => {
             let notice = awaiting_approval_notice(&item);
             Json(ApiResponse::ok(item).with_notice(notice))
         }
-        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+        Err(error) => Json(ApiResponse::err(error)),
     }
 }
 
@@ -152,17 +315,30 @@ pub async fn update(
     Json(request): Json<CreateQuickExecRequest>,
 ) -> Json<ApiResponse<QuickExec>> {
     let by_agent = crate::core::bridge_token::agent_authored(&bridge, &marker);
-    let response = update_as(state.clone(), id, request, by_agent).await;
+    let origin = origin_of(&bridge);
+    let response = update_as_in(state.clone(), id, request, by_agent, origin).await;
     announce_from_agent(&state, bridge.as_ref(), marker.as_ref(), &response.0).await;
     response
 }
 
 /// Update a Quick Exec; see [`create_as`] for `by_agent`.
+#[cfg(test)]
 pub(crate) async fn update_as(
+    state: AppState,
+    id: String,
+    request: CreateQuickExecRequest,
+    by_agent: bool,
+) -> Json<ApiResponse<QuickExec>> {
+    update_as_in(state, id, request, by_agent, TrustOrigin::default()).await
+}
+
+/// [`update_as`] for an agent launched from the rooms and run of `origin`.
+pub(crate) async fn update_as_in(
     state: AppState,
     id: String,
     mut request: CreateQuickExecRequest,
     by_agent: bool,
+    origin: TrustOrigin,
 ) -> Json<ApiResponse<QuickExec>> {
     if let Err(error) = validate_request(&request) {
         return Json(ApiResponse::err(error));
@@ -190,6 +366,24 @@ pub(crate) async fn update_as(
         (by_agent && needs_agent_approval(&request.command, &request.args)).then_some(true)
     };
     drop_stale_approval(&mut request, agent_written);
+    // KT-1492: the "approved by a trust level" mark is the server's, never the
+    // request's: it stays only on the very line a level approved, still approved.
+    let mut approved_by_trust = existing
+        .approved_by_trust
+        .filter(|_| same_line && request.unmodelled_args_approved == Some(true));
+    let mut pending = None;
+    if by_agent {
+        pending = approve_by_trust(
+            &state,
+            &request.name,
+            request.project_id.as_deref(),
+            agent_written,
+            &mut request.unmodelled_args_approved,
+            &mut approved_by_trust,
+            &origin,
+        )
+        .await;
+    }
     // An unchanged stored line stays saveable (it is still refused at run
     // time); a new or changed one must be safe.
     let unchanged = existing.name == request.name.trim()
@@ -220,20 +414,26 @@ pub(crate) async fn update_as(
             .unmodelled_args_approved
             .filter(|approved| *approved),
         agent_written,
+        approved_by_trust,
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
-    let saved = updated.clone();
-    match state
-        .db
-        .with_conn(move |conn| crate::db::quick_execs::update_quick_exec(conn, &saved))
-        .await
-    {
+    match store_quick_exec(&state, &updated, false, pending).await {
         Ok(()) => {
+            // Answer with the line as stored: a retained approval the level
+            // took back meanwhile is not reported as still given.
+            let stored_id = updated.id.clone();
+            let updated = state
+                .db
+                .with_conn(move |conn| crate::db::quick_execs::get_quick_exec(conn, &stored_id))
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(updated);
             let notice = awaiting_approval_notice(&updated);
             Json(ApiResponse::ok(updated).with_notice(notice))
         }
-        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+        Err(error) => Json(ApiResponse::err(error)),
     }
 }
 
@@ -272,6 +472,25 @@ pub async fn delete(
     {
         Ok(()) => Json(ApiResponse::ok(())),
         Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+    }
+}
+
+/// The Exec step a saved Quick Exec runs as. It carries every approval of the
+/// saved line, **the trust level's included**: `exec_approved_by_trust` is what
+/// puts a level-approved line under the vault sandbox
+/// (`workflows::exec_step::confined_for_level`); a step built without it runs
+/// unconfined, and its output reaches a model.
+fn run_step(item: &QuickExec) -> WorkflowStep {
+    WorkflowStep {
+        name: item.name.clone(),
+        step_type: StepType::Exec,
+        exec_command: Some(item.command.clone()),
+        exec_args: item.args.clone(),
+        exec_timeout_secs: Some(item.timeout_secs),
+        exec_unmodelled_args_approved: item.unmodelled_args_approved,
+        exec_agent_written: item.agent_written,
+        exec_approved_by_trust: item.approved_by_trust,
+        ..WorkflowStep::default()
     }
 }
 
@@ -549,16 +768,7 @@ pub async fn run(
         }
         return Json(ApiResponse::ok(response));
     }
-    let step = WorkflowStep {
-        name: item.name.clone(),
-        step_type: StepType::Exec,
-        exec_command: Some(item.command.clone()),
-        exec_args: item.args.clone(),
-        exec_timeout_secs: Some(item.timeout_secs),
-        exec_unmodelled_args_approved: item.unmodelled_args_approved,
-        exec_agent_written: item.agent_written,
-        ..WorkflowStep::default()
-    };
+    let step = run_step(&item);
     let running_at = Utc::now();
     let running = crate::models::SharedRun {
         exec_details: None,
@@ -772,6 +982,18 @@ pub async fn import(
     item.agent_written = (crate::core::bridge_token::agent_authored(&bridge, &marker)
         && needs_agent_approval(&item.command, &item.args))
     .then_some(true);
+    item.approved_by_trust = None;
+    let new_id = Uuid::new_v4().to_string();
+    let pending = approve_by_trust(
+        &state,
+        &item.name.clone(),
+        request.project_id.as_deref(),
+        item.agent_written,
+        &mut item.unmodelled_args_approved,
+        &mut item.approved_by_trust,
+        &origin_of(&bridge),
+    )
+    .await;
     let validation = CreateQuickExecRequest {
         name: item.name.clone(),
         icon: Some(item.icon.clone()),
@@ -791,21 +1013,16 @@ pub async fn import(
         return Json(ApiResponse::err(error));
     }
     let now = Utc::now();
-    item.id = Uuid::new_v4().to_string();
+    item.id = new_id;
     item.project_id = request.project_id;
     item.created_at = now;
     item.updated_at = now;
-    let saved = item.clone();
-    match state
-        .db
-        .with_conn(move |conn| crate::db::quick_execs::insert_quick_exec(conn, &saved))
-        .await
-    {
+    match store_quick_exec(&state, &item, true, pending).await {
         Ok(()) => {
             let notice = awaiting_approval_notice(&item);
             Json(ApiResponse::ok(item).with_notice(notice))
         }
-        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+        Err(error) => Json(ApiResponse::err(error)),
     }
 }
 
@@ -1060,7 +1277,7 @@ async fn settle_waiting_line(
         })
         .await
     {
-        Ok(WaitingLineOutcome::Settled(item)) => Ok(item),
+        Ok(WaitingLineOutcome::Settled(item)) => Ok(*item),
         Ok(WaitingLineOutcome::Refused(why)) => Err(why),
         Ok(WaitingLineOutcome::Gone) => Err("Quick Exec not found".into()),
         Err(error) => Err(format!("DB error: {error}")),
@@ -1234,12 +1451,53 @@ mod tests {
         assert!(inline_code_error(&plain, None).is_none());
     }
 
+    /// KT-1492: the run's step carries the trust level's mark, so
+    /// `confined_for_level` wraps a level-approved line in the vault sandbox.
+    /// Without a real sandbox in the test host this is what pins the wiring
+    /// (the end-to-end read of the key is in `api_tests`).
+    #[test]
+    #[serial_test::serial]
+    fn a_level_approved_quick_exec_runs_as_a_step_the_sandbox_wraps() {
+        let item = |by_trust: bool| QuickExec {
+            approved_by_trust: by_trust.then_some(true),
+            id: "q".into(),
+            name: "Read".into(),
+            icon: String::new(),
+            description: String::new(),
+            project_id: None,
+            command: "cat".into(),
+            args: vec!["/data/encryption_key".into()],
+            timeout_secs: 10,
+            output_format: CollectQuickExecOutputFormat::Text,
+            variables: vec![],
+            pinned: false,
+            unmodelled_args_approved: Some(true),
+            agent_written: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let by_level = run_step(&item(true));
+        assert_eq!(by_level.exec_approved_by_trust, Some(true));
+        assert_eq!(by_level.exec_unmodelled_args_approved, Some(true));
+        let by_human = run_step(&item(false));
+        assert_eq!(by_human.exec_approved_by_trust, None);
+        // The step the run builds is what `confined_for_level` decides on.
+        let args = by_level.exec_args.clone();
+        let (program, launch) =
+            crate::workflows::exec_step::confined_for_level(&by_level, "cat", &args);
+        assert_ne!(program, "cat", "a level-approved line was not wrapped");
+        assert_eq!(launch.last(), args.last());
+        let (program, _) = crate::workflows::exec_step::confined_for_level(&by_human, "cat", &args);
+        assert_eq!(program, "cat");
+    }
+
     /// R5-05 and B: an imported Quick Exec never carries an approval, and
     /// one imported or saved by an agent needs a human for any value.
     #[tokio::test]
     async fn quick_exec_imports_and_agent_saves_need_a_human_for_values() {
         let state = state();
         let mut item = QuickExec {
+            approved_by_trust: None,
             id: "src".into(),
             name: "Greet".into(),
             icon: String::new(),
@@ -1871,6 +2129,36 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(outcome, WaitingLineOutcome::Refused(_)));
+    }
+
+    /// KT-1492: a human activation is a human approval. A line that still
+    /// carried a level's mark loses it, so lowering the level later cannot take
+    /// back what a person chose to activate.
+    #[tokio::test]
+    async fn a_human_activation_clears_a_stale_trust_mark() {
+        use crate::db::quick_execs::{settle_waiting_line, WaitingLineOutcome};
+        let state = state();
+        let Json(saved) = create_as(state.clone(), purge_line(), true).await;
+        let item = saved.data.unwrap();
+        let id = item.id.clone();
+        let outcome = state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE quick_execs SET approved_by_trust = 1 WHERE id = ?1",
+                    [&id],
+                )?;
+                settle_waiting_line(conn, &id, true, |_| Ok(()))
+            })
+            .await
+            .unwrap();
+        let WaitingLineOutcome::Settled(settled) = outcome else {
+            panic!("the activation must land");
+        };
+        assert_eq!(settled.approved_by_trust, None);
+        let after = stored(&state, &item.id).await;
+        assert_eq!(after.unmodelled_args_approved, Some(true));
+        assert_eq!(after.approved_by_trust, None);
     }
 
     /// KT-1490: « Refuser » is recorded server-side by a human only, names the

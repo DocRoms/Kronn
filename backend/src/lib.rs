@@ -938,6 +938,55 @@ fn bridge_refusal(status: StatusCode, message: &str) -> axum::response::Response
         .into_response()
 }
 
+/// Largest body a trust write carries: a level and a code.
+const TRUST_CONFIRM_BODY_LIMIT: usize = 64 * 1024;
+
+/// A bridge-token request on a trust write: refused unless it carries a code
+/// (the `X-Kronn-Confirm` header or a `proof` field), which the handler then
+/// verifies. The request reaches the handler marked as the bridge channel.
+async fn trust_confirm_gate(
+    grant: &std::sync::Arc<crate::core::bridge_token::BridgeGrant>,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let (mut parts, body) = request.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, TRUST_CONFIRM_BODY_LIMIT).await else {
+        return bridge_refusal(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+    };
+    let in_header = parts
+        .headers
+        .get(crate::api::trust::CONFIRM_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|code| !code.trim().is_empty());
+    let in_body = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|json| {
+            json.get("proof")
+                .and_then(|p| p.as_str().map(str::to_owned))
+        })
+        .is_some_and(|code| !code.trim().is_empty());
+    if !in_header && !in_body {
+        return bridge_refusal(
+            StatusCode::FORBIDDEN,
+            "a trust setting changes only with a strong-confirmation code: send the owner's code in the X-Kronn-Confirm header or a `proof` field",
+        );
+    }
+    parts
+        .extensions
+        .insert(crate::core::bridge_token::BridgeCaller {
+            token_id: grant.id.clone(),
+            project: None,
+            own_discussions: grant.own_discussions(),
+            own_run: grant.scope.workflow_run_id.clone(),
+            agent: grant.scope.agent.clone(),
+        });
+    next.run(axum::extract::Request::from_parts(
+        parts,
+        axum::body::Body::from(bytes),
+    ))
+    .await
+}
+
 /// Admit a bridge-token request only on its positive list and its scope.
 async fn bridge_gate(
     state: &AppState,
@@ -959,6 +1008,13 @@ async fn bridge_gate(
         .get::<axum::extract::MatchedPath>()
         .map(|matched| matched.as_str().to_owned())
         .unwrap_or_default();
+    // KT-1492: the code is the proof, whatever the channel. A trust write is not
+    // on the bridge list, but a bridge token carrying a strong-confirmation code
+    // reaches it; the handler checks the code (single use, bound to this route
+    // and object, journalled as the bridge channel, lockout after 5 failures).
+    if bridge_token::trust_confirm_route(&method, &pattern) {
+        return trust_confirm_gate(&grant, request, next).await;
+    }
     let Some(route) = bridge_token::route_for(&method, &pattern) else {
         tracing::warn!(target: "kronn::bridge_token", token = %grant.id, %method, route = %pattern,
             "bridge token refused on a route outside its list");
@@ -1134,7 +1190,7 @@ const PERMISSION_POSTS: &[&str] = &["/api/config/embed-origins", "/api/pages/imp
 /// Passe D — the destructive-request criterion: every DELETE (no benign DELETE
 /// exists in this API), the listed POSTs, and the parameterized
 /// `/api/mcps/custom/{id}/cleanup-orphan-env`.
-fn is_destructive(method: &axum::http::Method, path: &str) -> bool {
+pub(crate) fn is_destructive(method: &axum::http::Method, path: &str) -> bool {
     method == axum::http::Method::DELETE
         || DESTRUCTIVE_POSTS.contains(&path)
         || (method == axum::http::Method::POST && PERMISSION_POSTS.contains(&path))
@@ -1146,6 +1202,8 @@ fn is_destructive(method: &axum::http::Method, path: &str) -> bool {
         || path.ends_with("/audit-attestation")
         // KT-1433: opening the host (Docker, or everything) to a project's validations.
         || (method != axum::http::Method::GET && path.ends_with("/validations-access"))
+        // KT-1492: a trust level decides what agents are granted without asking.
+        || (method != axum::http::Method::GET && path.starts_with("/api/trust"))
 }
 
 /// Pure auth decision for a request that already cleared the always-open
@@ -1680,6 +1738,34 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/validations-access",
             get(api::projects::validations_access::get).put(api::projects::validations_access::set),
+        )
+        // KT-1492: trust levels. None is a bridge route: a bridge token reaches a
+        // write only with the owner's confirmation code (`trust_confirm_gate`).
+        .route("/api/trust", get(api::trust::overview))
+        .route("/api/trust/audit", get(api::trust::audit))
+        .route("/api/trust/proof", get(api::trust::get_proof))
+        .route("/api/trust/proof/enroll", post(api::trust::enroll_proof))
+        .route("/api/trust/proof/confirm", post(api::trust::confirm_proof))
+        .route(
+            "/api/trust/proof/recovery-codes",
+            post(api::trust::renew_recovery_codes),
+        )
+        .route("/api/trust/proof/disable", post(api::trust::disable_proof))
+        .route(
+            "/api/trust/instance",
+            get(api::trust::get_instance).put(api::trust::put_instance),
+        )
+        .route(
+            "/api/trust/workflows/{id}",
+            get(api::trust::get_workflow)
+                .put(api::trust::put_workflow)
+                .delete(api::trust::delete_workflow),
+        )
+        .route(
+            "/api/trust/rooms/{id}",
+            get(api::trust::get_room)
+                .put(api::trust::put_room)
+                .delete(api::trust::delete_room),
         )
         .route(
             "/api/projects/{id}/repository-resources",
@@ -3627,6 +3713,55 @@ mod auth_tests {
             .is_none(),
             "an agent token cannot answer the elevation card"
         );
+    }
+
+    /// KT-1492: a trust level decides what agents are granted without asking, so
+    /// only a human (or whoever the human gave a one-time code to) sets it: no
+    /// trust route is on the bridge list (a bridge token reaches a write only
+    /// with a confirmation code), and a change is refused to a remote caller
+    /// without a token.
+    #[test]
+    fn trust_levels_are_human_only() {
+        let routes: [(&str, &str); 13] = [
+            ("GET", "/api/trust"),
+            ("GET", "/api/trust/audit"),
+            ("PUT", "/api/trust/instance"),
+            ("PUT", "/api/trust/rooms/{id}"),
+            ("DELETE", "/api/trust/rooms/{id}"),
+            ("PUT", "/api/trust/workflows/{id}"),
+            ("DELETE", "/api/trust/workflows/{id}"),
+            ("GET", "/api/trust/proof"),
+            ("POST", "/api/trust/proof/enroll"),
+            ("POST", "/api/trust/proof/confirm"),
+            ("POST", "/api/trust/proof/recovery-codes"),
+            ("POST", "/api/trust/proof/disable"),
+            ("POST", "/api/trust/proof"),
+        ];
+        for (method, pattern) in routes {
+            assert!(
+                crate::core::bridge_token::route_for(method, pattern).is_none(),
+                "{method} {pattern} must not be a bridge route"
+            );
+        }
+        for method in [Method::PUT, Method::POST, Method::DELETE] {
+            for path in [
+                "/api/trust/instance",
+                "/api/trust/rooms/r1",
+                "/api/trust/workflows/w1",
+                "/api/trust/proof/enroll",
+                "/api/trust/proof/confirm",
+                "/api/trust/proof/recovery-codes",
+                "/api/trust/proof/disable",
+            ] {
+                assert!(super::is_destructive(&method, path), "{method} {path}");
+                assert!(
+                    !auth_allows(&method, path, false, true, false, false),
+                    "{method} {path} from a remote caller without a token"
+                );
+                assert!(auth_allows(&method, path, false, true, true, false));
+            }
+        }
+        assert!(!super::is_destructive(&Method::GET, "/api/trust"));
     }
 
     #[test]

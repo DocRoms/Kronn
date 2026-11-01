@@ -79,7 +79,7 @@ impl Mechanism {
     }
 
     /// The program that applies this mechanism.
-    fn launcher(self) -> &'static str {
+    pub(crate) fn launcher(self) -> &'static str {
         match self {
             Self::Seatbelt => SANDBOX_EXEC,
             Self::Bubblewrap => BWRAP,
@@ -179,6 +179,20 @@ impl Mechanism {
     }
 }
 
+/// A way to start a command under an OS sandbox: the worker's lane
+/// ([`Confinement`]) or the profile of what a trust level grants
+/// ([`crate::core::trust_sandbox::LevelConfinement`]).
+pub trait CommandConfinement: Send + Sync {
+    /// The process `probe` becomes under this confinement, not yet started.
+    fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command;
+}
+
+impl CommandConfinement for Confinement {
+    fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command {
+        Confinement::command(self, probe, route)
+    }
+}
+
 /// What a confined command may write. Everything else on disk is read-only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxPolicy {
@@ -190,6 +204,9 @@ pub struct SandboxPolicy {
     /// network. Only a validation of a project whose human opened Docker to its
     /// validations carries one (KT-1433): the socket is the host's root.
     pub docker_socket: Option<PathBuf>,
+    /// Directories the command can neither read nor write (KT-1492): the Kronn
+    /// data directory, for a validation a trust level reached Docker for.
+    pub hidden: Vec<PathBuf>,
 }
 
 impl SandboxPolicy {
@@ -200,6 +217,7 @@ impl SandboxPolicy {
             write_roots: lane.write_roots(),
             temp_dir: lane.tmp_dir(),
             docker_socket: None,
+            hidden: Vec::new(),
         }
     }
 
@@ -233,7 +251,7 @@ impl SandboxPolicy {
 
 /// `path` with its longest existing ancestor canonicalized: a Cargo target that
 /// does not exist yet still resolves through `/tmp` → `/private/tmp`.
-fn real_path(path: &Path) -> PathBuf {
+pub(crate) fn real_path(path: &Path) -> PathBuf {
     let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
     let mut current = path;
     loop {
@@ -251,7 +269,7 @@ fn real_path(path: &Path) -> PathBuf {
 }
 
 /// A Seatbelt string literal: `\` and `"` escaped.
-fn seatbelt_literal(path: &Path) -> String {
+pub(crate) fn seatbelt_literal(path: &Path) -> String {
     let text = path.to_string_lossy();
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -346,6 +364,19 @@ pub fn bubblewrap_args(writable: &[PathBuf]) -> Vec<String> {
 /// [`bubblewrap_args`], plus `docker_socket` bound back at its path: a Unix
 /// socket is reached by path, so the empty network namespace does not cut it.
 pub fn bubblewrap_args_with(writable: &[PathBuf], docker_socket: Option<&Path>) -> Vec<String> {
+    bubblewrap_args_hiding(writable, docker_socket, &[])
+}
+
+/// [`bubblewrap_args_with`], plus an empty tmpfs over each existing `hidden`
+/// directory (KT-1492: the Kronn data dir). The mounts are emitted here, after
+/// every bind (so the tmpfs stays on top) and before the namespace flags and
+/// the `--` sentinel: no caller splices into a finished list, and the command
+/// pushed after it can never be taken for an option.
+pub fn bubblewrap_args_hiding(
+    writable: &[PathBuf],
+    docker_socket: Option<&Path>,
+    hidden: &[PathBuf],
+) -> Vec<String> {
     let mut args: Vec<String> = [
         "--ro-bind",
         "/",
@@ -372,6 +403,9 @@ pub fn bubblewrap_args_with(writable: &[PathBuf], docker_socket: Option<&Path>) 
         let at = socket.to_string_lossy().into_owned();
         args.extend(["--bind".to_string(), real, at]);
     }
+    for dir in crate::core::trust_sandbox::bubblewrap_mount_points(hidden) {
+        args.extend(["--tmpfs".to_string(), dir]);
+    }
     args.extend(
         [
             "--unshare-net",
@@ -396,12 +430,12 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
             mechanism.launcher().to_string(),
             vec![
                 "-p".to_string(),
-                seatbelt_profile_with(&writable, policy.docker_socket.as_deref()),
+                seatbelt_profile_hiding(&writable, policy.docker_socket.as_deref(), &policy.hidden),
             ],
         ),
         Mechanism::Bubblewrap => (
             mechanism.launcher().to_string(),
-            bubblewrap_args_with(&writable, policy.docker_socket.as_deref()),
+            bubblewrap_args_hiding(&writable, policy.docker_socket.as_deref(), &policy.hidden),
         ),
     };
     args.push(probe.program.clone());
@@ -430,6 +464,18 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
         env,
         timeout: probe.timeout,
     }
+}
+
+/// [`seatbelt_profile_with`], plus a deny over each `hidden` directory
+/// (KT-1492: the Kronn data dir). Appended last: the last matching rule wins.
+fn seatbelt_profile_hiding(
+    writable: &[PathBuf],
+    docker_socket: Option<&Path>,
+    hidden: &[PathBuf],
+) -> String {
+    let mut profile = seatbelt_profile_with(writable, docker_socket);
+    profile.push_str(&crate::core::trust_sandbox::seatbelt_hide_rules(hidden));
+    profile
 }
 
 /// The Docker socket a validation of this host reaches: `DOCKER_HOST` when it
@@ -585,6 +631,12 @@ impl Confinement {
     /// opened Docker to its validations (KT-1433).
     pub fn with_docker_socket(mut self, socket: PathBuf) -> Self {
         self.policy.docker_socket = Some(socket);
+        self
+    }
+
+    /// This confinement with `dirs` closed to the command (KT-1492).
+    pub fn hiding(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.policy.hidden = dirs;
         self
     }
 

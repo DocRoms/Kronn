@@ -794,6 +794,7 @@ fn workflow_step_api_call_roundtrip() {
     query.insert("jql".into(), "project = KRONN".into());
 
     let step = WorkflowStep {
+        exec_approved_by_trust: None,
         id: None,
         name: "fetch_issues".into(),
         step_type: StepType::ApiCall,

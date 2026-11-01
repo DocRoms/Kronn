@@ -5,7 +5,7 @@ repository paths. The wizard exposes one path per line in the step's advanced
 settings. An empty or absent list retains the existing launch policy. This is
 an explicit per-step declaration; listing a companion project in documentation
 does not automatically grant access.
-[src: file: backend/src/models/workflows.rs:1044-1048#read_only_repos]
+[src: file: backend/src/models/workflows.rs:1050-1054#read_only_repos]
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4577-4591#read_only_repos]
 
 ```json
@@ -152,10 +152,10 @@ runs with the copy as its working directory, so `node <declared path>` and a
 helper loaded through `process.cwd()` or the script's own directory come from
 the copy. The run's checkout is in `KRONN_WORKTREE`, the copy in
 `KRONN_APPROVED_SCRIPTS_DIR`. The setup command still runs in the checkout.
-[src: file: backend/src/workflows/exec_step.rs:91-111#approved_script_child]
-[src: file: backend/src/workflows/exec_step.rs:115-139#prepare_approved_scripts]
-[src: file: backend/src/workflows/exec_step.rs:457-468#approved_copy]
-[src: file: backend/src/workflows/exec_step.rs:706-713#approved_script_child]
+[src: file: backend/src/workflows/exec_step.rs:107-127#approved_script_child]
+[src: file: backend/src/workflows/exec_step.rs:131-155#prepare_approved_scripts]
+[src: file: backend/src/workflows/exec_step.rs:476-487#approved_copy]
+[src: file: backend/src/workflows/exec_step.rs:727-733#approved_script_child]
 
 Limits: only the declared files are verified. Absolute imports, paths built
 from `KRONN_WORKTREE` and interpreter search paths outside the copy are not

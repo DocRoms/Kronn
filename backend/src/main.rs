@@ -128,6 +128,9 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         app_config.server.runtime_port = Some(port);
     }
     let port = app_config.server.listening_port();
+    // KT-1492: "Protect the Kronn vault from agents" (on unless the config says
+    // otherwise): what a trust level grants runs without access to the data dir.
+    kronn::core::trust_sandbox::set_protect_vault(app_config.server.protect_vault_from_agents);
     // Host binding priority:
     //   1. `KRONN_HOST` env — explicit opt-in (e.g. `KRONN_HOST=0.0.0.0` to
     //      expose a NATIVE instance on the LAN for the contacts / P2P feature,
