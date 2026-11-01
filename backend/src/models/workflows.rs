@@ -1070,7 +1070,8 @@ pub struct DelegateSubtasksConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub concurrency: Option<u32>,
-    /// Review rounds per subtask before it escalates. Default 3, maximum 10.
+    /// Review rounds per subtask before it escalates. Maximum 10; unset uses
+    /// Settings > Workers (default 5, or unlimited).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub max_review_rounds: Option<u32>,

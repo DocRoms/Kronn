@@ -1,6 +1,6 @@
 import type { AcceptAuditStepResponse, ActivateQuickExecRequest, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange, QuickExecPendingApproval } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
-import type { WorkerConnectivity } from '../types/generated';
+import type { WorkerConnectivity, WorkersConfig } from '../types/generated';
 import type { ComfyUiConfig, ComfyUiStatus, ExternalApiConnection, SetComfyUiSlotsRequest, SetComfyUiSettingsRequest, SetComfyUiModelFamilyRequest } from '../types/generated';
 import type {
   DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, GrantDiscussionProjectRequest,
@@ -909,6 +909,9 @@ export const config = {
   /** Default AI doc folder, relative to every project root (KT-263); null = historical detection. */
   getDefaultDocsDir: () => api<string | null>('GET', '/config/default-docs-dir'),
   saveDefaultDocsDir: (dir: string | null) => api<string | null>('POST', '/config/default-docs-dir', dir),
+  /** Settings > Workers: the default review-round limit of every launch path (KT-1345). */
+  getWorkers: () => api<WorkersConfig>('GET', '/config/workers'),
+  saveWorkers: (workers: WorkersConfig) => api<WorkersConfig>('POST', '/config/workers', workers),
   getScanDepth: () => api<number>('GET', '/config/scan-depth'),
   setScanDepth: (depth: number) => api<number>('POST', '/config/scan-depth', depth),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
@@ -3832,7 +3835,8 @@ export interface CreateCampaignRequest {
   target_workspace_id?: string | null;
   target_branch: string;
   integration_strategy?: IntegrationStrategy;
-  max_review_rounds?: number;
+  /** A count, or "unlimited"; omitted = the Settings > Workers default. */
+  max_review_rounds?: number | 'unlimited';
   max_concurrent_executions?: number;
   max_cli_concurrent_executions?: number;
   token_budget?: number | null;
@@ -3889,6 +3893,21 @@ export const orchestration = {
     reason: string,
   ) => api<unknown>('POST', `/orchestration/executions/${executionId}/reassign`, {
     worker,
+    reason,
+  }),
+  /** Raise an execution's review-round limit (KT-1345): rounds to add, or `unlimited`. */
+  extendReviewRounds: (
+    executionId: string,
+    extend: number | 'unlimited',
+    reason: string,
+  ) => api<{
+    task_execution_id: string;
+    previous_limit: number | 'unlimited';
+    max_review_rounds: number | 'unlimited';
+    review_rounds: number;
+    reoffered_to_worker: boolean;
+  }>('POST', `/orchestration/executions/${executionId}/extend-review-rounds`, {
+    extend_review_rounds: extend,
     reason,
   }),
   reviewExecution: (

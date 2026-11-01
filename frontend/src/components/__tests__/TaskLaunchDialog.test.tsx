@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   createCampaign: vi.fn(),
   launch: vi.fn(),
   catalog: vi.fn(),
+  workers: vi.fn(),
 }));
 
 vi.mock('../../lib/api', () => buildApiMock({
@@ -18,6 +19,7 @@ vi.mock('../../lib/api', () => buildApiMock({
     launch: mocks.launch as never,
   },
   modelCatalogApi: { list: mocks.catalog as never },
+  config: { getWorkers: mocks.workers as never },
 }));
 
 vi.mock('../../lib/I18nContext', () => ({
@@ -49,6 +51,7 @@ describe('TaskLaunchDialog', () => {
     mocks.createCampaign.mockResolvedValue(campaign);
     mocks.launch.mockResolvedValue({ execution: { id: 'exec-1' } });
     mocks.catalog.mockResolvedValue({ targets: [] });
+    mocks.workers.mockResolvedValue({ default_max_review_rounds: 5, review_rounds_unlimited: false });
   });
 
   const renderDialog = (overrides: Partial<React.ComponentProps<typeof TaskLaunchDialog>> = {}) => {
@@ -142,6 +145,87 @@ describe('TaskLaunchDialog', () => {
         }),
       }),
     }));
+  });
+
+  // KT-1345 — the review-round limit starts from Settings > Workers.
+  it('pre-fills the review rounds from Settings > Workers and still lets the run override it', async () => {
+    mocks.workers.mockResolvedValue({ default_max_review_rounds: 9, review_rounds_unlimited: false });
+    const props = renderDialog();
+    const rounds = screen.getByTestId('launch-review-rounds');
+    await waitFor(() => expect(rounds).toHaveValue(9));
+    expect(screen.queryByTestId('launch-review-warning')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'orch.launch' }));
+    await waitFor(() => expect(props.onLaunched).toHaveBeenCalled());
+    expect(mocks.createCampaign).toHaveBeenLastCalledWith(expect.objectContaining({ max_review_rounds: 9 }));
+
+    fireEvent.change(rounds, { target: { value: '2' } });
+    expect(rounds).toHaveValue(2);
+  });
+
+  it('sends the per-run override instead of the default', async () => {
+    mocks.workers.mockResolvedValue({ default_max_review_rounds: 9, review_rounds_unlimited: false });
+    const props = renderDialog();
+    const rounds = screen.getByTestId('launch-review-rounds');
+    await waitFor(() => expect(rounds).toHaveValue(9));
+    fireEvent.change(rounds, { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'orch.launch' }));
+    await waitFor(() => expect(props.onLaunched).toHaveBeenCalled());
+    expect(mocks.createCampaign).toHaveBeenLastCalledWith(expect.objectContaining({ max_review_rounds: 2 }));
+  });
+
+  it('opens unlimited with the token-burn warning when that is the Workers default', async () => {
+    mocks.workers.mockResolvedValue({ default_max_review_rounds: 5, review_rounds_unlimited: true });
+    const props = renderDialog();
+    expect(await screen.findByTestId('launch-review-warning')).toHaveTextContent('config.workers.unlimitedWarning');
+    expect(screen.getByTestId('launch-review-unlimited')).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'orch.launch' }));
+    await waitFor(() => expect(props.onLaunched).toHaveBeenCalled());
+    expect(mocks.createCampaign).toHaveBeenLastCalledWith(expect.objectContaining({ max_review_rounds: 'unlimited' }));
+  });
+
+  it('does not let a late Workers default overwrite what the user already typed', async () => {
+    let resolveWorkers: (value: unknown) => void = () => {};
+    mocks.workers.mockReturnValue(new Promise(resolve => { resolveWorkers = resolve; }));
+    renderDialog();
+    const rounds = screen.getByTestId('launch-review-rounds');
+    fireEvent.change(rounds, { target: { value: '4' } });
+    resolveWorkers({ default_max_review_rounds: 9, review_rounds_unlimited: false });
+    await waitFor(() => expect(mocks.workers).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(rounds).toHaveValue(4);
+  });
+
+  it('leaves the limit out while the Workers default is still loading, so the server applies it', async () => {
+    mocks.workers.mockReturnValue(new Promise(() => {}));
+    const props = renderDialog();
+    expect(screen.getByTestId('launch-review-rounds')).toHaveValue(null);
+    fireEvent.click(screen.getByRole('button', { name: 'orch.launch' }));
+    await waitFor(() => expect(props.onLaunched).toHaveBeenCalled());
+    expect(mocks.createCampaign.mock.calls[0][0]).not.toHaveProperty('max_review_rounds');
+  });
+
+  it('never substitutes a built-in figure when the Workers default cannot be read', async () => {
+    mocks.workers.mockRejectedValue(new Error('boom'));
+    const props = renderDialog();
+    expect(await screen.findByTestId('launch-review-unavailable')).toHaveTextContent(
+      'orch.config.reviewRoundsUnavailable',
+    );
+    expect(screen.getByTestId('launch-review-rounds')).toHaveValue(null);
+    fireEvent.click(screen.getByRole('button', { name: 'orch.launch' }));
+    await waitFor(() => expect(props.onLaunched).toHaveBeenCalled());
+    expect(mocks.createCampaign.mock.calls[0][0]).not.toHaveProperty('max_review_rounds');
+  });
+
+  it('still sends what the human typed when the Workers default could not be read', async () => {
+    mocks.workers.mockRejectedValue(new Error('boom'));
+    const props = renderDialog();
+    await screen.findByTestId('launch-review-unavailable');
+    fireEvent.change(screen.getByTestId('launch-review-rounds'), { target: { value: '7' } });
+    expect(screen.queryByTestId('launch-review-unavailable')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'orch.launch' }));
+    await waitFor(() => expect(props.onLaunched).toHaveBeenCalled());
+    expect(mocks.createCampaign).toHaveBeenLastCalledWith(expect.objectContaining({ max_review_rounds: 7 }));
   });
 
   it('closes with Escape without starting work', () => {

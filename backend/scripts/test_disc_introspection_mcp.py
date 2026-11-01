@@ -1763,6 +1763,112 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             }),
         ])
 
+    def test_max_review_rounds_is_forwarded_and_an_unknown_argument_is_refused(self):
+        """KT-1345 — `max_review_rounds` rides prepare and launch; an argument the
+        tool does not declare is refused, never silently dropped (`target_ref`
+        used to be ignored and the base fell back to main)."""
+        http = mock.MagicMock(return_value={"success": True, "data": {"launchable": True}})
+        worker = {"kind": "discussion_agent", "agent_type": "Ollama"}
+        base = {
+            "task_reference": "KT-1345", "worker": worker,
+            "worker_scope_intent": "generic",
+        }
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_prepare({**base, "max_review_rounds": 8})
+            self.mod.call_task_exec_launch({**base, "max_review_rounds": "unlimited"})
+            self.mod.call_task_exec_launch(base)
+            for call in (self.mod.call_task_exec_prepare, self.mod.call_task_exec_launch):
+                with self.subTest(call=call.__name__), self.assertRaises(RuntimeError) as refused:
+                    call({**base, "target_ref": "develop"})
+                self.assertIn("target_ref", str(refused.exception))
+                self.assertIn("max_review_rounds", str(refused.exception))
+            with self.assertRaises(RuntimeError):
+                self.mod.call_task_exec_reassign({
+                    "task_execution_id": "exec-1", "reason": "r", "target_ref": "x",
+                    "extend_review_rounds": 2,
+                })
+        bodies = [call.args[2] for call in http.call_args_list]
+        self.assertEqual(len(bodies), 3, "a refused call never reaches the backend")
+        self.assertEqual(bodies[0]["max_review_rounds"], 8)
+        self.assertEqual(bodies[1]["max_review_rounds"], "unlimited")
+        self.assertNotIn("max_review_rounds", bodies[2])
+        tools = {item["name"]: item for item in self.mod.TOOLS}
+        for name in ("task_exec_prepare", "task_exec_launch"):
+            schema = tools[name]["inputSchema"]
+            self.assertIn("max_review_rounds", schema["properties"])
+            self.assertNotIn("max_review_rounds", schema["required"])
+        manual = self.mod.TOOL_MANUALS["task_exec_prepare"]
+        for fact in ("Settings > Workers", "\"unlimited\"", "default_max_review_rounds", "extend_review_rounds"):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, manual)
+
+    def test_an_explicit_null_review_limit_reaches_the_backend_to_be_refused(self):
+        """KT-1345 — absent means the Settings > Workers default; `null` is not
+        « absent », so it is forwarded (the backend refuses it) instead of being
+        dropped and quietly defaulted."""
+        http = mock.MagicMock(return_value={"success": True, "data": {}})
+        base = {
+            "task_reference": "KT-1345",
+            "worker": {"kind": "discussion_agent", "agent_type": "Ollama"},
+            "worker_scope_intent": "generic",
+        }
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            for call in (self.mod.call_task_exec_prepare, self.mod.call_task_exec_launch):
+                with self.subTest(call=call.__name__):
+                    http.reset_mock()
+                    call({**base, "max_review_rounds": None})
+                    body = http.call_args.args[2]
+                    self.assertIn("max_review_rounds", body)
+                    self.assertIsNone(body["max_review_rounds"])
+                    http.reset_mock()
+                    call(base)
+                    self.assertNotIn("max_review_rounds", http.call_args.args[2])
+
+    def test_extending_the_review_limit_is_a_reassign_change(self):
+        """KT-1345 — raising an execution's limit rides `task_exec_reassign` (one
+        change per call, reason journaled) instead of a tool of its own."""
+        http = mock.MagicMock(return_value={"success": True, "data": {"max_review_rounds": 7}})
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_reassign({
+                "task_execution_id": "exec-1", "extend_review_rounds": 2,
+                "reason": "real bugs remain",
+            })
+            self.mod.call_task_exec_reassign({
+                "task_execution_id": "exec-1", "extend_review_rounds": "unlimited",
+                "reason": "keep going",
+            })
+            worker = {"kind": "cli", "agent_type": "Codex", "cli_session_id": 7}
+            for refused in (
+                {"task_execution_id": "exec-1", "worker": worker,
+                 "extend_review_rounds": 2, "reason": "r"},
+                {"task_execution_id": "exec-1", "validations": [],
+                 "extend_review_rounds": 2, "reason": "r"},
+                {"task_execution_id": "exec-1", "extend_review_rounds": 2},
+            ):
+                with self.subTest(refused=refused), self.assertRaises(RuntimeError):
+                    self.mod.call_task_exec_reassign(refused)
+        identity = {"source_agent": "ClaudeCode", "source_session_id": "adhoc-live-a"}
+        self.assertEqual(http.call_count, 2)
+        http.assert_has_calls([
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/reassign", {
+                **identity, "extend_review_rounds": 2, "reason": "real bugs remain",
+            }),
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/reassign", {
+                **identity, "extend_review_rounds": "unlimited", "reason": "keep going",
+            }),
+        ])
+        schema = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_reassign"
+        )["inputSchema"]
+        self.assertIn("extend_review_rounds", schema["properties"])
+        self.assertIn("`extend_review_rounds`", self.mod.TOOL_MANUALS["task_exec_reassign"])
+
     def test_stale_bridge_refuses_a_validations_swap_before_http(self):
         self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0
         self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"

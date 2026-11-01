@@ -10,7 +10,7 @@ errors that CI (`test-python`) and a plain terminal do not have:
 - `test_real_reexec_restores_fragmented_json_rpc_line`
 - `test_real_reexec_preserves_queued_mutation_cancellation`
 
-[src: file: backend/scripts/test_disc_introspection_mcp.py:9338-9506#test_stdio_process_survives_real_reexec_and_serves_fresh_contract]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:9444-9612#test_stdio_process_survives_real_reexec_and_serves_fresh_contract]
 
 ## Cause
 

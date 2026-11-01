@@ -74,7 +74,7 @@ Awareness batches are bounded (20/wake), explicitly flagged
 never end a quiet wait. The bridge itself does not return merely because one
 server poll was quiet.
 [src: file: backend/src/api/disc_invite.rs:1071-1075#AWARENESS_MAX_MESSAGES] [src: file: backend/src/api/disc_invite.rs:1135-1142#awareness]
-[src: file: backend/src/api/disc_invite.rs:1716-1735#load_awareness_batch] [src: file: backend/scripts/disc-introspection-mcp.py:7245-7256#_WAIT_MIN_QUIET_POLL_SECS]
+[src: file: backend/src/api/disc_invite.rs:1716-1735#load_awareness_batch] [src: file: backend/scripts/disc-introspection-mcp.py:7275-7286#_WAIT_MIN_QUIET_POLL_SECS]
 [src: file: docs/architecture/discussion-agent-routing.md:87-99#awareness_offered_upto]
 
 ## 3 bis — Bridge guarantee vs host capability
@@ -112,7 +112,7 @@ the CLI alias.
 [src: file: backend/src/db/discussions.rs:2086-2089#reply_author]
 [src: file: backend/src/api/disc_invite.rs:1979-1999#addressed_to_session]
 [src: file: backend/src/api/disc_invite.rs:1708-1718#addressed_to_caller]
-[src: file: backend/scripts/disc-introspection-mcp.py:11224-11234#attention_required]
+[src: file: backend/scripts/disc-introspection-mcp.py:11298-11308#attention_required]
 [src: file: backend/src/api/discussions/streaming.rs:2382-2430#punctual_identity_notice]
 [src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
 [src: file: backend/src/api/disc_invite.rs:1622-1630#reply_target]

@@ -858,6 +858,34 @@ async fn a_subtask_without_a_worker_stops_before_anything_launches() {
     assert!(world.executions().await.is_empty());
 }
 
+/// KT-1345 — a step that sets no `max_review_rounds` takes Settings > Workers;
+/// one that sets it keeps its own.
+#[tokio::test]
+async fn a_step_without_max_review_rounds_takes_the_workers_setting() {
+    for (unlimited, step_rounds, expected) in [
+        (false, None, 7),
+        (true, None, crate::models::UNLIMITED_REVIEW_ROUNDS),
+        (true, Some(2), 2),
+    ] {
+        let fixture = fixture(1, &[]).await;
+        fixture.state.config.write().await.workers = crate::models::WorkersConfig {
+            default_max_review_rounds: 7,
+            review_rounds_unlimited: unlimited,
+        };
+        let world = FakeWorld::new(fixture.state.db.clone(), Box::new(approve));
+        let mut step = config(1, 3);
+        step.max_review_rounds = step_rounds;
+        let report = delegate(&fixture, &step, &world, None).await;
+        assert_eq!(report.signal, DelegationSignal::Ok, "{}", report.summary);
+        let executions = world.executions().await;
+        assert_eq!(executions.len(), 1);
+        assert_eq!(
+            executions[0].0.max_review_rounds, expected,
+            "unlimited={unlimited} step={step_rounds:?}"
+        );
+    }
+}
+
 #[test]
 fn the_authoring_schema_example_is_a_valid_step() {
     let schema: Value =

@@ -343,7 +343,7 @@
         "agent_settings (reviewer model/tier/effort)",
         "prompt_template (extra review guidance)",
         "delegate_subtasks.concurrency (1-8, default 1)",
-        "delegate_subtasks.max_review_rounds (1-10, default 3)",
+        "delegate_subtasks.max_review_rounds (1-10, default: Settings > Workers)",
         "delegate_subtasks.validations ([{command}])",
         "delegate_subtasks.target_branch (default: the run's branch)",
         "delegate_subtasks.timeout_secs (default 21600)"
