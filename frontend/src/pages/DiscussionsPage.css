@@ -1979,10 +1979,16 @@ button.disc-contact-open {
   min-width: 0;
 }
 
-.disc-chat-header-invite {
+/* KT-1530 — the pair every detail header carries at the far right of its title
+   row: the page's primary action (green) and "Details" (the panel icon). Same
+   box for both, so they read as two halves of one control. */
+.disc-chat-header-buttons {
   display: flex;
   align-items: center;
+  gap: 6px;
   flex-shrink: 0;
+  /* Badge / freshness text and the pair share one baseline. */
+  min-height: 30px;
 }
 
 .disc-chat-header-title {
@@ -2273,92 +2279,67 @@ button.disc-contact-open {
   white-space: nowrap;
 }
 
-/* Pinned right, opposite the invite above it, so the two toggles that open
-   something read as a pair down the right edge. */
-.disc-chat-header-details-toggle {
+/* One size for both header buttons (primary action + Details): same height,
+   padding, font and radius, light and dark. */
+.disc-chat-header-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  margin-left: auto;
-  padding: 2px 8px;
-  font-size: 0.8em;
-  border: 1px solid var(--kr-border);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--kr-text-tertiary);
-  cursor: pointer;
-}
-
-.disc-chat-header-details-toggle:hover {
-  border-color: var(--kr-border-strong);
-  color: var(--kr-text-primary);
-}
-
-.disc-chat-header-details-toggle[aria-expanded='true'] {
-  border-color: var(--kr-accent);
-  color: var(--kr-accent);
-}
-
-/* The discussion's Details opens the side panel, so it is a button of the same
-   weight as the invite above it rather than the small fold toggle. */
-.disc-chat-header-details-btn {
-  display: inline-flex;
-  align-items: center;
+  justify-content: center;
   gap: 5px;
   flex-shrink: 0;
-  margin-left: auto;
-  min-height: 26px;
-  padding: 3px 10px;
+  min-height: 30px;
+  padding: 4px 12px;
   font-size: var(--kr-fs-sm);
-  border: 1px solid var(--kr-border);
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  border: 1px solid var(--kr-border-strong);
   border-radius: var(--kr-r-sm);
   background: transparent;
   color: var(--kr-text-secondary);
   cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
 }
 
-.disc-chat-header-details-btn:hover {
-  border-color: var(--kr-border-strong);
-  color: var(--kr-text-primary);
-}
-
-.disc-chat-header-details-btn:focus-visible {
+.disc-chat-header-btn:focus-visible {
   outline: 2px solid var(--kr-accent);
   outline-offset: 2px;
+}
+
+.disc-chat-header-btn:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.disc-chat-header-btn span {
+  color: inherit;
+  font-size: inherit;
+}
+
+/* Green: the page's one primary action. */
+.disc-chat-header-btn--primary {
+  border-color: var(--kr-success);
+  background: var(--kr-success);
+  color: var(--kr-on-success);
+}
+
+.disc-chat-header-btn--primary:hover:not(:disabled) {
+  background: rgba(var(--kr-success-rgb), 0.85);
+}
+
+.disc-chat-header-btn--primary[aria-expanded='true'] {
+  box-shadow: 0 0 0 2px rgba(var(--kr-success-rgb), 0.35);
+}
+
+/* Details opens the side panel: neutral until the panel is showing. */
+.disc-chat-header-details-btn:hover {
+  border-color: var(--kr-border-heavy);
+  color: var(--kr-text-primary);
 }
 
 .disc-chat-header-details-btn[aria-expanded='true'] {
   border-color: var(--kr-accent);
   color: var(--kr-accent);
-}
-
-/* The chevron points at what the button does: down to open the row, up once
-   the row is open and the click would close it. */
-.disc-chat-header-details-toggle svg {
-  transition: transform 120ms ease;
-}
-
-.disc-chat-header-details-toggle[aria-expanded='true'] svg {
-  transform: rotate(180deg);
-}
-
-/* Row 3 — the fold. Same typography as row 2 so opening it reads as more of
-   the header rather than as a different surface. */
-.disc-chat-header-details {
-  font-size: var(--kr-fs-sm);
-  color: var(--kr-text-secondary);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-  white-space: nowrap;
-}
-
-.disc-chat-header-details::-webkit-scrollbar {
-  display: none;
 }
 
 .disc-native-agent-control {
@@ -2473,17 +2454,6 @@ button.disc-contact-open {
   gap: 2px;
 }
 
-.disc-chat-header-actions {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  flex-shrink: 0;
-  padding: 3px;
-  border: 1px solid var(--kr-border-ghost);
-  border-radius: var(--kr-r-lg);
-  background: var(--kr-bg-subtle);
-}
-
 .disc-title-input {
   background: var(--kr-bg-hover-strong);
   border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
@@ -2505,11 +2475,6 @@ button.disc-contact-open {
   .disc-chat-header-info {
     flex-basis: calc(100% - 64px);
   }
-
-  .disc-chat-header-actions {
-    width: 100%;
-    justify-content: flex-end;
-  }
 }
 
 @media (max-width: 640px) {
@@ -2520,16 +2485,6 @@ button.disc-contact-open {
 
   .disc-chat-header-title {
     min-width: 0;
-  }
-
-  .disc-chat-header-actions {
-    justify-content: flex-start;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-
-  .disc-chat-header-actions::-webkit-scrollbar {
-    display: none;
   }
 }
 

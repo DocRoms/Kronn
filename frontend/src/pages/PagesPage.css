@@ -97,13 +97,24 @@
 
 .live-pages-viewer-header h1 { margin: 0; font-size: var(--kr-fs-xl); }
 .live-pages-viewer-header span { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); }
-.live-pages-viewer-header .disc-chat-header-details-toggle span { color: inherit; font-size: inherit; }
+.live-pages-viewer-header .disc-chat-header-btn span { color: inherit; font-size: inherit; }
+/* The id pill sits right after the title and keeps its size (CopyIdPill's span is
+   muted by the rule above, which is what the pill wants). */
+.live-pages-viewer-header .live-pages-id-pill { flex: 0 0 auto; }
+/* Sync freshness: small muted text right before « Synchroniser » (KT-1530). */
+.live-pages-viewer-header .live-pages-sync-fresh { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); white-space: nowrap; }
 /* The shared header's rows do not wrap (the discussion's chip strip scrolls);
-   this one's controls do, and its fold holds editors that open downwards. */
+   this one's controls do. */
 .live-pages-viewer-header .disc-chat-header-sub { flex-wrap: wrap; row-gap: 4px; }
-.live-pages-viewer-header .disc-chat-header-details { flex-wrap: wrap; row-gap: 4px; overflow: visible; }
-.live-pages-viewer-header .disc-chat-header-details > * { flex: 0 0 auto; }
-.live-pages-viewer-header .disc-chat-header-details .live-page-slug-pill { flex: 0 1 auto; min-width: 0; }
+/* Side panel tabs (KT-1530): Sync / Details, like the discussion's panel tabs. */
+.live-pages-panel-tabs { display: flex; min-width: 0; align-items: center; gap: 2px; }
+.live-pages-panel-tabs button { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: var(--kr-r-sm); background: transparent; color: var(--kr-text-muted); font-size: var(--kr-fs-sm); font-weight: 600; cursor: pointer; }
+.live-pages-panel-tabs button:hover { background: var(--kr-bg-hover); color: var(--kr-text-secondary); }
+.live-pages-panel-tabs button:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
+.live-pages-panel-tabs button[data-active='true'] { border-color: rgba(var(--kr-accent-rgb), .45); background: rgba(var(--kr-accent-rgb), .12); color: var(--kr-accent); }
+.live-pages-details-body { display: flex; flex-direction: column; overflow-x: hidden; }
+.live-pages-details-section { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; gap: 10px; padding: 12px; }
+.live-pages-details-section .live-page-slug-pill { min-width: 0; max-width: 100%; }
 .live-pages-title-display { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .live-pages-title-display h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-pages-title-display button,
@@ -189,27 +200,6 @@
 .live-pages-export-popover a { display: flex; align-items: center; gap: 7px; min-height: 30px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--kr-text-secondary); font-size: 11px; text-align: left; text-decoration: none; cursor: pointer; }
 .live-pages-export-popover button:hover,
 .live-pages-export-popover a:hover { background: var(--kr-bg-hover); color: var(--kr-accent); }
-.live-pages-refresh-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 30px;
-  padding: 0 9px;
-  border: 1px solid var(--kr-border-medium);
-  border-radius: var(--kr-r-sm);
-  background: transparent;
-  color: var(--kr-text-muted);
-  font-size: 11px;
-  cursor: pointer;
-}
-.live-pages-refresh-trigger:hover { background: var(--kr-bg-hover); color: var(--kr-text-secondary); }
-.live-pages-refresh-trigger:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
-.live-pages-refresh-trigger[data-state='synced'] { border-color: rgba(var(--kr-success-rgb), 0.3); background: rgba(var(--kr-success-rgb), 0.08); color: var(--kr-success); }
-.live-pages-refresh-trigger[aria-expanded='true'] { border-color: rgba(var(--kr-accent-rgb), .45); background: rgba(var(--kr-accent-rgb), .12); }
-.live-pages-refresh-trigger > span { color: inherit; font-size: inherit; }
-.live-pages-refresh-trigger[data-state='synced'] > span { color: var(--kr-text-primary); }
-.live-pages-refresh-trigger time { padding-left: 4px; border-left: 1px solid var(--kr-border-medium); color: var(--kr-text-muted); font: 10px var(--kr-font-mono); }
-
 /* Sync side panel: the shell comes from DiscussionToolPanel.css; this file owns
    the three stacked zones (linked workflows, dataset sizes, history). */
 .live-pages-sync-panel { min-width: 0; }

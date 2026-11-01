@@ -271,21 +271,12 @@ async function openAutomationKind(kind: string) {
 }
 
 function revealCopyableIds() {
-  // The discussion ID lives in the side panel's settings tab, behind the
-  // header's Details button. Open the panel through that real control before
-  // resolving this required anchor: otherwise the provider finds no
-  // discussion ID and skips the step.
-  if (!document.querySelector('[data-tour-id="discussion-id-pill"]')) {
-    document
-      .querySelector<HTMLElement>(
-        '[data-testid="disc-header-details-btn"][aria-expanded="false"]',
-      )
-      ?.click();
-  }
-
-  // The discussion ID sits in the panel beside the transcript, while message IDs scroll with
-  // the transcript. Bring the latest visible message header into view so the
-  // tour can point at both concrete IDs at once.
+  // The discussion ID sits next to the title in the header (KT-1530), never
+  // behind "Details", so there is nothing to open: the required anchor is
+  // already on screen.
+  //
+  // Message IDs scroll with the transcript. Bring the latest visible message
+  // header into view so the tour can point at both concrete IDs at once.
   const messageIds = document.querySelectorAll<HTMLElement>(
     '[data-tour-id="message-id-pill"]',
   );

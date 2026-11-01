@@ -3,8 +3,9 @@
 // regression of the UX fix added alongside the disc_prompts worktree notice.
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
+import { learnings as learningsApi } from '../../lib/api';
 
 vi.mock('../../lib/api', () => buildApiMock());
 vi.mock('../../lib/I18nContext', () => ({
@@ -83,6 +84,29 @@ describe('ChatHeader — pending files badge', () => {
   // KT-581 — the pending-file badge, its cap and its tooltip moved with the
   // panels themselves: they are asserted in DiscussionPanelSwitcher's spec.
   // What stays here is what the header still owns.
+  // KT-1530 capture 1/2 — the pending-learnings badge used to sit after the
+  // shell, to the right of « Détails » and lower. It joins the button group,
+  // before the pair, so « Détails » is the rightmost control at the same right
+  // edge as on the Artifact header.
+  it('puts the pending-learnings badge before the button pair, Détails staying last', async () => {
+    vi.mocked(learningsApi.pending).mockResolvedValue({ count: 3 });
+    const { container } = renderHeader(0);
+    const badge = await waitFor(() => {
+      const found = container.querySelector('.learnings-badge');
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    const group = screen.getByTestId('detail-header-buttons');
+    const details = screen.getByTestId('disc-header-details-btn');
+    expect(group).toContainElement(badge as HTMLElement);
+    expect(group.lastElementChild).toBe(details);
+    const children = [...group.children];
+    expect(children.indexOf(badge as Element)).toBeLessThan(children.indexOf(details));
+    // Nothing is left after the info column: no strip pushes Détails inwards.
+    const header = container.querySelector('.disc-chat-header')!;
+    expect(header.lastElementChild).toBe(header.querySelector('.disc-chat-header-info'));
+  });
+
   it('carries no panel buttons at all', () => {
     renderHeader(0);
     // Every one of them, including the control that opens the column, now

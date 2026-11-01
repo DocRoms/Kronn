@@ -87,7 +87,6 @@ import { HtmlCodeEditor, HtmlRevisionDiff } from '../../components/HtmlCodeEdito
 import { PagesPage } from '../PagesPage';
 import { triggerDownload } from '../../lib/downloadBlob';
 
-const HEADER_DETAILS_KEY = 'kronn:artifactHeaderDetails';
 
 function openHeaderDetails() {
   const toggle = screen.getByTestId('live-page-header-details-toggle');
@@ -105,7 +104,6 @@ beforeEach(() => {
   vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: false, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   localStorage.removeItem('kronn:pageNavigation');
   localStorage.removeItem('kronn:pageCollapsedSections');
-  localStorage.removeItem(HEADER_DETAILS_KEY);
   linkRelay.connect.mockClear();
   linkRelay.dispose.mockClear();
   actionRelay.onAction = null;
@@ -141,7 +139,6 @@ beforeEach(() => {
 afterEach(() => {
   localStorage.removeItem('kronn:pageNavigation');
   localStorage.removeItem('kronn:pageCollapsedSections');
-  localStorage.removeItem(HEADER_DETAILS_KEY);
   vi.unstubAllGlobals();
 });
 
@@ -348,14 +345,14 @@ describe('PagesPage', () => {
       .toHaveClass('collection-detail-header');
   });
 
-  it('keeps the Page id in the Details fold, apart from the header buttons, with wrapping rules (KT-1141, KT-1344)', async () => {
+  it('keeps the Page id next to the title, apart from the header buttons, with wrapping rules (KT-1141, KT-1530)', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
     const header = document.querySelector('.live-pages-viewer-header')!;
-    // Folded: the id is not on the header until Details opens.
-    expect(header.querySelector('.copy-id-pill')).toBeNull();
-    openHeaderDetails();
-    const idPill = header.querySelector('.disc-chat-header-details .copy-id-pill');
+    // Visible without opening anything: right after the title, never behind Details.
+    const idPill = header.querySelector('.disc-chat-header-title .copy-id-pill');
+    expect(idPill).not.toBeNull();
+    expect(document.getElementById('live-page-side-panel')).toBeNull();
     expect(idPill).toHaveClass('live-pages-id-pill');
     expect(idPill).toHaveAttribute('title', expect.stringContaining('pages.copyId'));
     expect(idPill!.closest('.live-pages-header-actions')).toBeNull();
@@ -366,7 +363,6 @@ describe('PagesPage', () => {
     const rule = (selector: string) => [...css.matchAll(new RegExp(`(?:^|\\n)${selector.replace(/[.*]/g, '\\$&')}\\s*\\{([^}]*)\\}`, 'g'))]
       .map(match => match[1]).join(';');
     expect(rule('.live-pages-viewer-header .disc-chat-header-sub')).toContain('flex-wrap: wrap');
-    expect(rule('.live-pages-viewer-header .disc-chat-header-details')).toContain('flex-wrap: wrap');
     expect(rule('.live-pages-header-actions')).toContain('flex: 0 1 auto');
     expect(rule('.live-pages-id-pill span')).toContain('text-overflow: ellipsis');
     expect(css).toMatch(/@container live-page-viewer \(max-width: 640px\)[^@]*\.live-pages-open-tab-label \{ display: none; \}/);
@@ -571,7 +567,7 @@ describe('PagesPage', () => {
     const refreshTrigger = screen.getByTestId('live-page-refresh-menu');
     expect(refreshTrigger).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+    fireEvent.click(screen.getByTestId('live-page-refresh-menu'));
     expect(refreshTrigger).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByTestId('live-page-recent-refreshes')).toBeVisible();
     expect(screen.getAllByText('1.5 KB').length).toBeGreaterThanOrEqual(2);
@@ -586,7 +582,7 @@ describe('PagesPage', () => {
     const onNavigateWorkflow = vi.fn();
     render(<PagesPage onNavigateWorkflow={onNavigateWorkflow} />);
 
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
     expect(pagesApi.publications).toHaveBeenCalledWith(page.id);
     expect(screen.getAllByLabelText('pages.openRefreshRun:Adobe cron')).toHaveLength(3);
     expect(screen.getByText('data r3')).toBeInTheDocument();
@@ -628,7 +624,7 @@ describe('PagesPage', () => {
     expect(plain.defaultPrevented).toBe(true);
     expect(onNavigateDiscussion).toHaveBeenCalledExactlyOnceWith('linked-disc');
 
-    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+    fireEvent.click(screen.getByTestId('live-page-refresh-menu'));
     const workflow = screen.getByRole('link', { name: 'Adobe cron' });
     const run = screen.getAllByRole('link', { name: 'pages.openRefreshRun:Adobe cron' })[0];
     for (const link of [workflow, run]) {
@@ -891,7 +887,7 @@ describe('PagesPage', () => {
       failRun = onError;
     });
     render(<PagesPage />);
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
     const sync = screen.getByLabelText('pages.runLinkedWorkflow:Adobe cron');
     expect(sync).toHaveAttribute('data-state', 'idle');
     fireEvent.click(sync);
@@ -924,7 +920,7 @@ describe('PagesPage', () => {
 
   it('opens a vertical side panel with separate workflow, dataset and history zones', async () => {
     const { container } = render(<PagesPage />);
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
 
     const panel = screen.getByTestId('live-page-recent-refreshes');
     expect(panel.tagName).toBe('ASIDE');
@@ -952,7 +948,7 @@ describe('PagesPage', () => {
       else onError('Network unavailable');
     });
     render(<PagesPage />);
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
 
     fireEvent.click(screen.getByRole('button', { name: 'pages.runAllWorkflowsMany:2' }));
 
@@ -977,7 +973,7 @@ describe('PagesPage', () => {
     vi.mocked(workflowsApi.triggerStream).mockClear();
     vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
     render(<PagesPage />);
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
     const button = screen.getByRole('button', { name: 'pages.runAllWorkflowsMany:2' });
 
     act(() => { button.click(); button.click(); });
@@ -994,7 +990,7 @@ describe('PagesPage', () => {
     vi.mocked(workflowsApi.triggerStream).mockClear();
     vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
     render(<PagesPage />);
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
     const single = screen.getByLabelText('pages.runLinkedWorkflow:Adobe cron');
 
     act(() => { single.click(); single.click(); });
@@ -1017,7 +1013,7 @@ describe('PagesPage', () => {
       finish[id] = () => { onDone({ status: 'Success' }); resolve(); };
     }));
     render(<PagesPage />);
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
     fireEvent.click(screen.getByRole('button', { name: 'pages.runAllWorkflowsMany:2' }));
     expect(screen.getByRole('button', { name: 'pages.runAllProgress:0,2' })).toBeInTheDocument();
 
@@ -1042,7 +1038,7 @@ describe('PagesPage', () => {
       finish = () => { onDone({ status: 'Success' }); resolve(); };
     }));
     render(<PagesPage />);
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
     fireEvent.click(await screen.findByLabelText('pages.runLinkedWorkflow:Adobe cron'));
     expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(1);
 
@@ -1068,7 +1064,7 @@ describe('PagesPage', () => {
     vi.mocked(workflowsApi.triggerStream).mockClear();
     vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
     render(<PagesPage />);
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
     fireEvent.click(await screen.findByRole('button', { name: 'pages.runAllWorkflowsMany:2' }));
     expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(2);
 
@@ -1089,7 +1085,7 @@ describe('PagesPage', () => {
     vi.mocked(workflowsApi.triggerStream).mockClear();
     vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
     render(<PagesPage />);
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
     fireEvent.click(await screen.findByRole('button', { name: 'pages.runAllWorkflowsMany:2' }));
     expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(2);
 
@@ -1105,7 +1101,7 @@ describe('PagesPage', () => {
     vi.mocked(workflowsApi.triggerStream).mockClear();
     vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
     render(<PagesPage />);
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
     fireEvent.click(await screen.findByLabelText('pages.runLinkedWorkflow:Adobe cron'));
     expect(workflowsApi.triggerStream).toHaveBeenCalledTimes(1);
 
@@ -1120,7 +1116,7 @@ describe('PagesPage', () => {
   it('one Escape closes the Export popover first, the next one the Sync panel', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
-    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+    fireEvent.click(screen.getByTestId('live-page-refresh-menu'));
     const summary = screen.getByText('pages.export').closest('summary')!;
     fireEvent.click(summary);
 
@@ -1138,7 +1134,7 @@ describe('PagesPage', () => {
       { id: 'wf-3', name: 'Old import', enabled: false, step_names: ['publish'] },
     ]);
     render(<PagesPage />);
-    fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+    fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
 
     expect(screen.getByRole('button', { name: 'pages.runAllWorkflows' })).toBeDisabled();
     expect(workflowsApi.triggerStream).not.toHaveBeenCalled();
@@ -1397,7 +1393,7 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
   it('clicking outside the Sync panel closes it', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
-    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+    fireEvent.click(screen.getByTestId('live-page-refresh-menu'));
     expect(screen.getByTestId('live-page-recent-refreshes')).toBeInTheDocument();
 
     fireEvent.mouseDown(document.body);
@@ -1419,7 +1415,7 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
     const onNavigateWorkflow = vi.fn();
     render(<PagesPage onNavigateWorkflow={onNavigateWorkflow} />);
     await screen.findByTestId('live-page-frame');
-    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+    fireEvent.click(screen.getByTestId('live-page-refresh-menu'));
 
     fireEvent.mouseDown(screen.getByRole('link', { name: 'Adobe cron' }));
     expect(screen.getByTestId('live-page-recent-refreshes')).toBeInTheDocument();
@@ -1431,7 +1427,7 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
     fireEvent.click(screen.getByText('pages.export'));
-    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+    fireEvent.click(screen.getByTestId('live-page-refresh-menu'));
     expect(screen.getByTestId('live-page-export-menu')).toHaveAttribute('open');
     expect(screen.getByTestId('live-page-recent-refreshes')).toBeInTheDocument();
 
@@ -1456,7 +1452,7 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
   it('Escape closes the Sync panel and returns focus to its trigger', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
-    const trigger = screen.getByLabelText('pages.autoRefresh');
+    const trigger = screen.getByTestId('live-page-refresh-menu');
     fireEvent.click(trigger);
     expect(screen.getByTestId('live-page-recent-refreshes')).toBeInTheDocument();
 
@@ -1468,7 +1464,7 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
   it('the trigger and the close button also close the Sync panel', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
-    const trigger = screen.getByLabelText('pages.autoRefresh');
+    const trigger = screen.getByTestId('live-page-refresh-menu');
     fireEvent.click(trigger);
     fireEvent.click(screen.getByRole('button', { name: 'pages.closeSyncPanel' }));
     expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
@@ -1491,65 +1487,118 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
     expect(screen.queryByTestId('live-page-recent-refreshes')).not.toBeInTheDocument();
   });
 
-  describe('header shared with the discussion (KT-1344)', () => {
-    it('puts Sync in the right-hand slot of the title row, as the invite is in the discussion header', async () => {
+  describe('header shared with the discussion (KT-1344, KT-1530)', () => {
+    it('puts Sync (green) and Details side by side at the far right of the title row, same size', async () => {
       render(<PagesPage />);
       await screen.findByTestId('live-page-frame');
       const header = document.querySelector('.live-pages-viewer-header')!;
       expect(header).toHaveClass('disc-chat-header', 'collection-detail-header');
       const top = header.querySelector('.disc-chat-header-top')!;
-      const slot = top.querySelector('.disc-chat-header-invite')!;
-      const trigger = screen.getByTestId('live-page-refresh-menu');
-      expect(slot).toContainElement(trigger);
-      // Title first, the Sync slot after it: the panel opens from the right.
+      const group = top.querySelector('.disc-chat-header-buttons')!;
+      const sync = screen.getByTestId('live-page-refresh-menu');
+      const details = screen.getByTestId('live-page-header-details-toggle');
+      // Freshness, then Sync, then Details last: the panel opener is the rightmost control.
+      expect([...group.children]).toEqual([screen.getByTestId('live-page-sync-freshness'), sync, details]);
+      expect(sync).toHaveClass('disc-chat-header-btn', 'disc-chat-header-btn--primary');
+      expect(details).toHaveClass('disc-chat-header-btn');
+      expect(details).not.toHaveClass('disc-chat-header-btn--primary');
+      expect(sync).toHaveTextContent('pages.syncAction');
+      // Title first, the button group after it.
       const children = [...top.children];
-      expect(children.indexOf(top.querySelector('.disc-chat-header-title')!)).toBeLessThan(children.indexOf(slot));
-      // Nothing else of the Sync trigger is left among the row-2 actions.
-      expect(header.querySelector('.disc-chat-header-sub')).not.toContainElement(trigger);
+      expect(children.indexOf(top.querySelector('.disc-chat-header-title')!)).toBeLessThan(children.indexOf(group));
+      // Neither is left among the row-2 actions, and there is no third row.
+      expect(header.querySelector('.disc-chat-header-sub')).not.toContainElement(sync);
+      expect(header.querySelector('.disc-chat-header-sub')).not.toContainElement(details);
+      expect(header.querySelector('.disc-chat-header-details')).toBeNull();
     });
 
-    it('keeps the Details toggle at the end of the second row, folded by default', async () => {
+    it('shows the sync freshness next to Sync as visible text, before the pair (capture 3)', async () => {
       render(<PagesPage />);
       await screen.findByTestId('live-page-frame');
-      const sub = document.querySelector('.disc-chat-header-sub')!;
+      const fresh = await screen.findByText(/^pages\.refreshSynced · /);
+      expect(fresh).toBe(screen.getByTestId('live-page-sync-freshness'));
+      expect(fresh).toHaveAttribute('data-state', 'synced');
+      const group = screen.getByTestId('detail-header-buttons');
+      expect(fresh.nextElementSibling).toBe(screen.getByTestId('live-page-refresh-menu'));
+      expect(group.lastElementChild).toBe(screen.getByTestId('live-page-header-details-toggle'));
+    });
+
+    it('says the page is waiting for its first run when nothing was published yet', async () => {
+      vi.mocked(pagesApi.publications).mockResolvedValue([]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const fresh = await screen.findByTestId('live-page-sync-freshness');
+      expect(fresh).toHaveTextContent('pages.refreshWaiting');
+      expect(fresh).toHaveAttribute('data-state', 'waiting');
+    });
+
+    it('keeps the id next to the title, in the title block', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const title = document.querySelector('.live-pages-viewer-header .disc-chat-header-title')!;
+      expect(title.querySelector('h1')).toHaveTextContent('Adobe Signals');
+      expect(title.querySelector('.copy-id-pill')).not.toBeNull();
+    });
+
+    it('opens the side panel on a Details tab holding the former folded metadata, and closes it', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
       const toggle = screen.getByTestId('live-page-header-details-toggle');
-      expect(sub.lastElementChild).toBe(toggle);
       expect(toggle).toHaveAttribute('aria-expanded', 'false');
-      expect(toggle).toHaveAttribute('aria-controls', 'live-page-header-details');
+      expect(toggle).toHaveAttribute('aria-controls', 'live-page-side-panel');
       expect(toggle).toHaveAttribute('title', 'pages.headerDetailsShow');
-      expect(document.getElementById('live-page-header-details')).toBeNull();
-    });
-
-    it('unfolds the third line with the secondary metadata, and folds it back', async () => {
-      render(<PagesPage />);
-      await screen.findByTestId('live-page-frame');
-      const toggle = screen.getByTestId('live-page-header-details-toggle');
+      expect(document.getElementById('live-page-side-panel')).toBeNull();
 
       fireEvent.click(toggle);
-      const third = document.getElementById('live-page-header-details')!;
+      const panel = document.getElementById('live-page-side-panel')!;
       expect(toggle).toHaveAttribute('aria-expanded', 'true');
       expect(toggle).toHaveAttribute('title', 'pages.headerDetailsHide');
-      expect(third).toHaveClass('disc-chat-header-details');
-      expect(third).toHaveTextContent('data r3 · HTML r2');
-      expect(third.querySelector('.live-pages-id-pill')).not.toBeNull();
-      expect(third.querySelector('.live-page-slug-pill')).not.toBeNull();
+      expect(screen.getByTestId('live-page-panel-tab-details')).toHaveAttribute('aria-selected', 'true');
+      expect(panel).toHaveTextContent('data r3 · HTML r2');
+      expect(panel.querySelector('.live-page-slug-pill')).not.toBeNull();
+      // The sync content is on the other tab.
+      expect(screen.queryByTestId('live-page-sync-workflows')).toBeNull();
 
       fireEvent.click(toggle);
-      expect(document.getElementById('live-page-header-details')).toBeNull();
+      expect(document.getElementById('live-page-side-panel')).toBeNull();
     });
 
-    it('remembers the fold for Artifacts, apart from the discussion header', async () => {
-      const first = render(<PagesPage />);
-      await screen.findByTestId('live-page-frame');
-      fireEvent.click(screen.getByTestId('live-page-header-details-toggle'));
-      expect(localStorage.getItem(HEADER_DETAILS_KEY)).toBe('1');
-      expect(localStorage.getItem('kronn:discHeaderDetails')).not.toBe('1');
-      first.unmount();
-
+    it('switches between the Sync and Details tabs of the same panel', async () => {
       render(<PagesPage />);
       await screen.findByTestId('live-page-frame');
-      expect(screen.getByTestId('live-page-header-details-toggle')).toHaveAttribute('aria-expanded', 'true');
-      expect(document.getElementById('live-page-header-details')).not.toBeNull();
+      const sync = screen.getByTestId('live-page-refresh-menu');
+      const details = screen.getByTestId('live-page-header-details-toggle');
+
+      fireEvent.click(sync);
+      expect(screen.getByTestId('live-page-sync-workflows')).toBeInTheDocument();
+      expect(sync).toHaveAttribute('aria-expanded', 'true');
+      expect(details).toHaveAttribute('aria-expanded', 'false');
+
+      fireEvent.click(screen.getByTestId('live-page-panel-tab-details'));
+      expect(screen.queryByTestId('live-page-sync-workflows')).toBeNull();
+      expect(details).toHaveAttribute('aria-expanded', 'true');
+      expect(sync).toHaveAttribute('aria-expanded', 'false');
+
+      // The header buttons are toggles for their own tab only.
+      fireEvent.click(sync);
+      expect(screen.getByTestId('live-page-sync-workflows')).toBeInTheDocument();
+      expect(document.querySelectorAll('#live-page-side-panel')).toHaveLength(1);
+    });
+
+    it('does not remember anything in localStorage: no folded row is left', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      fireEvent.click(screen.getByTestId('live-page-header-details-toggle'));
+      expect(localStorage.getItem('kronn:artifactHeaderDetails')).toBeNull();
+    });
+
+    it('returns focus to Details when its panel closes from the close button', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const details = screen.getByTestId('live-page-header-details-toggle');
+      fireEvent.click(details);
+      fireEvent.click(screen.getByRole('button', { name: 'pages.closeSyncPanel' }));
+      expect(document.activeElement).toBe(details);
     });
 
     it('keeps a heavy Page warning on the visible row instead of the fold', async () => {
@@ -1576,7 +1625,7 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
     it('reads the plain label, disabled with a reason, when nothing can be replayed', async () => {
       vi.mocked(pagesApi.workflows).mockResolvedValue([wf('wf-3', false)]);
       render(<PagesPage />);
-      fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+      fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
       const button = screen.getByRole('button', { name: 'pages.runAllWorkflows' });
       expect(button).toBeDisabled();
       expect(button).toHaveAttribute('title', 'pages.runAllWorkflowsNone');
@@ -1585,7 +1634,7 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
     it('reads the singular label for one workflow', async () => {
       vi.mocked(pagesApi.workflows).mockResolvedValue([wf('wf-1'), wf('wf-3', false)]);
       render(<PagesPage />);
-      fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+      fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
       const button = screen.getByRole('button', { name: 'pages.runAllWorkflowsOne:1' });
       expect(button).toBeEnabled();
     });
@@ -1595,7 +1644,7 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
       vi.mocked(workflowsApi.triggerStream).mockClear();
       vi.mocked(workflowsApi.triggerStream).mockImplementation(() => new Promise<void>(() => {}));
       render(<PagesPage />);
-      fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+      fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
 
       fireEvent.click(screen.getByRole('button', { name: 'pages.runAllWorkflowsMany:3' }));
 
@@ -1611,7 +1660,7 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
       vi.mocked(pagesApi.workflows).mockImplementation(async id => id === page.id
         ? [wf('wf-1'), wf('wf-2')] : [wf('wf-5')]);
       render(<PagesPage />);
-      fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
+      fireEvent.click(await screen.findByTestId('live-page-refresh-menu'));
       expect(await screen.findByRole('button', { name: 'pages.runAllWorkflowsMany:2' })).toBeInTheDocument();
 
       fireEvent.click(getCanonicalPageRow('Other Page'));

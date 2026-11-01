@@ -3,8 +3,8 @@ import { discussionPath, livePagePath, workflowPath } from '../lib/routes';
 import {
   Activity, Archive, CheckCircle2, CheckSquare2, ChevronDown, ChevronRight,
   Braces, Clock3, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
-  History, ListChecks, Loader2, MessageSquare, Pencil, Play, RefreshCw,
-  PanelRight, PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Upload, Workflow, X,
+  History, Info, ListChecks, Loader2, MessageSquare, Pencil, Play, RefreshCw,
+  PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Upload, Workflow, X,
 } from 'lucide-react';
 import type {
   LivePage, LivePageDatasetUsage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
@@ -70,8 +70,8 @@ import '../components/DiscussionToolPanel.css';
 import './DiscussionsPage.css';
 import './PagesPage.css';
 
-// The header's Details fold, remembered for this page type (the discussion has its own).
-const ARTIFACT_HEADER_DETAILS_KEY = 'kronn:artifactHeaderDetails';
+type ArtifactPanelTab = 'sync' | 'details';
+const ARTIFACT_PANEL_TABS: ArtifactPanelTab[] = ['sync', 'details'];
 
 const REFRESH_MS = 30_000;
 const PAGE_NAVIGATION_STORAGE_KEY = 'kronn:pageNavigation';
@@ -223,13 +223,20 @@ export function PagesPage({
   // is independent of the selected Page, so an in-flight run stays locked
   // when the user switches Page and comes back.
   const workflowLocksRef = useRef<Set<string>>(new Set());
-  const [syncPanelOpen, setSyncPanelOpen] = useState(false);
-  const syncPanelRef = useRef<HTMLElement>(null);
+  // KT-1530 — one vertical side panel, two tabs: « Synchroniser » opens it on the
+  // sync tab, « Détails » on the details tab (the former folded header row).
+  const [sidePanel, setSidePanel] = useState<ArtifactPanelTab | null>(null);
+  const sidePanelRef = useRef<HTMLElement>(null);
   const syncTriggerRef = useRef<HTMLButtonElement>(null);
-  const closeSyncPanel = useCallback(() => {
-    setSyncPanelOpen(false);
-    syncTriggerRef.current?.focus();
+  const detailsTriggerRef = useRef<HTMLButtonElement>(null);
+  const toggleSidePanel = useCallback((tab: ArtifactPanelTab) => {
+    setSidePanel(current => (current === tab ? null : tab));
   }, []);
+  const closeSidePanel = useCallback(() => {
+    // Focus goes back to the control that opened the tab being closed.
+    (sidePanel === 'details' ? detailsTriggerRef : syncTriggerRef).current?.focus();
+    setSidePanel(null);
+  }, [sidePanel]);
   const [exportBusy, setExportBusy] = useState<'pdf' | 'docx' | 'json' | null>(null);
   const [exportResult, setExportResult] = useState<{ url: string; filename: string } | null>(null);
   const [importOpen, setImportOpen] = useState(false);
@@ -503,14 +510,18 @@ export function PagesPage({
   // The side panel closes on Escape and on a click outside it (the trigger
   // toggles it on its own).
   useEffect(() => {
-    if (!syncPanelOpen) return undefined;
+    if (!sidePanel) return undefined;
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (syncPanelRef.current?.contains(target) || syncTriggerRef.current?.contains(target)) return;
-      setSyncPanelOpen(false);
+      if (
+        sidePanelRef.current?.contains(target)
+        || syncTriggerRef.current?.contains(target)
+        || detailsTriggerRef.current?.contains(target)
+      ) return;
+      setSidePanel(null);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !event.defaultPrevented) closeSyncPanel();
+      if (event.key === 'Escape' && !event.defaultPrevented) closeSidePanel();
     };
     window.document.addEventListener('mousedown', onPointerDown);
     window.document.addEventListener('keydown', onKeyDown);
@@ -518,7 +529,7 @@ export function PagesPage({
       window.document.removeEventListener('mousedown', onPointerDown);
       window.document.removeEventListener('keydown', onKeyDown);
     };
-  }, [syncPanelOpen, closeSyncPanel]);
+  }, [sidePanel, closeSidePanel]);
 
   const persistHtml = useAsyncGuard(async (pageId: string, html: string) => {
     setSavingHtml(true);
@@ -1092,17 +1103,20 @@ export function PagesPage({
           && <div className="live-pages-notice" role="status" data-testid="artifact-export-redacted">{exportNotice.text}</div>}
         {detail ? (
           <>
-            {/* KT-1344 — the discussion header's shell: the sync trigger takes the
-                invite's slot (the panel opens from the right), the secondary
-                metadata folds under Details. */}
+            {/* KT-1344 / KT-1530 — the discussion header's shell: the id next to
+                the title, « Synchroniser » (green) in the invite's slot and
+                « Détails » at the far right, both opening the side panel. */}
             <DetailHeaderShell
               className="live-pages-viewer-header"
-              storageKey={ARTIFACT_HEADER_DETAILS_KEY}
-              detailsId="live-page-header-details"
+              detailsId="live-page-side-panel"
               detailsLabel={t('pages.headerDetails')}
               detailsShowTitle={t('pages.headerDetailsShow')}
               detailsHideTitle={t('pages.headerDetailsHide')}
               toggleTestId="live-page-header-details-toggle"
+              detailsButtonRef={detailsTriggerRef}
+              onOpenDetails={() => toggleSidePanel('details')}
+              detailsPanelOpen={sidePanel === 'details'}
+              idPill={<CopyIdPill id={detail.id} title={t('pages.copyId', detail.title)} className="live-pages-id-pill" />}
               title={editingTitle ? (
                 <form
                   className="live-pages-title-editor"
@@ -1133,26 +1147,33 @@ export function PagesPage({
                   </button>
                 </div>
               )}
-              trailing={(
+              status={(
+                <span
+                  className="live-pages-sync-fresh"
+                  data-testid="live-page-sync-freshness"
+                  data-state={latestPublication ? 'synced' : 'waiting'}
+                >
+                  {latestPublication
+                    ? `${t('pages.refreshSynced')} · ${formatRelativeTime(latestPublication.published_at, locale)}`
+                    : t('pages.refreshWaiting')}
+                </span>
+              )}
+              primaryAction={(
                 <button
                   type="button"
-                  className="live-pages-refresh-trigger"
+                  className="disc-chat-header-btn disc-chat-header-btn--primary"
                   data-testid="live-page-refresh-menu"
                   data-state={latestPublication ? 'synced' : 'waiting'}
-                  aria-label={t('pages.autoRefresh')}
-                  aria-expanded={syncPanelOpen}
-                  aria-controls="live-page-sync-panel"
-                  onClick={() => setSyncPanelOpen(open => !open)}
+                  title={latestPublication
+                    ? `${t('pages.autoRefresh')} · ${t('pages.refreshSynced')} ${formatRelativeTime(latestPublication.published_at, locale)}`
+                    : `${t('pages.autoRefresh')} · ${t('pages.refreshWaiting')}`}
+                  aria-expanded={sidePanel === 'sync'}
+                  aria-controls="live-page-side-panel"
+                  onClick={() => toggleSidePanel('sync')}
                   ref={syncTriggerRef}
                 >
-                  <CheckCircle2 size={14} />
-                  <span>{latestPublication ? t('pages.refreshSynced') : t('pages.refreshWaiting')}</span>
-                  {latestPublication && (
-                    <time title={new Date(latestPublication.published_at).toLocaleString(locale)}>
-                      {formatRelativeTime(latestPublication.published_at, locale)}
-                    </time>
-                  )}
-                  <PanelRight size={13} />
+                  <RefreshCw size={13} />
+                  <span>{t('pages.syncAction')}</span>
                 </button>
               )}
               sub={(
@@ -1218,25 +1239,6 @@ export function PagesPage({
                       <span className="live-pages-action-label">{editingHtml ? t('pages.closeEditor') : t('pages.editHtml')}</span>
                     </button>
                   </div>
-                </>
-              )}
-              details={(
-                <>
-                  {pageHtmlWeight(detail.html_size_bytes) === 'ok' && (
-                    <HtmlWeightBadge bytes={detail.html_size_bytes} variant="header" />
-                  )}
-                  <div className="live-pages-revision">
-                    <Activity size={13} /> data r{detail.data_revision} · HTML r{detail.revision.revision}
-                  </div>
-                  <LivePageSlugEditor
-                    key={detail.id}
-                    page={detail}
-                    onSaved={(updated) => {
-                      setPages(current => current.map(item => item.id === updated.id ? updated : item));
-                      setDetail(current => current?.id === updated.id ? updated : current);
-                    }}
-                  />
-                  <CopyIdPill id={detail.id} title={t('pages.copyId', detail.title)} className="live-pages-id-pill" />
                 </>
               )}
             />
@@ -1395,24 +1397,38 @@ export function PagesPage({
           <div className="live-pages-empty">{t('pages.empty')}</div>
         )}
       </section>
-      {detail && syncPanelOpen && (
+      {detail && sidePanel && (
         <aside
-          id="live-page-sync-panel"
-          ref={syncPanelRef}
+          id="live-page-side-panel"
+          ref={sidePanelRef}
           className="disc-tool-panel live-pages-sync-panel"
-          data-testid="live-page-recent-refreshes"
-          aria-label={t('pages.autoRefresh')}
+          data-testid={sidePanel === 'sync' ? 'live-page-recent-refreshes' : 'live-page-details-panel'}
+          aria-label={sidePanel === 'sync' ? t('pages.autoRefresh') : t('pages.headerDetails')}
         >
           <header className="disc-tool-panel-header">
-            <div className="disc-tool-panel-title">
-              <History size={15} />
-              <span>{t('pages.autoRefresh')}</span>
+            <div className="live-pages-panel-tabs" role="tablist" aria-label={t('pages.sidePanelTabs')}>
+              {ARTIFACT_PANEL_TABS.map(tab => (
+                <button
+                  key={tab}
+                  type="button"
+                  role="tab"
+                  id={`live-page-panel-tab-${tab}`}
+                  aria-selected={sidePanel === tab}
+                  aria-controls="live-page-panel-body"
+                  data-active={sidePanel === tab}
+                  data-testid={`live-page-panel-tab-${tab}`}
+                  onClick={() => setSidePanel(tab)}
+                >
+                  {tab === 'sync' ? <History size={14} /> : <Info size={14} />}
+                  <span>{tab === 'sync' ? t('pages.syncAction') : t('pages.headerDetails')}</span>
+                </button>
+              ))}
             </div>
             <div className="disc-tool-panel-actions">
               <button
                 type="button"
                 className="disc-tool-panel-icon"
-                onClick={closeSyncPanel}
+                onClick={closeSidePanel}
                 aria-label={t('pages.closeSyncPanel')}
                 title={t('pages.closeSyncPanel')}
               >
@@ -1420,7 +1436,35 @@ export function PagesPage({
               </button>
             </div>
           </header>
-          <div className="disc-tool-panel-body live-pages-sync-body">
+          {sidePanel === 'details' ? (
+            <div
+              className="disc-tool-panel-body live-pages-details-body"
+              id="live-page-panel-body"
+              role="tabpanel"
+              aria-labelledby="live-page-panel-tab-details"
+            >
+              <section className="live-pages-details-section" aria-label={t('pages.headerDetails')}>
+                <HtmlWeightBadge bytes={detail.html_size_bytes} variant="header" />
+                <div className="live-pages-revision">
+                  <Activity size={13} /> data r{detail.data_revision} · HTML r{detail.revision.revision}
+                </div>
+                <LivePageSlugEditor
+                  key={detail.id}
+                  page={detail}
+                  onSaved={(updated) => {
+                    setPages(current => current.map(item => item.id === updated.id ? updated : item));
+                    setDetail(current => current?.id === updated.id ? updated : current);
+                  }}
+                />
+              </section>
+            </div>
+          ) : (
+          <div
+            className="disc-tool-panel-body live-pages-sync-body"
+            id="live-page-panel-body"
+            role="tabpanel"
+            aria-labelledby="live-page-panel-tab-sync"
+          >
             <section className="live-pages-sync-section" data-testid="live-page-sync-workflows" aria-label={t('pages.linkedWorkflows')}>
               <header>
                 <h3><Workflow size={12} />{t('pages.linkedWorkflows')}</h3>
@@ -1605,6 +1649,7 @@ export function PagesPage({
                     </div>
             </section>
           </div>
+          )}
         </aside>
       )}
       {importOpen && <ArtifactImportDialog onClose={closeImport} onImported={page => {

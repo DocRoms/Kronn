@@ -132,12 +132,8 @@ for (const viewport of VIEWPORTS) {
           }
         }
         if (stepId === 'copyable-ids') {
-          // The ID lives in the side panel's « Paramètres » tab: the tour opens
-          // it through the header's single « Détails » button, on every viewport.
-          await expect(
-            page.locator('[data-testid="disc-header-details-btn"]'),
-            `${label}: the details panel must be open so the discussion ID is visible`,
-          ).toHaveAttribute('aria-expanded', 'true');
+          // The ID sits next to the title in the header (KT-1530): the tour finds
+          // it without opening the « Détails » panel, on every viewport.
           await expect(
             page.locator('[data-tour-id="discussion-id-pill"]'),
             `${label}: the required discussion ID must be visible`,

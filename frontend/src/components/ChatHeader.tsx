@@ -21,6 +21,7 @@ import { LearningsBadge } from './LearningsBadge';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 import { DiscussionScopeChip } from './DiscussionScope';
 import { DiscInviteButton } from './DiscInviteButton';
+import { DiscussionIdPill } from './DiscussionIdPill';
 import { DetailHeaderShell } from './DetailHeaderShell';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 import type { AgentSwitchTarget } from './AgentSwitchPicker';
@@ -37,8 +38,9 @@ export interface ChatHeaderProps {
   externalConnections?: ExternalApiConnectionView[];
   isMobile: boolean;
   sending: boolean;
-  /** "Details" opens the side panel on its settings tab: the id, the cost, the
-   *  project and the worktree state live there, not in a third header row. */
+  /** "Details" opens the side panel on its settings tab: the cost, the project
+   *  and the worktree state live there, not in a third header row. The id stays
+   *  next to the title. */
   onOpenDetails: () => void;
   /** Whether that panel is showing, for the button's `aria-expanded`. */
   settingsPanelOpen?: boolean;
@@ -257,7 +259,8 @@ export function ChatHeader({
           <p className="kr-context-help-agent-note">{t('contextHelp.discussion.mcp')}</p>
         </ContextHelp>
       </>}
-      trailing={
+      idPill={<DiscussionIdPill discussionId={discussion.id} toast={toast} t={t} />}
+      primaryAction={
         // The invite acts on the discussion, so it sits on the discussion's own
         // row rather than at the end of the chip strip.
         <DiscInviteButton
@@ -266,7 +269,6 @@ export function ChatHeader({
           t={t}
           onInvited={() => setParticipantsRefresh(n => n + 1)}
         />
-
       }
       sub={<>
         {/* First position, as the row's subject: whether this discussion
@@ -365,12 +367,9 @@ export function ChatHeader({
           t={t}
         />
       </>}
-      actions={
-        <div className="disc-chat-header-actions" data-tour-id="disc-output-controls">
-          {/* 0.10.0 — pending-learnings badge (self-contained; hidden when 0). */}
-          <LearningsBadge t={t} toast={toast} />
-        </div>
-      }
+      // Before the pair, same baseline: « Détails » stays the rightmost control.
+      status={<LearningsBadge t={t} toast={toast} />}
+      buttonsProps={{ 'data-tour-id': 'disc-output-controls' }}
     />
   );
 }
