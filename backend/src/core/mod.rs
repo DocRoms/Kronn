@@ -27,6 +27,7 @@ pub mod cmd;
 pub mod comfyui;
 pub mod commit_facts;
 pub mod config;
+pub mod config_salvage;
 pub mod content_memo;
 pub mod context_audit;
 pub mod context_files;

@@ -27,8 +27,8 @@
      `config.toml.corrupt.<timestamp>` (`0600`) and kept; it may hold
      credentials in clear. Its credentials join the boot, and the notice tells
      the operator to delete the file once checked; Kronn does not delete it.
-     [src: file: backend/src/core/config.rs:226-281#set_aside_unreadable_config]
-     [src: file: backend/src/core/config.rs:900-912#set_aside_unreadable_config]
+     [src: file: backend/src/core/config.rs:410-465#set_aside_unreadable_config]
+     [src: file: backend/src/core/config.rs:1081-1093#set_aside_unreadable_config]
 - **Why we can't fix now (constraint)**: All three are deliberate KT-1007
   trade-offs against losing the key or a credential: dropping the file copy
   of the key without two durable copies, rewriting `config.toml` under a
