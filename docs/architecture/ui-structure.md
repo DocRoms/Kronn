@@ -307,7 +307,7 @@ rendered in its source turn with an explicit queued/running state and a compact
 Stop action. The action addresses the dispatch id, not the discussion or the
 agent type, so cancelling an older response preserves later responses from the
 same agent. `[src: file: frontend/src/pages/DiscussionsPage.tsx:195-217#disc-pending-agent-stop]`
-`[src: file: backend/src/api/discussions/messaging.rs:1375-1465#stop_agent_dispatch]`
+`[src: file: backend/src/api/discussions/messaging.rs:1412-1502#stop_agent_dispatch]`
 
 **Message deletion and authorship:** deleting an individual discussion message
 removes its original payload, message-scoped attachments and routing metadata,

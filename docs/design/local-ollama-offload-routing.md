@@ -13,7 +13,7 @@ quality. Existing deterministic work should remain `ApiCall`, `Exec`, or
 with another model. Kronn already supports explicit per-step Ollama models and
 grammar-constrained `TypedSchema` output. [src: file:
 backend/src/workflows/steps.rs:107-124#step_model_override] [src: file:
-backend/src/workflows/steps.rs:1070-1093#ollama_envelope_format]
+backend/src/workflows/steps.rs:1099-1122#ollama_envelope_format]
 
 ## Core safety invariant
 

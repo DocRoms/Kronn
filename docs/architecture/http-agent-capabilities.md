@@ -234,7 +234,7 @@ mutable Quick Prompt. CLI effort keeps its existing snapshot format.
 [src: file: backend/src/api/mcp_remote.rs:584-612#create_batch_run_with_launch_settings]
 [src: file: backend/src/db/discussion_launch_settings.rs:18-117#capture]
 [src: file: backend/src/db/sql/186_discussion_http_settings.sql:1-10#discussion_http_settings]
-[src: file: backend/src/api/discussions/crud.rs:627-638#capture]
+[src: file: backend/src/api/discussions/crud.rs:646-657#capture]
 
 HTTP launches transmit explicit `reasoning_effort` and `max_tokens` on the
 OpenAI-compatible wire. Ollama receives `think` and `options.num_predict` after
@@ -256,7 +256,7 @@ validation to explicit workflow Agent-step controls. Legacy batch/compare target
 overrides are outside this single-launch snapshot change.
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:571-624#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
-[src: file: backend/src/workflows/steps.rs:1356-1360#reasoning_effort_override]
+[src: file: backend/src/workflows/steps.rs:1377-1381#reasoning_effort_override]
 [src: file: backend/src/agents/runner.rs:3813-3817#validate]
 
 The HTTP regression launches through the native QP tool and the discussion

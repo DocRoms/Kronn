@@ -124,7 +124,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/db/discussions.rs:1305-1325#insert_user_message_with_dispatches]
 [src: file: backend/src/db/agent_dispatch.rs:677-826#recover_after_restart]
 [src: file: backend/src/db/discussions.rs:3590-3592#DispatchInProgress]
-[src: file: backend/src/api/discussions/messaging.rs:1013-1021#DispatchInProgress]
+[src: file: backend/src/api/discussions/messaging.rs:1050-1058#DispatchInProgress]
 [src: file: backend/src/db/discussions.rs:3541-3801#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
 [src: file: backend/src/api/federation.rs:102-147#federate_message_revision]
@@ -164,9 +164,9 @@ mention that launched nobody is annotated with its reason (already scheduled
 on the root turn, or no marker), computed from `message_targets`.
 [src: file: frontend/src/lib/agentDelegation.ts:62-149#detectDelegation]
 [src: file: backend/src/db/discussions.rs:1760-1804#native_agents_scheduled_for_root_turn]
-[src: file: backend/src/api/discussions/crud.rs:545-553#initial_participants]
+[src: file: backend/src/api/discussions/crud.rs:586-594#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/api/discussions/crud.rs:916-920#attach_discussion_participants]
+[src: file: backend/src/api/discussions/crud.rs:953-957#attach_discussion_participants]
 [src: file: backend/src/api/discussions/streaming.rs:2236-2348#independent_sibling_notice]
 [src: file: backend/src/api/discussions/streaming.rs:2129-2184#discussion_at_dispatch_trigger]
 [src: file: backend/src/api/discussions/streaming.rs:2191-2226#thread_under_trigger]
@@ -260,7 +260,7 @@ Two distinctions the reason must not blur, and does not:
   New-discussion `@alias` routing is persisted on the initial user message
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
-  [src: file: backend/src/api/discussions/crud.rs:618-661#replace_message_targets]
+  [src: file: backend/src/api/discussions/crud.rs:695-738#replace_message_targets]
   [src: file: backend/src/api/discussions/runtime.rs:644-663#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.

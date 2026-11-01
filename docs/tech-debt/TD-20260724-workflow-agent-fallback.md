@@ -16,8 +16,8 @@ session-limit refusal is not retried: the run waits for the announced reset on
 the same provider (KT-811), or is parked for a human. The user then has to
 notice the failed run, edit Claude to Codex (for example), and replay it by hand.
 [src: file: backend/src/models/workflows.rs:1692-1698#RetryConfig]
-[src: file: backend/src/workflows/steps.rs:465-481#RETRY_BACKOFF_UNIT]
-[src: file: backend/src/workflows/steps.rs:964-971#classify]
+[src: file: backend/src/workflows/steps.rs:224-240#RETRY_BACKOFF_UNIT]
+[src: file: backend/src/workflows/steps.rs:983-990#classify]
 [src: user: 2026-08-10: unattended workflow steps should continue on an
 explicit fallback and make the switch visible]
 
@@ -53,7 +53,7 @@ discussion identity. Switching Claude to Codex or Ollama changes more than the
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
-currently wins over the tier. [src: file: backend/src/models/setup.rs:718-764#ModelTier]
+currently wins over the tier. [src: file: backend/src/models/setup.rs:730-776#ModelTier]
 [src: file: backend/src/agents/runner.rs:3456-3490#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
@@ -69,7 +69,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:875-950#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:888-963#AgentDetection]
 
 ## Policy and precedence
 
@@ -170,8 +170,8 @@ explicit escalation policy rather than be folded into this router. [src: file: b
 This is the hardest part. An Agent step can modify the worktree or call tools
 before a provider error. The current executor streams output and tool markers,
 then only returns success or a string error; it does not produce a durable
-effect boundary suitable for safe cross-agent replay. [src: file: backend/src/workflows/steps.rs:1543-1555#drive_agent_to_output]
-[src: file: backend/src/workflows/steps.rs:1270-1302#run_agent_with_timeout]
+effect boundary suitable for safe cross-agent replay. [src: file: backend/src/workflows/steps.rs:1565-1577#drive_agent_to_output]
+[src: file: backend/src/workflows/steps.rs:1287-1319#run_agent_with_timeout]
 
 The router must distinguish these cases:
 
@@ -254,7 +254,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:1032-1189#synthesis_external_http] |
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:510-534#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1291-1490#generate_summary_on_demand] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1802-2043#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3700-3780#execute_step] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1819-2060#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3700-3780#execute_step] |
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1911-1925#start] |
 | Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1117-1127#start] |
 
