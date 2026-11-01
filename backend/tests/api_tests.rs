@@ -21696,7 +21696,40 @@ mod cold_api_handlers_tests {
 
     // ── api/discover.rs (was 13%) ───────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial]
     async fn discover_repos_returns_err_envelope_when_no_tokens_configured() {
+        // The env-token fallback is a feature: a developer shell that exports
+        // GITHUB_TOKEN / GH_TOKEN / GITLAB_TOKEN legitimately yields a source.
+        // "No tokens configured" must therefore hold whatever the host exports.
+        const PROVIDER_ENV: [&str; 7] = [
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "GITLAB_TOKEN",
+            "GITLAB_PERSONAL_ACCESS_TOKEN",
+            "GITLAB_HOST",
+            "GL_HOST",
+            "GITLAB_API_URL",
+        ];
+        struct RestoreEnv(Vec<(&'static str, Option<String>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in self.0.drain(..) {
+                    match value {
+                        Some(value) => kronn::core::child_env::set_var(name, value),
+                        None => kronn::core::child_env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let _restore = RestoreEnv(
+            PROVIDER_ENV
+                .iter()
+                .map(|name| (*name, kronn::core::child_env::var(name).ok()))
+                .collect(),
+        );
+        for name in PROVIDER_ENV {
+            kronn::core::child_env::remove_var(name);
+        }
         let app = test_app();
         let (st, body) = post_json(
             app,

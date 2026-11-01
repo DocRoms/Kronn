@@ -2543,6 +2543,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_json_path",
+ "serde_path_to_error",
  "sha2 0.11.0",
  "syn 2.0.119",
  "thiserror 2.0.20",

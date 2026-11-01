@@ -1581,6 +1581,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_json_path",
+ "serde_path_to_error",
  "serde_yaml",
  "serial_test",
  "sha2 0.11.0",
