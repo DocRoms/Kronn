@@ -444,6 +444,26 @@ pub(crate) fn next_step_index_for_resume(
     }
 }
 
+/// Run-state key holding the step a Gate « Request changes » sends the run
+/// back to. The resume cursor reads it first and the runner consumes it once
+/// (#448): truncating `step_results` alone cannot say where to resume when a
+/// `Goto` jumped over steps before the target.
+pub const REQUEST_CHANGES_TARGET_STATE_KEY: &str = "__kronn.request_changes_target";
+
+/// Where a run resumes: the step a Gate « Request changes » named, when it
+/// still exists, else the step after the last kept result
+/// ([`next_step_index_for_resume`]). The kept rows are not always the linear
+/// prefix of the target: a `Goto` may have skipped steps on the way (#448).
+pub(crate) fn resume_cursor(
+    steps: &[crate::models::WorkflowStep],
+    step_results: &[crate::models::StepResult],
+    request_changes_target: Option<&str>,
+) -> usize {
+    request_changes_target
+        .and_then(|target| steps.iter().position(|s| s.name == target))
+        .unwrap_or_else(|| next_step_index_for_resume(steps, step_results))
+}
+
 /// How many `step_results` to KEEP when a Gate RequestChanges sends the
 /// run back to a target step. Cut at the FIRST result that IS the target
 /// step (by name): everything before the target's first execution is, by
@@ -1227,7 +1247,13 @@ async fn execute_run_body(
                 &db,
                 run.project_id.as_deref().or(workflow.project_id.as_deref()),
                 workflow,
-                next_step_index_for_resume(&workflow.steps, &run.step_results),
+                resume_cursor(
+                    &workflow.steps,
+                    &run.step_results,
+                    run.state
+                        .get(REQUEST_CHANGES_TARGET_STATE_KEY)
+                        .map(String::as_str),
+                ),
                 &launch_ctx,
             )
             .await;
@@ -1992,7 +2018,12 @@ async fn execute_run_body(
     let mut stopped_by_guard = false;
     let mut paused_for_approval = false;
     let mut paused_for_quota = false;
-    let mut step_idx = next_step_index_for_resume(&workflow.steps, &run.step_results);
+    let request_changes_target = run.state.remove(REQUEST_CHANGES_TARGET_STATE_KEY);
+    let mut step_idx = resume_cursor(
+        &workflow.steps,
+        &run.step_results,
+        request_changes_target.as_deref(),
+    );
     let mut retried_step = None;
     if run.step_results.last().is_some_and(|result| {
         matches!(
@@ -4305,6 +4336,13 @@ pub async fn resume_run(
         let target_step_name = workflow.steps.get(target_idx).map(|s| s.name.clone());
         let cut = request_changes_cut(&run.step_results, target_step_name.as_deref(), target_idx);
         run.step_results.truncate(cut);
+        // The kept rows are not always the linear prefix of the target: a Goto
+        // may have skipped steps before it, and the step after the last kept
+        // row would then be one of them (#448). Name the target explicitly.
+        if let Some(name) = target_step_name.clone() {
+            run.state
+                .insert(REQUEST_CHANGES_TARGET_STATE_KEY.to_string(), name);
+        }
 
         // The target re-runs on top of the checkpoint; verify the run's own
         // worktree is still exactly that commit (KT-1042).
@@ -5421,6 +5459,43 @@ mod tests {
             3,
             "cursor lands ON implement"
         );
+    }
+
+    #[test]
+    fn request_changes_resumes_on_its_target_after_a_goto_skipped_a_step() {
+        // #448: `mode` jumps (Goto) to `code` over `comment_plan`, an external
+        // effect that must only run in another mode. Request changes at
+        // `gate` (target `code`) cuts before the first `code`: the last kept
+        // row is `mode`, whose next step in the definition is the skipped one.
+        let steps = vec![
+            fake_step("gate_plan"),
+            fake_step("mode"),
+            fake_step("comment_plan"),
+            fake_step("code"),
+            fake_step("gate"),
+        ];
+        let results = vec![
+            fake_result("gate_plan"),
+            fake_result("mode"),
+            fake_result("code"),
+            fake_result("gate"),
+        ];
+        let kept = &results[..request_changes_cut(&results, Some("code"), 3)];
+        assert_eq!(kept.len(), 2);
+        assert_eq!(
+            next_step_index_for_resume(&steps, kept),
+            2,
+            "the skipped step: the bug"
+        );
+        assert_eq!(
+            resume_cursor(&steps, kept, Some("code")),
+            3,
+            "the target, explicitly named"
+        );
+        // Without a recorded target (any other resume), the usual cursor.
+        assert_eq!(resume_cursor(&steps, kept, None), 2);
+        // A target removed from the workflow since: the usual cursor too.
+        assert_eq!(resume_cursor(&steps, kept, Some("gone")), 2);
     }
 
     #[test]

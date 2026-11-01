@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { ToastItem } from './ToastItem';
 import type { Toast, ToastFn, ToastType } from './toastTypes';
 
@@ -30,6 +30,18 @@ export function useToast() {
    *  intentionally don't tie this to React state because the dedup
    *  decision must be synchronous and not depend on a re-render. */
   const lastSeenRef = useRef<Map<string, number>>(new Map());
+  /** Pending auto-dismiss timers. Cleared on unmount so a timer never
+   *  fires `setToasts` after the host is gone (in tests, that happens
+   *  after jsdom teardown and throws `window is not defined`). */
+  const timersRef = useRef<Set<number>>(new Set());
+
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      timers.forEach(t => window.clearTimeout(t));
+      timers.clear();
+    };
+  }, []);
 
   const dismiss = useCallback((id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id));
@@ -65,7 +77,11 @@ export function useToast() {
     setToasts(prev => [...prev.slice(-2), { id, message, type, persistent, copyable }]);
 
     if (!persistent) {
-      window.setTimeout(() => dismiss(id), AUTO_DISMISS_MS[type]);
+      const timer = window.setTimeout(() => {
+        timersRef.current.delete(timer);
+        dismiss(id);
+      }, AUTO_DISMISS_MS[type]);
+      timersRef.current.add(timer);
     }
   }, [dismiss]);
 
