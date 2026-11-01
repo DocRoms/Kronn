@@ -45,6 +45,7 @@ pub mod git_ops;
 pub mod github_connection;
 pub mod health;
 pub mod human_credentials;
+pub mod human_gate;
 pub mod id_resolver;
 pub mod learnings;
 pub mod lite_llm;

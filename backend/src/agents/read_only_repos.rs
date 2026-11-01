@@ -306,6 +306,8 @@ impl ReadOnlyRepos {
             arg != "--dangerously-skip-permissions" && !arg.starts_with("--sandbox=")
         });
         args.extend(self.args(agent, work_dir));
+        // KT-1495 — one `--settings` document: the vault rules join the policy's.
+        crate::core::vault_guard::fold_vault_into_claude_settings(args);
         args.push(prompt);
     }
 
@@ -516,9 +518,14 @@ mod tests {
             settings["permissions"]["blockReadsOutsideWorkingDirectories"],
             true
         );
+        // The read-only rule first, then the Kronn data-dir rules (KT-1495) in
+        // the same document.
+        let mut deny = vec![format!("Edit(/{}/**)", repo.display())];
+        deny.extend(crate::core::vault_guard::claude_permission_deny());
+        assert_eq!(settings["permissions"]["deny"], serde_json::json!(deny));
         assert_eq!(
-            settings["permissions"]["deny"],
-            serde_json::json!([format!("Edit(/{}/**)", repo.display())])
+            settings["sandbox"]["filesystem"]["denyRead"],
+            serde_json::json!(crate::core::vault_guard::claude_sandbox_deny_read())
         );
         assert_eq!(
             settings["sandbox"]["filesystem"]["denyWrite"],

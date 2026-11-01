@@ -7219,6 +7219,10 @@ End with [SIGNAL: OK].`,
   "trust.proof.renew": "New recovery codes",
   "trust.proof.disable": "Disable",
   "trust.proof.reset": "Lost your authenticator and your recovery codes? With access to this machine outside Kronn, stop Kronn and delete trust-proof.json and trust-proof-lock.json from the data directory (docs/architecture/trust-levels.md).",
+  "api.confirmCode": "Enter a code from your authenticator app (or a recovery code) to confirm this action on Kronn's own secrets:",
+  "trust.vault.active": "Kronn's vault is closed to agents: the agent processes Kronn starts cannot read or write its data directory (encryption key, database, configuration). The Kronn API and the network stay reachable.",
+  "trust.vault.unavailable": "Kronn's vault protection is unavailable on this machine ({0}). Agents run as before and can read Kronn's data directory. Nothing is refused because of it.",
+  "trust.vault.off": "Kronn's vault protection is turned off in the config (protect_vault_from_agents = false). Agents run as before and can read Kronn's data directory.",
   "trust.audit.withdrawn": "withdrawn",
 };
 

@@ -81,8 +81,8 @@ guessed from a 404 or free text.
 [Pinned OpenCode error contract](https://github.com/anomalyco/opencode/blob/v1.18.27/packages/opencode/src/acp/error.ts)
 [src: file: backend/src/acp.rs:156-161#PendingRequest]
 [src: file: backend/src/acp.rs:1131-1139#missing_session_id]
-[src: file: backend/src/acp.rs:1191-1195#JSON_RPC_INVALID_PARAMS]
-[src: file: backend/src/acp.rs:1194-1230#classify_response_error]
+[src: file: backend/src/acp.rs:1211-1215#JSON_RPC_INVALID_PARAMS]
+[src: file: backend/src/acp.rs:1214-1250#classify_response_error]
 
 Each agent reply records which path its turn took in
 `messages.session_continuity`: `resumed`, `new` or `fallback_full_history`
@@ -111,8 +111,8 @@ cover capability absence, missing sessions, ambiguous errors, cancellation and
 redacted prompt/persistence failures.
 [src: file: backend/src/api/discussions/streaming.rs:8728-9047#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 [src: file: backend/src/db/acp_runtime_sessions.rs:402-531#completed_checkpoint_is_scoped_and_a_new_turn_invalidates_it_before_prompt]
-[src: file: backend/src/agents/runner.rs:14873-14974#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
-[src: file: backend/src/agents/runner.rs:15031-15235#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
+[src: file: backend/src/agents/runner.rs:14935-15036#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
+[src: file: backend/src/agents/runner.rs:15093-15297#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
 
 These tests do not launch a live provider or qualify real model behavior.
 Kronn normalizes ACP token counts but does not yet normalize optional cumulative

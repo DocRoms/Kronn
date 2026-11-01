@@ -18,7 +18,7 @@ which ones those are.
 `result` line, so only ClaudeCode messages can *possibly* carry a real
 measurement — but there is no column recording whether a given `ClaudeCode`
 row actually got one, or fell back to the same estimate as everyone else.
-[src: file: backend/src/agents/runner.rs:14095-14148#total_cost_usd]
+[src: file: backend/src/agents/runner.rs:14187-14240#total_cost_usd]
 [src: file: backend/src/api/discussions/streaming.rs:4840-4866#stream_json_cost]
 [src: file: backend/src/db/message_usage.rs:38-48#message_usage]
 

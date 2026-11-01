@@ -145,6 +145,7 @@ pub mod trust_sandbox;
 pub mod upstream_mirror;
 pub mod usage;
 pub mod user_context;
+pub mod vault_guard;
 pub mod version_sources;
 pub mod versions;
 pub mod vibe_trust;

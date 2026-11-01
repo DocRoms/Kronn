@@ -7009,6 +7009,10 @@ const zh: TranslationDict = {
   "trust.proof.renew": "新的恢复代码",
   "trust.proof.disable": "停用",
   "trust.proof.reset": "验证器和恢复代码都丢失了？在 Kronn 之外访问这台机器，停止 Kronn 并删除数据目录中的 trust-proof.json 和 trust-proof-lock.json（docs/architecture/trust-levels.md）。",
+  "api.confirmCode": "请输入验证器应用中的代码（或恢复代码），以确认这项涉及 Kronn 自身密钥的操作：",
+  "trust.vault.active": "Kronn 的保险库对代理关闭：Kronn 启动的代理进程无法读取或写入其数据目录（加密密钥、数据库、配置）。Kronn API 和网络保持可访问。",
+  "trust.vault.unavailable": "此机器上无法使用 Kronn 保险库保护（{0}）。代理照常运行，可以读取 Kronn 的数据目录。不会因此拒绝任何操作。",
+  "trust.vault.off": "配置中已关闭 Kronn 保险库保护（protect_vault_from_agents = false）。代理照常运行，可以读取 Kronn 的数据目录。",
   "trust.audit.withdrawn": "已撤回",
 };
 

@@ -93,11 +93,12 @@ fn forbidden_by(flag: Option<&OsStr>, gate: bool) -> bool {
 /// `test-support`) carrying [`NO_REAL_AGENTS_ENV`]. `false` in every
 /// production process, whatever its environment holds.
 pub fn real_agents_forbidden() -> bool {
-    cfg!(test)
+    let armed = cfg!(test)
         || forbidden_by(
             crate::core::child_env::var_os(NO_REAL_AGENTS_ENV).as_deref(),
             cfg!(feature = "test-support"),
-        )
+        );
+    armed && !real_agent_guard::live_probe_open()
 }
 
 /// `true` when [`NO_REAL_AGENTS_ENV`] is set in a build that ignores it: the
@@ -150,6 +151,78 @@ pub(crate) mod real_agent_guard {
 
     /// Real executions refused in this process, for the guard's own test.
     static REFUSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    /// The only gate that opens the guard (KT-1495): the opt-in live vault
+    /// probe, which has to start the real agent CLIs to see them refused the
+    /// data directory.
+    #[cfg(test)]
+    pub(crate) const LIVE_PROBE_GATE: &str = "KRONN_LIVE_VAULT_PROBE";
+
+    /// Name fragment of the tests allowed to ask for [`LiveProbeAllowance`].
+    #[cfg(test)]
+    const LIVE_PROBE_TEST: &str = "live_vault_probe_";
+
+    /// Live probes holding an allowance right now.
+    #[cfg(test)]
+    static LIVE_PROBES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// Whether a live probe holds an allowance, so the guard stands down.
+    /// Always `false` outside the library's own test build.
+    pub(crate) fn live_probe_open() -> bool {
+        #[cfg(test)]
+        {
+            LIVE_PROBES.load(std::sync::atomic::Ordering::SeqCst) > 0
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    /// Whether a test thread called `thread` may open the guard, given the
+    /// gate's value: the gate is exactly `1` **and** the test is a
+    /// `live_vault_probe_*`. Any other test, or the probe without the gate,
+    /// stays refused.
+    #[cfg(test)]
+    pub(crate) fn live_probe_may_open(thread: Option<&str>, gate: Option<&str>) -> bool {
+        gate == Some("1") && thread.is_some_and(|name| name.contains(LIVE_PROBE_TEST))
+    }
+
+    /// Held by a live probe for as long as it needs the real agents; the guard
+    /// is armed again when it drops.
+    #[cfg(test)]
+    pub(crate) struct LiveProbeAllowance(());
+
+    #[cfg(test)]
+    impl Drop for LiveProbeAllowance {
+        fn drop(&mut self) {
+            LIVE_PROBES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// The allowance for the calling test, when it is a `live_vault_probe_*`
+    /// and [`LIVE_PROBE_GATE`] is `1`; `None` for every other caller. It is
+    /// process-wide (the agent is started from tasks and blocking threads the
+    /// probe does not name), so the probes run under `#[serial]` and the gate
+    /// is only ever set for a run narrowed to them.
+    #[cfg(test)]
+    pub(crate) fn allow_live_probe() -> Option<LiveProbeAllowance> {
+        let gate = crate::core::child_env::var(LIVE_PROBE_GATE).ok();
+        allow_live_probe_for(std::thread::current().name(), gate.as_deref())
+    }
+
+    /// [`allow_live_probe`] for a given thread name and gate value.
+    #[cfg(test)]
+    pub(crate) fn allow_live_probe_for(
+        thread: Option<&str>,
+        gate: Option<&str>,
+    ) -> Option<LiveProbeAllowance> {
+        if !live_probe_may_open(thread, gate) {
+            return None;
+        }
+        LIVE_PROBES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(LiveProbeAllowance(()))
+    }
 
     #[cfg(test)]
     pub(crate) fn refused() -> Vec<String> {
@@ -439,6 +512,74 @@ mod tests {
         assert!(refused
             .iter()
             .any(|m| m.contains("/bin/ls") && m.contains("KT-1189")));
+    }
+
+    /// KT-1495: the live vault probe opens the guard only with the gate at `1`
+    /// **and** from a `live_vault_probe_*` test. The probe without the gate,
+    /// any other test with it, and a gate that is not exactly `1` stay refused.
+    #[test]
+    fn only_a_gated_live_vault_probe_may_open_the_guard() {
+        use real_agent_guard::live_probe_may_open;
+        let probe = Some("agents::vault_probe_test::live_vault_probe_codex_read_only");
+        assert!(live_probe_may_open(probe, Some("1")));
+        assert!(!live_probe_may_open(probe, None));
+        assert!(!live_probe_may_open(probe, Some("0")));
+        assert!(!live_probe_may_open(probe, Some("true")));
+        assert!(!live_probe_may_open(probe, Some("")));
+        let other = Some("agents::runner_test::a_codex_launch");
+        assert!(!live_probe_may_open(other, Some("1")));
+        assert!(!live_probe_may_open(Some("main"), Some("1")));
+        assert!(!live_probe_may_open(None, Some("1")));
+    }
+
+    /// KT-1495: without the gate, a thread named like a probe holds no
+    /// allowance and the guard still refuses a real agent binary. Reverting the
+    /// gate check in `live_probe_may_open` fails it.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_named_test_without_the_gate_still_cannot_start_a_real_agent() {
+        use crate::core::child_env::AgentFamily;
+        use real_agent_guard::allow_live_probe_for;
+        let name = "live_vault_probe_without_the_gate";
+        let (no_allowance, refused) = std::thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                let allowance = allow_live_probe_for(std::thread::current().name(), None);
+                let refused = std::panic::catch_unwind(|| {
+                    let _ = sync_cmd("/bin/ls", ChildRoute::Agent(AgentFamily::Codex));
+                });
+                (allowance.is_none(), refused.is_err())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(no_allowance, "no allowance without the gate");
+        assert!(refused, "the real agent binary is still refused");
+        assert!(real_agents_forbidden(), "the guard stays armed");
+    }
+
+    /// KT-1495: the allowance is held by a gated probe only, opens the guard
+    /// for the real binary while held, and the guard is armed again once it
+    /// drops. Runs on a thread of its own: the allowance is process-wide.
+    #[cfg(unix)]
+    #[test]
+    fn the_live_probe_allowance_is_scoped_to_its_holder() {
+        use crate::core::child_env::AgentFamily;
+        use real_agent_guard::{allow_live_probe, allow_live_probe_for, live_probe_open};
+        // This test's own name is not a probe's: nothing to hold, gate or not.
+        assert!(allow_live_probe().is_none());
+        assert!(allow_live_probe_for(std::thread::current().name(), Some("1")).is_none());
+        assert!(!live_probe_open() && real_agents_forbidden());
+        let held = allow_live_probe_for(Some("live_vault_probe_scoped"), Some("1"));
+        assert!(held.is_some() && live_probe_open() && !real_agents_forbidden());
+        // While held, the real binary starts on an agent route.
+        let _ = sync_cmd("/bin/ls", ChildRoute::Agent(AgentFamily::Codex));
+        drop(held);
+        assert!(!live_probe_open() && real_agents_forbidden());
+        let refused = std::panic::catch_unwind(|| {
+            let _ = sync_cmd("/bin/ls", ChildRoute::Agent(AgentFamily::Codex));
+        });
+        assert!(refused.is_err(), "refused again after the allowance drops");
     }
 
     /// KT-1189: a stub the test wrote under the temporary directory is a
