@@ -15,7 +15,7 @@
 - **Impact**: test fragility (false reds on local / real-DB runs; erodes trust in the E2E signal)
 - **Where (pointers)**:
   - `frontend/e2e/` — the a11y specs + `a11y-baseline.json`, `audit-banner-lifecycle*.spec.*`, the introspection / "real agent run" specs.
-  - The E2E seed/setup (`frontend/e2e/perf/seed.py` + the `test-e2e` job's setup steps in `.github/workflows/ci-test.yml`).
+  - The E2E seed/setup (`frontend/e2e/perf/seed.py` + the `test-e2e-shard` job's setup steps in `.github/workflows/ci-test.yml`).
 - **Suggested direction (non-binding)**:
   - **a11y**: make baselines **state-relative** (assert "no NEW violations vs a baseline captured on the same DB state", or scope axe to a stable region) instead of absolute element counts.
   - **audit-banner**: force a known state in the spec setup (cancel/await any in-progress audit, or stub `/api/projects/:id/audit-status`) rather than assuming the DB is idle.

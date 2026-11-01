@@ -2,7 +2,7 @@
  * QP launch — double-click race regression (E2E).
  *
  * The unit tests pin the in-component ref guard, but the full UX path
- * (Workflows tab → Quick Prompts → fill variable → press Enter twice
+ * (Workflows tab → Quick Prompts → inline launch button, two clicks
  * fast) involves React lazy loading, the I18n provider, and a real
  * `discussionsApi.create` POST against the backend. This spec exercises
  * that full chain to make sure the guard survives bundling, suspense,
@@ -13,19 +13,28 @@
  *    manually release it — that's what gives us a window to fire the
  *    second click.
  * 2. Navigate to Workflows → Quick Prompts.
- * 3. If at least one QP exists, expand its launch form (or use the
- *    inline launch button), fire two synchronous interactions, and
- *    assert the create endpoint was called exactly once.
+ * 3. Fire two synchronous clicks on the launch button of the seeded,
+ *    variable-free QP (found by `data-qp-id`) and assert the create
+ *    endpoint was called exactly once.
  *
- * If the user has no QPs in the dev DB the test skips — we don't seed
- * QPs from the spec to keep the smoke surface small.
+ * The spec seeds a variable-free Quick Prompt of its own: a fresh CI
+ * database has none, and another spec's leftovers are not a fixture.
  */
 
 import { test, expect } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
 import { WorkflowsPage } from '../pages/WorkflowsPage';
+import { seedQuickPrompt, deleteQuickPrompt } from '../fixtures/quick-prompt-seed';
 
 test.describe('QP launch — double-click race', () => {
+  let qpId = '';
+  test.beforeAll(async ({ request }) => {
+    qpId = await seedQuickPrompt(request, `Double-click PW ${Date.now()}`);
+  });
+  test.afterAll(async ({ request }) => {
+    await deleteQuickPrompt(request, qpId);
+  });
+
   test('two synchronous Launch clicks on a no-variable QP create exactly one discussion', async ({ page }) => {
     // Hold POST /api/discussions open so we can fire a second click
     // before the first request finishes. We count the hits and respond
@@ -76,25 +85,26 @@ test.describe('QP launch — double-click race', () => {
     // Switch to the Quick Prompts tab.
     await workflows.selectKind('quickPrompts');
 
-    // Find a launchable QP card. The launch button has class
-    // `qp-launch-btn` per WorkflowsPage.tsx; we click the first one we
-    // find. If there are no QPs, skip the test rather than fail —
-    // dev DBs vary.
-    const launchButtons = page.locator('button.qp-launch-btn');
-    const count = await launchButtons.count();
-    test.skip(count === 0, 'No Quick Prompts in dev DB — skipping double-click race E2E');
+    // Target the seeded card by `data-qp-id` (WorkflowsPage.tsx sets it on
+    // each `.qp-card`): on a populated database another prompt may come
+    // first, with variables, and the launch would open its form instead of
+    // the no-variable case this test is about.
+    const card = page.locator(`[data-qp-id="${qpId}"]`);
+    const launchButton = card.locator('button.qp-launch-btn');
+    await expect(launchButton, 'the seeded Quick Prompt must list a launch button').toBeVisible();
 
-    // Fire two synchronous click events on the first launch button via
-    // page.evaluate. We can't use locator.click() twice because after the
+    // Fire two synchronous click events on that launch button via
+    // evaluate. We can't use locator.click() twice because after the
     // first click the button is disabled — Playwright would wait for it
     // to re-enable, which never happens during the in-flight POST. The
     // race we care about is "two click events arriving back-to-back
     // before React commits the disabled state", which happens at the
     // browser level regardless of disabled (the closure-stale bug
     // pre-fix). Dispatching them directly mimics that pattern.
-    await page.evaluate(() => {
-      const btn = document.querySelector('button.qp-launch-btn') as HTMLButtonElement | null;
-      if (!btn) return;
+    // The seeded prompt has no variables, so the button calls the create
+    // endpoint directly (WorkflowsPage.tsx, `qp.variables.length === 0`):
+    // no launch form to go through.
+    await launchButton.evaluate(btn => {
       // Two synchronous click events. Browsers don't dispatch click on a
       // disabled <button>, so we use the underlying onClick handler via
       // dispatchEvent with bubbles:true. React listens at the document
@@ -102,22 +112,6 @@ test.describe('QP launch — double-click race', () => {
       btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-
-    // If a variable form opened on first click, the actual create-firing
-    // button is `.qp-launch-go-btn` — fire it twice too.
-    const goBtnExists = await page.locator('.qp-launch-go-btn').count() > 0;
-    if (goBtnExists) {
-      const inputs = page.locator('.qp-launch-form input.wf-input');
-      if (await inputs.count() > 0) {
-        await inputs.first().fill('TEST-VALUE');
-      }
-      await page.evaluate(() => {
-        const go = document.querySelector('button.qp-launch-go-btn') as HTMLButtonElement | null;
-        if (!go) return;
-        go.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        go.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      });
-    }
 
     // Give React + the network stub a moment to register both clicks.
     await page.waitForTimeout(300);
