@@ -748,6 +748,40 @@ pub async fn save_default_docs_dir(
     Json(ApiResponse::ok(normalized)).into_response()
 }
 
+/// GET /api/config/workers — the task-worker policy (KT-1345).
+pub async fn get_workers_config(State(state): State<AppState>) -> Json<ApiResponse<WorkersConfig>> {
+    Json(ApiResponse::ok(state.config.read().await.workers.clone()))
+}
+
+/// POST /api/config/workers — the default review-round limit every launch
+/// path starts from: an integer ≥ 1, or unlimited. Anything else is a 400 and
+/// leaves the saved value alone.
+pub async fn save_workers_config(
+    State(state): State<AppState>,
+    Json(value): Json<WorkersConfig>,
+) -> Response {
+    if let Err(reason) = value.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<WorkersConfig>::err_coded(
+                ApiErrorCode::Validation,
+                reason,
+            )),
+        )
+            .into_response();
+    }
+    let mut config = state.config.write().await;
+    let previous = std::mem::replace(&mut config.workers, value.clone());
+    if let Err(e) = config::save(&config).await {
+        config.workers = previous;
+        return Json(ApiResponse::<WorkersConfig>::err(format!(
+            "Failed to save: {e}"
+        )))
+        .into_response();
+    }
+    Json(ApiResponse::ok(value)).into_response()
+}
+
 /// GET /api/config/agent-access
 pub async fn get_agent_access(State(state): State<AppState>) -> Json<ApiResponse<AgentsConfig>> {
     let config = state.config.read().await;
@@ -5777,3 +5811,7 @@ mod default_docs_dir_tests {
         assert_eq!(state.config.read().await.scan.default_docs_dir, None);
     }
 }
+
+#[cfg(test)]
+#[path = "setup_workers_tests.rs"]
+mod workers_config_tests;

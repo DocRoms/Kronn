@@ -89,6 +89,95 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[ts(skip)]
     pub audit_briefing_docs: bool,
+    /// KT-1345 — task-worker policy (Settings > Workers).
+    #[serde(default)]
+    pub workers: WorkersConfig,
+}
+
+/// KT-1345 — Settings > Workers. The review-round limit every launch path
+/// starts from (campaign dialog, single-task MCP launch, delegated subtasks);
+/// each launch may still carry its own. Two fields rather than an optional
+/// integer so that unticking « Unlimited » gives the previous number back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkersConfig {
+    /// Review rounds a task execution may use before it escalates (min 1).
+    /// Ignored while `review_rounds_unlimited` is set.
+    #[serde(default = "default_workers_review_rounds")]
+    pub default_max_review_rounds: u32,
+    /// No round cap. Stalls (no delivery, watchdog) still escalate and a campaign's
+    /// `token_budget`, when set, still stops every further correction attempt; the
+    /// cost is tokens spent on a review that may never converge.
+    #[serde(default)]
+    pub review_rounds_unlimited: bool,
+}
+
+impl Default for WorkersConfig {
+    fn default() -> Self {
+        Self {
+            default_max_review_rounds: DEFAULT_MAX_REVIEW_ROUNDS,
+            review_rounds_unlimited: false,
+        }
+    }
+}
+
+fn default_workers_review_rounds() -> u32 {
+    DEFAULT_MAX_REVIEW_ROUNDS
+}
+
+impl WorkersConfig {
+    /// The value stored on a new run / execution: the integer, or the
+    /// [`UNLIMITED_REVIEW_ROUNDS`] sentinel. Never 0.
+    pub fn effective_max_review_rounds(&self) -> u32 {
+        if self.review_rounds_unlimited {
+            UNLIMITED_REVIEW_ROUNDS
+        } else {
+            self.default_max_review_rounds
+                .clamp(1, MAX_REVIEW_ROUNDS_INTEGER)
+        }
+    }
+
+    /// Refuse what the Settings form must never persist.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=MAX_REVIEW_ROUNDS_INTEGER).contains(&self.default_max_review_rounds) {
+            return Err(format!(
+                "default_max_review_rounds must be between 1 and {MAX_REVIEW_ROUNDS_INTEGER}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Default review-round limit (KT-1345; it was a hard-coded 3).
+pub const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 5;
+/// Largest explicit integer; above it, say « unlimited ».
+pub const MAX_REVIEW_ROUNDS_INTEGER: u32 = 1_000;
+/// « No cap », stored in the `max_review_rounds` columns (NOT NULL INTEGER).
+/// A sentinel and never 0, which `db::orchestration` refuses.
+pub const UNLIMITED_REVIEW_ROUNDS: u32 = u32::MAX;
+
+/// Parse the `max_review_rounds` argument of an MCP launch: an integer or the
+/// string `"unlimited"`. Anything else is refused, never defaulted.
+pub fn parse_review_rounds_arg(value: &serde_json::Value) -> Result<u32, String> {
+    match value {
+        serde_json::Value::String(text) if text.trim().eq_ignore_ascii_case("unlimited") => {
+            Ok(UNLIMITED_REVIEW_ROUNDS)
+        }
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .filter(|n| (1..=u64::from(MAX_REVIEW_ROUNDS_INTEGER)).contains(n))
+            .map(|n| n as u32)
+            .ok_or_else(|| {
+                format!(
+                    "max_review_rounds must be an integer between 1 and \
+                     {MAX_REVIEW_ROUNDS_INTEGER}, or \"unlimited\""
+                )
+            }),
+        _ => Err(format!(
+            "max_review_rounds must be an integer between 1 and {MAX_REVIEW_ROUNDS_INTEGER}, \
+             or \"unlimited\""
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

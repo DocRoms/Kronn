@@ -53,7 +53,7 @@ discussion identity. Switching Claude to Codex or Ollama changes more than the
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
-currently wins over the tier. [src: file: backend/src/models/setup.rs:730-776#ModelTier]
+currently wins over the tier. [src: file: backend/src/models/setup.rs:820-866#ModelTier]
 [src: file: backend/src/agents/runner.rs:3456-3490#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
@@ -280,7 +280,7 @@ property of each surface, not of an agent being installed. [src: file: backend/s
 `DiscussionMessage` already persists the actual `agent_type`, `model_tier`, and
 concrete `model`. `StepResult` already has `step_agent` and `step_model`, and
 Run Detail renders them. [src: file: backend/src/models/discussions.rs:324-372#DiscussionMessage]
-[src: file: backend/src/models/workflows.rs:2199-2212#step_agent]
+[src: file: backend/src/models/workflows.rs:2200-2213#step_agent]
 [src: file: frontend/src/components/workflows/RunDetail.tsx:1099-1106#StepModelBadge]
 
 Workflow Agent steps also keep a per-attempt trail (`StepResult.agent_provenance`:
@@ -289,7 +289,7 @@ resolved model, success, duration and `cost_usd`), and `step_agent`/`step_model`
 are stamped from the selected attempt, else the last one. That trail has no
 fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
-[src: file: backend/src/models/workflows.rs:2006-2085#WorkflowAgentProvenance]
+[src: file: backend/src/models/workflows.rs:2007-2086#WorkflowAgentProvenance]
 [src: file: backend/src/workflows/steps.rs:1405-1429#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/runner.rs:4854-4876#selected_attempt]
 
@@ -327,7 +327,7 @@ Required UI:
 Workflow runs persist token totals (`WorkflowRun.tokens_used`) and each Agent
 attempt carries its own `cost_usd`, but there is no run-level cost total. Exact
 cross-provider cost display therefore needs additive persistence of that total,
-not only a frontend estimate. [src: file: backend/src/models/workflows.rs:1811-1820#tokens_used] [src: file: backend/src/models/workflows.rs:2081-2089#cost_usd]
+not only a frontend estimate. [src: file: backend/src/models/workflows.rs:1812-1821#tokens_used] [src: file: backend/src/models/workflows.rs:2082-2090#cost_usd]
 
 The current workflow budget also increments once per logical Agent step, even
 though retry, repair, escalation, or debate can perform more model invocations.

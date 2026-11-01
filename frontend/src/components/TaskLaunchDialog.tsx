@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
 import {
   agents,
+  config as configApi,
   orchestration,
   profiles,
   type CampaignView,
@@ -11,6 +12,14 @@ import { userError } from '../lib/userError';
 import { orchestrationResolution } from './taskLaunchResolution';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 import { ModelCatalogPicker } from './ModelCatalogPicker';
+import { AlertTriangle } from 'lucide-react';
+import {
+  DEFAULT_REVIEW_ROUNDS,
+  MAX_REVIEW_ROUNDS,
+  MIN_REVIEW_ROUNDS,
+  clampRounds,
+  isUnlimitedRounds,
+} from '../lib/reviewRounds';
 import type {
   AgentDetection,
   AgentProfile,
@@ -71,7 +80,20 @@ function TaskLaunchDialogContent({
   const [profileId, setProfileId] = useState(selected?.profile_id ?? '');
   const [branch, setBranch] = useState(campaign?.run.target_branch ?? defaultBranch ?? 'main');
   const [workspaceId, setWorkspaceId] = useState(campaign?.run.target_workspace_id ?? '');
-  const [maxReviewRounds, setMaxReviewRounds] = useState(campaign?.run.max_review_rounds ?? 3);
+  // KT-1345 — a new run starts from Settings > Workers (loaded below); an existing
+  // campaign keeps its own. Either way the human can still change it for this run.
+  const existingRounds = campaign?.run.max_review_rounds;
+  const [maxReviewRounds, setMaxReviewRounds] = useState(
+    existingRounds !== undefined && !isUnlimitedRounds(existingRounds) ? existingRounds : DEFAULT_REVIEW_ROUNDS,
+  );
+  const [unlimitedRounds, setUnlimitedRounds] = useState(isUnlimitedRounds(existingRounds));
+  const roundsTouched = useRef(false);
+  // Whether the form holds the limit this run will really use: an existing
+  // campaign's, the loaded Settings > Workers default, or the human's own.
+  // Until then nothing is shown or sent, so the server applies the setting
+  // instead of a built-in figure the human never saw.
+  const [roundsKnown, setRoundsKnown] = useState(campaign !== null);
+  const [roundsUnavailable, setRoundsUnavailable] = useState(false);
   const [validations, setValidations] = useState(
     campaign?.run.validations.map(item => item.command).join('\n') ?? '',
   );
@@ -92,6 +114,25 @@ function TaskLaunchDialogContent({
       });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (campaign) return undefined;
+    let active = true;
+    Promise.resolve()
+      .then(() => configApi.getWorkers())
+      .then(workers => {
+        if (!active || roundsTouched.current || !workers) return;
+        setMaxReviewRounds(clampRounds(workers.default_max_review_rounds));
+        setUnlimitedRounds(workers.review_rounds_unlimited);
+        setRoundsKnown(true);
+      })
+      .catch(() => {
+        // Never substitute a figure: the field stays empty and the launch
+        // leaves the limit out, so the server applies its own setting.
+        if (active && !roundsTouched.current) setRoundsUnavailable(true);
+      });
+    return () => { active = false; };
+  }, [campaign]);
 
   useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null;
@@ -161,7 +202,9 @@ function TaskLaunchDialogContent({
         target_workspace_id: workspaceId || null,
         target_branch: branch.trim() || 'main',
         integration_strategy: 'two_phase_ff_only',
-        max_review_rounds: maxReviewRounds,
+        ...(roundsKnown
+          ? { max_review_rounds: unlimitedRounds ? 'unlimited' as const : clampRounds(maxReviewRounds) }
+          : {}),
         max_concurrent_executions: 1,
         max_cli_concurrent_executions: 1,
         validations: validations
@@ -259,13 +302,44 @@ function TaskLaunchDialogContent({
             <span>{t('orch.config.reviewRounds')}</span>
             <input
               type="number"
-              min={1}
-              max={20}
-              value={maxReviewRounds}
-              disabled={policyLocked}
-              onChange={event => setMaxReviewRounds(Number(event.target.value) || 1)}
+              min={MIN_REVIEW_ROUNDS}
+              max={MAX_REVIEW_ROUNDS}
+              value={roundsKnown ? maxReviewRounds : ''}
+              placeholder={roundsKnown ? undefined : t('orch.config.reviewRoundsPending')}
+              disabled={policyLocked || unlimitedRounds}
+              data-testid="launch-review-rounds"
+              onChange={event => {
+                roundsTouched.current = true;
+                setRoundsKnown(true);
+                setMaxReviewRounds(Number(event.target.value) || MIN_REVIEW_ROUNDS);
+              }}
             />
           </label>
+          <label className="orch-approval-confirm">
+            <input
+              type="checkbox"
+              checked={unlimitedRounds}
+              disabled={policyLocked}
+              data-testid="launch-review-unlimited"
+              onChange={event => {
+                roundsTouched.current = true;
+                setRoundsKnown(true);
+                setUnlimitedRounds(event.target.checked);
+              }}
+            />
+            <span>{t('config.workers.unlimited')}</span>
+          </label>
+          {roundsUnavailable && !roundsKnown && (
+            <p className="orch-policy-note" role="status" data-testid="launch-review-unavailable">
+              {t('orch.config.reviewRoundsUnavailable')}
+            </p>
+          )}
+          {unlimitedRounds && (
+            <div className="set-expose-warn" role="alert" data-testid="launch-review-warning">
+              <AlertTriangle size={13} />
+              <span>{t('config.workers.unlimitedWarning')}</span>
+            </div>
+          )}
           <label className="orch-launch-validations">
             <span>{t('orch.config.validations')}</span>
             <textarea

@@ -1083,7 +1083,7 @@ impl OrchestrationRunInput {
             project_id: None,
             target_workspace_id: None,
             target_branch: None,
-            max_review_rounds: 3,
+            max_review_rounds: super::setup::DEFAULT_MAX_REVIEW_ROUNDS,
             max_concurrent_executions: 1,
             token_budget: None,
             integration_strategy: IntegrationStrategy::TwoPhaseFfOnly,
@@ -1147,7 +1147,7 @@ impl LaunchSingleTaskInput {
             worker_profile_id: None,
             worker_scope: None,
             worker_dod_ids: None,
-            max_review_rounds: 3,
+            max_review_rounds: super::setup::DEFAULT_MAX_REVIEW_ROUNDS,
             validations: Vec::new(),
             idempotency_key: None,
         }
@@ -1649,6 +1649,31 @@ pub struct TaskExecutionPreparation {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<CampaignTaskReason>,
     pub active_execution: Option<TaskExecution>,
+    /// KT-1345 — the review-round limit this launch gets when it passes no
+    /// `max_review_rounds`: an integer, or `"unlimited"`. Filled by the entry
+    /// points that hold the config (the preflight reads it, creates nothing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | \"unlimited\" | undefined")]
+    pub default_max_review_rounds: Option<serde_json::Value>,
+}
+
+/// A review-round limit as an agent reads it: the integer, or `"unlimited"`
+/// for the [`UNLIMITED_REVIEW_ROUNDS`](super::setup::UNLIMITED_REVIEW_ROUNDS) sentinel.
+pub fn review_limit_json(limit: u32) -> serde_json::Value {
+    if limit == super::setup::UNLIMITED_REVIEW_ROUNDS {
+        serde_json::json!("unlimited")
+    } else {
+        serde_json::json!(limit)
+    }
+}
+
+/// `3`, or `unlimited` — the human-readable twin of [`review_limit_json`].
+pub fn review_limit_label(limit: u32) -> String {
+    if limit == super::setup::UNLIMITED_REVIEW_ROUNDS {
+        "unlimited".to_string()
+    } else {
+        limit.to_string()
+    }
 }
 
 /// A single-task launch result: the execution plus whether the idempotent key

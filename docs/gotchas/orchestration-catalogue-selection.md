@@ -7,10 +7,10 @@ opening, searching, or a failed catalogue read leaves the stored value alone.
 An override absent from the saved catalogue stays in the list as a disabled
 "not in the catalogue" entry, so it can be preserved rather than silently
 replaced.
-[src: file: frontend/src/components/TaskLaunchDialog.tsx:139-145#selectAgent]
-[src: file: frontend/src/components/TaskLaunchDialog.tsx:215-232#AgentSwitchPicker]
-[src: file: frontend/src/components/DiscussionPlanPanel.tsx:397-403#selectReassignAgent]
-[src: file: frontend/src/components/DiscussionPlanPanel.tsx:1143-1158#AgentSwitchPicker]
+[src: file: frontend/src/components/TaskLaunchDialog.tsx:180-186#selectAgent]
+[src: file: frontend/src/components/TaskLaunchDialog.tsx:258-275#AgentSwitchPicker]
+[src: file: frontend/src/components/DiscussionPlanPanel.tsx:400-406#selectReassignAgent]
+[src: file: frontend/src/components/DiscussionPlanPanel.tsx:1161-1176#AgentSwitchPicker]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:163-171#configured]
 
 The launch dialog must let picker-owned Escape handling finish first: the model
@@ -18,11 +18,11 @@ picker prevents the event, while the agent picker’s portal is recognised befor
 the dialog’s window-level close handler runs.
 [src: file: frontend/src/components/SearchableSelect.tsx:209-213]
 [src: file: frontend/src/components/AgentSwitchPicker.tsx:321-325#createPortal]
-[src: file: frontend/src/components/TaskLaunchDialog.tsx:96-102]
+[src: file: frontend/src/components/TaskLaunchDialog.tsx:137-143]
 
 The regression also unmounts the launch dialog and checks that focus actually
 returns to its original trigger; the test title alone is not proof of focus
-restoration. [src: file: frontend/src/components/__tests__/TaskLaunchDialog.test.tsx:154-171]
+restoration. [src: file: frontend/src/components/__tests__/TaskLaunchDialog.test.tsx:238-255]
 
 ## Principal qualification
 

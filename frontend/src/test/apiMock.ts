@@ -182,6 +182,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       getScanDepth: resolve(2),
       getDefaultDocsDir: resolve(null),
       saveDefaultDocsDir: resolve(null),
+      getWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false }),
+      saveWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false }),
       getAgentAccess: resolve({ agents: {} }),
       getAgentAccessEffective: resolve([]),
       getModelTiers: resolve({ tiers: {} }),

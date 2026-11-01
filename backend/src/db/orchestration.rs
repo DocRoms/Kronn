@@ -1329,6 +1329,59 @@ fn run_token_usage(conn: &Connection, run_id: &str) -> Result<u64> {
     Ok(used.max(0) as u64)
 }
 
+/// The durable stop reason journaled and reported when a campaign's token budget
+/// is spent (KT-1345).
+pub const TOKEN_BUDGET_EXHAUSTED: &str = "token_budget_exhausted";
+
+/// A campaign whose consumed tokens reached its `token_budget`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenBudgetStop {
+    pub used: u64,
+    pub budget: u64,
+}
+
+impl TokenBudgetStop {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "reason": TOKEN_BUDGET_EXHAUSTED,
+            "tokens_used": self.used,
+            "token_budget": self.budget,
+        })
+    }
+}
+
+/// `Some` when the run owning `exec_id` has a `token_budget` and the messages of
+/// its executions already consumed it. Every additional worker attempt (a
+/// correction after `request_changes`, the re-offer of an extended execution, a
+/// reassignment) is checked against it, so no round limit, however generous or
+/// absent, can keep a correction loop alive past the budget. A run without a
+/// `token_budget` (every single-task launch) never stops here.
+pub fn execution_token_budget_stop(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<TokenBudgetStop>> {
+    let budget: Option<i64> = conn
+        .query_row(
+            "SELECT r.token_budget FROM task_executions e \
+             JOIN orchestration_runs r ON r.id = e.orchestration_run_id \
+             WHERE e.id = ?1",
+            [exec_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(budget) = budget.map(|value| value.max(0) as u64) else {
+        return Ok(None);
+    };
+    let run_id: String = conn.query_row(
+        "SELECT orchestration_run_id FROM task_executions WHERE id = ?1",
+        [exec_id],
+        |row| row.get(0),
+    )?;
+    let used = run_token_usage(conn, &run_id)?;
+    Ok((used >= budget).then_some(TokenBudgetStop { used, budget }))
+}
+
 fn candidate_reason(code: &str, detail: impl Into<String>) -> CampaignTaskReason {
     CampaignTaskReason {
         code: code.to_string(),
@@ -3762,6 +3815,9 @@ pub struct ReviewCheckpoint<'a> {
     /// request_changes only: the solicitation posted to the principal if the round bump reaches
     /// `max_review_rounds` (DoD-6). Built alongside `findings`; used only on the escalate branch.
     pub escalation: Option<EscalationDelivery<'a>>,
+    /// request_changes only: the solicitation used INSTEAD of `escalation` when the campaign's
+    /// token budget is spent (KT-1345). Falls back to `escalation` when absent.
+    pub token_escalation: Option<EscalationDelivery<'a>>,
     /// request_changes below the budget only: the CLI re-offer that re-activates the worker
     /// for the next attempt (DoD-9). `None` for approve, for the escalate branch, and for a
     /// non-CLI worker (which uses `native_dispatch`).
@@ -4018,7 +4074,18 @@ pub fn commit_review_checkpoint(
             // exhausted only ONCE a request_changes pushes `review_rounds` PAST it (`>`, not `>=`;
             // `max = N` gives N re-offers, escalates on the N+1-th). At/under the cap it
             // re-activates the worker; past it, it pauses in `Escalated` and solicits a human.
-            if new_rounds > max_review_rounds {
+            //
+            // (2b') The campaign's token budget is the OTHER stop (KT-1345): it is authoritative
+            // whatever the round limit, including "unlimited", so a spent budget escalates here
+            // too, with its own durable reason, instead of scheduling another correction.
+            let token_stop = execution_token_budget_stop(&tx, input.exec_id)?;
+            if new_rounds > max_review_rounds || token_stop.is_some() {
+                let reason = if token_stop.is_some() {
+                    TOKEN_BUDGET_EXHAUSTED
+                } else {
+                    "review_budget_exhausted"
+                };
+                let token_json = token_stop.map(|stop| stop.json());
                 // AwaitingReview → Escalated (the generalized budget escape, ADR §3).
                 let moved = transition_execution(
                     &tx,
@@ -4029,18 +4096,24 @@ pub fn commit_review_checkpoint(
                         "phase": "reviewed",
                         "verdict": "request_changes",
                         "attempt": input.attempt_no,
-                        "escalation": "review_budget_exhausted",
+                        "escalation": reason,
                         "review_rounds": new_rounds,
                         "max_review_rounds": max_review_rounds,
+                        "token_budget": token_json,
                     }),
                 )?;
                 if !moved {
                     return Ok(ReviewCheckpointOutcome::ExecutionRaced);
                 }
-                let escalation = input
-                    .escalation
-                    .as_ref()
-                    .expect("request_changes requires an escalation delivery");
+                let escalation = if token_stop.is_some() {
+                    input
+                        .token_escalation
+                        .as_ref()
+                        .or(input.escalation.as_ref())
+                } else {
+                    input.escalation.as_ref()
+                }
+                .expect("request_changes requires an escalation delivery");
                 // Auditable, queryable obligation: the `escalated` event names the TARGETED
                 // principal identity, so a lost solicitation is detectable, not deduced (mirrors
                 // the delivery path's `review_requested`).
@@ -4052,9 +4125,10 @@ pub fn commit_review_checkpoint(
                     None,
                     input.actor,
                     serde_json::json!({
-                        "reason": "review_budget_exhausted",
+                        "reason": reason,
                         "review_rounds": new_rounds,
                         "max_review_rounds": max_review_rounds,
+                        "token_budget": token_json,
                         "attempt": input.attempt_no,
                         "principal_discussion_id": escalation.parent_discussion_id,
                         "principal_target": escalation.principal_target,
@@ -6257,6 +6331,144 @@ pub fn replace_execution_validations(
     })
 }
 
+// ─── Review-round limit (KT-1345) ────────────────────────────────────────────
+
+const REVIEW_ROUNDS_EXTENDED: &str = "review_rounds_extended";
+
+/// How an existing execution's review-round limit is raised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewRoundsExtension {
+    /// N more rounds on top of the current limit.
+    By(u32),
+    /// Lift the cap altogether.
+    Unlimited,
+}
+
+impl ReviewRoundsExtension {
+    /// The `extend_review_rounds` argument: an integer ≥ 1 (rounds to add) or
+    /// `"unlimited"`. Anything else is refused.
+    pub fn parse(value: &serde_json::Value) -> Result<Self, String> {
+        match value {
+            serde_json::Value::String(text) if text.trim().eq_ignore_ascii_case("unlimited") => {
+                Ok(Self::Unlimited)
+            }
+            serde_json::Value::Number(number) => number
+                .as_u64()
+                .filter(|n| (1..=u64::from(crate::models::MAX_REVIEW_ROUNDS_INTEGER)).contains(n))
+                .map(|n| Self::By(n as u32))
+                .ok_or_else(Self::refusal),
+            _ => Err(Self::refusal()),
+        }
+    }
+
+    fn refusal() -> String {
+        format!(
+            "extend_review_rounds must be the number of rounds to add (1 to {}), or \"unlimited\"",
+            crate::models::MAX_REVIEW_ROUNDS_INTEGER
+        )
+    }
+}
+
+/// What [`extend_review_rounds`] changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRoundsExtended {
+    pub previous_limit: u32,
+    pub max_review_rounds: u32,
+    pub review_rounds: u32,
+    /// The execution was parked in `Escalated` by this very limit: raising it
+    /// is not enough, the worker still has to be given its findings again.
+    pub escalated_by_review_budget: bool,
+    /// The campaign's token budget is spent: the limit was raised, but no further
+    /// worker attempt may be scheduled, so the caller must not re-offer.
+    pub token_budget_stop: Option<TokenBudgetStop>,
+}
+
+/// Raise the review-round limit of ONE existing, non-terminal execution
+/// (KT-1345), journaled with its actor and reason. The cap is per execution
+/// (`task_executions.max_review_rounds`), so a campaign's other tasks keep the
+/// run's value. Extending an execution that already has no cap is refused
+/// rather than reported as a change.
+pub fn extend_review_rounds(
+    conn: &Connection,
+    exec_id: &str,
+    extension: ReviewRoundsExtension,
+    actor: &OrchestrationActor,
+    reason: &str,
+) -> Result<ReviewRoundsExtended> {
+    in_savepoint(conn, |conn| {
+        let execution = get_task_execution(conn, exec_id)?
+            .ok_or_else(|| anyhow::anyhow!("execution not found or caller is not its principal"))?;
+        if execution.status.is_terminal() {
+            bail!(
+                "execution is {}: its review-round limit can no longer change",
+                execution.status.as_str()
+            );
+        }
+        let previous = execution.max_review_rounds;
+        if previous == crate::models::UNLIMITED_REVIEW_ROUNDS {
+            bail!("execution already has no review-round limit");
+        }
+        let next = match extension {
+            ReviewRoundsExtension::Unlimited => crate::models::UNLIMITED_REVIEW_ROUNDS,
+            ReviewRoundsExtension::By(n) => previous
+                .checked_add(n)
+                .filter(|next| *next < crate::models::UNLIMITED_REVIEW_ROUNDS)
+                .ok_or_else(|| anyhow::anyhow!("the review-round limit would overflow"))?,
+        };
+        let escalated_by_review_budget = execution.status == TaskExecutionStatus::Escalated && {
+            // The LATEST entry into `Escalated`, whoever caused it: the review-budget path
+            // journals its `escalated` event right after the transition, a watchdog or quota
+            // escalation only leaves the bare transition, so an older budget escalation never
+            // speaks for a newer stall.
+            let last: Option<String> = conn
+                .query_row(
+                    "SELECT changes_json FROM task_execution_events \
+                     WHERE task_execution_id = ?1 AND (action = 'escalated' \
+                        OR (action = 'transition' AND to_status = 'Escalated')) \
+                     ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    [exec_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            last.and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                .is_some_and(|changes| changes["reason"] == "review_budget_exhausted")
+        };
+        let token_budget_stop = execution_token_budget_stop(conn, exec_id)?;
+        let updated = conn.execute(
+            "UPDATE task_executions SET max_review_rounds = ?2, updated_at = ?3 WHERE id = ?1",
+            params![exec_id, next as i64, Utc::now().to_rfc3339()],
+        )?;
+        anyhow::ensure!(
+            updated == 1,
+            "execution vanished before its limit was raised"
+        );
+        record_execution_event(
+            conn,
+            exec_id,
+            REVIEW_ROUNDS_EXTENDED,
+            None,
+            None,
+            actor,
+            serde_json::json!({
+                "previous_limit": crate::models::review_limit_json(previous),
+                "max_review_rounds": crate::models::review_limit_json(next),
+                "review_rounds": execution.review_rounds,
+                "reason": reason,
+                "escalated_by_review_budget": escalated_by_review_budget,
+                // The durable stop reason: the limit rose, the worker was not re-offered.
+                "token_budget": token_budget_stop.map(|stop| stop.json()),
+            }),
+        )?;
+        Ok(ReviewRoundsExtended {
+            previous_limit: previous,
+            max_review_rounds: next,
+            review_rounds: execution.review_rounds,
+            escalated_by_review_budget,
+            token_budget_stop,
+        })
+    })
+}
+
 // ─── Validation runs ─────────────────────────────────────────────────────────
 
 /// Record a validation run against the exact candidate commit (ADR §6). The
@@ -7286,6 +7498,16 @@ pub fn reassign_execution_worker(
             .ok_or_else(|| anyhow::anyhow!("unknown task execution"))?;
         if execution.status.is_terminal() {
             bail!("a terminal execution cannot be reassigned");
+        }
+        // KT-1345 — a reassignment schedules another worker attempt: the campaign's token
+        // budget stays authoritative over it.
+        if let Some(stop) = execution_token_budget_stop(conn, exec_id)? {
+            bail!(
+                "{TOKEN_BUDGET_EXHAUSTED}: the campaign consumed {} of its {} token budget, so \
+                 no further worker attempt is scheduled",
+                stop.used,
+                stop.budget
+            );
         }
         if execution.status == TaskExecutionStatus::Escalated {
             let recovery = get_execution_recovery(conn, exec_id)?;

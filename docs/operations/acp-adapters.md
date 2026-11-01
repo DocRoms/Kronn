@@ -96,7 +96,7 @@ or relax worker isolation. Workers run through WSL instead; the boundary
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
 runtimes report that a restart is required instead of attempting the Unix
 file-descriptor script reload used during source development.
-[src: file: backend/scripts/disc-introspection-mcp.py:11454-11464#_schedule_bridge_reload]
+[src: file: backend/scripts/disc-introspection-mcp.py:11505-11515#_schedule_bridge_reload]
 
 The desktop sidecar build runs an MCP smoke test from a relocated directory
 with spaces and non-ASCII characters, an empty PATH and an ephemeral HTTP
@@ -310,7 +310,7 @@ project path never reuses that identifier.
 
 `agent_settings.tools` (`{cli: [...], kronn_internal: [...]}`) replaces what a
 workflow Agent step is launched with. Undeclared, the argv is unchanged.
-[src: file: backend/src/models/workflows.rs:1601-1612#StepTools]
+[src: file: backend/src/models/workflows.rs:1602-1613#StepTools]
 
 - Claude adapter: `--tools <cli list>` (empty string = no built-in tool),
   `--disable-slash-commands` (no skill listing), and an MCP config holding
@@ -321,14 +321,14 @@ workflow Agent step is launched with. Undeclared, the argv is unchanged.
 - Codex adapter: the MCP override holds only `kronn-internal` with
   `enabled_tools`, or `mcp_servers={}`; `cli` is refused at save.
   [src: file: backend/src/acp/codex_adapter.rs:139-168#codex_project_mcp_override]
-  [src: file: backend/src/models/workflows.rs:1613-1634#validate]
+  [src: file: backend/src/models/workflows.rs:1614-1635#validate]
 - Native ACP agents: `session/new` offers only the narrowed bridge, or no
   server. [src: file: backend/src/agents/runner.rs:5921-5942#declared_mcp_servers]
 - The bridge, given `--step-tools=`, lists and dispatches only those tools
   and sends no catalogue instructions on `initialize` (only the decision-card bullet when `disc_append` is declared).
-  [src: file: backend/scripts/disc-introspection-mcp.py:5900-5915#_declared_step_tools]
-  [src: file: backend/scripts/disc-introspection-mcp.py:12055-12070#_declared_step_tools]
-  [src: file: backend/scripts/disc-introspection-mcp.py:12158-12167#_declared_step_tools]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5903-5918#_declared_step_tools]
+  [src: file: backend/scripts/disc-introspection-mcp.py:12104-12119#_declared_step_tools]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5900-5909#_declared_step_tools]
 - The direct CLI fallback (`KRONN_ACP_ADAPTER_*=0`) refuses a declared step
   rather than launch it with every tool.
 

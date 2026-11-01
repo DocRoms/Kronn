@@ -1546,6 +1546,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_default_docs_dir).post(api::setup::save_default_docs_dir),
         )
         .route(
+            "/api/config/workers",
+            get(api::setup::get_workers_config).post(api::setup::save_workers_config),
+        )
+        .route(
             "/api/config/scan-depth",
             get(api::setup::get_scan_depth).post(api::setup::set_scan_depth),
         )
@@ -3085,7 +3089,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/orchestration/tool/executions/{id}/reassign",
-            post(api::orchestration::task_exec_reassign),
+            post(api::orchestration::task_exec_reassign_http),
         )
         .route(
             "/api/orchestration/campaigns",
@@ -3134,6 +3138,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/orchestration/executions/{id}/reassign",
             post(api::orchestration::reassign_execution),
+        )
+        .route(
+            "/api/orchestration/executions/{id}/extend-review-rounds",
+            post(api::orchestration::extend_review_rounds_http),
         )
         .route(
             "/api/orchestration/executions/{id}/review",

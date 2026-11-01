@@ -72,6 +72,9 @@ struct BeginProvisioningContext<'a> {
     campaign: Option<&'a CampaignLaunchContext>,
     resume_execution_id: Option<&'a str>,
     worker_scope: Option<&'a TaskWorkerScope>,
+    /// KT-1345 — the review-round limit of a single-task launch: the caller's
+    /// explicit one, else Settings > Workers. `None` keeps the model default.
+    max_review_rounds: Option<u32>,
 }
 
 /// Campaign launch request. `worker_override = None` resolves the persisted
@@ -1668,35 +1671,102 @@ struct Prepared {
     already_launched: bool,
 }
 
+/// Serde hook for the `max_review_rounds` fields: a plain `Option` reads an
+/// explicit `null` as absent, which would silently apply the default. Here only
+/// a missing key is `None`; `null` stays a value, and [`review_rounds_argument`]
+/// refuses it like any other non-integer.
+fn explicit_review_rounds<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <serde_json::Value as Deserialize>::deserialize(deserializer).map(Some)
+}
+
+/// KT-1345 — the optional `max_review_rounds` of a launch: absent is fine (the
+/// Settings > Workers default applies), anything that is not an integer in
+/// range or `"unlimited"` is refused rather than defaulted.
+pub(crate) fn review_rounds_argument(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<u32>, String> {
+    value
+        .map(crate::models::parse_review_rounds_arg)
+        .transpose()
+}
+
 /// Launch a single ready task. A native worker drives to `Working` (its task
 /// `InProgress`); a `Cli` worker opens a durable control offer in the origin room
 /// and parks `Blocked(awaiting_worker_acceptance)` until the exact session accepts
 /// (KT-328 tranche 2). On any refusal/failure the returned error is structured and
 /// the durable state is resumable (DoD-6).
+///
+/// Takes no `AppState`, so it cannot read Settings > Workers: the execution gets
+/// the built-in review-round default. Production launches go through
+/// [`provision_single_task_execution_with_options`]; this is the entry point of
+/// the integration tests.
 pub async fn provision_single_task_execution(
     db: &Database,
     input: ProvisionInput,
 ) -> Result<TaskExecution, ProvisionError> {
-    provision_task_execution_inner(db, input, None, None, None, Vec::new()).await
+    provision_task_execution_inner(db, input, None, None, None, Vec::new(), None).await
 }
 
 /// Launch one task with mechanical gates selected by the authorized principal.
 /// The worker cannot influence this policy through its brief or delivery manifest.
+#[cfg(test)]
 pub async fn provision_single_task_execution_with_validations(
     db: &Database,
     input: ProvisionInput,
     validations: Vec<crate::models::ValidationSpec>,
 ) -> Result<TaskExecution, ProvisionError> {
-    provision_task_execution_inner(db, input, None, None, None, validations).await
+    provision_task_execution_inner(db, input, None, None, None, validations, None).await
 }
 
+#[cfg(test)]
 pub async fn provision_single_task_execution_with_scope_and_validations(
     db: &Database,
     input: ProvisionInput,
     worker_scope: Option<TaskWorkerScope>,
     validations: Vec<crate::models::ValidationSpec>,
 ) -> Result<TaskExecution, ProvisionError> {
-    provision_task_execution_inner(db, input, None, None, worker_scope, validations).await
+    provision_task_execution_inner(db, input, None, None, worker_scope, validations, None).await
+}
+
+/// KT-1345 — the review-round limit of a single-task launch. `Some` is the
+/// caller's explicit value; `None` falls back to Settings > Workers.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SingleTaskLaunchOptions {
+    pub max_review_rounds: Option<u32>,
+}
+
+/// Launch one task with the worker scope and gates the principal chose, and the
+/// review-round limit resolved: the explicit one, else the Settings > Workers
+/// default. Every principal-driven launch (MCP, native tool, REST) comes here.
+pub async fn provision_single_task_execution_with_options(
+    state: &AppState,
+    input: ProvisionInput,
+    worker_scope: Option<TaskWorkerScope>,
+    validations: Vec<crate::models::ValidationSpec>,
+    options: SingleTaskLaunchOptions,
+) -> Result<TaskExecution, ProvisionError> {
+    let rounds = match options.max_review_rounds {
+        Some(rounds) => rounds,
+        None => state
+            .config
+            .read()
+            .await
+            .workers
+            .effective_max_review_rounds(),
+    };
+    provision_task_execution_inner(
+        &state.db,
+        input,
+        None,
+        None,
+        worker_scope,
+        validations,
+        Some(rounds),
+    )
+    .await
 }
 
 async fn resume_provisioning_execution(
@@ -1704,7 +1774,8 @@ async fn resume_provisioning_execution(
     input: ProvisionInput,
     execution_id: &str,
 ) -> Result<TaskExecution, ProvisionError> {
-    provision_task_execution_inner(db, input, None, Some(execution_id), None, Vec::new()).await
+    provision_task_execution_inner(db, input, None, Some(execution_id), None, Vec::new(), None)
+        .await
 }
 
 pub async fn provision_campaign_task_execution(
@@ -1743,6 +1814,7 @@ pub async fn provision_campaign_task_execution(
         None,
         None,
         Vec::new(),
+        None,
     )
     .await?;
     Ok((execution, selection_reason))
@@ -1755,6 +1827,7 @@ async fn provision_task_execution_inner(
     resume_execution_id: Option<&str>,
     worker_scope: Option<TaskWorkerScope>,
     validations: Vec<crate::models::ValidationSpec>,
+    max_review_rounds: Option<u32>,
 ) -> Result<TaskExecution, ProvisionError> {
     // Phases A–D are worker-agnostic: the worker kind forks ONLY at Phase E (native
     // dispatch vs. CLI control offer), so a Cli worker provisions its sub-discussion
@@ -1784,6 +1857,7 @@ async fn provision_task_execution_inner(
                     campaign: campaign.as_ref(),
                     resume_execution_id: resume_execution_id.as_deref(),
                     worker_scope: worker_scope.as_ref(),
+                    max_review_rounds,
                 },
                 &backend_actor(),
             )
@@ -7510,129 +7584,143 @@ async fn decide_authorized_review(
         let actor_session_id = actor_session_id.clone();
         // ── request_changes pre-build (owned to move into the DB closure); approve builds none
         // of this. The checkpoint decides re-offer vs escalate inside its tx (DoD-6). ──
-        let (findings_owned, escalation_owned, reactivation_owned, native_dispatch_owned) =
-            if verdict == ReviewVerdict::RequestChanges {
-                let (parent, tid) = (exec.parent_discussion_id.clone(), exec.task_id.clone());
-                let eid = exec.id.clone();
-                let (principal_target, task) = db
-                    .with_conn(move |conn| {
-                        let parent = crate::db::discussions::get_discussion(conn, &parent)?
-                            .context("parent discussion vanished before review")?;
-                        let task = crate::db::planning::get_task(conn, &tid)?
-                            .context("task vanished before review")?;
-                        let target = crate::db::orchestration::principal_notice_target(
-                            conn,
-                            &eid,
-                            parent.agent,
-                        )?;
-                        Ok((target, task))
-                    })
-                    .await
-                    .map_err(|e| ProvisionError::Internal(e.to_string()))?;
-                let child = exec.sub_discussion_id.clone().unwrap_or_default();
-                let worker_target = worker_target_from_execution(&exec)
-                    .map_err(|e| ProvisionError::Internal(e.to_string()))?;
+        let (
+            findings_owned,
+            escalation_owned,
+            token_escalation_owned,
+            reactivation_owned,
+            native_dispatch_owned,
+        ) = if verdict == ReviewVerdict::RequestChanges {
+            let (parent, tid) = (exec.parent_discussion_id.clone(), exec.task_id.clone());
+            let eid = exec.id.clone();
+            let (principal_target, task) = db
+                .with_conn(move |conn| {
+                    let parent = crate::db::discussions::get_discussion(conn, &parent)?
+                        .context("parent discussion vanished before review")?;
+                    let task = crate::db::planning::get_task(conn, &tid)?
+                        .context("task vanished before review")?;
+                    let target = crate::db::orchestration::principal_notice_target(
+                        conn,
+                        &eid,
+                        parent.agent,
+                    )?;
+                    Ok((target, task))
+                })
+                .await
+                .map_err(|e| ProvisionError::Internal(e.to_string()))?;
+            let child = exec.sub_discussion_id.clone().unwrap_or_default();
+            let worker_target = worker_target_from_execution(&exec)
+                .map_err(|e| ProvisionError::Internal(e.to_string()))?;
 
-                // A rework replays the prelocalized range on the delivered file; an
-                // exhausted budget escalates instead, so it needs no re-anchoring.
-                let reworks = exec.status == TaskExecutionStatus::AwaitingReview
-                    && exec.review_rounds < exec.max_review_rounds;
-                let reanchored = if reworks {
-                    match reanchor_execution_scope(db, &exec).await {
-                        Ok(reanchored) => reanchored,
-                        Err(error) => {
-                            return match error.downcast::<StaleWorkerScope>() {
-                                Ok(stale) => Ok(ReviewOutcome::StaleScope(stale.0)),
-                                Err(error) => Err(ProvisionError::Internal(error.to_string())),
-                            }
+            // A rework replays the prelocalized range on the delivered file; an
+            // exhausted budget escalates instead, so it needs no re-anchoring.
+            let reworks = exec.status == TaskExecutionStatus::AwaitingReview
+                && exec.review_rounds < exec.max_review_rounds;
+            let reanchored = if reworks {
+                match reanchor_execution_scope(db, &exec).await {
+                    Ok(reanchored) => reanchored,
+                    Err(error) => {
+                        return match error.downcast::<StaleWorkerScope>() {
+                            Ok(stale) => Ok(ReviewOutcome::StaleScope(stale.0)),
+                            Err(error) => Err(ProvisionError::Internal(error.to_string())),
                         }
                     }
-                } else {
-                    None
-                };
-
-                // (a) findings → the worker in the child (DoD-4).
-                let lang = room_lang(db, &exec.parent_discussion_id).await;
-                let mut findings_msg = build_review_findings_message(
-                    &exec.id,
-                    exec.attempt_no,
-                    &decision,
-                    &child,
-                    lang,
-                );
-                if let Some(reanchored) = reanchored.as_ref() {
-                    findings_msg
-                        .content
-                        .push_str(&reanchored_scope_note(reanchored, lang));
                 }
-                let findings = (child.clone(), findings_msg, worker_target.clone());
+            } else {
+                None
+            };
 
-                // (b) escalation solicitation → the principal (used only if the budget is exhausted
-                // inside the checkpoint tx).
-                let escalation_msg = build_escalation_message(
+            // (a) findings → the worker in the child (DoD-4).
+            let lang = room_lang(db, &exec.parent_discussion_id).await;
+            let mut findings_msg =
+                build_review_findings_message(&exec.id, exec.attempt_no, &decision, &child, lang);
+            if let Some(reanchored) = reanchored.as_ref() {
+                findings_msg
+                    .content
+                    .push_str(&reanchored_scope_note(reanchored, lang));
+            }
+            let findings = (child.clone(), findings_msg, worker_target.clone());
+
+            // (b) escalation solicitation → the principal (used only if the budget is exhausted
+            // inside the checkpoint tx).
+            let escalation_msg = build_escalation_message(
+                &exec.id,
+                exec.attempt_no,
+                &task.summary.reference,
+                &task.summary.title,
+                exec.review_rounds + 1,
+                exec.max_review_rounds,
+                &child,
+                lang,
+            );
+            let token_escalation_msg = build_token_budget_escalation_message(
+                &exec.id,
+                exec.attempt_no,
+                &task.summary.reference,
+                &task.summary.title,
+                &child,
+                lang,
+            );
+            let token_escalation = (
+                exec.parent_discussion_id.clone(),
+                token_escalation_msg,
+                principal_target.clone(),
+            );
+            let escalation = (
+                exec.parent_discussion_id.clone(),
+                escalation_msg,
+                principal_target,
+            );
+
+            // (c) re-offer → re-activate the CLI worker for the next attempt (DoD-9). Only for a
+            // CLI worker (a native worker's re-dispatch is KT-335 — the review path is
+            // CLI-centric in V1). The offer id is minted server-side FIRST so the control
+            // message embeds the exact id; the checkpoint opens the offer with it in its tx.
+            // Used only on the below-budget branch.
+            let reactivation = if exec.worker_cli_session_id.is_some() {
+                let new_attempt = exec.attempt_no + 1;
+                let offer_id = Uuid::new_v4().to_string();
+                let control_msg = build_control_offer_message(
                     &exec.id,
-                    exec.attempt_no,
+                    new_attempt,
+                    &offer_id,
                     &task.summary.reference,
                     &task.summary.title,
-                    exec.review_rounds + 1,
-                    exec.max_review_rounds,
                     &child,
                     lang,
                 );
-                let escalation = (
+                Some((
+                    offer_id,
+                    new_attempt,
+                    worker_target.clone(),
                     exec.parent_discussion_id.clone(),
-                    escalation_msg,
-                    principal_target,
-                );
-
-                // (c) re-offer → re-activate the CLI worker for the next attempt (DoD-9). Only for a
-                // CLI worker (a native worker's re-dispatch is KT-335 — the review path is
-                // CLI-centric in V1). The offer id is minted server-side FIRST so the control
-                // message embeds the exact id; the checkpoint opens the offer with it in its tx.
-                // Used only on the below-budget branch.
-                let reactivation = if exec.worker_cli_session_id.is_some() {
-                    let new_attempt = exec.attempt_no + 1;
-                    let offer_id = Uuid::new_v4().to_string();
-                    let control_msg = build_control_offer_message(
-                        &exec.id,
-                        new_attempt,
-                        &offer_id,
-                        &task.summary.reference,
-                        &task.summary.title,
-                        &child,
-                        lang,
-                    );
-                    Some((
-                        offer_id,
-                        new_attempt,
-                        worker_target.clone(),
-                        exec.parent_discussion_id.clone(),
-                        child.clone(),
-                        control_msg,
-                    ))
-                } else {
-                    None
-                };
-
-                let native_dispatch = if exec.worker_cli_session_id.is_none() {
-                    let new_attempt = exec.attempt_no + 1;
-                    Some((
-                        Uuid::new_v4().to_string(),
-                        format!("orch-rework:{}:{}", exec.id, new_attempt),
-                    ))
-                } else {
-                    None
-                };
-
-                (
-                    Some(findings),
-                    Some(escalation),
-                    reactivation,
-                    native_dispatch,
-                )
+                    child.clone(),
+                    control_msg,
+                ))
             } else {
-                (None, None, None, None)
+                None
             };
+
+            let native_dispatch = if exec.worker_cli_session_id.is_none() {
+                let new_attempt = exec.attempt_no + 1;
+                Some((
+                    Uuid::new_v4().to_string(),
+                    format!("orch-rework:{}:{}", exec.id, new_attempt),
+                ))
+            } else {
+                None
+            };
+
+            (
+                Some(findings),
+                Some(escalation),
+                Some(token_escalation),
+                reactivation,
+                native_dispatch,
+            )
+        } else {
+            (None, None, None, None, None)
+        };
         db.with_conn(move |conn| {
             let actor = agent_actor(&alias_owned, actor_session_id.as_deref());
             let findings = findings_owned.as_ref().map(|(child, msg, target)| {
@@ -7649,6 +7737,15 @@ async fn decide_authorized_review(
                     principal_target: target,
                 }
             });
+            let token_escalation = token_escalation_owned
+                .as_ref()
+                .map(
+                    |(parent, msg, target)| crate::db::orchestration::EscalationDelivery {
+                        parent_discussion_id: parent,
+                        message: msg,
+                        principal_target: target,
+                    },
+                );
             let reactivation = reactivation_owned.as_ref().map(
                 |(offer_id, new_attempt, target, origin, child, msg)| {
                     crate::db::orchestration::ReworkReoffer {
@@ -7676,6 +7773,7 @@ async fn decide_authorized_review(
                     decision_json: &decision_owned,
                     findings,
                     escalation,
+                    token_escalation,
                     reactivation,
                     native_dispatch,
                     carried_dod: &carried_owned,
@@ -8197,6 +8295,7 @@ fn begin_provisioning(
         campaign,
         resume_execution_id,
         worker_scope,
+        max_review_rounds,
     } = context;
     let task = match crate::db::planning::get_task(conn, task_reference)? {
         Some(t) => t,
@@ -8362,6 +8461,9 @@ fn begin_provisioning(
     // this field is ignored by `launch_task_in_run` there.
     launch.target_branch = Some(target_branch);
     launch.validations = validations.to_vec();
+    if let Some(rounds) = max_review_rounds {
+        launch.max_review_rounds = rounds;
+    }
     launch.worker_target_kind = Some(worker.kind);
     launch.worker_cli_session_id = worker.cli_session_id;
     launch.worker_connection_id = worker.connection_id.clone();
@@ -9037,7 +9139,9 @@ fn build_escalation_message(
              Options :\n\
              - reprendre la main sur la sous-discussion `{child_discussion_id}` (piloter le \
              worker directement) ;\n\
-             - relever la limite de tours du run puis ré-offrir explicitement ;\n\
+             - rallonger la limite de tours de cette exécution : `task_exec_reassign` avec \
+             `extend_review_rounds` (nombre de tours à ajouter, ou `unlimited`) la relève et \
+             renvoie les points au worker ;\n\
              - basculer sur un worker natif, ou abandonner l'exécution."
         ),
         RoomLang::En => format!(
@@ -9048,11 +9152,52 @@ fn build_escalation_message(
              re-offered automatically — a **human decision** is required. Options:\n\
              - take over the sub-discussion `{child_discussion_id}` (drive the worker \
              directly);\n\
-             - raise the run's round limit then explicitly re-offer;\n\
+             - extend this execution's round limit: `task_exec_reassign` with \
+             `extend_review_rounds` (rounds to add, or `unlimited`) raises it and hands the \
+             findings back to the worker;\n\
              - switch to a native worker, or abandon the execution."
         ),
     };
     orchestrator_message(format!("orch-escalation:{exec_id}:{attempt_no}"), content)
+}
+
+/// The solicitation posted to the PRINCIPAL when a `request_changes` finds the campaign's
+/// token budget spent (KT-1345). Same pause as [`build_escalation_message`], but the cause is
+/// the token budget, so raising the review-round limit would not help and is not offered.
+fn build_token_budget_escalation_message(
+    exec_id: &str,
+    attempt_no: u32,
+    task_reference: &str,
+    task_title: &str,
+    child_discussion_id: &str,
+    lang: RoomLang,
+) -> DiscussionMessage {
+    let content = match lang {
+        RoomLang::Fr => format!(
+            "**Escalade — budget de tokens de la campagne épuisé — \
+             {task_reference} : {task_title}**\n\n\
+             Le worker vient de recevoir `request_changes`, mais le budget de tokens de la \
+             campagne est consommé : aucune nouvelle tentative n'est planifiée, quelle que soit \
+             la limite de tours de revue. L'exécution est en pause en `Escalated` \
+             (`token_budget_exhausted`) — une **décision humaine** est requise. Options :\n\
+             - reprendre la main sur la sous-discussion `{child_discussion_id}` (corriger \
+             directement) ;\n\
+             - abandonner l'exécution."
+        ),
+        RoomLang::En => format!(
+            "**Escalation — campaign token budget exhausted — {task_reference}: {task_title}**\n\n\
+             The worker has just received `request_changes`, but the campaign's token budget is \
+             spent: no further attempt is scheduled, whatever the review-round limit. The \
+             execution is paused in `Escalated` (`token_budget_exhausted`) — a **human \
+             decision** is required. Options:\n\
+             - take over the sub-discussion `{child_discussion_id}` (fix it directly);\n\
+             - abandon the execution."
+        ),
+    };
+    orchestrator_message(
+        format!("orch-escalation-tokens:{exec_id}:{attempt_no}"),
+        content,
+    )
 }
 
 /// The French brief, which the existing brief tests pin.
@@ -9912,8 +10057,9 @@ pub struct CreateCampaignRequest {
     pub target_branch: String,
     #[serde(default)]
     pub integration_strategy: crate::models::IntegrationStrategy,
-    #[serde(default = "default_campaign_review_rounds")]
-    pub max_review_rounds: u32,
+    /// KT-1345 — integer or `"unlimited"`; absent = Settings > Workers.
+    #[serde(default, deserialize_with = "explicit_review_rounds")]
+    pub max_review_rounds: Option<serde_json::Value>,
     #[serde(default = "default_campaign_concurrency")]
     pub max_concurrent_executions: u32,
     #[serde(default = "default_campaign_concurrency")]
@@ -9938,10 +10084,6 @@ pub struct CreateCampaignRequest {
     pub default_worker: Option<crate::models::CampaignWorkerSelection>,
     #[serde(default)]
     pub auto_continue: bool,
-}
-
-fn default_campaign_review_rounds() -> u32 {
-    3
 }
 
 fn default_campaign_concurrency() -> u32 {
@@ -10229,6 +10371,7 @@ pub(crate) fn prepare_task_execution(
         reasons,
         warnings: Vec::new(),
         active_execution,
+        default_max_review_rounds: None,
     })
 }
 
@@ -10293,6 +10436,16 @@ pub async fn create_campaign(
             format!("invalid validations: {reason}"),
         ));
     }
+    let max_review_rounds = match review_rounds_argument(request.max_review_rounds.as_ref()) {
+        Ok(Some(rounds)) => rounds,
+        Ok(None) => state
+            .config
+            .read()
+            .await
+            .workers
+            .effective_max_review_rounds(),
+        Err(detail) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, detail)),
+    };
     let resilience = crate::models::OrchestrationResiliencePolicy {
         activity_timeout_secs: request.activity_timeout_secs,
         review_timeout_secs: request.review_timeout_secs,
@@ -10316,7 +10469,7 @@ pub async fn create_campaign(
                 project_id: request.project_id,
                 target_workspace_id: request.target_workspace_id,
                 target_branch: Some(target_branch),
-                max_review_rounds: request.max_review_rounds,
+                max_review_rounds,
                 max_concurrent_executions: request.max_concurrent_executions,
                 token_budget: request.token_budget,
                 integration_strategy: request.integration_strategy,
@@ -11098,6 +11251,37 @@ fn default_cancel_reason() -> String {
 pub struct ReassignExecutionRequest {
     pub worker: crate::models::CampaignWorkerSelection,
     pub reason: String,
+}
+
+/// Body of `POST /api/orchestration/executions/{id}/extend-review-rounds`.
+#[derive(Deserialize)]
+pub struct ExtendReviewRoundsRequest {
+    /// Rounds to add, or `"unlimited"`.
+    pub extend_review_rounds: serde_json::Value,
+    pub reason: String,
+}
+
+/// The human's « extend by N » (KT-1345): the same amendment the principal
+/// makes through `task_exec_reassign`, journaled as a human decision.
+pub async fn extend_review_rounds_http(
+    State(state): State<AppState>,
+    Path(exec_id): Path<String>,
+    Json(request): Json<ExtendReviewRoundsRequest>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    let extension =
+        match crate::db::orchestration::ReviewRoundsExtension::parse(&request.extend_review_rounds)
+        {
+            Ok(extension) => extension,
+            Err(detail) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, detail)),
+        };
+    let mut actor = backend_actor();
+    actor.kind = PlanningActorKind::Human;
+    actor.id = Some("human".to_string());
+    match extend_execution_review_rounds(&state, &exec_id, extension, &request.reason, actor).await
+    {
+        Ok(value) => Json(ApiResponse::ok(value)),
+        Err((code, message)) => Json(ApiResponse::err_coded(code, message)),
+    }
 }
 
 fn recovery_view(conn: &rusqlite::Connection, exec_id: &str) -> Result<ExecutionRecoveryView> {
@@ -12438,6 +12622,9 @@ pub struct ProvisionRequest {
     pub validations: Vec<crate::models::ValidationSpec>,
     #[serde(default)]
     pub worker_scope: Option<TaskWorkerScope>,
+    /// KT-1345 — integer or `"unlimited"`; absent = Settings > Workers.
+    #[serde(default, deserialize_with = "explicit_review_rounds")]
+    pub max_review_rounds: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -12462,6 +12649,9 @@ pub struct TaskExecPrepareRequest {
     /// makes the preflight refuse instead of the integration.
     #[serde(default)]
     pub validations: Vec<crate::models::ValidationSpec>,
+    /// KT-1345 — checked like at launch, so a bad value refuses the preflight.
+    #[serde(default, deserialize_with = "explicit_review_rounds")]
+    pub max_review_rounds: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -12503,6 +12693,9 @@ pub struct TaskExecLaunchRequest {
     pub worker_scope_intent: Option<TaskWorkerScopeIntent>,
     #[serde(default)]
     pub worker_scope: Option<TaskWorkerScope>,
+    /// KT-1345 — integer or `"unlimited"`; absent = Settings > Workers.
+    #[serde(default, deserialize_with = "explicit_review_rounds")]
+    pub max_review_rounds: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -12565,6 +12758,10 @@ pub struct TaskExecReassignRequest {
     /// validations, it is not merged into them. An empty list removes every gate.
     #[serde(default)]
     pub validations: Option<Vec<crate::models::ValidationSpec>>,
+    /// KT-1345 — raise the execution's review-round limit instead: a number
+    /// of rounds to add, or `"unlimited"`.
+    #[serde(default)]
+    pub extend_review_rounds: Option<serde_json::Value>,
     pub reason: String,
 }
 
@@ -12579,22 +12776,32 @@ pub struct TaskExecReassignRequest {
 pub(crate) enum ExecutionAmendment {
     Reassign(MessageTarget),
     ReplaceValidations(Vec<crate::models::ValidationSpec>),
+    /// KT-1345 — more review rounds, without an escalation + reassignment.
+    ExtendReviewRounds(crate::db::orchestration::ReviewRoundsExtension),
 }
 
 pub(crate) fn execution_amendment(
     worker: Option<MessageTarget>,
     validations: Option<Vec<crate::models::ValidationSpec>>,
-) -> Result<ExecutionAmendment, &'static str> {
-    match (worker, validations) {
-        (Some(worker), None) => Ok(ExecutionAmendment::Reassign(worker)),
-        (None, Some(validations)) => Ok(ExecutionAmendment::ReplaceValidations(validations)),
-        (Some(_), Some(_)) => Err(
-            "task_exec_reassign makes one change per call: pass a `worker` to reassign the \
-             execution, or the complete `validations` set to replace its gates — not both",
+    extend_review_rounds: Option<&serde_json::Value>,
+) -> Result<ExecutionAmendment, String> {
+    let extension = extend_review_rounds
+        .map(crate::db::orchestration::ReviewRoundsExtension::parse)
+        .transpose()?;
+    match (worker, validations, extension) {
+        (Some(worker), None, None) => Ok(ExecutionAmendment::Reassign(worker)),
+        (None, Some(validations), None) => Ok(ExecutionAmendment::ReplaceValidations(validations)),
+        (None, None, Some(extension)) => Ok(ExecutionAmendment::ExtendReviewRounds(extension)),
+        (None, None, None) => Err(
+            "task_exec_reassign needs a change: a typed `worker` to reassign the execution, the \
+             complete `validations` set to replace its gates ([] removes every gate), or \
+             `extend_review_rounds` to raise its review-round limit"
+                .into(),
         ),
-        (None, None) => Err(
-            "task_exec_reassign needs a change: a typed `worker` to reassign the execution, or \
-             the complete `validations` set to replace its gates ([] removes every gate)",
+        _ => Err(
+            "task_exec_reassign makes one change per call: pass a `worker`, the complete \
+             `validations` set, or `extend_review_rounds` — not several"
+                .into(),
         ),
     }
 }
@@ -13796,6 +14003,16 @@ pub async fn task_exec_prepare(
     let worker = request.worker;
     let scope_refusal = worker_scope_refusal(&worker, request.worker_scope.as_ref());
     let validations_refusal = validations_refusal(&request.validations);
+    let rounds_refusal = match review_rounds_argument(request.max_review_rounds.as_ref()) {
+        Ok(_) => None,
+        Err(detail) => Some(preparation_reason("invalid_max_review_rounds", detail)),
+    };
+    let default_rounds = state
+        .config
+        .read()
+        .await
+        .workers
+        .effective_max_review_rounds();
     let (catalog_refusal, catalog_warning) = worker_catalog_verdict(&state, &worker).await;
     let result = state
         .db
@@ -13805,9 +14022,16 @@ pub async fn task_exec_prepare(
             }
             let mut preparation = prepare_task_execution(conn, &task, &parent, &worker)?;
             preparation.warnings.extend(catalog_warning);
-            for reason in [scope_refusal, validations_refusal, catalog_refusal]
-                .into_iter()
-                .flatten()
+            preparation.default_max_review_rounds =
+                Some(crate::models::review_limit_json(default_rounds));
+            for reason in [
+                scope_refusal,
+                validations_refusal,
+                rounds_refusal,
+                catalog_refusal,
+            ]
+            .into_iter()
+            .flatten()
             {
                 preparation.launchable = false;
                 preparation.reasons.push(reason);
@@ -13868,6 +14092,10 @@ pub async fn task_exec_launch(
             format!("{}: {}", reason.code, reason.detail),
         ));
     }
+    let max_review_rounds = match review_rounds_argument(request.max_review_rounds.as_ref()) {
+        Ok(rounds) => rounds,
+        Err(detail) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, detail)),
+    };
     let (catalog_refusal, _) = worker_catalog_verdict(&state, &request.worker).await;
     let preflight = {
         let task = request.task_reference.trim().to_string();
@@ -13904,8 +14132,8 @@ pub async fn task_exec_launch(
             ));
         }
     }
-    match provision_single_task_execution_with_scope_and_validations(
-        &state.db,
+    match provision_single_task_execution_with_options(
+        &state,
         ProvisionInput {
             task_reference: request.task_reference,
             parent_discussion_id: parent,
@@ -13915,6 +14143,7 @@ pub async fn task_exec_launch(
         },
         request.worker_scope,
         request.validations,
+        SingleTaskLaunchOptions { max_review_rounds },
     )
     .await
     {
@@ -14179,7 +14408,8 @@ pub(crate) fn compact_execution_status(
         attempt: execution.attempt_no,
         review_rounds: format!(
             "{}/{}",
-            execution.review_rounds, execution.max_review_rounds
+            execution.review_rounds,
+            crate::models::review_limit_label(execution.max_review_rounds)
         ),
         head_sha: detail
             .attempts
@@ -14456,10 +14686,54 @@ pub async fn task_exec_cancel(
     .await
 }
 
+/// The route handler: the bridge extension is what tells a Kronn-launched agent
+/// (which may be the execution's own worker) from the operator or a browser.
+pub async fn task_exec_reassign_http(
+    State(state): State<AppState>,
+    Path(exec_id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Json(request): Json<TaskExecReassignRequest>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    task_exec_reassign_as(
+        state,
+        exec_id,
+        request,
+        bridge.as_ref().map(|extension| &extension.0),
+    )
+    .await
+}
+
+/// The same call without a bridge token (no Kronn-launched agent behind it).
 pub async fn task_exec_reassign(
     State(state): State<AppState>,
     Path(exec_id): Path<String>,
     Json(request): Json<TaskExecReassignRequest>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    task_exec_reassign_as(state, exec_id, request, None).await
+}
+
+/// Whether a bridge-token caller is this execution's principal, read from what
+/// the token was minted for and never from the body: it owns the execution's
+/// parent room and is not its worker (a worker's token owns the child room).
+///
+/// A token that owns BOTH rooms is refused too: that is what a principal's token
+/// looks like after it adopted the child room, and it is indistinguishable from a
+/// worker that was also granted the parent. Such a principal extends through a
+/// token that owns only the parent room, or through the human UI.
+fn bridge_is_execution_principal(
+    bridge: &crate::core::bridge_token::BridgeCaller,
+    execution: &TaskExecution,
+) -> bool {
+    let owns = |room: &str| bridge.own_discussions.iter().any(|own| own == room);
+    owns(&execution.parent_discussion_id)
+        && !execution.sub_discussion_id.as_deref().is_some_and(owns)
+}
+
+pub(crate) async fn task_exec_reassign_as(
+    state: AppState,
+    exec_id: String,
+    request: TaskExecReassignRequest,
+    bridge: Option<&crate::core::bridge_token::BridgeCaller>,
 ) -> Json<ApiResponse<serde_json::Value>> {
     let caller = match principal_caller(
         &request.source_agent,
@@ -14476,7 +14750,11 @@ pub async fn task_exec_reassign(
         ));
     };
     let exec_id = execution.id;
-    let amendment = match execution_amendment(request.worker, request.validations) {
+    let amendment = match execution_amendment(
+        request.worker,
+        request.validations,
+        request.extend_review_rounds.as_ref(),
+    ) {
         Ok(amendment) => amendment,
         Err(refusal) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, refusal)),
     };
@@ -14506,6 +14784,42 @@ pub async fn task_exec_reassign(
                 notice: None,
                 readiness: None,
             })
+        }
+        ExecutionAmendment::ExtendReviewRounds(extension) => {
+            // The body's `source_agent`/`source_session_id` are declared by the
+            // caller, so a worker could name its principal in them: with a bridge
+            // token, the grant itself must be the principal's (KT-1345).
+            if let Some(bridge) = bridge {
+                let id = exec_id.clone();
+                let principal = state
+                    .db
+                    .with_conn(move |conn| crate::db::orchestration::get_task_execution(conn, &id))
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|execution| bridge_is_execution_principal(bridge, &execution));
+                if !principal {
+                    return Json(ApiResponse::err_coded(
+                        ApiErrorCode::Validation,
+                        "only the execution's principal or a human can extend its review-round \
+                         limit: a worker cannot raise its own, and a token that also owns the \
+                         child room (e.g. after adopting it) counts as the worker's",
+                    ));
+                }
+            }
+            pin_principal_caller(&state.db, &exec_id, &caller).await;
+            match extend_execution_review_rounds(
+                &state,
+                &exec_id,
+                extension,
+                &request.reason,
+                principal_actor(&caller),
+            )
+            .await
+            {
+                Ok(value) => Json(ApiResponse::ok(value)),
+                Err((code, message)) => Json(ApiResponse::err_coded(code, message)),
+            }
         }
         ExecutionAmendment::ReplaceValidations(validations) => match replace_execution_validations(
             &state.db,
@@ -14564,6 +14878,138 @@ pub(crate) async fn replace_execution_validations(
     .map_err(|error| (ApiErrorCode::Conflict, error.to_string()))
 }
 
+/// Raise the review-round limit of an existing execution (KT-1345), for every
+/// principal channel (MCP bridge, native tool, browser). An execution the limit
+/// itself escalated is also given its findings again and re-offered to its
+/// current worker: raising the number alone would leave it parked. Nothing is
+/// relaunched, the room, worktree and earlier rounds stay.
+pub(crate) async fn extend_execution_review_rounds(
+    state: &AppState,
+    exec_id: &str,
+    extension: crate::db::orchestration::ReviewRoundsExtension,
+    reason: &str,
+    actor: OrchestrationActor,
+) -> Result<serde_json::Value, (ApiErrorCode, String)> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err((
+            ApiErrorCode::Validation,
+            "reason is required: it is journaled with the new limit".into(),
+        ));
+    }
+    let id = exec_id.to_string();
+    let journal_reason = reason.clone();
+    let extended = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::orchestration::extend_review_rounds(
+                conn,
+                &id,
+                extension,
+                &actor,
+                &journal_reason,
+            )
+        })
+        .await
+        .map_err(|error| (ApiErrorCode::Conflict, error.to_string()))?;
+    let mut reoffered = false;
+    // KT-1345 — the token budget outranks the limit: a spent budget raises the number but
+    // schedules no further attempt.
+    if extended.escalated_by_review_budget && extended.token_budget_stop.is_none() {
+        reoffer_after_review_budget_extension(state, exec_id, &reason)
+            .await
+            .map_err(|error| {
+                (
+                    ApiErrorCode::Conflict,
+                    format!(
+                        "the limit is now {} but the execution could not be re-offered \
+                         (task_exec_reassign with its worker does it): {error}",
+                        crate::models::review_limit_label(extended.max_review_rounds)
+                    ),
+                )
+            })?;
+        reoffered = true;
+    }
+    Ok(serde_json::json!({
+        "task_execution_id": exec_id,
+        "previous_limit": crate::models::review_limit_json(extended.previous_limit),
+        "max_review_rounds": crate::models::review_limit_json(extended.max_review_rounds),
+        "review_rounds": extended.review_rounds,
+        "reoffered_to_worker": reoffered,
+        "stop_reason": extended
+            .token_budget_stop
+            .map(|_| crate::db::orchestration::TOKEN_BUDGET_EXHAUSTED),
+        "token_budget": extended.token_budget_stop.map(|stop| stop.json()),
+    }))
+}
+
+/// The findings the budget-exhausted `request_changes` never delivered go to
+/// the worker in its child room, then the execution takes the ordinary
+/// re-offer path of a reassignment to the SAME worker.
+async fn reoffer_after_review_budget_extension(
+    state: &AppState,
+    exec_id: &str,
+    reason: &str,
+) -> Result<()> {
+    let id = exec_id.to_string();
+    let execution = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("execution vanished before its re-offer")
+        })
+        .await?;
+    let lang = room_lang(&state.db, &execution.parent_discussion_id).await;
+    let child = execution
+        .sub_discussion_id
+        .clone()
+        .context("execution has no child discussion for its findings")?;
+    let id = exec_id.to_string();
+    let attempt = execution.attempt_no;
+    let review = state
+        .db
+        .with_conn(move |conn| crate::db::worker_reviews::get_review(conn, &id, attempt))
+        .await?;
+    if let Some(review) = review {
+        if let Ok(decision) = serde_json::from_str::<ReviewDecisionV1>(&review.decision_json) {
+            let message =
+                build_review_findings_message(&execution.id, attempt, &decision, &child, lang);
+            let child_id = child.clone();
+            // A message already posted for this attempt is the same findings.
+            let _ = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::discussions::insert_message(conn, &child_id, &message)
+                })
+                .await;
+        }
+    }
+    let target = worker_target_from_execution(&execution)?;
+    let Json(response) = reassign_execution(
+        State(state.clone()),
+        Path(exec_id.to_string()),
+        Json(ReassignExecutionRequest {
+            worker: crate::models::CampaignWorkerSelection {
+                target,
+                model: execution.worker_model.clone(),
+                profile_id: execution.worker_profile_id.clone(),
+            },
+            reason: format!("review-round limit raised: {reason}"),
+        }),
+    )
+    .await;
+    if response.success {
+        Ok(())
+    } else {
+        bail!(
+            "{}",
+            response
+                .error
+                .unwrap_or_else(|| "the re-offer was refused".into())
+        )
+    }
+}
+
 /// Map a launch-saga refusal/failure to a stable `(code, message)`. `ProvisionError` has
 /// no `Display` on purpose (each variant carries structured fields), so both handlers
 /// share this. A mid-saga workspace failure is `Conflict` (resumable), never a bare 500 —
@@ -14610,11 +15056,16 @@ pub async fn provision(
         base_rev: request.base_rev,
         idempotency_key: request.idempotency_key,
     };
-    match provision_single_task_execution_with_scope_and_validations(
-        &state.db,
+    let max_review_rounds = match review_rounds_argument(request.max_review_rounds.as_ref()) {
+        Ok(rounds) => rounds,
+        Err(detail) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, detail)),
+    };
+    match provision_single_task_execution_with_options(
+        &state,
         input,
         request.worker_scope,
         request.validations,
+        SingleTaskLaunchOptions { max_review_rounds },
     )
     .await
     {
@@ -16002,6 +16453,7 @@ pub(crate) mod tests {
                 room_agent: Some(room.clone()),
                 worker: None,
                 validations: Some(Vec::new()),
+                extend_review_rounds: None,
                 reason: "retry".into(),
             }),
         )
@@ -16181,6 +16633,7 @@ pub(crate) mod tests {
                     quick_exec_id: None,
                     timeout_secs: None,
                 }]),
+                extend_review_rounds: None,
                 reason: "a runnable check".into(),
             }),
         )
@@ -20655,17 +21108,24 @@ pub(crate) mod tests {
         let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
         let (exec, task_ref, _parent_id) =
             native_principal_with_launchable_task(&db, repo.path()).await;
-        let call = |name: &str, validations: serde_json::Value| ToolCall {
-            id: "c1".into(),
-            name: name.into(),
-            arguments: serde_json::json!({
+        // KT-1345: an argument a tool does not declare is refused, so the
+        // launch-only fields go to the launch alone.
+        let call = |name: &str, validations: serde_json::Value| {
+            let mut arguments = serde_json::json!({
                 "task_reference": task_ref,
                 "worker": serde_json::to_value(native_worker()).unwrap(),
                 "worker_scope_intent": "generic",
-                "base_rev": "main",
-                "idempotency_key": "kt-839-never-runs",
                 "validations": validations,
-            }),
+            });
+            if name == "task_exec_launch" {
+                arguments["base_rev"] = "main".into();
+                arguments["idempotency_key"] = "kt-839-never-runs".into();
+            }
+            ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                arguments,
+            }
         };
 
         for (label, command, culprit) in [
@@ -21088,6 +21548,7 @@ pub(crate) mod tests {
                 quick_exec_id: None,
                 timeout_secs: None,
             }]),
+            extend_review_rounds: None,
             reason: "the first set could never run".into(),
             room_agent: None,
         };
@@ -29032,6 +29493,7 @@ pub(crate) mod tests {
             source_session_id: "principal".into(),
             worker: Some(MessageTarget::cli(AgentType::ClaudeCode, session)),
             validations: None,
+            extend_review_rounds: None,
             reason: "explicitly recover this exact worker in its existing child".into(),
             room_agent: None,
         };
@@ -31884,6 +32346,7 @@ pub(crate) mod tests {
                 source_session_id: "principal-sess".into(),
                 worker: Some(MessageTarget::discussion_agent(AgentType::Ollama)),
                 validations: None,
+                extend_review_rounds: None,
                 reason: "the delivery misread the DoD; try a native worker".into(),
                 room_agent: None,
             }),
@@ -31968,6 +32431,7 @@ pub(crate) mod tests {
                 source_session_id: "principal-sess".into(),
                 worker: Some(MessageTarget::cli(AgentType::ClaudeCode, 102)),
                 validations: None,
+                extend_review_rounds: None,
                 reason: "hand the rework to another CLI".into(),
                 room_agent: None,
             }),
@@ -38783,6 +39247,7 @@ pub(crate) mod tests {
                 source_session_id: "principal".into(),
                 worker: Some(MessageTarget::cli(AgentType::ClaudeCode, 102)),
                 validations: None,
+                extend_review_rounds: None,
                 reason: "redirect to a fresh CLI since the first never accepted".into(),
                 room_agent: None,
             }),
@@ -39962,5 +40427,1084 @@ pub(crate) mod tests {
             pw_before + 1,
             "a replay after settlement cannot double-resume"
         );
+    }
+
+    // ── KT-1345 — the review-round limit ───────────────────────────────────────────────────
+
+    /// One rework round of the CLI review loop: `request_changes`, the worker re-accepts the
+    /// offer and delivers again.
+    async fn rework_round(db: &Database, exec_id: &str, round: u32) {
+        let outcome = decide_review(
+            db,
+            exec_id,
+            &review_request_changes(&format!("round {round}: corrige")),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                ReviewOutcome::Reviewed {
+                    verdict: ReviewVerdict::RequestChanges,
+                    ..
+                }
+            ),
+            "round {round} must be re-offered, got {outcome:?}"
+        );
+        let live = live_offers_for_session(db, 101).await;
+        assert_eq!(live.len(), 1, "round {round}: one live offer");
+        let attached =
+            accept_worker_offer_and_attach(db, &live[0].id, "ClaudeCode", "sess-a", "sess-a")
+                .await
+                .unwrap();
+        assert!(matches!(attached, AcceptAttachOutcome::Attached { .. }));
+        let manifest = clean_manifest_for_execution(db, exec_id).await;
+        deliver_worker_manifest(db, exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .unwrap();
+        assert_eq!(
+            exec_of(db, exec_id).await.status,
+            TaskExecutionStatus::AwaitingReview
+        );
+    }
+
+    fn state_for(db: &std::sync::Arc<Database>) -> AppState {
+        AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    /// With a limit of 5, request_changes is accepted past the old cap of 3 and escalates only on
+    /// the 6th; with no limit it never escalates for the budget.
+    #[tokio::test]
+    async fn request_changes_beyond_three_is_accepted_with_five_and_never_escalates_unlimited() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        set_max_review_rounds(&db, &exec_id, 5).await;
+        for round in 1..=5 {
+            rework_round(&db, &exec_id, round).await;
+        }
+        let execution = exec_of(&db, &exec_id).await;
+        assert_eq!(execution.review_rounds, 5);
+        assert_eq!(execution.max_review_rounds, 5);
+        match decide_review(
+            &db,
+            &exec_id,
+            &review_request_changes("round 6"),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap()
+        {
+            ReviewOutcome::Escalated { execution } => {
+                assert_eq!(execution.review_rounds, 6);
+            }
+            other => panic!("the 6th round must escalate at a limit of 5, got {other:?}"),
+        }
+
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        set_max_review_rounds(
+            &db,
+            &exec_id,
+            i64::from(crate::models::UNLIMITED_REVIEW_ROUNDS),
+        )
+        .await;
+        for round in 1..=5 {
+            rework_round(&db, &exec_id, round).await;
+        }
+        let execution = exec_of(&db, &exec_id).await;
+        assert_eq!(execution.review_rounds, 5);
+        assert_ne!(execution.status, TaskExecutionStatus::Escalated);
+    }
+
+    /// An execution at its cap is extended in place — no escalation, no reassignment — and the
+    /// next request_changes is accepted; the journal says who raised it and why.
+    #[tokio::test]
+    async fn extending_an_execution_at_its_cap_avoids_the_escalation() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        set_max_review_rounds(&db, &exec_id, 1).await;
+        rework_round(&db, &exec_id, 1).await;
+        // 1/1 and awaiting review: the next request_changes would escalate.
+        let state = state_for(&db);
+
+        let blank = extend_execution_review_rounds(
+            &state,
+            &exec_id,
+            crate::db::orchestration::ReviewRoundsExtension::By(2),
+            "  ",
+            agent_actor("ClaudeCode", Some("sess-b")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blank.0, ApiErrorCode::Validation, "a reason is required");
+
+        let extended = extend_execution_review_rounds(
+            &state,
+            &exec_id,
+            crate::db::orchestration::ReviewRoundsExtension::By(2),
+            "the remaining findings are real bugs",
+            agent_actor("ClaudeCode", Some("sess-b")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(extended["previous_limit"], 1);
+        assert_eq!(extended["max_review_rounds"], 3);
+        assert_eq!(extended["review_rounds"], 1);
+        assert_eq!(extended["reoffered_to_worker"], false);
+        let execution = exec_of(&db, &exec_id).await;
+        assert_eq!(execution.max_review_rounds, 3);
+        assert_eq!(execution.status, TaskExecutionStatus::AwaitingReview);
+
+        rework_round(&db, &exec_id, 2).await;
+        rework_round(&db, &exec_id, 3).await;
+        assert_eq!(exec_of(&db, &exec_id).await.review_rounds, 3);
+
+        let id = exec_id.clone();
+        let event = db
+            .with_conn(move |conn| {
+                Ok(crate::db::orchestration::list_execution_events(conn, &id)?
+                    .into_iter()
+                    .find(|event| event.action == "review_rounds_extended")
+                    .expect("the extension is journaled"))
+            })
+            .await
+            .unwrap();
+        let changes = &event.changes;
+        assert_eq!(changes["previous_limit"], 1);
+        assert_eq!(changes["max_review_rounds"], 3);
+        assert_eq!(changes["reason"], "the remaining findings are real bugs");
+        assert_eq!(event.actor_id.as_deref(), Some("ClaudeCode"));
+
+        // « unlimited » lifts the cap, and a second lift is refused, not reported as a change.
+        let lifted = extend_execution_review_rounds(
+            &state,
+            &exec_id,
+            crate::db::orchestration::ReviewRoundsExtension::Unlimited,
+            "keep going",
+            agent_actor("ClaudeCode", Some("sess-b")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(lifted["max_review_rounds"], "unlimited");
+        assert_eq!(
+            exec_of(&db, &exec_id).await.max_review_rounds,
+            crate::models::UNLIMITED_REVIEW_ROUNDS
+        );
+        let again = extend_execution_review_rounds(
+            &state,
+            &exec_id,
+            crate::db::orchestration::ReviewRoundsExtension::By(1),
+            "again",
+            agent_actor("ClaudeCode", Some("sess-b")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(again.0, ApiErrorCode::Conflict);
+    }
+
+    /// An execution the limit itself escalated is extended AND re-offered: the findings the
+    /// exhausted `request_changes` never delivered reach the worker, which leaves `Escalated`.
+    #[tokio::test]
+    async fn extending_an_execution_the_limit_escalated_re_offers_the_findings() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_parent, child_id, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        set_max_review_rounds(&db, &exec_id, 1).await;
+        rework_round(&db, &exec_id, 1).await;
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_request_changes("la limite est atteinte mais le bug est réel"),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(outcome, ReviewOutcome::Escalated { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Escalated
+        );
+
+        let state = state_for(&db);
+        let extended = extend_execution_review_rounds(
+            &state,
+            &exec_id,
+            crate::db::orchestration::ReviewRoundsExtension::By(2),
+            "real bugs remain",
+            agent_actor("ClaudeCode", Some("sess-b")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(extended["max_review_rounds"], 3);
+        assert_eq!(extended["reoffered_to_worker"], true);
+        let after = exec_of(&db, &exec_id).await;
+        assert_ne!(after.status, TaskExecutionStatus::Escalated);
+        assert_eq!(after.max_review_rounds, 3);
+
+        let findings: i64 = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1 \
+                     AND content LIKE '%la limite est atteinte mais le bug est réel%'",
+                    [&child_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(findings, 1, "the findings reach the worker's room once");
+    }
+
+    /// Only the review budget earns the re-offer: a later watchdog escalation of the SAME
+    /// execution is extended (the limit rises) but never re-offered, even though an older
+    /// budget escalation sits in its journal.
+    #[tokio::test]
+    async fn extending_an_execution_a_watchdog_escalated_does_not_re_offer_it() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        set_max_review_rounds(&db, &exec_id, 1).await;
+        rework_round(&db, &exec_id, 1).await;
+        let outcome = decide_review(
+            &db,
+            &exec_id,
+            &review_request_changes("round 2"),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(outcome, ReviewOutcome::Escalated { .. }),
+            "{outcome:?}"
+        );
+
+        let state = state_for(&db);
+        let first = extend_execution_review_rounds(
+            &state,
+            &exec_id,
+            crate::db::orchestration::ReviewRoundsExtension::By(1),
+            "one more round",
+            agent_actor("ClaudeCode", Some("sess-b")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["reoffered_to_worker"], true);
+
+        // The worker then stalls: the watchdog parks the execution in Escalated again.
+        let id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &id,
+                TaskExecutionStatus::Escalated,
+                &PlanningActor {
+                    kind: PlanningActorKind::System,
+                    id: Some("orchestration-watchdog".into()),
+                    session_id: None,
+                    source_message_id: None,
+                },
+                serde_json::json!({ "timeout_kind": "activity" }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Escalated
+        );
+
+        let second = extend_execution_review_rounds(
+            &state,
+            &exec_id,
+            crate::db::orchestration::ReviewRoundsExtension::By(1),
+            "raise it anyway",
+            agent_actor("ClaudeCode", Some("sess-b")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second["max_review_rounds"], 3);
+        assert_eq!(second["reoffered_to_worker"], false);
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Escalated,
+            "a stall is not cured by a higher limit"
+        );
+    }
+
+    /// A finished execution keeps the limit it ended with: the extension is refused, not journaled.
+    #[tokio::test]
+    async fn a_finished_execution_cannot_have_its_limit_extended() {
+        for terminal in [TaskExecutionStatus::Cancelled, TaskExecutionStatus::Done] {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_parent, _child, exec_id, _head, _path) =
+                delivered_awaiting_review(&db, repo.path()).await;
+            let id = exec_id.clone();
+            db.with_conn(move |conn| {
+                // Done has its own proofs; the guard under test only reads the status.
+                conn.execute(
+                    "UPDATE task_executions SET status = ?2 WHERE id = ?1",
+                    rusqlite::params![id, terminal.as_str()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+            let refused = extend_execution_review_rounds(
+                &state_for(&db),
+                &exec_id,
+                crate::db::orchestration::ReviewRoundsExtension::By(2),
+                "too late",
+                agent_actor("ClaudeCode", Some("sess-b")),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(refused.0, ApiErrorCode::Conflict, "{terminal:?}");
+            let execution = exec_of(&db, &exec_id).await;
+            assert_eq!(
+                execution.max_review_rounds, 5,
+                "{terminal:?}: the limit is untouched"
+            );
+            let id = exec_id.clone();
+            let journaled = db
+                .with_conn(move |conn| {
+                    Ok(crate::db::orchestration::list_execution_events(conn, &id)?
+                        .into_iter()
+                        .any(|event| event.action == "review_rounds_extended"))
+                })
+                .await
+                .unwrap();
+            assert!(!journaled, "{terminal:?}: nothing is journaled");
+        }
+    }
+
+    /// Give the execution's campaign a token budget and message usage of `used` tokens in the
+    /// worker's room (what `run_token_usage` sums).
+    async fn spend_campaign_tokens(db: &Database, exec_id: &str, budget: i64, used: u64) {
+        let e = exec_id.to_string();
+        db.with_conn(move |conn| {
+            let (run_id, child): (String, String) = conn.query_row(
+                "SELECT orchestration_run_id, sub_discussion_id FROM task_executions WHERE id = ?1",
+                [&e],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            conn.execute(
+                "UPDATE orchestration_runs SET token_budget = ?2 WHERE id = ?1",
+                rusqlite::params![run_id, budget],
+            )?;
+            if used > 0 {
+                let mut usage = orchestrator_message(format!("usage:{e}:{used}"), "usage".into());
+                usage.tokens_used = used;
+                crate::db::discussions::insert_message(conn, &child, &usage)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn make_worker_native(db: &Database, exec_id: &str) {
+        let e = exec_id.to_string();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_executions SET worker_target_kind = 'agent', \
+                     worker_cli_session_id = NULL, worker_agent_type = 'Ollama' WHERE id = ?1",
+                [&e],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Every worker-scheduling artifact an execution owns: attempt, live CLI offers, native
+    /// dispatch jobs targeting its room.
+    async fn scheduled_attempts(db: &Database, exec_id: &str) -> (u32, usize, i64) {
+        let execution = exec_of(db, exec_id).await;
+        let offers = live_offers_for_session(db, 101).await.len();
+        let child = execution.sub_discussion_id.clone().unwrap();
+        let jobs: i64 = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = ?1",
+                    [&child],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        (execution.attempt_no, offers, jobs)
+    }
+
+    async fn latest_escalated_reason(db: &Database, exec_id: &str) -> serde_json::Value {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            Ok(crate::db::orchestration::list_execution_events(conn, &id)?
+                .into_iter()
+                .rev()
+                .find(|event| event.action == "escalated")
+                .expect("an escalated event")
+                .changes)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// KT-1345 — the campaign's token budget outranks the round limit: with NO limit and a
+    /// spent budget, `request_changes` pauses the execution in `Escalated` with its own durable
+    /// reason and schedules no further attempt (joined CLI offer, native dispatch alike).
+    #[tokio::test]
+    async fn request_changes_with_a_spent_token_budget_schedules_no_attempt_even_unlimited() {
+        for native in [false, true] {
+            let repo = init_repo();
+            let db = Database::open_in_memory().unwrap();
+            let (parent_id, _child, exec_id, _head, _path) =
+                delivered_awaiting_review(&db, repo.path()).await;
+            set_max_review_rounds(
+                &db,
+                &exec_id,
+                i64::from(crate::models::UNLIMITED_REVIEW_ROUNDS),
+            )
+            .await;
+            if native {
+                make_worker_native(&db, &exec_id).await;
+            }
+            // One token short of the budget: the correction is still scheduled.
+            spend_campaign_tokens(&db, &exec_id, 1_000, 999).await;
+            let outcome = decide_review(
+                &db,
+                &exec_id,
+                &review_request_changes("sous le budget"),
+                "ClaudeCode",
+                "sess-b",
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(
+                    outcome,
+                    ReviewOutcome::Reviewed {
+                        verdict: ReviewVerdict::RequestChanges,
+                        ..
+                    }
+                ),
+                "native={native}: under the budget the correction goes out, got {outcome:?}"
+            );
+            let (attempt, offers, jobs) = scheduled_attempts(&db, &exec_id).await;
+            assert_eq!(attempt, 1, "native={native}");
+            assert!(
+                offers == 1 || jobs >= 1,
+                "native={native}: a worker is woken"
+            );
+
+            // The worker re-delivers; the budget is now reached.
+            if native {
+                let execution = exec_of(&db, &exec_id).await;
+                let child_id = execution.sub_discussion_id.clone().unwrap();
+                let dispatch = execution.dispatch_job_id.clone().unwrap();
+                let trigger = format!("orch-review-findings:{exec_id}:0");
+                let manifest = projected_manifest_for_execution(&db, &exec_id).await;
+                deliver_native_worker_manifest(
+                    &db,
+                    &exec_id,
+                    NativeExecutionCaller {
+                        discussion_id: &child_id,
+                        agent_type: &AgentType::Ollama,
+                        source_message_id: Some(&trigger),
+                        alias: "Ollama",
+                        actor_session_id: Some("native-rework-1"),
+                    },
+                    &dispatch,
+                    &manifest,
+                )
+                .await
+                .unwrap();
+            } else {
+                let live = live_offers_for_session(&db, 101).await;
+                accept_worker_offer_and_attach(&db, &live[0].id, "ClaudeCode", "sess-a", "sess-a")
+                    .await
+                    .unwrap();
+                let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+                deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                exec_of(&db, &exec_id).await.status,
+                TaskExecutionStatus::AwaitingReview,
+                "native={native}"
+            );
+            spend_campaign_tokens(&db, &exec_id, 1_000, 1).await;
+            let before = scheduled_attempts(&db, &exec_id).await;
+
+            let outcome = decide_review(
+                &db,
+                &exec_id,
+                &review_request_changes("budget atteint"),
+                "ClaudeCode",
+                "sess-b",
+            )
+            .await
+            .unwrap();
+            let execution = match outcome {
+                ReviewOutcome::Escalated { execution } => execution,
+                other => panic!("native={native}: a spent budget must escalate, got {other:?}"),
+            };
+            assert_eq!(execution.status, TaskExecutionStatus::Escalated);
+            assert_eq!(
+                execution.max_review_rounds,
+                crate::models::UNLIMITED_REVIEW_ROUNDS
+            );
+            let after = scheduled_attempts(&db, &exec_id).await;
+            assert_eq!(
+                after.0, before.0,
+                "native={native}: the attempt did not advance"
+            );
+            assert_eq!(
+                (after.1, after.2),
+                (before.1, before.2),
+                "native={native}: no new offer, no new dispatch"
+            );
+            let reason = latest_escalated_reason(&db, &exec_id).await;
+            assert_eq!(reason["reason"], "token_budget_exhausted");
+            assert_eq!(reason["token_budget"]["tokens_used"], 1_000);
+            assert_eq!(reason["token_budget"]["token_budget"], 1_000);
+
+            let principal_notice: i64 = db
+                .with_conn({
+                    let parent_id = parent_id.clone();
+                    let exec_id = exec_id.clone();
+                    move |conn| {
+                        Ok(conn.query_row(
+                            "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1 \
+                             AND id LIKE ?2",
+                            rusqlite::params![
+                                parent_id,
+                                format!("orch-escalation-tokens:{exec_id}:%")
+                            ],
+                            |row| row.get(0),
+                        )?)
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                principal_notice, 1,
+                "native={native}: the principal is told the budget is the cause"
+            );
+        }
+    }
+
+    /// KT-1345 — extending an execution the review limit escalated must not schedule another
+    /// attempt once the campaign's token budget is spent; the stop reason is returned and
+    /// journaled, and a reassignment is refused for the same reason.
+    #[tokio::test]
+    async fn extending_an_escalated_execution_with_a_spent_token_budget_does_not_re_offer() {
+        for native in [false, true] {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_parent, _child, exec_id, _head, _path) =
+                delivered_awaiting_review(&db, repo.path()).await;
+            if native {
+                make_worker_native(&db, &exec_id).await;
+            }
+            set_max_review_rounds(&db, &exec_id, 0).await;
+            let outcome = decide_review(
+                &db,
+                &exec_id,
+                &review_request_changes("round 1"),
+                "ClaudeCode",
+                "sess-b",
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(outcome, ReviewOutcome::Escalated { .. }),
+                "native={native}: {outcome:?}"
+            );
+            assert_eq!(
+                latest_escalated_reason(&db, &exec_id).await["reason"],
+                "review_budget_exhausted"
+            );
+            // The budget runs out while the execution waits for a decision.
+            spend_campaign_tokens(&db, &exec_id, 500, 600).await;
+            let before = scheduled_attempts(&db, &exec_id).await;
+
+            let state = state_for(&db);
+            let extended = extend_execution_review_rounds(
+                &state,
+                &exec_id,
+                crate::db::orchestration::ReviewRoundsExtension::Unlimited,
+                "the bugs are real",
+                agent_actor("ClaudeCode", Some("sess-b")),
+            )
+            .await
+            .unwrap();
+            assert_eq!(extended["max_review_rounds"], "unlimited");
+            assert_eq!(extended["reoffered_to_worker"], false, "native={native}");
+            assert_eq!(extended["stop_reason"], "token_budget_exhausted");
+            assert_eq!(extended["token_budget"]["tokens_used"], 600);
+            assert_eq!(
+                exec_of(&db, &exec_id).await.status,
+                TaskExecutionStatus::Escalated,
+                "native={native}"
+            );
+            assert_eq!(scheduled_attempts(&db, &exec_id).await, before);
+
+            let id = exec_id.clone();
+            let journaled = db
+                .with_conn(move |conn| {
+                    Ok(crate::db::orchestration::list_execution_events(conn, &id)?
+                        .into_iter()
+                        .find(|event| event.action == "review_rounds_extended")
+                        .expect("the extension is journaled")
+                        .changes)
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                journaled["token_budget"]["reason"],
+                "token_budget_exhausted"
+            );
+
+            // Reassigning the same worker is the other way back in: refused too.
+            let refused = reassign_execution(
+                State(state.clone()),
+                Path(exec_id.clone()),
+                Json(ReassignExecutionRequest {
+                    worker: crate::models::CampaignWorkerSelection {
+                        target: if native {
+                            MessageTarget::discussion_agent(AgentType::Ollama)
+                        } else {
+                            MessageTarget::cli(AgentType::ClaudeCode, 101)
+                        },
+                        model: None,
+                        profile_id: None,
+                    },
+                    reason: "try again".into(),
+                }),
+            )
+            .await
+            .0;
+            assert!(!refused.success, "native={native}");
+            assert!(
+                refused
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("token_budget_exhausted")),
+                "native={native}: {:?}",
+                refused.error
+            );
+            assert_eq!(scheduled_attempts(&db, &exec_id).await, before);
+        }
+    }
+
+    /// The extension argument: rounds to add (1-1000) or `unlimited`; nothing else.
+    #[test]
+    fn the_extension_argument_is_a_positive_count_or_unlimited() {
+        use crate::db::orchestration::ReviewRoundsExtension as Extension;
+        assert_eq!(
+            Extension::parse(&serde_json::json!(3)),
+            Ok(Extension::By(3))
+        );
+        assert_eq!(
+            Extension::parse(&serde_json::json!("unlimited")),
+            Ok(Extension::Unlimited)
+        );
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(1001),
+            serde_json::json!("3"),
+            serde_json::json!(null),
+        ] {
+            assert!(Extension::parse(&bad).is_err(), "{bad}");
+        }
+        // One change per call: an extension never rides along with a worker or gates.
+        let both = execution_amendment(
+            Some(MessageTarget::agent(AgentType::ClaudeCode)),
+            None,
+            Some(&serde_json::json!(2)),
+        );
+        assert!(both.is_err());
+        assert!(execution_amendment(None, None, None).is_err());
+        assert!(matches!(
+            execution_amendment(None, None, Some(&serde_json::json!(2))),
+            Ok(ExecutionAmendment::ExtendReviewRounds(Extension::By(2)))
+        ));
+    }
+
+    /// Every principal-driven single-task launch starts from Settings > Workers: the default of 5
+    /// (not the SQL 3), a changed integer, « unlimited », and an explicit argument over all three.
+    #[tokio::test]
+    async fn a_single_task_launch_takes_the_workers_default_unless_it_names_its_own() {
+        for (workers, explicit, expected) in [
+            (None, None, 5),
+            (
+                Some(crate::models::WorkersConfig {
+                    default_max_review_rounds: 9,
+                    review_rounds_unlimited: false,
+                }),
+                None,
+                9,
+            ),
+            (
+                Some(crate::models::WorkersConfig {
+                    default_max_review_rounds: 9,
+                    review_rounds_unlimited: true,
+                }),
+                None,
+                crate::models::UNLIMITED_REVIEW_ROUNDS,
+            ),
+            (
+                Some(crate::models::WorkersConfig {
+                    default_max_review_rounds: 9,
+                    review_rounds_unlimited: true,
+                }),
+                Some(2),
+                2,
+            ),
+        ] {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+            let state = state_for(&db);
+            if let Some(workers) = workers {
+                state.config.write().await.workers = workers;
+            }
+            let execution = provision_single_task_execution_with_options(
+                &state,
+                ProvisionInput {
+                    task_reference: task_ref,
+                    parent_discussion_id: parent_id,
+                    worker: native_worker(),
+                    base_rev: Some("main".into()),
+                    idempotency_key: Some("kt-1345-default".into()),
+                },
+                None,
+                Vec::new(),
+                SingleTaskLaunchOptions {
+                    max_review_rounds: explicit,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(execution.max_review_rounds, expected, "{explicit:?}");
+            let run_rounds: i64 = db
+                .with_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT max_review_rounds FROM orchestration_runs",
+                        [],
+                        |row| row.get(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(run_rounds, i64::from(expected), "the run carries it too");
+            assert_ne!(run_rounds, 0, "unlimited is a sentinel, never 0");
+        }
+    }
+
+    /// The MCP surface: prepare reports the default, launch takes an integer or `unlimited`,
+    /// refuses a bad value, and refuses an argument it does not declare instead of dropping it.
+    #[tokio::test]
+    async fn the_task_exec_tools_validate_max_review_rounds_and_refuse_unknown_arguments() {
+        use crate::agents::tools::ToolCall;
+
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (exec, task_ref, _parent_id) =
+            native_principal_with_launchable_task(&db, repo.path()).await;
+        let call = |name: &str, extra: serde_json::Value| {
+            let mut arguments = serde_json::json!({
+                "task_reference": task_ref,
+                "worker": serde_json::to_value(native_worker()).unwrap(),
+                "worker_scope_intent": "generic",
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                arguments[key] = value.clone();
+            }
+            ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                arguments,
+            }
+        };
+
+        // prepare: the default is read, nothing is created, a bad value makes it unlaunchable.
+        let prepared = exec
+            .execute(&call("task_exec_prepare", serde_json::json!({})))
+            .await;
+        assert!(prepared.ok);
+        assert_eq!(prepared.content["launchable"], true);
+        assert_eq!(prepared.content["default_max_review_rounds"], 5);
+        let bad = exec
+            .execute(&call(
+                "task_exec_prepare",
+                serde_json::json!({"max_review_rounds": 0}),
+            ))
+            .await;
+        assert_eq!(bad.content["launchable"], false);
+        assert!(bad.content["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason["code"] == "invalid_max_review_rounds"));
+
+        // An unknown argument is refused by both tools, with the allowed names.
+        for tool in ["task_exec_prepare", "task_exec_launch"] {
+            let refused = exec
+                .execute(&call(tool, serde_json::json!({"target_ref": "develop"})))
+                .await;
+            assert!(!refused.ok, "{tool} must refuse target_ref");
+            let message = refused.content.to_string();
+            assert!(
+                message.contains("unknown argument") && message.contains("target_ref"),
+                "{tool}: {message}"
+            );
+        }
+        // Launch refuses bad values before anything exists.
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!("many"),
+            serde_json::json!(null),
+        ] {
+            let refused = exec
+                .execute(&call(
+                    "task_exec_launch",
+                    serde_json::json!({"max_review_rounds": bad}),
+                ))
+                .await;
+            assert!(!refused.ok, "{bad} must be refused");
+        }
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM orchestration_runs").await,
+            0,
+            "a refused launch creates nothing"
+        );
+
+        let launched = exec
+            .execute(&call(
+                "task_exec_launch",
+                serde_json::json!({"max_review_rounds": "unlimited"}),
+            ))
+            .await;
+        assert!(launched.ok, "{:?}", launched.content);
+        assert_eq!(
+            launched.content["max_review_rounds"],
+            crate::models::UNLIMITED_REVIEW_ROUNDS
+        );
+    }
+
+    /// Campaigns: the run takes Settings > Workers unless the dialog sends its own.
+    #[tokio::test]
+    async fn a_campaign_takes_the_workers_default_unless_the_dialog_sends_its_own() {
+        for (unlimited, body, expected) in [
+            (false, serde_json::json!({}), 5),
+            (
+                true,
+                serde_json::json!({}),
+                crate::models::UNLIMITED_REVIEW_ROUNDS,
+            ),
+            (true, serde_json::json!({"max_review_rounds": 4}), 4),
+            (
+                false,
+                serde_json::json!({"max_review_rounds": "unlimited"}),
+                crate::models::UNLIMITED_REVIEW_ROUNDS,
+            ),
+        ] {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_task_ref, parent_id, _) = seed(&db, repo.path()).await;
+            let state = state_for(&db);
+            state.config.write().await.workers.review_rounds_unlimited = unlimited;
+            let mut request = serde_json::json!({
+                "discussion_id": parent_id,
+                "target_branch": "main",
+            });
+            for (key, value) in body.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            let Json(created) = create_campaign(
+                State(state.clone()),
+                Json(serde_json::from_value(request).unwrap()),
+            )
+            .await;
+            assert!(created.success, "{:?}", created.error);
+            assert_eq!(created.data.unwrap().run.max_review_rounds, expected);
+        }
+
+        // A bad value is a validation error, not a default.
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let runs_before = count(&db, "SELECT COUNT(*) FROM orchestration_runs").await;
+        let Json(null_limit) = create_campaign(
+            State(state_for(&db)),
+            Json(
+                serde_json::from_value(serde_json::json!({
+                    "discussion_id": parent_id,
+                    "target_branch": "main",
+                    "max_review_rounds": null,
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+        assert!(!null_limit.success, "an explicit null is not « absent »");
+        assert_eq!(null_limit.error_code.as_deref(), Some("validation"));
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM orchestration_runs").await,
+            runs_before,
+            "a refused campaign creates no run"
+        );
+        let Json(refused) = create_campaign(
+            State(state_for(&db)),
+            Json(
+                serde_json::from_value(serde_json::json!({
+                    "discussion_id": parent_id,
+                    "target_branch": "main",
+                    "max_review_rounds": 0,
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+        assert!(!refused.success);
+        assert_eq!(refused.error_code.as_deref(), Some("validation"));
+    }
+
+    /// The prepare and launch bodies tell « no key » from « key: null »: the first inherits
+    /// Settings > Workers, the second is refused like any other non-integer.
+    #[test]
+    fn prepare_and_launch_bodies_keep_an_explicit_null_review_limit_to_refuse_it() {
+        let base = serde_json::json!({
+            "task_reference": "KT-1",
+            "parent_discussion_id": "disc-1",
+            "worker": serde_json::to_value(native_worker()).unwrap(),
+        });
+        let with = |value: Option<serde_json::Value>| {
+            let mut body = base.clone();
+            if let Some(value) = value {
+                body["max_review_rounds"] = value;
+            }
+            body
+        };
+        let prepare = |body| serde_json::from_value::<TaskExecPrepareRequest>(body).unwrap();
+        let launch = |body| serde_json::from_value::<TaskExecLaunchRequest>(body).unwrap();
+
+        assert_eq!(prepare(with(None)).max_review_rounds, None);
+        assert_eq!(launch(with(None)).max_review_rounds, None);
+        for request in [
+            prepare(with(Some(serde_json::Value::Null))).max_review_rounds,
+            launch(with(Some(serde_json::Value::Null))).max_review_rounds,
+        ] {
+            assert_eq!(request, Some(serde_json::Value::Null));
+            assert!(review_rounds_argument(request.as_ref()).is_err());
+        }
+        for good in [serde_json::json!(4), serde_json::json!("unlimited")] {
+            let request = launch(with(Some(good.clone()))).max_review_rounds;
+            assert!(review_rounds_argument(request.as_ref()).unwrap().is_some());
+        }
+    }
+
+    /// A worker cannot raise its own review-round limit by naming its principal in the body:
+    /// with a bridge token, the grant's own rooms decide, never the declared identity.
+    #[tokio::test]
+    async fn a_worker_bridge_token_cannot_extend_its_own_review_rounds() {
+        use crate::core::bridge_token::BridgeCaller;
+
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_, parent, child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 103, &parent, "principal").await;
+        let state = state_for(&db);
+        let limit_before = exec_of(&db, &exec_id).await.max_review_rounds;
+        assert_eq!(limit_before, 5);
+        let bridge = |rooms: &[&str]| BridgeCaller {
+            token_id: "tok".into(),
+            project: None,
+            own_discussions: rooms.iter().map(|room| room.to_string()).collect(),
+            own_run: None,
+            agent: None,
+        };
+        // The worker names the principal's real session; only its token tells it apart.
+        let extend = |bridge: Option<&BridgeCaller>| {
+            let state = state.clone();
+            let exec_id = exec_id.clone();
+            let bridge = bridge.cloned();
+            async move {
+                let Json(response) = task_exec_reassign_as(
+                    state,
+                    exec_id,
+                    TaskExecReassignRequest {
+                        source_agent: "ClaudeCode".into(),
+                        source_session_id: "principal".into(),
+                        room_agent: None,
+                        worker: None,
+                        validations: None,
+                        extend_review_rounds: Some(serde_json::json!(2)),
+                        reason: "the remaining findings are real bugs".into(),
+                    },
+                    bridge.as_ref(),
+                )
+                .await;
+                response
+            }
+        };
+
+        // The second token is also what a principal looks like after adopting the child
+        // room: owning both rooms is refused, whoever holds it.
+        for worker_token in [
+            bridge(&[child.as_str()]),
+            bridge(&[parent.as_str(), child.as_str()]),
+        ] {
+            let refused = extend(Some(&worker_token)).await;
+            assert!(!refused.success, "a worker must not extend its own limit");
+            assert_eq!(refused.error_code.as_deref(), Some("validation"));
+            assert_eq!(
+                exec_of(&db, &exec_id).await.max_review_rounds,
+                limit_before,
+                "the limit is untouched"
+            );
+        }
+        let stranger = extend(Some(&bridge(&["some-other-room"]))).await;
+        assert!(
+            !stranger.success,
+            "a token that owns neither room is refused"
+        );
+        assert_eq!(exec_of(&db, &exec_id).await.max_review_rounds, limit_before);
+
+        // The principal's own token (it owns the parent room), then the non-bridge path.
+        let extended = extend(Some(&bridge(&[parent.as_str()]))).await;
+        assert!(extended.success, "{:?}", extended.error);
+        assert_eq!(exec_of(&db, &exec_id).await.max_review_rounds, 7);
+        let extended = extend(None).await;
+        assert!(extended.success, "{:?}", extended.error);
+        assert_eq!(exec_of(&db, &exec_id).await.max_review_rounds, 9);
     }
 }

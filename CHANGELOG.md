@@ -58,6 +58,23 @@ Release notes for 0.9.3 and earlier are available in the
   red above, with advice on how to optimize. The Pages list badges heavy Pages,
   and a heavy write returns a notice the agent receives as `kronn_notice`
   (#252).
+- The review-round limit is configurable and reaches every launch path (KT-1345).
+  Settings > Workers sets the default (5 out of the box, or Unlimited with a
+  token-burn warning), readable over `GET /api/config/workers` and, for MCP
+  principals, as `default_max_review_rounds` in `task_exec_prepare`. The
+  campaign dialog is pre-filled with it, single-task MCP launches take an
+  optional `max_review_rounds` (integer or `"unlimited"`; before, they were
+  stuck on 3), and workflow-delegated subtasks use it when the step sets none.
+  An unknown MCP argument is now refused instead of silently ignored, and an
+  existing execution's limit is raised with
+  `task_exec_reassign({extend_review_rounds})` (or the execution card's
+  « Extend rounds »), which also re-offers the findings of an execution the
+  limit had escalated. With unlimited rounds the campaign's `token_budget`
+  stays authoritative: once its consumed tokens reach it, a `request_changes`
+  escalates with `token_budget_exhausted` instead of scheduling another
+  correction, a worker reassignment is refused, and an extension re-offers
+  nothing. See `docs/operations/worker-review-rounds.md`.
+
 ### Fixed
 
 - The dark-theme contrast scan no longer fails on `:root`, the name axe gives

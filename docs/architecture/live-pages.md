@@ -277,7 +277,7 @@ block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
 `[src: file: backend/src/api/live_pages.rs:654-664#delete_dataset]`
 `[src: file: backend/src/api/live_pages.rs:689-700#update_dataset]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:7988-7995#call_page_delete_dataset]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:8018-8025#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
 become rows, a single array inside an object envelope is expanded while scalar
@@ -608,10 +608,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:12218-12407#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:13491-13533#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:13728-13770#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:13772-13825#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:12402-12591#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:13701-13743#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:13944-13986#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:13976-14046#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -650,8 +650,8 @@ Agents learn this contract where they write Page HTML: the MCP manuals of
 `data-kronn-action-state`, what the card shows), `page_update_html` adds that a
 block's reference must stay stable across revisions since it ties a button to
 its past launches, and the `workflow-architect` skill carries the same rules.
-`[src: file: backend/scripts/disc-introspection-mcp.py:10045-10080#_PAGE_ACTION_CONTRACT]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10375-10384#page_update_html]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10077-10112#_PAGE_ACTION_CONTRACT]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10426-10435#page_update_html]`
 `[src: file: backend/src/skills/workflow-architect.md:384-391#data-kronn-action-state]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records
