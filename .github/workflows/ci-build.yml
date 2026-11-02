@@ -178,6 +178,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       run: ${{ steps.scope.outputs.run }}
+      mac: ${{ steps.scope.outputs.mac }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -192,14 +193,23 @@ jobs:
         run: |
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "mac=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           changed=$(git diff --name-only "$BASE" "$HEAD")
           echo "$changed"
-          if echo "$changed" | grep -Eq '^backend/src/(core/worktree|api/maintenance|db/orchestration|agents/wsl|acp/secret_files)|^backend/Cargo\.(toml|lock)$|^rust-toolchain'; then
+          suites='^backend/src/(core/worktree|api/maintenance|db/orchestration|agents/wsl|acp/secret_files)'
+          if echo "$changed" | grep -Eq "$suites|^backend/Cargo\.(toml|lock)\$|^rust-toolchain"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+          # The macOS leg swaps on the 7 GB runner (KT-1535): a pull request runs it only
+          # when the tested modules change; dependency and toolchain bumps are tested on main.
+          if echo "$changed" | grep -Eq "$suites"; then
+            echo "mac=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mac=false" >> "$GITHUB_OUTPUT"
           fi
 
   test-backend-portability:
@@ -214,7 +224,8 @@ jobs:
     # a cancelled job saves no cache, so every later run started cold again.
     # 0.15.1: the macOS compile alone took 73 min with a cache hit (run
     # 39784513201) and Windows finished 17 s under 30 min (PR #238).
-    timeout-minutes: ${{ matrix.os == 'macos-latest' && 100 || 45 }}
+    # 0.15.2: twice cancelled at 100 min on a Cargo.lock change (run 41479294845).
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 150 || 45 }}
     defaults:
       run:
         working-directory: backend
@@ -252,30 +263,30 @@ jobs:
       # (9 200 tests) peaks above 13 GB in rustc (13.2 GB measured with -j 3,
       # docs/gotchas/ci-macos-portability-memory.md); the macOS runner has 7 GB
       # and swaps for 45-55 minutes (job 116332790208).
-      # A push to main only refreshes the shared cache: compile the lib tests
-      # the suites below run, run none of them.
-      - name: Build the lib tests without running them (push to main)
-        if: github.event_name == 'push'
-        run: cargo test --lib --no-run --locked --no-default-features
+      # A push to main runs every suite on both legs, then saves the shared cache:
+      # it is where the macOS leg tests dependency and toolchain bumps (KT-1535).
+      - name: macOS suites deferred to main
+        if: github.event_name == 'pull_request' && matrix.os == 'macos-latest' && needs.portability-scope.outputs.mac != 'true'
+        run: echo "This change does not touch the macOS suites' modules; the push to main runs them."
 
       - name: Worktree lifecycle and disk guards
-        if: github.event_name != 'push'
+        if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
         run: cargo test --lib --no-default-features core::worktree
 
       - name: Disk maintenance surface
-        if: github.event_name != 'push'
+        if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
         run: cargo test --lib --no-default-features api::maintenance
 
       - name: Cleanup authorisation from durable state
-        if: github.event_name != 'push'
+        if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
         run: cargo test --lib --no-default-features db::orchestration
 
       - name: Windows to WSL agent launches
-        if: github.event_name != 'push'
+        if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
         run: cargo test --lib --no-default-features agents::wsl
 
       - name: Secret file paths (drives, UNC shares, links)
-        if: github.event_name != 'push'
+        if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
         run: cargo test --lib --no-default-features acp::secret_files
 
       - name: Save cargo registry and build (main)

@@ -8,7 +8,7 @@ single `Compiling kronn` line: 52m 48s of pure rustc on one crate for 98 tests
 in [job 116332790208](https://github.com/DocRoms/Kronn/actions/runs/38707823085/job/116332790208).
 The log is silent between the ts-rs warnings of the first seconds and the
 linker warning `__eh_frame section too large (max 16MB)` at the end.
-[src: file: .github/workflows/ci-build.yml:244-258]
+[src: file: .github/workflows/ci-build.yml:255-270]
 
 ## Cause: memory, not CPU
 
@@ -96,3 +96,21 @@ than the full one but not guaranteed under 7 GB. Only splitting the crate into
 a workspace or running the job on a machine with more memory (self-hosted
 Apple Silicon, larger runner, or main-only scheduling) removes the swap for
 good.
+
+## 0.15.2: the macOS leg no longer gates a dependency bump (KT-1535)
+
+The crate kept growing after the `full-tests` gate: the macOS leg went back to
+49–96 minutes, and a pull request that changed `Cargo.lock` (#463, `calamine`
+0.37) was cancelled twice at the 100-minute limit, still in its first step.
+A changed lockfile misses the exact cache key, and a cancelled job saves no
+cache, so a retry starts cold again.
+
+- On a pull request, the macOS leg now runs only when the tested modules
+  change (`portability-scope` output `mac`). A `Cargo.toml`, `Cargo.lock` or
+  toolchain change still runs the Windows leg.
+- A push to main runs every suite on both legs, then saves the shared cache.
+  That is where a dependency or toolchain bump is tested on macOS.
+- The macOS limit is 150 minutes, for the main run.
+
+Splitting the backend into a workspace, which removes the swap, is planned
+separately.
