@@ -13,6 +13,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The security scan is green again (KT-1533). `calamine` moves to 0.37, so `zip`
+  8.6 leaves both lockfiles and RUSTSEC-2026-0429 no longer applies to the
+  spreadsheet reader. The only remaining `zip` < 9 is the build-time copy
+  `utoipa-swagger-ui` 9 uses to unpack its own bundled Swagger UI. The advisory is
+  ignored for that path with a dated rationale in `backend/.cargo/audit.toml`, and
+  moving to `utoipa` 6 is tracked separately.
 - A task is no longer marked `done` when its delivery is integrated into a
   campaign or feature branch that has not reached the default branch yet
   (KT-1519). It stays `in_progress`, integrated and awaiting the merge; the
