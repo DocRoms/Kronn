@@ -1903,6 +1903,7 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
         project_id: None,
         trigger: WorkflowTrigger::Manual,
         steps: vec![WorkflowStep {
+            exec_approved_by_trust: None,
             id: None,
             quick_prompt_version: None,
             step_type: StepType::default(),
@@ -5508,6 +5509,7 @@ fn workflow_multi_step_roundtrip() {
         trigger: WorkflowTrigger::Manual,
         steps: vec![
             WorkflowStep {
+                exec_approved_by_trust: None,
                 id: None,
                 quick_prompt_version: None,
                 step_type: StepType::default(),
@@ -5582,6 +5584,7 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
+                exec_approved_by_trust: None,
                 id: None,
                 quick_prompt_version: None,
                 step_type: StepType::default(),
@@ -5659,6 +5662,7 @@ fn workflow_multi_step_roundtrip() {
                 sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
+                exec_approved_by_trust: None,
                 id: None,
                 quick_prompt_version: None,
                 step_type: StepType::default(),
@@ -5788,6 +5792,7 @@ fn workflow_update_steps_count() {
 
     // Add a second step
     wf.steps.push(WorkflowStep {
+        exec_approved_by_trust: None,
         id: None,
         quick_prompt_version: None,
         step_type: StepType::default(),

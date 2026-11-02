@@ -19,7 +19,7 @@ The workflow envelope defines `data`, `status`, and `summary`, requires only
 `data` and `status`, and omits `additionalProperties`. It embeds the author's
 schema unchanged. The existing regression fixture also contains an object
 with an optional string field and no `additionalProperties` restriction.
-[src: file: backend/src/workflows/steps.rs:1099-1122#ollama_envelope_format]
+[src: file: backend/src/workflows/steps.rs:1087-1110#ollama_envelope_format]
 [src: file: backend/src/workflows/steps.rs:2280-2318#ollama_envelope_format]
 
 Inference from that code and the official contract: this envelope is invalid
@@ -43,7 +43,7 @@ their actual type to the authored string type.
 Ollama still receives the same envelope through its native `format` field,
 with a non-streaming request. No change to its decoding schema is required.
 [src: file: backend/src/agents/runner.rs:7868-7922#build_ollama_chat_body]
-[src: file: backend/src/workflows/steps.rs:1099-1101#ollama_envelope_format]
+[src: file: backend/src/workflows/steps.rs:1334-1336#ollama_envelope_format]
 
 ## Guarantees and regression coverage
 
@@ -53,8 +53,8 @@ the envelope, validates `data`, attempts repair, and applies `on_invalid`.
 That local validator supports a subset of JSON Schema; it is not a replacement
 for full provider-enforced validation. For example, it does not enforce
 `additionalProperties` or resolve `$ref`.
-[src: file: backend/src/workflows/steps.rs:552-575#validate_envelope_against_schema]
-[src: file: backend/src/workflows/steps.rs:784-802#on_invalid]
+[src: file: backend/src/workflows/steps.rs:532-555#validate_envelope_against_schema]
+[src: file: backend/src/workflows/steps.rs:773-791#on_invalid]
 [src: file: backend/src/workflows/template.rs:1366-1386#validate_envelope_against_schema]
 
 Body regressions cover explicit `strict: false`, preservation of nested optional

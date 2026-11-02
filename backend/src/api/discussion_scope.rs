@@ -263,7 +263,7 @@ fn filed(
     FiledScopeRequest {
         status,
         request_ref: request.as_ref().map(|request| request.id.clone()),
-        access: request.map(|request| request.access),
+        access: request.map(|request| request.granted_access.unwrap_or(request.access)),
         next,
     }
 }
@@ -287,7 +287,7 @@ pub async fn file_request(
             // An unknown name is filed like a known one: the reply never says
             // whether a project the token cannot read exists.
             let project_id = discussion_scope::resolve_project(conn, &request.project)?;
-            discussion_scope::file_request(
+            discussion_scope::file_request_with_trust(
                 conn,
                 &discussion_id,
                 project_id.as_deref(),
@@ -299,7 +299,16 @@ pub async fn file_request(
         })
         .await
     {
-        Ok(outcome) => {
+        Ok((Filed::New(request) | Filed::AlreadyPending(request), Some(_))) => {
+            // KT-1492: the room's trust level granted it; the journal says so.
+            let reply = filed(
+                "granted_by_trust",
+                Some(request),
+                "Granted by this room's trust level and journalled. The grant shows in the room; continue.",
+            );
+            (StatusCode::OK, Json(ApiResponse::ok(reply)))
+        }
+        Ok((outcome, _)) => {
             let reply = match outcome {
                 Filed::New(request) => filed(
                     "pending",

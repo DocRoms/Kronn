@@ -39,6 +39,7 @@ pub mod quick;
 pub mod setup;
 pub mod shared_runs;
 pub mod stats;
+pub mod trust;
 pub mod workflows;
 
 pub use agent_decisions::*;
@@ -71,6 +72,7 @@ pub use quick::*;
 pub use setup::*;
 pub use shared_runs::*;
 pub use stats::*;
+pub use trust::*;
 pub use workflows::*;
 
 /// Deserialize an optional field that distinguishes between absent, null, and present.

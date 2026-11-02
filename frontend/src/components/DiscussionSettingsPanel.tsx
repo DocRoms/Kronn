@@ -43,6 +43,7 @@ import type {
 import { ProfileTooltip } from './ProfileTooltip';
 import { DiscussionSkillPicker } from './DiscussionSkillPicker';
 import { DiscussionScopeSection } from './DiscussionScope';
+import { TrustLevelControl } from './TrustLevel';
 import { DiscussionDetailsSection } from './DiscussionDetailsSection';
 import './DiscussionToolPanel.css';
 import './DiscussionSettingsPanel.css';
@@ -342,6 +343,11 @@ export function DiscussionSettingsPanel({
               toast={toast}
               t={t}
             />
+          </div>
+
+          <div className="disc-settings-field">
+            <span>{t('trust.title')}</span>
+            <TrustLevelControl target={{ scope: 'room', id: discussion.id }} toast={toast} />
           </div>
 
           {availableProfiles.length > 0 && (

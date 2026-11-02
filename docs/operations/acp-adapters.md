@@ -321,7 +321,7 @@ workflow Agent step is launched with. Undeclared, the argv is unchanged.
 - Codex adapter: the MCP override holds only `kronn-internal` with
   `enabled_tools`, or `mcp_servers={}`; `cli` is refused at save.
   [src: file: backend/src/acp/codex_adapter.rs:139-168#codex_project_mcp_override]
-  [src: file: backend/src/models/workflows.rs:1614-1635#validate]
+  [src: file: backend/src/models/workflows.rs:1627-1648#validate]
 - Native ACP agents: `session/new` offers only the narrowed bridge, or no
   server. [src: file: backend/src/agents/runner.rs:5921-5942#declared_mcp_servers]
 - The bridge, given `--step-tools=`, lists and dispatches only those tools

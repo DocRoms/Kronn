@@ -65,6 +65,7 @@ function AttributedDescription({ text, className }: { text: string; className?: 
 
 import { IdentitySection } from '../components/settings/IdentitySection';
 import { RecoverySection } from '../components/settings/RecoverySection';
+import { TrustSection } from '../components/settings/TrustSection';
 import { AntiHallucSection } from '../components/settings/AntiHallucSection';
 import { TimezoneSetting } from '../components/settings/TimezoneSetting';
 import { PublicationCredentialsSection } from '../components/settings/PublicationCredentialsSection';
@@ -142,6 +143,7 @@ const SETTINGS_SECTION_IDS = [
   'settings-workers',
   'settings-user-context',
   'settings-recovery',
+  'settings-trust',
   'settings-server',
   'settings-debug',
   'settings-api-audit',
@@ -493,6 +495,7 @@ export function SettingsPage({
     { id: 'settings-workers', label: t('config.workers.title'), icon: <Bot size={15} /> },
     { id: 'settings-user-context', label: t('userContext.title'), icon: <FileText size={15} /> },
     { id: 'settings-recovery', label: t('settings.recovery.title'), icon: <Key size={15} />, group: t('config.systemSettings') },
+    { id: 'settings-trust', label: t('trust.nav'), icon: <Shield size={15} /> },
     { id: 'settings-server', label: t('config.server'), icon: <Server size={15} /> },
     { id: 'settings-debug', label: t('settings.debugSection'), icon: <Terminal size={15} />, live: serverDebugMode },
     ...(hasConfiguredApi
@@ -1794,6 +1797,8 @@ export function SettingsPage({
 
       {/* P2 — recovery passphrase for the MCP-secrets encryption key. */}
       <RecoverySection toast={toast} t={t} />
+
+      <TrustSection toast={toast} />
 
       <div id="settings-server" className="set-card">
         <div className="set-section">

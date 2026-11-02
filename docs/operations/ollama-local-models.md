@@ -33,10 +33,10 @@ references for the lifecycle actions they steer. A worker is still offered
 so a local model never has to reconstruct an opaque UUID, and it answers only
 the execution's principal or its own native worker.
 `[src: file: backend/src/api/agent_tools.rs:1649-1792#worker_room_catalogue]`
-`[src: file: backend/src/api/agent_tools.rs:2994-3018#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:4172-4194#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:2947-2977#task_exec_status]`
-`[src: file: backend/src/api/agent_tools.rs:4134-4170#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:3000-3024#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4194-4216#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:2953-2983#task_exec_status]`
+`[src: file: backend/src/api/agent_tools.rs:4156-4192#native_execution_for_caller]`
 
 The discussion SSE path resolves this scope from the durable
 `task_executions.sub_discussion_id` lineage before it constructs the HTTP tool
@@ -169,7 +169,7 @@ or parent-milestone section: a bounded edit has neither.
 `[src: file: backend/src/api/agent_workspace_tools.rs:1693-1710#validate_range_indentation]`
 `[src: file: backend/src/agents/runner.rs:1391-1405#structural_refusal]`
 `[src: file: backend/src/agents/runner.rs:1407-1424#worker_repair_iteration_limit]`
-`[src: file: backend/src/api/orchestration.rs:9097-9251#worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:9223-9377#worker_scope]`
 
 For a pure insertion, do not make the worker reproduce a paragraph inside a
 replacement range. Use one verified anchor line:
@@ -595,7 +595,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:4196-4224#count_arg] [src: file: backend/src/api/agent_tools.rs:3891-3934#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:4218-4246#count_arg] [src: file: backend/src/api/agent_tools.rs:3891-3934#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes
@@ -639,7 +639,7 @@ of schema compliance. Repeated launches, including a repair launch, negotiate
 the capability independently; no persistent capability cache is written.
 `[src: file: backend/src/agents/runner.rs:8715-8749#rejects_structured_output]`
 `[src: file: backend/src/agents/runner.rs:9418-9482#format_fallback_notice]`
-`[src: file: backend/src/workflows/steps.rs:1099-1122#ollama_envelope_format]`
+`[src: file: backend/src/workflows/steps.rs:1091-1114#ollama_envelope_format]`
 
 **Quality escalation** (`steps.rs::escalation_step`): if a LOCAL (Ollama)
 TypedSchema step still fails validation after the repair attempt, it retries

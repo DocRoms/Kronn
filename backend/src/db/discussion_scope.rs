@@ -777,6 +777,89 @@ pub fn file_request(
     }
 }
 
+/// [`file_request`], then KT-1492: when the room's trust level grants this kind
+/// of request on its own (Trusted: read, and planning write, on one of the
+/// user's registered projects), the request is decided at once, as the level,
+/// and the grant is journalled. A name that matches no project stays pending
+/// for a human to decline, like any request; so does a request the level does
+/// not cover, or one that cannot be decided. A request already pending for the
+/// same scope is decided like a new one. Returns the level that granted it.
+#[allow(clippy::too_many_arguments)]
+pub fn file_request_with_trust(
+    conn: &Connection,
+    discussion_id: &str,
+    project_id: Option<&str>,
+    requested_name: &str,
+    access: ScopeAccess,
+    reason: &str,
+    requested_by: &str,
+) -> Result<(Filed, Option<crate::models::TrustLevel>)> {
+    let filed = file_request(
+        conn,
+        discussion_id,
+        project_id,
+        requested_name,
+        access,
+        reason,
+        requested_by,
+    )?;
+    // A request already pending for the same scope is decided the same way: the
+    // owner may have raised the level after the card was filed, and the agent's
+    // retry must not stay blocked on it. What the level grants is the narrower
+    // of what the pending card asks for and what this call asks for: a retry
+    // for read on a pending write card is granted read when the level covers
+    // read (even if it does not cover write), and a retry for write on a read
+    // card never widens it.
+    let (Filed::New(request) | Filed::AlreadyPending(request)) = &filed else {
+        return Ok((filed, None));
+    };
+    let Some(project) = request.project_id.as_deref() else {
+        return Ok((filed, None));
+    };
+    let access = match (request.access, access) {
+        (ScopeAccess::Write, ScopeAccess::Write) => ScopeAccess::Write,
+        _ => ScopeAccess::Read,
+    };
+    let approval = match access {
+        ScopeAccess::Read => crate::models::TrustApproval::RoomScopeRead,
+        ScopeAccess::Write => crate::models::TrustApproval::RoomScopePlan,
+    };
+    let origin = crate::db::trust::TrustOrigin::room(discussion_id);
+    let Some(trust) = crate::db::trust::level_grants(conn, &origin, approval)? else {
+        return Ok((filed, None));
+    };
+    let decided_by = format!("trust level {}", trust.level.as_str());
+    match decide(conn, discussion_id, &request.id, Some(access), &decided_by) {
+        Ok((decided, Some(granted))) => {
+            let subject = format!(
+                "Room scope {} on \u{201c}{}\u{201d}",
+                access.as_str(),
+                clean_line(&request.requested_name, 120)
+            );
+            // The journal names the grant: lowering the level revokes it.
+            crate::db::trust::grant(
+                conn,
+                &origin,
+                approval,
+                &subject,
+                Some(project),
+                Some(crate::db::trust::TrustObject::room_scope_grant(
+                    &granted.id,
+                    discussion_id,
+                )),
+            )?;
+            // The reply carries the decided request, with the access granted.
+            let filed = match filed {
+                Filed::New(_) => Filed::New(decided),
+                _ => Filed::AlreadyPending(decided),
+            };
+            Ok((filed, Some(trust.level)))
+        }
+        // The request stays pending for a human.
+        _ => Ok((filed, None)),
+    }
+}
+
 /// A human's decision on a pending request. Approving grants at most the
 /// access asked for.
 pub fn decide(

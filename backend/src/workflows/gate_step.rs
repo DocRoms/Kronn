@@ -112,6 +112,7 @@ mod tests {
 
     fn gate_step(name: &str, message: Option<&str>) -> WorkflowStep {
         WorkflowStep {
+            exec_approved_by_trust: None,
             id: None,
             name: name.into(),
             step_type: StepType::Gate,

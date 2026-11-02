@@ -296,6 +296,7 @@ fn blank_agent_settings() -> AgentSettings {
 /// Keeps the template's intent legible without 50+ lines per step.
 fn blank_step(name: &str, kind: StepType, agent: AgentType) -> WorkflowStep {
     WorkflowStep {
+        exec_approved_by_trust: None,
         id: None,
         name: name.into(),
         step_type: kind,

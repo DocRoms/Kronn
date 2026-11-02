@@ -271,6 +271,7 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Ve
     }
     for mut exec in bundle.referenced_quick_execs {
         exec.unmodelled_args_approved = None;
+        exec.approved_by_trust = None;
         validate_prompt_variables(&exec.variables).map_err(anyhow::Error::msg)?;
         if let Some(error) = crate::core::inline_code::quick_exec_validation_error(
             &exec.name,

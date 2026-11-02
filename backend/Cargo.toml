@@ -70,6 +70,8 @@ async-stream = "0.3"
 # Crypto
 aes-gcm = "0.10"
 sha2 = "0.11"
+# RFC 6238 TOTP (the strong confirmation that raises a trust level, KT-1492): HMAC-SHA1.
+sha1 = "0.10"
 base64 = "0.22"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # OS keychain (macOS Keychain / Windows Credential Manager) — a backup tier for

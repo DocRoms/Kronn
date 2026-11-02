@@ -1,0 +1,293 @@
+/* KT-1492 — trust levels: control, risk panel, badge. */
+.trust-control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+}
+
+.trust-levels {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+}
+
+.trust-level {
+  padding: var(--kr-sp-2) var(--kr-sp-6);
+  border-radius: var(--kr-r-md);
+  border: 1px solid var(--kr-border-strong);
+  background: transparent;
+  color: var(--kr-text-muted);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.trust-level[data-active='true'] {
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-active);
+}
+
+.trust-level[data-level='trusted'][data-active='true'] {
+  border-color: rgba(var(--kr-warning-rgb), 0.5);
+  color: var(--kr-warning);
+}
+
+.trust-level[data-level='full'][data-active='true'] {
+  border-color: rgba(var(--kr-error-rgb), 0.55);
+  color: var(--kr-error);
+}
+
+.trust-level:disabled { cursor: not-allowed; opacity: 0.6; }
+.trust-level:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
+.trust-inherit { border-style: dashed; }
+
+.trust-effective {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+}
+
+.trust-vault-note {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  border-left: 2px solid var(--kr-warning, currentColor);
+  padding-left: 6px;
+}
+
+.trust-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 4px 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 16px;
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.4);
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+}
+
+.trust-badge[data-level='full'] {
+  border-color: rgba(var(--kr-error-rgb), 0.5);
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.08);
+}
+
+.trust-badge-revoke {
+  border: 0;
+  padding: 0 3px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 999px;
+}
+
+.trust-badge-revoke:hover,
+.trust-badge-revoke:focus-visible { background: rgba(var(--kr-text-rgb, 255, 255, 255), 0.15); }
+
+.trust-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--kr-bg-overlay);
+}
+
+.trust-dialog {
+  width: 560px;
+  max-width: 95vw;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: var(--kr-sp-10);
+  border-radius: var(--kr-r-2xl);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.35);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-base);
+  line-height: 1.5;
+}
+
+.trust-dialog[data-level='trusted'] { border-color: rgba(var(--kr-warning-rgb), 0.35); }
+
+.trust-dialog-title {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  margin: 0 0 var(--kr-sp-4);
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-lg);
+}
+
+.trust-dialog[data-level='full'] .trust-dialog-title { color: var(--kr-error); }
+
+.trust-dialog-intro { margin: 0 0 var(--kr-sp-4); }
+
+.trust-effects {
+  margin: 0 0 var(--kr-sp-4);
+  padding-left: var(--kr-sp-8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+}
+
+.trust-risk {
+  display: block;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+
+.trust-pending-tag {
+  margin-left: var(--kr-sp-3);
+  font-size: 10px;
+  color: var(--kr-text-muted);
+  border: 1px dashed var(--kr-border-strong);
+  border-radius: 999px;
+  padding: 0 5px;
+}
+
+.trust-journal,
+.trust-limit,
+.trust-never,
+.trust-reach,
+.trust-global-link { margin: 0 0 var(--kr-sp-4); font-size: var(--kr-fs-xs); }
+
+.trust-never ul,
+.trust-reach ul { margin: var(--kr-sp-2) 0 0; padding-left: var(--kr-sp-8); }
+
+.trust-closed strong { color: var(--kr-success, inherit); }
+
+.trust-blocked {
+  margin: var(--kr-sp-4) 0 0;
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.5);
+  border-radius: var(--kr-r-md);
+  font-size: var(--kr-fs-xs);
+}
+
+.trust-proof {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-4);
+  font-size: var(--kr-fs-xs);
+}
+
+.trust-proof input {
+  width: 12rem;
+  padding: var(--kr-sp-2) var(--kr-sp-4);
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-family: var(--kr-font-mono, monospace);
+  letter-spacing: 0.08em;
+}
+
+.trust-proof input:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 1px;
+}
+
+/* Links inside the panel and the section: the accent ink reads on every theme. */
+.trust-global-link a,
+.trust-blocked a {
+  color: var(--kr-accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.trust-global-link a:focus-visible,
+.trust-blocked a:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
+
+.trust-enrol > p {
+  margin: var(--kr-sp-6) 0 var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+}
+
+.trust-qr {
+  width: 12rem;
+  height: 12rem;
+  background: #fff;
+  border-radius: var(--kr-r-md);
+}
+
+.trust-secret {
+  display: block;
+  margin: var(--kr-sp-2) 0 var(--kr-sp-4);
+  font-size: var(--kr-fs-sm, 13px);
+  user-select: all;
+}
+
+.trust-recovery {
+  margin: var(--kr-sp-4) 0;
+  padding: var(--kr-sp-4);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.5);
+  border-radius: var(--kr-r-md);
+}
+
+.trust-recovery ul {
+  columns: 2;
+  margin: var(--kr-sp-2) 0;
+  padding-left: var(--kr-sp-8);
+}
+
+.trust-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  margin-top: var(--kr-sp-4);
+}
+
+.trust-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--kr-sp-4);
+  margin-top: var(--kr-sp-8);
+}
+
+/* Same box as .trust-level, so the level buttons and the authenticator ones
+   read as one family. */
+.trust-btn {
+  padding: var(--kr-sp-2) var(--kr-sp-6);
+  border-radius: var(--kr-r-md);
+  border: 1px solid var(--kr-border-strong);
+  background: var(--kr-bg-active);
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.trust-btn:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
+
+.trust-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-3);
+  margin-top: var(--kr-sp-4);
+}
+
+.trust-btn-danger {
+  border-color: rgba(var(--kr-error-rgb), 0.5);
+  background: rgba(var(--kr-error-rgb), 0.15);
+  color: var(--kr-error);
+}
+
+.trust-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.trust-audit {
+  margin: var(--kr-sp-4) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  font-size: var(--kr-fs-xs);
+}
+
+.trust-audit time { color: var(--kr-text-muted); margin-right: var(--kr-sp-3); }

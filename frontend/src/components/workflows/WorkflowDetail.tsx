@@ -7,6 +7,7 @@ import { livePagePath, workflowPath } from '../../lib/routes';
 import { useT } from '../../lib/I18nContext';
 import { UnsafeStepsPanel } from './UnsafeStepsPanel';
 import { WorkflowScopeEditor } from '../WorkflowScope';
+import { TrustBadge, TrustLevelControl } from '../TrustLevel';
 import { SafetyWarnings } from './SafetyWarnings';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi, executionVariables as executionVariablesApi } from '../../lib/api';
 import type { BatchPreview, ExecutionVariableMetadata } from '../../lib/api';
@@ -1928,6 +1929,16 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
       {onApplyUnsafeFix && (
         <UnsafeStepsPanel workflow={workflow} onApply={onApplyUnsafeFix} onApprove={onApproveUnsafeStep} />
       )}
+
+      {/* KT-1492 — the trust level for this workflow's runs and the agents its steps launch. */}
+      <div className="wf-info-row" data-testid="wf-trust">
+        <span className="wf-info-label">{t('trust.title')}</span>
+        <TrustBadge target={{ scope: 'workflow', id: workflow.id }} />
+        <TrustLevelControl
+          target={{ scope: 'workflow', id: workflow.id }}
+          toast={toast ? (message, type) => toast(message, type === 'warning' ? 'info' : type) : undefined}
+        />
+      </div>
 
       <WorkflowScopeEditor
         workflowId={workflow.id}
