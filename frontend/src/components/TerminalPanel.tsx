@@ -15,7 +15,8 @@ interface TerminalEntry {
 
 interface TerminalPanelProps {
   discussionId: string;
-  onClose: () => void;
+  /** Omitted when a surrounding panel (the side-panel shell) owns the close button. */
+  onClose?: () => void;
 }
 
 export function TerminalPanel({ discussionId, onClose }: TerminalPanelProps) {
@@ -132,14 +133,16 @@ export function TerminalPanel({ discussionId, onClose }: TerminalPanelProps) {
           <span>{t('git.terminal')}</span>
         </div>
         <div className="disc-tool-panel-actions">
-          <button
-            type="button"
-            className="disc-tool-panel-icon"
-            onClick={onClose}
-            aria-label={t('common.close')}
-          >
-            <X size={14} />
-          </button>
+          {onClose && (
+            <button
+              type="button"
+              className="disc-tool-panel-icon"
+              onClick={onClose}
+              aria-label={t('common.close')}
+            >
+              <X size={14} />
+            </button>
+          )}
         </div>
       </header>
 

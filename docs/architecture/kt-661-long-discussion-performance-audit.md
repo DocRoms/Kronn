@@ -30,13 +30,13 @@ alone does not establish a user-visible duration.
    key. [src: file: backend/src/db/sql/082_message_sequence.sql:14-15#idx_messages_discussion_sort_order_unique]
 4. The frontend polls `GET /api/discussions/{id}/poll` on active-discussion
    changes, immediately and then every five seconds.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:1190-1198#fetchActive]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:1017-1050#reloadDiscussion]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1200-1208#fetchActive]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1030-1063#reloadDiscussion]
    The server builds the complete detail on every poll and omits it only when
    its revision matches the one the client holds; a changed response replaces
    that discussion's cached detail object.
    [src: file: backend/src/api/discussions/crud.rs:195-225#poll]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:989-990#reconcileLoadedDiscussion]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:997-998#reconcileLoadedDiscussion]
 5. The detail response also queries all message targets belonging to the
    discussion and groups them in a map.
    [src: file: backend/src/db/discussions.rs:3059-3103#list_discussion_message_targets]
@@ -49,16 +49,16 @@ alone does not establish a user-visible duration.
 1. The active transcript is rendered as the complete `activeDiscussion.messages`
    collection inside one scrolling container; this code does not window or
    paginate visible message rows.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:4578-4598#transcriptElements]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:4606-4626#transcriptElements]
    Each normal item creates a
    `MessageBubble`; tool groups create `ToolCallsGroup`.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3983-4041#MessageBubble]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:4043-4101#MessageBubble]
 2. Before mapping rows, the page filters notes, projects messages into
    conversation order and builds lookup maps, memoized per transcript change;
    the memoized element list then makes several more passes to calculate
    metadata and reply/turn anchors.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3250-3267#transcriptIndex]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3808-3889#transcriptElements]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3260-3277#transcriptIndex]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3816-3897#transcriptElements]
 3. The conversation-order projection maps every message and sorts the resulting
    array; resolving a reply chain can walk up to 16 links for an eligible row.
    [src: file: frontend/src/lib/messageTargets.ts:319-367#messagesInConversationOrder]
@@ -79,28 +79,28 @@ alone does not establish a user-visible duration.
    [src: file: frontend/src/components/MessageBubble.tsx:1996-2003#MAX_MARKDOWN_CHARS]
 5. The active-detail change also triggers an effect that filters the complete
    array to mark the discussion seen.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:1939-1953#markDiscussionSeen]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1959-1973#markDiscussionSeen]
    The code-count refresh
    effect is similarly keyed to the message-array length.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2088-2115#setPendingFilesCount]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2123-2150#setPendingFilesCount]
 
 ### Scrolling and streaming
 
 1. On initial settling of a loaded discussion, `scrollToBottomSettled` writes
    `scrollTop = scrollHeight` on animation frames for up to 700 ms; the effect
    is reached after a non-empty message list loads.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2011-2050#bottomSettleRafRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2028-2067#bottomSettleRafRef]
    [src: file: frontend/src/pages/DiscussionsPage.tsx:2093-2107#lastSettledDiscIdRef]
 2. For streaming content while stuck to the bottom, the page calls
    `scrollIntoView` no more often than once per 250 ms.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2060-2070#lastScrollRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2075-2085#lastScrollRef]
 3. Incoming stream chunks are buffered and flush at most once per animation
    frame into the discussion streaming map.
    [src: file: frontend/src/hooks/useRafBatchedStream.ts:20-49#useRafBatchedStream]
    The active streaming text is
    deferred before being passed to the streaming reply renderer.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:1550#deferredStreamingText]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3900-3908#deferredStreamingText]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1558#deferredStreamingText]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3916-3924#deferredStreamingText]
 
 ## Findings and priorities
 

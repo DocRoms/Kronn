@@ -42,7 +42,8 @@ export function DiscussionAssetsPanel({
 }: {
   discussionId: string;
   files: ContextFile[];
-  onClose: () => void;
+  /** Omitted when a surrounding panel (the side-panel shell) owns the close button. */
+  onClose?: () => void;
   onNavigateMessage: (messageId: string) => void;
   t: T;
   /// External API connections, so a generation can be launched from the tab
@@ -176,15 +177,17 @@ export function DiscussionAssetsPanel({
           <h2>{t('disc.assets.title')}</h2>
           <p>{t('disc.assets.subtitle', files.length)}</p>
         </div>
-        <button
-          type="button"
-          className="disc-icon-btn"
-          onClick={onClose}
-          aria-label={t('disc.assets.close')}
-          title={t('disc.assets.close')}
-        >
-          <X size={16} />
-        </button>
+        {onClose && (
+          <button
+            type="button"
+            className="disc-icon-btn"
+            onClick={onClose}
+            aria-label={t('disc.assets.close')}
+            title={t('disc.assets.close')}
+          >
+            <X size={16} />
+          </button>
+        )}
       </header>
 
       <div className="disc-assets-tabs" role="tablist" aria-label={t('disc.assets.tabs')}>

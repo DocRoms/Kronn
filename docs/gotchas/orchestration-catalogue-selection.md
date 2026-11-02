@@ -10,7 +10,7 @@ replaced.
 [src: file: frontend/src/components/TaskLaunchDialog.tsx:180-186#selectAgent]
 [src: file: frontend/src/components/TaskLaunchDialog.tsx:258-275#AgentSwitchPicker]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:400-406#selectReassignAgent]
-[src: file: frontend/src/components/DiscussionPlanPanel.tsx:1161-1176#AgentSwitchPicker]
+[src: file: frontend/src/components/DiscussionPlanPanel.tsx:1164-1179#AgentSwitchPicker]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:163-171#configured]
 
 The launch dialog must let picker-owned Escape handling finish first: the model

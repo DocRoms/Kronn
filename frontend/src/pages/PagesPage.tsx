@@ -44,6 +44,7 @@ import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
 import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
+import { SidePanelShell } from '../components/SidePanelShell';
 import { CollectionShell } from '../components/CollectionShell';
 import { CollectionProjectTree } from '../components/CollectionProjectTree';
 import { HtmlCodeEditor, HtmlRevisionDiff } from '../components/HtmlCodeEditor';
@@ -226,7 +227,7 @@ export function PagesPage({
   // KT-1530 — one vertical side panel, two tabs: « Synchroniser » opens it on the
   // sync tab, « Détails » on the details tab (the former folded header row).
   const [sidePanel, setSidePanel] = useState<ArtifactPanelTab | null>(null);
-  const sidePanelRef = useRef<HTMLElement>(null);
+  const sidePanelRef = useRef<HTMLElement | null>(null);
   const syncTriggerRef = useRef<HTMLButtonElement>(null);
   const detailsTriggerRef = useRef<HTMLButtonElement>(null);
   const toggleSidePanel = useCallback((tab: ArtifactPanelTab) => {
@@ -1398,51 +1399,30 @@ export function PagesPage({
         )}
       </section>
       {detail && sidePanel && (
-        <aside
+        <SidePanelShell
           id="live-page-side-panel"
-          ref={sidePanelRef}
-          className="disc-tool-panel live-pages-sync-panel"
-          data-testid={sidePanel === 'sync' ? 'live-page-recent-refreshes' : 'live-page-details-panel'}
-          aria-label={sidePanel === 'sync' ? t('pages.autoRefresh') : t('pages.headerDetails')}
+          panelRef={sidePanelRef}
+          className="live-pages-sync-panel"
+          testId={sidePanel === 'sync' ? 'live-page-recent-refreshes' : 'live-page-details-panel'}
+          ariaLabel={sidePanel === 'sync' ? t('pages.autoRefresh') : t('pages.headerDetails')}
+          title={detail.title}
+          railLabel={t('pages.sidePanelTabs')}
+          activeId={sidePanel}
+          onSelect={(tab) => setSidePanel(tab as ArtifactPanelTab)}
+          onClose={closeSidePanel}
+          closeLabel={t('pages.closeSyncPanel')}
+          bodyId="live-page-panel-body"
+          tabIdPrefix="live-page-panel-tab-"
+          tabTestIdPrefix="live-page-panel-tab-"
+          items={ARTIFACT_PANEL_TABS.map(tab => ({
+            id: tab,
+            label: tab === 'sync' ? t('pages.panelRail.sync') : t('pages.headerDetails'),
+            description: tab === 'sync' ? t('pages.syncAction') : t('pages.headerDetails'),
+            icon: tab === 'sync' ? <History size={18} /> : <Info size={18} />,
+          }))}
         >
-          <header className="disc-tool-panel-header">
-            <div className="live-pages-panel-tabs" role="tablist" aria-label={t('pages.sidePanelTabs')}>
-              {ARTIFACT_PANEL_TABS.map(tab => (
-                <button
-                  key={tab}
-                  type="button"
-                  role="tab"
-                  id={`live-page-panel-tab-${tab}`}
-                  aria-selected={sidePanel === tab}
-                  aria-controls="live-page-panel-body"
-                  data-active={sidePanel === tab}
-                  data-testid={`live-page-panel-tab-${tab}`}
-                  onClick={() => setSidePanel(tab)}
-                >
-                  {tab === 'sync' ? <History size={14} /> : <Info size={14} />}
-                  <span>{tab === 'sync' ? t('pages.syncAction') : t('pages.headerDetails')}</span>
-                </button>
-              ))}
-            </div>
-            <div className="disc-tool-panel-actions">
-              <button
-                type="button"
-                className="disc-tool-panel-icon"
-                onClick={closeSidePanel}
-                aria-label={t('pages.closeSyncPanel')}
-                title={t('pages.closeSyncPanel')}
-              >
-                <X size={14} />
-              </button>
-            </div>
-          </header>
           {sidePanel === 'details' ? (
-            <div
-              className="disc-tool-panel-body live-pages-details-body"
-              id="live-page-panel-body"
-              role="tabpanel"
-              aria-labelledby="live-page-panel-tab-details"
-            >
+            <div className="disc-tool-panel-body live-pages-details-body">
               <section className="live-pages-details-section" aria-label={t('pages.headerDetails')}>
                 <HtmlWeightBadge bytes={detail.html_size_bytes} variant="header" />
                 <div className="live-pages-revision">
@@ -1459,12 +1439,7 @@ export function PagesPage({
               </section>
             </div>
           ) : (
-          <div
-            className="disc-tool-panel-body live-pages-sync-body"
-            id="live-page-panel-body"
-            role="tabpanel"
-            aria-labelledby="live-page-panel-tab-sync"
-          >
+          <div className="disc-tool-panel-body live-pages-sync-body">
             <section className="live-pages-sync-section" data-testid="live-page-sync-workflows" aria-label={t('pages.linkedWorkflows')}>
               <header>
                 <h3><Workflow size={12} />{t('pages.linkedWorkflows')}</h3>
@@ -1650,7 +1625,7 @@ export function PagesPage({
             </section>
           </div>
           )}
-        </aside>
+        </SidePanelShell>
       )}
       {importOpen && <ArtifactImportDialog onClose={closeImport} onImported={page => {
         setImportOpen(false);

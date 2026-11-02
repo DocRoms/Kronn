@@ -17,7 +17,8 @@ export interface DiscussionNotesPanelProps {
   /** Bumped by the page when a note is written from the composer, so the list
    *  does not wait for a reopen to show it. */
   refreshKey?: number;
-  onClose: () => void;
+  /** Omitted when a surrounding panel (the side-panel shell) owns the close button. */
+  onClose?: () => void;
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
 }
@@ -173,9 +174,11 @@ export function DiscussionNotesPanel({
           {t('disc.note.panelTitle')}
           {notes && <em>{loaded?.total ?? notes.length}</em>}
         </span>
-        <button type="button" className="set-icon-btn" onClick={onClose} aria-label={t('common.close')}>
-          <X size={13} />
-        </button>
+        {onClose && (
+          <button type="button" className="set-icon-btn" onClick={onClose} aria-label={t('common.close')}>
+            <X size={13} />
+          </button>
+        )}
       </header>
 
       {/* Writing and reading in the same place: the old gesture asked the

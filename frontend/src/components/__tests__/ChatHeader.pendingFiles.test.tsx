@@ -82,7 +82,7 @@ describe('ChatHeader — pending files badge', () => {
   });
 
   // KT-581 — the pending-file badge, its cap and its tooltip moved with the
-  // panels themselves: they are asserted in DiscussionPanelSwitcher's spec.
+  // panels themselves: the badge rendering is asserted in SidePanelShell's spec.
   // What stays here is what the header still owns.
   // KT-1530 capture 1/2 — the pending-learnings badge used to sit after the
   // shell, to the right of « Détails » and lower. It joins the button group,

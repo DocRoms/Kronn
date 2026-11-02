@@ -876,7 +876,7 @@ catalogue does not pay for a long manual.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4449-4465#MAX_DISC_APPEND_ATTACHMENTS] [src: file: backend/scripts/disc-introspection-mcp.py:53#MAX_DISC_APPEND_ATTACHMENTS]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4540-4606#_attach_files_to_appended_message]`
 `[src: file: frontend/src/components/MessageAttachments.tsx:114-299#AttachmentThumb]`
-`[src: file: frontend/src/components/DiscussionAssetsPanel.tsx:138-149#filteredFiles] [src: file: frontend/src/components/DiscussionAssetsPanel.tsx:259-275#disc-assets-filters] [src: file: frontend/src/pages/DiscussionsPage.tsx:5569-5581#assets]`
+`[src: file: frontend/src/components/DiscussionAssetsPanel.tsx:138-149#filteredFiles] [src: file: frontend/src/components/DiscussionAssetsPanel.tsx:259-275#disc-assets-filters] [src: file: frontend/src/pages/DiscussionsPage.tsx:5600-5612#assets]`
 
 Agent-library catalogs deliberately stay compact:
 `skills_list` / `profiles_list` / `directives_list` omit their potentially long

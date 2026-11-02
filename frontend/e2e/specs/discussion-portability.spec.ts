@@ -39,9 +39,10 @@ test('exports, imports and replays a discussion idempotently', async ({ page, re
   await dashboard.goto();
   await dashboard.openDiscussion(sourceId);
 
-  const panelRail = await openDiscussionPanel(page);
+  await openDiscussionPanel(page);
   const downloadPromise = page.waitForEvent('download');
-  await panelRail.getByRole('button', { name: 'Exporter la discussion' }).click();
+  await page.getByTestId('side-panel-menu-btn').click();
+  await page.getByRole('menuitem', { name: 'Exporter la discussion' }).click();
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toMatch(/\.kronn-discussion\.json$/);
   const bundlePath = await download.path();

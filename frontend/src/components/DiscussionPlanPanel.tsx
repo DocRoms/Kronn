@@ -66,7 +66,8 @@ import { awaitingMergeTitle, shortBranch } from '../lib/awaitingMerge';
 interface Props {
   discussionId: string;
   initialTaskId?: string;
-  onClose: () => void;
+  /** Omitted when a surrounding panel (the side-panel shell) owns the close button. */
+  onClose?: () => void;
   onChanged?: (plan: DiscussionPlan) => void;
   /** Opens a discussion; with a workspace, its Git panel on that workspace. */
   onNavigateDiscussion?: (discussionId: string, options?: { gitWorkspaceId?: string }) => void;
@@ -774,9 +775,11 @@ export function DiscussionPlanPanel({
             </div>
           )}
         </div>
-        <button type="button" className="disc-tool-panel-icon plan-panel-close" onClick={onClose} aria-label={t('common.close')}>
-          <X size={16} />
-        </button>
+        {onClose && (
+          <button type="button" className="disc-tool-panel-icon plan-panel-close" onClick={onClose} aria-label={t('common.close')}>
+            <X size={16} />
+          </button>
+        )}
       </header>
 
       <div className="plan-quick-create">

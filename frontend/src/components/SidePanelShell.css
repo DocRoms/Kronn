@@ -1,0 +1,259 @@
+/* Shared side panel: fixed to the window's right edge over the top navigation.
+   Width = the rail plus the content, so content keeps --kr-panel-w. The rail is
+   60px, and only grows when a label needs it (« Synchronisation »). */
+.side-panel-shell {
+  --side-panel-rail-w: 60px;
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: calc(var(--kr-z-sticky) + 10);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  max-width: 100vw;
+  overflow: hidden;
+  border-left: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
+  box-shadow: -10px 0 24px rgba(0, 0, 0, 0.08), var(--kr-shadow-popover);
+}
+
+.side-panel-shell-spacer {
+  flex-shrink: 0;
+  align-self: stretch;
+}
+
+.side-panel-shell-header {
+  min-height: 52px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
+}
+
+.side-panel-shell-title {
+  /* Zero basis: a long title must not widen the panel, only ellipsize. */
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-md);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-panel-shell-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.side-panel-shell-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.side-panel-shell-icon:hover,
+.side-panel-shell-icon:focus-visible,
+.side-panel-shell-icon[aria-expanded='true'] {
+  border-color: var(--kr-border-medium);
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.side-panel-shell-icon:focus-visible,
+.side-panel-shell-tab:focus-visible,
+.side-panel-shell-menu button:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 1px;
+}
+
+.side-panel-shell-menu-wrap { position: relative; }
+
+.side-panel-shell-menu {
+  position: absolute;
+  z-index: 2;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 230px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+  box-shadow: var(--kr-shadow-popover);
+}
+
+.side-panel-shell-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-panel-shell-menu button:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.side-panel-shell-menu button:disabled { opacity: 0.55; cursor: progress; }
+
+.side-panel-shell-menu button[data-danger] { color: var(--kr-error); }
+
+.side-panel-shell-menu button[data-danger]:hover:not(:disabled) {
+  background: rgba(var(--kr-error-rgb), 0.12);
+  color: var(--kr-error);
+}
+
+.side-panel-shell-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.side-panel-shell-rail {
+  /* Sized by the longest label, never narrower than the base rail: a label is
+     one line, so a long word widens the rail instead of wrapping. */
+  width: auto;
+  min-width: var(--side-panel-rail-w);
+  flex-shrink: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 4px;
+  overflow-y: auto;
+  border-right: 1px solid var(--kr-border);
+  background: var(--kr-bg-subtle);
+}
+
+.side-panel-shell-tab {
+  width: 100%;
+  min-height: 50px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 0;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-tertiary);
+  cursor: pointer;
+}
+
+.side-panel-shell-tab:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.side-panel-shell-tab[data-active='true'] {
+  border-color: var(--kr-accent-border);
+  background: rgba(var(--kr-accent-rgb), 0.12);
+  color: var(--kr-accent);
+}
+
+.side-panel-shell-tab-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.side-panel-shell-tab-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.side-panel-shell-badge {
+  position: absolute;
+  top: -6px;
+  right: -10px;
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-accent);
+  color: var(--kr-text-on-dark);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+}
+
+.side-panel-shell-body {
+  min-width: min(var(--kr-panel-w), calc(100vw - var(--side-panel-rail-w)));
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* A panel component keeps its own width (the Git code view widens it) but
+   drops the chrome the shell now draws. */
+.side-panel-shell-body > * {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  max-width: calc(100vw - var(--side-panel-rail-w));
+  border-left: 0;
+  box-shadow: none;
+}
+
+@media (max-width: 760px) {
+  .side-panel-shell-body > .disc-tool-panel {
+    position: static;
+    inset: auto;
+    width: auto;
+    box-shadow: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .side-panel-shell {
+    --side-panel-rail-w: 48px;
+    left: 0;
+    width: 100vw;
+  }
+  .side-panel-shell-spacer { display: none; }
+  .side-panel-shell-body { flex: 1; min-width: 0; }
+  .side-panel-shell-body > * { width: auto; }
+  .side-panel-shell-tab { min-height: 42px; }
+  /* Icons only; the label stays the tab's accessible name. */
+  .side-panel-shell-tab-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
