@@ -392,6 +392,14 @@ fn ref_exists(repo: &Path, refname: &str) -> bool {
 /// The full ref the profile is read from, or `None` outside a git repository
 /// or when no default branch exists.
 pub fn default_branch_ref(repo: &Path) -> Option<String> {
+    default_branch_refs(repo).into_iter().next()
+}
+
+/// Every ref that currently holds the default branch, the local branch first.
+/// Both are consulted to learn whether a commit reached it: after a GitHub
+/// merge only the fetched `refs/remotes/origin/<name>` moves, the local branch
+/// stays behind until a pull (KT-1519).
+pub fn default_branch_refs(repo: &Path) -> Vec<String> {
     let mut names = Vec::new();
     if let Some(head) = git_output(
         repo,
@@ -407,14 +415,34 @@ pub fn default_branch_ref(repo: &Path) -> Option<String> {
             names.push(name.to_string());
         }
     }
-    names.into_iter().find_map(|name| {
+    let refs_of = |name: &String| {
         [
             format!("refs/heads/{name}"),
             format!("refs/remotes/origin/{name}"),
         ]
         .into_iter()
-        .find(|refname| ref_exists(repo, refname))
-    })
+        .filter(|refname| ref_exists(repo, refname))
+        .collect::<Vec<_>>()
+    };
+    names
+        .iter()
+        .map(refs_of)
+        .find(|found| !found.is_empty())
+        .unwrap_or_default()
+}
+
+/// Whether `branch` (a local branch name) is the repository's default branch.
+/// A repository with no discoverable default branch has no other branch to
+/// tell apart from it, so every branch counts as default there (KT-1519).
+pub fn is_default_branch(repo: &Path, branch: &str) -> bool {
+    let Some(default) = default_branch_ref(repo) else {
+        return true;
+    };
+    let name = default
+        .strip_prefix("refs/heads/")
+        .or_else(|| default.strip_prefix("refs/remotes/origin/"))
+        .unwrap_or(&default);
+    name == branch.strip_prefix("refs/heads/").unwrap_or(branch)
 }
 
 /// Reads the profile at the main checkout's default branch. An absent file is

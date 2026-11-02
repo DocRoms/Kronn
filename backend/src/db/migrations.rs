@@ -1027,6 +1027,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "282_trust_forget_settings_only",
         include_str!("sql/282_trust_forget_settings_only.sql"),
     ),
+    (
+        "283_planning_awaiting_merge",
+        include_str!("sql/283_planning_awaiting_merge.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

@@ -42,6 +42,7 @@ import type {
 import './DiscussionsPage.css';
 import './PlanningPage.css';
 import { LoadingState } from '../components/LoadingState';
+import { awaitingMergeTitle, shortBranch } from '../lib/awaitingMerge';
 
 interface Props {
   /** The task to open on mount, when the page keeps its own selection. */
@@ -522,9 +523,18 @@ function PlanningPageView({
                         <span className="disc-item-title"><span className="disc-item-title-text">{task.title}</span></span>
                         <span className="disc-item-meta">
                           <span className="planning-ref">{task.reference}</span>
-                          <span className="planning-status" data-status={task.status}>{t(`planning.status.${task.status}`)}</span>
+                          {!task.awaiting_merge && <span className="planning-status" data-status={task.status}>{t(`planning.status.${task.status}`)}</span>}
                           {task.total_subtasks > 0 && <span>{task.completed_subtasks}/{task.total_subtasks}</span>}
                         </span>
+                        {task.awaiting_merge && (
+                          <span
+                            className="planning-status planning-sidebar-awaiting"
+                            data-status="awaiting_merge"
+                            title={awaitingMergeTitle(task.awaiting_merge)}
+                          >
+                            {t('planning.status.awaitingMerge', shortBranch(task.awaiting_merge.branch))}
+                          </span>
+                        )}
                       </span>
                     </button>
                     {!canMultiSelect && <CollectionRowActions

@@ -68,6 +68,21 @@
   margin-left: var(--kr-sp-3);
 }
 
+/* KT-1519 — the "integrated into <branch>, awaiting merge" chip sits on its own
+   line under the meta row: it is the longest chip, so sharing a row with the
+   reference, the star and the menu made it overlap them. It shrinks with an
+   ellipsis (the full branch stays on the title tooltip). */
+.planning-sidebar-awaiting {
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  width: fit-content;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--kr-fs-xs);
+}
+
 .planning-sidebar-parent {
   overflow: hidden;
   color: var(--kr-text-ghost);
@@ -460,10 +475,13 @@
 }
 
 .planning-ref {
+  flex: 0 0 auto;
   font-family: var(--kr-font-mono);
+  white-space: nowrap;
 }
 
 .planning-status {
+  white-space: nowrap;
   padding: 1px 5px;
   border-radius: 999px;
   background: var(--kr-bg-elevated);
@@ -471,6 +489,7 @@
 
 .planning-status[data-status="blocked"] { color: var(--kr-error); }
 .planning-status[data-status="in_progress"] { color: var(--kr-info); }
+.planning-status[data-status="awaiting_merge"] { color: var(--kr-warning); }
 .planning-status[data-status="idea"] { color: var(--kr-purple); }
 
 .planning-tag {

@@ -497,7 +497,7 @@ fn repo_fetch_lock(repo: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
-async fn fetch_remote_branch(
+pub(crate) async fn fetch_remote_branch(
     repo: &Path,
     remote: &str,
     branch: &str,
