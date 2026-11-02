@@ -136,7 +136,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
                 "test-backend": 20,
                 "test-e2e": 45,
                 "build-release": 45,
-                "test-backend-portability": "${{ matrix.os == 'macos-latest' && 100 || 45 }}",
+                "test-backend-portability": "${{ matrix.os == 'macos-latest' && 150 || 45 }}",
             }.get(job, 60 if path == VERDICT_WORKFLOW else 30)
             self.assertIn(f"timeout-minutes: {expected_timeout}", section, job)
 
@@ -366,7 +366,11 @@ class E2eContainerWorkflowTests(unittest.TestCase):
 
     def test_a_push_to_main_only_builds_and_saves_the_rust_caches(self):
         # The merged tree was tested on its pull request: a push to main
-        # compiles what the pull requests restore, saves it, and runs nothing.
+        # compiles what the pull requests restore and saves it. The portability
+        # job is the exception (KT-1535): main runs its suites on both legs —
+        # it is where the macOS leg tests dependency and toolchain bumps —
+        # while a pull request runs the macOS suites only when the change
+        # touches the modules they test (`portability-scope.outputs.mac`).
         no_push = "github.event_name != 'push'"
         workflow = CI_WORKFLOW.read_text()
         build = BUILD_WORKFLOW.read_text()
@@ -395,8 +399,6 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             ("test-backend-build", "Upload the instrumented test archive"),
             ("test-backend-quality", "cargo test --doc"),
             ("test-e2e", "Run E2E tests"),
-            ("test-backend-portability", "Worktree lifecycle and disk guards"),
-            ("test-backend-portability", "Windows to WSL agent launches"),
         ):
             self.assertIn(f"if: {no_push}", step(job, name), f"{job}: {name}")
         # The same archive build runs on a pull request and on a push: the
@@ -404,8 +406,24 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         archive_build = step("test-backend-build", "Build the instrumented test archive")
         self.assertNotIn("if:", archive_build)
         self.assertIn("cargo nextest archive --workspace --locked", archive_build)
-        lib_build = step("test-backend-portability", "Build the lib tests without running them (push to main)")
-        self.assertIn("cargo test --lib --no-run --locked", lib_build)
+        mac_suites = (
+            "matrix.os != 'macos-latest' || github.event_name != 'pull_request' "
+            "|| needs.portability-scope.outputs.mac == 'true'"
+        )
+        for name in (
+            "Worktree lifecycle and disk guards",
+            "Disk maintenance surface",
+            "Cleanup authorisation from durable state",
+            "Windows to WSL agent launches",
+            "Secret file paths (drives, UNC shares, links)",
+        ):
+            self.assertIn(f"if: {mac_suites}", step("test-backend-portability", name), name)
+        deferred = step("test-backend-portability", "macOS suites deferred to main")
+        self.assertIn(
+            "if: github.event_name == 'pull_request' && matrix.os == 'macos-latest' "
+            "&& needs.portability-scope.outputs.mac != 'true'",
+            deferred,
+        )
         # A failed build must never be saved under the exact key: the next
         # run would see a hit and never replace it. The backend's own save is
         # gated by its verified `ready` marker instead.
