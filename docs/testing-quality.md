@@ -218,7 +218,7 @@ aggregates accept those skips only for a push. A save runs only on
 as a hit, and never replaced, until the next `Cargo.lock` change. The
 backend save keeps its own verified `ready` marker instead.
 [src: file: .github/workflows/ci-test.yml:225-235#archive] [src: file: .github/workflows/ci-test.yml:458-491#cache-clippy] [src: file: .github/workflows/ci-test.yml:759-786#cache-e2e-dev]
-[src: file: .github/workflows/ci-build.yml:227-268#cache-portability] [src: file: .github/workflows/ci-build.yml:284-309#cache-release]
+[src: file: .github/workflows/ci-build.yml:238-279#cache-portability] [src: file: .github/workflows/ci-build.yml:295-320#cache-release]
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when a hot
