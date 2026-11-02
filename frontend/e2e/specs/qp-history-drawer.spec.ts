@@ -7,17 +7,24 @@
  * frontend renders the response correctly, not the SQL aggregator
  * (which is covered by the backend unit tests).
  *
- * Target QP per the user spec: "Instances Analyses" on project
- * "front_euronews". The test stubs the responses so it passes even
- * when that QP isn't seeded yet (CI fresh DB), and exercises the
- * actual seed when present.
+ * The spec seeds the Quick Prompt it opens (a fresh CI database has
+ * none) and stubs the responses, so the SQL aggregator is never involved.
  */
 
 import { test, expect } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
 import { WorkflowsPage } from '../pages/WorkflowsPage';
+import { seedQuickPrompt, deleteQuickPrompt } from '../fixtures/quick-prompt-seed';
 
 test.describe('0.8.5 — QP history drawer', () => {
+  let qpId = '';
+  test.beforeAll(async ({ request }) => {
+    qpId = await seedQuickPrompt(request, `History drawer PW ${Date.now()}`);
+  });
+  test.afterAll(async ({ request }) => {
+    await deleteQuickPrompt(request, qpId);
+  });
+
   test('🕒 button opens drawer; cards render with metrics + diff toggle', async ({ page }) => {
     // Stub the two endpoints. The drawer auto-loads them on open.
     await page.route('**/api/quick-prompts/*/history', async (route, req) => {
@@ -71,12 +78,12 @@ test.describe('0.8.5 — QP history drawer', () => {
     await dashboard.clickWorkflows();
     await workflows.selectKind('quickPrompts');
 
-    const toggles = page.locator('[data-testid="qp-history-toggle"]');
-    const count = await toggles.count();
-    test.skip(count === 0, 'No QPs in dev DB — skipping QP history drawer E2E');
+    // The seeded card, by `data-qp-id`: another prompt may come first.
+    const toggle = page.locator(`[data-qp-id="${qpId}"] [data-testid="qp-history-toggle"]`);
+    await expect(toggle, 'the seeded Quick Prompt must list a history toggle').toBeVisible();
 
-    // Open the drawer on the first QP card.
-    await toggles.first().click();
+    // Open the drawer on the seeded QP card.
+    await toggle.click();
     await expect(page.locator('[data-testid="qp-history-drawer"]')).toBeVisible({ timeout: 5_000 });
 
     // Both version cards rendered.
