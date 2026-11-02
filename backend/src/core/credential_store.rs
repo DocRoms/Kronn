@@ -582,6 +582,9 @@ pub async fn boot(
 
     apply_to_config(config, &merged);
     config.server.auth_locked = config.server.auth_token.is_none() && preserve.contains(&auth_key);
+    // What config.toml held that this build could not read, and the encrypted
+    // shelter keeps once the save below stops carrying credentials in clear.
+    crate::core::config::adopt_shelter(dir, &key, config);
     armed_map().insert(
         dir.to_path_buf(),
         Arc::new(Armed {
@@ -684,40 +687,61 @@ pub(crate) fn back_up_config_if_it_holds_secrets(
     Ok(Some(backup))
 }
 
-/// Move the encrypted config.toml backup from `from_hex` to `to_hex` when a key
-/// is retired; untouched when it is under another key or absent.
+/// The files encrypted with the instance key that a key change must follow:
+/// the config.toml backup, and the credentials of config.toml this build could
+/// not read.
+const KEY_BOUND_FILES: [&str; 2] = [
+    BACKUP_FILENAME,
+    crate::core::config_salvage::SHELTER_FILENAME,
+];
+
+/// Move the encrypted config.toml backup (and the preserved values) from
+/// `from_hex` to `to_hex` when a key is retired; untouched when under another
+/// key or absent.
 pub fn reencrypt_backup(dir: &Path, from_hex: &str, to_hex: &str) -> Result<bool> {
-    let path = dir.join(BACKUP_FILENAME);
+    let mut moved = false;
+    for name in KEY_BOUND_FILES {
+        moved |= reencrypt_file(dir, name, from_hex, to_hex)?;
+    }
+    Ok(moved)
+}
+
+fn reencrypt_file(dir: &Path, name: &str, from_hex: &str, to_hex: &str) -> Result<bool> {
+    let path = dir.join(name);
     let Ok(text) = read_backup(&path, from_hex) else {
         return Ok(false);
     };
     let to = crypto::parse_secret(to_hex).map_err(anyhow::Error::msg)?;
     let encrypted = crypto::encrypt(&text, &to).map_err(anyhow::Error::msg)?;
-    let tmp = dir.join(format!(".{BACKUP_FILENAME}.reencrypt.tmp"));
+    let tmp = dir.join(format!(".{name}.reencrypt.tmp"));
     crate::core::keyvault::write_private_atomic(&tmp, &path, encrypted.as_bytes())
-        .context("write config backup")?;
+        .with_context(|| format!("write {name}"))?;
     Ok(true)
 }
 
-/// Make the encrypted config.toml backup readable with `key_hex`: when it is
-/// under another candidate (a retirement that stopped half-way, an older key),
-/// re-encrypt it. Untouched when absent, already current, or under no
-/// candidate.
+/// Make the encrypted config.toml backup (and the preserved values) readable
+/// with `key_hex`: when one is under another candidate (a retirement that
+/// stopped half-way, an older key), re-encrypt it. Untouched when absent,
+/// already current, or under no candidate.
 pub fn reencrypt_backup_to(
     dir: &Path,
     candidates: &[(String, &'static str)],
     key_hex: &str,
 ) -> Result<bool> {
-    let path = dir.join(BACKUP_FILENAME);
-    if !path.exists() || read_backup(&path, key_hex).is_ok() {
-        return Ok(false);
-    }
-    for (from, _) in candidates {
-        if from != key_hex && read_backup(&path, from).is_ok() {
-            return reencrypt_backup(dir, from, key_hex);
+    let mut moved = false;
+    for name in KEY_BOUND_FILES {
+        let path = dir.join(name);
+        if !path.exists() || read_backup(&path, key_hex).is_ok() {
+            continue;
+        }
+        for (from, _) in candidates {
+            if from != key_hex && read_backup(&path, from).is_ok() {
+                moved |= reencrypt_file(dir, name, from, key_hex)?;
+                break;
+            }
         }
     }
-    Ok(false)
+    Ok(moved)
 }
 
 /// Decrypt a backup written by [`back_up_config_if_it_holds_secrets`].
