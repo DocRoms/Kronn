@@ -2677,6 +2677,7 @@ mod tests {
         fmt: crate::models::StepOutputFormat,
     ) -> crate::models::WorkflowStep {
         crate::models::WorkflowStep {
+            exec_approved_by_trust: None,
             id: None,
             name: name.into(),
             step_type: crate::models::StepType::default(),

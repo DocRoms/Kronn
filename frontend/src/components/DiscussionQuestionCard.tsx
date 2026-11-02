@@ -15,8 +15,11 @@ import {
 } from '../lib/discussionQuestions';
 import { useT } from '../lib/I18nContext';
 import { findFenceProblem } from '../lib/questionFence';
+import { settingsSectionPath } from '../lib/routes';
 import { userError } from '../lib/userError';
 import type { DiscussionQuestion, DiscussionQuestionAnswer } from '../types/generated';
+import { AppLink } from './AppLink';
+import { TRUST_SETTINGS_SECTION } from './TrustLevel';
 import './DiscussionQuestionCard.css';
 
 export interface DiscussionQuestionCardProps {
@@ -28,6 +31,9 @@ export interface DiscussionQuestionCardProps {
    *  identify the durable row the backend wrote when the message landed. */
   sourceMessageId?: string;
   fenceIndex?: number;
+  /** Opens a Settings section in this tab. Without it the link is a plain
+   *  address (a new tab, a copied link), which loads the app again. */
+  onOpenSettingsSection?: (sectionId: string) => void;
 }
 
 export function DiscussionQuestionCard({
@@ -35,6 +41,7 @@ export function DiscussionQuestionCard({
   source,
   sourceMessageId,
   fenceIndex,
+  onOpenSettingsSection,
 }: DiscussionQuestionCardProps) {
   const { questions, loading } = useDiscussionQuestions(discussionId);
   const question = sourceMessageId === undefined || fenceIndex === undefined
@@ -44,7 +51,15 @@ export function DiscussionQuestionCard({
         && candidate.fence_index === fenceIndex,
     ) ?? null;
 
-  if (question) return <QuestionBody discussionId={discussionId} question={question} />;
+  if (question) {
+    return (
+      <QuestionBody
+        discussionId={discussionId}
+        question={question}
+        onOpenSettingsSection={onOpenSettingsSection}
+      />
+    );
+  }
   // Still reading, or nothing was ever recorded. Either way the fence itself
   // is not worth showing as code: it is machine notation.
   return <QuestionPlaceholder loading={loading} source={source} />;
@@ -89,12 +104,17 @@ function QuestionPlaceholder({ loading, source }: { loading: boolean; source?: s
   );
 }
 
+/** KT-1492 — a privilege elevation card, posted by Kronn or by an agent: its key starts with `kronn-elevation-`. */
+const isElevationCard = (question: DiscussionQuestion) => question.key.startsWith('kronn-elevation-');
+
 function QuestionBody({
   discussionId,
   question,
+  onOpenSettingsSection,
 }: {
   discussionId: string;
   question: DiscussionQuestion;
+  onOpenSettingsSection?: (sectionId: string) => void;
 }) {
   const { t } = useT();
   const [selected, setSelected] = useState<string[]>([]);
@@ -247,6 +267,18 @@ function QuestionBody({
 
       <p className="disc-question-text">{question.question}</p>
       {question.context && <p className="disc-question-context">{question.context}</p>}
+      {isElevationCard(question) && (
+        <p className="disc-question-context disc-question-trust-hint" data-testid="disc-question-trust-hint">
+          {t('trust.cardHint')}{' '}
+          <AppLink
+            to={settingsSectionPath(TRUST_SETTINGS_SECTION)}
+            onNavigate={onOpenSettingsSection && (() => onOpenSettingsSection(TRUST_SETTINGS_SECTION))}
+            data-testid="disc-question-trust-link"
+          >
+            {t('trust.globalLink')}
+          </AppLink>
+        </p>
+      )}
       {question.td_errors && (
         <p
           className="disc-question-unread-warning disc-question-td-errors"

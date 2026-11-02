@@ -15,7 +15,7 @@ only judgement in that loop is reading a delivery against its DoD.
 
 At 0.14.3 no workflow step could delegate: `StepType` had no variant that
 drives a task execution (0.15.0 adds `DelegateSubtasks`).
-`[src: file: backend/src/models/workflows.rs:1369-1372#DelegateSubtasks]`
+`[src: file: backend/src/models/workflows.rs:1378-1381#DelegateSubtasks]`
 
 ## 2. What already exists (and is reused as is)
 
@@ -38,12 +38,12 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   the worker, and escalates (`Escalated`, principal solicited) when the budget
   is spent. `[src: file: backend/src/models/orchestration.rs:1903-1909#ReviewVerdict]`
   `[src: file: backend/src/models/orchestration.rs:1946-1969#ReviewDecisionV1]`
-  `[src: file: backend/src/api/orchestration.rs:7214-7221#decide_review]`
+  `[src: file: backend/src/api/orchestration.rs:7340-7347#decide_review]`
   `[src: file: backend/src/db/orchestration.rs:3806-3815#ReviewCheckpoint]`
   `[src: file: backend/src/db/orchestration.rs:3837-3849#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
-  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:12402-12414#reassign_execution]`
-  `[src: file: backend/src/api/orchestration.rs:15991-16000#human_review]`
+  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:12528-12540#reassign_execution]`
+  `[src: file: backend/src/api/orchestration.rs:16117-16126#human_review]`
 - **Integration saga.** `run_integration` integrates an `Approved` execution
   into `run.target_branch`, through the single worktree where that branch is
   checked out (or by moving the ref when no worktree has it), refusing a dirty
@@ -54,7 +54,7 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
   `[src: file: backend/src/workflows/steps.rs:2062-2096#evaluate_conditions]`
-  `[src: file: backend/src/models/workflows.rs:1039-1043#room_id]`
+  `[src: file: backend/src/models/workflows.rs:1045-1049#room_id]`
   `[src: file: backend/src/workflows/sub_workflow_step.rs:812-829#record_foreach_done]`
 
 So the step does not need a new orchestration engine: it needs a **mechanical
@@ -78,9 +78,9 @@ branch. Checked against the code:
   the discussion, or the room's native agent during its own running turn. The
   review obligation and the escalation are messages posted to the principal of
   that discussion.
-  `[src: file: backend/src/api/orchestration.rs:12879-12892#principal_is_authorized]`
-  `[src: file: backend/src/api/orchestration.rs:12953-12995#room_agent_is_authorized]`
-  `[src: file: backend/src/api/orchestration.rs:6155-6162#deliver_worker_manifest]`
+  `[src: file: backend/src/api/orchestration.rs:13005-13018#principal_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:13079-13121#room_agent_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:6281-6288#deliver_worker_manifest]`
   `[src: file: backend/src/db/orchestration.rs:3748-3755#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
   `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:730-733#build_branch_name]`
@@ -142,7 +142,7 @@ Behaviour:
    500 ms, capped at 170 s).
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:42-45#IDLE_POLL]`
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:279-289#idle]`
-   `[src: file: backend/src/api/orchestration.rs:14176-14214#wait_for_execution_status]`
+   `[src: file: backend/src/api/orchestration.rs:14302-14340#wait_for_execution_status]`
 4. On each `AwaitingReview`: start **one fresh reviewer session** with a
    compact context (task title, DoD, delivered diff against `base_sha`, the
    worker's manifest and the validation results), no room history and no MCP

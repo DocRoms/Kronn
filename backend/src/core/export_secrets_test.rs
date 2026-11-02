@@ -45,6 +45,7 @@ fn api(
 
 fn exec(args: &[&str]) -> QuickExec {
     QuickExec {
+        approved_by_trust: None,
         id: "qe-1".into(),
         name: "Deploy".into(),
         icon: String::new(),

@@ -2133,6 +2133,7 @@ pub(crate) enum WorkflowWriter {
 pub(crate) fn clear_human_approvals(steps: &mut [WorkflowStep]) {
     for step in steps {
         step.exec_unmodelled_args_approved = None;
+        step.exec_approved_by_trust = None;
     }
 }
 
@@ -2242,6 +2243,29 @@ pub(crate) fn keep_human_approvals(steps: &mut [WorkflowStep], stored: &[Workflo
     }
 }
 
+/// An update keeps the approval a level gave an unchanged step by copying it
+/// from the workflow as it was read, before the save. Checked on the write
+/// connection against the workflow as stored now: a mark the level took back
+/// meanwhile (or whose lines changed) is not written back. A human's own
+/// approval of those very lines, given since, is kept.
+fn keep_only_live_trust_marks(steps: &mut [WorkflowStep], current: &[WorkflowStep]) {
+    for step in steps
+        .iter_mut()
+        .filter(|step| step.exec_approved_by_trust == Some(true))
+    {
+        let stored = current.iter().find(|known| {
+            known.name == step.name && line_identities(known) == line_identities(step)
+        });
+        if stored.is_some_and(|known| known.exec_approved_by_trust == Some(true)) {
+            continue;
+        }
+        step.exec_approved_by_trust = None;
+        step.exec_unmodelled_args_approved = stored
+            .and_then(|known| known.exec_unmodelled_args_approved)
+            .filter(|approved| *approved);
+    }
+}
+
 /// Who last wrote each command line (KT-1017): an unchanged line keeps its
 /// writer, a changed or new one takes this save's, so a human edit
 /// re-attributes only the line it changed. Never read from the request. Only
@@ -2254,6 +2278,12 @@ pub(crate) fn mark_line_writers(
     for step in steps.iter_mut() {
         let known = stored.iter().find(|known| known.name == step.name);
         let known_lines = known.map(line_identities).unwrap_or_default();
+        // KT-1492: the "approved by a trust level" mark is the server's, never
+        // the request's: it survives only on the very lines a level approved.
+        step.exec_approved_by_trust = known
+            .filter(|known| line_identities(known) == line_identities(step))
+            .and_then(|known| known.exec_approved_by_trust)
+            .filter(|_| step.exec_unmodelled_args_approved == Some(true));
         let mut probe = step.clone();
         probe.exec_unmodelled_args_approved = None;
         probe.exec_agent_lines = line_identities(step)
@@ -2347,6 +2377,102 @@ pub(crate) fn clear_stale_approvals(steps: &mut [WorkflowStep]) {
     }
 }
 
+/// KT-1492 — under Trusted, the Exec steps an agent wrote whose run values
+/// would wait for a human are approved at once, each grant journalled. A step
+/// the level does not cover (Standard, an unreadable setting) keeps waiting.
+/// The workflow's own level, and the launch's room, are consulted.
+pub(crate) async fn approve_exec_steps_by_trust(
+    state: &AppState,
+    mut response: ApiResponse<Workflow>,
+    origin: &crate::db::trust::TrustOrigin,
+) -> ApiResponse<Workflow> {
+    let Some(workflow) = response.data.take() else {
+        return response;
+    };
+    fn waiting(step: &WorkflowStep) -> bool {
+        step.exec_unmodelled_args_approved != Some(true)
+            && !step.exec_agent_lines.is_empty()
+            && crate::core::inline_code::classify_step(step, false)
+                .iter()
+                .any(|line| line.agent_written && line.reason == "unmodelled_program")
+    }
+    let any_waiting = workflow
+        .steps
+        .iter()
+        .chain(&workflow.on_failure)
+        .any(waiting);
+    if !response.success || !any_waiting {
+        response.data = Some(workflow);
+        return response;
+    }
+    // The level is the launch's own (its rooms, or the run it belongs to): the
+    // workflow being edited lends nothing, so an agent in a room with no level
+    // that edits a Full workflow gets no approval from it.
+    //
+    // The level, the grant journal and the write of the steps are one unit on
+    // the one database connection, on the workflow as it is stored now: a level
+    // lowered meanwhile either comes first (nothing is approved) or after (it
+    // withdraws what this approved), and a concurrent edit is not overwritten
+    // by a copy loaded earlier.
+    let origin = origin.clone();
+    let workflow_id = workflow.id.clone();
+    let approved: Result<Option<Workflow>, anyhow::Error> = state
+        .db
+        .with_conn(move |conn| {
+            let Some(mut stored) = crate::db::workflows::get_workflow(conn, &workflow_id)? else {
+                return Ok(None);
+            };
+            let tx = conn.unchecked_transaction()?;
+            let mut changed = false;
+            let (workflow_name, project_id) = (stored.name.clone(), stored.project_id.clone());
+            for step in stored.steps.iter_mut().chain(stored.on_failure.iter_mut()) {
+                if !waiting(step) {
+                    continue;
+                }
+                let subject = format!(
+                    "Exec step \u{ab} {} \u{bb} of workflow \u{ab} {workflow_name} \u{bb}",
+                    step.name
+                );
+                let object = crate::db::trust::TrustObject::workflow_step(&workflow_id, &step.name);
+                let granted = crate::db::trust::grant(
+                    &tx,
+                    &origin,
+                    TrustApproval::ExecStepLine,
+                    &subject,
+                    project_id.as_deref(),
+                    Some(object),
+                )?;
+                if granted.is_some() {
+                    step.exec_unmodelled_args_approved = Some(true);
+                    step.exec_approved_by_trust = Some(true);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Ok(None);
+            }
+            crate::db::workflows::update_workflow_as_agent(&tx, &stored)?;
+            tx.commit()?;
+            Ok(Some(stored))
+        })
+        .await;
+    match approved {
+        Ok(Some(stored)) => {
+            response.data = Some(stored);
+            with_awaiting_notice(state, response).await
+        }
+        Ok(None) => {
+            response.data = Some(workflow);
+            response
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Exec steps approved by trust were not saved: they wait for a human");
+            response.data = Some(workflow);
+            response
+        }
+    }
+}
+
 impl WorkflowWriter {
     /// An agent wrote the request: it holds a bridge token, or the MCP bridge
     /// marked it (a host-launched CLI has no token; KT-1490).
@@ -2369,13 +2495,29 @@ pub async fn create(
     Json(req): Json<CreateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
     let label = agent_label(&state, &bridge, &marker).await;
-    create_as_labeled(
-        state,
-        req,
-        WorkflowWriter::from_caller(&bridge, &marker),
-        label,
-    )
-    .await
+    let writer = WorkflowWriter::from_caller(&bridge, &marker);
+    let Json(response) = create_as_labeled(state.clone(), req, writer, label).await;
+    Json(finish_agent_save(&state, response, &bridge).await)
+}
+
+/// The response of a bridge-token save with the Exec steps its trust level
+/// approves (KT-1492); a human's save is returned as it is.
+async fn finish_agent_save(
+    state: &AppState,
+    response: ApiResponse<Workflow>,
+    bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+) -> ApiResponse<Workflow> {
+    match bridge {
+        Some(axum::Extension(caller)) => {
+            approve_exec_steps_by_trust(
+                state,
+                response,
+                &crate::db::trust::TrustOrigin::from_caller(caller),
+            )
+            .await
+        }
+        None => response,
+    }
 }
 
 /// Who a bridge-token caller is, for the record of an automatic disable:
@@ -3006,14 +3148,9 @@ pub async fn update(
     Json(req): Json<UpdateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
     let label = agent_label(&state, &bridge, &marker).await;
-    update_as_labeled(
-        state,
-        id,
-        req,
-        WorkflowWriter::from_caller(&bridge, &marker),
-        label,
-    )
-    .await
+    let writer = WorkflowWriter::from_caller(&bridge, &marker);
+    let Json(response) = update_as_labeled(state.clone(), id, req, writer, label).await;
+    Json(finish_agent_save(&state, response, &bridge).await)
 }
 
 pub(crate) async fn update_as(
@@ -3551,14 +3688,21 @@ async fn update_written(
     match state
         .db
         .with_conn(move |conn| {
+            let mut w = w;
             // Checked on the write connection right before the UPDATE, so no
             // other save can land between the comparison and the write.
             if let Some(expected) = expected_revision {
                 match crate::db::workflows::written_revision(conn, &w.id)? {
-                    None => return Ok(Some(false)),
-                    Some(current) if current != expected => return Ok(None),
+                    None => return Ok((Some(false), w)),
+                    Some(current) if current != expected => return Ok((None, w)),
                     Some(_) => {}
                 }
+            }
+            // Same connection, same moment: a level approval this save would
+            // retain is re-read, never copied over one that was withdrawn.
+            if let Some(current) = crate::db::workflows::get_workflow(conn, &w.id)? {
+                keep_only_live_trust_marks(&mut w.steps, &current.steps);
+                keep_only_live_trust_marks(&mut w.on_failure, &current.on_failure);
             }
             let saved = if by_agent {
                 crate::db::workflows::update_workflow_as_agent(conn, &w)?
@@ -3568,19 +3712,21 @@ async fn update_written(
             if saved && clear_record {
                 crate::db::workflows::clear_auto_disabled(conn, &w.id)?;
             }
-            Ok(Some(saved))
+            Ok((Some(saved), w))
         })
         .await
     {
-        Ok(None) => Json(ApiResponse::err_coded(
+        Ok((None, _)) => Json(ApiResponse::err_coded(
             ApiErrorCode::Conflict,
             "The workflow changed since this edit read it; nothing was saved. \
              Read the step again and retry.",
         )),
-        Ok(Some(true)) => {
+        Ok((Some(true), written)) => {
             // The stored flag and retention may differ from this read (see
-            // `update_workflow_as_agent`).
+            // `update_workflow_as_agent`); the approvals are the ones written.
             let mut updated = updated;
+            updated.steps = written.steps;
+            updated.on_failure = written.on_failure;
             if by_agent {
                 let id = updated.id.clone();
                 if let Ok(Some(stored)) = state
@@ -3607,7 +3753,7 @@ async fn update_written(
         }
         // The workflow existed when we loaded it above but was deleted
         // concurrently before the UPDATE landed → 404, not a fake success.
-        Ok(Some(false)) => Json(ApiResponse::err_coded(
+        Ok((Some(false), _)) => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Workflow not found",
         )),
@@ -7163,6 +7309,7 @@ pub async fn suggestions(
                 .step_prompts
                 .iter()
                 .map(|(step_name, prompt, structured)| WorkflowStep {
+                    exec_approved_by_trust: None,
                     id: None,
                     name: step_name.to_string(),
                     step_type: StepType::Agent,
@@ -8145,6 +8292,7 @@ mod tests {
 
     fn mk_step(name: &str, kind: StepType) -> WorkflowStep {
         WorkflowStep {
+            exec_approved_by_trust: None,
             id: None,
             name: name.into(),
             step_type: kind,

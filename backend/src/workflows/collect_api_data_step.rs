@@ -70,6 +70,7 @@ pub async fn execute_collect_api_data_step(
             )
             .then_some(true),
         );
+        let step_approved_by_trust = step.exec_approved_by_trust;
         let source_id = if source.quick_exec.is_some() {
             None
         } else if !source.quick_exec_id.is_empty() {
@@ -208,6 +209,7 @@ pub async fn execute_collect_api_data_step(
                         exec.timeout_secs,
                         exec.output_format,
                         step_approved,
+                        step_approved_by_trust,
                     )
                 })
                 .or_else(|| {
@@ -218,6 +220,7 @@ pub async fn execute_collect_api_data_step(
                             Some(exec.timeout_secs),
                             exec.output_format,
                             (exec.unmodelled_args_approved, exec.agent_written),
+                            exec.approved_by_trust,
                         )
                     })
                 });
@@ -228,19 +231,18 @@ pub async fn execute_collect_api_data_step(
                 timeout_secs,
                 output_format,
                 (approved, agent_written),
+                approved_by_trust,
             )) = exec_config
             {
                 let quick_exec_identity = Some((command.clone(), args.clone()));
-                let child_step = WorkflowStep {
-                    name: source.alias.clone(),
-                    step_type: StepType::Exec,
-                    exec_command: Some(command),
-                    exec_args: args,
-                    exec_timeout_secs: timeout_secs,
-                    exec_unmodelled_args_approved: approved,
-                    exec_agent_written: agent_written,
-                    ..WorkflowStep::default()
-                };
+                let child_step = exec_child_step(
+                    &source.alias,
+                    command,
+                    args,
+                    timeout_secs,
+                    (approved, agent_written),
+                    approved_by_trust,
+                );
                 (
                     super::exec_step::execute_exec_step_with_output_limit(
                         &child_step,
@@ -348,6 +350,30 @@ pub async fn execute_collect_api_data_step(
     results.sort_by_key(|result| result.index);
 
     finish(step, started, results)
+}
+
+/// The Exec step a command source runs as. KT-1492: an approval a trust level
+/// gave (the step's, for an inline source; the Quick Exec's, for a saved one)
+/// keeps the level's vault sandbox on the child, so the marker is carried over.
+fn exec_child_step(
+    alias: &str,
+    command: String,
+    args: Vec<String>,
+    timeout_secs: Option<u32>,
+    (approved, agent_written): (Option<bool>, Option<bool>),
+    approved_by_trust: Option<bool>,
+) -> WorkflowStep {
+    WorkflowStep {
+        name: alias.to_string(),
+        step_type: StepType::Exec,
+        exec_command: Some(command),
+        exec_args: args,
+        exec_timeout_secs: timeout_secs,
+        exec_unmodelled_args_approved: approved,
+        exec_agent_written: agent_written,
+        exec_approved_by_trust: approved_by_trust,
+        ..WorkflowStep::default()
+    }
 }
 
 fn validate_sources(config: &crate::models::CollectApiDataConfig) -> Result<(), String> {
@@ -980,6 +1006,7 @@ mod tests {
             crate::db::quick_execs::insert_quick_exec(
                 conn,
                 &crate::models::QuickExec {
+                    approved_by_trust: None,
                     id: "qe-p2".into(),
                     name: "echo".into(),
                     icon: String::new(),
@@ -1095,6 +1122,93 @@ mod tests {
         assert!(error.contains("expr"), "{refused}");
         let approved = collect_one(source, Some(true)).await;
         assert_eq!(approved["data"]["sources"]["greet"], "hello", "{approved}");
+    }
+
+    /// KT-1492 — an inline source a trust level approved runs under the level's
+    /// vault sandbox, like an Exec step: it cannot read Kronn's key, where the
+    /// same source approved by a human can. Applied for real where the host
+    /// allows it.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_level_approved_inline_source_cannot_read_the_encryption_key() {
+        if let Err(reason) = crate::core::task_worker_sandbox::Mechanism::usable_on_host() {
+            eprintln!("skipped: no sandbox can be applied here ({reason})");
+            return;
+        }
+        let data = tempfile::tempdir().unwrap();
+        let key = data.path().join("encryption_key");
+        std::fs::write(&key, "TOPSECRET").unwrap();
+        std::env::set_var("KRONN_DATA_DIR", data.path());
+        let mut source = exec_source("peek", CollectQuickExecOutputFormat::Text);
+        let exec = source.quick_exec.as_mut().unwrap();
+        exec.command = "cat".into();
+        exec.args = vec![key.to_str().unwrap().into()];
+
+        let collect = |by_trust: bool| {
+            let step = WorkflowStep {
+                name: "collect".into(),
+                step_type: StepType::CollectApiData,
+                collect_api_data: Some(CollectApiDataConfig {
+                    sources: vec![source.clone()],
+                    concurrent_limit: None,
+                }),
+                exec_unmodelled_args_approved: Some(true),
+                exec_approved_by_trust: by_trust.then_some(true),
+                ..WorkflowStep::default()
+            };
+            async move {
+                execute_collect_api_data_step(
+                    &step,
+                    None,
+                    &collect_state(),
+                    &TemplateContext::new(),
+                    ApiCallLogContext::workflow(),
+                    &["cat".to_string()],
+                    "",
+                    &crate::core::api_access::ApiCaller::Human,
+                )
+                .await
+                .result
+                .output
+            }
+        };
+        let human = collect(false).await;
+        assert!(human.contains("TOPSECRET"), "control: {human}");
+        let by_level = collect(true).await;
+        assert!(
+            !by_level.contains("TOPSECRET"),
+            "the sandbox leaked: {by_level}"
+        );
+    }
+
+    /// KT-1492 — the child step of a source keeps the level's marker, so
+    /// `confined_for_level` wraps it in the vault sandbox. Needs no usable
+    /// sandbox: the launcher is only named, not applied.
+    #[test]
+    #[serial_test::serial]
+    fn a_level_approved_source_child_is_wrapped_in_the_sandbox_launcher() {
+        let args = vec!["x".to_string()];
+        let child = |by_trust| {
+            exec_child_step(
+                "peek",
+                "cat".into(),
+                args.clone(),
+                Some(5),
+                (Some(true), None),
+                by_trust,
+            )
+        };
+        let (program, _) = super::super::exec_step::confined_for_level(&child(None), "cat", &args);
+        assert_eq!(program, "cat", "a human-approved source is not wrapped");
+        let (program, launch) =
+            super::super::exec_step::confined_for_level(&child(Some(true)), "cat", &args);
+        assert_eq!(
+            program,
+            crate::core::task_worker_sandbox::Mechanism::of_host()
+                .unwrap()
+                .launcher()
+        );
+        assert_eq!(&launch[launch.len() - 2..], ["cat", "x"]);
     }
 
     /// A source variable cannot take a built-in's name.

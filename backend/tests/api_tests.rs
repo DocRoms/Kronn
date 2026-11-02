@@ -814,6 +814,83 @@ async fn an_approved_quick_exec_runs_and_an_unapproved_one_is_refused() {
     assert!(status.to_lowercase().contains("preflight"), "{status}");
 }
 
+/// KT-1492 — a line a trust level approved runs under the level's sandbox
+/// through the real route: it cannot read the installation key, while the same
+/// line approved by a human (the control) can. Self-skips only on a host that
+/// cannot apply a sandbox.
+#[tokio::test]
+#[serial]
+async fn a_level_approved_quick_exec_cannot_read_the_encryption_key_through_the_run_route() {
+    if let Err(reason) = kronn::core::trust_sandbox::host_sandbox() {
+        eprintln!("skipped: no sandbox can be applied here ({reason})");
+        return;
+    }
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let previous = kronn::core::child_env::var_os("KRONN_DATA_DIR");
+    let data = tempfile::tempdir().unwrap();
+    let key = data.path().join("encryption_key");
+    std::fs::write(&key, "LEVEL-SECRET-KEY").unwrap();
+    kronn::core::child_env::set_var("KRONN_DATA_DIR", data.path());
+    kronn::core::trust_sandbox::set_protect_vault(true);
+
+    let now = chrono::Utc::now();
+    for (id, by_trust) in [("by-human", false), ("by-level", true)] {
+        let item = kronn::models::QuickExec {
+            id: id.into(),
+            name: id.into(),
+            icon: "x".into(),
+            description: String::new(),
+            project_id: None,
+            command: "cat".into(),
+            args: vec![key.to_string_lossy().into_owned()],
+            timeout_secs: 10,
+            output_format: kronn::models::CollectQuickExecOutputFormat::Text,
+            variables: vec![],
+            pinned: false,
+            unmodelled_args_approved: Some(true),
+            agent_written: None,
+            approved_by_trust: by_trust.then_some(true),
+            created_at: now,
+            updated_at: now,
+        };
+        state
+            .db
+            .with_conn(move |conn| kronn::db::quick_execs::insert_quick_exec(conn, &item))
+            .await
+            .unwrap();
+    }
+
+    let human = post_json(
+        app.clone(),
+        "/api/quick-execs/by-human/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await
+    .1;
+    let level = post_json(
+        app,
+        "/api/quick-execs/by-level/run",
+        serde_json::json!({"variables": {}}),
+    )
+    .await
+    .1;
+    match previous {
+        Some(previous) => kronn::core::child_env::set_var("KRONN_DATA_DIR", previous),
+        None => kronn::core::child_env::remove_var("KRONN_DATA_DIR"),
+    }
+
+    assert!(
+        human.to_string().contains("LEVEL-SECRET-KEY"),
+        "control: a human-approved line reads the file: {human}"
+    );
+    assert_eq!(level["data"]["success"], false, "{level}");
+    assert!(
+        !level.to_string().contains("LEVEL-SECRET-KEY"),
+        "the key reached the output of a level-approved line: {level}"
+    );
+}
+
 #[tokio::test]
 async fn quick_exec_failures_keep_measured_process_diagnostics_on_reload() {
     let state = test_state();
@@ -2058,6 +2135,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
             };
             kronn::db::quick_apis::insert_quick_api(connection, &quick_api)?;
             let quick_exec = kronn::models::QuickExec {
+                approved_by_trust: None,
                 id: "qe-portable".into(),
                 pinned: false,
                 name: "Portable CLI".into(),
@@ -4239,6 +4317,7 @@ async fn project_repository_resources_expose_uses_and_used_by_with_missing_refer
                 kronn::db::quick_execs::insert_quick_exec(
                     conn,
                     &kronn::models::QuickExec {
+                        approved_by_trust: None,
                         id: "qe-lint".into(),
                         name: "Lint".into(),
                         icon: "terminal".into(),
@@ -4323,6 +4402,7 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
                 kronn::db::quick_execs::insert_quick_exec(
                     conn,
                     &kronn::models::QuickExec {
+                        approved_by_trust: None,
                         id: "qe-portable".into(),
                         name: "Deploy".into(),
                         icon: "terminal".into(),
@@ -29874,6 +29954,7 @@ async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
             kronn::db::quick_execs::insert_quick_exec(
                 conn,
                 &kronn::models::QuickExec {
+                    approved_by_trust: None,
                     id: "qe-legacy".into(),
                     name: "Legacy".into(),
                     icon: "⌘".into(),

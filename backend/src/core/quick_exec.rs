@@ -12,7 +12,7 @@
 
 use crate::core::cmd::async_cmd;
 use crate::core::task_worker_env::ProbeCommand;
-use crate::core::task_worker_sandbox::Confinement;
+use crate::core::task_worker_sandbox::CommandConfinement;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -507,11 +507,12 @@ enum Outcome {
 /// The process a validated spec starts, before stdio: the resolved binary,
 /// its argv and cwd, and a built environment (KT-1006). Nothing is inherited.
 ///
-/// With a [`Confinement`] (KT-1268) the same process runs under the lane's OS
-/// sandbox, started the way the lane's first build is.
+/// With a [`CommandConfinement`] (KT-1268: the lane's OS sandbox; KT-1492: the
+/// sandbox of what a trust level grants) the same process runs under it,
+/// started the way the lane's first build is.
 fn build_command(
     spec: &ValidatedSpec,
-    confinement: Option<&Confinement>,
+    confinement: Option<&dyn CommandConfinement>,
 ) -> tokio::process::Command {
     let route = crate::core::child_env::ChildRoute::QuickExec;
     match confinement {
@@ -557,13 +558,13 @@ pub async fn run_confined(
     spec: &ValidatedSpec,
     artifact_dir: Option<&Path>,
     cancel: &CancellationToken,
-    confinement: &Confinement,
+    confinement: &dyn CommandConfinement,
 ) -> Result<QuickExecResult> {
     run_with(spec, artifact_dir, cancel, Some(confinement)).await
 }
 
 /// SIGKILL to the whole process group `leader` leads. Only for a child that
-/// was spawned as its own group's leader ([`Confinement::command`] puts it in a
+/// was spawned as its own group's leader ([`CommandConfinement::command`] puts it in a
 /// session of its own): the id of any other process may name an unrelated group.
 #[cfg(unix)]
 pub(crate) fn kill_process_group(leader: u32) {
@@ -577,7 +578,7 @@ async fn run_with(
     spec: &ValidatedSpec,
     artifact_dir: Option<&Path>,
     cancel: &CancellationToken,
-    confinement: Option<&Confinement>,
+    confinement: Option<&dyn CommandConfinement>,
 ) -> Result<QuickExecResult> {
     let started = std::time::Instant::now();
 

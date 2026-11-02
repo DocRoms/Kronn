@@ -66,6 +66,7 @@ pub mod run_state;
 pub mod shared_runs;
 pub mod stored_credentials;
 pub mod task_boards;
+pub mod trust;
 pub mod ui_preferences;
 pub mod worker_deliveries;
 pub mod worker_offers;

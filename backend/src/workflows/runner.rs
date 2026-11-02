@@ -5200,6 +5200,7 @@ mod tests {
 
     fn fake_step(name: &str) -> crate::models::WorkflowStep {
         crate::models::WorkflowStep {
+            exec_approved_by_trust: None,
             id: None,
             name: name.into(),
             step_type: crate::models::StepType::Agent,
@@ -5555,6 +5556,7 @@ mod tests {
 
     fn mk_step_for_snapshot(kind: StepType) -> WorkflowStep {
         WorkflowStep {
+            exec_approved_by_trust: None,
             id: None,
             name: "s".into(),
             step_type: kind,

@@ -2707,6 +2707,7 @@ mod tests {
         // duplicated here because it's `fn` private in the sibling module
         // and we want this test file standalone.
         WorkflowStep {
+            exec_approved_by_trust: None,
             id: None,
             name: "t".into(),
             step_type: crate::models::StepType::Agent,

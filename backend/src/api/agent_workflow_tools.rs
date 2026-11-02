@@ -182,6 +182,12 @@ impl KronnToolExecutor {
                     crate::api::workflows::WorkflowWriter::Agent,
                 )
                 .await;
+                let response = crate::api::workflows::approve_exec_steps_by_trust(
+                    &self.state,
+                    response,
+                    &self.trust_origin(),
+                )
+                .await;
                 unwrap_api_noticed(call, response)
             }
             "workflow_get" | "workflow_update" => {
@@ -227,6 +233,12 @@ impl KronnToolExecutor {
                     saved.id,
                     request,
                     crate::api::workflows::WorkflowWriter::Agent,
+                )
+                .await;
+                let response = crate::api::workflows::approve_exec_steps_by_trust(
+                    &self.state,
+                    response,
+                    &self.trust_origin(),
                 )
                 .await;
                 unwrap_api_noticed(call, response)

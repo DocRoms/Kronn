@@ -20,6 +20,7 @@ import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 import { DiscussionScopeChip } from './DiscussionScope';
+import { TrustBadge } from './TrustLevel';
 import { DiscInviteButton } from './DiscInviteButton';
 import { DiscussionIdPill } from './DiscussionIdPill';
 import { DetailHeaderShell } from './DetailHeaderShell';
@@ -366,6 +367,8 @@ export function ChatHeader({
           onOpen={onOpenDetails}
           t={t}
         />
+        {/* KT-1492 — never folded away: the trust level in force for this room. */}
+        <TrustBadge target={{ scope: 'room', id: discussion.id }} />
       </>}
       // Before the pair, same baseline: « Détails » stays the rightmost control.
       status={<LearningsBadge t={t} toast={toast} />}

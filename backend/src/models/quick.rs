@@ -627,6 +627,15 @@ pub struct QuickExec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub agent_written: Option<bool>,
+    /// KT-1492 — the approval above came from a trust level, not from a human:
+    /// the line runs under the level's OS sandbox, and lowering the level
+    /// withdraws the approval. Set by the server only. It is (de)serialized
+    /// because an export carries and seals it, so every route that takes a
+    /// `QuickExec` from outside (an unsealed import, a bundle, a create or an
+    /// update) overwrites it; a request body never decides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub approved_by_trust: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -355,6 +355,7 @@ mod tests {
 
     fn make_step(config: NotifyConfig) -> WorkflowStep {
         WorkflowStep {
+            exec_approved_by_trust: None,
             id: None,
             name: "notify".into(),
             step_type: StepType::Notify,

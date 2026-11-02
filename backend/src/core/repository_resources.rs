@@ -2120,6 +2120,7 @@ mod tests {
 
     fn sample_exec(secret: &str) -> QuickExec {
         QuickExec {
+            approved_by_trust: None,
             id: "qe-1".into(),
             name: "Deploy".into(),
             icon: "terminal".into(),
