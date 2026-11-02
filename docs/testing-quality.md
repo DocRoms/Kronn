@@ -311,7 +311,7 @@ Ordinary jobs in the CI workflow have a 30-minute technical timeout; the
 on `main`, save its cache; verified hot runs stay subject to the independent
 10-minute SLO.
 The E2E job (a dev-profile backend build) and the release build have 45 minutes.
-The macOS portability job has 100 minutes: its lib-test rebuild took
+The macOS portability job has 150 minutes: its lib-test rebuild took
 29m13s in [run 36912793272](https://github.com/DocRoms/Kronn/actions/runs/36912793272/job/110539336655),
 then the first suite passed as the former 30-minute limit cancelled the job,
 leaving the maintenance and durable-cleanup suites unexecuted; a later cold
@@ -325,7 +325,7 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:377#timeout-minutes] [src: file: .github/workflows/ci-test.yml:736#timeout-minutes] [src: file: .github/workflows/ci-build.yml:213-217#timeout-minutes] [src: file: .github/workflows/ci-build.yml:298#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:85#timeout-minutes] [src: file: .github/workflows/ci-test.yml:377#timeout-minutes] [src: file: .github/workflows/ci-test.yml:736#timeout-minutes] [src: file: .github/workflows/ci-build.yml:224-228#timeout-minutes] [src: file: .github/workflows/ci-build.yml:309#timeout-minutes]
 [src: file: .github/workflows/ci-test.yml:968-1004#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
 
 ## Test placement
