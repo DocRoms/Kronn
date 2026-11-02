@@ -15,7 +15,7 @@ green. Bats 1.13 reported the run as "Executed 427 instead of expected 431"
 with no `not ok` lines for them; run with `--filter`, the same tests report
 the real assertion failure.
 [src: url: https://github.com/DocRoms/Kronn/actions/runs/38716955660/job/116407733631]
-[src: file: tests/bats/service_update.bats:308-403]
+[src: file: tests/bats/service_update.bats:334-429]
 
 Try the GNU form first: `stat -c` on BSD/macOS fails without printing anything,
 so `stat -c %Y FILE 2>/dev/null || stat -f %m FILE 2>/dev/null` is clean on both.
