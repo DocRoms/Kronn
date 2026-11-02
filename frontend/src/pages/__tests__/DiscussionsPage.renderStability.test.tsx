@@ -163,7 +163,7 @@ vi.mock('../../lib/api', () => ({
       later: [],
       completed_active: 0,
       total_active: 0,
-      stats: { ready: 0, blocked: 0, in_progress: 0, ideas: 0, done: 0, later: 0 },
+      stats: { ready: 0, blocked: 0, in_progress: 0, awaiting_merge: 0, ideas: 0, done: 0, later: 0 },
     }),
     proposals: vi.fn().mockResolvedValue({
       proposals: [],

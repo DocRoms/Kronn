@@ -440,3 +440,145 @@ fn gh_auth_token_answers_from_its_own_login_only() {
     let command = probe::with_secret_parent("/usr/bin", "/home/u", super::gh_auth_token_command);
     probe::assert_built_without_secrets(command.as_std(), "/usr/bin", &[]);
 }
+
+/// KT-1519: a task claims a GitHub item only through its `github-N` tag; a link
+/// is a reference, and only a pull-request link to this repository is even a
+/// candidate.
+#[test]
+fn a_task_claims_its_issue_by_tag_and_only_candidates_linked_pull_requests() {
+    let tags = [
+        "github-12",
+        "GitHub-7",
+        "github-",
+        "github-x",
+        "area:ui",
+        "é",
+    ]
+    .map(String::from)
+    .to_vec();
+    assert_eq!(tagged_work_item_numbers(&tags), vec![7, 12]);
+    assert!(tagged_work_item_numbers(&[]).is_empty());
+
+    let links = [
+        "https://github.com/Octo/Repo/issues/30",
+        "https://github.com/octo/repo/pull/12/files",
+        "https://github.com/octo/other/pull/99",
+        "https://github.com/octo/repo/actions/runs/5",
+        "https://example.com/octo/repo/pull/8",
+    ]
+    .map(String::from)
+    .to_vec();
+    assert_eq!(linked_pull_numbers("octo/repo", &links), vec![12]);
+    assert!(linked_pull_numbers("octo/repo", &[]).is_empty());
+}
+
+/// KT-1519: a linked pull request closes a task only when it was merged from the
+/// task's own branch into the default branch; an earlier merged pull request it
+/// merely references, one merged into a parent campaign branch or from a fork, an
+/// unmerged one and an answer GitHub does not give do not.
+#[tokio::test]
+async fn a_linked_pull_request_lands_the_task_only_from_its_own_branch() {
+    let server = MockServer::start().await;
+    let pull = |merged: bool, head: &str, base: &str, head_repo: serde_json::Value| {
+        serde_json::json!({
+            "merged": merged,
+            "head": {"ref": head, "repo": head_repo},
+            "base": {"ref": base,
+                     "repo": {"full_name": "octo/repo", "default_branch": "main"}},
+        })
+    };
+    let own = || serde_json::json!({"full_name": "octo/repo"});
+    for (number, body) in [
+        (1, pull(true, "autocode/kt-7", "main", own())),
+        (2, pull(true, "autocode/kt-1", "main", own())),
+        (3, pull(false, "autocode/kt-7", "main", own())),
+        (5, pull(true, "autocode/kt-7", "autocode/campaign-1", own())),
+        (
+            6,
+            pull(
+                true,
+                "autocode/kt-7",
+                "main",
+                serde_json::json!({"full_name": "stranger/repo"}),
+            ),
+        ),
+        (
+            7,
+            pull(true, "autocode/kt-7", "main", serde_json::Value::Null),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/octo/repo/pulls/{number}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+    }
+    let base = server.uri();
+    let landed = |number| {
+        let base = base.clone();
+        async move { pull_request_landed(&base, "token", "octo/repo", number, "autocode/kt-7").await }
+    };
+    assert_eq!(landed(1).await, Some(true));
+    assert_eq!(landed(2).await, Some(false), "someone else's branch");
+    assert_eq!(landed(3).await, Some(false), "not merged");
+    assert_eq!(landed(4).await, None, "GitHub does not know it");
+    assert_eq!(
+        landed(5).await,
+        Some(false),
+        "merged into a campaign branch, not the default branch"
+    );
+    assert_eq!(landed(6).await, Some(false), "same-named branch of a fork");
+    assert_eq!(
+        landed(7).await,
+        Some(true),
+        "deleted fork: head repo unknown"
+    );
+}
+
+/// KT-1519: a merged pull request or a closed issue has landed; an open one, a
+/// pull request closed without a merge, an issue closed as not planned and an
+/// answer GitHub does not give have not.
+#[tokio::test]
+async fn github_says_whether_an_item_landed() {
+    let server = MockServer::start().await;
+    for (number, body) in [
+        (1, serde_json::json!({"state": "open"})),
+        (2, serde_json::json!({"state": "closed"})),
+        (
+            3,
+            serde_json::json!({"state": "closed", "state_reason": "not_planned"}),
+        ),
+        (
+            4,
+            serde_json::json!({"state": "closed", "pull_request": {"merged_at": null}}),
+        ),
+        (
+            5,
+            serde_json::json!({"state": "closed",
+                "pull_request": {"merged_at": "2026-10-30T10:00:00Z"}}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/octo/repo/issues/{number}")))
+            .and(header("authorization", "Bearer token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/repos/octo/repo/issues/6"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let base = server.uri();
+    let landed = |number| {
+        let base = base.clone();
+        async move { work_item_landed(&base, "token", "octo/repo", number).await }
+    };
+    assert_eq!(landed(1).await, Some(false));
+    assert_eq!(landed(2).await, Some(true));
+    assert_eq!(landed(3).await, Some(false));
+    assert_eq!(landed(4).await, Some(false));
+    assert_eq!(landed(5).await, Some(true));
+    assert_eq!(landed(6).await, None);
+}

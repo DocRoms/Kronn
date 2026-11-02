@@ -181,6 +181,49 @@ fn the_profile_is_read_from_the_default_branch_never_from_head_or_the_working_tr
     );
 }
 
+/// KT-1519: only the default branch completes a task; a campaign branch does not.
+#[test]
+fn only_the_default_branch_is_the_default_branch() {
+    let repo = repo_with_profile(None);
+    git(repo.path(), &["branch", "autocode/kt-1495"]);
+    assert!(is_default_branch(repo.path(), "main"));
+    assert!(is_default_branch(repo.path(), "refs/heads/main"));
+    assert!(!is_default_branch(repo.path(), "autocode/kt-1495"));
+}
+
+/// KT-1519: with no default branch there is no other branch to tell apart from
+/// it, so a task integrated there is not left waiting for a merge that has no
+/// target.
+#[test]
+fn without_a_default_branch_every_branch_is_the_default_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "trunk"]);
+    assert!(default_branch_ref(dir.path()).is_none());
+    assert!(default_branch_refs(dir.path()).is_empty());
+    assert!(is_default_branch(dir.path(), "trunk"));
+    assert!(is_default_branch(dir.path(), "autocode/kt-1495"));
+}
+
+/// KT-1519: a merge on GitHub moves only the fetched `origin/<default>`; both
+/// refs that hold the default branch are reported, the local one first.
+#[test]
+fn the_default_branch_is_held_by_its_local_and_its_fetched_ref() {
+    let repo = repo_with_profile(None);
+    assert_eq!(default_branch_refs(repo.path()), ["refs/heads/main"]);
+    git(
+        repo.path(),
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+    assert_eq!(
+        default_branch_refs(repo.path()),
+        ["refs/heads/main", "refs/remotes/origin/main"]
+    );
+    assert_eq!(
+        default_branch_ref(repo.path()).as_deref(),
+        Some("refs/heads/main")
+    );
+}
+
 #[test]
 fn origin_head_names_the_default_branch_and_its_remote_ref_stands_in() {
     let upstream = repo_with_profile(Some(EXAMPLE));

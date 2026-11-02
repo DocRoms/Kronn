@@ -83,11 +83,11 @@ async fn discussion_monitor_is_bounded_read_only_and_isolates_missing_rooms() {
     assert_eq!(preview["plan"], expected_plan);
     assert_eq!(
         preview["plan"],
-        serde_json::json!({"ready":2,"blocked":10,"in_progress":2,"ideas":2,"done":4,"later":20})
+        serde_json::json!({"ready":2,"blocked":10,"in_progress":2,"ideas":2,"done":4,"later":20,"awaiting_merge":0})
     );
     assert_eq!(
         items[2]["preview"]["plan"],
-        serde_json::json!({"ready":0,"blocked":0,"in_progress":0,"ideas":0,"done":0,"later":0})
+        serde_json::json!({"ready":0,"blocked":0,"in_progress":0,"ideas":0,"done":0,"later":0,"awaiting_merge":0})
     );
     assert_eq!(preview["agent_running"], true);
     assert_eq!(preview["progress_phase"], "tool_activity");

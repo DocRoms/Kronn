@@ -17,6 +17,7 @@ import { useT } from '../lib/I18nContext';
 import type { PlanningTaskSummary } from '../types/generated';
 import { CopyIdPill } from './CopyIdPill';
 import './ProjectTasksPanel.css';
+import { awaitingMergeTitle, shortBranch } from '../lib/awaitingMerge';
 
 interface ProjectTasksPanelProps {
   projectId: string;
@@ -143,8 +144,14 @@ export function ProjectTasksPanel({
             label={task.reference}
             title={t('planning.copyTaskId', task.reference)}
           />
-          <span className="planning-status" data-status={task.status}>
-            {t(`planning.status.${task.status}`)}
+          <span
+            className="planning-status"
+            data-status={task.awaiting_merge ? 'awaiting_merge' : task.status}
+            title={task.awaiting_merge ? awaitingMergeTitle(task.awaiting_merge) : undefined}
+          >
+            {task.awaiting_merge
+              ? t('planning.status.awaitingMerge', shortBranch(task.awaiting_merge.branch))
+              : t(`planning.status.${task.status}`)}
           </span>
           <span className="project-task-priority" data-priority={task.priority}>
             {t(`planning.priority.${task.priority}`)}

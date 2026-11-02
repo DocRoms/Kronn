@@ -11,7 +11,7 @@ use crate::models::{
     CreatePlanningTaskLink, CreatePlanningTaskRequest, DiscussionPlan,
     LinkPlanningDiscussionRequest, MessageTargetKind, ModelTier, PlanningActor, PlanningActorKind,
     PlanningAssignee, PlanningAssigneeInput, PlanningAssigneeRole, PlanningAssigneeSource,
-    PlanningDependencySummary, PlanningDiscussionRelation, PlanningDodItem,
+    PlanningAwaitingMerge, PlanningDependencySummary, PlanningDiscussionRelation, PlanningDodItem,
     PlanningDodVerification, PlanningLiveCheck, PlanningPlacement, PlanningPlanStats,
     PlanningTaskChange, PlanningTaskDetail, PlanningTaskEvent, PlanningTaskLink,
     PlanningTaskListQuery, PlanningTaskListResponse, PlanningTaskPriority, PlanningTaskStatus,
@@ -1209,6 +1209,32 @@ fn actor_assignee(
     }))
 }
 
+/// KT-1519 — the integrated-but-unmerged marker of the tasks `scope` selects
+/// (a fixed SQL predicate over `t` taking the single `?1` bind).
+fn load_awaiting_merge(
+    conn: &Connection,
+    scope: &str,
+    bind: &str,
+) -> Result<std::collections::HashMap<String, PlanningAwaitingMerge>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT t.id, t.awaiting_merge_branch, COALESCE(t.awaiting_merge_sha, '')
+           FROM planning_tasks t
+          WHERE {scope} AND t.status = 'in_progress' AND t.awaiting_merge_branch IS NOT NULL"
+    ))?;
+    let rows = statement
+        .query_map([bind], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                PlanningAwaitingMerge {
+                    branch: row.get(1)?,
+                    sha: row.get(2)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+    Ok(rows)
+}
+
 /// KT-1254 — the unticked post-integration DoD items, grouped by task. `scope`
 /// is a fixed SQL predicate over `t` (the task) taking the single `?1` bind.
 fn load_live_checks(
@@ -1254,7 +1280,9 @@ fn get_summary(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskSu
                      FROM planning_task_blockers b
                      JOIN planning_tasks blocker ON blocker.id = b.blocker_task_id
                      WHERE b.task_id = t.id
-                       AND blocker.status NOT IN ('done', 'archived'))
+                       AND blocker.status NOT IN ('done', 'archived')
+                       AND NOT (blocker.status = 'in_progress'
+                       AND blocker.awaiting_merge_branch IS NOT NULL))
              FROM planning_tasks t
              LEFT JOIN planning_tasks p ON p.id = t.parent_id
              LEFT JOIN planning_tasks c ON c.parent_id = t.id
@@ -1310,9 +1338,11 @@ fn get_summary(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskSu
     let live_checks = load_live_checks(conn, "t.id = ?1", &id)?
         .remove(&id)
         .unwrap_or_default();
+    let awaiting_merge = load_awaiting_merge(conn, "t.id = ?1", &id)?.remove(&id);
     Ok(Some(PlanningTaskSummary {
         assignees,
         live_checks,
+        awaiting_merge,
         project_ids: load_string_list(
             conn,
             "SELECT project_id
@@ -1899,7 +1929,11 @@ pub fn update_task(
     transaction.execute(
         "UPDATE planning_tasks
          SET parent_id = ?2, title = ?3, description = ?4, status = ?5,
-             priority = ?6, rank = ?7, blocked_reason = ?8, updated_at = ?9
+             priority = ?6, rank = ?7, blocked_reason = ?8, updated_at = ?9,
+             awaiting_merge_branch = CASE WHEN ?5 = 'in_progress'
+                 THEN awaiting_merge_branch END,
+             awaiting_merge_sha = CASE WHEN ?5 = 'in_progress'
+                 THEN awaiting_merge_sha END
          WHERE id = ?1",
         params![
             task_id,
@@ -2015,7 +2049,9 @@ pub fn mark_task_in_progress_within_tx(
            FROM planning_task_blockers b
            JOIN planning_tasks blocker ON blocker.id = b.blocker_task_id
           WHERE b.task_id = ?1
-            AND blocker.status NOT IN ('done', 'archived')",
+            AND blocker.status NOT IN ('done', 'archived')
+            AND NOT (blocker.status = 'in_progress'
+                       AND blocker.awaiting_merge_branch IS NOT NULL)",
         [task_id.as_str()],
         |row| row.get(0),
     )?;
@@ -2089,11 +2125,20 @@ pub fn mark_task_done_within_tx(
                 "pending_live_checks": pending_live_checks,
             }),
         )?;
+        // The change reached the default branch: nothing is awaiting a merge
+        // any more, only the live check keeps the task open.
+        tx.execute(
+            "UPDATE planning_tasks
+                SET awaiting_merge_branch = NULL, awaiting_merge_sha = NULL
+              WHERE id = ?1",
+            [task_id],
+        )?;
         return Ok(true);
     }
     let changed = tx.execute(
         "UPDATE planning_tasks
-            SET status = 'done', blocked_reason = NULL, updated_at = ?2
+            SET status = 'done', blocked_reason = NULL, updated_at = ?2,
+                awaiting_merge_branch = NULL, awaiting_merge_sha = NULL
           WHERE id = ?1 AND status = 'in_progress'",
         params![task_id, Utc::now().to_rfc3339()],
     )?;
@@ -2108,6 +2153,122 @@ pub fn mark_task_done_within_tx(
         serde_json::json!({ "status": "done", "via": "orchestration_integration" }),
     )?;
     Ok(true)
+}
+
+/// KT-1519 — the delivery landed on `branch`, which is not the default branch:
+/// the task stays open and carries the integrated commit until that branch is
+/// merged ([`close_awaiting_merge_within_tx`]) or a human closes it. Same
+/// compare-and-swap and unticked-DoD refusal as [`mark_task_done_within_tx`], so
+/// the caller rolls the checkpoint back on `Ok(false)`.
+pub fn mark_task_awaiting_merge_within_tx(
+    tx: &Connection,
+    task_id: &str,
+    branch: &str,
+    sha: &str,
+    actor: &PlanningActor,
+) -> Result<bool> {
+    validate_actor(actor)?;
+    if !unticked_worker_dod_within_tx(tx, task_id)?.is_empty() {
+        return Ok(false);
+    }
+    let changed = tx.execute(
+        "UPDATE planning_tasks
+            SET awaiting_merge_branch = ?2, awaiting_merge_sha = ?3, updated_at = ?4
+          WHERE id = ?1 AND status = 'in_progress'",
+        params![task_id, branch, sha, Utc::now().to_rfc3339()],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    insert_event(
+        tx,
+        task_id,
+        "integrated_awaiting_merge",
+        actor,
+        serde_json::json!({
+            "status": "in_progress",
+            "via": "orchestration_integration",
+            "branch": branch,
+            "sha": sha,
+        }),
+    )?;
+    Ok(true)
+}
+
+/// KT-1519 — a task integrated into a non-default branch, with what tells
+/// whether that branch was merged: the integrated commit, and the tags and link
+/// URLs that name its GitHub issue or pull request.
+#[derive(Debug, Clone)]
+pub struct AwaitingMergeTask {
+    pub task_id: String,
+    pub branch: String,
+    pub sha: String,
+    pub tags: Vec<String>,
+    pub link_urls: Vec<String>,
+}
+
+/// KT-1519 — the tasks of `project_id` integrated into a non-default branch.
+pub fn list_awaiting_merge(conn: &Connection, project_id: &str) -> Result<Vec<AwaitingMergeTask>> {
+    let mut statement = conn.prepare(
+        "SELECT t.id, t.awaiting_merge_branch, t.awaiting_merge_sha FROM planning_tasks t
+          WHERE t.status = 'in_progress' AND t.awaiting_merge_branch IS NOT NULL
+            AND t.awaiting_merge_sha IS NOT NULL
+            AND EXISTS(SELECT 1 FROM planning_task_projects p
+                        WHERE p.task_id = t.id AND p.project_id = ?1)
+          ORDER BY t.task_number",
+    )?;
+    let rows = statement
+        .query_map([project_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut tasks = Vec::with_capacity(rows.len());
+    for (task_id, branch, sha) in rows {
+        let tags = load_string_list(
+            conn,
+            "SELECT tag FROM planning_task_tags WHERE task_id = ?1 ORDER BY tag COLLATE NOCASE",
+            &task_id,
+        )?;
+        let link_urls = load_string_list(
+            conn,
+            "SELECT url FROM planning_task_links WHERE task_id = ?1 ORDER BY position",
+            &task_id,
+        )?;
+        tasks.push(AwaitingMergeTask {
+            task_id,
+            branch,
+            sha,
+            tags,
+            link_urls,
+        });
+    }
+    Ok(tasks)
+}
+
+/// KT-1519 — the merge reached the default branch: close the awaiting-merge
+/// task, or leave it open on its pending live check (see
+/// [`mark_task_done_within_tx`]). Returns whether the task left the
+/// awaiting-merge state.
+pub fn close_awaiting_merge_within_tx(
+    tx: &Connection,
+    task_id: &str,
+    actor: &PlanningActor,
+) -> Result<bool> {
+    let awaiting: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM planning_tasks
+                        WHERE id = ?1 AND status = 'in_progress'
+                          AND awaiting_merge_branch IS NOT NULL)",
+        [task_id],
+        |row| row.get(0),
+    )?;
+    if !awaiting {
+        return Ok(false);
+    }
+    mark_task_done_within_tx(tx, task_id, actor)
 }
 
 /// KT-1262 — tick the worker DoD items an approve verified as met and keep the
@@ -2531,7 +2692,9 @@ pub fn update_dod_item(
                             WHERE task_id = ?1 AND status = 'Done' AND integrated_sha IS NOT NULL)
                 AND NOT EXISTS(SELECT 1 FROM planning_task_dod_items
                                 WHERE task_id = ?1 AND verification = 'post_integration'
-                                  AND completed = 0)",
+                                  AND completed = 0)
+                AND NOT EXISTS(SELECT 1 FROM planning_tasks
+                                WHERE id = ?1 AND awaiting_merge_branch IS NOT NULL)",
             [&task_id],
             |row| row.get(0),
         )?;
@@ -2848,8 +3011,8 @@ pub fn get_discussion_plan(conn: &Connection, discussion_id: &str) -> Result<Dis
         let placement = PlanningPlacement::from_str(&placement)?;
         let active_blockers = dependencies.remove(&task_id).unwrap_or_default();
         let is_active = placement == PlanningPlacement::Active;
-        // Active-only bucket, strict precedence done > blocked > in_progress >
-        // ideas > ready. `blocked` = an explicit Blocked status OR any active
+        // Active-only bucket, strict precedence done > blocked > awaiting_merge >
+        // in_progress > ideas > ready. `blocked` = an explicit Blocked status OR any active
         // blocker (`blocker_count` already counts only non done/archived
         // blockers). A nascent `Idea` has its own bucket so `ready` stays equal
         // to the actionable count. `ready` is the residual = Todo, no active
@@ -2860,6 +3023,9 @@ pub fn get_discussion_plan(conn: &Connection, discussion_id: &str) -> Result<Dis
                 PlanningTaskStatus::Done => stats.done += 1,
                 PlanningTaskStatus::Blocked => stats.blocked += 1,
                 _ if has_active_blocker => stats.blocked += 1,
+                PlanningTaskStatus::InProgress if task.awaiting_merge.is_some() => {
+                    stats.awaiting_merge += 1
+                }
                 PlanningTaskStatus::InProgress => stats.in_progress += 1,
                 PlanningTaskStatus::Idea => stats.ideas += 1,
                 _ => stats.ready += 1,
@@ -2947,6 +3113,11 @@ fn load_summaries_for_discussion(
         "t.id IN (SELECT task_id FROM planning_task_discussions WHERE discussion_id = ?1)",
         discussion_id,
     )?;
+    let mut awaiting_merge = load_awaiting_merge(
+        conn,
+        "t.id IN (SELECT task_id FROM planning_task_discussions WHERE discussion_id = ?1)",
+        discussion_id,
+    )?;
 
     let mut stmt = conn.prepare(
         "SELECT t.id, t.task_number, t.parent_id, p.task_number, p.title,
@@ -2957,7 +3128,9 @@ fn load_summaries_for_discussion(
                  FROM planning_task_blockers b
                  JOIN planning_tasks blocker ON blocker.id = b.blocker_task_id
                  WHERE b.task_id = t.id
-                   AND blocker.status NOT IN ('done', 'archived'))
+                   AND blocker.status NOT IN ('done', 'archived')
+            AND NOT (blocker.status = 'in_progress'
+                       AND blocker.awaiting_merge_branch IS NOT NULL))
          FROM planning_task_discussions ptd
          JOIN planning_tasks t ON t.id = ptd.task_id
          LEFT JOIN planning_tasks p ON p.id = t.parent_id
@@ -3026,6 +3199,7 @@ fn load_summaries_for_discussion(
         let summary = PlanningTaskSummary {
             assignees: assignees.remove(&id).unwrap_or_default(),
             live_checks: live_checks.remove(&id).unwrap_or_default(),
+            awaiting_merge: awaiting_merge.remove(&id),
             project_ids: projects.get(&id).cloned().unwrap_or_default(),
             discussion_ids: discussions.get(&id).cloned().unwrap_or_default(),
             tags: tags.get(&id).cloned().unwrap_or_default(),
@@ -3065,6 +3239,8 @@ fn load_active_dependencies_for_discussion(
            JOIN planning_tasks blocker ON blocker.id = b.blocker_task_id
           WHERE ptd.discussion_id = ?1
             AND blocker.status NOT IN ('done', 'archived')
+            AND NOT (blocker.status = 'in_progress'
+                       AND blocker.awaiting_merge_branch IS NOT NULL)
           ORDER BY ptd.task_id, blocker.task_number",
     )?;
     let rows = stmt
@@ -4497,6 +4673,389 @@ mod tests {
         assert!(
             plan.later.iter().all(|r| !r.actionable),
             "Later is never actionable"
+        );
+    }
+
+    /// KT-1519: a blocker integrated into a campaign branch, awaiting its merge,
+    /// no longer blocks the next task — which builds on that branch — and shows
+    /// the wait on the plan.
+    #[test]
+    fn an_awaiting_merge_blocker_is_satisfied_and_the_plan_shows_the_wait() {
+        let conn = connection();
+        seed_disc(&conn, "d");
+        let next = linked_task(
+            &conn,
+            "d",
+            "next",
+            PlanningTaskStatus::Todo,
+            PlanningPlacement::Active,
+        );
+        let blocker = linked_task(
+            &conn,
+            "d",
+            "integrated",
+            PlanningTaskStatus::InProgress,
+            PlanningPlacement::Active,
+        );
+        add_blocker(
+            &conn,
+            &next,
+            &AddPlanningBlockerRequest {
+                blocker_task_id: blocker.clone(),
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+        let blocked_by = |conn: &Connection| {
+            get_discussion_plan(conn, "d")
+                .unwrap()
+                .active
+                .into_iter()
+                .find(|r| r.task.title == "next")
+                .unwrap()
+                .active_blockers
+                .len()
+        };
+        assert_eq!(blocked_by(&conn), 1, "an in-progress blocker blocks");
+
+        let actor = PlanningActor::default();
+        assert!(mark_task_awaiting_merge_within_tx(
+            &conn,
+            &blocker,
+            "autocode/kt-1495",
+            "abc123",
+            &actor
+        )
+        .unwrap());
+        assert_eq!(blocked_by(&conn), 0, "integrated is enough to continue");
+        let plan = get_discussion_plan(&conn, "d").unwrap();
+        let shown = plan
+            .active
+            .iter()
+            .find(|r| r.task.title == "integrated")
+            .unwrap();
+        assert_eq!(shown.task.status, PlanningTaskStatus::InProgress);
+        assert_eq!(
+            shown
+                .task
+                .awaiting_merge
+                .as_ref()
+                .map(|m| m.branch.as_str()),
+            Some("autocode/kt-1495")
+        );
+    }
+
+    /// KT-1519: the start checkpoint and the monitor's plan counters apply the same
+    /// « satisfied » rule as the plan: an awaiting-merge blocker no longer holds
+    /// its dependent back.
+    #[test]
+    fn an_awaiting_merge_blocker_lets_the_dependent_start_and_is_not_counted_blocked() {
+        let conn = connection();
+        seed_disc(&conn, "d");
+        let next = linked_task(
+            &conn,
+            "d",
+            "next",
+            PlanningTaskStatus::Todo,
+            PlanningPlacement::Active,
+        );
+        let blocker = linked_task(
+            &conn,
+            "d",
+            "integrated",
+            PlanningTaskStatus::InProgress,
+            PlanningPlacement::Active,
+        );
+        add_blocker(
+            &conn,
+            &next,
+            &AddPlanningBlockerRequest {
+                blocker_task_id: blocker.clone(),
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+        let start = |conn: &Connection| {
+            let tx = conn.unchecked_transaction().unwrap();
+            let outcome = mark_task_in_progress_within_tx(&tx, &next, &backend_actor()).unwrap();
+            if outcome == StartTaskCheckpoint::Started {
+                tx.commit().unwrap();
+            }
+            outcome
+        };
+        let stats = crate::db::discussion_monitor::plan_stats(&conn, "d").unwrap();
+        assert_eq!((stats.blocked, stats.ready), (1, 0));
+        assert_eq!(start(&conn), StartTaskCheckpoint::BlockedByActive);
+
+        assert!(mark_task_awaiting_merge_within_tx(
+            &conn,
+            &blocker,
+            "autocode/kt-1495",
+            "abc123",
+            &backend_actor()
+        )
+        .unwrap());
+        let stats = crate::db::discussion_monitor::plan_stats(&conn, "d").unwrap();
+        assert_eq!((stats.blocked, stats.ready), (0, 1));
+        assert_eq!(start(&conn), StartTaskCheckpoint::Started);
+    }
+
+    /// KT-1519: the list endpoint behind the Planning page and the project Tasks
+    /// panel carries the same wait as the discussion plan — the integrated task
+    /// reads « awaiting merge » and its dependent is no longer counted blocked.
+    #[test]
+    fn the_task_list_shows_the_awaiting_merge_wait_and_frees_the_dependent() {
+        let conn = connection();
+        seed_disc(&conn, "d");
+        let next = linked_task(
+            &conn,
+            "d",
+            "next",
+            PlanningTaskStatus::Todo,
+            PlanningPlacement::Active,
+        );
+        let blocker = linked_task(
+            &conn,
+            "d",
+            "integrated",
+            PlanningTaskStatus::InProgress,
+            PlanningPlacement::Active,
+        );
+        add_blocker(
+            &conn,
+            &next,
+            &AddPlanningBlockerRequest {
+                blocker_task_id: blocker.clone(),
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+        let listed = |conn: &Connection| {
+            let items = list_tasks(conn, &PlanningTaskListQuery::default())
+                .unwrap()
+                .items;
+            let pick = |title: &str| {
+                items
+                    .iter()
+                    .find(|task| task.title == title)
+                    .unwrap_or_else(|| panic!("{title} is listed"))
+                    .clone()
+            };
+            (pick("integrated"), pick("next"))
+        };
+        let (integrated, dependent) = listed(&conn);
+        assert!(integrated.awaiting_merge.is_none());
+        assert_eq!(dependent.blocker_count, 1);
+
+        assert!(mark_task_awaiting_merge_within_tx(
+            &conn,
+            &blocker,
+            "autocode/kt-1495",
+            "abc123",
+            &backend_actor()
+        )
+        .unwrap());
+        let (integrated, dependent) = listed(&conn);
+        assert_eq!(integrated.status, PlanningTaskStatus::InProgress);
+        let wait = integrated.awaiting_merge.expect("listed as awaiting merge");
+        assert_eq!(
+            (wait.branch.as_str(), wait.sha.as_str()),
+            ("autocode/kt-1495", "abc123")
+        );
+        assert_eq!(
+            dependent.blocker_count, 0,
+            "integrated is enough to continue"
+        );
+    }
+
+    /// KT-1519: a stale `awaiting_merge_branch` on a blocker that is not
+    /// `in_progress` (no `awaiting_merge` is read for it) must not free the
+    /// dependent in any SQL blocker count: they agree with `satisfies_dependents`.
+    #[test]
+    fn a_stale_awaiting_marker_on_a_non_in_progress_blocker_still_blocks() {
+        let conn = connection();
+        seed_disc(&conn, "d");
+        let next = linked_task(
+            &conn,
+            "d",
+            "next",
+            PlanningTaskStatus::Todo,
+            PlanningPlacement::Active,
+        );
+        let blocker = linked_task(
+            &conn,
+            "d",
+            "stale",
+            PlanningTaskStatus::Blocked,
+            PlanningPlacement::Active,
+        );
+        add_blocker(
+            &conn,
+            &next,
+            &AddPlanningBlockerRequest {
+                blocker_task_id: blocker.clone(),
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE planning_tasks
+                SET awaiting_merge_branch = 'autocode/kt-1', awaiting_merge_sha = 'abc'
+              WHERE id = ?1",
+            [blocker.as_str()],
+        )
+        .unwrap();
+
+        let listed = list_tasks(&conn, &PlanningTaskListQuery::default())
+            .unwrap()
+            .items;
+        let dependent = listed.iter().find(|t| t.title == "next").unwrap();
+        assert_eq!(dependent.blocker_count, 1, "list_tasks");
+        assert!(dependent.awaiting_merge.is_none());
+        let stale = listed.iter().find(|t| t.title == "stale").unwrap();
+        assert!(!stale.satisfies_dependents());
+
+        let stats = crate::db::discussion_monitor::plan_stats(&conn, "d").unwrap();
+        assert_eq!(stats.blocked, 2, "plan_stats counts the dependent blocked");
+    }
+
+    /// KT-1519 × KT-1254: the merge of an awaiting task that still owes a live check
+    /// ends the wait once — the task stays open on the check alone and a second
+    /// sweep neither repeats the event nor moves it — while a live check ticked
+    /// before the merge lets the merge close the task.
+    #[test]
+    fn a_merge_ends_the_wait_once_and_leaves_a_pending_live_check_open() {
+        let conn = connection();
+        let live_check_task = |ticked_before_merge: bool| {
+            let mut create = request(if ticked_before_merge {
+                "ticked"
+            } else {
+                "owed"
+            });
+            create.status = PlanningTaskStatus::InProgress;
+            create.definition_of_done = vec![CreatePlanningDodItem {
+                id: None,
+                sentence: "Replayed live".into(),
+                completed: false,
+                verification: Some(PlanningDodVerification::PostIntegration),
+            }];
+            let task = create_task(&conn, &create).unwrap();
+            let id = task.summary.id.clone();
+            assert!(mark_task_awaiting_merge_within_tx(
+                &conn,
+                &id,
+                "autocode/kt-1500",
+                "abc123",
+                &backend_actor()
+            )
+            .unwrap());
+            if ticked_before_merge {
+                let ticked = update_dod_item(
+                    &conn,
+                    &id,
+                    &task.definition_of_done[0].id,
+                    &UpdatePlanningDodItemRequest {
+                        completed: true,
+                        actor: PlanningActor::default(),
+                        evidence: Some("replayed live: ok".into()),
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    ticked.summary.status,
+                    PlanningTaskStatus::InProgress,
+                    "still awaiting the merge: ticking alone does not close it"
+                );
+                assert!(ticked.summary.awaiting_merge.is_some());
+            }
+            id
+        };
+        let events = |id: &str, action: &str| {
+            get_task(&conn, id)
+                .unwrap()
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| event.action == action)
+                .count()
+        };
+
+        let owed = live_check_task(false);
+        assert!(close_awaiting_merge_within_tx(&conn, &owed, &backend_actor()).unwrap());
+        let open = get_task(&conn, &owed).unwrap().unwrap();
+        assert_eq!(open.summary.status, PlanningTaskStatus::InProgress);
+        assert!(
+            open.summary.awaiting_merge.is_none(),
+            "merged: no longer waiting"
+        );
+        assert_eq!(
+            open.summary.live_checks.len(),
+            1,
+            "the live check keeps it open"
+        );
+        assert_eq!(events(&owed, "integrated_pending_live_check"), 1);
+        assert!(
+            !close_awaiting_merge_within_tx(&conn, &owed, &backend_actor()).unwrap(),
+            "a second sweep finds nothing awaiting"
+        );
+        assert_eq!(events(&owed, "integrated_pending_live_check"), 1);
+
+        let ticked = live_check_task(true);
+        assert!(close_awaiting_merge_within_tx(&conn, &ticked, &backend_actor()).unwrap());
+        let closed = get_task(&conn, &ticked).unwrap().unwrap();
+        assert_eq!(closed.summary.status, PlanningTaskStatus::Done);
+        assert!(closed.summary.awaiting_merge.is_none());
+        assert_eq!(events(&ticked, "integrated_pending_live_check"), 0);
+    }
+
+    /// KT-1519: a task integrated into a feature branch is neither `in_progress`
+    /// nor `done` in the plan counters — the discussion plan and the monitor's
+    /// aggregate agree on an `awaiting_merge` bucket, and a blocked or done task
+    /// keeps its own precedence.
+    #[test]
+    fn an_awaiting_merge_task_has_its_own_plan_bucket_in_the_plan_and_the_monitor() {
+        let conn = connection();
+        seed_disc(&conn, "d");
+        let integrated = linked_task(
+            &conn,
+            "d",
+            "integrated",
+            PlanningTaskStatus::InProgress,
+            PlanningPlacement::Active,
+        );
+        linked_task(
+            &conn,
+            "d",
+            "running",
+            PlanningTaskStatus::InProgress,
+            PlanningPlacement::Active,
+        );
+        let both = |conn: &Connection| {
+            (
+                get_discussion_plan(conn, "d").unwrap().stats,
+                crate::db::discussion_monitor::plan_stats(conn, "d").unwrap(),
+            )
+        };
+        let (plan, monitor) = both(&conn);
+        assert_eq!((plan.in_progress, plan.awaiting_merge), (2, 0));
+        assert_eq!((monitor.in_progress, monitor.awaiting_merge), (2, 0));
+
+        assert!(mark_task_awaiting_merge_within_tx(
+            &conn,
+            &integrated,
+            "autocode/kt-1495",
+            "abc123",
+            &backend_actor()
+        )
+        .unwrap());
+        let (plan, monitor) = both(&conn);
+        assert_eq!(
+            (plan.in_progress, plan.awaiting_merge, plan.done),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            (monitor.in_progress, monitor.awaiting_merge, monitor.done),
+            (1, 1, 0)
         );
     }
 
