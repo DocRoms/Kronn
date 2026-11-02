@@ -19,7 +19,7 @@ const NO_TEXT_PREVIEW: &str = "Binary or invalid text — no text preview. The o
 const OFFICE_DOC_EXTENSIONS: &[&str] = &["xlsx", "xls", "docx", "pptx", "pdf"];
 /// Hard cap on the RAW bytes of an office doc before we hand it to a parser.
 /// Bounds the work an untrusted spreadsheet/doc can force on the underlying
-/// parsers. `calamine` now uses the patched `quick-xml` 0.41 line; this cap
+/// parsers. `calamine` now uses the patched `quick-xml` 0.42 line; this cap
 /// remains useful defense in depth for parser CPU and memory consumption.
 /// 10 MB is comfortably above any legitimate context spreadsheet.
 const MAX_OFFICE_DOC_SIZE: usize = 10 * 1024 * 1024;
@@ -1565,6 +1565,93 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("PDF extraction failed"), "got {err}");
+    }
+
+    #[test]
+    fn extract_xlsx_minimal_zip_reads_cells_from_every_sheet() {
+        // Build a minimal two-sheet xlsx in memory so the calamine parse path
+        // (shared strings, numbers, booleans, sheet headers) is exercised for real.
+        use std::io::Write;
+        let parts: [(&str, &str); 6] = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+</Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Alpha" sheetId="1" r:id="rId1"/><sheet name="Beta" sheetId="2" r:id="rId2"/></sheets>
+</workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
+</Relationships>"#,
+            ),
+            (
+                "xl/sharedStrings.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="2" uniqueCount="2">
+<si><t>Hello</t></si><si><t>World</t></si>
+</sst>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>
+<row r="2"><c r="A2"><v>42</v></c><c r="B2" t="b"><v>1</v></c></row>
+</sheetData></worksheet>"#,
+            ),
+        ];
+        let sheet2 = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+<row r="1"><c r="A1"><v>3.5</v></c></row>
+</sheetData></worksheet>"#;
+
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(cursor);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (name, body) in parts {
+                zip.start_file(name, opts).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            }
+            zip.start_file("xl/worksheets/sheet2.xml", opts).unwrap();
+            zip.write_all(sheet2.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let text = extract_text("book.xlsx", &buf).expect("xlsx must parse");
+        // More than one sheet: each one gets a header, in workbook order.
+        let alpha = text.find("--- Sheet: Alpha ---").expect("Alpha header");
+        let beta = text.find("--- Sheet: Beta ---").expect("Beta header");
+        assert!(alpha < beta, "sheets out of order: {text}");
+        assert!(text.contains("Hello,World\n"), "shared strings: {text}");
+        assert!(text.contains("42,true\n"), "numbers and bools: {text}");
+        assert!(text.contains("3.5\n"), "second sheet cell: {text}");
     }
 
     #[test]
