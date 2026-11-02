@@ -2190,9 +2190,14 @@ async fn failed_discovered_keys_are_not_kept_live() {
 async fn credentials_of_a_schema_invalid_config_are_recovered() {
     let dir = DataDir::new();
     let key = crypto::generate_secret();
-    // Valid TOML, but a field of the wrong type: not a config this Kronn reads.
-    let text = write_0142_config_text(&key).replacen("port = ", "port = \"x\" # ", 1);
-    assert!(text.contains("port = \"x\""));
+    // Valid TOML, but the key is of the wrong type: the file is set aside (a
+    // wrong type elsewhere only costs that value, KT-1513).
+    let text = write_0142_config_text(&key).replacen(
+        "encryption_secret = ",
+        "encryption_secret = 5 # ",
+        1,
+    );
+    assert!(text.contains("encryption_secret = 5"));
     std::fs::write(dir.path().join("config.toml"), &text).unwrap();
     let db = Arc::new(Database::open_in_memory().unwrap());
     let mut cfg = config::load().await.unwrap().unwrap();
@@ -2694,4 +2699,291 @@ async fn an_export_warns_about_locked_secrets_files() {
         .unwrap_or_default()
         .to_string();
     assert!(header.contains("locked-secrets-not-exported"), "{header}");
+}
+
+/// KT-1513 — what config.toml held that this build could not read and that is a
+/// credential (a malformed provider key, a key of a newer build, an unreadable
+/// token) is never written in clear once the store is armed, and is not lost:
+/// the encrypted shelter keeps it across saves and restarts.
+#[tokio::test]
+#[serial]
+async fn credentials_this_build_could_not_read_are_kept_encrypted_not_lost() {
+    use crate::core::config_salvage::{read_shelter, Preserved, SHELTER_FILENAME};
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    std::fs::write(
+        dir.path().join("config.toml"),
+        format!(
+            "encryption_secret = \"{key}\"\nfuture_top_level = \"kept\"\n\
+             [server]\nport = 4242\n\
+             [tokens]\nmistral = \"sk-future\"\nfuture_rotation_days = 30\n\
+             [[tokens.keys]]\nid = \"1\"\nname = \"n\"\nprovider = \"mistral\"\n\
+             value = \"sk-good\"\nactive = true\n\
+             [[tokens.keys]]\nid = \"2\"\nname = \"n\"\nprovider = \"mistral\"\n\
+             value = \"sk-malformed\"\nactive = \"yes\"\n"
+        ),
+    )
+    .unwrap();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+
+    let (mut cfg, _, booted) = boot_like_main(&dir, &db).await;
+    assert!(booted.is_some(), "armed");
+    assert_eq!(cfg.tokens.keys.len(), 1, "only the readable key is live");
+
+    let clear_free = |text: &str| {
+        for secret in ["sk-future", "sk-malformed", "sk-good", key.as_str()] {
+            assert!(!text.contains(secret), "{secret} in clear: {text}");
+        }
+    };
+    clear_free(&dir.config_text());
+    // A setting that is not a credential stays in the file.
+    assert!(dir.config_text().contains("future_rotation_days = 30"));
+    assert!(dir.config_text().contains("future_top_level"));
+    // The shelter is encrypted, owner-only, and opens with the instance key.
+    let shelter_path = dir.path().join(SHELTER_FILENAME);
+    clear_free(&std::fs::read_to_string(&shelter_path).unwrap());
+    let held = read_shelter(dir.path(), &key).unwrap();
+    let holds = |wanted: &str| {
+        held.iter().any(|e| match e {
+            Preserved::Value(_, v) | Preserved::Element(_, v) => v.to_string().contains(wanted),
+        })
+    };
+    assert!(holds("sk-future") && holds("sk-malformed"), "{held:?}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&shelter_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    // A later save changes a setting: the shelter and the clear file hold.
+    cfg.server.port = 5555;
+    config::save(&cfg).await.unwrap();
+    clear_free(&dir.config_text());
+    assert!(dir.config_text().contains("port = 5555"));
+    assert_eq!(read_shelter(dir.path(), &key).unwrap().len(), held.len());
+
+    // A restart reads the clear file without them: the shelter brings them
+    // back, and a save after it still keeps every one.
+    dir.restart();
+    let (mut again, _, _) = boot_like_main(&dir, &db).await;
+    again.server.port = 6666;
+    config::save(&again).await.unwrap();
+    clear_free(&dir.config_text());
+    let after = read_shelter(dir.path(), &key).unwrap();
+    assert_eq!(after.len(), held.len(), "{after:?}");
+    assert!(after.iter().any(|e| matches!(e, Preserved::Element(..))));
+
+    // The user clears the provider keys: the unreadable element goes with them.
+    again.tokens.keys.clear();
+    config::save(&again).await.unwrap();
+    let cleared = read_shelter(dir.path(), &key).unwrap();
+    assert!(
+        !cleared.iter().any(|e| matches!(e, Preserved::Element(..))),
+        "{cleared:?}"
+    );
+    assert!(
+        cleared
+            .iter()
+            .any(|e| matches!(e, Preserved::Value(p, _) if p.join(".") == "tokens.mistral")),
+        "{cleared:?}"
+    );
+}
+
+/// An armed store whose `config.toml` held a credential this build could not
+/// read: the shelter holds it, and the key is returned.
+async fn armed_with_a_sheltered_key(dir: &DataDir, db: &Arc<Database>) -> (AppConfig, String) {
+    let key = crypto::generate_secret();
+    std::fs::write(
+        dir.path().join("config.toml"),
+        format!("encryption_secret = \"{key}\"\n[tokens]\nmistral = \"sk-old\"\n"),
+    )
+    .unwrap();
+    let (cfg, _, booted) = boot_like_main(dir, db).await;
+    assert!(booted.is_some(), "armed");
+    (cfg, key)
+}
+
+fn sheltered_text(dir: &DataDir, key: &str) -> String {
+    format!(
+        "{:?}",
+        crate::core::config_salvage::read_shelter(dir.path(), key).unwrap()
+    )
+}
+
+/// KT-1513 — saves racing on one data directory all succeed and the shelter
+/// stays readable (a shared temp name made 29-42 of 120 fail).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn parallel_saves_with_a_shelter_all_succeed() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let (cfg, key) = armed_with_a_sheltered_key(&dir, &db).await;
+    let cfg = Arc::new(cfg);
+    for _ in 0..30 {
+        // Every round the four saves all have the shelter to write.
+        let _ = std::fs::remove_file(
+            dir.path()
+                .join(crate::core::config_salvage::SHELTER_FILENAME),
+        );
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let cfg = cfg.clone();
+                tokio::spawn(async move { config::save(&cfg).await })
+            })
+            .collect();
+        for worker in workers {
+            worker.await.unwrap().unwrap();
+        }
+    }
+    assert!(sheltered_text(&dir, &key).contains("sk-old"));
+    assert!(!dir.config_text().contains("sk-old"));
+}
+
+/// KT-1513 — the user changes a sheltered credential by hand: the shelter
+/// holds the new value only, the revoked one is in neither file.
+#[tokio::test]
+#[serial]
+async fn a_credential_changed_by_hand_replaces_the_sheltered_one() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let (_, key) = armed_with_a_sheltered_key(&dir, &db).await;
+    assert!(sheltered_text(&dir, &key).contains("sk-old"));
+
+    let mut file: toml::Table = dir.config_text().parse().unwrap();
+    file["tokens"]
+        .as_table_mut()
+        .unwrap()
+        .insert("mistral".into(), toml::Value::String("sk-new".into()));
+    std::fs::write(
+        dir.path().join("config.toml"),
+        toml::to_string(&file).unwrap(),
+    )
+    .unwrap();
+
+    dir.restart();
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    config::save(&cfg).await.unwrap();
+    let held = sheltered_text(&dir, &key);
+    assert!(held.contains("sk-new"), "{held}");
+    assert!(!held.contains("sk-old"), "the revoked value stays: {held}");
+    assert!(!dir.config_text().contains("sk-"), "{}", dir.config_text());
+
+    // Another boot and save: still the new one only.
+    dir.restart();
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    config::save(&cfg).await.unwrap();
+    let held = sheltered_text(&dir, &key);
+    assert!(
+        held.contains("sk-new") && !held.contains("sk-old"),
+        "{held}"
+    );
+}
+
+/// KT-1513 — an unknown key holding an array with a credential (an inline
+/// array with a `Bearer`, an array of tables with a `password`): the file keeps
+/// the scrubbed array, and a restart followed by a save, with no hand edit,
+/// must not take the credential out of the shelter.
+#[tokio::test]
+#[serial]
+async fn a_credential_in_an_unknown_array_survives_a_restart_and_a_save() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let key = crypto::generate_secret();
+    std::fs::write(
+        dir.path().join("config.toml"),
+        format!(
+            "encryption_secret = \"{key}\"\n\
+             [server]\nport = 4242\n\
+             [future]\nheaders = [\"Bearer sk-hdr\", \"plain\"]\n\
+             [[future.servers]]\nname = \"a\"\npassword = \"pw-srv\"\n"
+        ),
+    )
+    .unwrap();
+    let (cfg, _, booted) = boot_like_main(&dir, &db).await;
+    assert!(booted.is_some(), "armed");
+    config::save(&cfg).await.unwrap();
+    for round in 0..3 {
+        let held = sheltered_text(&dir, &key);
+        assert!(
+            held.contains("sk-hdr") && held.contains("pw-srv"),
+            "round {round}: {held}"
+        );
+        let file = dir.config_text();
+        assert!(
+            !file.contains("sk-hdr") && !file.contains("pw-srv"),
+            "{file}"
+        );
+        // The rest of the array stays in the file.
+        assert!(
+            file.contains("plain") && file.contains("name = \"a\""),
+            "{file}"
+        );
+        dir.restart();
+        let (again, _, _) = boot_like_main(&dir, &db).await;
+        config::save(&again).await.unwrap();
+    }
+}
+
+/// KT-1513 — a reset starts over: the shelter and every copy set aside as
+/// unreadable go with the old file.
+#[tokio::test]
+#[serial]
+async fn a_reset_removes_every_shelter_file() {
+    use crate::core::config_salvage::{write_shelter, Preserved, SHELTER_FILENAME};
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let _ = armed_with_a_sheltered_key(&dir, &db).await;
+    // Another key writes: the first shelter is set aside, not overwritten.
+    let other = crypto::generate_secret();
+    let entries = [Preserved::Value(
+        vec!["tokens".into(), "mistral".into()],
+        toml::Value::String("sk-other".into()),
+    )];
+    write_shelter(dir.path(), &other, &entries).unwrap();
+    let shelter_files = || -> Vec<String> {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(SHELTER_FILENAME))
+            .collect()
+    };
+    assert!(
+        shelter_files().len() >= 2,
+        "a copy set aside and the live one: {:?}",
+        shelter_files()
+    );
+
+    config::reset_to_key_only().await.unwrap();
+    assert!(shelter_files().is_empty(), "{:?}", shelter_files());
+}
+
+/// KT-1513 — a key rotation moves the shelter to the new key (the old key
+/// then cannot read it), whether the rotation is done in one step or resumed.
+#[test]
+fn a_key_rotation_follows_the_shelter() {
+    use crate::core::config_salvage::{read_shelter, write_shelter, Preserved};
+    let entries = [Preserved::Value(
+        vec!["tokens".into(), "mistral".into()],
+        toml::Value::String("sk-kept".into()),
+    )];
+    let (old, new) = (crypto::generate_secret(), crypto::generate_secret());
+
+    let dir = tempfile::tempdir().unwrap();
+    write_shelter(dir.path(), &old, &entries).unwrap();
+    assert!(reencrypt_backup(dir.path(), &old, &new).unwrap());
+    assert_eq!(read_shelter(dir.path(), &new).unwrap(), entries);
+    assert!(read_shelter(dir.path(), &old).is_err());
+
+    // A rotation that stopped half-way: the boot re-encrypts to the key in use.
+    let resumed = tempfile::tempdir().unwrap();
+    write_shelter(resumed.path(), &old, &entries).unwrap();
+    let candidates = [(old.clone(), "retired")];
+    assert!(reencrypt_backup_to(resumed.path(), &candidates, &new).unwrap());
+    assert_eq!(read_shelter(resumed.path(), &new).unwrap(), entries);
 }

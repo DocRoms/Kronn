@@ -161,7 +161,7 @@ debug information, disable incremental compilation, and explicitly retain
 debug assertions and overflow checks. A developer needing full debug info may
 use Cargo's explicit command-line override, for example
 `cargo build --config 'profile.dev.debug=true'`; this is a local choice and is
-not a global Cargo setting. [src: file: backend/Cargo.toml:156-167#profile.dev]
+not a global Cargo setting. [src: file: backend/Cargo.toml:168-179#profile.dev]
 [src: file: desktop/src-tauri/Cargo.toml:49-55#profile.dev]
 
 Qualification validation resolves a Cargo validation's effective target through
