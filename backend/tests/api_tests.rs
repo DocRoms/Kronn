@@ -3159,7 +3159,10 @@ async fn artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previo
     )
     .await;
     let mut bundle = exported["data"].clone();
-    let snapshot = bundle["artifact"]["datasets"][0].clone();
+    let mut snapshot = bundle["artifact"]["datasets"][0].clone();
+    // An old file dates each dataset by its last write on the source.
+    let source_date = "2026-01-02T03:04:05Z";
+    snapshot["updated_at"] = serde_json::json!(source_date);
     let mut null_snapshot = snapshot.clone();
     null_snapshot["has_current"] = serde_json::json!(true);
     null_snapshot["current"] = Value::Null;
@@ -3270,23 +3273,30 @@ async fn artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previo
         };
         assert_eq!(current(&summary).as_deref(), Some("null"), "{stored:?}");
         assert_eq!(current("never"), None, "{stored:?}");
-        // A dataset that arrives empty is dated by its import, not the source.
+        // A dataset that arrives with values keeps the file's date; one that
+        // arrives empty is dated by its import, not the source.
         let page = id.clone();
-        let never_at: String = state
+        let dates: Vec<(String, String)> = state
             .db
             .with_read_conn(move |conn| {
-                Ok(conn.query_row(
-                    "SELECT updated_at FROM live_page_datasets WHERE page_id = ?1 AND name = 'never'",
-                    [&page],
-                    |row| row.get(0),
-                )?)
+                let mut statement = conn.prepare(
+                    "SELECT name, updated_at FROM live_page_datasets WHERE page_id = ?1",
+                )?;
+                let dates = statement
+                    .query_map([&page], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(dates)
             })
             .await
             .unwrap();
-        assert_eq!(
-            chrono::DateTime::parse_from_rfc3339(&never_at).unwrap(),
-            created
-        );
+        let date = |name: &str| {
+            let (_, at) = dates.iter().find(|(stored, _)| stored == name).unwrap();
+            chrono::DateTime::parse_from_rfc3339(at).unwrap()
+        };
+        let source = chrono::DateTime::parse_from_rfc3339(source_date).unwrap();
+        assert_eq!(date(&summary), source, "{dates:?}");
+        assert_eq!(date("history"), source, "{dates:?}");
+        assert_eq!(date("never"), created, "{dates:?}");
         assert_eq!(
             points,
             vec![Some("first".to_owned()), Some("second".to_owned())]
