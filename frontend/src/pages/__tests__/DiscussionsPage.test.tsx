@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { useMemo, useRef, useState } from 'react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { loadDraft } from '../../lib/chat-drafts';
@@ -404,7 +404,7 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
 const openPanel = async (name: RegExp) => {
   const opener = await screen.findByTestId('disc-header-details-btn');
   if (opener.getAttribute('aria-expanded') !== 'true') fireEvent.click(opener);
-  fireEvent.click(await screen.findByRole('button', { name }));
+  fireEvent.click(await screen.findByRole('tab', { name }));
 };
 
 describe('DiscussionsPage', () => {
@@ -844,23 +844,99 @@ describe('DiscussionsPage', () => {
     // the open panel moves between them. What this test guards is unchanged:
     // opening one closes the other.
     fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
-    const terminalButton = await screen.findByRole('button', { name: 'Terminal' });
-    expect(terminalButton).toHaveAttribute('aria-expanded', 'false');
+    const terminalButton = await screen.findByRole('tab', { name: 'Terminal' });
+    expect(terminalButton).toHaveAttribute('aria-selected', 'false');
     fireEvent.click(terminalButton);
     expect(screen.getByRole('complementary', { name: 'Terminal' })).toBeInTheDocument();
-    expect(terminalButton).toHaveAttribute('aria-expanded', 'true');
+    expect(terminalButton).toHaveAttribute('aria-selected', 'true');
 
-    const gitButton = screen.getByRole('button', { name: 'Fichiers' });
+    const gitButton = screen.getByRole('tab', { name: 'Git' });
     fireEvent.click(gitButton);
     expect(screen.queryByRole('complementary', { name: 'Terminal' })).not.toBeInTheDocument();
-    expect(gitButton).toHaveAttribute('aria-expanded', 'true');
+    expect(gitButton).toHaveAttribute('aria-selected', 'true');
 
     fireEvent.click(terminalButton);
     expect(screen.getByRole('complementary', { name: 'Terminal' })).toBeInTheDocument();
-    expect(gitButton).toHaveAttribute('aria-expanded', 'false');
+    expect(gitButton).toHaveAttribute('aria-selected', 'false');
 
-    fireEvent.click(terminalButton);
+    // The rail selects; closing is the panel header's job.
+    fireEvent.click(screen.getByTestId('panel-open-toggle'));
     expect(screen.queryByRole('complementary', { name: 'Terminal' })).not.toBeInTheDocument();
+  });
+
+  it('shows a single close button on every panel: the shell\'s own', async () => {
+    const discussion = makeListDiscussion('d-one-close', 0);
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[discussion]}
+        configLanguage="fr"
+        agentAccess={{
+          claude_code: { full_access: true },
+        } as unknown as AgentsConfig}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-one-close"
+        {...liftedProps()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
+    const shell = await screen.findByTestId('panel-switcher');
+    for (const tab of within(shell).getAllByRole('tab')) {
+      fireEvent.click(tab);
+      expect(tab).toHaveAttribute('aria-selected', 'true');
+      const closes = within(shell).getAllByRole('button', { name: /ferm/i });
+      expect(closes.map(button => button.getAttribute('aria-label')), `panel « ${tab.textContent} »`)
+        .toEqual(['Fermer les panneaux']);
+    }
+  });
+
+  it('keeps the side panel out from under the full-screen mobile sidebar', async () => {
+    const mobile = (matches: boolean) => Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: matches && query.includes('767'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mobile(true);
+    try {
+      const discussion = makeListDiscussion('d-mobile-panel', 0);
+      vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+      await wrap(
+        <DiscussionsPage
+          projects={[]}
+          agents={[]}
+          allDiscussions={[discussion]}
+          configLanguage="fr"
+          agentAccess={null}
+          refetchDiscussions={noop}
+          refetchProjects={noop}
+          onNavigate={noop}
+          toast={toastFn}
+          initialActiveDiscussionId="d-mobile-panel"
+          {...liftedProps()}
+        />,
+      );
+
+      // The sidebar starts open on mobile and covers the screen: a panel that
+      // opens now must wait, not render hidden beneath it.
+      fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
+      expect(screen.queryByTestId('panel-switcher')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getAllByRole('button', { name: /Fermer la barre latérale/ })[0]);
+      expect(await screen.findByTestId('panel-switcher')).toBeInTheDocument();
+    } finally {
+      mobile(false);
+    }
   });
 
   it('sidebar shows message_count not messages.length', async () => {
@@ -1967,7 +2043,7 @@ describe('DiscussionsPage', () => {
     // The Assets entry is also where a first media generation starts, so an
     // empty discussion must keep it discoverable instead of hiding it.
     fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
-    expect(screen.getByRole('button', { name: /Parcourir tous les assets.*0/ })).toBeVisible();
+    expect(screen.getByRole('tab', { name: 'Fichiers' })).toHaveAttribute('title', expect.stringMatching(/Parcourir tous les assets.*0/));
     fireEvent.click(screen.getByRole('button', { name: /Discussion d2 —/ }));
     await waitFor(() => expect(discussionsApi.listContextFiles).toHaveBeenCalledWith('d2'));
     fireEvent.click(screen.getByRole('button', { name: /Discussion d1 —/ }));
@@ -1976,7 +2052,8 @@ describe('DiscussionsPage', () => {
       expect(vi.mocked(discussionsApi.listContextFiles).mock.calls
         .filter(call => call[0] === 'd1')).toHaveLength(2);
     });
-    await openPanel(/Parcourir tous les assets.*1/);
+    await openPanel(/^Fichiers$/);
+    expect(screen.getByRole('tab', { name: 'Fichiers' })).toHaveAttribute('title', expect.stringMatching(/Parcourir tous les assets.*1/));
     expect((await screen.findAllByText('late-report.csv')).length).toBeGreaterThan(0);
   });
 
@@ -2161,7 +2238,7 @@ describe('DiscussionsPage', () => {
     );
 
     fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
-    const assetsButton = await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ });
+    const assetsButton = await screen.findByRole('tab', { name: 'Fichiers' });
     fireEvent.click(assetsButton);
     expect(screen.getByRole('complementary', { name: 'Assets' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Aller au message contenant source\.csv/ }));
@@ -3089,7 +3166,7 @@ describe('DiscussionsPage', () => {
     try {
       await renderThread(disc);
       fireEvent.click(await screen.findByTestId('disc-header-details-btn'));
-      fireEvent.click(await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ }));
+      fireEvent.click(await screen.findByRole('tab', { name: 'Fichiers' }));
       await layout.clickWhileGrowing(screen.getByRole('button', { name: /Aller au message contenant source\.csv/ }));
       layout.expectTargetCentred();
     } finally {

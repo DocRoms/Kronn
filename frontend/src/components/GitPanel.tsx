@@ -63,7 +63,8 @@ interface Props {
   projectId?: string;
   discussionId?: string;
   initialWorkspaceId?: string;
-  onClose: () => void;
+  /** Omitted when a surrounding panel (the side-panel shell) owns the close button. */
+  onClose?: () => void;
   onExpandedChange?: (expanded: boolean) => void;
 }
 
@@ -534,13 +535,15 @@ export function GitPanel({
             >
               {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
             </button>
-            <button
-              className="disc-tool-panel-icon git-close-btn"
-              onClick={onClose}
-              aria-label={t('common.close')}
-            >
-              <X size={14} />
-            </button>
+            {onClose && (
+              <button
+                className="disc-tool-panel-icon git-close-btn"
+                onClick={onClose}
+                aria-label={t('common.close')}
+              >
+                <X size={14} />
+              </button>
+            )}
           </div>
         </header>
         {expanded && status ? (
@@ -623,7 +626,9 @@ export function GitPanel({
           <button className="disc-tool-panel-icon git-icon-btn" onClick={fetchStatus} title={t('git.refresh')} aria-label={t('git.refresh')}>
             <RefreshCw size={12} />
           </button>
-          <button className="disc-tool-panel-icon git-close-btn" onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
+          {onClose && (
+            <button className="disc-tool-panel-icon git-close-btn" onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
+          )}
         </div>
       </header>
 

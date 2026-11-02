@@ -35,7 +35,7 @@ import { BatchComparePanel } from '../components/BatchComparePanel';
 import { TestModeBanner } from '../components/TestModeBanner';
 import { TestModeModal } from '../components/TestModeModal';
 import type { TestModeBlocker } from '../types/extensions';
-import { DiscussionPanelSwitcher } from '../components/DiscussionPanelSwitcher';
+import { SidePanelShell } from '../components/SidePanelShell';
 import { ChatHeader } from '../components/ChatHeader';
 import { DiscussionSidebar } from '../components/DiscussionSidebar';
 import { CollectionSidebarRail } from '../components/CollectionShell';
@@ -79,6 +79,7 @@ import {
   ListTodo,
   Download,
   Trash2,
+  Copy,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import {
@@ -678,6 +679,13 @@ export function DiscussionsPage({
     agentAccess.vibe,
     agentAccess.copilot_cli,
   ].some(config => config?.full_access);
+  const activeSidePanel: PanelId | null = showSettingsPanel ? 'settings'
+    : showPlanPanel ? 'plan'
+    : showAssetsPanel ? 'assets'
+    : showNotesPanel ? 'notes'
+    : showGitPanel ? 'git'
+    : showTerminalPanel ? 'terminal'
+    : null;
   const openOnlyPanel = useCallback((panel: PanelId | null, openState?: Record<PanelId, boolean>) => {
     // Clicking the panel already showing closes it, as the header buttons did.
     // Without this the column can only be dismissed with Escape, and a reader
@@ -5521,46 +5529,68 @@ export function DiscussionsPage({
 
             </div>{/* end messages column */}
 
-            <div className="disc-utility-col">
-            {/* KT-581 — switching panels, above the panel being switched.
-              *  Each panel draws its own header, so putting these icons in the
-              *  discussion header too showed every one of them twice. */}
-            <DiscussionPanelSwitcher
-              groupLabel={t('disc.panelRail.group')}
+            {/* The mobile sidebar is a full-screen sheet above the panel: the panel
+                waits (its state is kept) instead of opening hidden underneath. */}
+            {activeSidePanel && !(isMobile && sidebarOpen) && (
+            <SidePanelShell
+              testId="panel-switcher"
+              ariaLabel={t('disc.panelRail.group')}
+              title={activeDiscussion.title}
+              railLabel={t('disc.panelRail.group')}
+              activeId={activeSidePanel}
+              onSelect={(id) => {
+                if (id === activeSidePanel) return;
+                openOnlyPanel(id as PanelId);
+              }}
+              onClose={() => {
+                setGitPanelExpanded(false);
+                setInitialGitWorkspaceId(undefined);
+                openOnlyPanel(null);
+              }}
               closeLabel={t('disc.panelRail.close')}
-              onToggleColumn={() => openOnlyPanel(null)}
-              actions={[
+              closeTestId="panel-open-toggle"
+              menuLabel={t('disc.panelRail.more')}
+              menuActions={[
                 {
                   id: 'export',
                   label: t('disc.portability.export'),
                   icon: exportingDiscussion
                     ? <Loader2 size={14} className="spin" />
                     : <Download size={14} />,
-                  active: false,
+                  disabled: exportingDiscussion,
                   onSelect: () => { void exportActiveDiscussion(activeDiscussion.id); },
                 },
                 {
+                  id: 'copy-id',
+                  label: t('disc.panelRail.copyId'),
+                  icon: <Copy size={14} />,
+                  onSelect: () => {
+                    void navigator.clipboard.writeText(activeDiscussion.id).then(
+                      () => toast(t('disc.idCopied'), 'success'),
+                      () => toast(t('disc.idCopyFailed'), 'error'),
+                    );
+                  },
+                },
+                {
                   id: 'delete',
-                  label: t('disc.delete'),
+                  label: t('disc.panelRail.delete'),
                   icon: <Trash2 size={14} />,
-                  active: false,
+                  danger: true,
                   onSelect: () => { void deleteActiveDiscussion(activeDiscussion.id); },
                 },
               ]}
-              panels={[
+              items={[
+                {
+                  id: 'settings',
+                  label: t('disc.panelRail.settings'),
+                  description: t('disc.settingsPanel'),
+                  icon: <Settings size={18} />,
+                },
                 {
                   id: 'plan',
-                  label: t('planning.openPlan'),
-                  icon: <ListTodo size={14} />,
-                  active: showPlanPanel,
-                  onSelect: () => openOnlyPanel('plan', {
-                    plan: showPlanPanel,
-                    assets: showAssetsPanel,
-                    notes: showNotesPanel,
-                    git: showGitPanel,
-                    terminal: showTerminalPanel,
-                    settings: showSettingsPanel,
-                  }),
+                  label: t('disc.panelRail.plan'),
+                  description: t('planning.openPlan'),
+                  icon: <ListTodo size={18} />,
                   badge: proposalInboxDiscussionId === activeDiscussion.id
                     && (proposalInbox?.pending_item_count ?? 0) > 0
                     ? proposalInbox?.pending_item_count
@@ -5568,93 +5598,41 @@ export function DiscussionsPage({
                 },
                 {
                   id: 'assets',
-                  label: t('disc.assets.open', activeContextFiles.length),
-                  icon: <Images size={14} />,
-                  active: showAssetsPanel,
-                  onSelect: () => openOnlyPanel('assets', {
-                    plan: showPlanPanel,
-                    assets: showAssetsPanel,
-                    notes: showNotesPanel,
-                    git: showGitPanel,
-                    terminal: showTerminalPanel,
-                    settings: showSettingsPanel,
-                  }),
+                  label: t('disc.panelRail.assets'),
+                  description: t('disc.assets.open', activeContextFiles.length),
+                  icon: <Images size={18} />,
                 },
                 {
                   id: 'notes',
-                  label: t('disc.note.panelOpen'),
-                  icon: <NotebookPen size={14} />,
-                  active: showNotesPanel,
-                  onSelect: () => openOnlyPanel('notes', {
-                    plan: showPlanPanel,
-                    assets: showAssetsPanel,
-                    notes: showNotesPanel,
-                    git: showGitPanel,
-                    terminal: showTerminalPanel,
-                    settings: showSettingsPanel,
-                  }),
+                  label: t('disc.panelRail.notes'),
+                  description: t('disc.note.panelOpen'),
+                  icon: <NotebookPen size={18} />,
                 },
                 {
                   id: 'git',
-                  label: pendingFilesCount > 0
+                  label: t('disc.panelRail.git'),
+                  description: pendingFilesCount > 0
                     ? t('git.pendingFilesTooltip', pendingFilesCount)
                     : t('git.filesBtn'),
-                  icon: <GitBranch size={14} />,
-                  active: showGitPanel,
-                  onSelect: () => openOnlyPanel('git', {
-                    plan: showPlanPanel,
-                    assets: showAssetsPanel,
-                    notes: showNotesPanel,
-                    git: showGitPanel,
-                    terminal: showTerminalPanel,
-                    settings: showSettingsPanel,
-                  }),
+                  icon: <GitBranch size={18} />,
                   badge: pendingFilesCount > 0 ? (pendingFilesCount > 9 ? '9+' : pendingFilesCount) : undefined,
                 },
                 ...(terminalEnabled
                   ? [{
                       id: 'terminal',
-                      label: t('git.terminal'),
-                      icon: <Terminal size={14} />,
-                      active: showTerminalPanel,
-                      onSelect: () => openOnlyPanel('terminal', {
-                    plan: showPlanPanel,
-                    assets: showAssetsPanel,
-                    notes: showNotesPanel,
-                    git: showGitPanel,
-                    terminal: showTerminalPanel,
-                    settings: showSettingsPanel,
-                  }),
+                      label: t('disc.panelRail.terminal'),
+                      description: t('git.terminal'),
+                      icon: <Terminal size={18} />,
                     }]
                   : []),
-                {
-                  id: 'settings',
-                  label: t('disc.settingsPanel'),
-                  icon: <Settings size={14} />,
-                  active: showSettingsPanel,
-                  onSelect: () => openOnlyPanel('settings', {
-                    plan: showPlanPanel,
-                    assets: showAssetsPanel,
-                    notes: showNotesPanel,
-                    git: showGitPanel,
-                    terminal: showTerminalPanel,
-                    settings: showSettingsPanel,
-                  }),
-                },
               ]}
-            />
-
+            >
             {/* Git Panel (side panel) */}
             {showGitPanel && (
               <GitPanel
                 projectId={activeDiscussion.project_id ?? undefined}
                 discussionId={activeDiscussion.id}
                 initialWorkspaceId={initialGitWorkspaceId}
-                onClose={() => {
-                  setGitPanelExpanded(false);
-                  setInitialGitWorkspaceId(undefined);
-                  setShowGitPanel(false);
-                }}
                 onExpandedChange={setGitPanelExpanded}
               />
             )}
@@ -5663,7 +5641,6 @@ export function DiscussionsPage({
               <TerminalPanel
                 key={activeDiscussion.id}
                 discussionId={activeDiscussion.id}
-                onClose={() => setShowTerminalPanel(false)}
               />
             )}
 
@@ -5672,7 +5649,6 @@ export function DiscussionsPage({
                 key={`${activeDiscussion.id}:${planTaskTarget?.discussionId === activeDiscussion.id ? planTaskTarget.sequence : 0}`}
                 discussionId={activeDiscussion.id}
                 initialTaskId={planTaskTarget?.discussionId === activeDiscussion.id ? planTaskTarget.taskId : undefined}
-                onClose={() => setShowPlanPanel(false)}
                 onChanged={setDiscussionPlan}
                 onNavigateDiscussion={(targetDiscussionId, options) => {
                   if (options?.gitWorkspaceId) {
@@ -5701,7 +5677,6 @@ export function DiscussionsPage({
                 mcpConfigs={mcpConfigs}
                 mcpIncompatibilities={mcpIncompatibilities}
                 contacts={contactsList}
-                onClose={() => setShowSettingsPanel(false)}
                 onRequestTestMode={() => { void handleRequestTestMode(activeDiscussion.id); }}
                 onDiscussionUpdated={handleDiscussionUpdated}
                 onShare={async (contactIds) => {
@@ -5721,7 +5696,6 @@ export function DiscussionsPage({
               <DiscussionNotesPanel
                 discussionId={activeDiscussion.id}
                 refreshKey={notesRefresh}
-                onClose={() => setShowNotesPanel(false)}
                 toast={toast}
                 t={t}
               />
@@ -5732,7 +5706,6 @@ export function DiscussionsPage({
                 discussionId={activeDiscussion.id}
                 files={activeContextFiles}
                 connections={mediaConnections}
-                onClose={() => setShowAssetsPanel(false)}
                 onMediaLaunched={(jobId) => {
                   const launchedDiscussionId = activeDiscussion.id;
                   void runsApi.get(jobId).then(run => {
@@ -5781,7 +5754,8 @@ export function DiscussionsPage({
               />
             )}
 
-            </div>{/* end utility column (strip + open panel) */}
+            </SidePanelShell>
+            )}
             </div>{/* end flex row (messages + utility panel) */}
           </>
         ) : !showNewDiscussion && (

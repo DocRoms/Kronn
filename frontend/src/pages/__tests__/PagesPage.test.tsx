@@ -924,7 +924,8 @@ describe('PagesPage', () => {
 
     const panel = screen.getByTestId('live-page-recent-refreshes');
     expect(panel.tagName).toBe('ASIDE');
-    expect(panel).toHaveClass('disc-tool-panel');
+    expect(panel).toHaveClass('side-panel-shell');
+    expect(within(panel).getByRole('tablist')).toHaveAttribute('aria-orientation', 'vertical');
     expect(container.querySelector('.live-pages-refresh-popover')).toBeNull();
     const workflows = within(panel).getByTestId('live-page-sync-workflows');
     const datasets = within(panel).getByTestId('live-page-sync-datasets');

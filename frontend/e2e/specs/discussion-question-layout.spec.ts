@@ -6,7 +6,6 @@ import { expect, test } from '@playwright/test';
 const styles = [
   '../../src/styles/tokens.css',
   '../../src/pages/DiscussionsPage.css',
-  '../../src/components/DiscussionPanelSwitcher.css',
   '../../src/components/DiscussionQuestionBanner.css',
 ].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
 

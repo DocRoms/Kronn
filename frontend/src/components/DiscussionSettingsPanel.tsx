@@ -57,7 +57,8 @@ interface Props {
   mcpConfigs: McpConfigDisplay[];
   mcpIncompatibilities: McpIncompatibility[];
   contacts: Contact[];
-  onClose: () => void;
+  /** Omitted when a surrounding panel (the side-panel shell) owns the close button. */
+  onClose?: () => void;
   /** The test-mode CTA the details section carries. */
   onRequestTestMode?: () => void;
   onDiscussionUpdated: () => void;
@@ -244,14 +245,16 @@ export function DiscussionSettingsPanel({
           <Settings size={15} />
           <span>{t('disc.settingsPanel')}</span>
         </div>
-        <button
-          type="button"
-          className="disc-tool-panel-icon"
-          onClick={onClose}
-          aria-label={t('common.close')}
-        >
-          <X size={16} />
-        </button>
+        {onClose && (
+          <button
+            type="button"
+            className="disc-tool-panel-icon"
+            onClick={onClose}
+            aria-label={t('common.close')}
+          >
+            <X size={16} />
+          </button>
+        )}
       </header>
 
       <div className="disc-tool-panel-body disc-settings-body">
