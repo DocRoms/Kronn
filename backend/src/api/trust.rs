@@ -335,20 +335,41 @@ async fn proof_view() -> TrustProofView {
     .await
     .ok()
     .and_then(Result::ok);
+    let (admin_secret_path, data_dir, in_docker) = proof_locations();
     match status {
         Some(status) => TrustProofView {
             enrolled: status.enrolled,
             pending: status.pending,
             recovery_codes_left: status.recovery_codes_left as u32,
             locked_for_secs: status.locked_for_secs as u32,
+            admin_secret_path,
+            data_dir,
+            in_docker,
         },
         None => TrustProofView {
             enrolled: false,
             pending: false,
             recovery_codes_left: 0,
             locked_for_secs: 0,
+            admin_secret_path,
+            data_dir,
+            in_docker,
         },
     }
+}
+
+/// Where the admin secret and the data directory are, for the screen to name
+/// them; an unresolvable directory leaves them empty.
+fn proof_locations() -> (String, String, bool) {
+    let display = |path: anyhow::Result<std::path::PathBuf>| {
+        path.map(|path| path.display().to_string())
+            .unwrap_or_default()
+    };
+    (
+        display(crate::core::operator_secret::secret_path()),
+        display(crate::core::config::config_dir()),
+        crate::core::env::is_docker(),
+    )
 }
 
 #[derive(Debug, Deserialize)]

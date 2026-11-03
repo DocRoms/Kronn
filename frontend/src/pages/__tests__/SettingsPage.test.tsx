@@ -32,8 +32,8 @@ vi.mock('../../lib/api', () => ({
     getScanIgnore: vi.fn().mockResolvedValue(['node_modules', '.git']),
     getServerConfig: vi.fn().mockResolvedValue({ host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5, agent_stall_timeout_min: 5, agent_global_timeout_min: 30, local_agent_global_timeout_min: 240, auth_enabled: true, discussion_notes_enabled: true, execution_variable_retention_days: 30 }),
     setServerConfig: vi.fn().mockResolvedValue(undefined),
-    getNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
-    setNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
+    getNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [], auth_token_set: false }),
+    setNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [], auth_token_set: false }),
     getRecoveryStatus: vi.fn().mockResolvedValue({ configured: false }),
     setRecovery: vi.fn().mockResolvedValue({ recovery_code: 'KRECOV1.mock.mock' }),
     restoreRecovery: vi.fn().mockResolvedValue(undefined),
@@ -199,6 +199,25 @@ vi.mock('../../lib/api', () => ({
     upsert: vi.fn(),
     delete: vi.fn(),
   },
+  trust: {
+    overview: vi.fn().mockResolvedValue({
+      instance: { scope: 'instance' },
+      effects: [],
+      never_covered: [],
+      sandbox: { available: true, protect_vault: true, protected: true },
+      proof: {
+        enrolled: false, pending: false, recovery_codes_left: 0, locked_for_secs: 0,
+        admin_secret_path: '/Users/romu/Library/Application Support/com.kronn.kronn/human-admin-secret',
+        data_dir: '/Users/romu/Library/Application Support/com.kronn.kronn',
+        in_docker: false,
+      },
+    }),
+    audit: vi.fn().mockResolvedValue([]),
+    instance: vi.fn().mockResolvedValue({
+      setting: { scope: 'instance' },
+      effective: { level: 'standard', source: 'instance', explicit: false },
+    }),
+  },
 }));
 
 import { SettingsPage } from '../SettingsPage';
@@ -206,6 +225,7 @@ import { agents as agentsApi, config as configApi } from '../../lib/api';
 import { dictionaries } from '../../lib/i18n/testing';
 import type { AgentsConfig, AgentDetection, RtkVersionInfo } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
+import { ApiRequestError } from '../../lib/apiRequestError';
 
 const noop = () => {};
 const toastFn: ToastFn = vi.fn();
@@ -407,7 +427,7 @@ describe('SettingsPage', () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
 
     const groups = [...document.querySelectorAll('.set-content-group-intro h2')].map(node => node.textContent);
-    expect(groups).toEqual(['Expérience & projets', 'Système & données']);
+    expect(groups).toEqual(['Expérience & projets', 'Sécurité et système']);
     expect(document.querySelector('#settings-user-context + .set-content-group-intro')).toBeTruthy();
   });
 
@@ -910,5 +930,91 @@ describe('SettingsPage', () => {
     expect(document.body.textContent).toContain(
       "le plafond global interrompra l'agent avant le timeout d'inactivité",
     );
+  });
+});
+
+describe('SettingsPage — security and system', () => {
+  const notExposed = { exposed: false, restart_required: false, port: 3140, reachable_ips: [], auth_token_set: false };
+  // Identity reads the exposure too: every read in the spec gets the same answer.
+  const exposeWithToken = () => vi.mocked(configApi.getNetworkExposure)
+    .mockResolvedValue({ ...notExposed, exposed: true, auth_token_set: true });
+  afterEach(() => { vi.mocked(configApi.getNetworkExposure).mockResolvedValue(notExposed); });
+
+  it('orders the security cards recovery, authenticator, trust levels, then server, in the index and on the page', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
+    await screen.findByTestId('trust-proof-section');
+
+    const sectionIds = [...(document.querySelector('.set-content')?.children ?? [])].map(child => child.id).filter(Boolean);
+    const at = sectionIds.indexOf('settings-recovery');
+    expect(sectionIds.slice(at, at + 4)).toEqual([
+      'settings-recovery', 'settings-authenticator', 'settings-trust', 'settings-server',
+    ]);
+    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    const hrefs = [...nav.querySelectorAll<HTMLAnchorElement>('.set-nav-btn')].map(link => link.getAttribute('href'));
+    const navAt = hrefs.indexOf('/config#settings-recovery');
+    expect(hrefs.slice(navAt, navAt + 4)).toEqual([
+      '/config#settings-recovery', '/config#settings-authenticator', '/config#settings-trust', '/config#settings-server',
+    ]);
+    expect(nav.querySelector('a[href="/config#settings-authenticator"]')?.textContent).toContain('Authentificateur');
+    // The admin secret path comes from the server, not from a guessed Linux path.
+    expect(screen.getByTestId('trust-proof-admin-secret-path').textContent)
+      .toBe('cat "/Users/romu/Library/Application Support/com.kronn.kronn/human-admin-secret"');
+  });
+
+  it('badges the network token from the server even when this browser holds no copy', async () => {
+    exposeWithToken();
+    await wrap(<SettingsPage {...defaultProps} />);
+    const badge = await screen.findByTestId('settings-auth-badge');
+    expect(badge).toHaveAttribute('data-on', 'true');
+    expect(badge.textContent).toBe('actif');
+    // No "create" offer that would replace the peers' token without a word.
+    expect(screen.queryByTestId('settings-auth-create')).toBeNull();
+    expect(screen.getByTestId('settings-auth-replace')).toBeTruthy();
+  });
+
+  it('asks before it replaces the token, and the server decides the badge, not the stored copy', async () => {
+    localStorage.setItem('kronn_auth_token', 'stale-token');
+    await wrap(<SettingsPage {...defaultProps} />);
+    const badge = await screen.findByTestId('settings-auth-badge');
+    expect(badge).toHaveAttribute('data-on', 'idle');
+    expect(badge.textContent).toBe('non créé');
+    expect(screen.getByTestId('settings-auth-create').textContent).toContain('Créer un token maintenant');
+    expect(screen.getByTestId('settings-auth-token').textContent).toContain("Kronn n'écoute que cette machine");
+    expect(screen.queryByTestId('settings-auth-replace')).toBeNull();
+  });
+
+  it('says nothing when the owner closes the authenticator dialog on the token', async () => {
+    exposeWithToken();
+    vi.mocked(toastFn).mockClear();
+    vi.mocked(configApi.regenerateAuthToken).mockRejectedValueOnce(
+      new ApiRequestError('needs a code', 'strong_confirmation_required'),
+    );
+    const originalConfirm = window.confirm;
+    window.confirm = vi.fn().mockReturnValue(true);
+    try {
+      await wrap(<SettingsPage {...defaultProps} />);
+      await act(async () => { fireEvent.click(await screen.findByTestId('settings-auth-replace')); });
+      await waitFor(() => expect(configApi.regenerateAuthToken).toHaveBeenCalled());
+      expect(toastFn).not.toHaveBeenCalledWith(expect.anything(), 'error');
+    } finally {
+      window.confirm = originalConfirm;
+    }
+  });
+
+  it('replaces a token in force only after the confirmation', async () => {
+    exposeWithToken();
+    vi.mocked(configApi.regenerateAuthToken).mockClear();
+    const originalConfirm = window.confirm;
+    window.confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
+    try {
+      await wrap(<SettingsPage {...defaultProps} />);
+      fireEvent.click(await screen.findByTestId('settings-auth-replace'));
+      expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('Remplacer le token'));
+      expect(configApi.regenerateAuthToken).not.toHaveBeenCalled();
+      await act(async () => { fireEvent.click(screen.getByTestId('settings-auth-replace')); });
+      await waitFor(() => expect(configApi.regenerateAuthToken).toHaveBeenCalledTimes(1));
+    } finally {
+      window.confirm = originalConfirm;
+    }
   });
 });

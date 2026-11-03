@@ -150,7 +150,6 @@
 }
 
 .trust-journal,
-.trust-limit,
 .trust-never,
 .trust-reach,
 .trust-global-link { margin: 0 0 var(--kr-sp-4); font-size: var(--kr-fs-xs); }
@@ -279,6 +278,25 @@
 }
 
 .trust-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.trust-step-title {
+  margin: var(--kr-sp-6) 0 var(--kr-sp-2);
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+}
+
+.trust-path {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  max-width: 100%;
+  vertical-align: middle;
+}
+
+.trust-path .set-code { overflow-wrap: anywhere; }
+.trust-path-list { margin: 4px 0 0; padding-left: 18px; display: grid; gap: 4px; }
+
+.trust-proof-section .set-expose-warn { margin: var(--kr-sp-4) 0 0; }
 
 .trust-audit {
   margin: var(--kr-sp-4) 0 0;

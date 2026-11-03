@@ -55,9 +55,9 @@ beforeEach(() => {
   config.saveGlobalContext.mockResolvedValue(undefined);
   config.getGlobalContextMode.mockResolvedValue('always');
   config.saveGlobalContextMode.mockResolvedValue(undefined);
-  config.getNetworkExposure.mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] });
+  config.getNetworkExposure.mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [], auth_token_set: false });
   config.getDesktopPort.mockResolvedValue({ saved: 47315, current: 47315, min: 1024, max: 65535 });
-  config.setNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [] });
+  config.setNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [], auth_token_set: true });
   contacts.networkInfo.mockResolvedValue({
     tailscale_ip: null, advertised_host: null, detected_ips: [],
   });
@@ -68,10 +68,10 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-async function mountIdentity(toast = vi.fn()) {
+async function mountIdentity(toast = vi.fn(), onExposureChange?: (exposure: unknown) => void) {
   let result: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<IdentitySection toast={toast as never} t={t} />);
+    result = render(<IdentitySection toast={toast as never} t={t} onExposureChange={onExposureChange} />);
   });
   // Let the mount effects settle (getServerConfig / getGlobalContext /
   // getGlobalContextMode / networkInfo all resolve in microtasks).
@@ -244,9 +244,10 @@ describe('IdentitySection — global context lifecycle', () => {
 
 describe('IdentitySection — network exposure toggle', () => {
   it('reflects current exposure + toggling persists and surfaces the restart notice', async () => {
-    config.getNetworkExposure.mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] });
-    config.setNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [] });
-    await mountIdentity();
+    config.getNetworkExposure.mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [], auth_token_set: false });
+    config.setNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [], auth_token_set: true });
+    const onExposureChange = vi.fn();
+    await mountIdentity(vi.fn(), onExposureChange);
 
     const toggle = screen.getByTestId('expose-network-toggle');
     expect(toggle).toHaveAttribute('aria-checked', 'false');
@@ -258,6 +259,8 @@ describe('IdentitySection — network exposure toggle', () => {
     expect(screen.getByText('settings.exposeSecurityNote')).toBeInTheDocument();
     expect(screen.getByText('settings.exposeRestartRequired')).toBeInTheDocument();
     expect(toggle).toHaveAttribute('aria-checked', 'true');
+    // The token card hears that exposing created the network access token.
+    expect(onExposureChange).toHaveBeenCalledWith(expect.objectContaining({ exposed: true, auth_token_set: true }));
   });
 
   it('saves the interface preferences server-side before the desktop restarts', async () => {
@@ -266,7 +269,7 @@ describe('IdentitySection — network exposure toggle', () => {
     const invoke = vi.fn(async (command: string) => { calls.push(command); });
     window.__TAURI__ = { core: { invoke: invoke as never } };
     try {
-      config.getNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [] });
+      config.getNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [], auth_token_set: false });
       await mountIdentity();
       await act(async () => { fireEvent.click(screen.getByText('settings.exposeRestartBtn')); });
       await waitFor(() => expect(calls).toEqual(['flush', 'restart_app']));
@@ -290,7 +293,7 @@ describe('IdentitySection — network exposure toggle', () => {
   });
 
   it('shows the CLI restart hint (not a Tauri button) in web mode', async () => {
-    config.getNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [] });
+    config.getNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [], auth_token_set: false });
     await mountIdentity();
     // happy-dom has no `__TAURI__` → web mode → CLI hint, no restart button.
     expect(screen.getByText('./kronn restart')).toBeInTheDocument();

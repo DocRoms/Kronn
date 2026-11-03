@@ -4,12 +4,12 @@
  * once; changing or disabling it needs a proof of the current one.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import type { TrustProofView } from '../../types/generated';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { TrustOverview, TrustProofView } from '../../types/generated';
 
 const { trustMock } = vi.hoisted(() => ({
   trustMock: {
-    proof: vi.fn(),
+    overview: vi.fn(),
     enrolProof: vi.fn(),
     confirmProof: vi.fn(),
     renewRecoveryCodes: vi.fn(),
@@ -24,8 +24,16 @@ vi.mock('../../lib/api', async () => {
 import { I18nProvider } from '../../lib/I18nContext';
 import { TrustProofSection } from '../settings/TrustProofSection';
 
-const NONE: TrustProofView = { enrolled: false, pending: false, recovery_codes_left: 0, locked_for_secs: 0 };
-const ENROLLED: TrustProofView = { enrolled: true, pending: false, recovery_codes_left: 9, locked_for_secs: 0 };
+const PATHS = {
+  admin_secret_path: '/Users/romu/Library/Application Support/com.kronn.kronn/human-admin-secret',
+  data_dir: '/Users/romu/Library/Application Support/com.kronn.kronn',
+  in_docker: false,
+};
+const NONE: TrustProofView = { enrolled: false, pending: false, recovery_codes_left: 0, locked_for_secs: 0, ...PATHS };
+const ENROLLED: TrustProofView = { enrolled: true, pending: false, recovery_codes_left: 9, locked_for_secs: 0, ...PATHS };
+const PROTECTED: TrustOverview['sandbox'] = { available: true, protect_vault: true, protected: true };
+/** The overview the card reads: the proof state and the vault protection. */
+const overview = (proof: TrustProofView, sandbox = PROTECTED) => ({ proof, sandbox }) as TrustOverview;
 const ENROLMENT = {
   secret: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ',
   uri: 'otpauth://totp/Kronn:human?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Kronn&algorithm=SHA1&digits=6&period=30',
@@ -41,7 +49,7 @@ afterEach(cleanup);
 
 describe('TrustProofSection', () => {
   it('enrols: shows the QR code and the manual key, confirms the first code, then shows the recovery codes once', async () => {
-    trustMock.proof.mockResolvedValueOnce(NONE).mockResolvedValue(ENROLLED);
+    trustMock.overview.mockResolvedValueOnce(overview(NONE)).mockResolvedValue(overview(ENROLLED));
     trustMock.enrolProof.mockResolvedValue(ENROLMENT);
     trustMock.confirmProof.mockResolvedValue({ codes: CODES });
     wrap();
@@ -70,7 +78,7 @@ describe('TrustProofSection', () => {
   });
 
   it('lets the owner cancel a pending enrolment with the admin secret', async () => {
-    trustMock.proof.mockResolvedValueOnce({ ...NONE, pending: true }).mockResolvedValue(NONE);
+    trustMock.overview.mockResolvedValueOnce(overview({ ...NONE, pending: true })).mockResolvedValue(overview(NONE));
     trustMock.disableProof.mockResolvedValue(NONE);
     wrap();
 
@@ -82,15 +90,40 @@ describe('TrustProofSection', () => {
     await waitFor(() => expect(screen.queryByTestId('trust-proof-cancel-pending')).toBeNull());
   });
 
-  it('says nothing can be raised while no authenticator is enrolled', async () => {
-    trustMock.proof.mockResolvedValue(NONE);
-    wrap();
-    expect((await screen.findByTestId('trust-proof-status')).textContent).toMatch(/aucun niveau/i);
+  it('says the agents stay at Standard while no authenticator is enrolled, and badges it', async () => {
+    trustMock.overview.mockResolvedValue(overview(NONE));
+    const { container } = wrap();
+    expect((await screen.findByTestId('trust-proof-status')).textContent).toMatch(/restent au niveau Standard/);
+    expect(screen.getByTestId('trust-proof-badge')).toHaveAttribute('data-on', 'false');
+    expect(screen.getByTestId('trust-proof-badge').textContent).toBe('Non configuré');
     expect(screen.queryByTestId('trust-proof-disable')).toBeNull();
+    expect(container.querySelector('#settings-authenticator.set-card')).not.toBeNull();
+    // The vault is protected here: no warning that agents can read the file.
+    expect(screen.queryByTestId('trust-proof-unprotected')).toBeNull();
+  });
+
+  it('badges a pending enrolment and an active one with its backup codes left', async () => {
+    trustMock.overview.mockResolvedValue(overview({ ...NONE, pending: true }));
+    wrap();
+    expect(await screen.findByTestId('trust-proof-badge')).toHaveAttribute('data-on', 'pending');
+    expect(screen.getByTestId('trust-proof-badge').textContent).toBe('En attente');
+    cleanup();
+
+    trustMock.overview.mockResolvedValue(overview(ENROLLED));
+    wrap();
+    const badge = await screen.findByTestId('trust-proof-badge');
+    expect(badge).toHaveAttribute('data-on', 'true');
+    expect(badge.textContent).toBe('Actif · 9 codes de secours');
+  });
+
+  it('warns that agents can read the admin secret too when the data folder is not protected', async () => {
+    trustMock.overview.mockResolvedValue(overview(NONE, { available: false, protect_vault: true, protected: false }));
+    wrap();
+    expect((await screen.findByTestId('trust-proof-unprotected')).textContent).toMatch(/tes agents peuvent aussi lire ce fichier/);
   });
 
   it('asks for a proof before it renews the codes, replaces or disables the enrolment', async () => {
-    trustMock.proof.mockResolvedValue(ENROLLED);
+    trustMock.overview.mockResolvedValue(overview(ENROLLED));
     trustMock.renewRecoveryCodes.mockResolvedValue({ codes: CODES });
     trustMock.disableProof.mockResolvedValue(NONE);
     trustMock.enrolProof.mockResolvedValue(ENROLMENT);
@@ -113,7 +146,7 @@ describe('TrustProofSection', () => {
   });
 
   it('replaces the authenticator with a proof of the current one', async () => {
-    trustMock.proof.mockResolvedValue(ENROLLED);
+    trustMock.overview.mockResolvedValue(overview(ENROLLED));
     trustMock.enrolProof.mockResolvedValue(ENROLMENT);
     wrap();
     await screen.findByTestId('trust-proof-status');
@@ -130,13 +163,14 @@ describe('TrustProofSection', () => {
   });
 
   it('leaves the replacement with a cancel, and words the admin-secret help for a replacement', async () => {
-    trustMock.proof.mockResolvedValue(ENROLLED);
+    trustMock.overview.mockResolvedValue(overview(ENROLLED));
     wrap();
     await screen.findByTestId('trust-proof-status');
     fireEvent.click(screen.getByTestId('trust-proof-replace-open'));
-    const help = screen.getByTestId('trust-proof-admin-secret').closest('label')!;
+    const help = screen.getByTestId('trust-proof-admin-hint');
     expect(help.textContent).toContain('Pour remplacer');
-    expect(help.textContent).not.toContain('Nécessaire au premier enrôlement');
+    expect(help.textContent).toContain(`cat "${ENROLLED.admin_secret_path}"`);
+    expect(help.textContent).not.toContain('premier démarrage');
     fireEvent.change(screen.getByTestId('trust-proof-admin-secret'), { target: { value: 'kr-admin-secret' } });
     fireEvent.click(screen.getByTestId('trust-proof-replace-cancel'));
     expect(screen.queryByTestId('trust-proof-admin-secret')).toBeNull();
@@ -145,7 +179,7 @@ describe('TrustProofSection', () => {
   });
 
   it('says the delay while the confirmation is locked, and still takes a recovery code', async () => {
-    trustMock.proof.mockResolvedValue({ ...ENROLLED, locked_for_secs: 37 });
+    trustMock.overview.mockResolvedValue(overview({ ...ENROLLED, locked_for_secs: 37 }));
     trustMock.disableProof.mockResolvedValue(undefined);
     wrap();
     expect((await screen.findByTestId('trust-proof-locked')).textContent).toContain('37');
@@ -159,26 +193,78 @@ describe('TrustProofSection', () => {
     await waitFor(() => expect(trustMock.disableProof).toHaveBeenCalledWith('abcd-efgh-ijkl'));
   });
 
-  it('tells how to reset it from the host', async () => {
-    trustMock.proof.mockResolvedValue(NONE);
-    const { container } = wrap();
-    await screen.findByTestId('trust-proof-status');
-    expect(container.textContent).toContain('trust-proof.json');
-    expect(container.textContent).toContain('trust-proof-lock.json');
+  it('tells how to reset it from the host, in the data folder the server names', async () => {
+    trustMock.overview.mockResolvedValue(overview(ENROLLED));
+    wrap();
+    const reset = await screen.findByTestId('trust-proof-reset');
+    expect(reset.textContent).toContain('trust-proof.json');
+    expect(reset.textContent).toContain('trust-proof-lock.json');
+    expect(reset.textContent).toContain(ENROLLED.data_dir);
   });
 
-  it('says where the admin secret is and that an agent cannot read it', async () => {
-    trustMock.proof.mockResolvedValue(NONE);
-    const { container } = wrap();
-    await screen.findByTestId('trust-proof-status');
-    expect(container.textContent).toContain('human-admin-secret');
+  it('shows the admin secret path from the payload, with a copy button, and how to get a new secret', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    trustMock.overview.mockResolvedValue(overview(NONE));
+    wrap();
+    const hint = await screen.findByTestId('trust-proof-admin-hint');
+    expect(hint.textContent).toContain(`cat "${NONE.admin_secret_path}"`);
+    // Never the Linux path guessed on every platform.
+    expect(hint.textContent).not.toContain('~/.config/kronn');
+    expect(screen.getByTestId('trust-proof-admin-secret-path').textContent).toBe(`cat "${NONE.admin_secret_path}"`);
+    fireEvent.click(within(hint).getByRole('button'));
+    expect(writeText).toHaveBeenCalledWith(`cat "${NONE.admin_secret_path}"`);
     expect(screen.getByTestId('trust-proof-admin-secret')).toHaveAttribute('type', 'password');
+    expect(screen.getByTestId('trust-proof-lost').textContent).toContain('recover-admin-secret');
+    expect(screen.getByTestId('trust-proof-lost').textContent).toContain(NONE.data_dir);
+  });
+
+  it('points inside the container under Docker', async () => {
+    trustMock.overview.mockResolvedValue(overview({
+      ...NONE, in_docker: true, admin_secret_path: '/data/human-admin-secret', data_dir: '/data',
+    }));
+    wrap();
+    const hint = await screen.findByTestId('trust-proof-admin-hint');
+    expect(hint.textContent).toMatch(/dans le conteneur Kronn/);
+    expect(hint.textContent).toContain('/data/human-admin-secret');
+    expect(hint.textContent).not.toContain('cat "');
+  });
+
+  it('gives a PowerShell command for a Windows path', async () => {
+    const path = 'C:\\Users\\romu\\AppData\\Roaming\\kronn\\kronn\\config\\human-admin-secret';
+    trustMock.overview.mockResolvedValue(overview({ ...NONE, admin_secret_path: path }));
+    wrap();
+    expect((await screen.findByTestId('trust-proof-admin-secret-path')).textContent).toBe(`Get-Content "${path}"`);
+  });
+
+  it('keeps a generic file name when the server could not resolve the path', async () => {
+    trustMock.overview.mockResolvedValue(overview({ ...NONE, admin_secret_path: '', data_dir: '' }));
+    wrap();
+    const hint = await screen.findByTestId('trust-proof-admin-hint');
+    expect(hint.textContent).toContain('human-admin-secret');
+    expect(screen.getByTestId('trust-proof-admin-command-mac').textContent)
+      .toBe('cat "$HOME/Library/Application Support/com.kronn.kronn/human-admin-secret"');
+    expect(screen.queryByTestId('trust-proof-admin-secret-path')).toBeNull();
+    expect(screen.queryByTestId('trust-proof-lost')).toBeNull();
+  });
+
+  it('names the usual folders, never a bare file name as a command, when an older backend sends no path', async () => {
+    const { admin_secret_path: _path, data_dir: _dir, in_docker: _docker, ...older } = NONE;
+    trustMock.overview.mockResolvedValue(overview(older as typeof NONE));
+    wrap();
+    const hint = await screen.findByTestId('trust-proof-admin-hint');
+    expect(screen.getByTestId('trust-proof-admin-command-linux').textContent)
+      .toBe('cat "$HOME/.config/kronn/human-admin-secret"');
+    expect(hint.textContent).not.toMatch(/terminal : human-admin-secret/);
+    expect(screen.getByTestId('trust-proof-admin-command-windows').textContent)
+      .toBe('Get-Content "$env:APPDATA\\kronn\\kronn\\config\\human-admin-secret"');
+    expect(screen.queryByTestId('trust-proof-admin-secret-path')).toBeNull();
   });
 
   it('shows nothing, rather than breaking Settings, when the state cannot be read', async () => {
-    trustMock.proof.mockRejectedValue(new Error('down'));
+    trustMock.overview.mockRejectedValue(new Error('down'));
     const { container } = wrap();
-    await waitFor(() => expect(trustMock.proof).toHaveBeenCalled());
+    await waitFor(() => expect(trustMock.overview).toHaveBeenCalled());
     expect(container.querySelector('[data-testid="trust-proof-section"]')).toBeNull();
   });
 });

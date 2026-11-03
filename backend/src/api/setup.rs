@@ -1150,6 +1150,8 @@ pub struct NetworkExposure {
     pub port: u16,
     /// Reachable addresses (LAN + Tailscale) a peer could use to reach us.
     pub reachable_ips: Vec<crate::core::tailscale::DetectedIp>,
+    /// A network access token is in force: auth is on and a token exists.
+    pub auth_token_set: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1161,9 +1163,13 @@ pub struct SetNetworkExposureRequest {
 pub async fn get_network_exposure(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<NetworkExposure>> {
-    let (host, port) = {
+    let (host, port, auth_token_set) = {
         let config = state.config.read().await;
-        (config.server.host.clone(), config.server.listening_port())
+        (
+            config.server.host.clone(),
+            config.server.listening_port(),
+            auth_token_set(&config.server),
+        )
     };
     let reachable_ips = crate::core::tailscale::detect_all_ips().await;
     Json(ApiResponse::ok(NetworkExposure {
@@ -1171,7 +1177,12 @@ pub async fn get_network_exposure(
         restart_required: crate::core::net_expose::restart_required(&host),
         port,
         reachable_ips,
+        auth_token_set,
     }))
+}
+
+fn auth_token_set(server: &crate::models::ServerConfig) -> bool {
+    server.auth_enabled && server.auth_token.as_deref().is_some_and(|t| !t.is_empty())
 }
 
 /// POST /api/config/network-exposure — flip LAN/Tailscale exposure.
@@ -5918,6 +5929,26 @@ mod frontend_origin_tests {
         );
         for bad in ["http://h:3140/path", "*", "http://evil#", "null"] {
             assert!(normalize_origin_list(&[bad.into()]).is_err(), "{bad}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod network_exposure_tests {
+    use super::auth_token_set;
+
+    #[test]
+    fn auth_token_set_needs_auth_on_and_a_token() {
+        let mut server = crate::core::config::default_config().server;
+        for (enabled, token, expected) in [
+            (true, Some("tok"), true),
+            (false, Some("tok"), false),
+            (true, None, false),
+            (true, Some(""), false),
+        ] {
+            server.auth_enabled = enabled;
+            server.auth_token = token.map(str::to_owned);
+            assert_eq!(auth_token_set(&server), expected, "{enabled} {token:?}");
         }
     }
 }

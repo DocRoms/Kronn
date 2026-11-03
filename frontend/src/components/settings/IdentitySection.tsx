@@ -20,9 +20,11 @@ function GravatarPreview({ email, alt }: { email: string; alt: string }) {
 interface IdentitySectionProps {
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
+  /** The exposure toggle changed: exposing creates the network access token. */
+  onExposureChange?: (exposure: NetworkExposure) => void;
 }
 
-export function IdentitySection({ toast, t }: IdentitySectionProps) {
+export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionProps) {
   const [pseudo, setPseudo] = useState('');
   const [avatarEmail, setAvatarEmail] = useState('');
   const [bio, setBio] = useState('');
@@ -261,6 +263,7 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
                 try {
                   const updated = await configApi.setNetworkExposure(!exposure?.exposed);
                   setExposure(updated);
+                  onExposureChange?.(updated);
                 } catch (error) {
                   reportSaveError(error);
                 }

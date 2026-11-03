@@ -241,6 +241,13 @@ pub struct TrustProofView {
     pub recovery_codes_left: u32,
     /// Seconds left of a lockout (5 wrong codes lock it, 60 s then longer); 0 when open.
     pub locked_for_secs: u32,
+    /// Where the human-admin secret file is, so the screen can name it; empty
+    /// when the data directory cannot be resolved. Never the secret itself.
+    pub admin_secret_path: String,
+    /// The Kronn data directory, where the recovery and reset files go.
+    pub data_dir: String,
+    /// Kronn runs in a container: the paths are inside it, not on the host.
+    pub in_docker: bool,
 }
 
 /// A proof of the strong confirmation: the authenticator's current code, or a

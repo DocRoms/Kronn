@@ -6211,7 +6211,11 @@ restart_required: boolean, port: number,
 /**
  * Reachable addresses (LAN + Tailscale) a peer could use to reach us.
  */
-reachable_ips: Array<DetectedIp>, };
+reachable_ips: Array<DetectedIp>,
+/**
+ * A network access token is in force: auth is on and a token exists.
+ */
+auth_token_set: boolean, };
 
 /**
  * Network info for multi-user connectivity.
@@ -11014,7 +11018,20 @@ pending: boolean, recovery_codes_left: number,
 /**
  * Seconds left of a lockout (5 wrong codes lock it, 60 s then longer); 0 when open.
  */
-locked_for_secs: number, };
+locked_for_secs: number,
+/**
+ * Where the human-admin secret file is, so the screen can name it; empty
+ * when the data directory cannot be resolved. Never the secret itself.
+ */
+admin_secret_path: string,
+/**
+ * The Kronn data directory, where the recovery and reset files go.
+ */
+data_dir: string,
+/**
+ * Kronn runs in a container: the paths are inside it, not on the host.
+ */
+in_docker: boolean, };
 
 /**
  * Ten single-use recovery codes, shown once: only their digests are kept.

@@ -1266,6 +1266,32 @@ async fn with_the_vault_protection_off_the_raise_names_the_setting() {
 
 #[tokio::test]
 #[serial]
+async fn the_proof_view_names_the_admin_secret_file_and_the_data_dir_not_the_secret() {
+    let (state, dir) = unenrolled();
+    let admin = admin_secret(&state).await;
+    let (_, Json(view)) = crate::api::trust::get_proof().await;
+    let view = view.data.unwrap();
+    assert_eq!(
+        view.admin_secret_path,
+        dir.path().join("human-admin-secret").display().to_string()
+    );
+    assert_eq!(
+        view.admin_secret_path,
+        crate::core::operator_secret::secret_path()
+            .unwrap()
+            .display()
+            .to_string()
+    );
+    assert_eq!(view.data_dir, dir.path().display().to_string());
+    assert_eq!(view.in_docker, crate::core::env::is_docker());
+    assert!(!serde_json::to_string(&view).unwrap().contains(&admin));
+
+    let (_, Json(overview)) = crate::api::trust::overview(State(state)).await;
+    assert_eq!(overview.data.unwrap().proof, view);
+}
+
+#[tokio::test]
+#[serial]
 async fn the_enrolment_routes_issue_a_seed_confirm_it_and_need_a_proof_to_change_it() {
     let (state, dir) = unenrolled();
     let admin = admin_secret(&state).await;

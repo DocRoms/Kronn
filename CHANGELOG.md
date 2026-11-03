@@ -19,6 +19,21 @@ Release notes for 0.9.3 and earlier are available in the
   `utoipa-swagger-ui` 9 uses to unpack its own bundled Swagger UI. The advisory is
   ignored for that path with a dated rationale in `backend/.cargo/audit.toml`, and
   moving to `utoipa` 6 is tracked separately.
+- Settings › Security and system tells its three security mechanisms apart
+  (KT-1534). The authenticator has its own card (`#settings-authenticator`,
+  between the recovery phrase and the trust levels) with numbered enrolment
+  steps; it names the real `human-admin-secret` path from the server (macOS
+  `~/Library/Application Support/com.kronn.kronn/`, Docker `KRONN_DATA_DIR`)
+  instead of a Linux path given for every platform, says when agents can read
+  that file too, and how to get a new secret (`recover-admin-secret`). The
+  network access token card follows the server (`auth_token_set` on
+  `GET /api/config/network-exposure`) instead of this browser's stored copy:
+  after turning on network exposure it no longer says « désactivé » and offers
+  to create a token that would replace the one peers use. The risk panel puts
+  the missing authenticator first, links to its card and shows no
+  acknowledgement until one is set up; « coffre Kronn » becomes « dossier de
+  données de Kronn ».
+
 - A task is no longer marked `done` when its delivery is integrated into a
   campaign or feature branch that has not reached the default branch yet
   (KT-1519). It stays `in_progress`, integrated and awaiting the merge; the

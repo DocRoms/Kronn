@@ -6,8 +6,7 @@ import { trust as trustApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
 import type { ToastFn } from '../../hooks/useToast';
 import type { TrustAuditEntry, TrustOverview } from '../../types/generated';
-import { TRUST_SETTINGS_SECTION, TrustBadge, TrustLevelControl } from '../TrustLevel';
-import { TrustProofSection } from './TrustProofSection';
+import { TRUST_PROOF_SECTION, TRUST_SETTINGS_SECTION, TrustBadge, TrustLevelControl, TrustSectionLink } from '../TrustLevel';
 
 const CHANGED = 'kronn:trust-changed';
 
@@ -28,17 +27,19 @@ export function TrustSection({ toast }: { toast?: ToastFn }) {
   const { t } = useT();
   const [audit, setAudit] = useState<TrustAuditEntry[]>([]);
   const [sandbox, setSandbox] = useState<TrustOverview['sandbox'] | null>(null);
+  const [enrolled, setEnrolled] = useState<boolean | null>(null);
   const load = useCallback(() => {
     Promise.resolve()
       .then(() => trustApi.audit(50))
       .then(entries => setAudit(entries ?? []))
       .catch(() => setAudit([]));
-  }, []);
-  useEffect(() => {
     Promise.resolve()
       .then(() => trustApi.overview())
-      .then(loaded => setSandbox(loaded?.sandbox ?? null))
-      .catch(() => setSandbox(null));
+      .then(overview => {
+        setEnrolled(overview?.proof.enrolled ?? null);
+        setSandbox(overview?.sandbox ?? null);
+      })
+      .catch(() => { setEnrolled(null); setSandbox(null); });
   }, []);
   useEffect(() => {
     load();
@@ -56,8 +57,15 @@ export function TrustSection({ toast }: { toast?: ToastFn }) {
         </div>
         <p className="set-meta">{t('trust.section.hint')}</p>
         <VaultStatus sandbox={sandbox} />
+        {enrolled === false && (
+          <p className="set-meta" data-testid="trust-need-proof">
+            {t('trust.section.needProof')}{' '}
+            <TrustSectionLink section={TRUST_PROOF_SECTION} data-testid="trust-need-proof-link">
+              {t('trust.panel.proofEnrolLink')}
+            </TrustSectionLink>
+          </p>
+        )}
         <TrustLevelControl target={{ scope: 'instance' }} toast={toast} />
-        <TrustProofSection toast={toast} />
         <h4 className="mt-8">{t('trust.audit.title')}</h4>
         {audit.length === 0 ? (
           <p className="set-meta" data-testid="trust-audit-empty">{t('trust.audit.empty')}</p>

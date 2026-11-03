@@ -886,6 +886,8 @@ export interface NetworkExposure {
   restart_required: boolean;
   port: number;
   reachable_ips: DetectedIp[];
+  /** A network access token is in force (auth on and a token stored). */
+  auth_token_set: boolean;
 }
 
 export const config = {
