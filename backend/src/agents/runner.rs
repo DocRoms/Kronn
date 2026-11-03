@@ -8303,6 +8303,9 @@ enum LeadingThinkingState {
 pub(crate) struct LeadingThinkingFilter {
     state: LeadingThinkingState,
     pending: String,
+    /// Second stage, over what the first lets through: tool calls the model
+    /// wrote as text instead of through the `tool_calls` channel.
+    text_calls: TextToolCallFilter,
 }
 
 impl LeadingThinkingFilter {
@@ -8315,6 +8318,16 @@ impl LeadingThinkingFilter {
     const CLOSE_TAGS: [&'static str; 2] = ["</think>", "</thinking>"];
 
     pub(crate) fn push(&mut self, input: &str) -> String {
+        let visible = self.push_thinking(input);
+        self.text_calls.push(&visible)
+    }
+
+    /// A tool call written as text was stripped from this reply (KT-1543).
+    pub(crate) fn stripped_text_calls(&self) -> bool {
+        self.text_calls.stripped
+    }
+
+    fn push_thinking(&mut self, input: &str) -> String {
         if self.state == LeadingThinkingState::Passthrough {
             return input.to_string();
         }
@@ -8376,7 +8389,7 @@ impl LeadingThinkingFilter {
     }
 
     pub(crate) fn finish(&mut self) -> String {
-        match self.state {
+        let tail = match self.state {
             LeadingThinkingState::Suppressing => {
                 self.pending.clear();
                 String::new()
@@ -8384,7 +8397,10 @@ impl LeadingThinkingFilter {
             LeadingThinkingState::Probing | LeadingThinkingState::Passthrough => {
                 std::mem::take(&mut self.pending)
             }
-        }
+        };
+        let mut visible = self.text_calls.push(&tail);
+        visible.push_str(&self.text_calls.finish());
+        visible
     }
 
     fn longest_possible_tag_suffix(input: &str, tags: &[&str]) -> usize {
@@ -8394,6 +8410,130 @@ impl LeadingThinkingFilter {
             .map(str::len)
             .max()
             .unwrap_or(0)
+    }
+}
+
+/// Drops tool calls a model wrote into its text, e.g.
+/// `###Call:default_api:git_log{limit:5}###` (KT-1543).
+///
+/// Some models behind an OpenAI-compatible proxy fall back to a pseudo-syntax in
+/// `content` instead of the `tool_calls` channel. It is not valid JSON
+/// (`{limit:5}`) and arrives after the model has already gone on writing, so it
+/// is stripped rather than executed late: the room never shows it as prose.
+/// Deltas can split the markers anywhere, hence the carry-over buffer.
+///
+/// A span is a call only when `###Call:` is closed by `}###` on the same line.
+/// Anything else (a prose mention, a Markdown `###` heading further down) is
+/// left untouched. Whitespace around stripped calls is not text: until real text
+/// has been shown, it is dropped too.
+#[derive(Debug, Default)]
+struct TextToolCallFilter {
+    pending: String,
+    inside: bool,
+    /// Visible text has already been emitted, so nothing is "leading" any more.
+    emitted: bool,
+    /// A call was stripped while nothing was shown: swallow the blank space
+    /// that follows it.
+    trim_leading: bool,
+    /// At least one call was stripped.
+    stripped: bool,
+}
+
+impl TextToolCallFilter {
+    const OPEN: &'static str = "###Call:";
+    const CLOSE: &'static str = "}###";
+    /// A call longer than this is not a call, it is text that happens to contain
+    /// the marker: it is shown instead of withheld without end.
+    const MAX_CALL_BYTES: usize = 4096;
+
+    /// Append `text` to `out`, honouring the leading-blank rule.
+    fn emit(&mut self, out: &mut String, text: &str) {
+        let text = if self.trim_leading {
+            text.trim_start()
+        } else {
+            text
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.trim_leading = false;
+        self.emitted = true;
+        out.push_str(text);
+    }
+
+    fn push(&mut self, input: &str) -> String {
+        self.pending.push_str(input);
+        let mut out = String::new();
+        loop {
+            if self.inside {
+                let newline = self.pending.find('\n');
+                match self.pending.find(Self::CLOSE) {
+                    Some(end) if newline.is_none_or(|newline| end < newline) => {
+                        self.pending.drain(..end + Self::CLOSE.len());
+                        self.inside = false;
+                        self.stripped = true;
+                        self.trim_leading = !self.emitted;
+                        continue;
+                    }
+                    _ => {}
+                }
+                if let Some(newline) = newline {
+                    // The line ended before any closing: a mention, not a call.
+                    let text = format!("{}{}", Self::OPEN, &self.pending[..=newline]);
+                    self.pending.drain(..=newline);
+                    self.inside = false;
+                    self.emit(&mut out, &text);
+                    continue;
+                }
+                if self.pending.len() > Self::MAX_CALL_BYTES {
+                    let text = format!("{}{}", Self::OPEN, std::mem::take(&mut self.pending));
+                    self.inside = false;
+                    self.emit(&mut out, &text);
+                }
+                break;
+            }
+            if let Some(start) = self.pending.find(Self::OPEN) {
+                let before: String = self.pending.drain(..start).collect();
+                self.pending.drain(..Self::OPEN.len());
+                self.inside = true;
+                // Blank space ahead of a leading call is not text either.
+                if self.emitted || !before.trim().is_empty() {
+                    self.emit(&mut out, &before);
+                }
+                continue;
+            }
+            if !self.emitted {
+                // Blanks that may still precede a call (or a split marker) wait.
+                let candidate = self.pending.trim_start();
+                if candidate.len() < Self::OPEN.len() && Self::OPEN.starts_with(candidate) {
+                    break;
+                }
+            }
+            // Hold a tail that may be the start of a marker split across deltas.
+            // The marker is ASCII, so the cut always lands on a char boundary.
+            let keep = (1..Self::OPEN.len())
+                .rev()
+                .find(|n| self.pending.ends_with(&Self::OPEN[..*n]))
+                .unwrap_or(0);
+            let cut = self.pending.len() - keep;
+            let text: String = self.pending.drain(..cut).collect();
+            self.emit(&mut out, &text);
+            break;
+        }
+        out
+    }
+
+    /// What is held at the end of the stream was ordinary text after all: a
+    /// partial marker, or a `###Call:` that never closed.
+    fn finish(&mut self) -> String {
+        let mut text = std::mem::take(&mut self.pending);
+        if self.inside {
+            self.inside = false;
+            text.insert_str(0, Self::OPEN);
+        }
+        let mut out = String::new();
+        self.emit(&mut out, &text);
+        out
     }
 }
 
@@ -9866,6 +10006,7 @@ async fn start_ollama_http_with_idle(
                 }
             }
             emitted_text |= emitted_this_turn;
+            let stripped_text_calls = thinking_filter.stripped_text_calls();
 
             let calls = pending_tools.finish();
             // A provider that reports no usage is charged its estimated prompt.
@@ -10549,25 +10690,51 @@ async fn start_ollama_http_with_idle(
                 // results are not an answer. Ask once, explicitly, for the written
                 // reply. Bounded to a single extra turn and only when tools really
                 // ran, so it cannot become a loop of its own.
-                if got_done && !got_error && !emitted_text && !asked_for_answer && turn > 0 {
+                //
+                // KT-1543: a first turn made only of tool calls written as text is
+                // the same silence, so it is retried too — the pseudo-calls were
+                // stripped, and their `{path:...}` arguments are not valid JSON to
+                // execute. That retry keeps the tools: nothing ran, so the model
+                // still has to make its call, through the proper channel.
+                let text_calls_only = turn == 0 && stripped_text_calls;
+                if got_done
+                    && !got_error
+                    && !emitted_text
+                    && !asked_for_answer
+                    && (turn > 0 || text_calls_only)
+                {
                     asked_for_answer = true;
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(format!(
-                            "{backend} finished without any text after using tools — asking once for the answer"
-                        ));
+                        se.push(if text_calls_only {
+                            format!(
+                                "{backend} wrote its tool calls as text and nothing else — asking once to use the tool-call channel"
+                            )
+                        } else {
+                            format!(
+                                "{backend} finished without any text after using tools — asking once for the answer"
+                            )
+                        });
                     }
                     if let Some(messages) = body["messages"].as_array_mut() {
                         messages.push(serde_json::json!({
                             "role": "user",
-                            "content": "You used tools but wrote no answer. Reply now, in prose, \
-                                        using what the tools returned. Do not call any more tools.",
+                            "content": if text_calls_only {
+                                "Your reply contained only tool calls written as text, which \
+                                 were discarded and not run. Call the tools through the \
+                                 tool-calling interface, or answer in prose."
+                            } else {
+                                "You used tools but wrote no answer. Reply now, in prose, \
+                                 using what the tools returned. Do not call any more tools."
+                            },
                         }));
                     }
                     // Drop the tool declarations for this turn: the instruction is to
                     // write, and removing them makes another tool call impossible
                     // rather than merely discouraged.
-                    if let Some(map) = body.as_object_mut() {
-                        map.remove("tools");
+                    if !text_calls_only {
+                        if let Some(map) = body.as_object_mut() {
+                            map.remove("tools");
+                        }
                     }
                     if !is_openai_wire {
                         resize_ollama_num_ctx(&mut body, ctx_cap);

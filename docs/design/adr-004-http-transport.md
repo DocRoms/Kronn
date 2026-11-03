@@ -26,7 +26,7 @@ agent, regardless of which named connection backs it. It replaces an inline
 ternary that used to live inside `start_ollama_http`, mirroring
 `acp::resolve_acp_route` being the sole ACP route decision point.
 [src: file: backend/src/http_transport.rs:28-41]
-[src: file: backend/src/agents/runner.rs:9053-9056#resolve_chat_codec] (call site)
+[src: file: backend/src/agents/runner.rs:9193-9196#resolve_chat_codec] (call site)
 
 ### Pre-dispatch capability gate
 
