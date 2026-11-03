@@ -65,7 +65,7 @@ like a credential, so a plugin export never carries a secret. Agents only see
 the header names in their API context, never the values.
 [src: file: backend/src/api/mcps.rs:1096-1101#validate_custom_payload]
 [src: file: backend/src/api/mcps.rs:1192-1256#validate_default_headers]
-[src: file: backend/src/core/mcp_scanner.rs:4125-4136#default_headers]
+[src: file: backend/src/core/mcp_scanner.rs:4150-4161#default_headers]
 
 ## Test endpoint of a plugin
 

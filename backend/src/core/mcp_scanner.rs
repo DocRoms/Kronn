@@ -2197,6 +2197,35 @@ fn previously_owned_host_keys(state_path: &Path) -> BTreeSet<String> {
     owned
 }
 
+/// Keep a copy of a host config the first time Kronn is about to rewrite it
+/// (no ownership state yet), so a user's hand-written file can be recovered.
+/// Best-effort: a failed copy is logged by `rotate_backup`, never blocks the sync.
+fn backup_before_first_host_write(config_path: &Path, state_path: &Path) {
+    if config_path.is_file() && !state_path.exists() {
+        rotate_backup(config_path, BACKUP_ROTATION_SLOTS);
+    }
+}
+
+/// Replace only the Kronn-owned keys of a `mcpServers` map: drop the keys in
+/// `owned`, then insert `entries`. Never removes the file or any other key.
+fn merge_owned_json_servers(
+    servers: &mut serde_json::Map<String, serde_json::Value>,
+    owned: &BTreeSet<String>,
+    entries: &HashMap<String, McpServerEntry>,
+) {
+    for key in owned {
+        servers.remove(key);
+    }
+    for (key, entry) in entries {
+        match serde_json::to_value(entry) {
+            Ok(value) => {
+                servers.insert(key.clone(), value);
+            }
+            Err(e) => tracing::warn!("Failed to serialize MCP entry '{}': {}", key, e),
+        }
+    }
+}
+
 /// HostMcpSync impl for OpenAI Codex CLI. TOML format, stdio-only,
 /// merges with the existing `[model_providers]` / `[profiles]` etc.
 /// `~/.codex/config.toml` (single global file — no per-project support).
@@ -2378,6 +2407,7 @@ impl HostMcpSync for CodexSync {
                 return None;
             }
         };
+        backup_before_first_host_write(&codex_config, &state_path);
         Some(HostSyncPlan {
             path: codex_config,
             content,
@@ -2529,17 +2559,11 @@ impl HostMcpSync for CopilotSync {
             );
             return None;
         };
-        for key in previously_owned_host_keys(&state_path) {
-            servers.remove(&key);
-        }
-        for (key, entry) in &mcp_servers {
-            match serde_json::to_value(entry) {
-                Ok(value) => {
-                    servers.insert(key.clone(), value);
-                }
-                Err(e) => tracing::warn!("Failed to serialize Copilot MCP entry '{}': {}", key, e),
-            }
-        }
+        merge_owned_json_servers(
+            servers,
+            &previously_owned_host_keys(&state_path),
+            &mcp_servers,
+        );
 
         let summary = format!(
             "Synced Copilot global config ({} Kronn MCP servers)",
@@ -2552,6 +2576,7 @@ impl HostMcpSync for CopilotSync {
                 return None;
             }
         };
+        backup_before_first_host_write(&config_path, &state_path);
         Some(HostSyncPlan {
             path: config_path,
             content,
@@ -6168,5 +6193,84 @@ Always send emails from contact@example.com
         assert!(std::fs::read_to_string(&codex_path)
             .unwrap()
             .contains("model = \"o4\""));
+    }
+
+    #[test]
+    fn merging_kronn_servers_keeps_hand_written_entries_with_or_without_kronn_mcps() {
+        let hand = serde_json::json!({"command": "user-cmd"});
+        let entry = McpServerEntry {
+            command: Some("kronn-cmd".into()),
+            args: Some(vec![]),
+            url: None,
+            env: HashMap::new(),
+        };
+        let owned: BTreeSet<String> =
+            ["kronn-owned".to_string(), "kronn-internal".to_string()].into();
+        let fresh_servers = || {
+            let mut m = serde_json::Map::new();
+            m.insert("user-copilot".into(), hand.clone());
+            m.insert("kronn-owned".into(), serde_json::json!({"command": "old"}));
+            m.insert(
+                "kronn-internal".into(),
+                serde_json::json!({"command": "old"}),
+            );
+            m
+        };
+
+        // With a Kronn MCP: the owned key is replaced, the hand-written one stays.
+        let mut with = fresh_servers();
+        let entries = HashMap::from([("kronn-owned".to_string(), entry)]);
+        merge_owned_json_servers(&mut with, &owned, &entries);
+        assert_eq!(with["user-copilot"], hand);
+        assert_eq!(with["kronn-owned"]["command"], "kronn-cmd");
+        assert!(!with.contains_key("kronn-internal"));
+
+        // Without any Kronn MCP: owned keys vanish alone, the rest stays.
+        let mut without = fresh_servers();
+        merge_owned_json_servers(&mut without, &owned, &HashMap::new());
+        assert_eq!(without.len(), 1);
+        assert_eq!(without["user-copilot"], hand);
+    }
+
+    #[test]
+    #[serial]
+    fn host_sync_backs_up_the_user_file_once_and_never_deletes_it() {
+        let _restore = EnvRestore::capture(&HOST_SYNC_ENV);
+        let root = tempfile::tempdir().unwrap();
+        let home = fake_home_with_user_configs(root.path());
+        crate::core::child_env::set_var("KRONN_HOST_HOME", &home);
+        crate::core::child_env::remove_var("KRONN_IN_DOCKER");
+        crate::core::child_env::remove_var("KRONN_MCP_SECRET_REFERENCES");
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let originals = [
+            (
+                home.join(".copilot/mcp-config.json"),
+                home.join(".copilot/mcp-config.json.kronn-backup.1"),
+            ),
+            (
+                home.join(".codex/config.toml"),
+                home.join(".codex/config.toml.kronn-backup.1"),
+            ),
+        ];
+        let before: Vec<String> = originals
+            .iter()
+            .map(|(config, _)| std::fs::read_to_string(config).unwrap())
+            .collect();
+
+        run_host_sync(&CopilotSync, &conn, "test-secret");
+        run_host_sync(&CodexSync, &conn, "test-secret");
+        for ((config, backup), original) in originals.iter().zip(&before) {
+            assert!(config.exists());
+            assert_eq!(&std::fs::read_to_string(backup).unwrap(), original);
+        }
+
+        // Second sync: ownership state exists, so no further backup slot.
+        run_host_sync(&CopilotSync, &conn, "test-secret");
+        run_host_sync(&CodexSync, &conn, "test-secret");
+        for (config, backup) in &originals {
+            assert!(config.exists());
+            assert!(!backup.with_extension("2").exists());
+        }
     }
 }
