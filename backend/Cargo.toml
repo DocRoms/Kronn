@@ -117,7 +117,7 @@ syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 
 # Document extraction (context files: xlsx, docx, pptx, pdf)
-calamine = "0.37"                                          # Excel spreadsheets
+calamine = "0.38"                                          # Excel spreadsheets
 zip = { version = "9", default-features = false, features = ["deflate"] }  # Office XML (docx, pptx)
 pdf-extract = "0.12"                                        # PDF text extraction (0.12 → lopdf ≥0.42, fixes RUSTSEC-2026-0187)
 
