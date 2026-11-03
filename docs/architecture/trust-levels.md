@@ -192,7 +192,7 @@ screen, and loopback does not lift it: a command an agent approved that sends
 - The channel `ui` / `http` / `bridge` is decided by the server: `bridge` is a live
   bridge token seen by the gate, or the agent marker of the MCP bridge; `ui` is a request carrying a browser's `Origin`
   (a label for the journal, not a privilege); anything else is `http`.
-- **Enrolment** (Settings › Trust levels): the admin secret, a QR code and the manual
+- **Enrolment** (Settings › Authenticator): the admin secret, a QR code and the manual
   key, then a first code. The record is `trust-proof.json` in the data directory:
   the seed is encrypted with the installation key, the recovery codes are keyed
   digests, the file is mode 0600. The sandbox hides that directory from what a
@@ -210,11 +210,16 @@ screen, and loopback does not lift it: a command an agent approved that sends
   owner starts a replacement). A pending enrolment (a seed
   issued, no first code yet) is **not replaced** for 15 minutes (`409`). The owner
   does not have to wait: `POST /api/trust/proof/disable` with the admin secret
-  cancels a pending enrolment at once (a button in Settings › Trust levels); an agent
+  cancels a pending enrolment at once (a button in Settings › Authenticator); an agent
   without the secret, or a bridge token, cannot. The admin secret is compared in
   constant time (`admin_secret_matches`). Each accepted
   step is journalled (`enrolment step authorised by the admin secret`); the seed
-  and the recovery codes are never sent to a bridge token. Tests:
+  and the recovery codes are never sent to a bridge token. The proof state
+  (`GET /api/trust/proof`, `TrustOverview.proof`) names where the secret file and
+  the data directory are (`admin_secret_path` from `operator_secret::secret_path`,
+  `data_dir` from `config::config_dir`, `in_docker`), never the secret, so the
+  screen shows the real path per platform. Tests:
+  `the_proof_view_names_the_admin_secret_file_and_the_data_dir_not_the_secret`,
   `the_first_enrolment_needs_the_admin_secret_and_an_agent_without_it_gets_nothing`,
   `a_pending_enrolment_is_not_replaced_until_it_expires`,
   `the_owner_cancels_a_pending_enrolment_with_the_admin_secret`.
@@ -382,22 +387,24 @@ fails if one starts to:
 `TrustLevelControl` (Settings › Trust levels, the room's settings panel, the
 workflow page), `TrustRiskPanel` (any raise above Standard: the effects, what
 stays reachable, what the sandbox closes, the acknowledgement and the code, the
-missing vault protection with its own acknowledgement, and the enrolment link when
-no authenticator is set up), `TrustProofSection`
-(enrolment, recovery codes, replace, disable), `TrustBadge` (room header,
+missing vault protection with its own acknowledgement; with no authenticator set
+up it says so right after its intro, links to the enrolment and offers no
+acknowledgement nor confirm button), `TrustProofSection` (its own card, Settings ›
+Authenticator, `/config#settings-authenticator`, between the recovery phrase and
+the trust levels: enrolment in numbered steps with the admin secret path, recovery
+codes, replace, disable), `TrustBadge` (room header,
 workflow, settings; revoke is an explicit Standard at that scope). Every card
 whose key starts with `kronn-elevation-` (Kronn's or an agent's) renders a line
 naming the global setting with a link to `/config#settings-trust`.
 
 ## Limits
 
-- **Agent processes are not confined by this branch (KT-1495).** The agent CLIs
-  Kronn launches (Claude's Bash, Codex) are not under the sandbox yet: they can
-  read `encryption_key` and `trust-proof.json`, and so mint codes. The proof
-  protects against **what a level approves** (Quick Exec and Exec lines,
-  validations); the agent processes themselves are confined from 0.15.2 by
-  KT-1495, **which ships in the same release as this branch**. The risk panel says
-  so (`trust.panel.limit`).
+- **Agent processes are confined (KT-1495), a terminal CLI is not.** The agent
+  CLIs Kronn launches (Claude's Bash, Codex) run without Kronn's data folder, like
+  what a level approves, so they cannot read `encryption_key` or
+  `trust-proof.json` to mint codes. A CLI the owner starts in their own terminal
+  is not launched by Kronn and runs with the owner's rights: the Authenticator card
+  says so and asks to enrol early (KT-1534).
 - The Docker daemon is root and cannot be confined: Kronn closes its own data to
   the command and refuses a volume that names it. Each source is expanded the way
   a shell would (`~`, `$HOME`, `${VAR}`), a relative one (`./link-to-data`) is

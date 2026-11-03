@@ -17,12 +17,18 @@ import {
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
   Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink, Gamepad2,
-  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow, Gauge, Bot,
+  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow, Gauge, Bot, KeyRound,
 } from 'lucide-react';
 import { userError } from '../lib/userError';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
 import { TTS_VOICES, getTtsVoiceId, setTtsVoiceId } from '../lib/tts-models';
-import { setAuthToken } from '../lib/api';
+import { setAuthToken, type NetworkExposure } from '../lib/api';
+import { ApiRequestError } from '../lib/apiRequestError';
+import { isStrongRequired } from '../lib/strongConfirm';
+
+/** The owner closed the authenticator dialog: nothing failed, so nothing is announced. */
+const cancelledConfirmation = (error: unknown) =>
+  error instanceof ApiRequestError && isStrongRequired(error.code);
 import { useTheme, type ThemeMode } from '../lib/ThemeContext';
 import { useLayoutDensity } from '../lib/layoutDensity';
 import { AgentsSection } from '../components/settings/AgentsSection';
@@ -66,6 +72,7 @@ function AttributedDescription({ text, className }: { text: string; className?: 
 import { IdentitySection } from '../components/settings/IdentitySection';
 import { RecoverySection } from '../components/settings/RecoverySection';
 import { TrustSection } from '../components/settings/TrustSection';
+import { TrustProofSection } from '../components/settings/TrustProofSection';
 import { AntiHallucSection } from '../components/settings/AntiHallucSection';
 import { TimezoneSetting } from '../components/settings/TimezoneSetting';
 import { PublicationCredentialsSection } from '../components/settings/PublicationCredentialsSection';
@@ -143,6 +150,7 @@ const SETTINGS_SECTION_IDS = [
   'settings-workers',
   'settings-user-context',
   'settings-recovery',
+  'settings-authenticator',
   'settings-trust',
   'settings-server',
   'settings-debug',
@@ -406,6 +414,28 @@ export function SettingsPage({
     safeGetItem('kronn_auth_token')
   ));
   const [authVisible, setAuthVisible] = useState(false);
+  // The server says whether a token is in force; the stored copy only shows it.
+  const [exposure, setExposure] = useState<NetworkExposure | null | undefined>(undefined);
+  useEffect(() => {
+    Promise.resolve()
+      .then(() => configApi.getNetworkExposure())
+      .then(loaded => setExposure(loaded ?? null))
+      .catch(() => setExposure(null));
+  }, []);
+  // null while loading; a failed read falls back to the stored copy.
+  const tokenSet = exposure ? exposure.auth_token_set === true : exposure === null ? !!authToken : null;
+  const adoptToken = (token: string) => {
+    setAuthTokenState(token);
+    setAuthToken(token);
+    setExposure(current => current && { ...current, auth_token_set: true });
+  };
+  const replaceToken = async () => {
+    if (!confirm(t('config.authRegenConfirm'))) return;
+    try {
+      adoptToken(await configApi.regenerateAuthToken());
+      toast(t('config.authRegenerated'), 'success');
+    } catch (error) { if (!cancelledConfirmation(error)) toast(t('config.authRegenError'), 'error'); }
+  };
 
   // Internal API calls
   const { data: dbInfo, refetch: refetchDbInfo } = useApi(() => configApi.dbInfo(), []);
@@ -495,6 +525,7 @@ export function SettingsPage({
     { id: 'settings-workers', label: t('config.workers.title'), icon: <Bot size={15} /> },
     { id: 'settings-user-context', label: t('userContext.title'), icon: <FileText size={15} /> },
     { id: 'settings-recovery', label: t('settings.recovery.title'), icon: <Key size={15} />, group: t('config.systemSettings') },
+    { id: 'settings-authenticator', label: t('trust.proof.nav'), icon: <KeyRound size={15} /> },
     { id: 'settings-trust', label: t('trust.nav'), icon: <Shield size={15} /> },
     { id: 'settings-server', label: t('config.server'), icon: <Server size={15} /> },
     { id: 'settings-debug', label: t('settings.debugSection'), icon: <Terminal size={15} />, live: serverDebugMode },
@@ -579,7 +610,7 @@ export function SettingsPage({
 
         <div className="set-content">
 
-      <IdentitySection toast={toast} t={t} />
+      <IdentitySection toast={toast} t={t} onExposureChange={setExposure} />
 
       <div id="settings-agent-config" className="set-card set-agent-config-card">
         <div className="set-section">
@@ -1798,6 +1829,8 @@ export function SettingsPage({
       {/* P2 — recovery passphrase for the MCP-secrets encryption key. */}
       <RecoverySection toast={toast} t={t} />
 
+      <TrustProofSection toast={toast} />
+
       <TrustSection toast={toast} />
 
       <div id="settings-server" className="set-card">
@@ -1807,54 +1840,55 @@ export function SettingsPage({
             <span className="font-semibold text-lg">{t('config.server')}</span>
           </div>
 
-          {/* Auth Token */}
-          <div className="mb-8">
+          {/* Network access token */}
+          <div className="mb-8" data-testid="settings-auth-token">
             <div className="flex-row gap-3 mb-3">
               <Shield size={12} className="text-tertiary" />
               <span className="label" style={{ marginBottom: 0 }}>{t('config.authToken')}</span>
-              <span className="set-auth-badge" data-on={!!authToken}>
-                {authToken ? t('config.authEnabled') : t('config.authDisabled')}
-              </span>
+              {tokenSet !== null && (
+                <span className="set-auth-badge" data-on={tokenSet ? 'true' : exposure?.exposed ? 'false' : 'idle'} data-testid="settings-auth-badge">
+                  {tokenSet ? t('config.authEnabled') : t('config.authDisabled')}
+                </span>
+              )}
             </div>
-            {authToken ? (
+            {tokenSet === true && (
               <>
-                <div className="flex-row gap-3">
-                  <code className="set-code flex-1 text-xs truncate">
-                    {authVisible ? authToken : '••••••••••••••••••••'}
-                  </code>
-                  <button className="set-icon-btn" aria-label={authVisible ? 'Hide token' : 'Show token'} onClick={() => setAuthVisible(!authVisible)}>
-                    {authVisible ? <EyeOff size={11} /> : <Eye size={11} />}
+                {authToken ? (
+                  <div className="flex-row gap-3">
+                    <code className="set-code flex-1 text-xs truncate">
+                      {authVisible ? authToken : '••••••••••••••••••••'}
+                    </code>
+                    <button className="set-icon-btn" aria-label={authVisible ? 'Hide token' : 'Show token'} onClick={() => setAuthVisible(!authVisible)}>
+                      {authVisible ? <EyeOff size={11} /> : <Eye size={11} />}
+                    </button>
+                    <button className="set-icon-btn" aria-label={t('disc.copy')} onClick={() => { navigator.clipboard.writeText(authToken); toast(t('config.authCopied'), 'success'); }}>
+                      <Copy size={11} />
+                    </button>
+                    <button className="set-icon-btn" aria-label={t('config.regenerate')} onClick={() => void replaceToken()} data-testid="settings-auth-replace">
+                      <RefreshCw size={11} />
+                    </button>
+                  </div>
+                ) : (
+                  <button type="button" className="btn btn-ghost" onClick={() => void replaceToken()} data-testid="settings-auth-replace">
+                    <RefreshCw size={12} /> {t('config.regenerate')}
                   </button>
-                  <button className="set-icon-btn" aria-label={t('disc.copy')} onClick={() => { navigator.clipboard.writeText(authToken); toast(t('config.authCopied'), 'success'); }}>
-                    <Copy size={11} />
-                  </button>
-                  <button className="set-icon-btn" aria-label={t('config.regenerate')} onClick={async () => {
-                    if (!confirm(t('config.authRegenConfirm'))) return;
-                    try {
-                      const newToken = await configApi.regenerateAuthToken();
-                      setAuthTokenState(newToken);
-                      setAuthToken(newToken);
-                      toast(t('config.authRegenerated'), 'success');
-                    } catch { toast(t('config.authRegenError'), 'error'); }
-                  }}>
-                    <RefreshCw size={11} />
-                  </button>
-                </div>
+                )}
                 <div className="set-hint-xs">
                   {t('config.authHint')}
                 </div>
               </>
-            ) : (
+            )}
+            {tokenSet === false && (
               <div>
-                <button className="set-install-btn" onClick={async () => {
+                <button type="button" className="btn btn-ghost" onClick={async () => {
                   try {
                     const newToken = await configApi.regenerateAuthToken();
-                    setAuthTokenState(newToken);
-                    setAuthToken(newToken);
+                    adoptToken(newToken);
                     setAuthVisible(true);
+                    void navigator.clipboard?.writeText(newToken).catch(() => undefined);
                     toast(t('config.authActivated'), 'success');
-                  } catch { toast(t('config.authRegenError'), 'error'); }
-                }}>
+                  } catch (error) { if (!cancelledConfirmation(error)) toast(t('config.authRegenError'), 'error'); }
+                }} data-testid="settings-auth-create">
                   <Shield size={12} /> {t('config.authActivate')}
                 </button>
                 <div className="set-hint-xs">

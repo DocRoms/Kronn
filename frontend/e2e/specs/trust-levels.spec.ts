@@ -68,7 +68,7 @@ test.describe('trust levels (KT-1492)', () => {
   });
 
   test('enrols an authenticator: QR, manual key, first code, recovery codes shown once', async ({ page }) => {
-    await page.goto('/config#settings-trust');
+    await page.goto('/config#settings-authenticator');
     const section = page.getByTestId('trust-proof-section');
     await expect(section.getByTestId('trust-proof-status')).toBeVisible();
 

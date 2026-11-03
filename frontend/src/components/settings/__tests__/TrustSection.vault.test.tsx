@@ -28,7 +28,7 @@ const OVERVIEW: TrustOverview = {
   effects: [],
   never_covered: [],
   sandbox: { available: true, protect_vault: true, protected: true },
-  proof: { enrolled: false, pending: false, recovery_codes_left: 0, locked_for_secs: 0 },
+  proof: { enrolled: false, pending: false, recovery_codes_left: 0, locked_for_secs: 0, admin_secret_path: '', data_dir: '', in_docker: false },
 };
 
 const withSandbox = (sandbox: TrustOverview['sandbox']): TrustOverview => ({ ...OVERVIEW, sandbox });

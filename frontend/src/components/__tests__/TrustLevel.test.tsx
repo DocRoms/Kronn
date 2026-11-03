@@ -27,6 +27,7 @@ vi.mock('../../lib/api', async () => {
 
 import { I18nProvider } from '../../lib/I18nContext';
 import { TrustBadge, TrustLevelControl } from '../TrustLevel';
+import { TrustSection } from '../settings/TrustSection';
 
 const OVERVIEW: TrustOverview = {
   instance: { scope: 'instance', level: 'standard' },
@@ -42,7 +43,10 @@ const OVERVIEW: TrustOverview = {
   ],
   never_covered: ['credentials', 'trust_settings', 'destructive_confirmations', 'peer_inheritance'],
   sandbox: { available: true, protect_vault: true, protected: true },
-  proof: { enrolled: true, pending: false, recovery_codes_left: 10, locked_for_secs: 0 },
+  proof: {
+    enrolled: true, pending: false, recovery_codes_left: 10, locked_for_secs: 0,
+    admin_secret_path: '/home/romu/.config/kronn/human-admin-secret', data_dir: '/home/romu/.config/kronn', in_docker: false,
+  },
 };
 
 function view(level: TrustLevel, source: TrustScope = 'instance', own: TrustLevel | null = level): TrustScopeView {
@@ -156,29 +160,51 @@ describe('TrustLevelControl', () => {
     expect(screen.getByTestId('trust-closed').textContent).not.toMatch(/port d'API|réseau est fermé/);
     expect(screen.getByTestId('trust-never').textContent)
       .not.toMatch(/jamais lisibles|never readable|nunca son legibles/i);
-    // The panel states the limit: the code protects against what a level
-    // approves; the agent processes themselves are confined by a separate protection
-    // of the same release (0.15.2), named in words, never by a ticket number.
-    const limit = screen.getByTestId('trust-limit').textContent ?? '';
-    expect(limit).not.toMatch(/KT-\d+/);
-    expect(limit).toMatch(/protection distincte/);
-    expect(limit).toMatch(/0\.15\.2/);
+    // Agents launched by Kronn no longer reach the data folder: no limit is stated.
+    expect(screen.queryByTestId('trust-limit')).toBeNull();
   });
 
-  it('blocks the choice, and points to the enrolment, when no authenticator is set up', async () => {
+  it('blocks the choice, and points to the enrolment first, when no authenticator is set up', async () => {
     trustMock.overview.mockResolvedValue({
       ...OVERVIEW,
-      proof: { enrolled: false, pending: false, recovery_codes_left: 0, locked_for_secs: 0 },
+      proof: { ...OVERVIEW.proof, enrolled: false, recovery_codes_left: 0 },
     });
     trustMock.instance.mockResolvedValue(view('standard', 'instance', null));
     wrap(<TrustLevelControl target={{ scope: 'instance' }} />);
 
     fireEvent.click(await screen.findByTestId('trust-level-trusted'));
-    await screen.findByTestId('trust-proof-missing');
-    expect(screen.getByTestId('trust-proof-enrol-link').getAttribute('href')).toContain('settings-trust');
+    const missing = await screen.findByTestId('trust-proof-missing');
+    // Right after the intro, before the effects.
+    const panel = screen.getByTestId('trust-risk-panel');
+    expect(panel.querySelector('.trust-dialog-intro')?.nextElementSibling).toBe(missing);
+    expect(screen.getByTestId('trust-proof-enrol-link').getAttribute('href')).toBe('/config#settings-authenticator');
+    // Nothing to confirm: no code field, no acknowledgements, no confirm button.
     expect(screen.queryByTestId('trust-proof-input')).toBeNull();
-    fireEvent.click(screen.getByTestId('trust-ack'));
-    expect(screen.getByTestId('trust-confirm')).toBeDisabled();
+    expect(screen.queryByTestId('trust-ack')).toBeNull();
+    expect(screen.queryByTestId('trust-vault-ack')).toBeNull();
+    expect(screen.queryByTestId('trust-confirm')).toBeNull();
+    expect(screen.getByTestId('trust-cancel')).toBeTruthy();
+  });
+
+  it('scrolls to the authenticator card and closes the panel when it is on the page', async () => {
+    trustMock.overview.mockResolvedValue({
+      ...OVERVIEW,
+      proof: { ...OVERVIEW.proof, enrolled: false },
+    });
+    trustMock.instance.mockResolvedValue(view('standard', 'instance', null));
+    const card = document.createElement('div');
+    card.id = 'settings-authenticator';
+    card.scrollIntoView = vi.fn();
+    document.body.appendChild(card);
+    try {
+      wrap(<TrustLevelControl target={{ scope: 'instance' }} />);
+      fireEvent.click(await screen.findByTestId('trust-level-trusted'));
+      fireEvent.click(await screen.findByTestId('trust-proof-enrol-link'));
+      expect(card.scrollIntoView).toHaveBeenCalled();
+      expect(screen.queryByTestId('trust-risk-panel')).toBeNull();
+    } finally {
+      card.remove();
+    }
   });
 
   it('does not block a host without a sandbox: it names the missing vault protection and asks for its own acknowledgement', async () => {
@@ -198,13 +224,16 @@ describe('TrustLevelControl', () => {
 
     // The level control itself states it, before any panel opens.
     const note = await screen.findByTestId('trust-vault-note');
-    expect(note.textContent).toMatch(/protection du coffre Kronn est indisponible sur cette machine/);
+    expect(note.textContent).toMatch(/protection du dossier de données de Kronn n'est pas disponible sur cette machine/);
+    expect(note.textContent).not.toMatch(/coffre/);
     expect(note.textContent).toMatch(/sandbox-exec ni bubblewrap/);
 
     fireEvent.click(await screen.findByTestId('trust-level-full'));
     const gap = await screen.findByTestId('trust-vault-unprotected');
     expect(gap.textContent).toContain('bwrap is not installed');
     expect(gap.textContent).toMatch(/indisponible sur cette machine/);
+    expect(gap.textContent).not.toMatch(/coffre/);
+    expect(screen.getByTestId('trust-vault-ack').closest('label')?.textContent).toMatch(/dossier de données de Kronn/);
 
     // The proof and the risk acknowledgement are not enough: the missing
     // protection has its own acknowledgement.
@@ -238,7 +267,7 @@ describe('TrustLevelControl', () => {
   it('says how long a locked confirmation stays locked, and still takes a recovery code', async () => {
     trustMock.overview.mockResolvedValue({
       ...OVERVIEW,
-      proof: { enrolled: true, pending: false, recovery_codes_left: 10, locked_for_secs: 42 },
+      proof: { ...OVERVIEW.proof, locked_for_secs: 42 },
     });
     trustMock.instance.mockResolvedValue(view('standard', 'instance', null));
     trustMock.setInstance.mockResolvedValue(view('trusted'));
@@ -261,7 +290,7 @@ describe('TrustLevelControl', () => {
   it('re-reads the lock after a refused code and when the lockout ends', async () => {
     const locked = {
       ...OVERVIEW,
-      proof: { enrolled: true, pending: false, recovery_codes_left: 10, locked_for_secs: 1 },
+      proof: { ...OVERVIEW.proof, locked_for_secs: 1 },
     };
     trustMock.overview.mockResolvedValueOnce(OVERVIEW).mockResolvedValueOnce(locked).mockResolvedValue(OVERVIEW);
     trustMock.instance.mockResolvedValue(view('standard', 'instance', null));
@@ -366,5 +395,26 @@ describe('TrustBadge', () => {
     wrap(<TrustBadge target={{ scope: 'workflow', id: 'w1' }} />);
     await waitFor(() => expect(trustMock.get).toHaveBeenCalled());
     expect(screen.queryByTestId('trust-badge-workflow')).toBeNull();
+  });
+});
+
+describe('TrustSection', () => {
+  it('sends the owner to the authenticator card before Trusted or Full can be chosen', async () => {
+    trustMock.overview.mockResolvedValue({ ...OVERVIEW, proof: { ...OVERVIEW.proof, enrolled: false } });
+    trustMock.instance.mockResolvedValue(view('standard', 'instance', null));
+    wrap(<TrustSection />);
+    expect((await screen.findByTestId('trust-need-proof')).textContent).toMatch(/configure d'abord l'authentificateur/);
+    expect(screen.getByTestId('trust-need-proof-link').getAttribute('href')).toBe('/config#settings-authenticator');
+    // The authenticator has its own card now.
+    expect(screen.queryByTestId('trust-proof-section')).toBeNull();
+    expect(await screen.findByTestId('trust-control-instance')).toBeTruthy();
+  });
+
+  it('says nothing about the authenticator once it is enrolled', async () => {
+    trustMock.instance.mockResolvedValue(view('standard', 'instance', null));
+    wrap(<TrustSection />);
+    await screen.findByTestId('trust-control-instance');
+    await waitFor(() => expect(trustMock.overview).toHaveBeenCalled());
+    expect(screen.queryByTestId('trust-need-proof')).toBeNull();
   });
 });

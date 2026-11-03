@@ -1,13 +1,14 @@
 // KT-1492 — trust levels: the control that sets one, the risk panel that gates
 // any level above Standard, and the badge that shows an active level with a
 // one-click revoke.
-import { useCallback, useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useState, type ComponentProps } from 'react';
 import { AlertTriangle, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { trust as trustApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { settingsSectionPath } from '../lib/routes';
 import { userError } from '../lib/userError';
 import { useLockExpiry } from '../hooks/useLockExpiry';
+import { AppLink } from './AppLink';
 import type { ToastFn } from '../hooks/useToast';
 import type {
   NeverCovered, TrustEffect, TrustLevel, TrustOverview, TrustScopeView,
@@ -16,6 +17,23 @@ import './TrustLevel.css';
 
 /** The Settings section that holds the global level (Settings › Trust levels). */
 export const TRUST_SETTINGS_SECTION = 'settings-trust';
+/** The Settings section that enrols the authenticator (Settings › Authenticator). */
+export const TRUST_PROOF_SECTION = 'settings-authenticator';
+
+/** A link to a Settings section: scrolls to it when it is on this page,
+ *  otherwise opens Configuration there. */
+export function TrustSectionLink({
+  section, onFollow, children, className, ...rest
+}: { section: string; onFollow?: () => void } & Omit<ComponentProps<typeof AppLink>, 'to' | 'onNavigate'>) {
+  const to = settingsSectionPath(section);
+  const follow = () => {
+    const target = document.getElementById(section);
+    if (!target) { window.location.assign(to); return; }
+    onFollow?.();
+    target.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  };
+  return <AppLink {...rest} className={className ?? 'kr-inline-link'} to={to} onNavigate={follow}>{children}</AppLink>;
+}
 
 export type TrustTarget =
   | { scope: 'instance' }
@@ -128,6 +146,14 @@ export function TrustRiskPanel({
           {t('trust.panel.title', levelLabel(t, level))}
         </h3>
         <p className="trust-dialog-intro">{t(`trust.panel.intro.${level}`)}</p>
+        {!enrolment.enrolled && (
+          <p className="trust-blocked" role="alert" data-testid="trust-proof-missing">
+            {t('trust.panel.proofMissing')}{' '}
+            <TrustSectionLink section={TRUST_PROOF_SECTION} onFollow={onCancel} data-testid="trust-proof-enrol-link">
+              {t('trust.panel.proofEnrolLink')}
+            </TrustSectionLink>
+          </p>
+        )}
         <ul className="trust-effects" data-testid="trust-effects">
           {effects.map(effect => (
             <li key={effect.approval} data-approval={effect.approval}>
@@ -150,7 +176,6 @@ export function TrustRiskPanel({
             {CLOSED.map(key => <li key={key}>{t(`trust.panel.closed.${key}`)}</li>)}
           </ul>
         </div>
-        <p className="trust-limit" data-testid="trust-limit">{t('trust.panel.limit')}</p>
         <div className="trust-never" data-testid="trust-never">
           <strong>{t('trust.panel.neverTitle')}</strong>
           <ul>
@@ -159,22 +184,14 @@ export function TrustRiskPanel({
         </div>
         {scope !== 'instance' && (
           <p className="trust-global-link">
-            <a href={settingsSectionPath(TRUST_SETTINGS_SECTION)} data-testid="trust-panel-settings-link">
+            <TrustSectionLink section={TRUST_SETTINGS_SECTION} onFollow={onCancel} data-testid="trust-panel-settings-link">
               {t('trust.globalLink')}
-            </a>
+            </TrustSectionLink>
           </p>
         )}
         {gap && (
           <p className="trust-blocked" role="alert" data-testid="trust-vault-unprotected">
             {gap}
-          </p>
-        )}
-        {!enrolment.enrolled && (
-          <p className="trust-blocked" role="alert" data-testid="trust-proof-missing">
-            {t('trust.panel.proofMissing')}{' '}
-            <a href={settingsSectionPath(TRUST_SETTINGS_SECTION)} data-testid="trust-proof-enrol-link">
-              {t('trust.panel.proofEnrolLink')}
-            </a>
           </p>
         )}
         {ready && (
@@ -197,16 +214,18 @@ export function TrustRiskPanel({
             {t('trust.panel.proofLocked', String(enrolment.locked_for_secs))}
           </p>
         )}
-        <label className="trust-ack">
-          <input
-            type="checkbox"
-            checked={understood}
-            onChange={event => setUnderstood(event.target.checked)}
-            data-testid="trust-ack"
-          />
-          {t('trust.panel.ack')}
-        </label>
-        {gap && (
+        {ready && (
+          <label className="trust-ack">
+            <input
+              type="checkbox"
+              checked={understood}
+              onChange={event => setUnderstood(event.target.checked)}
+              data-testid="trust-ack"
+            />
+            {t('trust.panel.ack')}
+          </label>
+        )}
+        {ready && gap && (
           <label className="trust-ack">
             <input
               type="checkbox"
@@ -221,15 +240,17 @@ export function TrustRiskPanel({
           <button type="button" className="trust-btn" autoFocus onClick={onCancel} data-testid="trust-cancel">
             {t('common.cancel')}
           </button>
-          <button
-            type="button"
-            className="trust-btn trust-btn-danger"
-            disabled={!understood || (gap !== null && !vaultUnderstood) || !ready || proof.trim() === '' || busy}
-            onClick={() => onConfirm(proof.trim(), gap !== null)}
-            data-testid="trust-confirm"
-          >
-            {t('trust.panel.confirm', levelLabel(t, level))}
-          </button>
+          {ready && (
+            <button
+              type="button"
+              className="trust-btn trust-btn-danger"
+              disabled={!understood || (gap !== null && !vaultUnderstood) || proof.trim() === '' || busy}
+              onClick={() => onConfirm(proof.trim(), gap !== null)}
+              data-testid="trust-confirm"
+            >
+              {t('trust.panel.confirm', levelLabel(t, level))}
+            </button>
+          )}
         </div>
       </div>
     </div>

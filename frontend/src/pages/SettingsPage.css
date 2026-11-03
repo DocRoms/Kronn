@@ -5261,6 +5261,19 @@
   border: 1px solid rgba(var(--kr-error-rgb), 0.2);
 }
 
+.set-auth-badge[data-on="pending"] {
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  color: var(--kr-warning);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.2);
+}
+
+/* Not an error: on loopback the token is not needed. */
+.set-auth-badge[data-on="idle"] {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-muted);
+  border: 1px solid var(--kr-border);
+}
+
 /* ── Domain input ──────────────────────────────────────── */
 .set-domain-input {
   flex: 1;
