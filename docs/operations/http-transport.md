@@ -31,15 +31,15 @@ for repetition only; exhausted call budgets and open error circuits still
 apply, and effectful calls remain cached. Workers retain their separate bounded
 finalization policy. This prevents a post-edit verification from receiving the
 pre-edit file or a repetition refusal (KT-948).
-[src: file: backend/src/agents/runner.rs:11346-11389#observation_readers_to_restore]
+[src: file: backend/src/agents/runner.rs:11513-11556#observation_readers_to_restore]
 
 The HTTP runner also publishes structured input/output and reported cache-token
 counters through `AgentProcess`, which Full and partial audits consume. Each
 provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
-[src: file: backend/src/agents/runner.rs:8540-8551#cached_prompt_tokens]
-[src: file: backend/src/agents/runner.rs:1991-1998#reported_usage_counters] [src: file: backend/src/agents/runner.rs:9857-9886#task_usage]
+[src: file: backend/src/agents/runner.rs:8680-8691#cached_prompt_tokens]
+[src: file: backend/src/agents/runner.rs:1991-1998#reported_usage_counters] [src: file: backend/src/agents/runner.rs:9997-10027#task_usage]
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
 per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
@@ -73,7 +73,7 @@ are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
 [src: file: backend/src/agents/runner.rs:8045-8047#HOSTED_STEP_CTX_BUDGET]
 [src: file: backend/src/agents/runner.rs:8049-8051#HOSTED_AUDIT_STEP_INPUT_BUDGET]
-[src: file: backend/src/agents/runner.rs:11970-11985#audit_budget_spent]
+[src: file: backend/src/agents/runner.rs:12137-12152#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
 each step. Comma-bundled file references (including a repeated `file:` prefix)
@@ -114,7 +114,7 @@ Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
 [src: file: backend/src/api/audit/validation.rs:183-223#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:8585-8589#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/runner.rs:8725-8729#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the

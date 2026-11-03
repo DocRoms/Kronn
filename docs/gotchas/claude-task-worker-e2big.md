@@ -17,25 +17,25 @@ path does not exist is skipped with a warning: it has no worktree catalogue for
 the sandbox to enumerate. Any other unreadable Git root still fails closed with
 `claude_sandbox_catalogue_unreadable`, naming the project or linked repository
 (never its path).
-[src: file: backend/src/agents/runner.rs:12346-12376#ClaudeSandboxCatalogueReceipt]
-[src: file: backend/src/agents/runner.rs:12382-12431#claude_sandbox_catalogue_receipt]
-[src: file: backend/src/agents/runner.rs:12433-12462#claude_sandbox_catalogue_roots]
-[src: file: backend/src/agents/runner.rs:12464-12471#claude_task_worker_catalogue_preflight]
+[src: file: backend/src/agents/runner.rs:12513-12543#ClaudeSandboxCatalogueReceipt]
+[src: file: backend/src/agents/runner.rs:12549-12598#claude_sandbox_catalogue_receipt]
+[src: file: backend/src/agents/runner.rs:12600-12629#claude_sandbox_catalogue_roots]
+[src: file: backend/src/agents/runner.rs:12635-12642#claude_task_worker_catalogue_preflight]
 [src: file: backend/src/api/orchestration.rs:10512-10522#worker_project_refusal]
 
 The worker remains fail-closed: sandbox availability is mandatory,
 unsandboxed commands are disabled, and the explicit write roots are the
 canonical managed task worktree and its lane's private Cargo target (see
-"Build and test policy" below). [src: file: backend/src/agents/runner.rs:12257-12292#claude_task_worker_settings]
+"Build and test policy" below). [src: file: backend/src/agents/runner.rs:12424-12459#claude_task_worker_settings]
 
 Regression coverage uses real synthetic Git common directories to exercise
 accepted and refused catalogue sizes, common-directory deduplication and
 path-free diagnostics, and separately preserves the write boundary: an
 unmanaged worktree is the only write root, a managed one adds only its lane
 target.
-[src: file: backend/src/agents/runner_test.rs:10131-10330#synthetic_git_worktree_catalogue]
-[src: file: backend/src/agents/runner_test.rs:9847-9897#claude_task_worker_uses_fail_closed_workspace_sandbox]
-[src: file: backend/src/agents/runner_test.rs:9911-9952#claude_task_worker_sandbox_allows_loopback_and_its_lane_without_a_network_domain]
+[src: file: backend/src/agents/runner_test.rs:10358-10557#synthetic_git_worktree_catalogue]
+[src: file: backend/src/agents/runner_test.rs:10074-10124#claude_task_worker_uses_fail_closed_workspace_sandbox]
+[src: file: backend/src/agents/runner_test.rs:10138-10179#claude_task_worker_sandbox_allows_loopback_and_its_lane_without_a_network_domain]
 
 ## Build and test policy (KT-1246)
 

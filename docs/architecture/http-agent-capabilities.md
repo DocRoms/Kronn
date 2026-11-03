@@ -219,7 +219,7 @@ rest of the discussion, or keep the partial answer.
 * **In a discussion, the round ceiling is no longer a failure.** The round's calls are
   refused, the model answers with what it has, and the question follows. A workflow step or
   a worker still fails with its reason: there is no one there to answer.
-  [src: file: backend/src/agents/runner.rs:10686-10727#ask_on_ceiling]
+  [src: file: backend/src/agents/runner.rs:10853-10894#ask_on_ceiling]
   [src: file: backend/src/api/discussions/ceilings.rs:117-205#ceiling_question]
 
 ## Saved Quick Prompt generation settings (KT-670)
@@ -243,7 +243,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-71#apply_http]
-[src: file: backend/src/agents/runner.rs:9394#apply_http]
+[src: file: backend/src/agents/runner.rs:9534#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -290,7 +290,7 @@ to reach every family. Window reservation counts the whole reachable catalogue,
 including JSON separators, before loading a family. A regression test checks
 exact byte counts and an unchanged window through every family load.
 [src: file: backend/src/agents/runner.rs:6918-6948#reachable_tools_bytes]
-[src: file: backend/src/agents/runner_test.rs:1586-1624#the_window_does_not_move_when_a_run_loads_a_tool_family]
+[src: file: backend/src/agents/runner_test.rs:1686-1724#the_window_does_not_move_when_a_run_loads_a_tool_family]
 
 ## Audits (KT-924)
 
@@ -428,7 +428,7 @@ token window: the 198,119 B answer is shortened to 8,005 B, of which the shape i
 1,071 B; the model reads the shape, sends one call with
 `$.data[*].metrics['lcp','fcp','inp','ttfb']`, and gets the 400 values in 2,127 B,
 unshortened; the conversation then stands at 19,319 estimated tokens of 32,768
-[src: file: backend/src/agents/runner_test.rs:2809-2917#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window].
+[src: file: backend/src/agents/runner_test.rs:2906-3014#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window].
 
 What this does not show: how often a model writes the extract it is shown, or
 writes a good one unprompted. The "model" in that test reads the shape and follows
@@ -475,7 +475,7 @@ it does not establish model authoring quality. The measured attempts and their
 execution checks are recorded in
 [`native-workflow-2026-09-22.md`](../research/native-workflow-2026-09-22.md).
 [src: file: backend/src/agents/runner.rs:7617-7634#workflow_step_schema]
-[src: file: backend/src/agents/runner_test.rs:2275-2342#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
+[src: file: backend/src/agents/runner_test.rs:2376-2443#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 
 ### Further capabilities
 
