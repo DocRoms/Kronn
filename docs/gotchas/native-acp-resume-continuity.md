@@ -39,7 +39,7 @@ an interrupted/failed turn or rolled-back write leaves no completed proof.
 [src: file: backend/src/db/sql/173_acp_completed_turn_checkpoint.sql:1-9]
 [src: file: backend/src/db/acp_runtime_sessions.rs:110-195#begin_turn]
 [src: file: backend/src/db/discussions.rs:1855-1879#insert_native_agent_message_with_checkpoint]
-[src: file: backend/src/db/discussions.rs:1903-1911#checkpoint]
+[src: file: backend/src/db/discussions.rs:1905-1913#checkpoint]
 [src: file: backend/src/db/discussions.rs:2157-2160#complete_turn]
 
 Claude CLI-print retains its separate `claude_cli_print_v1` identity. Its init

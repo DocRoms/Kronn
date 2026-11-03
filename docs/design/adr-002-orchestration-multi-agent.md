@@ -511,7 +511,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   Across a parent discussion / OrchestrationRun, a configurable `max_concurrent_executions`, enforced
   when the campaign selects launchable tasks (`remaining_slots`, from the count of non-terminal
   executions) `[src: file: backend/src/db/orchestration.rs:1295-1312#active_execution_counts]`. The
-  `agent_dispatch_jobs` `group_id` concurrency limit `[src: file: backend/src/db/agent_dispatch.rs:604-613#group_concurrency_limit]`
+  `agent_dispatch_jobs` `group_id` concurrency limit `[src: file: backend/src/db/agent_dispatch.rs:678-687#group_concurrency_limit]`
   exists for batch fan-out; orchestration dispatches enqueue with `group_id: None`.
 - **Human escalation** — `Escalated` surfaces in the parent discussion, as the workflow Human Gate does
   with its decide endpoint `[src: file: backend/src/api/workflows.rs:5986-6173#decide_run]`, but the
