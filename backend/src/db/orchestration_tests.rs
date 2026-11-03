@@ -338,13 +338,14 @@ fn completed_native_dispatch_without_delivery_interrupts_the_working_execution()
     let recovery = get_execution_recovery(&conn, &exec_id).unwrap().unwrap();
     assert_eq!(
         recovery.recovery_action,
-        crate::models::ExecutionRecoveryAction::AwaitHuman
+        crate::models::ExecutionRecoveryAction::ResumeWorker
     );
     assert_eq!(
         recovery.recovery_reason,
         "worker_completed_without_delivery"
     );
-    assert!(!recovery.pending);
+    // KT-1540 — the parked decision waits to be applied once; it is not consumed.
+    assert!(recovery.pending);
 
     let events = list_execution_events(&conn, &exec_id).unwrap();
     let interruption = events

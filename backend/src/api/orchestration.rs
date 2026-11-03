@@ -1148,15 +1148,16 @@ async fn classify_interrupted_execution(
             | TaskExecutionStatus::Applying
     );
 
+    // KT-1540 — an undelivered worker is parked as a pending `resume_worker` for
+    // the principal; a restart must still not wake it on its own.
     let durable_human_gate = prior_recovery.as_ref().filter(|recovery| {
-        recovery.recovery_action == ExecutionRecoveryAction::AwaitHuman
-            && (recovery
-                .recovery_reason
-                .starts_with("worker_failed_without_delivery")
-                || recovery
-                    .recovery_reason
-                    .starts_with("worker_completed_without_delivery")
-                || recovery.recovery_reason.starts_with("quota_exhausted:"))
+        (recovery.recovery_action == ExecutionRecoveryAction::AwaitHuman
+            && (crate::db::orchestration::is_undelivered_worker_reason(&recovery.recovery_reason)
+                || recovery.recovery_reason.starts_with("quota_exhausted:")))
+            || (recovery.recovery_action == ExecutionRecoveryAction::ResumeWorker
+                && crate::db::orchestration::is_undelivered_worker_reason(
+                    &recovery.recovery_reason,
+                ))
     });
 
     let (action, reason) = if !parent_active {
@@ -14669,6 +14670,19 @@ fn compact_next_action(detail: &crate::models::TaskExecutionDetail) -> Option<Co
                     | Action::IdempotentClose
             )
     });
+    // KT-1540 — a worker that ended without delivering is parked for one resume.
+    if execution.status == Interrupted
+        && detail.recovery.as_ref().is_some_and(|recovery| {
+            recovery.pending
+                && recovery.recovery_action == Action::ResumeWorker
+                && crate::db::orchestration::is_undelivered_worker_reason(&recovery.recovery_reason)
+        })
+    {
+        return Some(CompactNextAction {
+            tool: Some("task_exec_resume"),
+            reason: "the worker ended without delivering: resume it once (its worktree is kept), or reassign / cancel",
+        });
+    }
     let applying_hold = execution.blocked_from_status == Some(Applying);
     let resumable = (execution.status == Blocked && applying_hold)
         || (execution.status == Interrupted
@@ -14714,14 +14728,19 @@ fn compact_last_error(detail: &crate::models::TaskExecutionDetail) -> Option<Str
         .outcome_reason
         .as_deref()
         .filter(|_| execution.status != TaskExecutionStatus::Done);
+    let dispatch = (detail.progress.phase == crate::models::TaskExecutionProgressPhase::Failed)
+        .then_some(detail.progress.reason.as_deref())
+        .flatten();
+    // An undelivered-worker reason only says the turn ended without a delivery;
+    // a failed dispatch (a refused preflight…) is the cause.
     let recovery = detail
         .recovery
         .as_ref()
         .filter(|recovery| recovery.pending)
-        .map(|recovery| recovery.recovery_reason.as_str());
-    let dispatch = (detail.progress.phase == crate::models::TaskExecutionProgressPhase::Failed)
-        .then_some(detail.progress.reason.as_deref())
-        .flatten();
+        .map(|recovery| recovery.recovery_reason.as_str())
+        .filter(|reason| {
+            dispatch.is_none() || !crate::db::orchestration::is_undelivered_worker_reason(reason)
+        });
     // KT-1402 — a refused delivery is the cause; the recovery reason only says
     // the worker ended without one.
     let refusal = detail
@@ -15940,7 +15959,15 @@ pub(crate) fn deliver_outcome_to_response(outcome: DeliverOutcome) -> ApiRespons
         ),
         DeliverOutcome::NotDeliverable { status } => ApiResponse::err_coded(
             ApiErrorCode::Conflict,
-            format!("execution not deliverable ({})", status.as_str()),
+            match status {
+                // KT-1540 — say what to do instead of leaving the worker to retry.
+                TaskExecutionStatus::Interrupted => format!(
+                    "execution not deliverable ({}): do not continue the work, its principal \
+                     must resume it (task_exec_resume) first",
+                    status.as_str()
+                ),
+                _ => format!("execution not deliverable ({})", status.as_str()),
+            },
         ),
         DeliverOutcome::InvalidManifest(detail) => {
             ApiResponse::err_coded(ApiErrorCode::Validation, detail)
@@ -40498,6 +40525,159 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// A native worker whose turn ended without a delivery, settled the way the
+    /// dispatch settlement does it.
+    async fn undelivered_native_worker(
+        db: &std::sync::Arc<Database>,
+        repo: &Path,
+        key: &str,
+    ) -> TaskExecution {
+        let (task_ref, parent_id, _) = seed(db, repo).await;
+        let execution = provision_single_task_execution(
+            db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some(key.into()),
+            },
+        )
+        .await
+        .unwrap();
+        let dispatch_id = execution.dispatch_job_id.clone().unwrap();
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::mark_completed(conn, &dispatch_id)?;
+            crate::db::orchestration::interrupt_undelivered_execution_for_dispatch(
+                conn,
+                &dispatch_id,
+                "worker_completed_without_delivery",
+                &backend_actor(),
+            )?
+            .context("the worker ended without a delivery")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        execution
+    }
+
+    /// KT-1540 — the worker's turn ended undelivered: the first `/resume` wakes
+    /// it on a fresh dispatch; only a second one is « already consumed ».
+    #[tokio::test]
+    async fn an_undelivered_worker_resumes_once_and_only_the_replay_is_consumed() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution = undelivered_native_worker(&db, repo.path(), "undelivered-resume").await;
+        let parked = exec_of(&db, &execution.id).await;
+        assert_eq!(parked.status, TaskExecutionStatus::Interrupted);
+
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(resumed.success, "first resume refused: {:?}", resumed.error);
+        let working = exec_of(&db, &execution.id).await;
+        assert_eq!(working.status, TaskExecutionStatus::Working);
+        assert_ne!(working.dispatch_job_id, execution.dispatch_job_id);
+
+        // The woken worker can deliver: the execution is Working on its dispatch.
+        let Json(replay) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(!replay.success);
+        assert!(
+            replay
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("already consumed")),
+            "{:?}",
+            replay.error
+        );
+        assert_eq!(
+            exec_of(&db, &execution.id).await.dispatch_job_id,
+            working.dispatch_job_id,
+            "the replay woke nobody"
+        );
+    }
+
+    /// KT-1540 — a message in the child room wakes the worker on a NEW dispatch
+    /// while its execution is `Interrupted`: that dispatch adopts the resume,
+    /// once, and only for the execution's own worker.
+    #[tokio::test]
+    async fn a_worker_woken_in_its_room_resumes_the_interrupted_execution() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution = undelivered_native_worker(&db, repo.path(), "undelivered-woken").await;
+        let child = execution.sub_discussion_id.clone().unwrap();
+        let enqueue = |id: &'static str| {
+            let child = child.clone();
+            db.with_conn(move |conn| {
+                crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id,
+                        discussion_id: &child,
+                        dedupe_key: id,
+                        agent_override: Some(&AgentType::ClaudeCode),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                Ok(())
+            })
+        };
+        enqueue("woken-by-note").await.unwrap();
+        enqueue("second-wake").await.unwrap();
+        let adopt = |provider: &'static str, dispatch: &'static str| {
+            let child = child.clone();
+            db.with_conn(move |conn| {
+                crate::db::orchestration::adopt_woken_dispatch_for_interrupted_worker(
+                    conn, &child, provider, dispatch,
+                )
+            })
+        };
+
+        assert!(
+            !adopt("Codex", "woken-by-note").await.unwrap(),
+            "another provider is not the execution's worker"
+        );
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Interrupted
+        );
+
+        assert!(adopt("ClaudeCode", "woken-by-note").await.unwrap());
+        let working = exec_of(&db, &execution.id).await;
+        assert_eq!(working.status, TaskExecutionStatus::Working);
+        assert_eq!(working.dispatch_job_id.as_deref(), Some("woken-by-note"));
+        let id = execution.id.clone();
+        let recovery = db
+            .with_conn(move |conn| crate::db::orchestration::get_execution_recovery(conn, &id))
+            .await
+            .unwrap()
+            .expect("the decision stays on record");
+        assert!(!recovery.pending, "the resume was consumed");
+
+        assert!(
+            !adopt("ClaudeCode", "second-wake").await.unwrap(),
+            "a second wake adopts nothing"
+        );
+        assert_eq!(
+            exec_of(&db, &execution.id).await.dispatch_job_id.as_deref(),
+            Some("woken-by-note")
+        );
+    }
+
+    #[test]
+    fn an_interrupted_delivery_tells_the_worker_to_stop_and_who_decides() {
+        let refusal = deliver_outcome_to_response(DeliverOutcome::NotDeliverable {
+            status: TaskExecutionStatus::Interrupted,
+        });
+        let error = refusal.error.as_deref().unwrap();
+        assert!(error.contains("Interrupted"), "{error}");
+        assert!(error.contains("task_exec_resume"), "{error}");
     }
 
     #[tokio::test]

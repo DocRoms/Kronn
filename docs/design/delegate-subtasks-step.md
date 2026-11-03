@@ -39,11 +39,11 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   is spent. `[src: file: backend/src/models/orchestration.rs:1903-1909#ReviewVerdict]`
   `[src: file: backend/src/models/orchestration.rs:1946-1969#ReviewDecisionV1]`
   `[src: file: backend/src/api/orchestration.rs:7601-7608#decide_review]`
-  `[src: file: backend/src/db/orchestration.rs:3801-3810#ReviewCheckpoint]`
-  `[src: file: backend/src/db/orchestration.rs:3832-3844#ReviewCheckpointOutcome]`
+  `[src: file: backend/src/db/orchestration.rs:3878-3887#ReviewCheckpoint]`
+  `[src: file: backend/src/db/orchestration.rs:3909-3921#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
   decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:12779-12791#reassign_execution]`
-  `[src: file: backend/src/api/orchestration.rs:16371-16380#human_review]`
+  `[src: file: backend/src/api/orchestration.rs:16390-16399#human_review]`
 - **Integration saga.** `run_integration` integrates an `Approved` execution
   into `run.target_branch`, through the single worktree where that branch is
   checked out (or by moving the ref when no worktree has it), refusing a dirty
@@ -81,7 +81,7 @@ branch. Checked against the code:
   `[src: file: backend/src/api/orchestration.rs:13256-13269#principal_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:13266-13308#room_agent_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:6549-6556#deliver_worker_manifest]`
-  `[src: file: backend/src/db/orchestration.rs:3748-3755#EscalationDelivery]`
+  `[src: file: backend/src/db/orchestration.rs:3825-3832#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
   `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:730-733#build_branch_name]`
 

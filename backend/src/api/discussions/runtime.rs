@@ -145,7 +145,7 @@ pub(crate) fn persist_dispatch_settlement(
             } else {
                 (
                     "Worker terminé sans livraison durable",
-                    "Relis le bilan du worker dans la sous-discussion, puis réaffecte ou annule explicitement l'exécution.",
+                    "Relis le bilan du worker dans la sous-discussion, puis reprends l'exécution une fois (`task_exec_resume`, le worktree est conservé), ou réaffecte / annule-la explicitement.",
                 )
             };
             let message_id = format!("orch-worker-undelivered:{}", interrupted.execution_id);

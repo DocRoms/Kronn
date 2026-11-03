@@ -3012,6 +3012,35 @@ pub(super) async fn make_agent_stream_inner(
             .await
             .unwrap_or(false)
     };
+    // KT-1540 — a worker woken in the child room of its `Interrupted`,
+    // undelivered execution resumes that execution before its tools are scoped,
+    // so it leaves this turn able to deliver. Anything else stays an ordinary turn.
+    if let Some(woken_dispatch) = dispatch_job_id.clone() {
+        let room = discussion_id.clone();
+        let provider = crate::db::orchestration::agent_type_to_db(&agent_type);
+        match state
+            .db
+            .with_conn(move |conn| {
+                crate::db::orchestration::adopt_woken_dispatch_for_interrupted_worker(
+                    conn,
+                    &room,
+                    &provider,
+                    &woken_dispatch,
+                )
+            })
+            .await
+        {
+            Ok(true) => tracing::info!(
+                discussion_id,
+                "Worker woken in its room resumed its interrupted execution"
+            ),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                discussion_id,
+                "Could not resume the interrupted execution of a woken worker: {error}"
+            ),
+        }
+    }
     let native_http_tools = match native_http_tools_for_discussion(
         &state,
         &discussion_id,

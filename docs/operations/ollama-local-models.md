@@ -595,7 +595,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:4284-4312#count_arg] [src: file: backend/src/api/agent_tools.rs:3957-4000#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:4305-4333#count_arg] [src: file: backend/src/api/agent_tools.rs:3957-4000#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes

@@ -403,7 +403,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:884-912#extract]
-  [src: file: backend/src/api/agent_tools.rs:4927-4951#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4948-4972#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down

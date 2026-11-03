@@ -27,8 +27,8 @@ through their actually available output and to explicitly ask the principal to
 relay it toward the parent room — without promising automatic visibility,
 guaranteed delivery, or a publication tool the surface does not declare.
 [src: file: backend/src/api/orchestration.rs:9695-9748#parent_milestones]
-[src: file: backend/src/db/orchestration.rs:6575-6619#get_execution_lineage]
-[src: file: backend/src/api/orchestration.rs:18813-18966#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
+[src: file: backend/src/db/orchestration.rs:6652-6696#get_execution_lineage]
+[src: file: backend/src/api/orchestration.rs:18834-18987#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
 [src: file: backend/src/models/orchestration.rs:1324-1337#TaskExecutionLineage]
 
 The bridge documents that `disc_question_list` reads durable question state and

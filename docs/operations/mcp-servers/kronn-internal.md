@@ -482,7 +482,7 @@ the reason and the previous set); nothing is relaunched and earlier validation
 results stay as evidence. It is refused while the execution is Integrating,
 Validating or Applying, once it is Done, Failed or Cancelled, and for an
 execution of a campaign run, whose gates are the campaign's shared policy.
-`[src: file: backend/src/db/orchestration.rs:6256-6349#replace_execution_validations]`
+`[src: file: backend/src/db/orchestration.rs:6333-6426#replace_execution_validations]`
 The swap is a change of `task_exec_reassign` and not a tool of its own because
 every declaration is paid for on every session (`mcp_surface_budget.py`), and
 because that tool is already the principal's amendment of a live execution:
@@ -502,7 +502,7 @@ paid for inside the catalogue budget; on an execution the limit itself escalated
 back to its worker, unless the campaign's `token_budget` is spent: the answer then says `stop_reason:
 token_budget_exhausted` and nothing is scheduled (a `request_changes` or a worker reassignment is stopped the same way). The whole contract, the sentinel and the UI are in
 [worker review rounds](../worker-review-rounds.md).
-`[src: file: backend/src/api/orchestration.rs:15188#extend_execution_review_rounds]`
+`[src: file: backend/src/api/orchestration.rs:15207#extend_execution_review_rounds]`
 
 The worker brief of a worker with a shell says who runs which gates: the worker
 runs the TARGETED tests, the long validations the principal persisted are played
@@ -539,7 +539,7 @@ call is refused once the worker committed or left changes since the send-back,
 or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
 the re-validation does not rewind the attempt the send-back opened.
 [src: file: backend/src/api/orchestration.rs:4998-5135#send_back] [src: file: backend/src/api/orchestration.rs:11838-11915#revalidate_sent_back_execution]
-[src: file: backend/src/db/orchestration.rs:4561-4634#reopen_approval_after_rework]
+[src: file: backend/src/db/orchestration.rs:4638-4711#reopen_approval_after_rework]
 
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
 review rounds, delivered `head_sha`, last error, the latest candidate's
@@ -571,7 +571,7 @@ address the joined CLI that last launched, reviewed, resumed or reassigned it
 while that session remains in the room, so its `disc_wait_for_peer` wakes on
 them; without such a session they address the room's configured agent.
 `[src: file: backend/src/api/orchestration.rs:14539-14591#EXEC_WAIT_DEFAULT_SECS]`
-`[src: file: backend/src/db/orchestration.rs:5275-5317#pin_principal_cli_session]`
+`[src: file: backend/src/db/orchestration.rs:5350-5392#pin_principal_cli_session]`
 
 When the worker identity is not already known, call `agent_list()` first and
 copy one returned `worker` object unchanged into `task_exec_prepare`. Native
@@ -742,7 +742,7 @@ agent-type/alias matching or any other permissive resolution if either is missin
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration.rs:30693-30823#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration.rs:30715-30845#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:75-188#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,

@@ -2414,17 +2414,22 @@ pub fn interrupt_undelivered_execution_for_dispatch(
         )? {
             return Ok(None);
         }
+        // KT-1540 — the parked decision is waiting to be applied, not already
+        // consumed: `pending = 1` lets the principal (or `/resume`) wake this same
+        // worker once, which is what its worktree, child room and history are kept
+        // for. Written `pending = 0` it made the first resume answer « recovery
+        // decision was already consumed ».
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO task_execution_recovery (
                  task_execution_id, recovery_action, recovery_reason, last_activity_at,
                  human_wait_started_at, assignment_generation, pending, updated_at
-             ) VALUES (?1, 'await_human', ?2, ?3, ?3, 0, 0, ?3)
+             ) VALUES (?1, 'resume_worker', ?2, ?3, ?3, 0, 1, ?3)
              ON CONFLICT(task_execution_id) DO UPDATE SET
-                recovery_action = 'await_human', recovery_reason = excluded.recovery_reason,
+                recovery_action = 'resume_worker', recovery_reason = excluded.recovery_reason,
                  activity_deadline_at = NULL, review_deadline_at = NULL,
                  total_deadline_at = NULL, human_wait_started_at = excluded.human_wait_started_at,
-                 pending = 0, updated_at = excluded.updated_at",
+                 pending = 1, updated_at = excluded.updated_at",
             params![execution.id, reason, now],
         )?;
         Ok(Some(UndeliveredDispatchInterruption {
@@ -2433,6 +2438,78 @@ pub fn interrupt_undelivered_execution_for_dispatch(
             task_id: execution.task_id,
             delivery_refusal,
         }))
+    })
+}
+
+/// Whether a recovery reason is the one [`interrupt_undelivered_execution_for_dispatch`]
+/// writes: the worker's turn ended and no delivery came out of it.
+pub fn is_undelivered_worker_reason(reason: &str) -> bool {
+    reason.starts_with("worker_completed_without_delivery")
+        || reason.starts_with("worker_failed_without_delivery")
+}
+
+/// KT-1540 — a message posted in the child room of an `Interrupted`,
+/// undelivered execution wakes its worker with a NEW dispatch. That dispatch is
+/// not the one the execution points at, so the worker got neither the delivery
+/// capability nor any word on why: it worked, then could not deliver.
+///
+/// Waking the worker is the resume the parked decision was waiting for, so the
+/// woken dispatch adopts it: the execution goes back to `Working` on this
+/// dispatch and the decision is consumed, exactly as `/resume` does. Only the
+/// execution's own worker provider adopts it, only while the parked decision is
+/// pending, and only once — a second dispatch finds the execution `Working` with
+/// a consumed decision and adopts nothing.
+///
+/// Returns whether this dispatch became the execution's worker dispatch.
+pub fn adopt_woken_dispatch_for_interrupted_worker(
+    conn: &Connection,
+    discussion_id: &str,
+    agent_type: &str,
+    dispatch_job_id: &str,
+) -> Result<bool> {
+    in_savepoint(conn, |conn| {
+        let Some(execution) = get_execution_for_sub_discussion(conn, discussion_id)? else {
+            return Ok(false);
+        };
+        if execution.status != TaskExecutionStatus::Interrupted
+            || matches!(
+                execution.worker_target_kind,
+                None | Some(MessageTargetKind::Cli)
+            )
+            || execution.worker_agent_type.as_deref() != Some(agent_type)
+        {
+            return Ok(false);
+        }
+        let parked = get_execution_recovery(conn, &execution.id)?.is_some_and(|recovery| {
+            recovery.pending
+                && recovery.recovery_action == ExecutionRecoveryAction::ResumeWorker
+                && is_undelivered_worker_reason(&recovery.recovery_reason)
+        });
+        let in_room = super::agent_dispatch::get(conn, dispatch_job_id)?
+            .is_some_and(|job| job.discussion_id == discussion_id);
+        if !parked || !in_room {
+            return Ok(false);
+        }
+        if !transition_execution(
+            conn,
+            &execution.id,
+            TaskExecutionStatus::Working,
+            &OrchestrationActor {
+                kind: PlanningActorKind::Backend,
+                id: Some("orchestrator".into()),
+                session_id: None,
+                source_message_id: None,
+            },
+            serde_json::json!({
+                "recovery": "worker_woken_in_room",
+                "dispatch_job_id": dispatch_job_id,
+            }),
+        )? {
+            return Ok(false);
+        }
+        attach_execution_dispatch(conn, &execution.id, dispatch_job_id)?;
+        clear_execution_recovery(conn, &execution.id, "worker_woken_in_room")?;
+        Ok(true)
     })
 }
 
