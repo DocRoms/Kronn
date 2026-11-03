@@ -46,7 +46,7 @@ What the code does today:
 - `.kronn/` is the runtime directory (worktrees, MCP backups, ownership
   ledgers, temporary files), kept out of `git status` through the repository's
   local `info/exclude`, never through its `.gitignore`
-  [src: file: backend/src/core/mcp_scanner.rs:3786-3793#ensure_local_exclude]
+  [src: file: backend/src/core/mcp_scanner.rs:3811-3818#ensure_local_exclude]
   [src: file: backend/src/core/native_files.rs:17-20#LEDGER_PATH].
 - Secrets are masked on export by `core/export_secrets.rs`.
 

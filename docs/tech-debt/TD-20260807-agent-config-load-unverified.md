@@ -34,7 +34,7 @@
 - **Suggested direction (non-binding)**:
   1. **Generalise the probe.** Introduce a small per-agent `verify_config_loadable(project)` alongside each host-sync writer, returning `Loadable | Blocked(reason) | Unknown`. Vibe's trust check is the first implementation; `Unknown` is an honest default for agents with no cheap probe.
   2. **Report, never repair.** Keep every probe read-only. Offer the user a one-click *"open the trust prompt"* action rather than editing another tool's security state.
-  3. **Fold into `kronn doctor` as the single operator surface**, mirroring how `warn_missing_host_binaries` [src: file: backend/src/core/mcp_scanner.rs:2872-2880#warn_missing_host_binaries] already routes there.
+  3. **Fold into `kronn doctor` as the single operator surface**, mirroring how `warn_missing_host_binaries` [src: file: backend/src/core/mcp_scanner.rs:2897-2905#warn_missing_host_binaries] already routes there.
   4. Consider a post-write readback for the cheap cases (config re-parsed through the agent's own schema) before reaching for anything that spawns an agent.
 
 - **Next step**: create a ticket for item 1 (per-agent `verify_config_loadable` contract). Items 2–4 are design constraints on that ticket, not separate work.
