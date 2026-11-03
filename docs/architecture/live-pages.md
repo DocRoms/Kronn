@@ -77,7 +77,7 @@ When a Page uses such a dataset for a personal default, recollect using the
 recipient's configured connection and reopen the Page before checking that
 default; do not infer the viewer from an imported identity snapshot.
 [src: file: backend/src/api/artifact_portability.rs:134-138]
-[src: file: backend/src/api/artifact_portability/import.rs:925]
+[src: file: backend/src/api/artifact_portability/import.rs:926]
 [src: file: frontend/src/lib/live-page-sandbox.ts:314-333#runtimeData]
 
 Configured connections, their stored credentials, agent-library entries and
@@ -102,7 +102,7 @@ datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
 [src: file: backend/src/lib.rs:1376-1397#artifact_portability]
-[src: file: backend/src/api/artifact_portability/import.rs:1119-1137#preview_digest]
+[src: file: backend/src/api/artifact_portability/import.rs:1147-1165#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
 ## Status
@@ -700,7 +700,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:4854-4862#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:4881-4889#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:128-130#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -748,7 +748,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:4976-4986#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:5003-5013#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
