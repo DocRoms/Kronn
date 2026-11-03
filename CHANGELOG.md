@@ -13,6 +13,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- One request no longer starts a cascade of media generations, and Stop is
+  final (KT-1481). Every agent generation is tied to the human message at the
+  base of its wake chain: a result or failure notification now says it is a
+  notification, not a new request; after a failed, timed-out or cancelled job
+  nothing more is generated for that request (no retry, no other provider, no
+  dropped references — KT-1420); a request may start at most six jobs; and a
+  notification only leads to a new generation that builds on its result. Stop
+  disarms the callbacks of running generations in the database, so a late
+  result cannot wake the stopped agent, restart included. A new human message
+  is a new request with a fresh allowance.
 - The security scan is green again (KT-1533). `calamine` moves to 0.37, so `zip`
   8.6 leaves both lockfiles and RUSTSEC-2026-0429 no longer applies to the
   spreadsheet reader. The only remaining `zip` < 9 is the build-time copy

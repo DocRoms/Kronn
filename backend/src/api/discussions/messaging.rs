@@ -1348,6 +1348,14 @@ pub async fn stop_agent(
             let count = crate::db::agent_dispatch::cancel_for_discussion(&transaction, &cancel_id)?;
             let resume_job_ids =
                 crate::db::agent_jobs::cancel_for_discussion(&transaction, &cancel_id)?;
+            // KT-1481 — the wakes still armed on running generations. Their
+            // results keep landing in the room, but nobody is called back: a
+            // late callback would otherwise start the agent the human just
+            // stopped. Same transaction, so no callback slips between the two.
+            let cleared_wakes = crate::db::media_jobs::clear_wake_requests_for_discussion(
+                &transaction,
+                &cancel_id,
+            )?;
             let still_awaiting =
                 crate::db::agent_dispatch::has_active_for_discussion(&transaction, &cancel_id)?;
             crate::db::discussions::set_awaiting_agent(&transaction, &cancel_id, still_awaiting)?;
@@ -1362,13 +1370,19 @@ pub async fn stop_agent(
                 }
             }
             transaction.commit()?;
-            Ok((active.map(|job| job.id), count, resume_job_ids, batch_run))
+            Ok((
+                active.map(|job| job.id),
+                count,
+                resume_job_ids,
+                batch_run,
+                cleared_wakes,
+            ))
         })
         .await;
-    let (active_dispatch_id, cancelled_jobs, resume_job_ids, batch_run) = cancelled_job
-        .unwrap_or_else(|error| {
+    let (active_dispatch_id, cancelled_jobs, resume_job_ids, batch_run, cleared_wakes) =
+        cancelled_job.unwrap_or_else(|error| {
             tracing::error!("Failed to cancel durable dispatch for {id}: {error}");
-            (None, 0, Vec::new(), None)
+            (None, 0, Vec::new(), None, 0)
         });
     let cancelled_dispatch_process = active_dispatch_id.is_some_and(|dispatch_id| {
         let token = state
@@ -1402,6 +1416,7 @@ pub async fn stop_agent(
         || cancelled_dispatch_process
         || cancelled_resume_process
         || cancelled_jobs > 0
+        || cleared_wakes > 0
         || !resume_job_ids.is_empty();
     state.agent_dispatch_notify.notify_waiters();
     Json(ApiResponse::ok(

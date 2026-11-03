@@ -54,6 +54,7 @@ pub mod maintenance;
 pub mod mcp_remote;
 pub mod mcps;
 pub mod media;
+pub mod media_request_guard;
 pub mod model_catalog;
 pub mod nvidia;
 pub mod ollama;

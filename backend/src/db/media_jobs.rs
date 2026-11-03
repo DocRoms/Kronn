@@ -191,6 +191,39 @@ pub fn take_wake_request(conn: &Connection, job_id: &str) -> Result<Option<Strin
     Ok((cleared == 1).then_some(payload))
 }
 
+/// Drops every wake still armed in a discussion. Stop calls this: a generation
+/// that settles after the human pressed Stop must not call the agent back, and
+/// the column is durable, so the guarantee holds across a backend restart.
+pub fn clear_wake_requests_for_discussion(conn: &Connection, discussion_id: &str) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE media_jobs SET wake_agent_json = NULL
+          WHERE discussion_id = ?1 AND wake_agent_json IS NOT NULL",
+        [discussion_id],
+    )?)
+}
+
+/// Stamps the human request a job was launched under. Set once: a replayed
+/// launch (same idempotency key) must not move a job to another request.
+pub fn set_request_root(conn: &Connection, job_id: &str, root: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE media_jobs SET request_root_id = ?2
+          WHERE id = ?1 AND request_root_id IS NULL",
+        params![job_id, root],
+    )?;
+    Ok(())
+}
+
+/// Every job launched under one human request, oldest first.
+pub fn list_for_request_root(conn: &Connection, root: &str) -> Result<Vec<MediaJob>> {
+    let sql = format!(
+        "SELECT {COLUMNS} FROM media_jobs WHERE request_root_id = ?1
+         ORDER BY created_at ASC, id ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![root], row_to_job)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub fn get(conn: &Connection, id: &str) -> Result<Option<MediaJob>> {
     let sql = format!("SELECT {COLUMNS} FROM media_jobs WHERE id = ?1");
     Ok(conn.query_row(&sql, params![id], row_to_job).optional()?)

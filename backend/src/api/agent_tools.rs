@@ -2664,6 +2664,61 @@ impl KronnToolExecutor {
                         )
                     }
                 };
+                let references: Vec<String> = call
+                    .arguments
+                    .get("reference_asset_ids")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // KT-1481 — bounded per human request: no cascade after a
+                // notification, no retry of a refusal, no silent provider
+                // switch or loss of references (KT-1420), nothing after Stop.
+                let named_connection = match connection_id.as_deref() {
+                    Some(named) => {
+                        crate::api::media_request_guard::resolve_connection_id(&self.state, named)
+                            .await
+                    }
+                    None => None,
+                };
+                let verdict = {
+                    let dispatch_id = self.source_dispatch_job_id.clone();
+                    let message_id = self.source_message_id.clone();
+                    let references = references.clone();
+                    self.state
+                        .db
+                        .with_read_conn(move |conn| {
+                            crate::api::media_request_guard::authorize(
+                                conn,
+                                &crate::api::media_request_guard::Caller {
+                                    dispatch_id: dispatch_id.as_deref(),
+                                    message_id: message_id.as_deref(),
+                                },
+                                &crate::api::media_request_guard::Ask {
+                                    modality,
+                                    references: &references,
+                                    connection_id: named_connection.as_deref(),
+                                },
+                            )
+                        })
+                        .await
+                };
+                let (request_root, connection_id) = match verdict {
+                    Ok(crate::api::media_request_guard::Verdict::Allow {
+                        root,
+                        pinned_connection,
+                    }) => (root, pinned_connection.or(connection_id)),
+                    Ok(crate::api::media_request_guard::Verdict::Refuse(reason)) => {
+                        return fail(call, reason)
+                    }
+                    Err(error) => {
+                        return fail(call, format!("could not check this generation: {error}"))
+                    }
+                };
                 let request = crate::api::media::GenerateMediaRequest {
                     // Derived from the request when the agent gives none.
                     // Without this the server falls back to a random id, so two
@@ -2713,12 +2768,7 @@ impl KronnToolExecutor {
                         .arguments
                         .get("reference_asset_ids")
                         .and_then(serde_json::Value::as_array)
-                        .map(|ids| {
-                            ids.iter()
-                                .filter_map(serde_json::Value::as_str)
-                                .map(str::to_string)
-                                .collect()
-                        }),
+                        .map(|_| references.clone()),
                     reference_asset_id: None,
                     reference_mode: match call
                         .arguments
@@ -2739,6 +2789,22 @@ impl KronnToolExecutor {
                     axum::Json(request),
                 )
                 .await;
+
+                // The job now belongs to the human request that asked for it, so
+                // the next notification of this chain counts against the same one.
+                if let (Some(root), Some(queued)) = (request_root, response.0.data.as_ref()) {
+                    let job = queued.job_id.clone();
+                    if let Err(error) = self
+                        .state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::db::media_jobs::set_request_root(conn, &job, &root)
+                        })
+                        .await
+                    {
+                        tracing::warn!("media job could not be tied to its request: {error}");
+                    }
+                }
 
                 // Recorded AFTER the job exists, and only when asked. Writing it
                 // into the generation request would carry caller identity into

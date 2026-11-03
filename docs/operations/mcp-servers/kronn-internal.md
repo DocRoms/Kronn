@@ -704,7 +704,7 @@ of the same provider remain distinguishable in the audit trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5852-5861#_task_exec_principal]`
 `[src: file: backend/src/api/orchestration.rs:13193-13203#principal_cli_is_authorized]`
 `[src: file: backend/src/api/orchestration.rs:13266-13304#room_agent_is_authorized]`
-`[src: file: backend/src/api/agent_tools.rs:4156-4192#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:4222-4258#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`
 
 For a native HTTP worker, the execution id is also server-derived. The executor
@@ -714,7 +714,7 @@ worker schema contains no execution-id field; if a client nevertheless injects
 one, it has no influence. The regression test uses two real concurrent
 executions and forges B's valid id in worker A's call to prove that A remains
 the only target.
-`[src: file: backend/src/api/agent_tools.rs:4194-4216#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4260-4282#native_worker_execution_for_trusted_dispatch]`
 `[src: file: backend/src/api_tests.rs:7002-7141#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
