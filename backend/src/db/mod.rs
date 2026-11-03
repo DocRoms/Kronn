@@ -63,6 +63,7 @@ pub mod review_ledger;
 pub mod run_outcome;
 pub mod run_retention;
 pub mod run_state;
+pub mod schema_check;
 pub mod shared_runs;
 pub mod stored_credentials;
 pub mod task_boards;
