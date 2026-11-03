@@ -83,6 +83,31 @@ pub async fn publish_media_job(state: &AppState, job_id: &str) -> anyhow::Result
     published
 }
 
+/// What the woken agent is told. A notification is not a request: it reports a
+/// result and asks for nothing, and the wording says so, because a model that
+/// reads "did not complete" as "try again" is how one sentence became ten jobs.
+pub(crate) fn media_wake_reason(job: &crate::db::media_jobs::MediaJob) -> String {
+    let (outcome, instruction) = match job.status {
+        MediaJobStatus::Completed => (
+            "is ready",
+            "Read it with media_job_status and present it to the user.",
+        ),
+        _ => (
+            "did not complete",
+            "Read it with media_job_status and tell the user what happened. Do not retry, \
+             change the parameters, switch connection or drop references: that is the \
+             user's decision.",
+        ),
+    };
+    format!(
+        "The {} generation you asked to be called back on {outcome} (job {}). {instruction} \
+         This is a notification, not a new request: start another generation only if it \
+         builds on this result or the user asks again.",
+        job.modality.as_str(),
+        job.id,
+    )
+}
+
 /// Wakes the agent that asked to be called back when this generation settled.
 ///
 /// An agent used to get a job id and nothing else: to act on the result — feed
@@ -117,15 +142,24 @@ async fn wake_media_requester(
         .as_str()
         .map(str::to_string);
 
-    let outcome = match job.status {
-        MediaJobStatus::Completed => "is ready",
-        _ => "did not complete",
-    };
-    let reason = format!(
-        "The {} generation you asked to be called back on {outcome} (job {}).          Read it with media_job_status before acting.",
-        job.modality.as_str(),
-        job.id,
-    );
+    // A Stop that landed while this generation ran: the human withdrew the turn
+    // that armed the wake, so the result is kept in the room but nobody is
+    // called back. The claim above already consumed the request, so a late
+    // callback cannot fire it later either.
+    if let Some(dispatch_id) = source_dispatch_job_id.clone() {
+        let stopped = state
+            .db
+            .with_read_conn(move |conn| {
+                crate::api::media_request_guard::dispatch_was_stopped(conn, &dispatch_id)
+            })
+            .await?;
+        if stopped {
+            tracing::info!(job = %job.id, "media wake dropped: the turn that asked for it was stopped");
+            return Ok(());
+        }
+    }
+
+    let reason = media_wake_reason(job);
 
     crate::api::agent_jobs::schedule_wake(
         state,

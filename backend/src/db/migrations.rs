@@ -1031,6 +1031,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "283_planning_awaiting_merge",
         include_str!("sql/283_planning_awaiting_merge.sql"),
     ),
+    (
+        "284_media_request_root",
+        include_str!("sql/284_media_request_root.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

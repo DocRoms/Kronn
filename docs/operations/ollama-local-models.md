@@ -33,10 +33,10 @@ references for the lifecycle actions they steer. A worker is still offered
 so a local model never has to reconstruct an opaque UUID, and it answers only
 the execution's principal or its own native worker.
 `[src: file: backend/src/api/agent_tools.rs:1649-1792#worker_room_catalogue]`
-`[src: file: backend/src/api/agent_tools.rs:3000-3024#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:4194-4216#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:2953-2983#task_exec_status]`
-`[src: file: backend/src/api/agent_tools.rs:4156-4192#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:3066-3090#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4260-4282#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:3019-3049#task_exec_status]`
+`[src: file: backend/src/api/agent_tools.rs:4222-4258#native_execution_for_caller]`
 
 The discussion SSE path resolves this scope from the durable
 `task_executions.sub_discussion_id` lineage before it constructs the HTTP tool
@@ -595,7 +595,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:4218-4246#count_arg] [src: file: backend/src/api/agent_tools.rs:3891-3934#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:4284-4312#count_arg] [src: file: backend/src/api/agent_tools.rs:3957-4000#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes
