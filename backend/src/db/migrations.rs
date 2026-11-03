@@ -1255,7 +1255,19 @@ fn migration_is_applied(conn: &Connection, current_name: &str) -> Result<bool> {
 
 /// Run all migrations, optionally backing up the database file first.
 pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> {
-    run_with_backup_checked(conn, db_path, |dir| fs2::available_space(dir))
+    run_with_backup_checked(conn, db_path, |dir| fs2::available_space(dir))?;
+    // KT-1483: only a real database file is verified. In-memory test databases
+    // are built by these very migrations and cannot drift.
+    if db_path.is_some() {
+        crate::db::schema_check::check_at_boot(conn);
+    }
+    Ok(())
+}
+
+/// Every migration on a fresh database, with no backup and no schema check: the
+/// reference the boot check diffs a live database against.
+pub(crate) fn build_reference_schema(conn: &Connection) -> Result<()> {
+    run_with_backup_checked(conn, None, |dir| fs2::available_space(dir))
 }
 
 fn backup_disabled() -> bool {

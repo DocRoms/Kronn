@@ -31,6 +31,15 @@ pub async fn health() -> axum::Json<serde_json::Value> {
         // Under Docker the UI points to the host-side `kronn` CLI for installs.
         "in_docker": crate::core::env::is_docker(),
     });
+    // KT-1483: what the boot-time schema check found, so a database that lost a
+    // table is visible without reading the logs.
+    if let Some(report) = crate::db::schema_check::last_report() {
+        body["schema"] = serde_json::json!({
+            "status": report.status(),
+            "repaired": report.repaired,
+            "unrepaired": report.unrepaired,
+        });
+    }
     if let Some(nonce) = INSTANCE_NONCE.get() {
         body["instance"] = serde_json::Value::String(instance_tag(nonce));
     }
