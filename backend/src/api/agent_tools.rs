@@ -4269,8 +4269,29 @@ fn native_worker_execution_for_trusted_dispatch(
 ) -> anyhow::Result<crate::models::TaskExecution> {
     let dispatch_job_id = source_dispatch_job_id
         .ok_or_else(|| anyhow::anyhow!("execution not found or caller is not a party"))?;
-    let execution = crate::db::orchestration::get_execution_for_dispatch(conn, dispatch_job_id)?
-        .ok_or_else(|| anyhow::anyhow!("execution not found or caller is not a party"))?;
+    let Some(execution) =
+        crate::db::orchestration::get_execution_for_dispatch(conn, dispatch_job_id)?
+    else {
+        // KT-1540 — a worker woken in the room of an execution that is no longer
+        // `Working` (its turn ended undelivered and nobody resumed it) is told so
+        // before it works for nothing. Only that room's own worker provider is.
+        let stalled =
+            crate::db::orchestration::get_execution_for_sub_discussion(conn, discussion_id)?
+                .filter(|execution| {
+                    execution.status != crate::models::TaskExecutionStatus::Working
+                        && execution.worker_agent_type.as_deref()
+                            == Some(crate::db::orchestration::agent_type_to_db(actor_type).as_str())
+                });
+        return Err(match stalled {
+            Some(execution) => anyhow::anyhow!(
+                "this execution is {}: it cannot be delivered from this turn, so do not \
+                 continue the work. Its principal must resume it (task_exec_resume), or \
+                 reassign or cancel it",
+                execution.status.as_str()
+            ),
+            None => anyhow::anyhow!("execution not found or caller is not a party"),
+        });
+    };
     native_execution_for_caller(
         conn,
         &execution.id,

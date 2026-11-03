@@ -420,7 +420,7 @@ restart. Boot first quiesces due dispatches and moves non-terminal executions to
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:296-396#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:6821-6892#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:6898-6969#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
 dead worker `[src: file: backend/src/api/orchestration.rs:687-858#start_resilience_watchdog]`.
 
@@ -428,7 +428,7 @@ Cancellation and reassignment preserve the same lineage. Cancellation first canc
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:12398-12551#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:7823-7869#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:12779-12968#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:7505-7797#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:12398-12551#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:7900-7946#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:12779-12968#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:7582-7874#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:388-485#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
