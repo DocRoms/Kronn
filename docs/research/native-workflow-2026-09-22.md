@@ -47,7 +47,7 @@ full window plus accumulated tool history, then the clamp-before-resize order.
 It verifies that the schema stays complete while ordinary output is trimmed.
 The model failures do not establish whether or when their schema was truncated,
 or whether clamping caused a particular mistaken argument.
-[src: file: backend/src/agents/runner_test.rs:2274-2342#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
+[src: file: backend/src/agents/runner_test.rs:2376-2444#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 
 Attempt 4 read the JsonData and TransformData contracts separately, created the
 correct disabled draft and produced the requested result through all three
@@ -99,7 +99,7 @@ with warnings denied.
 [src: file: backend/scripts/disc-introspection-mcp.py:9621-9623#call_workflow_step_schema]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:7345-7347#test_step_schema_reads_the_shared_backend_contract]
 [src: file: backend/src/api/agent_workflow_tests.rs:23-248#workflow_authoring_creates_a_disabled_draft_and_preserves_omitted_fields]
-[src: file: backend/src/agents/runner_test.rs:2223-2403#clamp_trims_the_biggest_tool_result_to_fit_the_cap]
+[src: file: backend/src/agents/runner_test.rs:2325-2505#clamp_trims_the_biggest_tool_result_to_fit_the_cap]
 
 The [two-small-model growth check](native-catalogue-growth-2026-09-22.md)
 replays the seven existing non-workflow scenarios with the enlarged catalogue.

@@ -134,5 +134,5 @@ and QP-improvement parsers remain separate.
 [src: file: backend/tests/api_tests.rs:1491-1546#discussion_action_invalid_proposals_are_actionable_through_the_real_message_transaction]
 [src: file: backend/tests/api_tests.rs:1391-1486#discussion_action_allow_manual_override_never_leaks_plaintext_through_the_api]
 [src: file: backend/tests/api_tests.rs:1245-1386#discussion_action_launch_context_resolves_project_env_for_a_global_target]
-[src: file: backend/src/agents/runner_test.rs:2274-2342#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
+[src: file: backend/src/agents/runner_test.rs:2376-2444#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]

@@ -1562,6 +1562,108 @@ fi
         );
     }
 
+    #[test]
+    fn text_encoded_tool_call_never_reaches_the_visible_message() {
+        // KT-1543: LiteLLM (Gemini) wrote its call into `content`.
+        let run = |chunks: &[&str]| {
+            let mut filter = LeadingThinkingFilter::default();
+            let mut visible = chunks
+                .iter()
+                .map(|chunk| filter.push(chunk))
+                .collect::<String>();
+            visible.push_str(&filter.finish());
+            visible
+        };
+        let whole = "###Call:default_api:git_log{limit:5}###\n\nLa revue de la PR.";
+        assert_eq!(run(&[whole]), "La revue de la PR.");
+        // Split at every byte boundary, the markers included.
+        let bytes = whole.as_bytes();
+        for cut in 1..bytes.len() {
+            let (a, b) = whole.split_at(cut);
+            assert_eq!(run(&[a, b]), "La revue de la PR.", "cut at {cut}");
+        }
+        // Mid-message and repeated calls go too; surrounding text is kept.
+        assert_eq!(
+            run(&["Avant ###Call:ns:a{x:1}### milieu ###Call:ns:b{}### après"]),
+            "Avant  milieu  après"
+        );
+        // Markdown headings and a lone marker-like prefix are text.
+        assert_eq!(run(&["### Titre\n##Call: x"]), "### Titre\n##Call: x");
+        assert_eq!(run(&["fin ###Ca"]), "fin ###Ca");
+        // A `###Call:` that never closes is text, not a call: it stays visible.
+        assert_eq!(
+            run(&["ok ###Call:default_api:git_log{limit:"]),
+            "ok ###Call:default_api:git_log{limit:"
+        );
+        // A "call" that never closes within bounds is shown, not swallowed.
+        let long = format!("###Call:{}", "x".repeat(5000));
+        assert_eq!(run(&[&long]), long);
+    }
+
+    #[test]
+    fn text_encoded_tool_calls_leave_no_blank_text_behind() {
+        // KT-1543 review: the exact room input, three calls separated by spaces.
+        let run = |chunks: &[&str]| {
+            let mut filter = LeadingThinkingFilter::default();
+            let mut visible = chunks
+                .iter()
+                .map(|chunk| filter.push(chunk))
+                .collect::<String>();
+            visible.push_str(&filter.finish());
+            (visible, filter.stripped_text_calls())
+        };
+        let calls = "###Call:default_api:read_file{path:docs/AGENTS.md}### \
+                     ###Call:default_api:git_log{limit:5}### \
+                     ###Call:default_api:git_diff{revision_range:main...160bc727b}###";
+        // Only calls: nothing visible, but the strip is reported.
+        assert_eq!(run(&[calls]), (String::new(), true));
+        // The blanks between and after the calls are not text: the first line
+        // break is still trimmed, so the review starts clean.
+        let whole = format!("{calls}\n\nLa revue");
+        assert_eq!(run(&[&whole]), ("La revue".to_string(), true));
+        // Same at every split, including a delta made only of blanks.
+        for cut in 1..whole.len() {
+            let (a, b) = whole.split_at(cut);
+            assert_eq!(run(&[a, b]).0, "La revue", "cut at {cut}");
+        }
+        assert_eq!(
+            run(&[
+                "  ",
+                "###Call:a:b{x:1}###",
+                " ",
+                "###Call:a:c{}###",
+                "\n\n",
+                "Ok"
+            ])
+            .0,
+            "Ok"
+        );
+        // Plain text, even with leading blanks, reports nothing stripped.
+        assert_eq!(run(&["  bonjour"]), ("  bonjour".to_string(), false));
+    }
+
+    #[test]
+    fn a_prose_mention_of_the_marker_never_swallows_the_text_after_it() {
+        // KT-1543 review: no closing `}###` on the line, then a Markdown heading.
+        let run = |chunks: &[&str]| {
+            let mut filter = LeadingThinkingFilter::default();
+            let mut visible = chunks
+                .iter()
+                .map(|chunk| filter.push(chunk))
+                .collect::<String>();
+            visible.push_str(&filter.finish());
+            (visible, filter.stripped_text_calls())
+        };
+        let prose = "Le modèle écrit ###Call:default_api:read_file pour appeler.\n\
+                     Un paragraphe.\n\n### 1. Revue\nContenu";
+        assert_eq!(run(&[prose]), (prose.to_string(), false));
+        let (a, b) = prose.split_at(30);
+        assert_eq!(run(&[a, b]), (prose.to_string(), false));
+        // A real call earlier on the same message is still stripped.
+        let mixed = format!("###Call:ns:a{{x:1}}###\n{prose}");
+        assert_eq!(run(&[&mixed]), (prose.to_string(), true));
+    }
+
     // ─── Ollama /api/chat request body (asserts on the REQUEST, never on the
     //     generated text — greedy-stable ≠ bit-exact on Metal, would be flaky) ─
     #[test]
@@ -4709,6 +4811,75 @@ fi
         assert!(
             captured.contains("reason_code=prelocalized_read_exhausted"),
             "the terminal reason must be stable and machine-readable: {captured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_first_turn_of_text_encoded_calls_only_is_retried_not_left_empty() {
+        // KT-1543 review: stripped to nothing at turn 0, the run used to end with
+        // an empty message and no retry.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let calls = "###Call:default_api:read_file{path:docs/AGENTS.md}### \
+                     ###Call:default_api:git_log{limit:5}###";
+        let first = format!(
+            r#"{{"choices":[{{"index":0,"delta":{{"content":{}}}}}]}}"#,
+            serde_json::to_string(calls).unwrap()
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(format!("data: {first}\n\ndata: [DONE]\n\n")),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"La revue de la PR.\"}}]}\n\ndata: [DONE]\n\n",
+            ))
+            .mount(&server)
+            .await;
+
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "review the PR",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+        let mut out = String::new();
+        while let Some(line) = process.next_line().await {
+            out.push_str(&line);
+        }
+
+        assert!(out.contains("La revue de la PR."), "{out}");
+        assert!(!out.contains("###Call"), "{out}");
+        let requests = server.received_requests().await.expect("recorded");
+        assert_eq!(requests.len(), 2, "the model is asked again, once");
+        let retry: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        let last = retry["messages"].as_array().unwrap().last().unwrap();
+        assert!(
+            last["content"]
+                .as_str()
+                .unwrap()
+                .contains("tool-calling interface"),
+            "{last}"
         );
     }
 
@@ -9125,6 +9296,62 @@ fi
             visible.push_str(&chunk);
         }
         assert_eq!(visible, "Final answer");
+    }
+
+    #[tokio::test]
+    async fn forward_chat_line_strips_text_encoded_tool_call_from_litellm_reply() {
+        // KT-1543: the room message began with `###Call:default_api:git_log{limit:5}###`.
+        use crate::agents::chat_codec::OpenAiCodec;
+        use std::sync::{Arc, Mutex};
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (mut done, mut err) = (false, false);
+        let mut provider_error = None;
+        let mut tally = TokenTally::default();
+        let mut thinking_filter = LeadingThinkingFilter::default();
+        let mut pending_tools = crate::agents::tools::ToolCallAccumulator::default();
+
+        for content in [
+            "###Call:default_api:",
+            "git_log{limit:5}###",
+            "\n\nLa revue de la PR #458.",
+        ] {
+            let line = format!(
+                r#"data: {{"choices":[{{"delta":{{"content":{}}}}}]}}"#,
+                serde_json::to_string(content).unwrap()
+            );
+            assert!(
+                forward_chat_line(
+                    &OpenAiCodec,
+                    "LiteLLM",
+                    &line,
+                    &tx,
+                    &stderr,
+                    &mut done,
+                    &mut err,
+                    &mut provider_error,
+                    0,
+                    &mut tally,
+                    &mut thinking_filter,
+                    &mut pending_tools,
+                    &mut false,
+                    &mut ReplayHold::default(),
+                )
+                .await
+            );
+        }
+        let trailing = thinking_filter.finish();
+        if !trailing.is_empty() {
+            tx.send(trailing).await.unwrap();
+        }
+        drop(tx);
+
+        let mut visible = String::new();
+        while let Some(chunk) = rx.recv().await {
+            visible.push_str(&chunk);
+        }
+        assert_eq!(visible, "La revue de la PR #458.");
     }
 
     #[tokio::test]
