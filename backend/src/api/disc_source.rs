@@ -3609,6 +3609,21 @@ mod tests {
             "a step that targets the native principal still wakes it"
         );
 
+        // KT-1539 — a wake-up still waiting for the principal absorbs the next
+        // one, so the first turn has to have run for the hand-back to need its own.
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE agent_dispatch_jobs SET status = 'Completed'
+                     WHERE discussion_id = 'd-lint'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
         let mut handback = agent_msg("human-cli-handback", "À toi pour la suite.");
         handback.agent_type = Some(AgentType::ClaudeCode);
         append_as(&state, vec![handback], Some("human-cli")).await;

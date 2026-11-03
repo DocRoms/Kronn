@@ -1645,7 +1645,9 @@ pub fn insert_message_with_targets_and_dispatches_within_tx(
                 claimed_target_positions[index] = true;
                 targets[index].connection_id.as_deref()
             });
-            let job = super::agent_dispatch::enqueue_with_connection(
+            // KT-1539 — a burst of live appends wakes the room's agent once:
+            // a wake-up already waiting for this responder absorbs this one.
+            let job = super::agent_dispatch::enqueue_coalescing_peer_wake(
                 tx,
                 super::agent_dispatch::NewAgentDispatchJob {
                     id: dispatch.job_id,

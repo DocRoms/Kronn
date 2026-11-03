@@ -62,8 +62,8 @@ hiding joined peers. The mode switch retires pending native dispatches in the
 same transaction, and the dispatcher's final claim also checks that native
 mode is still enabled.
 [src: file: backend/src/db/discussions.rs:951-970#set_disc_no_agent_within_tx]
-[src: file: backend/src/db/agent_dispatch.rs:556-664#claim_with_limits]
-[src: file: backend/src/db/agent_dispatch.rs:838-856#mark_agent_started]
+[src: file: backend/src/db/agent_dispatch.rs:630-738#claim_with_limits]
+[src: file: backend/src/db/agent_dispatch.rs:912-930#mark_agent_started]
 
 Current bridges send their durable session id on every wait (resolved by
 session id alone when the provider is unknown). Waking and seeing are separate
@@ -122,10 +122,10 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:162-258#processingDiscsRef]
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
 [src: file: backend/src/db/discussions.rs:1313-1333#insert_user_message_with_dispatches]
-[src: file: backend/src/db/agent_dispatch.rs:677-826#recover_after_restart]
-[src: file: backend/src/db/discussions.rs:3595-3597#DispatchInProgress]
+[src: file: backend/src/db/agent_dispatch.rs:751-900#recover_after_restart]
+[src: file: backend/src/db/discussions.rs:3597-3599#DispatchInProgress]
 [src: file: backend/src/api/discussions/messaging.rs:1050-1058#DispatchInProgress]
-[src: file: backend/src/db/discussions.rs:3541-3801#revise_message_with_dispatch]
+[src: file: backend/src/db/discussions.rs:3548-3808#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
 [src: file: backend/src/api/federation.rs:102-147#federate_message_revision]
 [src: file: backend/src/api/ws.rs:1164-1172#resolved_targets]
@@ -229,6 +229,23 @@ lookup fails closed like the rest of the presence snapshot.
 [src: file: backend/src/api/discussions/routing.rs:42-69#route_joined_peer_turn]
 [src: file: backend/src/api/disc_source.rs:737-781#session_identity]
 
+### A burst of wake-ups is one turn (KT-1539)
+
+A job is one *turn*, and a turn reads the whole room when it runs. Jobs of one
+room run one after the other, so every live peer append used to queue its own
+job and the room's agent answered each in turn: near-identical replies about a
+minute apart. `enqueue_coalescing_peer_wake` now folds a peer wake-up
+(`peer:` dedupe key, no chain, batch or group) into a `Pending` one already
+waiting for the same responder (same `agent_override` and connection): nothing
+is lost, because the waiting turn sees every message posted before it is
+claimed. A `Running` turn is never reused, so the events of its window queue
+exactly one follow-up, and the rest fold into that one. Jobs under any other
+dedupe key (execution workers, resume completions, human turns, question
+answers) are neither absorbed nor absorbing. Server-authored orchestration
+events post with zero dispatch; they do not queue a turn.
+[src: file: backend/src/db/agent_dispatch.rs:319-386#enqueue_coalescing_peer_wake]
+[src: file: backend/src/db/discussions.rs:1593-1671#insert_message_with_targets_and_dispatches_within_tx]
+
 ## When a start is refused
 
 A dispatch that never reaches the agent is settled as a refused preflight, and the
@@ -272,7 +289,7 @@ Two distinctions the reason must not blur, and does not:
   names the elapsed deadline and offers an explicit retry.
 [src: file: backend/src/db/discussions.rs:1506-1549#insert_message_with_targeted_dispatch]
   [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/db/agent_dispatch.rs:677-826#recover_after_restart]
+[src: file: backend/src/db/agent_dispatch.rs:751-900#recover_after_restart]
 [src: file: backend/src/api/discussions/streaming.rs:658-674#timeout_notice]
 
 The pure zero/single-target decision table remains in

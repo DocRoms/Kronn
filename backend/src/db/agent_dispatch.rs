@@ -311,6 +311,80 @@ pub fn enqueue_with_connection(
     anyhow::bail!("dispatch enqueue did not persist or match its dedupe key")
 }
 
+/// Dedupe-key prefix of a live peer append's wake-up (`peer:{message}[:{agent}]`).
+/// Only these jobs coalesce: every other scheme names a job some caller binds
+/// to (an execution's worker dispatch, a resume completion, a human turn).
+const PEER_DISPATCH_KEY_PREFIX: &str = "peer:";
+
+/// Enqueue a wake-up for a room agent, folding it into the wake-up already
+/// waiting for that same agent when there is one (KT-1539).
+///
+/// A job is one *turn*, and a turn reads the whole room when it runs, not just
+/// the message that queued it. Jobs of one room run strictly one after the
+/// other, so three events landing in a burst used to queue three jobs and give
+/// three near-identical replies, one after another. A `Pending` peer job that
+/// has not run yet will see every message posted before it is claimed, so a
+/// further wake-up for the same responder adds nothing and is absorbed: nothing
+/// is lost, and the turn runs once.
+///
+/// While a turn is `Running`, it is not a candidate (it has already read the
+/// room), so the first event of that window queues exactly one follow-up and
+/// the rest of the window folds into it.
+///
+/// A replay of the same `dedupe_key` still returns its own job unchanged.
+pub fn enqueue_coalescing_peer_wake(
+    conn: &Connection,
+    new: NewAgentDispatchJob<'_>,
+    connection_id: Option<&str>,
+) -> Result<AgentDispatchJob> {
+    let coalescible = new.dedupe_key.starts_with(PEER_DISPATCH_KEY_PREFIX)
+        && new.chain_prompt_ids.is_empty()
+        && new.batch_item.is_none()
+        && new.group_id.is_none();
+    if coalescible {
+        let own: Option<AgentDispatchJob> = conn
+            .query_row(
+                &format!("SELECT {JOB_COLUMNS} FROM agent_dispatch_jobs WHERE dedupe_key = ?1"),
+                [new.dedupe_key],
+                map_job,
+            )
+            .optional()?;
+        if let Some(own) = own {
+            return Ok(own);
+        }
+        let agent_json = new.agent_override.map(serde_json::to_string).transpose()?;
+        let waiting: Option<AgentDispatchJob> = conn
+            .query_row(
+                &format!(
+                    "SELECT {JOB_COLUMNS} FROM agent_dispatch_jobs
+                     WHERE discussion_id = ?1
+                       AND status = 'Pending'
+                       AND attempts < ?2
+                       AND dedupe_key LIKE '{PEER_DISPATCH_KEY_PREFIX}%'
+                       AND chain_prompt_ids_json = '[]'
+                       AND batch_item IS NULL
+                       AND group_id IS NULL
+                       AND agent_override_json IS ?3
+                       AND connection_id IS ?4
+                     ORDER BY created_at, rowid
+                     LIMIT 1"
+                ),
+                params![
+                    new.discussion_id,
+                    i64::from(MAX_DISPATCH_ATTEMPTS),
+                    agent_json,
+                    connection_id
+                ],
+                map_job,
+            )
+            .optional()?;
+        if let Some(waiting) = waiting {
+            return Ok(waiting);
+        }
+    }
+    enqueue_with_connection(conn, new, connection_id)
+}
+
 pub struct NewLatestUserDispatch<'a> {
     pub id: &'a str,
     pub discussion_id: &'a str,
@@ -2704,5 +2778,228 @@ mod tests {
         assert!(list_watchdog_candidates(&connection, Utc::now())
             .unwrap()
             .is_empty());
+    }
+
+    // ── KT-1539 — one turn per burst of wake-ups ──────────────────────────
+
+    fn peer_event(id: &str) -> crate::models::DiscussionMessage {
+        crate::models::DiscussionMessage {
+            id: id.to_string(),
+            role: crate::models::MessageRole::Agent,
+            channel: crate::models::MessageChannel::Main,
+            content: format!("report {id}"),
+            agent_type: Some(AgentType::OpenCode),
+            timestamp: Utc::now(),
+            tokens_used: 0,
+            session_tokens_at_message: None,
+            recovered_partial: false,
+            auth_mode: None,
+            model_tier: None,
+            model: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
+            lint_report: None,
+            target_agent: None,
+            reply_to_message_id: None,
+            author_cli_ordinal: None,
+            session_continuity: None,
+            kind: Default::default(),
+        }
+    }
+
+    /// One live peer append for the room's own agent, exactly as the bridge's
+    /// append route issues it (no explicit dedupe key, no override).
+    fn peer_wake(connection: &Connection, message_id: &str) -> AgentDispatchJob {
+        let job_id = format!("job-{message_id}");
+        let (_, jobs) =
+            crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+                connection,
+                "d1",
+                &peer_event(message_id),
+                &[],
+                &[crate::db::discussions::UserDispatchSpec {
+                    job_id: &job_id,
+                    agent_override: None,
+                    dedupe_key: None,
+                }],
+                None,
+            )
+            .unwrap();
+        jobs.into_iter().next().expect("one dispatch spec, one job")
+    }
+
+    fn jobs_in_room(connection: &Connection) -> Vec<(String, String)> {
+        let mut statement = connection
+            .prepare(
+                "SELECT id, status FROM agent_dispatch_jobs
+                 WHERE discussion_id = 'd1' ORDER BY created_at, rowid",
+            )
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        rows.map(|row| row.unwrap()).collect()
+    }
+
+    fn room_message_ids(connection: &Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare("SELECT id FROM messages WHERE discussion_id = 'd1' ORDER BY sort_order")
+            .unwrap();
+        let rows = statement.query_map([], |row| row.get(0)).unwrap();
+        rows.map(|row| row.unwrap()).collect()
+    }
+
+    #[test]
+    fn three_events_in_a_burst_start_one_run_that_sees_all_three() {
+        let connection = connection();
+        let first = peer_wake(&connection, "e1");
+        let second = peer_wake(&connection, "e2");
+        let third = peer_wake(&connection, "e3");
+
+        assert_eq!(first.id, second.id, "the second event folds into the first");
+        assert_eq!(first.id, third.id, "so does the third");
+        assert_eq!(
+            jobs_in_room(&connection),
+            vec![("job-e1".to_string(), "Pending".to_string())],
+            "a burst queues exactly one run"
+        );
+
+        // The run that gets claimed reads the room as it stands, which now
+        // holds all three events: nothing was dropped by not queueing more.
+        let run = claim(&connection, &first.id)
+            .unwrap()
+            .expect("the one run claims");
+        assert_eq!(run.status, DispatchStatus::Running);
+        let seen = room_message_ids(&connection);
+        for event in ["e1", "e2", "e3"] {
+            assert!(seen.contains(&event.to_string()), "{event} is in the room");
+        }
+        let last_event_order: i64 = connection
+            .query_row(
+                "SELECT sort_order FROM messages WHERE id = 'e3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            last_event_order > run.trigger_sort_order,
+            "the third event is newer than the run's trigger yet still reaches it"
+        );
+        assert_eq!(
+            list_runnable_ids(&connection, 10).unwrap(),
+            Vec::<String>::new(),
+            "no second run is left to start after it"
+        );
+    }
+
+    #[test]
+    fn an_event_during_a_run_queues_exactly_one_follow_up() {
+        let connection = connection();
+        let running = peer_wake(&connection, "e1");
+        claim(&connection, &running.id)
+            .unwrap()
+            .expect("first run claims");
+
+        // Two events land while the turn is Running: the turn has already read
+        // the room, so they need a next turn, but one, not one each.
+        let follow_up = peer_wake(&connection, "e2");
+        let folded = peer_wake(&connection, "e3");
+        assert_ne!(follow_up.id, running.id, "a running turn is never reused");
+        assert_eq!(folded.id, follow_up.id, "the second late event folds in");
+        assert_eq!(
+            jobs_in_room(&connection),
+            vec![
+                ("job-e1".to_string(), "Running".to_string()),
+                ("job-e2".to_string(), "Pending".to_string()),
+            ],
+        );
+
+        // Never parallel: the follow-up cannot be claimed while the run lives.
+        assert!(claim(&connection, &follow_up.id).unwrap().is_none());
+        mark_completed(&connection, &running.id).unwrap();
+        let next = claim(&connection, &follow_up.id)
+            .unwrap()
+            .expect("the follow-up runs once the first run ends");
+        assert_eq!(next.id, "job-e2");
+        assert!(room_message_ids(&connection).contains(&"e3".to_string()));
+    }
+
+    #[test]
+    fn a_replayed_event_returns_its_own_job_and_other_responders_stay_apart() {
+        let connection = connection();
+        let first = peer_wake(&connection, "e1");
+        // The same message id replayed is the same wake, not a new one.
+        let replay = enqueue_coalescing_peer_wake(
+            &connection,
+            NewAgentDispatchJob {
+                id: "job-replay",
+                discussion_id: "d1",
+                trigger_message_id: "e1",
+                trigger_sort_order: 2,
+                dedupe_key: "peer:e1",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(replay.id, first.id);
+
+        // A different responder is a different obligation: never folded.
+        let other = enqueue_coalescing_peer_wake(
+            &connection,
+            NewAgentDispatchJob {
+                id: "job-codex",
+                discussion_id: "d1",
+                trigger_message_id: "e1",
+                trigger_sort_order: 2,
+                dedupe_key: "peer:e1:Codex",
+                agent_override: Some(&AgentType::Codex),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(other.id, "job-codex");
+        assert_eq!(jobs_in_room(&connection).len(), 2);
+    }
+
+    #[test]
+    fn a_job_with_a_named_key_is_never_absorbed_nor_absorbs() {
+        let connection = connection();
+        // An execution's worker dispatch carries an orchestration key and is
+        // bound to its execution: a peer wake must not fold into it...
+        enqueue_default(&connection, "job-worker", "orch-reassign:x:1");
+        let wake = peer_wake(&connection, "e1");
+        assert_eq!(wake.id, "job-e1");
+        // ...and a keyed enqueue is not a peer wake, so it is left untouched.
+        let keyed = enqueue_coalescing_peer_wake(
+            &connection,
+            NewAgentDispatchJob {
+                id: "job-keyed",
+                discussion_id: "d1",
+                trigger_message_id: "u1",
+                trigger_sort_order: 1,
+                dedupe_key: "orch-recovery-review:x:1",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(keyed.id, "job-keyed");
+        assert_eq!(jobs_in_room(&connection).len(), 3);
     }
 }

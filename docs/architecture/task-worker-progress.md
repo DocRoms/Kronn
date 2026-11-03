@@ -8,4 +8,4 @@ Process liveness is attached by both execution-status surfaces only when the run
 
 Native Claude stream tool boundaries update durable progress: tool start records `tool_activity`, and tool completion returns the phase to `upstream_wait`. [src: file: backend/src/api/discussions/streaming.rs:4826-4911#mark_progress]
 
-The dispatcher persists provider launch and later progress boundaries in `agent_dispatch_jobs.last_progress_at`. [src: file: backend/src/db/agent_dispatch.rs:838-891#mark_agent_started]
+The dispatcher persists provider launch and later progress boundaries in `agent_dispatch_jobs.last_progress_at`. [src: file: backend/src/db/agent_dispatch.rs:912-965#mark_agent_started]
