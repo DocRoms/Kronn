@@ -36,6 +36,9 @@ use super::api_call_security::{
 };
 use crate::core::safe_http::{self, ClientOptions, Outbound, Redirects, SafeClient, SendError};
 
+type OAuth2Cache =
+    std::sync::Arc<tokio::sync::Mutex<HashMap<String, crate::core::oauth2_cache::CachedToken>>>;
+
 /// Logging context plumbed through `execute_api_call_step_with_db` so the
 /// audit table (`api_call_logs`) can attribute each call to its source +
 /// optional workflow run / disc context. Default = workflow run with no
@@ -820,9 +823,17 @@ pub async fn execute_api_call_probe(
     ctx: &TemplateContext,
     policy: SecurityPolicy,
 ) -> StepOutcome {
-    let mut resolved_env = env.clone();
-    resolve_dynamic_auth(plugin, config_id, state, &mut resolved_env, policy).await;
-    execute_api_call_step_core(step, plugin, &resolved_env, ctx, policy).await
+    execute_with_token_refresh(
+        step,
+        plugin,
+        config_id,
+        &state.oauth2_cache,
+        env.clone(),
+        ctx,
+        policy,
+        None,
+    )
+    .await
 }
 
 /// Same as [`execute_api_call_step_with_db`] but lets the caller stamp a
@@ -885,8 +896,58 @@ async fn execute_api_call_step_with_db_inner(
     };
 
     let config_id = step.api_config_id.clone().unwrap_or_default();
-    resolve_dynamic_auth(&plugin, &config_id, state, &mut env, policy).await;
-    execute_core_gated(step, &plugin, &env, ctx, policy, gate).await
+    execute_with_token_refresh(
+        step,
+        &plugin,
+        &config_id,
+        &state.oauth2_cache,
+        env,
+        ctx,
+        policy,
+        gate,
+    )
+    .await
+}
+
+/// Mint (or fetch the cached) dynamic credential, run the call, and, when the
+/// API answers 401 to a cached OAuth2 / token-exchange bearer, drop that entry,
+/// mint once more and send the call once more. A token without `expires_in`
+/// is cached for a guessed hour, so a provider that issued a shorter one
+/// refuses it long before the cache lets go of it; the 401 is the only signal.
+/// A second 401 is the answer: the credentials themselves are refused.
+#[allow(clippy::too_many_arguments)]
+async fn execute_with_token_refresh(
+    step: &WorkflowStep,
+    plugin: &McpServer,
+    config_id: &str,
+    cache: &OAuth2Cache,
+    mut env: HashMap<String, String>,
+    ctx: &TemplateContext,
+    policy: SecurityPolicy,
+    gate: Option<crate::core::api_access::EndpointGate>,
+) -> StepOutcome {
+    resolve_dynamic_auth(plugin, config_id, cache, &mut env, policy).await;
+    let outcome = execute_core_gated(step, plugin, &env, ctx, policy, gate.clone()).await;
+    let rejected = env.remove("__access_token__");
+    let refused = outcome.result.status == RunStatus::Failed
+        && extract_http_status_from_output(&outcome.result.output) == Some(401);
+    let Some(rejected) = rejected.filter(|_| uses_cached_token(plugin) && refused) else {
+        return outcome;
+    };
+    crate::core::oauth2_cache::invalidate_token(cache, config_id, &rejected).await;
+    resolve_dynamic_auth(plugin, config_id, cache, &mut env, policy).await;
+    execute_core_gated(step, plugin, &env, ctx, policy, gate).await
+}
+
+/// Whether the plugin's bearer comes from the OAuth2 / token-exchange cache,
+/// the only credentials a 401 can be cured by minting again.
+fn uses_cached_token(plugin: &McpServer) -> bool {
+    plugin.api_spec.as_ref().is_some_and(|spec| {
+        matches!(
+            spec.auth,
+            ApiAuthKind::OAuth2ClientCredentials { .. } | ApiAuthKind::TokenExchange { .. }
+        )
+    })
 }
 
 /// The step hydrated from its Quick API, its plugin and its decrypted env:
@@ -1055,14 +1116,14 @@ async fn load_broker_target(
 async fn resolve_dynamic_auth(
     plugin: &McpServer,
     config_id: &str,
-    state: &crate::AppState,
+    cache: &OAuth2Cache,
     env: &mut HashMap<String, String>,
     policy: SecurityPolicy,
 ) {
     if let Some(spec) = plugin.api_spec.as_ref() {
         if matches!(spec.auth, ApiAuthKind::OAuth2ClientCredentials { .. }) {
             match crate::core::oauth2_cache::resolve_token(
-                &state.oauth2_cache,
+                cache,
                 config_id,
                 &spec.auth,
                 env,
@@ -1085,7 +1146,7 @@ async fn resolve_dynamic_auth(
             // store — both auth kinds produce CachedToken values keyed
             // by config_id and share TTL/refresh semantics.
             match crate::core::oauth2_cache::resolve_token_exchange(
-                &state.oauth2_cache,
+                cache,
                 config_id,
                 &spec.auth,
                 &spec.base_url,
@@ -1757,13 +1818,14 @@ pub(crate) struct WatchPollResponse {
 
 /// Sends a Watch poll through the broker: the source's stored credentials,
 /// the API's default headers and the guarded transport, a GET only, no
-/// retry (the next poll is the retry) and no `api_call_logs` row.
+/// retry (the next poll is the retry, bar the one re-mint after a 401 on a
+/// cached bearer) and no `api_call_logs` row.
 pub(crate) async fn execute_watch_poll(
     state: &crate::AppState,
     policy: SecurityPolicy,
     request: WatchPollRequest<'_>,
 ) -> Result<WatchPollResponse, String> {
-    let (step, plugin, mut env) =
+    let (step, plugin, env) =
         load_broker_target(request.source, request.project_id, state, None).await?;
     // Before token minting: a poll the workflow's audience may not make
     // sends nothing; the gate then re-decides the request and every hop.
@@ -1779,23 +1841,65 @@ pub(crate) async fn execute_watch_poll(
     .await
     .map_err(|refusal| call_secrets(&plugin, &env).scrub(&refusal))?;
     let config_id = step.api_config_id.clone().unwrap_or_default();
-    resolve_dynamic_auth(&plugin, &config_id, state, &mut env, policy).await;
     tracing::debug!(
         workflow_id = %request.workflow.id,
         plugin = %plugin.id,
         "Watch poll"
     );
-    let mut secrets = call_secrets(&plugin, &env);
-    let outcome = watch_poll_unscrubbed(
+    poll_with_token_refresh(
         &step,
         &plugin,
-        &env,
+        &config_id,
+        &state.oauth2_cache,
+        env,
         policy,
         &request,
         gate.as_ref(),
-        &mut secrets,
     )
-    .await;
+    .await
+}
+
+/// Mint (or fetch the cached) dynamic credential and poll once; when the API
+/// answers 401 to a cached OAuth2 / token-exchange bearer, drop that entry,
+/// mint again and poll once more, as [`execute_with_token_refresh`] does for a
+/// call. A token without `expires_in` is cached for a guessed hour, so
+/// without this a watch would keep sending the dead token until the guess
+/// ran out. A second 401 is the answer.
+#[allow(clippy::too_many_arguments)]
+async fn poll_with_token_refresh(
+    step: &WorkflowStep,
+    plugin: &McpServer,
+    config_id: &str,
+    cache: &OAuth2Cache,
+    mut env: HashMap<String, String>,
+    policy: SecurityPolicy,
+    request: &WatchPollRequest<'_>,
+    gate: Option<&crate::core::api_access::EndpointGate>,
+) -> Result<WatchPollResponse, String> {
+    resolve_dynamic_auth(plugin, config_id, cache, &mut env, policy).await;
+    let first = poll_scrubbed(step, plugin, &env, policy, request, gate).await;
+    let rejected = env.remove("__access_token__");
+    let refused = matches!(&first, Err(error) if error.starts_with("HTTP 401 "));
+    let Some(rejected) = rejected.filter(|_| uses_cached_token(plugin) && refused) else {
+        return first;
+    };
+    crate::core::oauth2_cache::invalidate_token(cache, config_id, &rejected).await;
+    resolve_dynamic_auth(plugin, config_id, cache, &mut env, policy).await;
+    poll_scrubbed(step, plugin, &env, policy, request, gate).await
+}
+
+/// One poll with this env's credentials, every text field scrubbed of them.
+async fn poll_scrubbed(
+    step: &WorkflowStep,
+    plugin: &McpServer,
+    env: &HashMap<String, String>,
+    policy: SecurityPolicy,
+    request: &WatchPollRequest<'_>,
+    gate: Option<&crate::core::api_access::EndpointGate>,
+) -> Result<WatchPollResponse, String> {
+    let mut secrets = call_secrets(plugin, env);
+    let outcome =
+        watch_poll_unscrubbed(step, plugin, env, policy, request, gate, &mut secrets).await;
     match outcome {
         Ok(response) => Ok(WatchPollResponse {
             status: response.status,
@@ -3929,6 +4033,329 @@ mod tests {
             "expected body excerpt: {}",
             outcome.result.output
         );
+    }
+
+    /// A token endpoint that omits `expires_in` (so the cache keeps the token
+    /// for the guessed hour) and hands out `tok-1` then `tok-2`.
+    async fn mount_expiry_less_token_endpoint(server: &MockServer, mints: u64) {
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "tok-1"
+            })))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "tok-2"
+            })))
+            .expect(mints - 1)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_401_on_an_expiry_less_oauth2_token_clears_the_cache_and_retries_once() {
+        let server = MockServer::start().await;
+        mount_expiry_less_token_endpoint(&server, 2).await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("Authorization", "Bearer tok-1"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("token expired"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("Authorization", "Bearer tok-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::OAuth2ClientCredentials {
+                token_url: format!("{}/token", server.uri()),
+                client_id_env: "CID".into(),
+                client_secret_env: "CSECRET".into(),
+                scope: String::new(),
+                extra_headers: vec![],
+            },
+            vec![mk_endpoint("GET", "/me")],
+        );
+        let env = HashMap::from([
+            ("CID".to_string(), "id".to_string()),
+            ("CSECRET".to_string(), "secret".to_string()),
+        ]);
+        let cache: OAuth2Cache = Default::default();
+        let step = mk_step("/me");
+
+        let outcome = execute_with_token_refresh(
+            &step,
+            &plugin,
+            "cfg-oauth",
+            &cache,
+            env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "{}",
+            outcome.result.output
+        );
+        let cached = cache.lock().await.get("cfg-oauth").cloned();
+        assert_eq!(cached.map(|c| c.access_token).as_deref(), Some("tok-2"));
+        // The `expect`s on the mocks assert one 401, one retry, two mints on drop.
+    }
+
+    #[tokio::test]
+    async fn a_second_401_after_the_re_mint_is_returned_without_a_third_attempt() {
+        let server = MockServer::start().await;
+        mount_expiry_less_token_endpoint(&server, 2).await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("refused"))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::OAuth2ClientCredentials {
+                token_url: format!("{}/token", server.uri()),
+                client_id_env: "CID".into(),
+                client_secret_env: "CSECRET".into(),
+                scope: String::new(),
+                extra_headers: vec![],
+            },
+            vec![mk_endpoint("GET", "/me")],
+        );
+        let env = HashMap::from([
+            ("CID".to_string(), "id".to_string()),
+            ("CSECRET".to_string(), "secret".to_string()),
+        ]);
+        let outcome = execute_with_token_refresh(
+            &mk_step("/me"),
+            &plugin,
+            "cfg-oauth-401",
+            &Default::default(),
+            env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+            None,
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            outcome.result.output.contains("401"),
+            "{}",
+            outcome.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn a_401_on_a_token_exchange_bearer_clears_the_cache_and_retries_once() {
+        let server = MockServer::start().await;
+        mount_expiry_less_token_endpoint(&server, 2).await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("Authorization", "Bearer tok-1"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("Authorization", "Bearer tok-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::TokenExchange {
+                endpoint: "/token".into(),
+                method: "POST".into(),
+                body_template: json!({ "key": "${ENV.KEY}" }),
+                body_format: TokenExchangeBodyFormat::Json,
+                token_jsonpath: "$.access_token".into(),
+                ttl_seconds: 3600,
+                inject: TokenInjection::BearerHeader,
+                creds_env_keys: vec!["KEY".into()],
+            },
+            vec![mk_endpoint("GET", "/me")],
+        );
+        let env = HashMap::from([("KEY".to_string(), "k".to_string())]);
+        let outcome = execute_with_token_refresh(
+            &mk_step("/me"),
+            &plugin,
+            "cfg-exchange",
+            &Default::default(),
+            env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "{}",
+            outcome.result.output
+        );
+    }
+
+    fn mk_workflow() -> Workflow {
+        serde_json::from_value(json!({
+            "id": "wf",
+            "name": "wf",
+            "project_id": null,
+            "trigger": { "type": "Manual" },
+            "steps": [],
+            "actions": [],
+            "safety": {},
+            "workspace_config": null,
+            "concurrency_limit": null,
+            "enabled": true,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        }))
+        .expect("workflow fixture")
+    }
+
+    async fn poll_with_refresh(
+        plugin: &McpServer,
+        config_id: &str,
+        cache: &OAuth2Cache,
+        env: HashMap<String, String>,
+    ) -> Result<WatchPollResponse, String> {
+        let workflow = mk_workflow();
+        let source = mk_step("/me");
+        poll_with_token_refresh(
+            &source,
+            plugin,
+            config_id,
+            cache,
+            env,
+            SecurityPolicy::allow_loopback_for_tests(),
+            &WatchPollRequest {
+                source: &source,
+                workflow: &workflow,
+                project_id: None,
+                if_none_match: None,
+                if_modified_since: None,
+                max_body_bytes: 1 << 20,
+                timeout: Duration::from_secs(5),
+            },
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_watch_poll_401_on_an_expiry_less_oauth2_token_clears_the_cache_and_polls_again() {
+        let server = MockServer::start().await;
+        mount_expiry_less_token_endpoint(&server, 2).await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("Authorization", "Bearer tok-1"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("token expired"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("Authorization", "Bearer tok-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::OAuth2ClientCredentials {
+                token_url: format!("{}/token", server.uri()),
+                client_id_env: "CID".into(),
+                client_secret_env: "CSECRET".into(),
+                scope: String::new(),
+                extra_headers: vec![],
+            },
+            vec![mk_endpoint("GET", "/me")],
+        );
+        let env = HashMap::from([
+            ("CID".to_string(), "id".to_string()),
+            ("CSECRET".to_string(), "secret".to_string()),
+        ]);
+        let cache: OAuth2Cache = Default::default();
+
+        let response = poll_with_refresh(&plugin, "cfg-watch", &cache, env)
+            .await
+            .expect("the second poll succeeds");
+        assert_eq!(response.status, 200);
+        let cached = cache.lock().await.get("cfg-watch").cloned();
+        assert_eq!(cached.map(|c| c.access_token).as_deref(), Some("tok-2"));
+        // The `expect`s on the mocks assert one 401, one re-poll, two mints on drop.
+    }
+
+    #[tokio::test]
+    async fn a_second_watch_poll_401_is_returned_without_a_third_poll() {
+        let server = MockServer::start().await;
+        mount_expiry_less_token_endpoint(&server, 2).await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("refused"))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::TokenExchange {
+                endpoint: "/token".into(),
+                method: "POST".into(),
+                body_template: json!({ "key": "${ENV.KEY}" }),
+                body_format: TokenExchangeBodyFormat::Json,
+                token_jsonpath: "$.access_token".into(),
+                ttl_seconds: 3600,
+                inject: TokenInjection::BearerHeader,
+                creds_env_keys: vec!["KEY".into()],
+            },
+            vec![mk_endpoint("GET", "/me")],
+        );
+        let env = HashMap::from([("KEY".to_string(), "k".to_string())]);
+        let error = poll_with_refresh(&plugin, "cfg-watch-exchange", &Default::default(), env)
+            .await
+            .expect_err("a refused credential stays an error");
+        assert!(error.starts_with("HTTP 401 "), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_watch_poll_401_with_a_static_bearer_is_not_polled_again() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/me")],
+        );
+        let error = poll_with_refresh(&plugin, "cfg-none", &Default::default(), HashMap::new())
+            .await
+            .expect_err("401 stands");
+        assert!(error.starts_with("HTTP 401 "), "{error}");
     }
 
     #[tokio::test]

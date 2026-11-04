@@ -23,18 +23,18 @@ A JSON body containing `null` remains an ordinary JSON response; whitespace or
 other nonempty invalid JSON still produces a parsing failure.
 [src: file: backend/src/workflows/api_call_executor.rs:615-627#summary]
 [src: file: backend/src/workflows/api_call_executor.rs:651-655#empty_http_signal]
-[src: file: backend/src/workflows/api_call_executor.rs:4851-4906#empty_success_is_null_with_visible_http_status_and_one_request]
-[src: file: backend/src/workflows/api_call_executor.rs:5006-5037#nonempty_json_payloads_keep_their_original_meaning]
+[src: file: backend/src/workflows/api_call_executor.rs:5281-5336#empty_success_is_null_with_visible_http_status_and_one_request]
+[src: file: backend/src/workflows/api_call_executor.rs:5436-5467#nonempty_json_payloads_keep_their_original_meaning]
 
 An empty response ends pagination. If it is the first page, the result is null;
 if earlier pages returned data, those values are retained. Links on the empty
 response are not followed. The existing retry policy is unchanged: write verbs
 are not automatically resent. Tests assert the request count for writes,
 nonempty parse failures and pagination ending with an empty response.
-[src: file: backend/src/workflows/api_call_executor.rs:2128-2136#empty_status]
-[src: file: backend/src/workflows/api_call_executor.rs:2375-2379#max_retries]
-[src: file: backend/src/workflows/api_call_executor.rs:4908-4970#empty_page_ends_pagination_without_discarding_prior_data]
-[src: file: backend/src/workflows/api_call_executor.rs:4972-5004#nonempty_invalid_json_still_fails_without_resending_a_write]
+[src: file: backend/src/workflows/api_call_executor.rs:2232-2240#empty_status]
+[src: file: backend/src/workflows/api_call_executor.rs:2479-2483#max_retries]
+[src: file: backend/src/workflows/api_call_executor.rs:5338-5400#empty_page_ends_pagination_without_discarding_prior_data]
+[src: file: backend/src/workflows/api_call_executor.rs:5402-5434#nonempty_invalid_json_still_fails_without_resending_a_write]
 
 ## Default headers declared on a plugin
 
@@ -52,8 +52,8 @@ the call before anything is sent. A header of the same name given on the call
 itself (`api_headers`) wins, and a header the auth already sends is never
 replaced. Values are attached as sensitive headers.
 [src: file: backend/src/models/mcp.rs:82-86#default_headers]
-[src: file: backend/src/workflows/api_call_executor.rs:458-460#apply_default_headers]
-[src: file: backend/src/workflows/api_call_executor.rs:1357-1378#apply_default_headers]
+[src: file: backend/src/workflows/api_call_executor.rs:461-463#apply_default_headers]
+[src: file: backend/src/workflows/api_call_executor.rs:1418-1439#apply_default_headers]
 
 Custom API plugins edit them in **Headers sent on every call**, and the 🪄
 helper proposes them from the docs or a curl example. Create, update, file
@@ -99,7 +99,7 @@ declare `api_response: {"type": "Binary"}`; the body then comes back as
 server and never appear in the step output, the summary or the audit log.
 Omitting the field (or `{"type": "Json"}`) keeps the JSON behaviour unchanged.
 [src: file: backend/src/models/workflows.rs:826-829#api_response]
-[src: file: backend/src/workflows/api_call_executor.rs:2434-2439#read_binary_body]
+[src: file: backend/src/workflows/api_call_executor.rs:2538-2543#read_binary_body]
 
 ```json
 "api_response": {"type": "Binary", "accept": ["image/png", "image/jpeg"], "max_bytes": 131072}
