@@ -109,6 +109,27 @@ fn token_client(policy: SafeHttpPolicy) -> Result<SafeClient, String> {
     )
 }
 
+/// Drop the cache entry for `config_id` when it still holds `rejected`, the
+/// token the API just answered 401 to. The token's lifetime is the provider's
+/// word (or our guess when `expires_in` is absent), so a 401 is the only proof
+/// the entry is dead. A concurrent call that already minted a replacement is
+/// left alone: its entry no longer holds `rejected`.
+pub async fn invalidate_token(
+    cache: &Arc<Mutex<HashMap<String, CachedToken>>>,
+    config_id: &str,
+    rejected: &str,
+) -> bool {
+    let mut guard = cache.lock().await;
+    if guard
+        .get(config_id)
+        .is_some_and(|cached| cached.access_token == rejected)
+    {
+        guard.remove(config_id);
+        return true;
+    }
+    false
+}
+
 fn cred_fingerprint(parts: &[&str]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
