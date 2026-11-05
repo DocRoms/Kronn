@@ -7,7 +7,10 @@
 # Evidence is the gate's verdict step, whose name records the identity it
 # tested: "Gate verdict for pull_request #<n> head <sha> base <sha>". A
 # dispatch, another pull request or another base never carries that step, so
-# it is never accepted. Earlier means a lower run id.
+# it is never accepted. Run ids are NOT compared: a label event can start this
+# verdict a couple of seconds before the CI Tests / CI Build run of the same
+# push, and a re-run of the verdict keeps its id. When no run exists yet, it is
+# awaited (PREVIOUS_VERDICT_DISCOVERY_SECONDS) before giving up.
 #
 # A run that saw no label (its "Require the <label> label" step failed) is
 # re-run once: the caller checked the label is present now, and the re-run
@@ -15,7 +18,7 @@
 #
 # Usage: previous_gate_verdict.sh <workflow file> <gate job name> <label>
 # Environment: GH_TOKEN, GITHUB_REPOSITORY, GITHUB_RUN_ID, PR_NUMBER, HEAD_SHA,
-# BASE_SHA.
+# BASE_SHA; optional PREVIOUS_VERDICT_WAIT_SECONDS, PREVIOUS_VERDICT_DISCOVERY_SECONDS.
 set -euo pipefail
 
 workflow="$1"
@@ -28,8 +31,21 @@ identity="Gate verdict for pull_request #$PR_NUMBER head $HEAD_SHA base $BASE_SH
 label_step="Require the $label label"
 repo="repos/$GITHUB_REPOSITORY"
 
-candidates="$(gh api "$repo/actions/workflows/$workflow/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100" \
-  --jq "[.workflow_runs[] | select(.event == \"pull_request\" and .head_sha == \"$HEAD_SHA\" and .id < $GITHUB_RUN_ID)] | sort_by(.id) | reverse | .[].id")"
+discovery_seconds="${PREVIOUS_VERDICT_DISCOVERY_SECONDS:-180}"
+discovery_deadline=$(( $(date +%s) + discovery_seconds ))
+if [ "$discovery_deadline" -gt "$deadline" ]; then
+  discovery_deadline="$deadline"
+fi
+
+while :; do
+  candidates="$(gh api "$repo/actions/workflows/$workflow/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100" \
+    --jq "[.workflow_runs[] | select(.event == \"pull_request\" and .head_sha == \"$HEAD_SHA\")] | sort_by(.id) | reverse | .[].id")"
+  if [ -n "$candidates" ] || [ "$(date +%s)" -ge "$discovery_deadline" ]; then
+    break
+  fi
+  echo "No $workflow run for head $HEAD_SHA yet; waiting for it to start..."
+  sleep 10
+done
 
 cancelled_run=""
 for run in $candidates; do
@@ -106,5 +122,5 @@ if [ -n "${cancelled_run:-}" ]; then
   echo "::error::Run $cancelled_run was cancelled before $job decided, and no earlier run tested this state. Re-run it: https://github.com/$GITHUB_REPOSITORY/actions/runs/$cancelled_run"
   exit 1
 fi
-echo "::error::No earlier $workflow run tested pull request #$PR_NUMBER at head $HEAD_SHA, base $BASE_SHA. Push a commit, or close and reopen the pull request, to run it."
+echo "::error::No $workflow run tested pull request #$PR_NUMBER at head $HEAD_SHA, base $BASE_SHA. Push a commit, or close and reopen the pull request, to run it."
 exit 1

@@ -43,29 +43,41 @@ sys.stdout.write(result.stdout)
 
 REPO = "DocRoms/Kronn"
 RUN = 300
+OWN = 500  # this run's gate job id, which is also its check run id
 HEAD = "abc123"
 GATE = "ci-quality-gates"
 RUNS = f"repos/{REPO}/actions/workflows/ci-verdict.yml/runs"
+JOBS = f"repos/{REPO}/actions/runs/{RUN}/jobs"
 CHECKS = f"repos/{REPO}/commits/{HEAD}/check-runs"
 
 
-def verdict_run(run_id, head=HEAD):
-    return {"id": run_id, "head_sha": head, "event": "pull_request"}
+def verdict_run(run_id, status="completed"):
+    return {"id": run_id, "head_sha": HEAD, "event": "pull_request", "status": status}
 
 
-def check(check_id, run_id, name=GATE, conclusion="failure", status="completed"):
+def check(check_id, name=GATE, conclusion="failure", status="completed", run_id=100):
     return {
         "id": check_id,
         "name": name,
         "status": status,
         "conclusion": conclusion,
-        "details_url": f"https://github.com/{REPO}/actions/runs/{run_id}/job/1",
+        "details_url": f"https://github.com/{REPO}/actions/runs/{run_id}/job/{check_id}",
+    }
+
+
+def api(checks, runs=(), **extra):
+    """The fake API: this run's gate job is OWN; `runs` are earlier verdict runs."""
+    return {
+        JOBS: {"jobs": [{"id": 9, "name": "ci-build-gates"}, {"id": OWN, "name": GATE}]},
+        RUNS: {"workflow_runs": list(runs)},
+        CHECKS: {"check_runs": checks},
+        **extra,
     }
 
 
 @unittest.skipUnless(shutil.which("jq"), "jq is required")
 class SupersedeVerdictsTests(unittest.TestCase):
-    def supersede(self, state: dict, gate: str = GATE):
+    def supersede(self, responses_body: dict, gate: str = GATE):
         """Returns (completed process, PATCH calls)."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
@@ -73,7 +85,7 @@ class SupersedeVerdictsTests(unittest.TestCase):
             gh.write_text(FAKE_GH)
             gh.chmod(0o755)
             responses = tmp_path / "responses.json"
-            responses.write_text(json.dumps(state))
+            responses.write_text(json.dumps(responses_body))
             env = {
                 **os.environ,
                 "PATH": f"{tmp_path}:{os.environ['PATH']}",
@@ -81,6 +93,8 @@ class SupersedeVerdictsTests(unittest.TestCase):
                 "GITHUB_REPOSITORY": REPO,
                 "GITHUB_RUN_ID": str(RUN),
                 "HEAD_SHA": HEAD,
+                # Never sleep in a test: a run that does not finish is given up on.
+                "SUPERSEDE_WAIT_SECONDS": "0",
             }
             result = subprocess.run(
                 ["bash", str(SCRIPT), gate], capture_output=True, text=True, env=env, timeout=30
@@ -93,15 +107,12 @@ class SupersedeVerdictsTests(unittest.TestCase):
     def patched(calls):
         return sorted(int(call["path"].rsplit("/", 1)[1]) for call in calls)
 
-    def test_earlier_verdicts_become_neutral_and_name_the_latest_run(self):
-        result, calls = self.supersede({
-            RUNS: {"workflow_runs": [verdict_run(100), verdict_run(200), verdict_run(250)]},
-            CHECKS: {"check_runs": [
-                check(1, 100, conclusion="failure"),
-                check(2, 200, conclusion="failure"),
-                check(3, 250, conclusion="success"),
-            ]},
-        })
+    def test_earlier_checks_become_neutral_and_name_the_latest_run(self):
+        result, calls = self.supersede(api([
+            check(1, conclusion="failure"),
+            check(2, conclusion="failure"),
+            check(3, conclusion="success"),
+        ]))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.patched(calls), [1, 2, 3])
         for call in calls:
@@ -111,84 +122,72 @@ class SupersedeVerdictsTests(unittest.TestCase):
             self.assertEqual(call["fields"]["output[title]"], f"Superseded by run {RUN}")
             self.assertIn(f"/actions/runs/{RUN}", call["fields"]["output[summary]"])
 
-    def test_the_running_and_later_runs_are_never_touched(self):
-        result, calls = self.supersede({
-            RUNS: {"workflow_runs": [verdict_run(200), verdict_run(RUN), verdict_run(400)]},
-            CHECKS: {"check_runs": [
-                check(1, 200),
-                check(2, RUN, conclusion=None, status="in_progress"),
-                check(3, 400, conclusion="success"),
-            ]},
-        })
+    def test_this_check_and_later_ones_are_never_touched(self):
+        result, calls = self.supersede(api([
+            check(200),
+            check(OWN, conclusion=None, status="in_progress", run_id=RUN),
+            check(OWN + 1, conclusion="success", run_id=400),
+        ]))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.patched(calls), [1])
+        self.assertEqual(self.patched(calls), [200])
 
-    def test_a_ci_tests_check_of_the_same_name_is_not_a_verdict(self):
-        # ci-test.yml publishes `ci-quality-gates` too, on the same SHA.
-        result, calls = self.supersede({
-            RUNS: {"workflow_runs": [verdict_run(200)]},
-            CHECKS: {"check_runs": [
-                check(1, 200),
-                check(2, 150, conclusion="success"),
-            ]},
-        })
+    def test_a_ci_tests_gate_of_the_same_name_that_predates_this_verdict_is_superseded(self):
+        # ci-test.yml publishes `ci-quality-gates` too: the red one of the
+        # `opened` run (no label yet) must not outlive the verdict that replaced it.
+        result, calls = self.supersede(api([
+            check(1, conclusion="failure", run_id=150),
+            check(2, conclusion="cancelled", run_id=160),
+            check(OWN + 5, conclusion="success", run_id=170),
+        ]))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.patched(calls), [1])
+        self.assertEqual(self.patched(calls), [1, 2])
 
-    def test_another_gate_and_another_head_are_left_alone(self):
-        result, calls = self.supersede({
-            RUNS: {"workflow_runs": [verdict_run(200), verdict_run(210, head="other")]},
-            CHECKS: {"check_runs": [
-                check(1, 200, name="ci-build-gates"),
-                check(2, 210),
-            ]},
-        })
+    def test_another_gate_is_left_alone(self):
+        result, calls = self.supersede(api([check(1, name="ci-build-gates")]))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calls, [])
 
     def test_already_superseded_or_unfinished_checks_are_skipped(self):
-        result, calls = self.supersede({
-            RUNS: {"workflow_runs": [verdict_run(100), verdict_run(200)]},
-            CHECKS: {"check_runs": [
-                check(1, 100, conclusion="neutral"),
-                check(2, 200, conclusion=None, status="in_progress"),
-            ]},
-        })
+        result, calls = self.supersede(api([
+            check(1, conclusion="neutral"),
+            check(2, conclusion=None, status="in_progress"),
+        ]))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(calls, [])
 
     def test_a_cancelled_earlier_verdict_is_superseded_too(self):
-        result, calls = self.supersede({
-            RUNS: {"workflow_runs": [verdict_run(200)]},
-            CHECKS: {"check_runs": [check(1, 200, conclusion="cancelled")]},
-        })
+        result, calls = self.supersede(api([check(1, conclusion="cancelled")]))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.patched(calls), [1])
 
-    def test_no_earlier_verdict_run_is_a_no_op(self):
-        result, calls = self.supersede({
-            RUNS: {"workflow_runs": [verdict_run(RUN)]},
-            CHECKS: {"check_runs": []},
-        })
+    def test_a_run_still_winding_down_is_awaited_only_for_the_set_time(self):
+        # The cancelled run never completes in this fake: the wait is bounded.
+        result, calls = self.supersede(
+            api([check(1, conclusion="cancelled")], runs=[verdict_run(200, status="in_progress")])
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("nothing to supersede", result.stdout)
+        self.assertEqual(self.patched(calls), [1])
+
+    def test_no_earlier_check_is_a_no_op(self):
+        result, calls = self.supersede(api([]))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("No earlier", result.stdout)
         self.assertEqual(calls, [])
 
     def test_a_refused_update_warns_and_never_fails_the_verdict(self):
-        result, calls = self.supersede({
-            RUNS: {"workflow_runs": [verdict_run(200)]},
-            CHECKS: {"check_runs": [check(1, 200)]},
-            "fail": [f"repos/{REPO}/check-runs/1"],
-        })
+        result, calls = self.supersede(api([check(1)], fail=[f"repos/{REPO}/check-runs/1"]))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("::warning::", result.stdout)
         self.assertEqual(calls, [])
 
     def test_an_unreadable_listing_warns_and_exits_green(self):
-        result, calls = self.supersede({
-            RUNS: {"workflow_runs": [verdict_run(200)]},
-            "fail": [CHECKS],
-        })
+        result, calls = self.supersede(api([check(1)], fail=[CHECKS]))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("::warning::", result.stdout)
+        self.assertEqual(calls, [])
+
+    def test_an_unknown_own_job_warns_and_exits_green(self):
+        result, calls = self.supersede(api([check(1)]), gate="ci-other-gates")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("::warning::", result.stdout)
         self.assertEqual(calls, [])

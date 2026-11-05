@@ -16,8 +16,9 @@ permissions: {}
 
 # One verdict per pull-request state: a burst of label events keeps only the
 # newest run, so a check that predates the label cannot outlive its successor.
-# A run that finishes then marks the earlier verdict check runs of the same head
-# as neutral "Superseded by run <id>" (scripts/ci/supersede_verdicts.sh).
+# A run that finishes then marks every earlier check run of the same gate on the
+# same head (earlier verdicts, cancelled ones, the red "no label" run of CI Tests
+# or CI Build) as neutral "Superseded by run <id>" (scripts/ci/supersede_verdicts.sh).
 concurrency:
   group: ci-verdict-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.event.pull_request.base.sha }}
   cancel-in-progress: true
@@ -30,7 +31,7 @@ jobs:
     permissions:
       # Re-runs CI Tests when it ran before the label (read-only on forks).
       actions: write
-      # Marks this gate's earlier verdicts on the same head as superseded.
+      # Marks this gate's earlier check runs on the same head as superseded.
       checks: write
       contents: read
     steps:
@@ -49,7 +50,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: scripts/ci/previous_gate_verdict.sh ci-test.yml ci-quality-gates ci-test
       # Not on a cancel: a run a newer label event cancelled supersedes nothing.
-      - name: Supersede this gate's earlier verdicts on the same head
+      - name: Supersede this gate's earlier check runs on the same head
         if: success() || failure()
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,7 +62,7 @@ jobs:
     timeout-minutes: 60
     permissions:
       actions: write
-      # Marks this gate's earlier verdicts on the same head as superseded.
+      # Marks this gate's earlier check runs on the same head as superseded.
       checks: write
       contents: read
     steps:
@@ -80,7 +81,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: scripts/ci/previous_gate_verdict.sh ci-build.yml ci-build-gates ci-build
       # Not on a cancel: a run a newer label event cancelled supersedes nothing.
-      - name: Supersede this gate's earlier verdicts on the same head
+      - name: Supersede this gate's earlier check runs on the same head
         if: success() || failure()
         env:
           GH_TOKEN: ${{ github.token }}
