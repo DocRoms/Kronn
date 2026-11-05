@@ -21,7 +21,19 @@ re-run once and its new verdict is repeated.
   one. So the run that finishes **supersedes** the earlier verdicts
   (`scripts/ci/supersede_verdicts.sh`, last step of each gate job).
 
-## Superseded verdicts
+## Which run answers a label event
+
+`previous_gate_verdict.sh` looks at every CI Tests / CI Build run of the same
+pull-request head and picks the newest one that carries the gate's identity
+step (same PR number, head and base). It does **not** compare run ids: when
+`ci-test` and `ci-build` are added at creation, CI Verdict can start about two
+seconds before the CI run of the same push, and a re-run of the verdict keeps
+its original id. When no run exists yet, it polls for up to
+`PREVIOUS_VERDICT_DISCOVERY_SECONDS` (default 180) before reporting
+"No ci-*.yml run tested pull request #N…". The wait for the run itself is
+still bounded by `PREVIOUS_VERDICT_WAIT_SECONDS` (default 3000).
+
+## Superseded check runs
 
 When a CI Verdict run has reported `ci-quality-gates` or `ci-build-gates`, it
 updates the earlier check runs of the **same head SHA and the same gate name**
@@ -31,23 +43,31 @@ success or failure of that gate on the head.
 
 A check run is superseded only if all of these hold:
 
-- it has the gate's name and is completed and not yet `neutral` (so a second
-  pass is a no-op);
-- its `details_url` points at a **CI Verdict** run of this head SHA with a lower
-  run id. CI Tests and CI Build publish checks with the same names on the same
-  SHA: those are never touched;
+- it has the gate's name, belongs to the same head SHA, and is completed and
+  not yet `neutral` (so a second pass is a no-op). `cancelled` and `failure`
+  both count;
+- it is **older than this run's own gate job** (a job id is its check run id,
+  and ids grow with time). The workflow that published it does not matter:
+  cancelled verdicts replaced by a newer label event, and the red
+  "no `ci-test` label" gate of the CI Tests / CI Build run started at PR
+  creation, are superseded alike. Checks newer than this job are never
+  touched: the verdict repeats the CI result, so they agree with it;
 - the current run is not cancelled (the step runs on success or failure only):
   a run replaced by a newer label event supersedes nothing, its successor does.
+
+An earlier verdict run that is still winding down after its cancel has no
+completed check yet, so the script waits for it (`SUPERSEDE_WAIT_SECONDS`,
+default 60) before listing.
 
 Superseding is cosmetic and never turns a verdict red: a read-only token (a
 fork) or an API error prints a warning and exits 0, and the old check stays
 listed. The job needs `checks: write`.
 
-`backend/scripts/test_ci_supersede_verdicts.py` covers which runs are selected
-and the fields sent, against a stub `gh`:
+Tests, against a stub `gh`:
 
 ```bash
-python3 -m unittest backend/scripts/test_ci_supersede_verdicts.py
+python3 -m unittest backend/scripts/test_ci_supersede_verdicts.py backend/scripts/test_ci_gate_verdict.py
+tests/bats/bats-core/bin/bats tests/bats/previous_gate_verdict.bats
 ```
 
 ## Which checks must be required

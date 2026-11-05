@@ -83,7 +83,7 @@ def jobs_path(run_id):
 
 @unittest.skipUnless(shutil.which("jq"), "jq is required")
 class PreviousGateVerdictTests(unittest.TestCase):
-    def verdict(self, state: dict, calls: list | None = None) -> subprocess.CompletedProcess:
+    def verdict(self, state: dict, calls: list | None = None, discovery: str = "0") -> subprocess.CompletedProcess:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
             gh = tmp_path / "gh"
@@ -102,6 +102,8 @@ class PreviousGateVerdictTests(unittest.TestCase):
                 "PR_NUMBER": str(PR),
                 "HEAD_SHA": HEAD,
                 "BASE_SHA": BASE,
+                # The sleep is stubbed: never spin waiting for a run to appear.
+                "PREVIOUS_VERDICT_DISCOVERY_SECONDS": discovery,
             }
             result = subprocess.run(
                 ["bash", str(SCRIPT), "ci-test.yml", GATE, "ci-test"],
@@ -138,13 +140,24 @@ class PreviousGateVerdictTests(unittest.TestCase):
         })
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_never_reads_a_later_run(self):
+    def test_reads_a_run_created_after_the_verdict(self):
+        # A label event starts the verdict a moment before the CI run of the
+        # same push: its id is higher, and it is still the evidence.
         result = self.verdict({
             RUNS: [listing(run(210))],
             jobs_path(210): [gate(steps=[(identity(), "success")])],
         })
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("No earlier ci-test.yml run", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Run 210 passed", result.stdout)
+
+    def test_waits_for_a_run_that_has_not_started_yet(self):
+        result = self.verdict({
+            RUNS: [listing(), listing(run(210))],
+            jobs_path(210): [gate(steps=[(identity(), "success")])],
+        }, discovery="60")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("waiting for it to start", result.stdout)
+        self.assertIn("Run 210 passed", result.stdout)
 
     def test_a_green_dispatch_on_the_same_commit_is_not_evidence(self):
         result = self.verdict({
@@ -152,7 +165,7 @@ class PreviousGateVerdictTests(unittest.TestCase):
             jobs_path(180): [gate(steps=[(identity(), "success")])],
         })
         self.assertEqual(result.returncode, 1)
-        self.assertIn("No earlier", result.stdout)
+        self.assertIn("No ci-test.yml run tested", result.stdout)
 
     def test_another_pull_request_or_base_is_not_evidence(self):
         for other in (identity(pr=7), identity(base="base222")):
@@ -161,7 +174,7 @@ class PreviousGateVerdictTests(unittest.TestCase):
                 jobs_path(180): [gate(steps=[(other, "success")])],
             })
             self.assertEqual(result.returncode, 1, other)
-            self.assertIn("No earlier", result.stdout)
+            self.assertIn("No ci-test.yml run tested", result.stdout)
 
     def test_a_run_for_another_base_is_passed_over_without_a_rerun(self):
         calls = []
@@ -241,7 +254,7 @@ class PreviousGateVerdictTests(unittest.TestCase):
             f"repos/{REPO}/actions/runs/180": [{"status": "completed"}],
         })
         self.assertEqual(result.returncode, 1)
-        self.assertIn("No earlier", result.stdout)
+        self.assertIn("No ci-test.yml run tested", result.stdout)
 
 
 if __name__ == "__main__":

@@ -88,3 +88,44 @@ verdict() {
     assert_failure
     assert_output --partial "did not pass ci-build-gates for this pull request state (failure)"
 }
+
+@test "verdict: a run started after the verdict is accepted (label event first)" {
+    # Run ids above GITHUB_RUN_ID (1000): the label event beat the CI run.
+    runs 1002
+    jobs 1002 success
+    verdict
+    assert_success
+    assert_output --partial "Run 1002 passed ci-build-gates"
+}
+
+@test "verdict: the newest run decides, not the oldest" {
+    runs 1002 100
+    jobs 1002 failure
+    jobs 100 success
+    verdict
+    assert_failure
+    assert_output --partial "Run 1002 did not pass ci-build-gates"
+}
+
+@test "verdict: no run yet is awaited, then reported" {
+    runs
+    PREVIOUS_VERDICT_DISCOVERY_SECONDS=0 verdict
+    assert_failure
+    assert_output --partial "No ci-build.yml run tested pull request #7 at head h7, base b7"
+}
+
+@test "verdict: a run that appears while waiting is picked up" {
+    runs
+    # The first listing is empty; the stubbed sleep publishes the run.
+    printf '#!/usr/bin/env bash\ncp "%s/late_runs.json" "%s/actions_workflows_ci-build.yml_runs.json"\n' \
+        "$FIXTURES" "$FIXTURES" > "$TEST_TMPDIR/bin/sleep"
+    chmod +x "$TEST_TMPDIR/bin/sleep"
+    runs 1001
+    mv "$FIXTURES/actions_workflows_ci-build.yml_runs.json" "$FIXTURES/late_runs.json"
+    runs
+    jobs 1001 success
+    verdict
+    assert_success
+    assert_output --partial "waiting for it to start"
+    assert_output --partial "Run 1001 passed ci-build-gates"
+}
