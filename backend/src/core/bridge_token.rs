@@ -1710,7 +1710,7 @@ impl Reach {
             None => false,
             Some(bound) => {
                 bound == project
-                    || self.granted.all == Some(ScopeAccess::Write)
+                    || self.granted.all.is_some_and(ScopeAccess::plans)
                     || self.granted.write.contains(project)
             }
         }

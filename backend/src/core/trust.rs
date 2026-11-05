@@ -23,15 +23,13 @@ pub fn minimum_level(approval: TrustApproval) -> TrustLevel {
     }
 }
 
-/// Whether a gate in this build asks the table for `approval`. Code write on
-/// other projects (KT-1491) and host access for agents have their gate in
-/// another ticket: they are in the policy so that gate has one place to ask,
-/// and the panel says they are not enforced yet.
+/// Whether a gate in this build asks the table for `approval`. Host access for
+/// agents has its gate in another ticket: it is in the policy so that gate has
+/// one place to ask, and the panel says it is not enforced yet. Code write on
+/// other projects is asked by `db::discussion_scope::file_request_with_trust`
+/// (KT-1491).
 pub fn is_enforced(approval: TrustApproval) -> bool {
-    !matches!(
-        approval,
-        TrustApproval::CodeWriteOtherProject | TrustApproval::HostAccess
-    )
+    !matches!(approval, TrustApproval::HostAccess)
 }
 
 /// Whether `level` grants `approval` without asking.
@@ -143,18 +141,13 @@ mod tests {
 
     #[test]
     fn the_approvals_with_no_gate_yet_are_flagged_not_enforced() {
+        // Code write on other projects has its gate since KT-1491.
         let not_enforced: Vec<_> = effects()
             .into_iter()
             .filter(|effect| !effect.enforced)
             .map(|effect| effect.approval)
             .collect();
-        assert_eq!(
-            not_enforced,
-            vec![
-                TrustApproval::CodeWriteOtherProject,
-                TrustApproval::HostAccess
-            ]
-        );
+        assert_eq!(not_enforced, vec![TrustApproval::HostAccess]);
     }
 
     #[test]

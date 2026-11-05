@@ -1532,7 +1532,7 @@ pub fn create_discussion_worktree(
     }
 
     // Create the worktree with a new branch based on base_branch
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::cmd::project_git_cmd()
         .args(["worktree", "add", "-b", &branch])
         .arg(&worktree_path)
         .arg(base_branch)
@@ -1743,7 +1743,7 @@ pub fn reattach_worktree(
         .output();
 
     // Attach existing branch to new worktree path (no -b, branch already exists)
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::cmd::project_git_cmd()
         .args(["worktree", "add"])
         .arg(&worktree_path)
         .arg(existing_branch)
@@ -2791,7 +2791,7 @@ pub fn create_task_worktree(
     }
 
     // Create from the EXACT pinned commit (a SHA, not a branch name).
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::cmd::project_git_cmd()
         .args(["worktree", "add", "-b", &branch])
         .arg(&worktree_path)
         .arg(base_sha)

@@ -41,7 +41,7 @@
 .wfs-chip svg { flex: none; }
 /* A long project name is cut with an ellipsis (the full text is the title) */
 .wfs-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wfs-chip[data-access="write"] { background: rgba(var(--kr-warning-rgb), 0.13); color: var(--wfs-warn-ink); }
+.wfs-chip[data-access="plan"] { background: rgba(var(--kr-warning-rgb), 0.13); color: var(--wfs-warn-ink); }
 .wfs-chip[data-kind="all"] { background: rgba(var(--kr-error-rgb), 0.12); color: var(--kr-error); }
 .wfs-chip[data-kind="none"],
 .wfs-chip[data-kind="more"] { background: var(--kr-bg-active); color: var(--kr-text-muted); }
@@ -125,7 +125,7 @@
 .wfs-level button:hover:not(:disabled) { color: var(--kr-text-primary); }
 .wfs-level button[aria-checked="true"][data-level="none"] { background: var(--kr-bg-active); color: var(--kr-text-primary); }
 .wfs-level button[aria-checked="true"][data-level="read"] { background: rgba(var(--kr-info-rgb), 0.16); color: var(--kr-info); font-weight: 600; }
-.wfs-level button[aria-checked="true"][data-level="write"] { background: rgba(var(--kr-warning-rgb), 0.16); color: var(--kr-warning); font-weight: 600; }
+.wfs-level button[aria-checked="true"][data-level="plan"] { background: rgba(var(--kr-warning-rgb), 0.16); color: var(--kr-warning); font-weight: 600; }
 .wfs-level button:disabled { opacity: 0.5; cursor: not-allowed; }
 .wfs-level button:focus-visible { outline: 2px solid var(--kr-accent-ink); outline-offset: 1px; }
 
@@ -219,7 +219,7 @@
   background: var(--kr-bg-surface);
 }
 .wfs-project[data-level="read"] { border-color: rgba(var(--kr-info-rgb), 0.45); }
-.wfs-project[data-level="write"] { border-color: rgba(var(--kr-warning-rgb), 0.5); }
+.wfs-project[data-level="plan"] { border-color: rgba(var(--kr-warning-rgb), 0.5); }
 .wfs-project-name {
   flex: 1;
   min-width: 0;
@@ -252,7 +252,7 @@
   background: rgba(var(--kr-info-rgb), 0.14);
   color: var(--kr-info);
 }
-.wfs-tag[data-access="write"] { background: rgba(var(--kr-warning-rgb), 0.13); color: var(--kr-warning); }
+.wfs-tag[data-access="plan"] { background: rgba(var(--kr-warning-rgb), 0.13); color: var(--kr-warning); }
 
 /* Actions */
 .wfs-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--kr-sp-4); }

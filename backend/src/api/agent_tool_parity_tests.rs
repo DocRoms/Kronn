@@ -302,3 +302,65 @@ fn version_and_shadow_knowledge_is_the_same_on_both_sides() {
     let namespaces = &schema["template_vars"]["namespaces"];
     assert!(namespaces["run.variant"].is_string() && namespaces["refs.<name>"].is_string());
 }
+
+/// KT-1491 — a room asks for `read`, `plan` or `code` through the same tool on
+/// both sides: the schemas and the manuals name the same levels, and neither
+/// still calls the planning level `write`.
+#[test]
+fn room_scope_names_the_same_access_levels_on_both_sides() {
+    let levels = ["read", "plan", "code"];
+
+    let native = full_discussion_catalogue()
+        .into_iter()
+        .find(|tool| tool["function"]["name"] == "room_scope")
+        .expect("room_scope in the native catalogue");
+    let native_enum: Vec<&str> = native["function"]["parameters"]["properties"]["access"]["enum"]
+        .as_array()
+        .expect("native access enum")
+        .iter()
+        .map(|level| level.as_str().expect("a level"))
+        .collect();
+    assert_eq!(native_enum, levels);
+
+    let script = include_str!("../../scripts/disc-introspection-mcp.py");
+    let marker = "\"access\": {\"enum\": [";
+    let declared = script
+        .lines()
+        .find(|line| line.contains(marker))
+        .expect("room_scope's access in the bridge");
+    let enum_start = declared.find(marker).expect("enum") + marker.len();
+    let bridge_enum: Vec<&str> = declared[enum_start..]
+        .split(']')
+        .next()
+        .expect("enum list")
+        .split(',')
+        .map(|level| level.trim().trim_matches('"'))
+        .collect();
+    assert_eq!(bridge_enum, levels);
+
+    // Both manuals carry the same level wording, word for word.
+    let bridge_manual = script
+        .split("TOOL_MANUALS[\"room_scope\"] = (")
+        .nth(1)
+        .and_then(|rest| rest.split("\n)\n").next())
+        .expect("the bridge's room_scope manual")
+        .lines()
+        .map(|line| line.trim().trim_matches('"').replace("\\\"", "\""))
+        .collect::<String>();
+    for sentence in [
+        "plan (planning only: create and edit tasks there, `project_ids` naming it; its files stay read-only; formerly called write)",
+        "code (plan, and you edit that project's checkout like your own: one project, never every project",
+        "the grant is applied for Claude Code only, a full-access agent ignores the room scope and the grant is not enforced for it",
+    ] {
+        assert!(
+            ROOM_SCOPE_MANUAL.contains(sentence),
+            "the native manual lacks: {sentence}"
+        );
+        assert!(
+            bridge_manual.contains(sentence),
+            "the bridge's manual lacks: {sentence}"
+        );
+    }
+    assert!(!ROOM_SCOPE_MANUAL.contains("write (planning only"));
+    assert!(!bridge_manual.contains("write (planning only"));
+}

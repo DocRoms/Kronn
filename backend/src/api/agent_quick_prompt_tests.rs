@@ -39,7 +39,7 @@ pub(super) async fn state_with_prompts() -> AppState {
             conn,
             "general",
             None,
-            crate::models::discussion_scope::ScopeAccess::Write,
+            crate::models::discussion_scope::ScopeAccess::Plan,
             crate::models::discussion_scope::ScopeGrantSource::General,
             "human",
         )?;

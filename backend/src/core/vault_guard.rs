@@ -483,6 +483,12 @@ pub fn fold_vault_into_claude_settings(args: &mut Vec<String>) {
             &mut settings["sandbox"]["filesystem"]["denyRead"],
             claude_sandbox_deny_read(),
         );
+        // KT-1491 — a checkout opened for editing (a `code` grant) must not reach
+        // the data directory through the shell's writes either.
+        push_unique(
+            &mut settings["sandbox"]["filesystem"]["denyWrite"],
+            claude_sandbox_deny_read(),
+        );
     }
     args[own + 1] = settings.to_string();
     if let Some(at) = standalone {

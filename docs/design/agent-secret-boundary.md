@@ -122,7 +122,10 @@ discussion (or one task execution, or one workflow run) and to its project.
 - The agent can read this token. Its scope is by design what the agent may do
   through room tools.
 - **Room grants (KT-1270).** A human may open other projects to a room: read,
-  write (planning only) or every project, the last in write only behind a typed
+  plan (planning only, formerly « write »; the files stay read-only), code (one
+  project's checkout is opened for editing, KT-1491: Claude Code only, its secrets,
+  Git config and hooks and agent settings stay closed, and granting it asks for the
+  strong confirmation) or every project, the last in plan only behind a typed
   confirmation and the fingerprint of the scope the human saw. The token stays
   bound to its primary project; grants are re-read on every request, so a revoke
   applies on the next call. Grants never reach another project's credentials or

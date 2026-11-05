@@ -23,7 +23,7 @@ routing, cancellation and durable-cursor functions are unchanged.
 [src: file: backend/src/api/disc_invite.rs:683-689#max_total_secs]
 [src: file: backend/src/api/disc_invite.rs:698-703#disc_wait_for_peer]
 [src: file: backend/src/api/disc_invite.rs:7507-7516#join_protocol_does_not_put_unbounded_wait_before_ready_work]
-[src: file: backend/scripts/disc-introspection-mcp.py:10033-10069#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10035-10071#ROOM_WORK_PROTOCOL]
 
 Each bounded step has a room announcement and an evidence/limits update.
 Delegated milestones belong in the parent room too. An exact CLI target in
@@ -47,10 +47,10 @@ shared `ROOM_WORK_PROTOCOL` supplies both join/wait manuals and the initialize
 orientation, including plan-first ordering, parent-room milestones and exact
 CLI routing. It no longer promises that cursor reads can never be replayed or
 that quiet returns cost nothing. The bridge's runtime functions did not change.
-[src: file: backend/scripts/disc-introspection-mcp.py:10033-10069#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10374-10375#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10759-10763#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:12170#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10035-10071#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10376-10377#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:10766-10770#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:12177#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12431-12481#JoinedRoomWorkProtocolTests]
 
 ## Deaf windows in the bridge wait (KT-703)
@@ -78,7 +78,7 @@ These fixes do not cover host behaviour. A host can still move a long wait to
 the background. Any other Kronn call ends the wait (`wait_preempted`), and an
 interactive turn that ends while the wait runs in the background is outside
 Kronn's control. A real Claude Code run is still needed to check that case.
-[src: file: backend/scripts/disc-introspection-mcp.py:12288-12296#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:12295-12303#_with_wait_preempted]
 
 ## Qualification scope
 

@@ -73,7 +73,7 @@ async fn grant_write(state: &AppState, room: &str, project: &str) {
                 conn,
                 &room,
                 Some(&project),
-                crate::models::discussion_scope::ScopeAccess::Write,
+                crate::models::discussion_scope::ScopeAccess::Plan,
                 crate::models::discussion_scope::ScopeGrantSource::Link,
                 "human",
             )?;
@@ -91,7 +91,7 @@ async fn grant_general(state: &AppState) {
                 conn,
                 "general",
                 None,
-                crate::models::discussion_scope::ScopeAccess::Write,
+                crate::models::discussion_scope::ScopeAccess::Plan,
                 crate::models::discussion_scope::ScopeGrantSource::General,
                 "human",
             )?;
@@ -199,6 +199,60 @@ async fn a_room_write_grant_opens_planning_and_nothing_else() {
     )
     .await;
     assert!(refused(&draft), "{}", draft.content);
+}
+
+/// KT-1491: a `code` grant opens the project's checkout to the agent, not its
+/// credentials, saved calls or tokens: in Kronn's tools it reaches what a plan
+/// grant reaches, and no more.
+#[tokio::test]
+async fn a_room_code_grant_opens_the_checkout_never_the_projects_credentials() {
+    let World { state, task_b, .. } = two_projects().await;
+    state
+        .db
+        .with_conn(|conn| {
+            crate::db::discussion_scope::grant(
+                conn,
+                "room-a",
+                Some("b"),
+                crate::models::discussion_scope::ScopeAccess::Code,
+                crate::models::discussion_scope::ScopeGrantSource::Link,
+                "human",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let agent = room_agent(&state, "room-a");
+    // Planning in the project works like a plan grant.
+    let updated = call(
+        agent.as_ref(),
+        "task_update",
+        json!({"task_id": &task_b, "title": "coded"}),
+    )
+    .await;
+    assert!(updated.ok, "{}", updated.content);
+    // Its saved calls, API configs and Quick Prompts stay the room's own
+    // project's: nothing is created in, or moved to, the granted project.
+    for tool in ["qa_create_draft", "qe_create_draft", "qp_create_draft"] {
+        let outcome = call(
+            agent.as_ref(),
+            tool,
+            json!({"name": "x", "api_plugin_slug": "s", "api_config_id": "c", "api_endpoint_path": "/", "command": "ls", "output_format": "text", "project_id": "b"}),
+        )
+        .await;
+        assert!(refused(&outcome), "{tool}: {}", outcome.content);
+    }
+    // And the project's bridge reach is the plan one: no general resources, no
+    // other project.
+    let grants = state
+        .db
+        .with_read_conn(|conn| {
+            crate::db::discussion_scope::granted_projects(conn, &["room-a".to_owned()])
+        })
+        .await
+        .unwrap();
+    assert!(grants.code.contains("b") && grants.write.contains("b"));
+    assert!(!grants.general && grants.all.is_none() && !grants.write.contains("general"));
 }
 
 #[tokio::test]
@@ -414,7 +468,7 @@ async fn a_room_without_a_project_writes_the_general_resources_only_once_a_human
                 conn,
                 "room-a",
                 None,
-                crate::models::discussion_scope::ScopeAccess::Write,
+                crate::models::discussion_scope::ScopeAccess::Plan,
                 crate::models::discussion_scope::ScopeGrantSource::General,
                 "human",
             )

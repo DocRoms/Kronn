@@ -19,7 +19,7 @@ const projects = [
 
 function scope(overrides: Partial<WorkflowScope> = {}): WorkflowScope {
   return {
-    workflow_id: 'wf', supported: true, all: null, fingerprint: 'fp-1', entries: [{ project_id: 'p2', project_name: 'api', access: 'write' }],
+    workflow_id: 'wf', supported: true, all: null, fingerprint: 'fp-1', entries: [{ project_id: 'p2', project_name: 'api', access: 'plan' }],
     valid: true, validated_by: 'romu', validated_at: '2026-10-16T10:00:00Z', ...overrides,
   };
 }
@@ -51,7 +51,7 @@ describe('WorkflowScopeSummary', () => {
 
 describe('WorkflowScopeEditor — folded line (KT-1355)', () => {
   // The levels read as words, as in the real catalogue, so the chips can be compared.
-  const words: Record<string, string> = { 'wf.scopeLevelRead': 'Read', 'wf.scopeLevelWrite': 'Write' };
+  const words: Record<string, string> = { 'wf.scopeLevelRead': 'Read', 'wf.scopeLevelPlan': 'Plan' };
   const tw = (key: string, ...args: (string | number)[]) => words[key] ?? t(key, ...args);
   const renderEditor = () => render(
     <WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={tw} />,
@@ -61,13 +61,13 @@ describe('WorkflowScopeEditor — folded line (KT-1355)', () => {
   it('folds a validated scope to its title and one chip per grant, the editor behind Details', async () => {
     api.scope.mockResolvedValue(scope({
       entries: [
-        { project_id: 'p2', project_name: 'front_api', access: 'write' },
+        { project_id: 'p2', project_name: 'front_api', access: 'plan' },
         { project_id: 'p3', project_name: 'front_node', access: 'read' },
       ],
     }));
     renderEditor();
     const items = await chips();
-    expect([...items].map(li => li.textContent)).toEqual(['front_api · write', 'front_node · read']);
+    expect([...items].map(li => li.textContent)).toEqual(['front_api · plan', 'front_node · read']);
     expect(screen.getByRole('heading', { name: 'wf.scopeTitle' })).toBeTruthy();
     expect(screen.queryByRole('radiogroup')).toBeNull();
     expect(screen.queryByText('wf.scopeHint')).toBeNull();
@@ -87,10 +87,10 @@ describe('WorkflowScopeEditor — folded line (KT-1355)', () => {
   });
 
   it('shows the global-access badge for every project', async () => {
-    api.scope.mockResolvedValue(scope({ entries: [], all: 'write' }));
+    api.scope.mockResolvedValue(scope({ entries: [], all: 'plan' }));
     renderEditor();
     const [badge] = await chips();
-    expect(badge.textContent).toBe('disc.scopeAllProjects · write');
+    expect(badge.textContent).toBe('disc.scopeAllProjects · plan');
     expect(badge.getAttribute('data-kind')).toBe('all');
     expect(screen.queryByRole('radiogroup')).toBeNull();
   });
@@ -119,7 +119,7 @@ describe('WorkflowScopeEditor — folded line (KT-1355)', () => {
     fireEvent.click(screen.getByTestId('workflow-scope-toggle'));
     const items = await chips();
     expect(items[0].textContent).toBe('wf.scopeChipSuspended');
-    expect(items[1].textContent).toBe('api · write');
+    expect(items[1].textContent).toBe('api · plan');
   });
 
   it('folds back by itself once the human validated a scope that was waiting for it', async () => {
@@ -127,7 +127,7 @@ describe('WorkflowScopeEditor — folded line (KT-1355)', () => {
     api.setScope.mockResolvedValue(scope());
     renderEditor();
     fireEvent.click(await screen.findByText('wf.scopeRevalidate'));
-    expect((await chips())[0].textContent).toBe('api · write');
+    expect((await chips())[0].textContent).toBe('api · plan');
   });
 
   it('keeps an unsupported workflow\'s revocable grants open, and an empty one folded', async () => {
@@ -149,10 +149,10 @@ describe('WorkflowScopeEditor — folded line (KT-1355)', () => {
 
   it('keeps a long project name whole in the chip title, for the ellipsis to cut it', async () => {
     const name = 'a-very-long-project-name-'.repeat(8);
-    api.scope.mockResolvedValue(scope({ entries: [{ project_id: 'x', project_name: name, access: 'write' }] }));
+    api.scope.mockResolvedValue(scope({ entries: [{ project_id: 'x', project_name: name, access: 'plan' }] }));
     renderEditor();
     const label = (await chips())[0].querySelector('.wfs-chip-label');
-    expect(label?.getAttribute('title')).toBe(`${name} · write`);
+    expect(label?.getAttribute('title')).toBe(`${name} · plan`);
   });
 
   it('gives the focus back to Details when validating folds the editor away', async () => {
@@ -181,6 +181,16 @@ describe('WorkflowScopeEditor — folded line (KT-1355)', () => {
 // jsdom does no layout: the narrow-screen contract is pinned on the stylesheet
 // (the folded line wraps instead of overflowing, chips cut long names, Details
 // keeps its own room, the warning ink is mixed toward the text colour).
+describe('WorkflowScope.css — level styling follows the levels the picker emits (KT-1491)', () => {
+  const css = readFileSync(resolve(__dirname, '../WorkflowScope.css'), 'utf8');
+
+  it('styles `plan` (the picker no longer emits `write`) on the picked button and on a project row', () => {
+    expect(css).toContain('.wfs-level button[aria-checked="true"][data-level="plan"]');
+    expect(css).toContain('.wfs-project[data-level="plan"]');
+    expect(css).not.toContain('data-level="write"');
+  });
+});
+
 describe('WorkflowScope.css — folded line on a narrow screen (KT-1355)', () => {
   const css = readFileSync(resolve(__dirname, '../WorkflowScope.css'), 'utf8');
   const rule = (selector: string) => {
@@ -203,7 +213,7 @@ describe('WorkflowScope.css — folded line on a narrow screen (KT-1355)', () =>
 
   it('never sets small warning text in the bare warning colour', () => {
     expect(css).toMatch(/--wfs-warn-ink:\s*color-mix\(/);
-    expect(rule('.wfs-chip[data-access="write"]')).toContain('var(--wfs-warn-ink)');
+    expect(rule('.wfs-chip[data-access="plan"]')).toContain('var(--wfs-warn-ink)');
     expect(rule('.wfs-chip[data-kind="status"]')).toContain('var(--wfs-warn-ink)');
   });
 });
@@ -215,7 +225,7 @@ describe('WorkflowScopeEditor', () => {
     render(<WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={t} />);
     fireEvent.click(await screen.findByText('wf.scopeRevalidate'));
     await waitFor(() => expect(api.setScope).toHaveBeenCalledWith('wf', {
-      entries: [{ project_id: 'p2', access: 'write' }],
+      entries: [{ project_id: 'p2', access: 'plan' }],
       all: null,
       confirm: null,
       expected_fingerprint: null,
@@ -234,11 +244,11 @@ describe('WorkflowScopeEditor', () => {
 
   it('opens every project in write only after the typed confirmation, with the scope seen', async () => {
     api.scope.mockResolvedValue(scope({ entries: [], valid: false, validated_by: null, validated_at: null }));
-    api.setScope.mockResolvedValue(scope({ entries: [], all: 'write' }));
+    api.setScope.mockResolvedValue(scope({ entries: [], all: 'plan' }));
     render(<WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={t} />);
     fireEvent.click(await screen.findByTestId('workflow-scope-toggle'));
     const allGroup = await screen.findByRole('radiogroup', { name: 'disc.scopeAllProjects' });
-    fireEvent.click(allGroup.querySelector('[data-level="write"]')!);
+    fireEvent.click(allGroup.querySelector('[data-level="plan"]')!);
     const validate = screen.getByText('wf.scopeValidate').closest('button')!;
     expect(validate.disabled).toBe(true);
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'ALL-PROJECTS-WRITE' } });
@@ -246,7 +256,7 @@ describe('WorkflowScopeEditor', () => {
     fireEvent.click(validate);
     await waitFor(() => expect(api.setScope).toHaveBeenCalledWith('wf', {
       entries: [],
-      all: 'write',
+      all: 'plan',
       confirm: 'ALL-PROJECTS-WRITE',
       expected_fingerprint: 'fp-1',
     }));
@@ -270,8 +280,8 @@ describe('WorkflowScopeEditor', () => {
   });
 
   it('asks the typed confirmation again to revalidate every project in write', async () => {
-    api.scope.mockResolvedValue(scope({ entries: [], all: 'write', valid: false, fingerprint: 'fp-2' }));
-    api.setScope.mockResolvedValue(scope({ entries: [], all: 'write' }));
+    api.scope.mockResolvedValue(scope({ entries: [], all: 'plan', valid: false, fingerprint: 'fp-2' }));
+    api.setScope.mockResolvedValue(scope({ entries: [], all: 'plan' }));
     render(<WorkflowScopeEditor workflowId="wf" ownProjectId="p1" projects={projects} toast={vi.fn()} t={t} />);
     const revalidate = (await screen.findByText('wf.scopeRevalidate')).closest('button')!;
     expect(revalidate.disabled).toBe(true);
@@ -280,7 +290,7 @@ describe('WorkflowScopeEditor', () => {
     fireEvent.click(revalidate);
     await waitFor(() => expect(api.setScope).toHaveBeenCalledWith('wf', {
       entries: [],
-      all: 'write',
+      all: 'plan',
       confirm: 'ALL-PROJECTS-WRITE',
       expected_fingerprint: 'fp-2',
     }));

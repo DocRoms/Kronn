@@ -153,12 +153,23 @@ pub fn clear_level(
     scope_id: Option<&str>,
     cleared_by: &str,
 ) -> Result<bool> {
+    clear_level_withdrawing(conn, scope, scope_id, cleared_by).map(|(removed, _)| removed)
+}
+
+/// [`clear_level`], and what it took back.
+pub fn clear_level_withdrawing(
+    conn: &Connection,
+    scope: TrustScope,
+    scope_id: Option<&str>,
+    cleared_by: &str,
+) -> Result<(bool, Vec<Withdrawn>)> {
     let previous = get_setting(conn, scope, scope_id)?.level;
     let key = scope_key(scope, scope_id);
     let removed = conn.execute(
         "DELETE FROM trust_settings WHERE scope = ?1 AND scope_id = ?2",
         params![scope.as_str(), key],
     )?;
+    let mut withdrawn = Vec::new();
     if removed > 0 {
         journal(
             conn,
@@ -175,9 +186,25 @@ pub fn clear_level(
                 ..Entry::default()
             },
         )?;
-        withdraw(conn, cleared_by)?;
+        withdrawn = withdraw(conn, cleared_by)?;
     }
-    Ok(removed > 0)
+    Ok((removed > 0, withdrawn))
+}
+
+/// The rooms whose `code` grant was just taken back: a turn running there still
+/// has the checkout open for writing.
+pub fn rooms_losing_code(withdrawn: &[Withdrawn]) -> Vec<String> {
+    let mut rooms: Vec<String> = withdrawn
+        .iter()
+        .filter(|entry| {
+            entry.kind == TrustObject::ROOM_SCOPE_GRANT
+                && entry.approval == TrustApproval::CodeWriteOtherProject
+        })
+        .filter_map(|entry| entry.room.clone())
+        .collect();
+    rooms.sort();
+    rooms.dedup();
+    rooms
 }
 
 fn workflow_of_run(conn: &Connection, run_id: &str) -> Result<Option<String>> {
@@ -362,6 +389,8 @@ pub struct Withdrawn {
     pub kind: String,
     pub id: String,
     pub subject: String,
+    /// The room a withdrawn room-scope grant was given to.
+    pub room: Option<String>,
 }
 
 /// One row of an active grant, as [`withdraw`] reads it.
@@ -480,11 +509,15 @@ pub fn withdraw(conn: &Connection, by: &str) -> Result<Vec<Withdrawn>> {
                 active: false,
             },
         )?;
+        let room = (grant.kind.as_deref() == Some(TrustObject::ROOM_SCOPE_GRANT))
+            .then(|| grant.reference.clone())
+            .flatten();
         withdrawn.push(Withdrawn {
             approval,
             kind: grant.kind.unwrap_or_default(),
             id: grant.object_id.unwrap_or_default(),
             subject: grant.subject,
+            room,
         });
     }
     Ok(withdrawn)

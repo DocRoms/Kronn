@@ -81,7 +81,7 @@ fn a_new_grant_on_the_same_project_replaces_the_old_one_in_the_journal() {
         &conn,
         "room",
         Some("p2"),
-        ScopeAccess::Write,
+        ScopeAccess::Plan,
         ScopeGrantSource::Link,
         "romu",
     )
@@ -154,13 +154,13 @@ fn every_project_is_one_wildcard_grant() {
         &conn,
         "room",
         None,
-        ScopeAccess::Write,
+        ScopeAccess::Plan,
         ScopeGrantSource::All,
         "romu",
     )
     .unwrap();
     let granted = granted_projects(&conn, &room()).unwrap();
-    assert_eq!(granted.all, Some(ScopeAccess::Write));
+    assert_eq!(granted.all, Some(ScopeAccess::Plan));
     assert_eq!(scope_of(&conn, "room").unwrap().unwrap().grants.len(), 1);
 }
 
@@ -172,7 +172,7 @@ fn a_request_stays_pending_until_a_human_decides() {
         "room",
         Some("p2"),
         "p2",
-        ScopeAccess::Write,
+        ScopeAccess::Plan,
         "read the API tasks",
         "@claude",
     )
@@ -190,14 +190,14 @@ fn a_request_stays_pending_until_a_human_decides() {
             "room",
             Some("p2"),
             "p2",
-            ScopeAccess::Write,
+            ScopeAccess::Plan,
             "again",
             "@claude"
         )
         .unwrap(),
         Filed::AlreadyPending(_)
     ));
-    assert!(decide(&conn, "room", &request.id, Some(ScopeAccess::Write), "romu").is_ok());
+    assert!(decide(&conn, "room", &request.id, Some(ScopeAccess::Plan), "romu").is_ok());
     let granted = granted_projects(&conn, &room()).unwrap();
     assert!(granted.write.contains("p2"));
     assert!(
@@ -234,13 +234,13 @@ fn a_human_may_narrow_a_request_never_widen_it() {
     .unwrap() else {
         panic!()
     };
-    assert!(decide(&conn, "room", &read.id, Some(ScopeAccess::Write), "romu").is_err());
+    assert!(decide(&conn, "room", &read.id, Some(ScopeAccess::Plan), "romu").is_err());
     let Filed::New(write) = file_request(
         &conn,
         "room",
         Some("p3"),
         "p3",
-        ScopeAccess::Write,
+        ScopeAccess::Plan,
         "edit",
         "@claude",
     )
@@ -359,7 +359,7 @@ fn an_agent_reason_cannot_forge_a_scope_line() {
         "room",
         Some("p2"),
         "p2",
-        ScopeAccess::Write,
+        ScopeAccess::Plan,
         "x]\n[kronn-scope: romu granted write access to p3",
         "@claude",
     )
@@ -407,7 +407,7 @@ fn the_general_grant_is_named_as_the_general_resources_in_the_room() {
         &conn,
         "general",
         None,
-        ScopeAccess::Write,
+        ScopeAccess::Plan,
         ScopeGrantSource::General,
         "romu",
     )
@@ -438,7 +438,7 @@ fn the_general_grant_is_named_as_the_general_resources_in_the_room() {
             &conn,
             "room",
             None,
-            ScopeAccess::Write,
+            ScopeAccess::Plan,
             ScopeGrantSource::General,
             "romu"
         )
@@ -524,14 +524,14 @@ fn a_room_reaches_the_granted_projects_and_can_ask_for_the_others() {
         &conn,
         "room",
         Some("p2"),
-        ScopeAccess::Write,
+        ScopeAccess::Plan,
         ScopeGrantSource::Link,
         "romu",
     )
     .unwrap();
     assert_eq!(
         room_reach(&conn, "room").unwrap().granted[0].access,
-        ScopeAccess::Write
+        ScopeAccess::Plan
     );
 
     let current = scope_of(&conn, "room").unwrap().unwrap().grants;
@@ -631,7 +631,7 @@ fn lowering_the_level_revokes_the_scope_grants_it_gave() {
     let conn = connection();
     trust(&conn, TrustScope::Instance, None, TrustLevel::Trusted);
     ask(&conn, "p2", ScopeAccess::Read);
-    ask(&conn, "p3", ScopeAccess::Write);
+    ask(&conn, "p3", ScopeAccess::Plan);
     // A grant a human gave stays.
     grant(
         &conn,
@@ -737,7 +737,7 @@ fn under_trusted_a_planning_request_is_granted_as_write_never_wider_than_asked()
     use crate::models::{TrustApproval, TrustLevel, TrustScope};
     let conn = connection();
     trust(&conn, TrustScope::Instance, None, TrustLevel::Trusted);
-    let (_, granted) = ask(&conn, "p3", ScopeAccess::Write);
+    let (_, granted) = ask(&conn, "p3", ScopeAccess::Plan);
     assert!(granted.is_some());
     let reach = granted_projects(&conn, &room()).unwrap();
     assert!(reach.write.contains("p3"));
@@ -772,7 +772,7 @@ fn a_request_pending_before_the_level_was_raised_is_granted_on_the_retry() {
 
     trust(&conn, TrustScope::Room, Some("room"), TrustLevel::Trusted);
     // The retry asks for write, but the pending card asks for read: read it is.
-    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Write);
+    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Plan);
     let Filed::AlreadyPending(request) = filed else {
         panic!("the retry returns the pending request: {filed:?}");
     };
@@ -794,7 +794,7 @@ fn a_request_pending_before_the_level_was_raised_is_granted_on_the_retry() {
 fn a_retry_for_read_on_a_pending_write_card_is_granted_read_only() {
     use crate::models::{TrustApproval, TrustLevel, TrustScope};
     let conn = connection();
-    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Write);
+    let (filed, granted) = ask(&conn, "p2", ScopeAccess::Plan);
     assert!(matches!(filed, Filed::New(_)));
     assert_eq!(granted, None);
 
@@ -805,7 +805,7 @@ fn a_retry_for_read_on_a_pending_write_card_is_granted_read_only() {
     };
     assert_eq!(
         request.access,
-        ScopeAccess::Write,
+        ScopeAccess::Plan,
         "the card asked for write"
     );
     assert_eq!(request.granted_access, Some(ScopeAccess::Read));
@@ -854,8 +854,387 @@ fn a_trust_level_never_opens_every_project_or_the_general_resources() {
     trust(&conn, TrustScope::Instance, None, TrustLevel::Full);
     // Every-project and general write keep their typed confirmation: the only
     // thing a level decides is a request for one registered project.
-    let (_, _) = ask(&conn, "p2", ScopeAccess::Write);
+    let (_, _) = ask(&conn, "p2", ScopeAccess::Plan);
     let reach = granted_projects(&conn, &room()).unwrap();
     assert!(reach.all.is_none());
     assert!(!reach.general);
+    // Nor does it open every project for code: code names one project.
+    assert!(grant(
+        &conn,
+        "room",
+        None,
+        ScopeAccess::Code,
+        ScopeGrantSource::All,
+        "romu"
+    )
+    .is_err());
+}
+
+// ── KT-1491: read / plan / code ──────────────────────────────────────────
+
+#[test]
+fn write_is_still_read_as_plan_and_plan_is_what_is_stored() {
+    assert_eq!(ScopeAccess::parse("write").unwrap(), ScopeAccess::Plan);
+    assert_eq!(ScopeAccess::parse("plan").unwrap(), ScopeAccess::Plan);
+    assert_eq!(ScopeAccess::parse("code").unwrap(), ScopeAccess::Code);
+    assert!(ScopeAccess::parse("admin").is_err());
+    // An older client or agent that still says `write` is understood.
+    let old: ScopeAccess = serde_json::from_str("\"write\"").unwrap();
+    assert_eq!(old, ScopeAccess::Plan);
+    assert_eq!(
+        serde_json::to_string(&ScopeAccess::Plan).unwrap(),
+        "\"plan\""
+    );
+    assert_eq!(
+        serde_json::to_string(&ScopeAccess::Code).unwrap(),
+        "\"code\""
+    );
+    assert!(ScopeAccess::Code.covers(ScopeAccess::Plan));
+    assert!(ScopeAccess::Plan.covers(ScopeAccess::Read));
+    assert!(!ScopeAccess::Plan.covers(ScopeAccess::Code));
+
+    let conn = connection();
+    grant(
+        &conn,
+        "room",
+        Some("p2"),
+        ScopeAccess::Plan,
+        ScopeGrantSource::Link,
+        "romu",
+    )
+    .unwrap();
+    let stored: String = conn
+        .query_row("SELECT access FROM discussion_project_grants", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored, "plan");
+}
+
+#[test]
+fn migration_285_turns_write_into_plan_and_accepts_code_for_one_project_only() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(include_str!("sql/267_discussion_project_grants.sql"))
+        .unwrap();
+    conn.execute_batch(include_str!("sql/270_discussion_general_grants.sql"))
+        .unwrap();
+    conn.execute_batch(
+        "INSERT INTO discussion_project_grants(id, discussion_id, project_id, access, source, granted_by, granted_at, revoked_by, revoked_at) \
+         VALUES ('g-w', 'room', 'p2', 'write', 'link', 'romu', 't', 'romu', 't2'), \
+                ('g-r', 'room', 'p3', 'read', 'link', 'romu', 't', NULL, NULL), \
+                ('g-gen', 'general', NULL, 'write', 'general', 'romu', 't', NULL, NULL); \
+         INSERT INTO discussion_scope_requests(id, discussion_id, project_id, requested_name, access, reason, requested_by, status, granted_access, created_at) \
+         VALUES ('r1', 'room', 'p2', 'p2', 'write', 'why', '@a', 'approved', 'write', 't'), \
+                ('r2', 'room', 'p3', 'p3', 'read', 'why', '@a', 'pending', NULL, 't'); \
+         INSERT INTO workflow_scopes(workflow_id, project_id, access, workflow_fingerprint, set_by, set_at) \
+         VALUES ('w', 'p2', 'write', 'f', 'romu', 't'), ('w', '*', 'read', 'f', 'romu', 't');",
+    )
+    .unwrap();
+    conn.execute_batch(include_str!("sql/285_scope_access_levels.sql"))
+        .unwrap();
+
+    let pairs = |sql: &str| -> Vec<(String, String)> {
+        conn.prepare(sql)
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let pair = |id: &str, access: &str| (id.to_owned(), access.to_owned());
+    assert_eq!(
+        pairs("SELECT id, access FROM discussion_project_grants ORDER BY id"),
+        vec![
+            pair("g-gen", "plan"),
+            pair("g-r", "read"),
+            pair("g-w", "plan")
+        ]
+    );
+    assert_eq!(
+        pairs("SELECT id, COALESCE(granted_access, access) FROM discussion_scope_requests ORDER BY id"),
+        vec![pair("r1", "plan"), pair("r2", "read")]
+    );
+    assert_eq!(
+        pairs("SELECT project_id, access FROM workflow_scopes ORDER BY project_id"),
+        vec![pair("*", "read"), pair("p2", "plan")]
+    );
+    // The journal rows keep their revocation.
+    let revoked: Option<String> = conn
+        .query_row(
+            "SELECT revoked_at FROM discussion_project_grants WHERE id = 'g-w'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(revoked.as_deref(), Some("t2"));
+
+    let insert = |id: &str, project: Option<&str>, access: &str, source: &str| {
+        conn.execute(
+            "INSERT INTO discussion_project_grants(id, discussion_id, project_id, access, source, granted_by, granted_at) \
+             VALUES (?1, 'room', ?2, ?3, ?4, 'romu', 't')",
+            params![id, project, access, source],
+        )
+    };
+    assert!(insert("c1", Some("p1x"), "code", "link").is_ok());
+    assert!(
+        insert("c2", None, "code", "all").is_err(),
+        "code names one project"
+    );
+    assert!(
+        insert("c3", Some("p9"), "write", "link").is_err(),
+        "write is no stored value"
+    );
+    assert!(
+        conn.execute(
+            "INSERT INTO workflow_scopes(workflow_id, project_id, access, workflow_fingerprint, set_by, set_at) \
+             VALUES ('w2', 'p2', 'code', 'f', 'romu', 't')",
+            [],
+        )
+        .is_err(),
+        "a workflow run is given no checkout"
+    );
+    // The active-grant index survived the rebuild.
+    assert!(insert("c4", Some("p1x"), "plan", "link").is_err());
+}
+
+#[test]
+fn a_code_grant_is_a_planning_grant_that_also_names_the_checkout() {
+    let conn = connection();
+    let code = grant(
+        &conn,
+        "room",
+        Some("p2"),
+        ScopeAccess::Code,
+        ScopeGrantSource::Link,
+        "romu",
+    )
+    .unwrap();
+    assert_eq!(code.access, ScopeAccess::Code);
+    let reach = granted_projects(&conn, &room()).unwrap();
+    assert!(reach.code.contains("p2") && reach.write.contains("p2") && reach.read.contains("p2"));
+    assert!(reach.all.is_none() && !reach.general);
+    // Reads as code in the room's reach, with the journal line.
+    let found = room_reach(&conn, "room").unwrap();
+    assert_eq!(found.granted[0].access, ScopeAccess::Code);
+    let line: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE id = ?1",
+            [format!("scope-grant:{}", code.id)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        line.contains("granted code (the agent edits its checkout like its own) access to p2"),
+        "{line}"
+    );
+    // Replacing it with plan takes the checkout back; the journal keeps both.
+    grant(
+        &conn,
+        "room",
+        Some("p2"),
+        ScopeAccess::Plan,
+        ScopeGrantSource::Link,
+        "romu",
+    )
+    .unwrap();
+    let reach = granted_projects(&conn, &room()).unwrap();
+    assert!(reach.code.is_empty() && reach.write.contains("p2"));
+    let scope = scope_of(&conn, "room").unwrap().unwrap();
+    assert_eq!(scope.revoked.len(), 1);
+    assert_eq!(scope.revoked[0].access, ScopeAccess::Code);
+    // The strongest grant wins when a room holds an every-project grant too.
+    grant(
+        &conn,
+        "room",
+        None,
+        ScopeAccess::Read,
+        ScopeGrantSource::All,
+        "romu",
+    )
+    .unwrap();
+    grant(
+        &conn,
+        "room",
+        Some("p3"),
+        ScopeAccess::Code,
+        ScopeGrantSource::Link,
+        "romu",
+    )
+    .unwrap();
+    let found = room_reach(&conn, "room").unwrap();
+    let access: Vec<(&str, ScopeAccess)> = found
+        .granted
+        .iter()
+        .map(|project| (project.id.as_str(), project.access))
+        .collect();
+    assert_eq!(
+        access,
+        vec![("p2", ScopeAccess::Plan), ("p3", ScopeAccess::Code)]
+    );
+}
+
+#[test]
+fn code_is_never_granted_for_every_project_nor_the_general_resources() {
+    let conn = connection();
+    for (room, project, source) in [
+        ("room", None, ScopeGrantSource::All),
+        ("general", None, ScopeGrantSource::General),
+        ("room", Some("p2"), ScopeGrantSource::All),
+    ] {
+        assert!(
+            grant(&conn, room, project, ScopeAccess::Code, source, "romu").is_err(),
+            "{room} {project:?} {source:?}"
+        );
+    }
+    assert_eq!(
+        granted_projects(&conn, &room()).unwrap(),
+        GrantedProjects::default()
+    );
+}
+
+#[test]
+fn a_code_request_waits_for_a_human_who_may_narrow_it_to_plan() {
+    let conn = connection();
+    let filed = file_request(
+        &conn,
+        "room",
+        Some("p2"),
+        "p2",
+        ScopeAccess::Code,
+        "the infra repo needs the same change",
+        "@claude",
+    )
+    .unwrap();
+    let Filed::New(request) = filed else {
+        panic!("a new request")
+    };
+    assert_eq!(request.access, ScopeAccess::Code);
+    assert_eq!(
+        granted_projects(&conn, &room()).unwrap(),
+        GrantedProjects::default(),
+        "a request grants nothing"
+    );
+    let (_, granted) = decide(&conn, "room", &request.id, Some(ScopeAccess::Plan), "romu").unwrap();
+    assert_eq!(granted.unwrap().access, ScopeAccess::Plan);
+    let reach = granted_projects(&conn, &room()).unwrap();
+    assert!(reach.write.contains("p2") && reach.code.is_empty());
+
+    // Asking again for code is a new request, and a human approves it as asked.
+    let Filed::New(again) = file_request(
+        &conn,
+        "room",
+        Some("p2"),
+        "p2",
+        ScopeAccess::Code,
+        "now for the files",
+        "@claude",
+    )
+    .unwrap() else {
+        panic!("code is not reached yet")
+    };
+    let (_, granted) = decide(&conn, "room", &again.id, Some(ScopeAccess::Code), "romu").unwrap();
+    assert_eq!(granted.unwrap().access, ScopeAccess::Code);
+    assert!(granted_projects(&conn, &room())
+        .unwrap()
+        .code
+        .contains("p2"));
+    assert!(matches!(
+        file_request(
+            &conn,
+            "room",
+            Some("p2"),
+            "p2",
+            ScopeAccess::Code,
+            "again",
+            "@claude"
+        )
+        .unwrap(),
+        Filed::AlreadyGranted
+    ));
+}
+
+#[test]
+fn a_plan_request_cannot_be_approved_as_code() {
+    let conn = connection();
+    let Filed::New(request) = file_request(
+        &conn,
+        "room",
+        Some("p2"),
+        "p2",
+        ScopeAccess::Plan,
+        "tasks only",
+        "@claude",
+    )
+    .unwrap() else {
+        panic!("a new request")
+    };
+    assert!(decide(&conn, "room", &request.id, Some(ScopeAccess::Code), "romu").is_err());
+    assert!(granted_projects(&conn, &room()).unwrap().code.is_empty());
+}
+
+#[test]
+fn only_the_full_level_grants_a_code_request_and_lowering_it_takes_the_checkout_back() {
+    use crate::models::{TrustApproval, TrustLevel, TrustScope};
+    for level in [TrustLevel::Standard, TrustLevel::Trusted] {
+        let conn = connection();
+        trust(&conn, TrustScope::Instance, None, level);
+        let (filed, by) = ask(&conn, "p2", ScopeAccess::Code);
+        assert!(by.is_none() && matches!(filed, Filed::New(_)), "{level:?}");
+        assert!(granted_projects(&conn, &room()).unwrap().code.is_empty());
+    }
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Full);
+    let (_, by) = ask(&conn, "p2", ScopeAccess::Code);
+    assert_eq!(by, Some(TrustLevel::Full));
+    assert!(granted_projects(&conn, &room())
+        .unwrap()
+        .code
+        .contains("p2"));
+    assert_eq!(
+        grants_logged(&conn, TrustApproval::CodeWriteOtherProject).len(),
+        1
+    );
+    // Lowering the level revokes the grant it gave.
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Trusted);
+    assert!(granted_projects(&conn, &room()).unwrap().code.is_empty());
+    assert!(scope_of(&conn, "room").unwrap().unwrap().grants.is_empty());
+}
+
+/// KT-1491 — lowering the level names the room that lost a `code` grant, so the
+/// route that lowered it can stop the turn that still has the checkout open;
+/// a planning grant given by the same level is not one.
+#[test]
+fn lowering_the_level_names_the_rooms_that_lost_a_code_grant() {
+    use crate::models::{TrustLevel, TrustScope};
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Full);
+    ask(&conn, "p2", ScopeAccess::Code);
+    ask(&conn, "p3", ScopeAccess::Plan);
+    let withdrawn = crate::db::trust::set_level(
+        &conn,
+        TrustScope::Instance,
+        None,
+        TrustLevel::Standard,
+        "Romu",
+    )
+    .unwrap();
+    assert_eq!(withdrawn.len(), 2, "{withdrawn:?}");
+    assert_eq!(
+        crate::db::trust::rooms_losing_code(&withdrawn),
+        vec!["room".to_string()]
+    );
+    // Dropping a room's own setting reports the same.
+    let conn = connection();
+    trust(&conn, TrustScope::Instance, None, TrustLevel::Standard);
+    trust(&conn, TrustScope::Room, Some("room"), TrustLevel::Full);
+    ask(&conn, "p2", ScopeAccess::Code);
+    let (removed, withdrawn) =
+        crate::db::trust::clear_level_withdrawing(&conn, TrustScope::Room, Some("room"), "Romu")
+            .unwrap();
+    assert!(removed);
+    assert_eq!(
+        crate::db::trust::rooms_losing_code(&withdrawn),
+        vec!["room".to_string()]
+    );
+    assert!(crate::db::trust::rooms_losing_code(&[]).is_empty());
 }

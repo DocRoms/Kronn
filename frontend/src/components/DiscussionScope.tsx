@@ -67,7 +67,19 @@ function grantLabel(t: T, projects: Project[], grant: DiscussionProjectGrant) {
 }
 
 function accessLabel(t: T, access: ScopeAccess) {
-  return access === 'write' ? t('disc.scopeWrite') : t('disc.scopeRead');
+  if (access === 'code') return t('disc.scopeCode');
+  return access === 'plan' ? t('disc.scopePlan') : t('disc.scopeRead');
+}
+
+/** What the level lets the agent do, said on the approval card. */
+function accessAllows(t: T, access: ScopeAccess) {
+  if (access === 'code') return t('disc.scopeCodeAllows');
+  return access === 'plan' ? t('disc.scopePlanAllows') : t('disc.scopeReadAllows');
+}
+
+function approveLabel(t: T, access: ScopeAccess) {
+  if (access === 'code') return t('disc.scopeApproveCode');
+  return access === 'plan' ? t('disc.scopeApprovePlan') : t('disc.scopeApproveRead');
 }
 
 /** Header chip: nothing for a room on its own project; otherwise the extra
@@ -84,7 +96,8 @@ export function DiscussionScopeChip({
   const extra = scope.grants.filter(grant => grant.project_id !== null);
   const pending = scope.requests.filter(request => request.status === 'pending').length;
   if (!all && !general && extra.length === 0 && pending === 0) return null;
-  const writes = extra.some(grant => grant.access === 'write');
+  const writes = extra.some(grant => grant.access !== 'read');
+  const codes = extra.some(grant => grant.access === 'code');
   return (
     <span className="disc-scope-chips" data-testid="disc-scope-chip">
       {all && (
@@ -94,7 +107,7 @@ export function DiscussionScopeChip({
           onClick={onOpen}
           title={t('disc.scopeAllTitle')}
         >
-          <ShieldAlert size={10} /> {all.access === 'write' ? t('disc.scopeAllWrite') : t('disc.scopeAllRead')}
+          <ShieldAlert size={10} /> {all.access === 'plan' ? t('disc.scopeAllWrite') : t('disc.scopeAllRead')}
         </button>
       )}
       {general && (
@@ -112,7 +125,7 @@ export function DiscussionScopeChip({
         <button
           type="button"
           className="disc-scope-chip"
-          data-access={writes ? 'write' : 'read'}
+          data-access={codes ? 'code' : writes ? 'plan' : 'read'}
           onClick={onOpen}
           title={extra.map(grant => `${grant.project_name ?? grant.project_id} (${accessLabel(t, grant.access)})`).join(', ')}
         >
@@ -173,12 +186,18 @@ function RequestRow({
           : `« ${request.requested_name} »`)}</span>
       </span>
       <span className="disc-scope-reason">{request.reason}</span>
+      {known && <span className="disc-scope-reason" data-testid="disc-scope-allows">{accessAllows(t, request.access)}</span>}
       {!known && <span className="disc-scope-reason">{t('disc.scopeUnknownProject')}</span>}
       <span className="disc-scope-actions">
         {known && <button type="button" className="disc-scope-btn" data-primary="true" onClick={() => onDecide(request.access)}>
-          {request.access === 'write' ? t('disc.scopeApproveWrite') : t('disc.scopeApproveRead')}
+          {approveLabel(t, request.access)}
         </button>}
-        {known && request.access === 'write' && (
+        {known && request.access === 'code' && (
+          <button type="button" className="disc-scope-btn" onClick={() => onDecide('plan')}>
+            {t('disc.scopeApprovePlan')}
+          </button>
+        )}
+        {known && request.access !== 'read' && (
           <button type="button" className="disc-scope-btn" onClick={() => onDecide('read')}>
             {t('disc.scopeApproveRead')}
           </button>
@@ -232,7 +251,7 @@ export function DiscussionScopeSection({
         t={t}
         onGrant={(confirm, fingerprint) => run(
           () => discussionsApi.grantScope(discussionId, {
-            project_id: null, all: false, general: true, access: 'write', confirm, expected_fingerprint: fingerprint,
+            project_id: null, all: false, general: true, access: 'plan', confirm, expected_fingerprint: fingerprint,
           }),
           t('disc.scopeGranted'),
         )}
@@ -309,7 +328,8 @@ export function DiscussionScopeSection({
           aria-label={t('disc.scopeAccess')}
         >
           <option value="read">{t('disc.scopeRead')}</option>
-          <option value="write">{t('disc.scopeWrite')}</option>
+          <option value="plan">{t('disc.scopePlan')}</option>
+          <option value="code">{t('disc.scopeCode')}</option>
         </select>
         <button
           type="button"
@@ -326,10 +346,14 @@ export function DiscussionScopeSection({
           {t('disc.scopeGrant')}
         </button>
       </div>
+      {/* What the picked level allows, before it is granted: `code` is the strongest. */}
+      <p className="disc-scope-reason disc-scope-add-allows" data-access={access} data-testid="disc-scope-add-allows">
+        {accessAllows(t, access)}
+      </p>
 
       <div className="disc-scope-all">
         <span className="disc-scope-all-title"><ShieldAlert size={11} /> {t('disc.scopeAllProjects')}</span>
-        {all?.access !== 'read' && all?.access !== 'write' && (
+        {all?.access !== 'read' && all?.access !== 'plan' && (
           <button
             type="button"
             className="disc-scope-btn"
@@ -344,7 +368,7 @@ export function DiscussionScopeSection({
             {t('disc.scopeAllRead')}
           </button>
         )}
-        {all?.access !== 'write' && !confirmingAllWrite && (
+        {all?.access !== 'plan' && !confirmingAllWrite && (
           <button
             type="button"
             className="btn-danger disc-scope-btn"
@@ -376,7 +400,7 @@ export function DiscussionScopeSection({
                   project_id: null,
                   all: true,
                   general: false,
-                  access: 'write',
+                  access: 'plan',
                   confirm: typed,
                   expected_fingerprint: scope.fingerprint,
                 }).then(() => setConfirmingAllWrite(false)),

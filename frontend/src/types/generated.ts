@@ -8876,7 +8876,7 @@ export type ScheduleAgentWakeRequest = { delay_seconds: number, reason: string, 
  */
 export type ScheduledCheck = { checked_at: string, sources_state: SourcesState, broken_count: number, };
 
-export type ScopeAccess = "read" | "write";
+export type ScopeAccess = "read" | "plan" | "code";
 
 export type ScopeGrantSource = "link" | "request" | "all" | "general";
 

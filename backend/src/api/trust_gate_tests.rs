@@ -2099,3 +2099,127 @@ async fn an_agent_marked_request_is_the_agent_channel_on_the_trust_routes() {
     assert_eq!(channel_of(false, true).await, Channel::Ui);
     assert_eq!(channel_of(false, false).await, Channel::Http);
 }
+
+/// A room with a running turn (its dispatch is claimed and its cancellation token
+/// registered), and a `code` grant on another project that `level` gave it.
+/// Returns the token of the running turn.
+async fn room_running_a_turn_with_a_code_grant_given_by(
+    state: &AppState,
+    scope: TrustScope,
+    scope_id: Option<&str>,
+    level: TrustLevel,
+) -> tokio_util::sync::CancellationToken {
+    state
+        .db
+        .with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            for id in ["app", "infra"] {
+                conn.execute(
+                    "INSERT INTO projects(id, name, path, created_at, updated_at) VALUES (?1, ?1, '/tmp/' || ?1, ?2, ?2)",
+                    rusqlite::params![id, now],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO discussions(id, title, project_id, created_at, updated_at) VALUES ('room', 'room', 'app', ?1, ?1)",
+                [&now],
+            )?;
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, channel, content, timestamp, sort_order, received_at) \
+                 VALUES ('u1', 'room', 'User', 'main', 'go', ?1, 0, ?1)",
+                [&now],
+            )?;
+            crate::db::agent_dispatch::enqueue(
+                conn,
+                crate::db::agent_dispatch::NewAgentDispatchJob {
+                    id: "job-1",
+                    discussion_id: "room",
+                    trigger_message_id: "u1",
+                    trigger_sort_order: 0,
+                    dedupe_key: "turn:1",
+                    agent_override: None,
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+            assert!(crate::db::agent_dispatch::claim(conn, "job-1")?.is_some());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let token = tokio_util::sync::CancellationToken::new();
+    state
+        .cancel_registry
+        .lock()
+        .unwrap()
+        .insert("job-1".into(), token.clone());
+
+    set_level(state, scope, scope_id, level).await;
+    state
+        .db
+        .with_conn(move |conn| {
+            let (_, by) = crate::db::discussion_scope::file_request_with_trust(
+                conn,
+                "room",
+                Some("infra"),
+                "infra",
+                crate::models::discussion_scope::ScopeAccess::Code,
+                "needed",
+                "@claude",
+            )?;
+            assert_eq!(by, Some(level), "{level:?} grants the code request");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(!token.is_cancelled());
+    token
+}
+
+/// KT-1491 — lowering the level through the API takes back the `code` grant it
+/// gave, and the turn that is running in that room (it still has the checkout
+/// open for writing) is stopped, so the next one launches without it. Driven
+/// through the real route: a handler that forgot the stop fails here.
+#[tokio::test]
+async fn lowering_the_level_through_the_api_stops_the_turn_holding_a_code_grant_it_gave() {
+    let state = state();
+    let token = room_running_a_turn_with_a_code_grant_given_by(
+        &state,
+        TrustScope::Instance,
+        None,
+        TrustLevel::Full,
+    )
+    .await;
+
+    let (status, Json(lowered)) = crate::api::trust::put_instance(
+        State(state.clone()),
+        Confirm::default(),
+        set(TrustLevel::Standard, false, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{:?}", lowered.error);
+    assert!(token.is_cancelled(), "the running turn must be stopped");
+}
+
+/// The same for dropping the override that gave the grant (the DELETE route).
+#[tokio::test]
+async fn dropping_the_override_through_the_api_stops_the_turn_holding_a_code_grant_it_gave() {
+    let state = state();
+    let token = room_running_a_turn_with_a_code_grant_given_by(
+        &state,
+        TrustScope::Room,
+        Some("room"),
+        TrustLevel::Full,
+    )
+    .await;
+
+    let (status, Json(dropped)) = crate::api::trust::delete_room(
+        State(state.clone()),
+        Confirm::default(),
+        axum::extract::Path("room".to_owned()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{:?}", dropped.error);
+    assert!(token.is_cancelled(), "the running turn must be stopped");
+}

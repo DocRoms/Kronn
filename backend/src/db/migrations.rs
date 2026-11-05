@@ -1035,6 +1035,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "284_media_request_root",
         include_str!("sql/284_media_request_root.sql"),
     ),
+    (
+        "285_scope_access_levels",
+        include_str!("sql/285_scope_access_levels.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth
