@@ -3231,6 +3231,8 @@ const zh: TranslationDict = {
   "settings.discussionNotes": "非上下文讨论笔记",
   "settings.discussionNotesHint": "显示一个用于笔记的组合器控件，这些笔记在对话中保持可见，但默认不发送给代理。",
   "settings.exposeSecurityNote": "⚠️ API 将可从你的网络访问。Kronn 会创建一个网络访问令牌：设备或对等方必须提供它（设置 › 服务器与网络访问）。这台机器不需要它。",
+  "settings.exposeDockerTitle": "网络暴露由 KRONN_BIND 决定",
+  "settings.exposeDockerNote": "此实例运行在 Docker 中：后端在容器内始终监听 0.0.0.0，其他设备能否访问由 KRONN_BIND 决定，即主机端口发布的地址（当前为 {0}）。在 .env 或 compose 环境中设置 KRONN_BIND=0.0.0.0 并重建容器即可允许其他设备（此时 API 需要网络访问令牌）；保持 127.0.0.1 则仅限本机。",
   "settings.exposeRestartRequired": "需要重启以应用网络绑定更改。",
   "settings.exposeRestartBtn": "重启 Kronn",
   "settings.desktopPort": "桌面端口",

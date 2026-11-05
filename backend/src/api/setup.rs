@@ -1142,11 +1142,18 @@ fn normalize_origin_list(entries: &[String]) -> Result<Vec<String>, String> {
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export)]
 pub struct NetworkExposure {
-    /// Configured to bind a network-reachable address (`0.0.0.0`/`::`), not just localhost.
+    /// Reachable from other machines. Native: the configured host is a bind-all
+    /// address. Docker: the host port publish (`KRONN_BIND`) is not loopback.
     pub exposed: bool,
     /// The configured exposure differs from what the process bound at boot →
-    /// a restart is needed for it to take effect.
+    /// a restart is needed for it to take effect. Never true in Docker, where
+    /// the exposure is set by `KRONN_BIND` in the compose file, not by Settings.
     pub restart_required: bool,
+    /// Running in a container: exposure is controlled by `KRONN_BIND`, so the
+    /// Settings toggle has no effect and the UI explains `KRONN_BIND` instead.
+    pub in_docker: bool,
+    /// The `KRONN_BIND` value in force (Docker only), when set.
+    pub kronn_bind: Option<String>,
     pub port: u16,
     /// Reachable addresses (LAN + Tailscale) a peer could use to reach us.
     pub reachable_ips: Vec<crate::core::tailscale::DetectedIp>,
@@ -1157,6 +1164,23 @@ pub struct NetworkExposure {
 #[derive(Debug, serde::Deserialize)]
 pub struct SetNetworkExposureRequest {
     pub exposed: bool,
+}
+
+/// `(exposed, restart_required)` for the given runtime. In Docker the backend
+/// always binds `0.0.0.0` inside the container, so `config.server.host` says
+/// nothing: the real lever is `KRONN_BIND` and nothing here can need a restart.
+fn exposure_state(is_docker: bool, kronn_bind: Option<&str>, config_host: &str) -> (bool, bool) {
+    if is_docker {
+        (
+            crate::core::net_expose::lan_exposed(true, kronn_bind, config_host),
+            false,
+        )
+    } else {
+        (
+            crate::core::net_expose::is_exposed_host(config_host),
+            crate::core::net_expose::restart_required(config_host),
+        )
+    }
 }
 
 /// GET /api/config/network-exposure
@@ -1172,9 +1196,18 @@ pub async fn get_network_exposure(
         )
     };
     let reachable_ips = crate::core::tailscale::detect_all_ips().await;
+    let in_docker = crate::core::env::is_docker();
+    let kronn_bind = in_docker
+        .then(|| crate::core::child_env::var("KRONN_BIND").ok())
+        .flatten()
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty());
+    let (exposed, restart_required) = exposure_state(in_docker, kronn_bind.as_deref(), &host);
     Json(ApiResponse::ok(NetworkExposure {
-        exposed: crate::core::net_expose::is_exposed_host(&host),
-        restart_required: crate::core::net_expose::restart_required(&host),
+        exposed,
+        restart_required,
+        in_docker,
+        kronn_bind,
         port,
         reachable_ips,
         auth_token_set,
@@ -1196,6 +1229,14 @@ pub async fn set_network_exposure(
     State(state): State<AppState>,
     Json(req): Json<SetNetworkExposureRequest>,
 ) -> Json<ApiResponse<NetworkExposure>> {
+    // Docker binds 0.0.0.0 whatever the config says: writing the host would be
+    // a silent no-op, so say where the real switch is instead.
+    if crate::core::env::is_docker() {
+        return Json(ApiResponse::err(
+            "In Docker, network exposure is set by KRONN_BIND (docker-compose), not from Settings."
+                .to_string(),
+        ));
+    }
     {
         let mut config = state.config.write().await;
         // Change a copy, adopt it only once saved: a failed save must not leave
@@ -5935,7 +5976,36 @@ mod frontend_origin_tests {
 
 #[cfg(test)]
 mod network_exposure_tests {
-    use super::auth_token_set;
+    use super::{auth_token_set, exposure_state};
+
+    #[test]
+    fn docker_exposure_follows_kronn_bind_and_never_needs_a_restart() {
+        // The config host is irrelevant in Docker (the container always binds
+        // 0.0.0.0): only the host port publish counts.
+        for host in ["127.0.0.1", "0.0.0.0"] {
+            assert_eq!(
+                exposure_state(true, Some("127.0.0.1"), host),
+                (false, false)
+            );
+            assert_eq!(exposure_state(true, None, host), (false, false));
+            assert_eq!(exposure_state(true, Some("0.0.0.0"), host), (true, false));
+            assert_eq!(
+                exposure_state(true, Some("192.168.1.10"), host),
+                (true, false)
+            );
+        }
+    }
+
+    #[test]
+    fn native_exposure_still_follows_the_configured_host() {
+        // KRONN_BIND is ignored natively; with no boot host recorded there is
+        // never a restart to ask for.
+        assert!(!exposure_state(false, Some("0.0.0.0"), "127.0.0.1").0);
+        assert!(exposure_state(false, None, "0.0.0.0").0);
+        assert!(exposure_state(false, None, "::").0);
+        assert!(!exposure_state(false, None, "127.0.0.1").0);
+        assert!(!exposure_state(false, None, "192.168.1.10").0);
+    }
 
     #[test]
     fn auth_token_set_needs_auth_on_and_a_token() {

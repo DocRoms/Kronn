@@ -3255,6 +3255,8 @@ const en: TranslationDict = {
   'settings.discussionNotes': 'Out-of-context discussion notes',
   'settings.discussionNotesHint': 'Shows a composer control for notes that remain visible in the conversation but are not sent to agents by default.',
   'settings.exposeSecurityNote': "⚠️ The API becomes reachable from your network. Kronn creates a network access token: a device or peer must provide it (Settings › Server & network access). This machine does not need it.",
+  'settings.exposeDockerTitle': "Network exposure is set by KRONN_BIND",
+  'settings.exposeDockerNote': "This instance runs in Docker: the backend always listens on 0.0.0.0 inside the container, and what decides whether other devices can reach it is KRONN_BIND, the address the host port is published on (currently {0}). Set KRONN_BIND=0.0.0.0 in your .env or compose environment and recreate the container to allow other devices (the API then requires a network access token); keep 127.0.0.1 for this machine only.",
   'settings.exposeRestartRequired': 'Restart required to apply the network-binding change.',
   'settings.exposeRestartBtn': 'Restart Kronn',
   'settings.desktopPort': 'Desktop port',
