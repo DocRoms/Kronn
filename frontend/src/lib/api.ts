@@ -884,6 +884,10 @@ export interface DesktopPortInfo { saved: number | null; current: number; min: n
 export interface NetworkExposure {
   exposed: boolean;
   restart_required: boolean;
+  /** Running in Docker: exposure comes from `KRONN_BIND`, the toggle is inert. */
+  in_docker: boolean;
+  /** `KRONN_BIND` in force (Docker only), when set. */
+  kronn_bind: string | null;
   port: number;
   reachable_ips: DetectedIp[];
   /** A network access token is in force (auth on and a token stored). */

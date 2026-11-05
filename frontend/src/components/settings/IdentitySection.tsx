@@ -252,36 +252,43 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
               </span>
             </div>
 
-            <button
-              type="button"
-              role="switch"
-              data-testid="expose-network-toggle"
-              aria-checked={!!exposure?.exposed}
-              className="set-identity-network-toggle"
-              disabled={exposure === null}
-              onClick={async () => {
-                try {
-                  const updated = await configApi.setNetworkExposure(!exposure?.exposed);
-                  setExposure(updated);
-                  onExposureChange?.(updated);
-                } catch (error) {
-                  reportSaveError(error);
-                }
-              }}
-            >
-              <span>
-                <strong>{t('settings.exposeNetwork')}</strong>
-                <small>{t('settings.exposeNetworkHint')}</small>
-              </span>
-              <span className="set-toggle-track" data-on={!!exposure?.exposed} aria-hidden="true">
-                <span className="set-toggle-thumb" style={{ left: exposure?.exposed ? 15 : 1 }} />
-              </span>
-            </button>
+            {exposure?.in_docker ? (
+              <div className="set-expose-warn" role="note" data-testid="expose-docker-note">
+                <strong>{t('settings.exposeDockerTitle')}</strong>{' '}
+                {t('settings.exposeDockerNote', exposure.kronn_bind ?? '127.0.0.1')}
+              </div>
+            ) : (
+              <button
+                type="button"
+                role="switch"
+                data-testid="expose-network-toggle"
+                aria-checked={!!exposure?.exposed}
+                className="set-identity-network-toggle"
+                disabled={exposure === null}
+                onClick={async () => {
+                  try {
+                    const updated = await configApi.setNetworkExposure(!exposure?.exposed);
+                    setExposure(updated);
+                    onExposureChange?.(updated);
+                  } catch (error) {
+                    reportSaveError(error);
+                  }
+                }}
+              >
+                <span>
+                  <strong>{t('settings.exposeNetwork')}</strong>
+                  <small>{t('settings.exposeNetworkHint')}</small>
+                </span>
+                <span className="set-toggle-track" data-on={!!exposure?.exposed} aria-hidden="true">
+                  <span className="set-toggle-thumb" style={{ left: exposure?.exposed ? 15 : 1 }} />
+                </span>
+              </button>
+            )}
 
             {exposure?.exposed && (
               <div className="set-expose-warn" role="note">{t('settings.exposeSecurityNote')}</div>
             )}
-            {exposure?.restart_required && (
+            {exposure?.restart_required && !exposure.in_docker && (
               <div className="set-expose-restart" role="alert">
                 <span>{t('settings.exposeRestartRequired')}</span>
                 {isTauri ? (
