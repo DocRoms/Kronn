@@ -680,10 +680,9 @@ TOOLS = [
         "description": (
             "Post to the bound room. Human decision → `kronn-question` fence "
             "(`tool_manual disc_question_list`); a refused one returns in `invalid_cards`: repost. "
-            "NEVER invent a pseudo: the human is `@user`; "
-            "native aliases are `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
-            "`@copilot`, `@ollama`; a joined CLI requires its exact `@…-cli[-N]` alias "
-            "from `disc_meta`; ambiguous bare aliases are refused. POSTING ALSO LISTENS unless "
+            "Never invent an addressee — the alias contract (human `@user`, native "
+            "aliases, joined CLI `@…-cli[-N]`) is in "
+            "`tool_manual({tool: \"disc_append\"})`. POSTING ALSO LISTENS unless "
             "`wait_for_reply:false`; `last_sort_order` is a write receipt, not a "
             "read cursor. Bulk import/dedup: "
             "`tool_manual({tool: \"disc_append\"})`."
@@ -1709,13 +1708,9 @@ TOOLS = [
             "Create a disabled draft for explicit user review. Discovery first, "
             "never guessing: plugin/config ids with `mcp_list`, bindings with "
             "their list tools, Quick APIs with `qa_list`, Quick Execs with "
-            "`qe_list`, Pages with `page_list`. `step_type` is a tagged object, "
-            "closed set is: **Agent, ApiCall, BatchApiCall, "
-            "BatchQuickPrompt, Exec, Gate, Notify, JsonData, "
-            "CollectApiData, TransformData, PublishPageData, SubWorkflow, "
-            "TriggerWorkflow**. "
-            "Call `workflow_step_schema` before composing steps. Prefer adapting a real "
-            "workflow via `workflow_get`/`workflow_clone`. Full authoring contract: "
+            "`qe_list`, Pages with `page_list`. Call `workflow_step_schema` "
+            "before composing steps. Prefer adapting a real workflow via "
+            "`workflow_get`/`workflow_clone`. Full authoring contract: "
             "`tool_manual({tool: \"workflow_create_draft\"})`. Returns the created JSON; "
             "its `kronn_readiness` says if it can start: never claim ready otherwise."
         ),
@@ -2473,6 +2468,15 @@ TOOLS = [
             "properties": {"job_id": {"type": "string", "description": "Job id (from `media_generate`)."}},
             "required": ["job_id"],
         },
+    },
+    {
+        "name": "media_models_list",
+        "description": (
+            "Every media model reachable per connection and capability (image, "
+            "video): what each advertises, the configured choice, eligibility, "
+            "observed cost, decision models. Contract: tool_manual."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "workflow_trigger",
@@ -9132,6 +9136,11 @@ def call_media_job_status(args):
     return _unwrap(_http("GET", f"/api/media/jobs/{job_id}"))
 
 
+def call_media_models_list(args):
+    """List every media model the configured connections can reach."""
+    return _unwrap(_http("GET", "/api/media/models/list"))
+
+
 def call_workflow_trigger(args):
     """0.8.6 phase 4 — launch a workflow run via the JSON wrapper route.
 
@@ -10371,7 +10380,12 @@ TOOL_MANUALS = {
         "changed by hand.\n\n"
         "Everything else about this tool — mentions, targets, the fact that "
         "posting also listens — is in its own description, because getting it "
-        "wrong means a peer never hears you."
+        "wrong means a peer never hears you.\n\n"
+        "**Addressees.** Never invent a pseudo: the human is `@user`; native "
+        "aliases are `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
+        "`@copilot`, `@ollama`; a joined CLI requires its exact "
+        "`@…-cli[-N]` alias from `disc_meta`; ambiguous bare aliases are "
+        "refused."
     ),
     "disc_wait_for_peer": (
         ROOM_WORK_PROTOCOL + "\n\n"
@@ -10844,6 +10858,35 @@ TOOL_MANUALS["media_generate"] = (
     "Cost. Video is billed per second and image per picture, audio included "
     "unless `generate_audio: false`. Nothing here is free to retry: reuse the "
     "same `idempotency_key` for a retry of a generation you already asked for."
+)
+TOOL_MANUALS["media_models_list"] = (
+    "Read the full report once, before promising a modality, a duration or a "
+    "reference mode, and when recommending a model to a human; never infer "
+    "capabilities from habit.\n\n"
+    "Per connection the report carries `image` and `video` catalogues plus "
+    "`decision`. A catalogue entry advertises durations, resolutions, ratios, "
+    "frame positions and `reference_modes`. Image-to-video comes from "
+    "`reference_modes` (or `frame_positions`): a video can start from a "
+    "picture only when it lists a frame mode; `max_input_references` null "
+    "means unknown, never no. `observed_unit_cost_usd` is what Kronn itself "
+    "was billed for that exact model, per second for video and per image "
+    "otherwise, BYOK rows excluded; `cost_samples: 0` means unknown, never "
+    "free.\n\n"
+    "`state` per modality: `ok` lists the provider's real catalogue; `absent` "
+    "is a provider with no media catalogue at all (NVIDIA, Ollama) — that "
+    "connection is working, not down; `unreachable` is a dead host or a "
+    "refusing one; `unauthorized` is an auth refusal; `unreadable` is a 200 "
+    "whose body cannot be parsed. An empty list under `absent` or "
+    "`unreachable` is not \"the provider serves nothing\".\n\n"
+    "`configured` names the model each connection currently has for the "
+    "modality, and `configured_capabilities` resolves it against the "
+    "catalogue — null when the catalogue never mentions it, never \"no\". The "
+    "local ComfyUI (`local:comfyui`) is listed from its built-in envelope "
+    "whenever a ComfyUI slot is configured: checkpoints, T5, custom nodes and "
+    "filesystem layout are not verified. `decision` lists only the models the "
+    "connection's catalogue marks with the `decision` capability, projected "
+    "to `model_id`, `display_name`, `capabilities` and `cost_hint`; a model "
+    "absent from that list is not absent from the world."
 )
 
 
@@ -11482,6 +11525,7 @@ DISPATCH = {
     # to cut mobile token cost ~80% (cf. [[project_mcp_remote_control_0_8_6]]).
     "media_generate": call_media_generate,
     "media_job_status": call_media_job_status,
+    "media_models_list": call_media_models_list,
     "workflow_trigger": call_workflow_trigger,
     "workflow_run_status": call_workflow_run_status,
     "qp_run": call_qp_run,

@@ -14175,7 +14175,7 @@ async fn bounded_media_capabilities(
 
 /// The connections the catalogue lists, plus the local ComfyUI when a media
 /// slot is set (KT-1381): it is reached like a connection, never stored.
-fn with_local_media_source(
+pub(crate) fn with_local_media_source(
     mut connections: Vec<crate::models::ExternalApiConnection>,
     config: &crate::models::AppConfig,
 ) -> Vec<crate::models::ExternalApiConnection> {

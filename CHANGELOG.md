@@ -11,6 +11,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- `media_models_list` (KT-1420): the discovery tool lists, per connection and
+  per capability, every model the provider's catalogue advertises — durations,
+  resolutions, ratios, frame positions, `reference_modes` — with the model each
+  connection has configured and the local ComfyUI whenever a slot is set. Each
+  entry carries what Kronn itself was billed for that exact model
+  (`observed_unit_cost_usd`, from past `media_jobs` rows), and each
+  connection's decision models come from the shared model catalogue. The same
+  report serves the HTTP route `GET /api/media/models/list` and the
+  `kronn-internal` bridge.
+
 ### Fixed
 
 - One request no longer starts a cascade of media generations, and Stop is

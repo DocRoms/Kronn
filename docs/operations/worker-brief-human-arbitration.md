@@ -38,5 +38,5 @@ runtime-bound one) while `disc_question_list` always resolves `_disc_id()` and
 ignores any id argument.
 [src: file: backend/scripts/disc-introspection-mcp.py:221-223#disc_question_list]
 [src: file: backend/scripts/disc-introspection-mcp.py:677-679#disc_append]
-[src: file: backend/scripts/disc-introspection-mcp.py:5441-5459#call_disc_append]
-[src: file: backend/scripts/disc-introspection-mcp.py:4626-4636#call_disc_question_list]
+[src: file: backend/scripts/disc-introspection-mcp.py:5446-5464#call_disc_append]
+[src: file: backend/scripts/disc-introspection-mcp.py:4632-4642#call_disc_question_list]

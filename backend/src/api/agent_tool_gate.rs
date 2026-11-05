@@ -468,6 +468,7 @@ impl KronnToolExecutor {
                 get("/api/mcps", Vec::new(), None)
             }
             "mcp_list" => get("/api/mcps", Vec::new(), None),
+            "media_models_list" => get("/api/media/models/list", Vec::new(), None),
             "media_job_status" => get(
                 "/api/media/jobs/{id}",
                 vec![("id".into(), id("job_id"))],

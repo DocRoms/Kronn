@@ -679,7 +679,7 @@ not assign them an audit step.
 [src: file: backend/src/core/template_manifest.rs:82-109#check]
 [src: file: backend/src/api/audit/helpers.rs:173-178#template_update]
 [src: file: frontend/src/components/TemplateUpdateNotice.tsx:34-40#installTemplate]
-[src: file: backend/scripts/disc-introspection-mcp.py:2735-2743#audit_prepare]
+[src: file: backend/scripts/disc-introspection-mcp.py:10674-10682#audit_prepare]
 
 A rename requires a unique match between a removed recorded template hash and
 an added upstream file. The move keeps the project's bytes; an occupied target
