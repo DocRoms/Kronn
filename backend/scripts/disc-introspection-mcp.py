@@ -214,8 +214,8 @@ TOOLS = [
     },
     {
         "name": "room_scope",
-        "description": "Room's project reach; `project` asks a human for one. See tool_manual.",
-        "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "access": {"enum": ["read", "write"]}, "reason": {"type": "string"}}},
+        "description": "Room's project reach; `project` asks a human. See tool_manual.",
+        "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}, "access": {"enum": ["read", "plan", "code"]}, "reason": {"type": "string"}}},
     },
     {
         "name": "disc_question_list",
@@ -4615,8 +4615,10 @@ def call_room_scope(args):
     reason = args.get("reason")
     if not isinstance(project, str) or not project.strip():
         raise RuntimeError("room_scope: project must be a project name or id")
-    if access not in ("read", "write"):
-        raise RuntimeError("room_scope: access must be read or write")
+    if access == "write":
+        access = "plan"  # the name before KT-1491
+    if access not in ("read", "plan", "code"):
+        raise RuntimeError("room_scope: access must be read, plan or code")
     if not isinstance(reason, str) or not reason.strip():
         raise RuntimeError("room_scope: say why the room needs this project (reason)")
     return _unwrap(_http(
@@ -10714,16 +10716,21 @@ TOOL_MANUALS["task_create"] = (
     "Pass `idempotency_key` for a stable retry identity; omitted, `source_message_id` "
     "derives one, so several tasks from one message need distinct explicit keys. "
     "Titles are never identities. A task lands in the room's project unless "
-    "`project_ids` names a project the room holds a write grant on (`room_scope`); "
+    "`project_ids` names a project the room holds a plan or code grant on (`room_scope`); "
     "a workflow step names another project only when its workflow's scope, set by a "
     "human, opens it in write."
 )
 TOOL_MANUALS["room_scope"] = (
     "A room has one primary project: its working directory, where what it creates "
     "lands, and the only project whose API configs and credentials it may use. A human "
-    "may also grant it other projects: read (tasks, rooms, runs, pages) or write "
-    "(planning only: create and edit tasks there, `project_ids` naming it), or every "
-    "project. `room_scope()` returns the grants, the pending requests and the journal. "
+    "may also grant it other projects: read (tasks, rooms, runs, pages), plan "
+    "(planning only: create and edit tasks there, `project_ids` naming it; its files "
+    "stay read-only; formerly called write) or code (plan, and you edit that project's "
+    "checkout like your own: one project, never every project, and never its secrets "
+    "(`.env*`, keys, `.mcp.json`, MCP configs), its Git config and hooks or its agent "
+    "settings; the grant is applied for Claude Code only, a full-access agent ignores "
+    "the room scope and the grant is not enforced for it), or every project in read or "
+    "plan. `room_scope()` returns the grants, the pending requests and the journal. "
     "When a call is refused as outside the token's project, ask with "
     "`room_scope({project, access, reason})`: it files a request the human approves, "
     "narrows or declines in the room, and grants nothing by itself. Do not wait or "

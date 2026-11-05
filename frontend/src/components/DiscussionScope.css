@@ -19,9 +19,14 @@
   color: var(--kr-text-muted);
 }
 
-.disc-scope-chip[data-access='write'] {
+.disc-scope-chip[data-access='plan'] {
   border-color: rgba(var(--kr-warning-rgb), 0.35);
   color: var(--kr-warning);
+}
+
+.disc-scope-chip[data-access='code'] {
+  border-color: rgba(var(--kr-error-rgb), 0.45);
+  color: var(--kr-error);
 }
 
 .disc-scope-chip[data-access='read'] {
@@ -85,9 +90,19 @@
   font-size: 10px;
 }
 
-.disc-scope-row[data-access='write'] .disc-scope-access {
+.disc-scope-row[data-access='plan'] .disc-scope-access {
   color: var(--kr-warning);
   border-color: rgba(var(--kr-warning-rgb), 0.35);
+}
+
+/* `code` edits another project's files: the stronger level stands out. */
+.disc-scope-row[data-access='code'] .disc-scope-access {
+  color: var(--kr-error);
+  border-color: rgba(var(--kr-error-rgb), 0.45);
+}
+
+.disc-scope-add-allows[data-access='code'] {
+  color: var(--kr-error);
 }
 
 .disc-scope-meta,

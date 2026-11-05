@@ -163,7 +163,8 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # its own declaration (shorter refusal clause and `task_execution_id` text):
 # net zero, ceiling unchanged.
 # KT-1345 + KT-1351 + #252 + #241 together, merged: measured 84_380 B.
-CATALOGUE_MAX_BYTES = 84_380
+# KT-1491: `room_scope` levels read/plan/code, its description trimmed: 84_379 B.
+CATALOGUE_MAX_BYTES = 84_379
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

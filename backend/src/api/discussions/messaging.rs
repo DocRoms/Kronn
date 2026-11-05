@@ -1424,6 +1424,42 @@ pub async fn stop_agent(
     ))
 }
 
+/// KT-1491 — a revoked `code` grant must not outlive the turn that already has
+/// the checkout open for writing: the room's access is read once per turn, so
+/// the running reply is stopped and the next one launches without it. Only the
+/// running reply is stopped; a queued one reads the scope when it starts, so it
+/// already runs under the revoke. Returns whether something was stopped.
+pub async fn stop_running_turn(state: &AppState, discussion_id: &str) -> bool {
+    let lookup = discussion_id.to_owned();
+    let running = state
+        .db
+        .with_conn(move |conn| crate::db::agent_dispatch::find_active_for_discussion(conn, &lookup))
+        .await
+        .ok()
+        .flatten()
+        .filter(|job| job.status == crate::db::agent_dispatch::DispatchStatus::Running);
+    let mut stopped = false;
+    if let Some(job) = running {
+        let reply = stop_agent_dispatch(
+            State(state.clone()),
+            Path((discussion_id.to_owned(), job.id)),
+        )
+        .await;
+        stopped = reply.0.data.is_some_and(|data| data["cancelled"] == true);
+    }
+    // A stream launched without a durable dispatch is keyed by the discussion.
+    let legacy = state
+        .cancel_registry
+        .lock()
+        .ok()
+        .and_then(|mut registry| registry.remove(discussion_id));
+    if let Some(token) = legacy {
+        token.cancel();
+        stopped = true;
+    }
+    stopped
+}
+
 /// POST /api/discussions/:id/agent-dispatches/:dispatch_id/stop
 ///
 /// Stop one exact pending/running response while preserving every sibling

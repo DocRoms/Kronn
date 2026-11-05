@@ -7,23 +7,62 @@ use ts_rs::TS;
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum ScopeAccess {
+    /// Reads the project: its planning in Kronn's tools, and its checkout as a
+    /// read-only directory.
     Read,
-    Write,
+    /// Plans in the project through Kronn's tools (tasks); its files stay
+    /// read-only. This is what `write` always meant: the stored and wire
+    /// `write` of before KT-1491 is still read as `plan`.
+    #[serde(alias = "write")]
+    Plan,
+    /// Plans, and the agent edits the project's checkout like its own. Never
+    /// opens the project's credentials, and is never granted for every project.
+    Code,
 }
 
 impl ScopeAccess {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
-            Self::Write => "write",
+            Self::Plan => "plan",
+            Self::Code => "code",
         }
     }
 
     pub fn parse(value: &str) -> anyhow::Result<Self> {
         match value {
             "read" => Ok(Self::Read),
-            "write" => Ok(Self::Write),
+            // `write` is the stored and wire value from before KT-1491.
+            "plan" | "write" => Ok(Self::Plan),
+            "code" => Ok(Self::Code),
             _ => anyhow::bail!("unknown scope access: {value}"),
+        }
+    }
+
+    /// Whether the level changes the project's planning (`plan` and `code`).
+    pub fn plans(self) -> bool {
+        self != Self::Read
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::Read => 0,
+            Self::Plan => 1,
+            Self::Code => 2,
+        }
+    }
+
+    /// Whether this level contains `other`: read < plan < code.
+    pub fn covers(self, other: Self) -> bool {
+        self.rank() >= other.rank()
+    }
+
+    /// The stronger of two levels.
+    pub fn stronger(self, other: Self) -> Self {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
         }
     }
 }

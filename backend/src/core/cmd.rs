@@ -341,6 +341,23 @@ pub fn git_cmd() -> std::process::Command {
     sync_cmd("git", ChildRoute::Git)
 }
 
+/// [`git_cmd`] for a command that only inspects or checks out a project's
+/// repository on Kronn's own behalf (`rev-parse`, `worktree add`): its hooks
+/// (`post-checkout`) and a configured file-system monitor are programs the
+/// repository names, and a room granted `code` on that project writes into it
+/// (KT-1491). Kronn's commits, merges and pushes keep running the repository's
+/// hooks on purpose (a DCO `commit-msg`, the user's `pre-push`).
+pub fn project_git_cmd() -> std::process::Command {
+    let mut cmd = git_cmd();
+    cmd.args([
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+    ]);
+    cmd
+}
+
 /// [`git_cmd`] for tokio.
 pub fn async_git_cmd() -> tokio::process::Command {
     async_cmd("git", ChildRoute::Git)

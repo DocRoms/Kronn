@@ -71,7 +71,7 @@ touches an execution that exists.
 `target_ref` used to be ignored by `task_exec_launch`, which silently launched from `main`. Both principal
 channels now refuse an argument the tool does not declare, naming it and listing the accepted ones:
 the Python bridge checks against its own `inputSchema` and the native tool layer against its catalogue.
-`[src: file: backend/scripts/disc-introspection-mcp.py:6082#_refuse_unknown_arguments]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:6084#_refuse_unknown_arguments]`
 `[src: file: backend/src/api/agent_tools.rs:1380#unknown_argument_refusal]`
 Note that `task_exec_prepare` does not declare `base_rev` / `idempotency_key`: those belong to the launch.
 

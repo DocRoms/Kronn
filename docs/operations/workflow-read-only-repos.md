@@ -23,8 +23,8 @@ includes external Git metadata for linked worktrees. Missing/non-Git paths,
 permission-pattern characters, overlap with the working directory, unsupported
 agents and native Windows launches are rejected before dispatch. The list does
 not accept workflow template expressions.
-[src: file: backend/src/agents/read_only_repos.rs:176-273#resolve_with_dirs]
-[src: file: backend/src/agents/read_only_repos.rs:205-235#canonical_directory]
+[src: file: backend/src/agents/read_only_repos.rs:672-776#resolve_with_dirs]
+[src: file: backend/src/agents/read_only_repos.rs:701-731#canonical_directory]
 [src: file: backend/src/api/workflow_step_schema.json:32#read_only_repos]
 
 Claude receives `--add-dir` together with `Edit` deny rules and sandbox
@@ -35,7 +35,7 @@ extending `:workspace`, with explicit `read` entries and approval policy `never`
 It keeps the standard broad filesystem read access; the declared directories
 are never added as writable roots, including when they live under a temporary
 directory. `--strict-config` rejects unsupported Codex settings.
-[src: file: backend/src/agents/read_only_repos.rs:312-380#args]
+[src: file: backend/src/agents/read_only_repos.rs:990-1107#args]
 [Claude permission rules](https://code.claude.com/docs/en/permissions)
 [Claude sandbox](https://code.claude.com/docs/en/sandboxing)
 [Codex permissions](https://learn.chatgpt.com/docs/permissions)
@@ -48,11 +48,11 @@ host probe confirmed that Python, Write and shell redirection were all refused.
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
-[src: file: backend/src/agents/runner.rs:4483-4487#read_only_repos]
-[src: file: backend/src/agents/runner.rs:4517-4519#read_only_repos]
-[src: file: backend/src/agents/read_only_repos.rs:303-310#apply]
-[src: file: backend/src/agents/runner.rs:13924-13929#sandbox_required]
-[src: file: backend/src/agents/runner.rs:14138-14148#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:4476-4480#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4507-4509#read_only_repos]
+[src: file: backend/src/agents/read_only_repos.rs:972-979#apply]
+[src: file: backend/src/agents/runner.rs:13949-13954#sandbox_required]
+[src: file: backend/src/agents/runner.rs:14166-14176#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -60,8 +60,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:13862-13881#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:13924-13938#is_codex]
+[src: file: backend/src/agents/runner.rs:13887-13906#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:13962-13976#is_codex]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -91,6 +91,78 @@ readable with this wording when that template is available:
 > are read-only. If a read is denied, report the limitation; do not claim to have
 > inspected the checkout or attempt to bypass the restriction.
 
+## Room checkouts, read-only and writable (KT-1406, KT-1491)
+
+A discussion's native Claude Code agent gets the projects a human granted to the
+room (`discussion_project_grants`) through the same policy, built per launch by
+`ReadOnlyRepos::resolve_room`: a `read` or `plan` grant opens the checkout
+read-only as above; a `code` grant opens it writable (`--add-dir`, the checkout in
+the sandbox's `allowWrite`, no `Edit` deny over it). Workflows never get a `code`
+root: a run is given no checkout, and `code` is refused on a workflow scope. The
+two launch routes (the direct CLI and the ACP adapter) build their arguments from
+the same policy at every launch, so a revoke applies from the next turn; revoking
+a `code` grant (or lowering the trust level that gave it) also stops the room's
+running turn, which still holds the checkout open.
+[src: file: backend/src/agents/read_only_repos.rs:785-841#resolve_room]
+[src: file: backend/src/api/discussions/messaging.rs:1432-1461#stop_running_turn]
+
+A writable root never opens what a later program runs or what is secret, whether
+or not the path exists when the turn starts:
+
+- **What runs later**, refused as `Edit`/`Write` rules and sandbox `denyWrite`, at
+  the top and at any depth: `.git` (hooks, `core.fsmonitor`, `core.sshCommand`),
+  `.envrc`, `.vscode`, the hook managers' files (`.husky`, `.githooks`,
+  `lefthook*.yml`, `.lefthook`) and the agent CLIs' own files
+  (`api::audit::step_remit::KRONN_OWNED`: `.claude`, `.cursor`, `.opencode`,
+  `opencode.json`, `.mcp.json`, the instruction files). `core.hooksPath` is read at
+  the launch (`git config`, which runs nothing): a hooks directory inside the
+  checkout (husky v9's `.husky/_`, a custom path) is denied too, with the path as
+  configured, where it really lies, and every symbolic link on the way (`hooks ->
+  .config/hooks`, `tools -> scripts` for `tools/hooks`), so the agent cannot replace
+  a link by a directory of its own. A `core.hooksPath` equal to the checkout root
+  does not fail the room: the `code` grant is not opened, the checkout is opened
+  read-only, and the agent is told why. The common Git directory of a linked
+  worktree lies outside its checkout, so it is not in `allowWrite` and needs no
+  rule, except when the granted project is a linked worktree of the room's own
+  repository: its common directory is then `<work_dir>/.git`, writable with the
+  working directory. Kronn's own
+  `git worktree add` and `rev-parse` on a project run with
+  `core.hooksPath=/dev/null` and `core.fsmonitor=false` (`core::cmd::project_git_cmd`).
+  Kronn's commits, merges and pushes still run the repository's hooks, which is why
+  `.git` and the hooks are closed. A consequence the agent is told: it cannot
+  `git add`, `git commit` or `git stash` in a `code` root; the human commits.
+- **Secrets**, refused as `Read`/`Edit`/`Write` rules by name at any depth
+  (`.env*`, `*.pem`, `*.key`, `.npmrc`, `.netrc`, `credentials.json`, `.ssh/`,
+  `.aws/`, `.kronn/backups/`, the Kronn vault file names) and in the sandbox's
+  `denyRead` and `denyWrite`: the fixed credential paths literally, whether or not
+  they exist (Seatbelt takes a path that is not there yet), the names as patterns
+  (honoured where the sandbox supports patterns), and what a bounded scan finds now
+  (depth 8, 20 000 entries, no link followed) as literal paths. The complete inline
+  `--settings` document has one 96 KiB budget shared by every root and already
+  includes the vault rules. Required tool rules and sandbox patterns come first.
+  Existing secrets no pattern can name (`is_secret_file` ignores letter case:
+  `PROD.PEM`, `Deploy.Key`) come next and are never dropped: their directories,
+  then parents, are denied until they fit. Pattern-covered literal paths use only
+  the remaining bytes. When absolute mandatory rules exceed the budget, Kronn uses
+  the shorter working-directory-relative form Claude documents for permission and
+  sandbox paths; if the mandatory compact form still cannot fit, the launch is
+  refused before the OS can fail it with `E2BIG`. A secret with an unpatterned name
+  created after the launch is not covered. The scan
+  runs once at the launch, off the async executor (`spawn_blocking`). A versioned
+  template such as `.env.example` is refused with them: a deny rule has no
+  exception. The same read denies apply to the `read` and `plan` roots of a room,
+  so a lower level never reads what `code` cannot; workflow `read_only_repos` are
+  unchanged.
+- **The Kronn data directory** (and the backup directory): a checkout that holds it
+  (a dotfiles repository registered at `$HOME`) is never opened for editing. The
+  directories are in `denyWrite` of a launch only when the vault protection is on
+  (`core::vault_guard`); the overlap refusal above holds either way.
+
+Full-access agents (Codex with full access, Gemini, OpenCode, Kiro…) ignore a
+project's scope: nothing is opened or closed for them, a `code` grant is not
+enforced, and their context says so. Codex with its default sandbox is told the
+grant is opened for Claude Code only.
+
 ## Run artifacts directory
 
 Each run gets its own directory, created by Kronn outside every checkout and
@@ -101,7 +173,7 @@ requirement: `--add-dir`, `Edit` deny rule and sandbox `denyWrite` for Claude,
 an explicit `read` entry for Codex. Other agents receive no grant.
 [src: file: backend/src/workflows/run_artifacts.rs:46-61#ensure]
 [src: file: backend/src/workflows/steps.rs:126-147#artifacts_read_only_dirs]
-[src: file: backend/src/agents/read_only_repos.rs:176-206#resolve_with_dirs]
+[src: file: backend/src/agents/read_only_repos.rs:672-702#resolve_with_dirs]
 
 ```json
 [
@@ -170,7 +242,7 @@ path, since the cwd is the copy. The copy goes with the artifacts directory.
 The automated policy and dispatch regressions use temporary repositories and
 fake CLI processes. They verify declarations and arguments; they do not prove
 vendor sandbox enforcement.
-[src: file: backend/src/agents/read_only_repos.rs:419-440#fixture]
+[src: file: backend/src/agents/read_only_repos.rs:1144-1165#fixture]
 [src: file: backend/tests/adapter_worker_policy.rs:41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 The dispatch regression checks initial and resumed Codex adapter arguments:

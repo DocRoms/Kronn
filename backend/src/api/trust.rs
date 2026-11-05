@@ -509,14 +509,25 @@ async fn put_scope(
     }
     let by = human(&state).await;
     let id = scope_id.clone();
-    if let Err(error) = state
+    let withdrawn = match state
         .db
         .with_conn(move |conn| trust::set_level(conn, scope, id.as_deref(), request.level, &by))
         .await
     {
-        return internal(error);
-    }
+        Ok(withdrawn) => withdrawn,
+        Err(error) => return internal(error),
+    };
+    stop_turns_losing_code(&state, &withdrawn).await;
     get_scope(state, scope, scope_id).await
+}
+
+/// KT-1491 — a lowered level takes back the `code` grants it gave; a turn that
+/// is running in such a room still has the checkout open for writing, so it is
+/// stopped and the next one launches without it.
+async fn stop_turns_losing_code(state: &AppState, withdrawn: &[trust::Withdrawn]) {
+    for room in trust::rooms_losing_code(withdrawn) {
+        crate::api::discussions::stop_running_turn(state, &room).await;
+    }
 }
 
 async fn delete_scope(
@@ -562,12 +573,16 @@ async fn delete_scope(
     }
     let by = human(&state).await;
     let id = scope_id.clone();
-    if let Err(error) = state
+    match state
         .db
-        .with_conn(move |conn| trust::clear_level(conn, scope, id.as_deref(), &by).map(|_| ()))
+        .with_conn(move |conn| {
+            trust::clear_level_withdrawing(conn, scope, id.as_deref(), &by)
+                .map(|(_, withdrawn)| withdrawn)
+        })
         .await
     {
-        return internal(error);
+        Ok(withdrawn) => stop_turns_losing_code(&state, &withdrawn).await,
+        Err(error) => return internal(error),
     }
     get_scope(state, scope, scope_id).await
 }

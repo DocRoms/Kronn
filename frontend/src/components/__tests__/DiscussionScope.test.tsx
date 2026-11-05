@@ -52,9 +52,9 @@ describe('DiscussionScopeChip', () => {
 
   it('shows every project in red and the pending requests', async () => {
     api.scope.mockResolvedValue(scope({
-      grants: [grant({ project_id: null, project_name: null, source: 'all', access: 'write' })],
+      grants: [grant({ project_id: null, project_name: null, source: 'all', access: 'plan' })],
       requests: [{
-        id: 'r1', discussion_id: 'd1', project_id: 'p2', project_name: 'api', requested_name: 'api', access: 'write', reason: 'docs',
+        id: 'r1', discussion_id: 'd1', project_id: 'p2', project_name: 'api', requested_name: 'api', access: 'plan', reason: 'docs',
         requested_by: '@ClaudeCode', status: 'pending', decided_by: null, decided_at: null, granted_access: null,
         created_at: '2026-10-16T10:00:00Z',
       }],
@@ -68,7 +68,7 @@ describe('DiscussionScopeChip', () => {
   it('shows the general resources in write in red for a room without a project', async () => {
     api.scope.mockResolvedValue(scope({
       primary_project_id: null,
-      grants: [grant({ project_id: null, project_name: null, source: 'general', access: 'write' })],
+      grants: [grant({ project_id: null, project_name: null, source: 'general', access: 'plan' })],
     }));
     render(<DiscussionScopeChip discussionId="d1" hasProject={false} t={t} />);
     const red = await screen.findByTestId('disc-scope-general');
@@ -80,7 +80,7 @@ describe('DiscussionScopeChip', () => {
 describe('DiscussionScopeSection', () => {
   it('opens every project in write only after the typed confirmation, with the seen fingerprint', async () => {
     api.scope.mockResolvedValue(scope());
-    api.grantScope.mockResolvedValue(grant({ project_id: null, access: 'write', source: 'all' }));
+    api.grantScope.mockResolvedValue(grant({ project_id: null, access: 'plan', source: 'all' }));
     render(<DiscussionScopeSection discussionId="d1" primaryProjectId="p1" projects={projects} toast={toast} t={t} />);
     await waitFor(() => expect(api.scope).toHaveBeenCalled());
     fireEvent.click(await screen.findByText('disc.scopeAllWrite'));
@@ -92,14 +92,14 @@ describe('DiscussionScopeSection', () => {
     expect(confirm.disabled).toBe(false);
     fireEvent.click(confirm);
     await waitFor(() => expect(api.grantScope).toHaveBeenCalledWith('d1', expect.objectContaining({
-      all: true, access: 'write', confirm: 'ALL-PROJECTS-WRITE', expected_fingerprint: 'fp-1',
+      all: true, access: 'plan', confirm: 'ALL-PROJECTS-WRITE', expected_fingerprint: 'fp-1',
     })));
   });
 
   it('lets the human narrow a write request to read', async () => {
     api.scope.mockResolvedValue(scope({
       requests: [{
-        id: 'r1', discussion_id: 'd1', project_id: 'p2', project_name: 'api', requested_name: 'api', access: 'write', reason: 'docs',
+        id: 'r1', discussion_id: 'd1', project_id: 'p2', project_name: 'api', requested_name: 'api', access: 'plan', reason: 'docs',
         requested_by: '@ClaudeCode', status: 'pending', decided_by: null, decided_at: null, granted_access: null,
         created_at: '2026-10-16T10:00:00Z',
       }],
@@ -110,9 +110,53 @@ describe('DiscussionScopeSection', () => {
     await waitFor(() => expect(api.approveScopeRequest).toHaveBeenCalledWith('d1', 'r1', expect.objectContaining({ access: 'read' })));
   });
 
+  it('says what a code request allows and lets the human narrow it to plan or read', async () => {
+    api.scope.mockResolvedValue(scope({
+      requests: [{
+        id: 'r1', discussion_id: 'd1', project_id: 'p2', project_name: 'api', requested_name: 'api', access: 'code', reason: 'infra change',
+        requested_by: '@ClaudeCode', status: 'pending', decided_by: null, decided_at: null, granted_access: null,
+        created_at: '2026-10-16T10:00:00Z',
+      }],
+    }));
+    api.approveScopeRequest.mockResolvedValue(scope());
+    render(<DiscussionScopeSection discussionId="d1" primaryProjectId="p1" projects={projects} toast={toast} t={t} />);
+    expect((await screen.findByTestId('disc-scope-allows')).textContent).toBe('disc.scopeCodeAllows');
+    fireEvent.click(screen.getByText('disc.scopeApprovePlan'));
+    await waitFor(() => expect(api.approveScopeRequest).toHaveBeenCalledWith('d1', 'r1', expect.objectContaining({ access: 'plan' })));
+    fireEvent.click(screen.getByText('disc.scopeApproveCode'));
+    await waitFor(() => expect(api.approveScopeRequest).toHaveBeenCalledWith('d1', 'r1', expect.objectContaining({ access: 'code' })));
+  });
+
+  it('offers code next to plan in the add form and grants it for one project', async () => {
+    api.scope.mockResolvedValue(scope());
+    api.grantScope.mockResolvedValue(grant({ access: 'code' }));
+    render(<DiscussionScopeSection discussionId="d1" primaryProjectId="p1" projects={projects} toast={toast} t={t} />);
+    await waitFor(() => expect(api.scope).toHaveBeenCalled());
+    fireEvent.change(screen.getByLabelText('disc.scopeAddProject'), { target: { value: 'p2' } });
+    fireEvent.change(screen.getByLabelText('disc.scopeAccess'), { target: { value: 'code' } });
+    fireEvent.click(screen.getByText('disc.scopeGrant'));
+    await waitFor(() => expect(api.grantScope).toHaveBeenCalledWith('d1', expect.objectContaining({
+      project_id: 'p2', all: false, access: 'code',
+    })));
+  });
+
+  it('says in the add form what each level allows, code in the stronger style', async () => {
+    api.scope.mockResolvedValue(scope());
+    render(<DiscussionScopeSection discussionId="d1" primaryProjectId="p1" projects={projects} toast={toast} t={t} />);
+    await waitFor(() => expect(api.scope).toHaveBeenCalled());
+    const allows = () => screen.getByTestId('disc-scope-add-allows');
+    expect(allows().textContent).toBe('disc.scopeReadAllows');
+    fireEvent.change(screen.getByLabelText('disc.scopeAccess'), { target: { value: 'plan' } });
+    expect(allows().textContent).toBe('disc.scopePlanAllows');
+    expect(allows().getAttribute('data-access')).toBe('plan');
+    fireEvent.change(screen.getByLabelText('disc.scopeAccess'), { target: { value: 'code' } });
+    expect(allows().textContent).toBe('disc.scopeCodeAllows');
+    expect(allows().getAttribute('data-access')).toBe('code');
+  });
+
   it('lets a room without a project write the general resources only after the typed confirmation', async () => {
     api.scope.mockResolvedValue(scope({ primary_project_id: null, fingerprint: 'fp-g' }));
-    api.grantScope.mockResolvedValue(grant({ project_id: null, access: 'write', source: 'general' }));
+    api.grantScope.mockResolvedValue(grant({ project_id: null, access: 'plan', source: 'general' }));
     render(<DiscussionScopeSection discussionId="d1" primaryProjectId={null} projects={projects} toast={toast} t={t} />);
     expect(screen.getByText('disc.scopeNeedsProject')).toBeTruthy();
     expect(screen.queryByLabelText('disc.scopeAddProject')).toBeNull();
@@ -125,14 +169,14 @@ describe('DiscussionScopeSection', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'GENERAL-WRITE' } });
     fireEvent.click(confirm);
     await waitFor(() => expect(api.grantScope).toHaveBeenCalledWith('d1', expect.objectContaining({
-      general: true, all: false, project_id: null, access: 'write', confirm: 'GENERAL-WRITE', expected_fingerprint: 'fp-g',
+      general: true, all: false, project_id: null, access: 'plan', confirm: 'GENERAL-WRITE', expected_fingerprint: 'fp-g',
     })));
   });
 
   it('shows a granted general write with its revoke', async () => {
     api.scope.mockResolvedValue(scope({
       primary_project_id: null,
-      grants: [grant({ id: 'gg', project_id: null, project_name: null, source: 'general', access: 'write' })],
+      grants: [grant({ id: 'gg', project_id: null, project_name: null, source: 'general', access: 'plan' })],
     }));
     api.revokeScope.mockResolvedValue(scope({ primary_project_id: null }));
     render(<DiscussionScopeSection discussionId="d1" primaryProjectId={null} projects={projects} toast={toast} t={t} />);

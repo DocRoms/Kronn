@@ -906,3 +906,128 @@ async fn the_recovery_routes_ask_for_no_code_even_when_enrolled() {
         "{body}"
     );
 }
+
+/// A room, its own project and two others, for the scope routes.
+async fn room_with_projects(harness: &Harness) {
+    harness
+        .state
+        .db
+        .with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            for id in ["app", "infra", "docs"] {
+                conn.execute(
+                    "INSERT INTO projects(id, name, path, created_at, updated_at) VALUES (?1, ?1, '/tmp/' || ?1, ?2, ?2)",
+                    rusqlite::params![id, now],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO discussions(id, title, project_id, created_at, updated_at) VALUES ('room', 'room', 'app', ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// KT-1491 — a room granted `code` edits another project's files, so granting it
+/// (directly, or by approving a request for it) asks for the proof like the other
+/// routes that hand out reach; a planning grant, or narrowing a code request to
+/// planning, does not. The route stays human-only: a bridge token never reaches it.
+#[tokio::test]
+async fn granting_code_asks_for_the_proof_and_planning_does_not() {
+    use kronn::db::discussion_scope::{file_request, Filed};
+    use kronn::models::discussion_scope::ScopeAccess;
+    let harness = Harness::new(true).await;
+    room_with_projects(&harness).await;
+    let grants = "/api/discussions/room/scope/grants";
+
+    // Planning: no proof.
+    let (status, done) = harness
+        .send(req(
+            "POST",
+            grants,
+            Some(json!({ "project_id": "docs", "access": "plan" })),
+        ))
+        .await;
+    assert_eq!(status, 200, "{done}");
+
+    // Code, directly: asked without a proof, granted with one.
+    let code_grant = json!({ "project_id": "infra", "access": "code" });
+    let (status, refused) = harness
+        .send(req("POST", grants, Some(code_grant.clone())))
+        .await;
+    assert!(asks(status, &refused), "{status} {refused}");
+    let (status, done) = harness
+        .send(req("POST", grants, Some(code_grant.clone())).code(&harness.codes[0]))
+        .await;
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["data"]["access"], "code");
+    // A request the validation refuses spends no proof and is not asked for one.
+    let (status, invalid) = harness
+        .send(req(
+            "POST",
+            grants,
+            Some(json!({ "all": true, "access": "code" })),
+        ))
+        .await;
+    assert!(
+        status == 400 && !asks(status, &invalid),
+        "{status} {invalid}"
+    );
+    // Human-only: an agent's token is refused before the handler, code or not.
+    let guard = bridge();
+    let token = guard.value().to_owned();
+    let (status, _) = harness
+        .send(
+            req("POST", grants, Some(code_grant))
+                .bearer(&token)
+                .code(&harness.codes[1]),
+        )
+        .await;
+    assert_eq!(status, 403);
+
+    // A request for code on another project: approving it asks, narrowing it to
+    // planning does not.
+    let id = harness
+        .state
+        .db
+        .with_conn(|conn| {
+            match file_request(
+                conn,
+                "room",
+                Some("docs"),
+                "docs",
+                ScopeAccess::Code,
+                "needed",
+                "@claude",
+            )? {
+                Filed::New(request) => Ok(request.id),
+                other => anyhow::bail!("{other:?}"),
+            }
+        })
+        .await
+        .unwrap();
+    let approve = format!("/api/discussions/room/scope/requests/{id}/approve");
+    let (status, refused) = harness.send(req("POST", &approve, Some(json!({})))).await;
+    assert!(asks(status, &refused), "{status} {refused}");
+    let (status, narrowed) = harness
+        .send(req("POST", &approve, Some(json!({ "access": "plan" }))))
+        .await;
+    assert_eq!(status, 200, "{narrowed}");
+}
+
+/// Without an enrolment the same grant goes through as before.
+#[tokio::test]
+async fn granting_code_asks_nothing_when_no_confirmation_is_enrolled() {
+    let harness = Harness::new(false).await;
+    room_with_projects(&harness).await;
+    let (status, done) = harness
+        .send(req(
+            "POST",
+            "/api/discussions/room/scope/grants",
+            Some(json!({ "project_id": "infra", "access": "code" })),
+        ))
+        .await;
+    assert_eq!(status, 200, "{done}");
+}

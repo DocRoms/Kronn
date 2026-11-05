@@ -319,7 +319,9 @@ async fn artifacts_directory_is_read_only(fixture: &mut Fixture) {
     );
     assert_eq!(
         settings["sandbox"]["filesystem"]["denyWrite"],
-        serde_json::json!([artifacts])
+        serde_json::json!(std::iter::once(artifacts.to_string_lossy().into_owned())
+            .chain(kronn::core::vault_guard::claude_sandbox_deny_read())
+            .collect::<Vec<_>>())
     );
     assert_eq!(settings["sandbox"]["failIfUnavailable"], true);
 

@@ -3798,11 +3798,14 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             return Err("room checkouts and read_only_repos are separate read policies".into());
         }
         let work_dir = resolve_agent_work_dir(config.work_dir, config.project_path)?;
-        super::read_only_repos::ReadOnlyRepos::resolve_room(
-            config.agent_type,
-            &work_dir,
-            config.room_checkouts,
-        )?
+        // The scan for secrets and the Git read are blocking: off the executor.
+        let agent_type = config.agent_type.clone();
+        let checkouts = config.room_checkouts.to_vec();
+        tokio::task::spawn_blocking(move || {
+            super::read_only_repos::ReadOnlyRepos::resolve_room(&agent_type, &work_dir, &checkouts)
+        })
+        .await
+        .map_err(|error| format!("room policy resolution failed: {error}"))??
     } else if !has_read_only_paths {
         None
     } else {
@@ -4452,20 +4455,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     config.project_path,
                 )?)
             } else if let Some(policy) = &read_only_repos {
-                let (_, _, mut args, _, _, _) = agent_command_with_task_worker_policy(
-                    config.agent_type,
-                    "",
-                    false,
-                    "",
-                    None,
-                    None,
-                    false,
-                    None,
-                    None,
-                );
-                policy.apply(config.agent_type, &work_dir, &mut args);
-                args.pop();
-                Some(args)
+                Some(adapter_policy_args(config.agent_type, &work_dir, policy))
             } else {
                 None
             };
@@ -5042,6 +5032,41 @@ async fn start_adapted_acp(
         transport,
     )
     .await
+}
+
+/// The command line the ACP adapter route spawns a policy-confined agent with
+/// (read-only repositories, a room's checkouts): the direct route's own, policy
+/// applied, without the prompt (the adapter adds it). A new adapter, so new
+/// arguments, is built for every launch: a grant that changed, a `code` grant
+/// that was revoked included, applies from the next turn.
+pub(crate) fn adapter_policy_args(
+    agent_type: &AgentType,
+    work_dir: &Path,
+    policy: &super::read_only_repos::ReadOnlyRepos,
+) -> Vec<String> {
+    let (_, _, mut args, _, _, _) = agent_command_with_task_worker_policy(
+        agent_type, "", false, "", None, None, false, None, None,
+    );
+    policy.apply(agent_type, work_dir, &mut args);
+    args.pop();
+    args
+}
+
+/// The direct CLI route's command line for a policy-confined launch: the CLI's
+/// own builder, the policy applied, the prompt last. Tests compare it with
+/// [`adapter_policy_args`].
+#[cfg(test)]
+pub(crate) fn direct_policy_args(
+    agent_type: &AgentType,
+    prompt: &str,
+    work_dir: &Path,
+    policy: &super::read_only_repos::ReadOnlyRepos,
+) -> Vec<String> {
+    let (_, _, mut args, _, _, _) = agent_command_with_task_worker_policy(
+        agent_type, prompt, false, "", None, None, false, None, None,
+    );
+    policy.apply(agent_type, work_dir, &mut args);
+    args
 }
 
 /// Bounds of a readiness probe's ACP handshake (KT-1107).

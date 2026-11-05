@@ -38,7 +38,7 @@ use crate::core::docs_location::DocsRoot;
 
 /// Files and folders outside the root that Kronn (or the agent CLI it
 /// launches) owns: root pointers, per-agent instruction and MCP config.
-const KRONN_OWNED: &[&str] = &[
+pub(crate) const KRONN_OWNED: &[&str] = &[
     "AGENTS.md",
     "CLAUDE.md",
     "GEMINI.md",

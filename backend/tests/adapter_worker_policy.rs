@@ -402,7 +402,15 @@ esac
                         .unwrap();
                         check(
                             settings["sandbox"]["filesystem"]["denyWrite"]
-                                == serde_json::json!([linked.canonicalize().unwrap()]),
+                                == serde_json::json!(std::iter::once(
+                                    linked
+                                        .canonicalize()
+                                        .unwrap()
+                                        .to_string_lossy()
+                                        .into_owned()
+                                )
+                                .chain(kronn::core::vault_guard::claude_sandbox_deny_read())
+                                .collect::<Vec<_>>()),
                             "linked repo must be unwritable by subprocesses",
                         );
                         check(

@@ -358,9 +358,18 @@ owning public object is the addressable boundary.
   to report progress.
 - A room plans in its own project. When a task belongs in another project
   (one sub-task per repository), `room_scope()` shows what the room reaches and
-  `room_scope({project, access: "write", reason})` asks the human for it: the
-  request grants nothing, a human approves it in the room, then `task_create`
-  with `project_ids` naming that project succeeds. Grants never open another
+  `room_scope({project, access, reason})` asks the human for it (`access` is
+  `read`, `plan` or `code`; the stored and wire value `write` of older versions
+  is read as `plan`): the request grants nothing, a human approves, narrows or
+  declines it in the room, then `task_create` with `project_ids` naming that
+  project succeeds for `plan` and `code`. `plan` is planning in Kronn's tools
+  and the project's files read-only; `code` adds editing that project's
+  checkout like the room's own, for Claude Code only (its file grant is applied
+  by the launch: a writable `--add-dir`, the Git config and hooks, the agent
+  settings files and every secret refused). An agent running with full access
+  ignores the room scope altogether, so a `code` grant is not enforced for it
+  and it is told so. Granting `code` asks for the strong confirmation when one
+  is enrolled. Grants never open another
   project's credentials or workflows, and reach only the room's own agents: a
   workflow step reaches another project only through the scope a human
   validated on its workflow (`docs/design/discussion-project-scope.md`).
@@ -647,12 +656,12 @@ A running audit does not defer the reload: it runs detached on the
 backend and the bridge only subscribes to its SSE. Retry the refused mutation once with the same idempotency
 key. If preflight, handoff or reexec fails, the bridge stops automatic attempts and
 reports one precise manual reconnect/recovery action instead.
-`[src: file: backend/scripts/disc-introspection-mcp.py:10895-10904#_require_fresh_bridge]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11721-11778#_bridge_stale_result]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11505-11570#_schedule_bridge_reload]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11573-11692#_perform_scheduled_bridge_reload]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10902-10911#_require_fresh_bridge]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11728-11785#_bridge_stale_result]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11512-11577#_schedule_bridge_reload]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11580-11699#_perform_scheduled_bridge_reload]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:2887-2959#_restore_reload_handoff]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:11695-11718#_close_inherited_reload_artifact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:11702-11725#_close_inherited_reload_artifact]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:12350-12363#list_changed]`
 `[src: file: backend/scripts/test_disc_introspection_mcp.py:9006-9022#test_reload_is_not_deferred_by_a_detached_full_audit]`
 
@@ -662,7 +671,7 @@ identical contents is not stale. `task_exec_status` remains available for
 recovery; every orchestration mutation stays fail-closed until the fresh bridge
 is ready.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4068-4154#_attempt_resume]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10891-10902#_bridge_freshness]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10898-10909#_bridge_freshness]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:10906-10917#_GUARDED_ORCHESTRATION_TOOLS]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
@@ -814,7 +823,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:12960-13010#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2640-2668#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:12989-13039#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2640-2668#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5864-5896#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:5891-5904#_spawned_task_worker_mode]`
 
@@ -868,7 +877,7 @@ The MCP `initialize` instructions expose this contract before any room tool is
 called, and `disc_join` repeats it in the room protocol. The full document and
 diagram examples remain on demand in the Kronn Docs skill so the permanent MCP
 catalogue does not pay for a long manual.
-`[src: file: backend/scripts/disc-introspection-mcp.py:12131-12137#first_contact]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:12138-12144#first_contact]`
 `[src: file: frontend/src/components/MermaidDiagram.tsx:111-119#validRoots]`
 `[src: file: backend/src/api/disc_prompts.rs:469-474#rich_output_notice]`
 `[src: file: backend/src/api/disc_invite.rs:583-713#join_next_steps]`
@@ -1209,7 +1218,7 @@ shared orientation supplies the join manual, wait manual and initialize text.
 This is a source instruction contract, not a guarantee that a running host has
 loaded or follows it. See [the diagnosis and qualification](../../gotchas/joined-cli-work-loop.md).
 [src: file: backend/scripts/disc-introspection-mcp.py:10063-10086#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:10739-10745#TOOL_MANUALS]
+[src: file: backend/scripts/disc-introspection-mcp.py:10746-10752#TOOL_MANUALS]
 
 The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, OpenCode → OpenCode, …), then from the parent command line, so no env-var prep is needed. An unidentified CLI joins as `Unknown`: it can read and post, but no implicit turn is routed to it. Set `KRONN_AGENT_TYPE` to name it explicitly.
 

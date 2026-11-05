@@ -30,11 +30,11 @@ function useWorkflowScope(workflowId: string) {
 }
 
 function accessLabel(t: T, access: ScopeAccess) {
-  return access === 'write' ? t('disc.scopeWrite') : t('disc.scopeRead');
+  return access === 'plan' ? t('disc.scopePlan') : t('disc.scopeRead');
 }
 
 function chipAccess(t: T, access: ScopeAccess) {
-  return (access === 'write' ? t('wf.scopeLevelWrite') : t('wf.scopeLevelRead')).toLocaleLowerCase();
+  return (access === 'plan' ? t('wf.scopeLevelPlan') : t('wf.scopeLevelRead')).toLocaleLowerCase();
 }
 
 /** On a launch card: what this workflow's run will reach, and whether the
@@ -65,7 +65,7 @@ function LevelPicker({
   const options: Array<[Level, string]> = [
     ['none', t('wf.scopeNone')],
     ['read', t('wf.scopeLevelRead')],
-    ['write', t('wf.scopeLevelWrite')],
+    ['plan', t('wf.scopeLevelPlan')],
   ];
   return (
     <div className="wfs-level" role="radiogroup" aria-label={label}>
@@ -122,7 +122,7 @@ export function WorkflowScopeEditor({
       .sort((a, b) => Number(b.id in stored.levels) - Number(a.id in stored.levels) || a.name.localeCompare(b.name));
   }, [projects, ownProjectId, query, stored]);
   const chosen = Object.keys(current.levels).length;
-  const allWrite = current.all === 'write';
+  const allWrite = current.all === 'plan';
   // The server asks for the typed confirmation on every validation that keeps
   // every project in write (a revalidation, another project changed), not only
   // the first one: the form asks for it each time too.

@@ -24,7 +24,13 @@ pub const MAX_PENDING_REQUESTS: usize = 5;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GrantedProjects {
     pub read: HashSet<String>,
+    /// Projects whose planning the room changes (`plan` and `code`).
     pub write: HashSet<String>,
+    /// Projects whose checkout the room's agent edits (`code`, KT-1491). Always
+    /// also in `write` and `read`; a code grant opens nothing more in Kronn's
+    /// tools than a plan grant does.
+    pub code: HashSet<String>,
+    /// Every project, at most `plan`: `code` names one project.
     pub all: Option<ScopeAccess>,
     /// A room without a project may write the general resources.
     pub general: bool,
@@ -38,14 +44,12 @@ impl GrantedProjects {
     pub fn merge(&mut self, other: GrantedProjects) {
         self.read.extend(other.read);
         self.write.extend(other.write);
+        self.code.extend(other.code);
         self.general |= other.general;
         self.general_own.extend(other.general_own);
         self.all = match (self.all, other.all) {
-            (Some(ScopeAccess::Write), _) | (_, Some(ScopeAccess::Write)) => {
-                Some(ScopeAccess::Write)
-            }
-            (Some(_), _) | (_, Some(_)) => Some(ScopeAccess::Read),
-            (None, None) => None,
+            (Some(a), Some(b)) => Some(a.stronger(b)),
+            (a, b) => a.or(b),
         };
     }
 }
@@ -137,18 +141,22 @@ pub fn granted_projects(conn: &Connection, discussion_ids: &[String]) -> Result<
         let (project, access, source) = row?;
         let access = ScopeAccess::parse(&access)?;
         if ScopeGrantSource::parse(&source)? == ScopeGrantSource::General {
-            granted.general |= access == ScopeAccess::Write;
+            granted.general |= access.plans();
             continue;
         }
         match project {
             None => {
-                granted.all = Some(match (granted.all, access) {
-                    (Some(ScopeAccess::Write), _) | (_, ScopeAccess::Write) => ScopeAccess::Write,
-                    _ => ScopeAccess::Read,
-                });
+                granted.all = Some(
+                    granted
+                        .all
+                        .map_or(access, |current| current.stronger(access)),
+                );
             }
             Some(project) => {
-                if access == ScopeAccess::Write {
+                if access == ScopeAccess::Code {
+                    granted.code.insert(project.clone());
+                }
+                if access.plans() {
                     granted.write.insert(project.clone());
                 }
                 granted.read.insert(project);
@@ -203,9 +211,8 @@ pub fn room_reach(conn: &Connection, discussion_id: &str) -> Result<RoomReach> {
         if grant.source == ScopeGrantSource::General {
             continue;
         }
-        let stronger = |current: Option<ScopeAccess>| match (current, grant.access) {
-            (Some(ScopeAccess::Write), _) | (_, ScopeAccess::Write) => ScopeAccess::Write,
-            _ => ScopeAccess::Read,
+        let stronger = |current: Option<ScopeAccess>| {
+            current.map_or(grant.access, |current| current.stronger(grant.access))
         };
         match &grant.project_id {
             None => every = Some(stronger(every)),
@@ -231,11 +238,8 @@ pub fn room_reach(conn: &Connection, discussion_id: &str) -> Result<RoomReach> {
             continue;
         }
         let access = match (by_project.get(&id).copied(), every) {
-            (Some(ScopeAccess::Write), _) | (_, Some(ScopeAccess::Write)) => {
-                Some(ScopeAccess::Write)
-            }
-            (Some(_), _) | (_, Some(_)) => Some(ScopeAccess::Read),
-            (None, None) => None,
+            (Some(own), Some(all)) => Some(own.stronger(all)),
+            (own, all) => own.or(all),
         };
         match access {
             Some(access) => reach.granted.push(ReachedProject {
@@ -407,7 +411,13 @@ fn check_target(
     discussion_id: &str,
     project: Option<&str>,
     source: ScopeGrantSource,
+    access: ScopeAccess,
 ) -> Result<()> {
+    // Code opens a checkout for the agent to edit: one named project, decided by
+    // a human for it, never every project nor the general resources.
+    if access == ScopeAccess::Code && (project.is_none() || source == ScopeGrantSource::General) {
+        return invalid("code access names one project: it is never granted for every project");
+    }
     let Some(primary) = primary_project(conn, discussion_id)? else {
         return Err(ScopeError::NotFound("discussion not found".into()).into());
     };
@@ -538,7 +548,8 @@ fn grant_receipt(conn: &Connection, grant: &DiscussionProjectGrant) -> Result<()
     let what = match (grant.source, grant.access) {
         (ScopeGrantSource::General, _) => "write",
         (_, ScopeAccess::Read) => "read",
-        (_, ScopeAccess::Write) => "write (planning)",
+        (_, ScopeAccess::Plan) => "plan (planning in Kronn's tools; its files stay read-only)",
+        (_, ScopeAccess::Code) => "code (the agent edits its checkout like its own)",
     };
     receipt(
         conn,
@@ -575,7 +586,7 @@ pub fn grant(
     source: ScopeGrantSource,
     granted_by: &str,
 ) -> Result<DiscussionProjectGrant> {
-    check_target(conn, discussion_id, project, source)?;
+    check_target(conn, discussion_id, project, source, access)?;
     let tx = conn.unchecked_transaction()?;
     let id = insert_grant(
         &tx,
@@ -705,9 +716,10 @@ pub fn file_request(
         let granted = granted_projects(conn, &[discussion_id.to_owned()])?;
         let reached = match access {
             ScopeAccess::Read => granted.all.is_some() || granted.read.contains(project_id),
-            ScopeAccess::Write => {
-                granted.all == Some(ScopeAccess::Write) || granted.write.contains(project_id)
+            ScopeAccess::Plan => {
+                granted.all.is_some_and(|all| all.plans()) || granted.write.contains(project_id)
             }
+            ScopeAccess::Code => granted.code.contains(project_id),
         };
         if reached {
             return Ok(Filed::AlreadyGranted);
@@ -778,8 +790,8 @@ pub fn file_request(
 }
 
 /// [`file_request`], then KT-1492: when the room's trust level grants this kind
-/// of request on its own (Trusted: read, and planning write, on one of the
-/// user's registered projects), the request is decided at once, as the level,
+/// of request on its own (Trusted: read, and planning, on one of the user's
+/// registered projects; Full: code, KT-1491), the request is decided at once, as the level,
 /// and the grant is journalled. A name that matches no project stays pending
 /// for a human to decline, like any request; so does a request the level does
 /// not cover, or one that cannot be decided. A request already pending for the
@@ -816,13 +828,17 @@ pub fn file_request_with_trust(
     let Some(project) = request.project_id.as_deref() else {
         return Ok((filed, None));
     };
-    let access = match (request.access, access) {
-        (ScopeAccess::Write, ScopeAccess::Write) => ScopeAccess::Write,
-        _ => ScopeAccess::Read,
+    let access = if request.access.covers(access) {
+        access
+    } else {
+        request.access
     };
     let approval = match access {
         ScopeAccess::Read => crate::models::TrustApproval::RoomScopeRead,
-        ScopeAccess::Write => crate::models::TrustApproval::RoomScopePlan,
+        ScopeAccess::Plan => crate::models::TrustApproval::RoomScopePlan,
+        // Only the Full level opens a checkout for editing on its own; under
+        // Standard and Trusted a human decides each one.
+        ScopeAccess::Code => crate::models::TrustApproval::CodeWriteOtherProject,
     };
     let origin = crate::db::trust::TrustOrigin::room(discussion_id);
     let Some(trust) = crate::db::trust::level_grants(conn, &origin, approval)? else {
@@ -878,11 +894,15 @@ pub fn decide(
     if request.status != ScopeRequestStatus::Pending {
         return Err(ScopeError::Conflict("this request was already decided".into()).into());
     }
-    let granted_access = match (approve, request.access) {
-        (Some(ScopeAccess::Write), ScopeAccess::Read) => {
-            return invalid("a request for read access cannot be approved for write")
+    let granted_access = match approve {
+        Some(access) if !request.access.covers(access) => {
+            return invalid(&format!(
+                "a request for {} access cannot be approved for {}",
+                request.access.as_str(),
+                access.as_str()
+            ))
         }
-        (access, _) => access,
+        access => access,
     };
     if granted_access.is_some() {
         let Some(project) = request.project_id.as_deref() else {
@@ -893,6 +913,7 @@ pub fn decide(
             discussion_id,
             Some(project),
             ScopeGrantSource::Request,
+            granted_access.unwrap_or(request.access),
         )?;
     }
     let tx = conn.unchecked_transaction()?;
@@ -1157,7 +1178,7 @@ pub fn run_granted_projects(conn: &Connection, run_id: &str) -> Result<GrantedPr
             granted.all = Some(access);
             continue;
         }
-        if access == ScopeAccess::Write {
+        if access.plans() {
             granted.write.insert(project_id.clone());
         }
         granted.read.insert(project_id);
