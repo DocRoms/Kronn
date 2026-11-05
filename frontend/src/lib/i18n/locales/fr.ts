@@ -3265,6 +3265,8 @@ const fr: TranslationDict = {
   'settings.discussionNotes': 'Notes de discussion hors contexte',
   'settings.discussionNotesHint': "Affiche dans le compositeur le bouton permettant d'ajouter une note visible dans la conversation, mais non transmise aux agents par défaut.",
   'settings.exposeSecurityNote': "⚠️ L'API devient joignable depuis ton réseau. Kronn crée un token d'accès réseau : un appareil ou un pair devra le fournir (Réglages › Serveur et accès réseau). Cette machine n'en a pas besoin.",
+  'settings.exposeDockerTitle': "L'exposition réseau dépend de KRONN_BIND",
+  'settings.exposeDockerNote': "Cette instance tourne dans Docker : le backend écoute toujours sur 0.0.0.0 dans le conteneur, et c'est KRONN_BIND, l'adresse sur laquelle le port est publié sur l'hôte (actuellement {0}), qui décide si d'autres appareils peuvent l'atteindre. Définis KRONN_BIND=0.0.0.0 dans ton .env ou l'environnement compose puis recrée le conteneur pour autoriser les autres appareils (l'API exige alors un token d'accès réseau) ; garde 127.0.0.1 pour cette machine seule.",
   'settings.exposeRestartRequired': 'Redémarrage requis pour appliquer le changement de liaison réseau.',
   'settings.exposeRestartBtn': 'Redémarrer Kronn',
   'settings.desktopPort': 'Port du bureau',

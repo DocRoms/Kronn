@@ -6200,14 +6200,25 @@ name: string, ok: boolean, };
  */
 export type NetworkExposure = {
 /**
- * Configured to bind a network-reachable address (`0.0.0.0`/`::`), not just localhost.
+ * Reachable from other machines. Native: the configured host is a bind-all
+ * address. Docker: the host port publish (`KRONN_BIND`) is not loopback.
  */
 exposed: boolean,
 /**
  * The configured exposure differs from what the process bound at boot →
- * a restart is needed for it to take effect.
+ * a restart is needed for it to take effect. Never true in Docker, where
+ * the exposure is set by `KRONN_BIND` in the compose file, not by Settings.
  */
-restart_required: boolean, port: number,
+restart_required: boolean,
+/**
+ * Running in a container: exposure is controlled by `KRONN_BIND`, so the
+ * Settings toggle has no effect and the UI explains `KRONN_BIND` instead.
+ */
+in_docker: boolean,
+/**
+ * The `KRONN_BIND` value in force (Docker only), when set.
+ */
+kronn_bind: string | null, port: number,
 /**
  * Reachable addresses (LAN + Tailscale) a peer could use to reach us.
  */

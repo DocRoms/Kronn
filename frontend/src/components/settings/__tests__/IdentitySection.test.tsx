@@ -263,6 +263,28 @@ describe('IdentitySection — network exposure toggle', () => {
     expect(onExposureChange).toHaveBeenCalledWith(expect.objectContaining({ exposed: true, auth_token_set: true }));
   });
 
+  it('in Docker explains KRONN_BIND instead of offering an inert switch', async () => {
+    config.getNetworkExposure.mockResolvedValue({ exposed: true, restart_required: false, in_docker: true, kronn_bind: '0.0.0.0', port: 3140, reachable_ips: [], auth_token_set: true });
+    await mountIdentity();
+
+    expect(screen.queryByTestId('expose-network-toggle')).not.toBeInTheDocument();
+    expect(screen.getByTestId('expose-docker-note')).toBeInTheDocument();
+    expect(screen.getByText('settings.networkReachable')).toBeInTheDocument();
+    expect(screen.queryByText('settings.exposeRestartRequired')).not.toBeInTheDocument();
+    // An exposed Docker instance keeps the security warning.
+    expect(screen.getByText('settings.exposeSecurityNote')).toBeInTheDocument();
+  });
+
+  it('in Docker with KRONN_BIND on loopback shows no security note', async () => {
+    config.getNetworkExposure.mockResolvedValue({ exposed: false, restart_required: false, in_docker: true, kronn_bind: '127.0.0.1', port: 3140, reachable_ips: [], auth_token_set: false });
+    await mountIdentity();
+
+    expect(screen.getByTestId('expose-docker-note')).toBeInTheDocument();
+    expect(screen.getByText('settings.networkLocalOnly')).toBeInTheDocument();
+    expect(screen.queryByText('settings.exposeSecurityNote')).not.toBeInTheDocument();
+    expect(screen.queryByText('settings.exposeRestartRequired')).not.toBeInTheDocument();
+  });
+
   it('saves the interface preferences server-side before the desktop restarts', async () => {
     const calls: string[] = [];
     flushUiPreferences.mockImplementation(async () => { calls.push('flush'); });

@@ -19,7 +19,7 @@ loss = **lost forever** without a copy.
 
 Kronn writes three kinds of copies. The scheduled one is built from the
 environment by `[src: file: backend/src/core/backup.rs:316-330#BackupScheduler]`;
-the manual one is `[src: file: backend/src/api/setup.rs:1735-1746#db_backup]`;
+the manual one is `[src: file: backend/src/api/setup.rs:1776-1787#db_backup]`;
 the pre-migration one is described below.
 
 | Copy | When | Where |

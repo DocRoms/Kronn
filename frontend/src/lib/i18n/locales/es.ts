@@ -3255,6 +3255,8 @@ const es: TranslationDict = {
   'settings.discussionNotes': 'Notas de discusión fuera de contexto',
   'settings.discussionNotesHint': 'Muestra un control en el editor para añadir notas visibles en la conversación que no se envían a los agentes por defecto.',
   'settings.exposeSecurityNote': "⚠️ La API pasa a ser accesible desde tu red. Kronn crea un token de acceso de red: un dispositivo o un par deberá proporcionarlo (Ajustes › Servidor y acceso de red). Esta máquina no lo necesita.",
+  'settings.exposeDockerTitle': "La exposición de red depende de KRONN_BIND",
+  'settings.exposeDockerNote': "Esta instancia se ejecuta en Docker: el backend siempre escucha en 0.0.0.0 dentro del contenedor, y lo que decide si otros dispositivos pueden alcanzarla es KRONN_BIND, la dirección en la que se publica el puerto del host (actualmente {0}). Define KRONN_BIND=0.0.0.0 en tu .env o en el entorno de compose y recrea el contenedor para permitir otros dispositivos (la API exigirá entonces un token de acceso de red); mantén 127.0.0.1 solo para esta máquina.",
   'settings.exposeRestartRequired': 'Reinicio necesario para aplicar el cambio de enlace de red.',
   'settings.exposeRestartBtn': 'Reiniciar Kronn',
   'settings.desktopPort': 'Puerto de escritorio',
