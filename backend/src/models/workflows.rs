@@ -1977,7 +1977,8 @@ impl RunStatus {
 pub enum QuotaParkReason {
     /// The refusal named no reset time Kronn can trust.
     NoResetTime,
-    /// The reset falls after the workflow's absolute timeout guard.
+    /// Legacy: an older engine parked a reset past the wall-clock timeout.
+    /// The wake sweep now schedules these from their reset.
     AfterDeadline,
     /// The provider kept refusing after several automatic wake-ups.
     TooManyAttempts,

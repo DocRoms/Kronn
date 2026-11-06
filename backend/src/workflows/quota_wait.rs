@@ -169,13 +169,13 @@ fn backoff_floor(attempt: u32) -> Duration {
 }
 
 /// Decides how the quota-refused step waits and records the attempt on the run.
-/// `deadline` is the workflow's absolute timeout: the wait counts against it.
+/// The provider wait is paused time, so it does not consume the workflow's
+/// active-execution timeout.
 pub fn plan_wait(
     run_state: &mut std::collections::HashMap<String, String>,
     step_name: &str,
     classified: QuotaWait,
     now: DateTime<Utc>,
-    deadline: DateTime<Utc>,
 ) -> QuotaWait {
     let attempt = previous_attempts(run_state, step_name) + 1;
     run_state.insert(
@@ -196,10 +196,6 @@ pub fn plan_wait(
         return wait;
     }
     let wake_at = (reset_at + RESET_MARGIN).max(now + backoff_floor(attempt));
-    if wake_at >= deadline {
-        wait.parked = Some(QuotaParkReason::AfterDeadline);
-        return wait;
-    }
     wait.wake_at = Some(wake_at);
     wait
 }
@@ -274,7 +270,8 @@ pub async fn wake_due_runs(state: &AppState, now: DateTime<Utc>) -> Vec<String> 
         }
     };
     let mut resumed = Vec::new();
-    for run in runs {
+    for mut run in runs {
+        reschedule_after_deadline(state, &mut run, now).await;
         let due = pending_wait(&run)
             .and_then(|wait| wait.wake_at)
             .is_some_and(|wake_at| wake_at <= now);
@@ -299,6 +296,61 @@ pub async fn wake_due_runs(state: &AppState, now: DateTime<Utc>) -> Vec<String> 
         }
     }
     resumed
+}
+
+/// How old a legacy `AfterDeadline` park's reset may be and still wake on its own.
+const LEGACY_PARK_MAX_AGE: chrono::Duration = chrono::Duration::hours(24);
+
+/// A wait parked `AfterDeadline` by an engine that counted the pause against
+/// the timeout has no wake; its reset now schedules one like any other.
+/// A park whose reset is older than [`LEGACY_PARK_MAX_AGE`] stays for a human:
+/// the run was left alone long enough that its repository may have moved on.
+async fn reschedule_after_deadline(state: &AppState, run: &mut WorkflowRun, now: DateTime<Utc>) {
+    let Some(wait) = pending_wait(run) else {
+        return;
+    };
+    if wait.parked != Some(QuotaParkReason::AfterDeadline) || wait.wake_at.is_some() {
+        return;
+    }
+    let Some(reset_at) = wait.reset_at else {
+        return;
+    };
+    if now - reset_at > LEGACY_PARK_MAX_AGE {
+        return;
+    }
+    let wake_at = reset_at + RESET_MARGIN;
+    let wait_id = wait.id.clone();
+    let run_id = run.id.clone();
+    let step_index = run.step_results.len() - 1;
+    let rescheduled = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::reschedule_after_deadline_wait(
+                conn,
+                &run_id,
+                step_index,
+                wait_id.as_deref(),
+                wake_at,
+            )
+        })
+        .await;
+    match rescheduled {
+        Ok(true) => {
+            if let Some(wait) = run
+                .step_results
+                .last_mut()
+                .and_then(|step| step.quota_wait.as_mut())
+            {
+                wait.wake_at = Some(wake_at);
+                wait.parked = None;
+                wait.detail = None;
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(run_id = %run.id, "could not reschedule a parked quota wait: {error}");
+        }
+    }
 }
 
 async fn wake_one(state: &AppState, workflow: Workflow, mut run: WorkflowRun) -> Option<String> {
