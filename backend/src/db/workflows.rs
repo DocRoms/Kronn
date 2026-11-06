@@ -2468,6 +2468,42 @@ pub fn reschedule_after_deadline_wait(
     Ok(n == 1)
 }
 
+/// KT-1556 — fails a quota-waiting child once its parent has ended, CAS on
+/// the wait: only the parent resumes a child, so an ended parent never will.
+pub fn fail_orphaned_quota_wait(
+    conn: &Connection,
+    run_id: &str,
+    step_index: usize,
+    wait_id: Option<&str>,
+) -> Result<bool> {
+    let path = format!("$[{step_index}]");
+    let n = conn.execute(
+        &format!(
+            "UPDATE workflow_runs
+             SET status = 'Failed', finished_at = ?3,
+                 step_results_json = json_set(
+                     json_remove(step_results_json, '{path}.quota_wait.wake_at'),
+                     '{path}.status', 'Failed',
+                     '{path}.quota_wait.parked', 'not_resumable',
+                     '{path}.quota_wait.detail', 'its parent run ended while it waited')
+             WHERE id = ?1 AND {}
+               AND NOT EXISTS (
+                   SELECT 1 FROM workflow_runs parent
+                   WHERE parent.id = workflow_runs.parent_run_id
+                     AND parent.status IN
+                         ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota', 'Interrupted'))",
+            quota_wait_guard(step_index, 2)
+        ),
+        params![run_id, wait_id, Utc::now().to_rfc3339()],
+    )?;
+    if n == 1 {
+        if let Some(run) = get_run(conn, run_id)? {
+            crate::db::shared_runs::sync_workflow(conn, &run)?;
+        }
+    }
+    Ok(n == 1)
+}
+
 /// KT-811 — runs parked on a provider quota, oldest first.
 pub fn list_quota_waiting_runs(conn: &Connection) -> Result<Vec<WorkflowRun>> {
     let sql = format!(
