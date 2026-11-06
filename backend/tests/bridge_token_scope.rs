@@ -4901,7 +4901,10 @@ async fn the_disk_report_is_scoped_to_the_token_s_project() {
     for entry in mine["data"]["entries"].as_array().unwrap() {
         assert_eq!(entry["project_id"], "p1", "{mine}");
     }
-    assert!(!mine.to_string().contains("p2"), "{mine}");
+    // The id as a value and the project's path, never a bare substring: a random
+    // temp dir name such as `.tmp2rh3X5` contains "p2".
+    let text = mine.to_string();
+    assert!(!text.contains("\"p2\"") && !text.contains("/p2"), "{mine}");
     assert!(
         mine["data"]["totals"]
             .as_array()
