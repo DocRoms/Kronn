@@ -156,7 +156,7 @@ without a reload.
 
 * `POST /api/media/generate`, `GET /api/media/jobs/{id}`,
   `POST /api/media/jobs/{id}/cancel`, `GET /api/media/costs`,
-  `GET /api/media/estimate`.
+  `GET /api/media/estimate`, `GET /api/media/models/list`.
 * UI: the discussion's **Assets** panel has three tabs. **Tout** is the
   inventory (search, filters, viewer). **Creator** is the launcher (modality,
   connection, prompt, duration / resolution / ratio, soundtrack, estimated
@@ -168,6 +168,26 @@ without a reload.
   native orchestration catalogue
   [src: file: backend/src/api/agent_tools.rs:1214-1254#media_generate]. The bridge route came
   first; the native one closed the half of the fleet that could not reach it.
+* Discovery: `media_models_list` and its HTTP route `GET /api/media/models/list`
+  report, per connection and per capability, every model the provider's
+  catalogue advertises — durations, resolutions, ratios, frame positions,
+  `reference_modes` — plus the model each connection has configured and
+  whether the catalogue names that exact model. Image-to-video eligibility
+  travels with the entry, so the agent never has to work it out from a null
+  reference count. `observed_unit_cost_usd` is what Kronn itself was billed
+  for that exact model, from past `media_jobs` rows; no sample means unknown,
+  never free. A catalogue that answers nothing reports its cause —
+  `unreachable`, `absent` (a provider with no media catalogue at all),
+  `unauthorized` or `unreadable` — and a model the catalogue never
+  mentions stays unknown, never "no". The local ComfyUI is listed from its built-in envelope
+  whenever a ComfyUI slot is configured, and each connection's decision
+  models come from the shared model catalogue — only the entries marked
+  with the `decision` capability, the same filter the Decision picker
+  applies
+  [src: file: backend/src/api/agent_tools.rs:1293-1298#media_models_list]
+  [src: file: backend/src/api/media.rs:1012-1040#models_list]. CLI agents
+  read the same report through the `kronn-internal` bridge
+  [src: file: backend/scripts/disc-introspection-mcp.py:11521-11542#media_models_list].
 * **The connection is optional (KT-686).** A generation names one, or names
   none and Kronn uses the only connection configured for that modality. When
   several can serve it, the request is refused with their names: choosing

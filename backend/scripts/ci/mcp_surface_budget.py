@@ -164,7 +164,7 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # net zero, ceiling unchanged.
 # KT-1345 + KT-1351 + #252 + #241 together, merged: measured 84_380 B.
 # KT-1491: `room_scope` levels read/plan/code, its description trimmed: 84_379 B.
-CATALOGUE_MAX_BYTES = 84_379
+CATALOGUE_MAX_BYTES = 84_374
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
@@ -173,7 +173,7 @@ CATALOGUE_MAX_BYTES = 84_379
 # Also corrected: this used to add raw `description` bytes to a separately
 # serialised schema, which counted neither the JSON envelope nor the escaping. It
 # now measures the whole declaration exactly as sent.
-DECLARATION_MAX_BYTES = 2_732
+DECLARATION_MAX_BYTES = 2_645
 
 # Tools allowed above DECLARATION_MAX_BYTES, with the reason. An entry here is a
 # debt acknowledged in writing, not an exemption to forget: shrink the tool and

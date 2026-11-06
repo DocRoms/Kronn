@@ -85,6 +85,29 @@ them — they are deliberately absent from the principal-only list a worker room
 [src: file: backend/src/api/agent_tools.rs:1543-1596#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
 discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1675-1709#orchestration_tool_catalogue].
 
+Beside them sits the discovery tool `media_models_list`
+[src: file: backend/src/api/agent_tools.rs:1293-1298#media_models_list]: per connection and per
+capability, every model the provider's catalogue advertises — durations, resolutions, ratios,
+frame positions, `reference_modes` — plus the model each connection has configured and whether
+the catalogue names that exact model. Image-to-video eligibility travels with the entry
+(`reference_modes`, from `advertised_modes`), so the agent never has to work it out from a null
+reference count. What Kronn itself was billed for each exact model rides along as
+`observed_unit_cost_usd`, read from past `media_jobs` rows in one pass
+[src: file: backend/src/db/media_jobs.rs:450-475#observed_unit_costs]; no sample means unknown,
+never free. A catalogue that answers nothing reports its cause: `unreachable`, `absent` (a
+provider with no media catalogue at all — a working connection, not a down one), `unauthorized`
+or `unreadable` — never an empty list pretending to be the whole story, and a model the
+catalogue never mentions stays unknown, never "no" [src: file: backend/src/api/media.rs:1027-1062#models_list]. The
+report also lists the local ComfyUI from its built-in envelope whenever a ComfyUI slot is
+configured, and each connection's decision models from the shared model catalogue
+(`http:<connection-id>`) — only the entries that declare the `decision` capability, the same
+filter the Decision picker applies, projected to the fields a recommendation needs. The same handler serves the HTTP route `GET /api/media/models/list`
+[src: file: backend/src/lib.rs:2369], so an agent and any HTTP client read one report. CLI
+agents read the same report through the `kronn-internal` bridge
+[src: file: backend/scripts/disc-introspection-mcp.py:2473-2480#media_models_list], with the full
+contract in its `TOOL_MANUALS` entry
+[src: file: backend/scripts/disc-introspection-mcp.py:10862-10886#media_models_list].
+
 Until then only CLI agents could generate an image or a video, because the tools were
 declared in the MCP bridge and an HTTP agent structurally cannot reach it. The capability
 existed and was announced to CLI agents by `kronn_intro`; the HTTP half of the fleet was
@@ -274,7 +297,7 @@ setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
 [src: file: backend/src/api/agent_tools.rs:357-437#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2601-2609#tools_load]
+[src: file: backend/src/api/agent_tools.rs:2595-2603#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -403,7 +426,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:884-912#extract]
-  [src: file: backend/src/api/agent_tools.rs:4948-4972#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4993-5017#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down
@@ -463,7 +486,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-467#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9623-9625#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9633-9635#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON
