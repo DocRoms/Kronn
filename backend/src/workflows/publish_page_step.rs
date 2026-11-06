@@ -168,7 +168,7 @@ fn from_exec(key: &str, value: &serde_json::Value, context: &TemplateContext) ->
 /// The `data` of an Exec envelope: its four keys and the optional flags.
 fn is_exec_data(value: &serde_json::Value) -> bool {
     const KEYS: [&str; 4] = ["exit_code", "stdout", "stderr", "duration_ms"];
-    const FLAGS: [&str; 2] = ["stdout_truncated", "stderr_truncated"];
+    const FLAGS: [&str; 3] = ["stdout_truncated", "stderr_truncated", "stdout_file"];
     value.as_object().is_some_and(|map| {
         KEYS.iter().all(|key| map.contains_key(*key))
             && map
@@ -194,6 +194,7 @@ fn exec_value(
     let truncated = match &value {
         serde_json::Value::String(text) => {
             text.contains(super::exec_step::TRUNCATION_MARKER_PREFIX)
+                || text.contains(super::exec_step::LEGACY_TRUNCATION_MARKER_PREFIX)
                 || flagged(&format!("{path}_truncated"))
         }
         serde_json::Value::Object(map) => ["stdout_truncated", "stderr_truncated"]
