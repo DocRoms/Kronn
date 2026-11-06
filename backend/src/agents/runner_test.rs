@@ -14467,6 +14467,610 @@ sleep 3600
         );
     }
 
+    // ── KT-1545: a model that keeps calling a tool after Kronn refused it ──
+
+    /// `probe` (twelve-call ceiling) and `other`, which has no ceiling to hit.
+    struct MixedTools {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::tools::ToolExecutor for MixedTools {
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            ["probe", "other"]
+                .into_iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": format!("Test tool {name}"),
+                            "parameters": { "type": "object", "properties": {} },
+                        },
+                    })
+                })
+                .collect()
+        }
+
+        async fn ceiling_allowance(&self) -> crate::agents::tools::CeilingAllowance {
+            asking()
+        }
+
+        async fn execute(
+            &self,
+            call: &crate::agents::tools::ToolCall,
+        ) -> crate::agents::tools::ToolOutcome {
+            self.seen.lock().unwrap().push(call.name.clone());
+            crate::agents::tools::ToolOutcome {
+                call: call.clone(),
+                content: serde_json::json!({ "from": call.name, "args": call.arguments.to_string() }),
+                ok: true,
+            }
+        }
+    }
+
+    /// One SSE frame carrying several tool calls, each `{"page": n}`.
+    fn tool_calls_frame(calls: &[(&str, usize)]) -> String {
+        let entries = calls
+            .iter()
+            .enumerate()
+            .map(|(index, (name, page))| {
+                format!(
+                    r#"{{"index":{index},"id":"c{index}-{page}","function":{{"name":"{name}","arguments":"{{\"page\":{page}}}"}}}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        sse(&[&format!(
+            r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{entries}]}}}}]}}"#
+        )])
+    }
+
+    /// `calls` calls to `name`, pages `first_page..`.
+    fn tool_call_frame(name: &str, first_page: usize, calls: usize) -> String {
+        let calls: Vec<(&str, usize)> = (first_page..first_page + calls)
+            .map(|page| (name, page))
+            .collect();
+        tool_calls_frame(&calls)
+    }
+
+    /// Room-visible refusal lines: the `[kronn-internal: …]` ones that failed.
+    fn failed_trace_lines(stderr: &[String]) -> Vec<&String> {
+        stderr
+            .iter()
+            .filter(|line| line.starts_with("[kronn-internal:") && line.contains("→ error"))
+            .collect()
+    }
+
+    async fn run_with_tools(
+        server: &wiremock::MockServer,
+        tools: std::sync::Arc<dyn crate::agents::tools::ToolExecutor>,
+    ) -> (String, Vec<String>, bool) {
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "review the diff",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(tools),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+        let mut text = String::new();
+        while let Some(line) = process.next_line().await {
+            text.push_str(&line);
+        }
+        let status = process.child.wait().await.expect("lifeline");
+        let stderr = process.captured_stderr_flushed().await;
+        (text, stderr, status.success())
+    }
+
+    /// The model ignores the withdrawal and asks again every round, each time
+    /// with a different page, so no exact-call guard can recognise it.
+    #[tokio::test]
+    async fn a_model_that_keeps_calling_a_capped_tool_is_stopped_after_a_few_refusals() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let round = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let request_body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("request body");
+                if request_body.get("tools").is_none() {
+                    return ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"partial answer after bounded convergence"}}]}"#,
+                    ]));
+                }
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string(tool_call_frame("probe", n, 1))
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (text, stderr, ok) = run_with_tools(
+            &server,
+            std::sync::Arc::new(MixedTools { seen: seen.clone() }),
+        )
+        .await;
+
+        let executed = seen.lock().unwrap().clone();
+        assert_eq!(executed.len(), 12, "the ceiling does not move");
+        assert!(
+            executed.iter().all(|name| name == "probe"),
+            "the unrelated tool is available but must not be executed: {executed:?}"
+        );
+        let requests = server.received_requests().await.expect("requests");
+        assert!(
+            requests.len() <= 12 + MAX_REFUSAL_ONLY_ROUNDS,
+            "the run must end after a short run of refusals, not {} requests",
+            requests.len()
+        );
+        assert!(
+            requests.iter().any(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let names = body["tools"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|tool| tool["function"]["name"].as_str())
+                    .collect::<Vec<_>>();
+                names == ["other"]
+            }),
+            "the capped tool must be withdrawn while the unrelated tool remains available"
+        );
+        assert!(
+            stderr
+                .iter()
+                .any(|line| line.contains("forced tool convergence")),
+            "{stderr:?}"
+        );
+        assert!(
+            !stderr.iter().any(|line| line.contains("stopping the run")),
+            "a discussion converges, it is never hard-stopped: {stderr:?}"
+        );
+        assert!(ok && text.contains("partial answer"), "{text:?}");
+        // The human card still has what it needs: the tool, its limit, a refusal.
+        let report = parse_ceiling_report(&stderr).expect("a ceiling report");
+        assert_eq!(
+            (report.tools[0].tool.as_str(), report.tools[0].limit),
+            ("probe", 12)
+        );
+        assert!(report.tools[0].refused >= 1);
+        // Refused calls are not each a room message.
+        assert!(
+            failed_trace_lines(&stderr).len() <= 2 * MAX_REFUSAL_TRACES_PER_TOOL,
+            "{:?}",
+            failed_trace_lines(&stderr)
+        );
+    }
+
+    /// One response may carry thousands of calls. Only a bounded number is
+    /// answered, the exchange stays balanced, and the card counts them all.
+    #[tokio::test]
+    async fn a_huge_same_response_batch_past_a_ceiling_is_bounded_and_balanced() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let round = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                if round.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200).set_body_string(tool_call_frame("probe", 0, 400))
+                } else {
+                    ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"partial answer"}}]}"#,
+                    ]))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (text, stderr, ok) = run_with_tools(
+            &server,
+            std::sync::Arc::new(CeilingTools {
+                seen: seen.clone(),
+                allowance: asking(),
+            }),
+        )
+        .await;
+
+        assert_eq!(seen.lock().unwrap().len(), 12);
+        assert!(ok && text.contains("partial answer"), "{text:?} {stderr:?}");
+        let requests = server.received_requests().await.expect("requests");
+        let second: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        let messages = second["messages"].as_array().unwrap();
+        let declared: usize = messages
+            .iter()
+            .filter_map(|message| message["tool_calls"].as_array())
+            .map(Vec::len)
+            .sum();
+        let answered = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .count();
+        assert_eq!(
+            (declared, answered),
+            (
+                12 + MAX_LOOP_REFUSALS_PER_RESPONSE,
+                12 + MAX_LOOP_REFUSALS_PER_RESPONSE
+            ),
+            "every declared call id is answered, and none beyond the bound is declared"
+        );
+        assert!(
+            messages.iter().any(|message| message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("dropped without being run"))),
+            "the model is told the rest was dropped"
+        );
+        // The card counts every call the model asked for past the ceiling.
+        let report = parse_ceiling_report(&stderr).expect("a ceiling report");
+        assert_eq!(report.tools[0].refused, 400 - 12);
+        assert!(
+            failed_trace_lines(&stderr).len() <= MAX_REFUSAL_TRACES_PER_TOOL,
+            "{:?}",
+            failed_trace_lines(&stderr)
+        );
+    }
+
+    /// Distinct invented paths all failing: the circuit opens after three, the
+    /// rest of the batch is refused up to the bound and then dropped.
+    #[tokio::test]
+    async fn a_huge_batch_of_not_found_errors_on_distinct_paths_is_bounded() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let round = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                if round.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200).set_body_string(tool_call_frame(
+                        "find_files",
+                        0,
+                        200,
+                    ))
+                } else {
+                    ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"partial answer"}}]}"#,
+                    ]))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (text, stderr, ok) = run_with_tools(
+            &server,
+            std::sync::Arc::new(ConvergenceTools {
+                seen: seen.clone(),
+                failing: ["find_files".to_string()].into_iter().collect(),
+            }),
+        )
+        .await;
+
+        assert_eq!(seen.lock().unwrap().len(), MAX_ERRORS_PER_TOOL);
+        assert!(ok && text.contains("partial answer"), "{text:?} {stderr:?}");
+        let requests = server.received_requests().await.expect("requests");
+        let second: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        let answered = second["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .count();
+        assert_eq!(
+            answered,
+            MAX_ERRORS_PER_TOOL + MAX_LOOP_REFUSALS_PER_RESPONSE
+        );
+    }
+
+    /// A useful call that follows the refused ones in the same response still runs.
+    #[tokio::test]
+    async fn a_useful_tool_after_a_refused_flood_in_one_response_still_runs() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let round = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                if round.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    // 12 allowed + 20 refused `probe` calls, then one `other`.
+                    let mut calls: Vec<(&str, usize)> =
+                        (0..32).map(|page| ("probe", page)).collect();
+                    calls.push(("other", 0));
+                    let flood = tool_calls_frame(&calls);
+                    ResponseTemplate::new(200).set_body_string(flood)
+                } else {
+                    ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"partial answer"}}]}"#,
+                    ]))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (text, _, ok) = run_with_tools(
+            &server,
+            std::sync::Arc::new(MixedTools { seen: seen.clone() }),
+        )
+        .await;
+
+        let calls = seen.lock().unwrap().clone();
+        assert_eq!(calls.iter().filter(|name| *name == "probe").count(), 12);
+        assert_eq!(
+            calls.iter().filter(|name| *name == "other").count(),
+            1,
+            "the unrelated tool must not be lost to the refused flood: {calls:?}"
+        );
+        assert!(ok && text.contains("partial answer"));
+    }
+
+    /// A worker keeps its tools after refusals, so nothing converges it: the
+    /// third refusal-only round is a hard stop, and a failure.
+    #[tokio::test]
+    async fn a_worker_asking_only_for_refused_tools_is_stopped_on_the_third_round() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let round = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string(tool_call_frame("Glob", n, 1))
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (_, stderr, ok) = run_with_tools(
+            &server,
+            std::sync::Arc::new(WorkerTools { seen: seen.clone() }),
+        )
+        .await;
+
+        assert!(!ok, "a worker without a deliverable fails: {stderr:?}");
+        assert!(seen.lock().unwrap().is_empty());
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), MAX_REFUSAL_ONLY_ROUNDS);
+        assert!(
+            stderr.iter().any(|line| line
+                .contains(&format!("for {MAX_REFUSAL_ONLY_ROUNDS} consecutive rounds"))
+                && line.contains("stopping the run")),
+            "{stderr:?}"
+        );
+        assert!(
+            !stderr
+                .iter()
+                .any(|line| line.contains("forced tool convergence")),
+            "a worker keeps its tools: {stderr:?}"
+        );
+    }
+
+    /// Audit mock: undeclared calls while exploring, then `stray_rounds` rounds
+    /// of the withdrawn `read_file` in the write phase, then one write.
+    async fn audit_refusal_provider(stray_rounds: usize) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let round = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let writing = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |request: &wiremock::Request| {
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let call = |name: &str, path: &str| {
+                    ResponseTemplate::new(200).set_body_string(sse(&[&format!(
+                        r#"{{"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"c{n}","function":{{"name":"{name}","arguments":"{{\"path\":\"{path}\"}}"}}}}]}}}}]}}"#
+                    )]))
+                };
+                if declared_names(&body) != ["write_file"] {
+                    return call("Glob", &format!("src/{n}"));
+                }
+                match writing.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    k if k < stray_rounds => call("read_file", &format!("missing-{n}.md")),
+                    k if k == stray_rounds => call("write_file", "docs/audit.md"),
+                    _ => ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"Audit written."}}]}"#,
+                    ])),
+                }
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Two refusal-only rounds open the write phase; one more stray round there
+    /// must not count as the third, so the deliverable is still written.
+    #[tokio::test]
+    async fn an_audit_still_writes_its_deliverable_after_refusal_convergence() {
+        let server = audit_refusal_provider(1).await;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (text, stderr, ok) = run_with_tools(
+            &server,
+            std::sync::Arc::new(AuditStuckReaderTools { seen: seen.clone() }),
+        )
+        .await;
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            ["write_file:docs/audit.md"],
+            "{stderr:?}"
+        );
+        assert!(ok && text.contains("Audit written."), "{text:?} {stderr:?}");
+        assert!(
+            stderr
+                .iter()
+                .any(|line| line.contains("forced tool convergence")),
+            "{stderr:?}"
+        );
+        assert!(
+            !stderr.iter().any(|line| line.contains("stopping the run")),
+            "{stderr:?}"
+        );
+    }
+
+    /// The write phase has its own bound: three refusal-only rounds in it stop
+    /// the audit, as a failure, without a write.
+    #[tokio::test]
+    async fn an_audit_write_phase_of_refusals_only_is_stopped_on_its_third_round() {
+        let server = audit_refusal_provider(usize::MAX).await;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (_, stderr, ok) = run_with_tools(
+            &server,
+            std::sync::Arc::new(AuditStuckReaderTools { seen: seen.clone() }),
+        )
+        .await;
+
+        assert!(!ok, "{stderr:?}");
+        assert!(seen.lock().unwrap().is_empty());
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(
+            requests.len(),
+            MAX_REFUSAL_ONLY_ROUNDS_BEFORE_SYNTHESIS + MAX_REFUSAL_ONLY_ROUNDS
+        );
+        assert!(
+            stderr.iter().any(|line| line
+                .contains(&format!("for {MAX_REFUSAL_ONLY_ROUNDS} consecutive rounds"))
+                && line.contains("stopping the run")),
+            "{stderr:?}"
+        );
+    }
+
+    /// A dropped call's tool result may not be an object: the model is told anyway.
+    #[tokio::test]
+    async fn the_dropped_calls_note_reaches_the_model_when_the_last_result_is_not_an_object() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        struct TextTools;
+
+        #[async_trait::async_trait]
+        impl crate::agents::tools::ToolExecutor for TextTools {
+            fn catalogue(&self) -> Vec<serde_json::Value> {
+                vec![serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": "other",
+                        "description": "Test tool other",
+                        "parameters": { "type": "object", "properties": {} },
+                    },
+                })]
+            }
+
+            async fn execute(
+                &self,
+                call: &crate::agents::tools::ToolCall,
+            ) -> crate::agents::tools::ToolOutcome {
+                crate::agents::tools::ToolOutcome {
+                    call: call.clone(),
+                    content: serde_json::json!("plain text result"),
+                    ok: true,
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        let round = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                if round.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    // Refused calls past the bound, then `other`, then more refused.
+                    let mut calls: Vec<(&str, usize)> = (0..MAX_LOOP_REFUSALS_PER_RESPONSE)
+                        .map(|page| ("Glob", page))
+                        .collect();
+                    calls.push(("other", 0));
+                    calls.extend((100..105).map(|page| ("Glob", page)));
+                    ResponseTemplate::new(200).set_body_string(tool_calls_frame(&calls))
+                } else {
+                    ResponseTemplate::new(200).set_body_string(sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"partial answer"}}]}"#,
+                    ]))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let (_, _, ok) = run_with_tools(&server, std::sync::Arc::new(TextTools)).await;
+
+        assert!(ok);
+        let requests = server.received_requests().await.expect("requests");
+        let second: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        let tool_messages: Vec<&serde_json::Value> = second["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .collect();
+        assert_eq!(tool_messages.len(), MAX_LOOP_REFUSALS_PER_RESPONSE + 1);
+        let last = tool_messages.last().unwrap()["content"].as_str().unwrap();
+        assert!(
+            last.contains("plain text result") && last.contains("dropped without being run"),
+            "{last}"
+        );
+    }
+
+    #[test]
+    fn only_kronns_own_anti_loop_refusals_count_as_loop_refusals() {
+        let outcome = |ok: bool, content: serde_json::Value| crate::agents::tools::ToolOutcome {
+            call: crate::agents::tools::ToolCall {
+                id: "c".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({}),
+            },
+            ok,
+            content,
+        };
+        for key in [
+            "round_ceiling_reached",
+            "undeclared_tool",
+            "tool_circuit_open",
+            "budget_exhausted",
+            "repeated_call_refused",
+        ] {
+            assert!(is_loop_refusal(&outcome(
+                false,
+                serde_json::json!({ key: true })
+            )));
+        }
+        // An executor's own failure, and a worker stage refusal, are not loops.
+        assert!(!is_loop_refusal(&outcome(
+            false,
+            serde_json::json!({ "error": "not found" })
+        )));
+        assert!(!is_loop_refusal(&outcome(
+            false,
+            serde_json::json!({ "prelocalized_scope_mismatch": true })
+        )));
+        assert!(!is_loop_refusal(&outcome(
+            true,
+            serde_json::json!({ "budget_exhausted": true })
+        )));
+    }
+
     #[test]
     fn the_round_ceiling_follows_the_model_window() {
         assert_eq!(
