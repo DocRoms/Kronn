@@ -2434,6 +2434,40 @@ pub fn park_quota_wait(
     Ok(n == 1)
 }
 
+/// KT-1562 — schedules the wake of a wait an older engine parked
+/// `after_deadline`. Compare-and-set on that same wait, like a park.
+pub fn reschedule_after_deadline_wait(
+    conn: &Connection,
+    run_id: &str,
+    step_index: usize,
+    wait_id: Option<&str>,
+    wake_at: chrono::DateTime<Utc>,
+) -> Result<bool> {
+    let wake_at = serde_json::to_value(wake_at)?
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let path = format!("$[{step_index}].quota_wait");
+    let n = conn.execute(
+        &format!(
+            "UPDATE workflow_runs
+             SET step_results_json = json_set(
+                 json_remove(step_results_json, '{path}.parked', '{path}.detail'),
+                 '{path}.wake_at', ?3)
+             WHERE id = ?1 AND {}
+               AND json_extract(step_results_json, '{path}.parked') = 'after_deadline'",
+            quota_wait_guard(step_index, 2)
+        ),
+        params![run_id, wait_id, wake_at],
+    )?;
+    if n == 1 {
+        if let Some(run) = get_run(conn, run_id)? {
+            crate::db::shared_runs::sync_workflow(conn, &run)?;
+        }
+    }
+    Ok(n == 1)
+}
+
 /// KT-811 — runs parked on a provider quota, oldest first.
 pub fn list_quota_waiting_runs(conn: &Connection) -> Result<Vec<WorkflowRun>> {
     let sql = format!(

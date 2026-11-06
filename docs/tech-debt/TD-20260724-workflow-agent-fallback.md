@@ -291,7 +291,7 @@ fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
 [src: file: backend/src/models/workflows.rs:2021-2100#WorkflowAgentProvenance]
 [src: file: backend/src/workflows/steps.rs:1405-1429#WorkflowAgentAttempt]
-[src: file: backend/src/workflows/runner.rs:4854-4876#selected_attempt]
+[src: file: backend/src/workflows/runner.rs:4905-4927#selected_attempt]
 
 Persist an `AgentAttempt` record (table or versioned run JSON) with:
 

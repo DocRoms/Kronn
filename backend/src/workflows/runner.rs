@@ -169,37 +169,119 @@ enum InFlightStepOutcome {
 }
 
 /// Race one in-flight executor against both operator cancellation and the
-/// workflow's absolute wall-clock deadline.
+/// workflow's monotonic active-execution deadline.
 ///
 /// Ordering is deliberate when multiple branches become ready in the same
 /// scheduler turn: an explicit cancellation wins, a completed step is kept,
-/// and timeout is the final fallback.
-async fn await_in_flight_step<F>(
+/// and timeout is the final fallback. `checkpoint` runs every
+/// [`TIMEOUT_CHECKPOINT_PERIOD`] while the step is in flight.
+async fn await_in_flight_step<F, C, CF>(
     step_future: F,
     cancel_token: &tokio_util::sync::CancellationToken,
     deadline: tokio::time::Instant,
+    mut checkpoint: C,
 ) -> InFlightStepOutcome
 where
     F: Future<Output = StepOutcome>,
+    C: FnMut() -> CF,
+    CF: Future<Output = ()>,
 {
-    tokio::select! {
-        biased;
-        _ = cancel_token.cancelled() => InFlightStepOutcome::Cancelled,
-        outcome = step_future => InFlightStepOutcome::Completed(Box::new(outcome)),
-        _ = tokio::time::sleep_until(deadline) => InFlightStepOutcome::TimedOut,
+    tokio::pin!(step_future);
+    let mut ticks = tokio::time::interval_at(
+        tokio::time::Instant::now() + TIMEOUT_CHECKPOINT_PERIOD,
+        TIMEOUT_CHECKPOINT_PERIOD,
+    );
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => return InFlightStepOutcome::Cancelled,
+            outcome = &mut step_future => {
+                return InFlightStepOutcome::Completed(Box::new(outcome));
+            }
+            _ = tokio::time::sleep_until(deadline) => return InFlightStepOutcome::TimedOut,
+            _ = ticks.tick() => checkpoint().await,
+        }
     }
 }
 
-fn workflow_timeout_deadline(
-    started_at: chrono::DateTime<Utc>,
-    timeout_seconds: u64,
-    now: chrono::DateTime<Utc>,
-) -> tokio::time::Instant {
-    let elapsed = (now - started_at)
-        .to_std()
-        .unwrap_or(std::time::Duration::ZERO);
-    let remaining = std::time::Duration::from_secs(timeout_seconds).saturating_sub(elapsed);
-    tokio::time::Instant::now() + remaining
+/// How much active time a backend crash mid-step can lose from the guard.
+#[cfg(not(test))]
+const TIMEOUT_CHECKPOINT_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const TIMEOUT_CHECKPOINT_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+
+pub(crate) const TIMEOUT_ACTIVE_MS_STATE_KEY: &str = "__kronn.timeout_active_ms";
+
+/// Durable active time from earlier execution segments plus a monotonic clock
+/// for this segment. A run starts a new segment after every persisted pause,
+/// so quota and approval waits never enter the timeout budget.
+struct WorkflowTimeoutClock {
+    carried: std::time::Duration,
+    segment_started: tokio::time::Instant,
+}
+
+impl WorkflowTimeoutClock {
+    fn resume(run: &WorkflowRun) -> Self {
+        let carried_ms = run
+            .state
+            .get(TIMEOUT_ACTIVE_MS_STATE_KEY)
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0);
+        Self {
+            carried: std::time::Duration::from_millis(carried_ms),
+            segment_started: tokio::time::Instant::now(),
+        }
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        self.carried.saturating_add(self.segment_started.elapsed())
+    }
+
+    fn deadline(&self, timeout_seconds: u64) -> tokio::time::Instant {
+        let remaining =
+            std::time::Duration::from_secs(timeout_seconds).saturating_sub(self.carried);
+        self.segment_started + remaining
+    }
+
+    fn deadline_utc(&self, timeout_seconds: u64) -> chrono::DateTime<Utc> {
+        let remaining = self
+            .deadline(timeout_seconds)
+            .saturating_duration_since(tokio::time::Instant::now());
+        Utc::now() + chrono::Duration::from_std(remaining).unwrap_or(chrono::Duration::MAX)
+    }
+
+    fn elapsed_ms(&self) -> String {
+        u64::try_from(self.elapsed().as_millis())
+            .unwrap_or(u64::MAX)
+            .to_string()
+    }
+
+    fn store(&self, run: &mut WorkflowRun) {
+        run.state
+            .insert(TIMEOUT_ACTIVE_MS_STATE_KEY.to_string(), self.elapsed_ms());
+    }
+
+    /// Persists the active time of a step still in flight, so a backend crash
+    /// cannot hand the resumed run the budget that step already spent.
+    async fn checkpoint(&self, db: &crate::db::Database, run_id: &str) {
+        let run_id = run_id.to_string();
+        let elapsed_ms = self.elapsed_ms();
+        let written = db
+            .with_conn(move |conn| {
+                crate::db::workflows::set_run_state_key(
+                    conn,
+                    &run_id,
+                    TIMEOUT_ACTIVE_MS_STATE_KEY,
+                    &elapsed_ms,
+                    &[RunStatus::Running],
+                )
+            })
+            .await;
+        if let Err(error) = written {
+            tracing::warn!("could not checkpoint the workflow active time: {error}");
+        }
+    }
 }
 
 /// Whether a fresh top-level run must create a dedicated worktree.
@@ -1048,6 +1130,7 @@ async fn execute_run_body(
     inherited_workspace: Option<String>,
     notify_security_policy: NotifySecurityPolicy,
 ) -> Result<()> {
+    let timeout_clock = WorkflowTimeoutClock::resume(run);
     let approval_workflow = workflow.clone();
     state
         .db
@@ -2021,12 +2104,10 @@ async fn execute_run_body(
     let budget = shared_budget
         .unwrap_or_else(|| SharedBudget::root(resolved_guards.max_llm_calls).recorded_on(&run.id))
         .within_deadline(
-            run.started_at
-                + chrono::Duration::seconds(
-                    i64::try_from(resolved_guards.timeout_seconds).unwrap_or(i64::MAX / 4),
-                ),
+            timeout_clock.deadline_utc(resolved_guards.timeout_seconds),
             resolved_guards.timeout_seconds,
         );
+    let timeout_deadline = timeout_clock.deadline(resolved_guards.timeout_seconds);
     // Visits, Goto-edge fires, iterations and LLM calls continue across resumes
     // (KT-1046): a loop through a pause must trip where it would without one.
     let mut guard_counters = super::guard_counters::GuardCounters::resume(
@@ -2116,13 +2197,10 @@ async fn execute_run_body(
         }
 
         // ── WorkflowGuards check (0.7.0) ────────────────────────────────
-        // Walls-clock timeout: elapsed since `run.started_at` (saved when
-        // the run was queued). Resume after a daemon restart counts the
-        // downtime — the deadline is absolute, not "active time". The
-        // alternative ("pause clock during AwaitingApproval/restart") was
-        // considered and rejected: it leaks complex state across reboots
-        // and surprises users who set "60 minutes" expecting wall-clock.
-        let elapsed_secs = (Utc::now() - run.started_at).num_seconds().max(0) as u64;
+        // The timeout guard measures active runner time. Persisted pauses
+        // start a fresh monotonic segment and keep the elapsed budget carried
+        // in run state, so a quota reset or approval wait cannot spend it.
+        let elapsed_secs = timeout_clock.elapsed().as_secs();
         if elapsed_secs >= resolved_guards.timeout_seconds {
             tracing::warn!(target: "kronn::workflow_guard",
                 run_id = %run.id, kind = "Timeout",
@@ -2311,6 +2389,7 @@ async fn execute_run_body(
         // decision; that conservative false positive is intentional.
         let side_effect_intent_recorded = record_side_effect_intent(run, step, step_idx)?;
         if side_effect_intent_recorded {
+            timeout_clock.store(run);
             let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
             let intent_db = db.clone();
             let persisted = intent_db
@@ -2361,6 +2440,7 @@ async fn execute_run_body(
             Some(&agents_config.model_tiers),
         );
         run.step_results.push(in_flight_result);
+        timeout_clock.store(run);
         let start_snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
         let start_db = db.clone();
         let persisted = start_db
@@ -2383,7 +2463,7 @@ async fn execute_run_body(
         broadcast_run_state(&run.status, step_idx as i32, Some(step.name.clone()));
 
         // Build the step's executor as a single future, then race it against
-        // operator cancellation AND the workflow's absolute deadline. When
+        // operator cancellation AND the workflow's active-time deadline. When
         // either stop branch wins, the executor future is dropped and the
         // kill_on_drop chain takes over:
         //   - Agent  → AgentProcess.child drops → SIGKILL
@@ -2855,12 +2935,13 @@ async fn execute_run_body(
             }
         };
 
-        let deadline =
-            workflow_timeout_deadline(run.started_at, resolved_guards.timeout_seconds, Utc::now());
+        let checkpoint_db = db.clone();
+        let checkpoint_run_id = run.id.clone();
         let mut outcome: StepOutcome = match await_in_flight_step(
             step_future,
             &cancel_token,
-            deadline,
+            timeout_deadline,
+            || timeout_clock.checkpoint(&checkpoint_db, &checkpoint_run_id),
         )
         .await
         {
@@ -2913,7 +2994,7 @@ async fn execute_run_body(
                 }
             }
             InFlightStepOutcome::TimedOut => {
-                let elapsed_secs = (Utc::now() - run.started_at).num_seconds().max(0) as u64;
+                let elapsed_secs = timeout_clock.elapsed().as_secs();
                 let actual_secs = elapsed_secs.max(resolved_guards.timeout_seconds);
                 tracing::warn!(
                     target: "kronn::workflow_guard",
@@ -3024,14 +3105,11 @@ async fn execute_run_body(
             && run.run_type == "linear"
         {
             if let Some(classified) = outcome.result.quota_wait.take() {
-                let timeout =
-                    i64::try_from(resolved_guards.timeout_seconds).unwrap_or(i64::MAX / 4);
                 let wait = super::quota_wait::plan_wait(
                     &mut run.state,
                     &step.name,
                     classified,
                     Utc::now(),
-                    run.started_at + chrono::Duration::seconds(timeout),
                 );
                 tracing::info!(
                     run_id = %run.id,
@@ -3295,6 +3373,7 @@ async fn execute_run_body(
         }
 
         // Persist progress
+        timeout_clock.store(run);
         let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
         let db4 = db.clone();
         db4.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
@@ -3955,6 +4034,7 @@ async fn execute_run_body(
         run.finished_at = Some(Utc::now());
     }
 
+    timeout_clock.store(run);
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let terminal_snapshot_run_id = (!paused).then(|| run.id.clone());
     let db5 = db.clone();
@@ -5937,9 +6017,13 @@ mod tests {
     #[tokio::test]
     async fn in_flight_step_stops_when_absolute_deadline_is_reached() {
         let cancel = tokio_util::sync::CancellationToken::new();
-        let result =
-            await_in_flight_step(std::future::pending(), &cancel, tokio::time::Instant::now())
-                .await;
+        let result = await_in_flight_step(
+            std::future::pending(),
+            &cancel,
+            tokio::time::Instant::now(),
+            || async {},
+        )
+        .await;
         assert!(matches!(result, InFlightStepOutcome::TimedOut));
     }
 
@@ -5947,9 +6031,13 @@ mod tests {
     async fn explicit_cancel_wins_when_cancel_and_deadline_are_both_ready() {
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel();
-        let result =
-            await_in_flight_step(std::future::pending(), &cancel, tokio::time::Instant::now())
-                .await;
+        let result = await_in_flight_step(
+            std::future::pending(),
+            &cancel,
+            tokio::time::Instant::now(),
+            || async {},
+        )
+        .await;
         assert!(matches!(result, InFlightStepOutcome::Cancelled));
     }
 
@@ -5960,17 +6048,21 @@ mod tests {
             async { successful_step_outcome() },
             &cancel,
             tokio::time::Instant::now(),
+            || async {},
         )
         .await;
         assert!(matches!(result, InFlightStepOutcome::Completed(_)));
     }
 
     #[test]
-    fn workflow_deadline_is_immediate_after_timeout_elapsed() {
-        let started_at = Utc::now() - chrono::Duration::seconds(61);
-        let before = tokio::time::Instant::now();
-        let deadline = workflow_timeout_deadline(started_at, 60, Utc::now());
-        assert!(deadline <= before + std::time::Duration::from_millis(5));
+    fn active_timeout_deadline_is_immediate_after_the_budget_is_spent() {
+        let mut run = pending_run("run-timeout-clock", "wf-timeout-clock");
+        run.state.insert(
+            TIMEOUT_ACTIVE_MS_STATE_KEY.to_string(),
+            61_000_u64.to_string(),
+        );
+        let clock = WorkflowTimeoutClock::resume(&run);
+        assert!(clock.deadline(60) <= tokio::time::Instant::now());
     }
 
     #[test]
@@ -7280,7 +7372,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_run_stops_an_in_flight_notify_at_the_absolute_deadline() {
+    async fn execute_run_stops_an_in_flight_agent_at_the_active_time_deadline() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let repo_path = repo.path().to_string_lossy().into_owned();
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id":"proj-timeout-in-flight", "name":"timeout-in-flight", "path":repo_path,
+            "repo_url":null, "token_override":null, "ai_config":{"detected":false,"configs":[]},
+            "created_at":chrono::Utc::now().to_rfc3339(), "updated_at":chrono::Utc::now().to_rfc3339()
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let work_dir =
+            crate::agents::runner::resolve_agent_work_dir(Some(&repo_path), &repo_path).unwrap();
+        let _route = crate::agents::runner::test_acp_routes::route(
+            &work_dir,
+            std::sync::Arc::new(PausedClaudeTurn { release }),
+        );
+
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-timeout-in-flight".into();
+        workflow.project_id = Some("proj-timeout-in-flight".into());
+        workflow.guards = Some(WorkflowGuards {
+            timeout_seconds: Some(1),
+            ..WorkflowGuards::default()
+        });
+        let mut agent = fake_step("slow_agent");
+        agent.prompt_template = "Wait for the timeout".into();
+        workflow.steps = vec![agent];
+        let mut run = pending_run("run-timeout-in-flight", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let started = tokio::time::Instant::now();
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("timeout is a terminal run outcome, not an executor error");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the runner must drop the in-flight agent future at its deadline"
+        );
+        assert_eq!(run.status, RunStatus::StoppedByGuard);
+        assert_eq!(run.step_results.len(), 1);
+        assert_eq!(run.step_results[0].status, RunStatus::StoppedByGuard);
+        assert_eq!(run.step_results[0].step_name, "slow_agent");
+
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-timeout-in-flight"))
+            .await
+            .expect("read persisted timeout run")
+            .expect("persisted timeout run exists");
+        assert_eq!(persisted.status, RunStatus::StoppedByGuard);
+        assert_eq!(persisted.step_results.len(), 1);
+        assert_eq!(persisted.step_results[0].status, RunStatus::StoppedByGuard);
+    }
+
+    #[tokio::test]
+    async fn execute_run_stops_an_in_flight_notify_at_the_active_time_deadline() {
         let app = axum::Router::new().route(
             "/slow",
             axum::routing::post(|| async {
@@ -7300,7 +7469,7 @@ mod tests {
 
         let (state, tokens, agents) = test_state_and_configs();
         let mut workflow = make_workflow_with_artifacts(Default::default());
-        workflow.id = "wf-timeout-in-flight".into();
+        workflow.id = "wf-timeout-in-flight-notify".into();
         workflow.guards = Some(WorkflowGuards {
             timeout_seconds: Some(1),
             ..WorkflowGuards::default()
@@ -7310,7 +7479,7 @@ mod tests {
             format!("http://127.0.0.1:{port}/slow"),
             "{}",
         )];
-        let mut run = pending_run("run-timeout-in-flight", &workflow.id);
+        let mut run = pending_run("run-timeout-in-flight-notify", &workflow.id);
         insert_wf_and_run(&state, &workflow, &run).await;
 
         let started = tokio::time::Instant::now();
@@ -7338,15 +7507,134 @@ mod tests {
         assert_eq!(run.step_results[0].status, RunStatus::StoppedByGuard);
         assert_eq!(run.step_results[0].step_name, "slow_notify");
 
-        let persisted = state
-            .db
-            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-timeout-in-flight"))
-            .await
-            .expect("read persisted timeout run")
-            .expect("persisted timeout run exists");
+        let persisted = quota_wait_runs::stored(&state, "run-timeout-in-flight-notify").await;
         assert_eq!(persisted.status, RunStatus::StoppedByGuard);
         assert_eq!(persisted.step_results.len(), 1);
         assert_eq!(persisted.step_results[0].status, RunStatus::StoppedByGuard);
+    }
+
+    /// KT-1563 — a backend crash mid-step keeps the active time that step
+    /// spent, so the resumed run still meets its Timeout guard.
+    #[tokio::test]
+    async fn a_crash_mid_step_keeps_the_active_time_the_step_spent() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let repo_path = repo.path().to_string_lossy().into_owned();
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id":"proj-timeout-crash", "name":"timeout-crash", "path":repo_path,
+            "repo_url":null, "token_override":null, "ai_config":{"detected":false,"configs":[]},
+            "created_at":chrono::Utc::now().to_rfc3339(), "updated_at":chrono::Utc::now().to_rfc3339()
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let work_dir =
+            crate::agents::runner::resolve_agent_work_dir(Some(&repo_path), &repo_path).unwrap();
+        let _route = crate::agents::runner::test_acp_routes::route(
+            &work_dir,
+            std::sync::Arc::new(PausedClaudeTurn {
+                release: release.clone(),
+            }),
+        );
+
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-timeout-crash".into();
+        workflow.project_id = Some("proj-timeout-crash".into());
+        workflow.guards = Some(WorkflowGuards {
+            timeout_seconds: Some(5),
+            ..WorkflowGuards::default()
+        });
+        let mut agent = fake_step("slow_agent");
+        agent.prompt_template = "Run until the backend dies".into();
+        workflow.steps = vec![agent];
+        let run = pending_run("run-timeout-crash", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let segment = {
+            let (state, workflow) = (state.clone(), workflow.clone());
+            let (tokens, agents) = (tokens.clone(), agents.clone());
+            tokio::spawn(async move {
+                let mut run = run;
+                let _ = execute_run(
+                    state, &workflow, &mut run, &tokens, &agents, None, None, None,
+                )
+                .await;
+            })
+        };
+        // 3 s into the 5 s step, the backend dies.
+        loop {
+            let live = quota_wait_runs::stored(&state, "run-timeout-crash").await;
+            assert!(
+                matches!(live.status, RunStatus::Pending | RunStatus::Running),
+                "the step must still be in flight: {:?}",
+                live.step_results
+            );
+            let active_ms = live
+                .state
+                .get(TIMEOUT_ACTIVE_MS_STATE_KEY)
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .unwrap_or(0);
+            if active_ms >= 3_000 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        segment.abort();
+        let _ = segment.await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::workflows::claim_run_status(
+                    conn,
+                    "run-timeout-crash",
+                    &RunStatus::Running,
+                    &RunStatus::Interrupted,
+                )
+            })
+            .await
+            .unwrap();
+
+        let state = quota_wait_runs::restarted(&state);
+        let mut run = quota_wait_runs::stored(&state, "run-timeout-crash").await;
+        claim_interrupted_run(&state, &mut run, false)
+            .await
+            .expect("a human resumes the interrupted run");
+        // The replayed step would answer after 3 s; under 2 s of budget is left.
+        let answer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            release.notify_one();
+        });
+        resume_interrupted_run(state.clone(), &workflow, &mut run, &tokens, &agents, None)
+            .await
+            .expect("the guard stop is a run outcome");
+        answer.abort();
+
+        assert_eq!(
+            run.status,
+            RunStatus::StoppedByGuard,
+            "{:?}",
+            run.step_results
+        );
+        assert_eq!(
+            run.step_results.last().map(|r| r.status.clone()),
+            Some(RunStatus::StoppedByGuard)
+        );
+        let active_ms = run
+            .state
+            .get(TIMEOUT_ACTIVE_MS_STATE_KEY)
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap();
+        assert!(active_ms >= 5_000, "active_ms={active_ms}");
     }
 
     #[tokio::test]

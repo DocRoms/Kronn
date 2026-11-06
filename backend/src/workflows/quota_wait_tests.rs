@@ -100,10 +100,9 @@ fn quota(reset_at: Option<DateTime<Utc>>) -> QuotaWait {
 #[test]
 fn the_step_wakes_after_the_reset_plus_a_margin() {
     let now = utc("2026-09-25T17:00:00Z");
-    let deadline = now + Duration::hours(6);
     let mut state = HashMap::new();
     let reset = utc("2026-09-25T19:40:00Z");
-    let wait = plan_wait(&mut state, "opus", quota(Some(reset)), now, deadline);
+    let wait = plan_wait(&mut state, "opus", quota(Some(reset)), now);
     assert_eq!(wait.wake_at, Some(reset + Duration::minutes(2)));
     assert_eq!(wait.attempt, 1);
     assert_eq!(wait.parked, None);
@@ -113,42 +112,30 @@ fn the_step_wakes_after_the_reset_plus_a_margin() {
 fn no_reset_parks_for_a_manual_resume() {
     let now = utc("2026-09-25T17:00:00Z");
     let mut state = HashMap::new();
-    let wait = plan_wait(
-        &mut state,
-        "opus",
-        quota(None),
-        now,
-        now + Duration::hours(6),
-    );
+    let wait = plan_wait(&mut state, "opus", quota(None), now);
     assert_eq!(wait.wake_at, None);
     assert_eq!(wait.parked, Some(QuotaParkReason::NoResetTime));
 }
 
 #[test]
-fn a_reset_after_the_workflow_deadline_parks_instead_of_waking_into_the_guard() {
+fn a_reset_beyond_the_timeout_still_schedules_a_wake() {
     let now = utc("2026-09-25T17:00:00Z");
     let mut state = HashMap::new();
-    let wait = plan_wait(
-        &mut state,
-        "opus",
-        quota(Some(now + Duration::hours(3))),
-        now,
-        now + Duration::hours(2),
-    );
-    assert_eq!(wait.wake_at, None);
-    assert_eq!(wait.parked, Some(QuotaParkReason::AfterDeadline));
+    let reset = now + Duration::hours(3);
+    let wait = plan_wait(&mut state, "opus", quota(Some(reset)), now);
+    assert_eq!(wait.wake_at, Some(reset + Duration::minutes(2)));
+    assert_eq!(wait.parked, None);
 }
 
 #[test]
 fn repeated_refusals_back_off_then_park() {
     let now = utc("2026-09-25T17:00:00Z");
-    let deadline = now + Duration::days(2);
     let mut state = HashMap::new();
     // The provider keeps announcing a reset seconds away: the floor grows.
     let imminent = Some(now + Duration::seconds(10));
     let floors: Vec<_> = (0..MAX_AUTOMATIC_WAKES)
         .map(|_| {
-            plan_wait(&mut state, "opus", quota(imminent), now, deadline)
+            plan_wait(&mut state, "opus", quota(imminent), now)
                 .wake_at
                 .unwrap()
                 - now
@@ -163,12 +150,12 @@ fn repeated_refusals_back_off_then_park() {
             Duration::minutes(40)
         ]
     );
-    let parked = plan_wait(&mut state, "opus", quota(imminent), now, deadline);
+    let parked = plan_wait(&mut state, "opus", quota(imminent), now);
     assert_eq!(parked.attempt, MAX_AUTOMATIC_WAKES + 1);
     assert_eq!(parked.parked, Some(QuotaParkReason::TooManyAttempts));
     assert_eq!(parked.wake_at, None);
     // Another step starts its own count.
-    let other = plan_wait(&mut state, "review", quota(imminent), now, deadline);
+    let other = plan_wait(&mut state, "review", quota(imminent), now);
     assert_eq!(other.attempt, 1);
 }
 
@@ -203,18 +190,13 @@ fn absurd_relative_resets_yield_no_reset_instead_of_panicking() {
 }
 
 #[test]
-fn a_parked_wait_keeps_a_valid_reset_to_explain_itself() {
+fn a_scheduled_wait_keeps_its_reset_and_identity() {
     let now = utc("2026-09-25T17:00:00Z");
     let mut state = HashMap::new();
     let reset = now + Duration::hours(3);
-    let wait = plan_wait(
-        &mut state,
-        "opus",
-        quota(Some(reset)),
-        now,
-        now + Duration::hours(2),
-    );
-    assert_eq!(wait.parked, Some(QuotaParkReason::AfterDeadline));
+    let wait = plan_wait(&mut state, "opus", quota(Some(reset)), now);
+    assert_eq!(wait.parked, None);
+    assert_eq!(wait.wake_at, Some(reset + Duration::minutes(2)));
     assert_eq!(wait.reset_at, Some(reset));
     assert!(wait.id.is_some());
 }

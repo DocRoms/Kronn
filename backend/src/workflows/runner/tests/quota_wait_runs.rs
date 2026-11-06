@@ -392,17 +392,138 @@ async fn without_a_reset_time_the_run_is_parked_and_resumes_by_hand() {
 }
 
 #[tokio::test]
-async fn a_reset_after_the_workflow_deadline_parks_the_run() {
-    // Three hours away against the default two-hour wall clock: waking would
-    // only meet the Timeout guard.
+async fn a_three_hour_quota_pause_does_not_spend_a_two_hour_timeout() {
     let refusal = "HTTP 429 Too Many Requests, retry-after: 10800";
     let fx = fixture("quota-deadline", refusal, 1, 2 * 3600).await;
-    let parked = run_until_paused(&fx, "run-quota-deadline").await;
-    assert_eq!(parked.status, RunStatus::WaitingQuota);
-    let wait = parked.step_results[1].quota_wait.clone().unwrap();
-    assert!(wait.reset_at.is_some());
-    assert_eq!(wait.wake_at, None);
+    let paused = run_until_paused(&fx, "run-quota-deadline").await;
+    assert_eq!(paused.status, RunStatus::WaitingQuota);
+    let wait = paused.step_results[1].quota_wait.clone().unwrap();
+    let reset_at = wait.reset_at.expect("the provider announced its reset");
+    let wake_at = wait.wake_at.expect("the reset schedules an automatic wake");
+    assert_eq!(wake_at, reset_at + chrono::Duration::minutes(2));
+    assert_eq!(wait.parked, None);
+
+    // The three hours really pass: a wall-clock guard would stop the resume.
+    let three_hours_ago = (Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+    fx.state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE workflow_runs SET started_at = ?2 WHERE id = ?1",
+                rusqlite::params!["run-quota-deadline", three_hours_ago],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let woken = crate::workflows::quota_wait::wake_due_runs(&fx.state, wake_at).await;
+    assert_eq!(woken, vec!["run-quota-deadline".to_string()]);
+    let done = wait_until_settled(&fx.state, "run-quota-deadline").await;
+    assert_eq!(done.status, RunStatus::Success, "{:?}", done.step_results);
+    assert!(Utc::now() - done.started_at >= chrono::Duration::hours(3));
+    assert_eq!(fx.prompt_markers(), vec!["prepare", "analyse", "analyse"]);
+    let active_ms = done
+        .state
+        .get(TIMEOUT_ACTIVE_MS_STATE_KEY)
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .expect("active execution time is durable");
+    assert!(active_ms < 2 * 3600 * 1000, "active_ms={active_ms}");
+    let history = done
+        .state
+        .get(RUN_RESUME_HISTORY_KEY)
+        .expect("automatic resume is visible in history");
+    assert!(history.contains("WaitingQuota"), "{history}");
+    assert!(history.contains("Running"), "{history}");
+}
+
+/// A wait an older engine parked `after_deadline` is woken from its reset.
+#[tokio::test]
+async fn a_legacy_after_deadline_park_is_woken_from_its_reset() {
+    let refusal = "HTTP 429 Too Many Requests, retry-after: 10800";
+    let fx = fixture("quota-legacy-park", refusal, 1, 2 * 3600).await;
+    let paused = run_until_paused(&fx, "run-quota-legacy-park").await;
+    let reset_at = paused.step_results[1]
+        .quota_wait
+        .as_ref()
+        .and_then(|w| w.reset_at)
+        .unwrap();
+    fx.state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE workflow_runs SET step_results_json = json_set(
+                     json_remove(step_results_json, '$[1].quota_wait.wake_at'),
+                     '$[1].quota_wait.parked', 'after_deadline')
+                 WHERE id = 'run-quota-legacy-park'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let legacy = stored(&fx.state, "run-quota-legacy-park").await;
+    let wait = legacy.step_results[1].quota_wait.clone().unwrap();
     assert_eq!(wait.parked, Some(QuotaParkReason::AfterDeadline));
+    assert_eq!(wait.wake_at, None);
+
+    let wake_at = reset_at + chrono::Duration::minutes(2);
+    assert!(crate::workflows::quota_wait::wake_due_runs(
+        &fx.state,
+        wake_at - chrono::Duration::seconds(1)
+    )
+    .await
+    .is_empty());
+    let rescheduled = stored(&fx.state, "run-quota-legacy-park").await;
+    let wait = rescheduled.step_results[1].quota_wait.clone().unwrap();
+    assert_eq!(wait.wake_at, Some(wake_at));
+    assert_eq!(wait.parked, None);
+    assert_eq!(rescheduled.status, RunStatus::WaitingQuota);
+
+    let woken = crate::workflows::quota_wait::wake_due_runs(&fx.state, wake_at).await;
+    assert_eq!(woken, vec!["run-quota-legacy-park".to_string()]);
+    let done = wait_until_settled(&fx.state, "run-quota-legacy-park").await;
+    assert_eq!(done.status, RunStatus::Success, "{:?}", done.step_results);
+    assert_eq!(fx.prompt_markers(), vec!["prepare", "analyse", "analyse"]);
+}
+
+#[tokio::test]
+async fn a_legacy_after_deadline_park_left_for_days_stays_for_a_human() {
+    let refusal = "HTTP 429 Too Many Requests, retry-after: 10800";
+    let fx = fixture("quota-legacy-stale", refusal, 1, 2 * 3600).await;
+    let paused = run_until_paused(&fx, "run-quota-legacy-stale").await;
+    let reset_at = paused.step_results[1]
+        .quota_wait
+        .as_ref()
+        .and_then(|w| w.reset_at)
+        .unwrap();
+    fx.state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE workflow_runs SET step_results_json = json_set(
+                     json_remove(step_results_json, '$[1].quota_wait.wake_at'),
+                     '$[1].quota_wait.parked', 'after_deadline')
+                 WHERE id = 'run-quota-legacy-stale'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let days_later = reset_at + chrono::Duration::days(3);
+    assert!(
+        crate::workflows::quota_wait::wake_due_runs(&fx.state, days_later)
+            .await
+            .is_empty()
+    );
+    let kept = stored(&fx.state, "run-quota-legacy-stale").await;
+    let wait = kept.step_results[1].quota_wait.clone().unwrap();
+    assert_eq!(wait.parked, Some(QuotaParkReason::AfterDeadline));
+    assert_eq!(wait.wake_at, None);
+    assert_eq!(kept.status, RunStatus::WaitingQuota);
+    assert_eq!(fx.prompt_markers(), vec!["prepare", "analyse"]);
 }
 
 #[tokio::test]
