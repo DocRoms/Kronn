@@ -511,9 +511,20 @@ pass (a frequent schedule adds no fire during the repeated hour).
   or a refused precondition still parks the run for the "Resume" button. A
   park or a claim names the wait it read (its
   `id`), so a stale engine tick never undoes a resume or a newer wait.
-  Automatic resume covers linear root runs only: sub-workflow children,
-  batches and `on_failure` compensations are not resumed; a child ends
-  `Failed` with the quota classification on its step.
+  A foreach child of a run that can wait waits too (KT-1556): the foreach
+  stops dispatching, its step and the parent run mirror the child's wait
+  under their own `id`, and only the parent is woken; its foreach then
+  reclaims the same child at its refused step; an item that failed before
+  the wait keeps its failure and is not replayed. A waiting child replays its
+  refused step even when its `[id]` commit is already in the git ledger: if
+  the limit hit after the agent committed or commented within that step, the
+  replay can duplicate it, the same risk KT-811 accepts for root runs. The child's wait, like the
+  parent's, spends no active time, so a reset past either Timeout still
+  resumes. A waiting child whose parent
+  has ended is failed by the engine tick so it frees its concurrency slot.
+  Single-mode sub-workflow children, batches and `on_failure` compensations
+  are not resumed; such a child ends `Failed` with the quota classification
+  on its step.
   [src: file: backend/src/workflows/quota_wait.rs:171-201#plan_wait]
   [src: file: backend/src/workflows/quota_wait.rs:222-256#park]
   [src: file: backend/src/workflows/quota_wait.rs:258-298#wake_due_runs]

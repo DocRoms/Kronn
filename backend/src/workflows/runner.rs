@@ -3099,18 +3099,20 @@ async fn execute_run_body(
         run.tokens_used += outcome.result.tokens_used.unwrap_or(0);
 
         // KT-811 — a quota refusal waits for the reset instead of failing the
-        // run. Children are resumed through their parent, so they still fail.
-        if outcome.result.status == RunStatus::Failed
-            && run.parent_run_id.is_none()
-            && run.run_type == "linear"
-        {
+        // run. A child waits only when its parent will resume it (KT-1556).
+        if outcome.result.status == RunStatus::Failed && super::quota_wait::can_wait(run) {
             if let Some(classified) = outcome.result.quota_wait.take() {
-                let wait = super::quota_wait::plan_wait(
-                    &mut run.state,
-                    &step.name,
-                    classified,
-                    Utc::now(),
-                );
+                let wait = if step.step_type == StepType::SubWorkflow {
+                    super::quota_wait::remember_mirrored_child(
+                        &mut run.state,
+                        &step.name,
+                        outcome.result.child_run_id.as_deref(),
+                        classified.id.as_deref(),
+                    );
+                    super::quota_wait::mirror_child_wait(classified)
+                } else {
+                    super::quota_wait::plan_wait(&mut run.state, &step.name, classified, Utc::now())
+                };
                 tracing::info!(
                     run_id = %run.id,
                     step = %step.name,
@@ -3126,6 +3128,9 @@ async fn execute_run_body(
                 .remove(super::quota_wait::QUOTA_ATTEMPTS_STATE_KEY);
         }
         let waiting_quota_here = outcome.result.status == RunStatus::WaitingQuota;
+        if step.step_type == StepType::SubWorkflow && !waiting_quota_here {
+            super::quota_wait::forget_mirrored_child(&mut run.state, &step.name);
+        }
         // 0.7.0 — count this step toward the LLM-calls quota. Only step
         // types that spawn an agent are counted: BatchQuickPrompt counts
         // as the number of children actually spawned (read from the
@@ -11064,6 +11069,7 @@ mod tests {
 
     mod gate_guard_runs;
     mod native_full_access_runs;
+    mod quota_wait_foreach_runs;
     mod quota_wait_runs;
     mod run_effect_runs;
     mod run_pin_runs;

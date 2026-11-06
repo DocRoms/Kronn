@@ -944,6 +944,10 @@ async fn execute_foreach(
     let mut legacy_child_done_indexes = std::collections::HashSet::new();
     let mut interrupted_children_by_id = std::collections::HashMap::new();
     let mut legacy_interrupted_children_by_index = std::collections::HashMap::new();
+    // Newest child per item, newest first: an item's latest outcome wins.
+    let mut seen_items = std::collections::HashSet::new();
+    let mut failed_children = Vec::new();
+    let mut waiting_children = Vec::new();
     for child in prior_children
         .into_iter()
         .filter(|child| child.workflow_id == child_wf.id)
@@ -961,7 +965,14 @@ async fn execute_foreach(
             .and_then(serde_json::Value::as_str)
             .filter(|id| !id.is_empty())
             .map(String::from);
+        let newest = seen_items.insert((item_id.clone(), item_index));
+        if let Some(wait) = super::quota_wait::pending_wait(&child) {
+            waiting_children.push((child.id.clone(), wait.id.clone(), item_index));
+        }
         match child.status {
+            RunStatus::Failed if newest => {
+                failed_children.push((item_id, item_index, child.id));
+            }
             RunStatus::Success => {
                 if let Some(id) = item_id {
                     child_done_ids.insert(id);
@@ -969,7 +980,8 @@ async fn execute_foreach(
                     legacy_child_done_indexes.insert(index);
                 }
             }
-            RunStatus::Interrupted => {
+            // A child waiting for its quota resumes at its step, like an interrupted one.
+            RunStatus::Interrupted | RunStatus::WaitingQuota => {
                 if let Some(id) = item_id {
                     interrupted_children_by_id.entry(id).or_insert(child);
                 } else if let Some(index) = item_index {
@@ -981,15 +993,48 @@ async fn execute_foreach(
             _ => {}
         }
     }
-    let state_done: std::collections::HashSet<String> = {
+    let parent_run = {
         let pid = parent_run_id.to_string();
-        let key = format!("__kronn.foreach_done.{}", step.name);
         state
             .db
             .with_conn(move |c| crate::db::workflows::get_run(c, &pid))
             .await
             .ok()
             .flatten()
+    };
+    // Resuming after a quota wait: the items this pass already failed keep
+    // their failure, so each wake does not replay them (duplicate PR comments).
+    // Only the wait the parent mirrored marks that pass, not a child left waiting.
+    let quota_waiting_index = parent_run
+        .as_ref()
+        .and_then(|run| super::quota_wait::mirrored_child(&run.state, &step.name))
+        .and_then(|(child_id, wait_id)| {
+            waiting_children
+                .iter()
+                .find(|(id, wait, _)| *id == child_id && *wait == wait_id)
+                .and_then(|(_, _, index)| *index)
+        });
+    let mut failed_before_wait_by_id = std::collections::HashMap::new();
+    let mut legacy_failed_before_wait_by_index = std::collections::HashMap::new();
+    if let Some(waiting_index) = quota_waiting_index {
+        for (item_id, item_index, child_id) in failed_children {
+            match (item_id, item_index) {
+                (_, Some(index)) if index >= waiting_index => {}
+                (Some(id), _) => {
+                    failed_before_wait_by_id.insert(id, child_id);
+                }
+                (None, Some(index)) => {
+                    legacy_failed_before_wait_by_index.insert(index, child_id);
+                }
+                (None, None) => {}
+            }
+        }
+    }
+    let parent_resumes_quota = parent_run.as_ref().is_some_and(super::quota_wait::can_wait);
+    let state_done: std::collections::HashSet<String> = {
+        let key = format!("__kronn.foreach_done.{}", step.name);
+        parent_run
+            .as_ref()
             .and_then(|r| r.state.get(&key).cloned())
             .and_then(|doc| serde_json::from_str::<serde_json::Value>(&doc).ok())
             .and_then(|d| {
@@ -1020,6 +1065,7 @@ async fn execute_foreach(
     let mut total_tokens = Some(0u64);
     let mut last_child_id: Option<String> = None;
     let mut last_output: Option<String> = None;
+    let mut child_quota_wait: Option<crate::models::QuotaWait> = None;
 
     for (idx, item) in items.iter().enumerate() {
         // Parent cancel between items — stop fan-out, keep what's done.
@@ -1030,6 +1076,14 @@ async fn execute_foreach(
 
         let item_id = foreach_item_id(item, idx);
 
+        // A quota-waiting child still has steps to run, even once its item
+        // reached the ledger: it is reclaimed below, never skipped as done.
+        // Its refused step replays whole, as a root run's does (KT-811).
+        let quota_waiting_child = interrupted_children_by_id
+            .get(&item_id)
+            .or_else(|| legacy_interrupted_children_by_index.get(&idx))
+            .is_some_and(|child| child.status == RunStatus::WaitingQuota);
+
         // 2026-06-12 (#3, in-run resume) — skip items ALREADY COMMITTED in
         // this worktree (commit subjects carry `[<id>]`): a Goto-retry of the
         // SubWorkflow step (gate request-changes, SUBWF_FAILED loop) then
@@ -1037,19 +1091,20 @@ async fn execute_foreach(
         // everything. Deterministic, 0 token. An Interrupted parent run also
         // reconciles its persisted children below before continuing.
         if !item_id.is_empty() {
-            let git_done = crate::core::cmd::async_git_cmd()
-                .args([
-                    "log",
-                    "--oneline",
-                    "--fixed-strings",
-                    "--grep",
-                    &format!("[{item_id}]"),
-                ])
-                .current_dir(&ws)
-                .output()
-                .await
-                .map(|o| o.status.success() && !o.stdout.is_empty())
-                .unwrap_or(false);
+            let git_done = !quota_waiting_child
+                && crate::core::cmd::async_git_cmd()
+                    .args([
+                        "log",
+                        "--oneline",
+                        "--fixed-strings",
+                        "--grep",
+                        &format!("[{item_id}]"),
+                    ])
+                    .current_dir(&ws)
+                    .output()
+                    .await
+                    .map(|o| o.status.success() && !o.stdout.is_empty())
+                    .unwrap_or(false);
             if git_done
                 || child_done_ids.contains(&item_id)
                 || legacy_child_done_indexes.contains(&idx)
@@ -1068,12 +1123,27 @@ async fn execute_foreach(
                     "foreach: done-set entry not confirmed by git ledger or a Success child row — stale marker ignored, re-running the item");
             }
         }
+        let failed_before_wait = if item_id.is_empty() {
+            None
+        } else {
+            failed_before_wait_by_id.remove(&item_id)
+        }
+        .or_else(|| legacy_failed_before_wait_by_index.remove(&idx));
+        if let Some(child_id) = failed_before_wait {
+            tracing::info!(target: "kronn::sub_workflow", parent_run=%parent_run_id, item=%idx, item_id=%item_id, child_run=%child_id,
+                "foreach: item failed before the quota wait — counted, not replayed");
+            failed += 1;
+            results.push(
+                json!({ "item": idx, "id": item_id, "child_run_id": child_id, "status": "Failed" }),
+            );
+            continue;
+        }
 
         // Flip économique (2026-06-12) — `mechanical:true` items whose content
         // was fully planned by triage (`files[]`, human-approved at the gate)
         // are applied by the ENGINE: write + commit, ZERO agent run. Any
         // validation problem falls back to the normal agent path (graceful).
-        if item.get("mechanical").and_then(|m| m.as_bool()) == Some(true) {
+        if !quota_waiting_child && item.get("mechanical").and_then(|m| m.as_bool()) == Some(true) {
             match validate_mechanical_files(item) {
                 Ok(files) => {
                     let mut write_err = None;
@@ -1173,6 +1243,9 @@ async fn execute_foreach(
         tctx.insert("__subwf_depth__".into(), json!(child_depth));
         tctx.insert("__subwf_item__".into(), json!(idx));
         tctx.insert("__subwf_item_id__".into(), json!(item_id));
+        if parent_resumes_quota {
+            tctx.insert(super::quota_wait::PARENT_RESUMES_KEY.into(), json!(true));
+        }
         if parent_shadow {
             tctx.insert(
                 super::shadow::VARIANT_KEY.into(),
@@ -1375,9 +1448,11 @@ async fn execute_foreach(
         }
 
         let ok = matches!(child_run.status, RunStatus::Success);
+        // Neither a success nor a failure yet: the parent waits with it.
+        let quota_wait = super::quota_wait::pending_wait(&child_run).cloned();
         if ok {
             succeeded += 1;
-        } else {
+        } else if quota_wait.is_none() {
             failed += 1;
         }
         let child_tokens = measured_run_tokens(&child_run);
@@ -1417,6 +1492,11 @@ async fn execute_foreach(
             foreach_terminal_stop = Some(reason);
             break;
         }
+        // The next items would meet the same provider limit.
+        if quota_wait.is_some() {
+            child_quota_wait = quota_wait;
+            break;
+        }
     }
     let _ = crate::core::rooted_io::remove(&ws_root, task_file); // best-effort cleanup
 
@@ -1426,13 +1506,19 @@ async fn execute_foreach(
     } else {
         String::new()
     };
+    let waiting_note = if child_quota_wait.is_some() {
+        ", 1 en attente de quota fournisseur"
+    } else {
+        ""
+    };
     let summary = format!(
-        "Sous-workflow « {} » × {} tâche(s) → {} ok / {} échec(s){} ({})",
+        "Sous-workflow « {} » × {} tâche(s) → {} ok / {} échec(s){}{} ({})",
         child_wf.name,
         results.len(),
         succeeded,
         failed,
         skipped_note,
+        waiting_note,
         tokens_label(total_tokens),
     );
     let data = json!({
@@ -1442,6 +1528,7 @@ async fn execute_foreach(
         "succeeded": succeeded,
         "failed": failed,
         "skipped_concurrency_limit": skipped_for_capacity,
+        "waiting_quota": child_quota_wait.is_some(),
         "items": results,
         "child_run_id": last_child_id,
         "last_output": last_output,
@@ -1470,7 +1557,9 @@ async fn execute_foreach(
             // (run-4 live finding: 12/13 ok killed the whole run + lost the
             // draft). The PARTIAL signal stays branchable via on_result for
             // workflows that want to retry instead. All-failed stays Failed.
-            status: if succeeded > 0 {
+            // A waiting child reads as Failed here; the runner turns it into
+            // the parent's own wait.
+            status: if succeeded > 0 && child_quota_wait.is_none() {
                 RunStatus::Success
             } else {
                 RunStatus::Failed
@@ -1493,7 +1582,7 @@ async fn execute_foreach(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
-            quota_wait: None,
+            quota_wait: child_quota_wait,
             terminal_stop: foreach_terminal_stop,
         },
         condition_action,
