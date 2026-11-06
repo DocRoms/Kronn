@@ -17363,6 +17363,173 @@ sleep 3600
             "le message d'outil c4 renvoyé au modèle porte la révision d'après-mutation: {livree}"
         );
     }
+
+    /// KT-1585 — a run directory under the root the production resolution
+    /// gives this data dir (the platform cache stood in by a temp dir).
+    fn resolved_run_dir(cache: &std::path::Path, run_id: &str) -> std::path::PathBuf {
+        let data = crate::core::config::config_dir().unwrap();
+        let protected = crate::core::trust_sandbox::protected_dirs();
+        let (root, warnings) = crate::workflows::run_artifacts::resolve_root(
+            None,
+            Some(&data),
+            Some(cache),
+            &protected,
+        );
+        let dir = root.expect("a root outside the data dir").join(run_id);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    /// KT-1585 — the paths a Seatbelt profile closes to reads.
+    fn seatbelt_denied_reads(profile: &str) -> Vec<std::path::PathBuf> {
+        profile
+            .split("(deny file-read* file-write*\n")
+            .skip(1)
+            .flat_map(|rest| rest.split("\n)\n").next().unwrap_or("").lines())
+            .filter_map(|line| line.trim().strip_prefix("(subpath \""))
+            .filter_map(|line| line.strip_suffix("\")"))
+            .map(std::path::PathBuf::from)
+            .collect()
+    }
+
+    /// KT-1585 — a real Claude launch for a step granted its run artifacts
+    /// directory: no read deny covers it, the data dir is still denied.
+    #[test]
+    #[serial_test::serial]
+    fn a_claude_step_reads_its_run_artifacts_while_the_data_dir_stays_denied() {
+        let cache = tempfile::tempdir().unwrap();
+        let artifacts = resolved_run_dir(cache.path(), "3e7f4d85-af84-4c3b-8a0d-4a5b6c7d8e9f");
+        let work = tempfile::tempdir().unwrap();
+        let dirs = [artifacts.display().to_string()];
+        let policy = crate::agents::read_only_repos::ReadOnlyRepos::resolve_with_dirs(
+            &AgentType::ClaudeCode,
+            work.path(),
+            &[],
+            &dirs,
+        )
+        .unwrap()
+        .unwrap();
+        let (_, _, mut args, _, _, _) =
+            super::super::agent_command(&AgentType::ClaudeCode, "p", false, "", None);
+        policy.apply(&AgentType::ClaudeCode, work.path(), &mut args);
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1] == dirs[0]));
+        let at = args.iter().position(|arg| arg == "--settings").unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&args[at + 1]).unwrap();
+        let read_rules: Vec<std::path::PathBuf> = settings["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|rule| rule.as_str()?.strip_prefix("Read(/")?.strip_suffix("/**)"))
+            .map(std::path::PathBuf::from)
+            .collect();
+        let deny_read: Vec<std::path::PathBuf> = settings["sandbox"]["filesystem"]["denyRead"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|dir| dir.as_str().map(std::path::PathBuf::from))
+            .collect();
+        let data = crate::core::config::config_dir().unwrap();
+        assert!(read_rules.contains(&data), "{read_rules:?}");
+        assert!(deny_read.contains(&data), "{deny_read:?}");
+        for closed in read_rules.iter().chain(&deny_read) {
+            assert!(
+                !artifacts.starts_with(closed),
+                "{closed:?} hides {artifacts:?}"
+            );
+        }
+        // The root before KT-1585 was denied like the rest of the data dir.
+        let legacy = data
+            .join("run-artifacts")
+            .join("3e7f4d85-af84-4c3b-8a0d-4a5b6c7d8e9f");
+        assert!(read_rules.iter().any(|closed| legacy.starts_with(closed)));
+        assert_eq!(
+            crate::core::vault_guard::launch_sandbox("claude", None, &args),
+            crate::core::vault_guard::LaunchSandbox::Own,
+            "Claude's own sandbox enforces denyRead"
+        );
+    }
+
+    /// KT-1585 — a real Codex launch for the same step, behind the Seatbelt
+    /// profile that replaces its sandbox: the artifacts are readable, the data
+    /// dir is not. On macOS a shell under that profile proves it.
+    #[test]
+    #[serial_test::serial]
+    fn a_codex_step_reads_its_run_artifacts_while_the_data_dir_stays_denied() {
+        use crate::core::task_worker_sandbox::Mechanism;
+        use crate::core::vault_guard::{launch_sandbox, wrap_launch, Confined, LaunchRoots};
+        let cache = tempfile::tempdir().unwrap();
+        let artifacts = resolved_run_dir(cache.path(), "4f805e96-b095-4d4c-9b1e-5b6c7d8e9fa0");
+        std::fs::write(artifacts.join("probe.txt"), "artifact-content").unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let dirs = [artifacts.display().to_string()];
+        let policy = crate::agents::read_only_repos::ReadOnlyRepos::resolve_with_dirs(
+            &AgentType::Codex,
+            work.path(),
+            &[],
+            &dirs,
+        )
+        .unwrap()
+        .unwrap();
+        let (_, _, mut args, _, _, _) =
+            super::super::agent_command(&AgentType::Codex, "p", false, "", None);
+        policy.apply(&AgentType::Codex, work.path(), &mut args);
+        let read_entry = format!("{}=\"read\"", serde_json::to_string(&artifacts).unwrap());
+        assert!(args.iter().any(|arg| arg.contains(&read_entry)), "{args:?}");
+
+        let protected = crate::core::trust_sandbox::protected_dirs();
+        let confinement =
+            crate::core::trust_sandbox::LevelConfinement::with(Mechanism::Seatbelt, protected);
+        let sandbox = launch_sandbox("codex", None, &args);
+        let roots = LaunchRoots::discover(work.path(), false);
+        let (_, wrapped, confined) =
+            wrap_launch(Some(&confinement), sandbox, &roots, "codex".into(), args);
+        assert!(
+            matches!(confined, Confined::Replaced | Confined::Wrapped),
+            "{confined:?}"
+        );
+        let profile = &wrapped[wrapped.iter().position(|arg| arg == "-p").unwrap() + 1];
+        let denied = seatbelt_denied_reads(profile);
+        let data = crate::core::config::config_dir().unwrap();
+        assert!(denied.contains(&data), "{denied:?}");
+        for closed in &denied {
+            assert!(
+                !artifacts.starts_with(closed),
+                "{closed:?} hides {artifacts:?}"
+            );
+        }
+        let legacy = data
+            .join("run-artifacts")
+            .join("4f805e96-b095-4d4c-9b1e-5b6c7d8e9fa0");
+        assert!(denied.iter().any(|closed| legacy.starts_with(closed)));
+
+        #[cfg(target_os = "macos")]
+        {
+            if Mechanism::Seatbelt.check_usable().is_ok() {
+                std::fs::create_dir_all(&data).unwrap();
+                let vault = data.join("kt1585-probe.txt");
+                std::fs::write(&vault, "vault-content").unwrap();
+                let script = format!(
+                    "cat '{}'; cat '{}' 2>/dev/null && echo LEAK",
+                    artifacts.join("probe.txt").display(),
+                    vault.display()
+                );
+                let output = crate::core::cmd::sync_tool_cmd(Mechanism::Seatbelt.launcher())
+                    .args(["-p", profile.as_str(), "/bin/sh", "-c", &script])
+                    .output()
+                    .unwrap();
+                let _ = std::fs::remove_file(&vault);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(stdout.contains("artifact-content"), "{stdout}");
+                assert!(!stdout.contains("LEAK"), "{stdout}");
+            } else {
+                eprintln!("shell check skipped: a sandbox cannot be applied from here");
+            }
+        }
+    }
 }
 
 // ─── #223: text blocks never share a line ──────────────────────────────────

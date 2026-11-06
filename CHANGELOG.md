@@ -13,6 +13,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A cut Exec stdout no longer reaches an agent silently (KT-1570). Past its
+  limit, a workflow Exec step's stdout ends with
+  `[TRUNCATED: kept X KB of Y KB — full output: <path>]`, the step summary
+  carries a warning, and the whole stdout (scrubbed, up to 8 MiB) is kept in
+  the run's artifacts directory as `{{steps.<exec>.data.stdout_file}}`.
+  Collectors, Quick Exec runs and stderr keep the old suffix and write no file.
+- Agents can read run artifacts again (KT-1585). The run artifacts directory
+  lived in the data directory, which the vault protection (KT-1495) hides from
+  every agent, so no step could open a screenshot or report it was given. It
+  now lives under `KRONN_RUN_ARTIFACTS_DIR` or the platform cache directory, in
+  a `kronn-run-artifacts/<key>` directory of Kronn's own; a base inside or
+  containing the data directory is refused. Docker uses a new
+  `kronn-run-artifacts` volume. Existing live run directories are moved at
+  startup, dead ones deleted. Any Agent step can still read any run's
+  artifacts; per-run confinement is KT-1587.
 - One request no longer starts a cascade of media generations, and Stop is
   final (KT-1481). Every agent generation is tied to the human message at the
   base of its wake chain: a result or failure notification now says it is a

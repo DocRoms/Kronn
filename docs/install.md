@@ -50,6 +50,10 @@ The published image is built once for everyone, so it cannot know your user id. 
 
 **Behaviour change:** a bare `docker compose exec backend ...` now opens a root shell (root's home, root-owned files): use `-u kronn` to act as Kronn.
 
+### Run artifacts volume
+
+Workflow run artifacts (screenshots, reports, the full output of a cut Exec stdout) live outside the data volume, which agents are not allowed to read: `KRONN_RUN_ARTIFACTS_DIR=/run-artifacts` on its own named volume, `kronn-run-artifacts`, kept across restarts so a resumed run still finds its files. A native install uses the platform cache directory (`~/Library/Caches/com.kronn.kronn`, `~/.cache/kronn`) unless `KRONN_RUN_ARTIFACTS_DIR` names another directory; one inside the data directory, or containing it, is refused. Kronn only ever writes and cleans `kronn-run-artifacts/<key>/` under it.
+
 ---
 
 ## Linux

@@ -62,7 +62,8 @@ with open(os.path.join(os.environ["KRONN_DATA_DIR"], "env-seen.txt"), "w") as fh
     fh.write(os.environ.get("KRONN_HOST_HOME", "<unset>"))
 keys = ["OPENAI_API_KEY", "KRONN_AUTH_TOKEN", "KRONN_KEK", "KRONN_BACKUP_DIR",
         "KRONN_BACKUP_INTERVAL_HOURS", "KRONN_BACKEND_URL", "KRONN_USE_KEYCHAIN",
-        "KRONN_DOCS_SIDECAR", "KRONN_DEV_UI_URL", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR", "PATH"]
+        "KRONN_DOCS_SIDECAR", "KRONN_DEV_UI_URL", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR", "PATH",
+        "KRONN_RUN_ARTIFACTS_DIR"]
 with open(os.path.join(os.environ["KRONN_DATA_DIR"], "environment.json"), "w") as fh:
     json.dump({key: os.environ.get(key) for key in keys}, fh)
 
@@ -146,6 +147,16 @@ KRONN_E2E_DEV_UI_PORT='5195 KRONN_KEK=x' \
     refuses "dev UI port" "refuses a dev UI port that is not a bare number" \
         "$SCRIPT" "$WORK/invalid-dev-ui-2" "$(free_port)"
 
+refuses "normalized path" "refuses a trailing slash that would nest the artifacts" \
+    "$SCRIPT" "$WORK/trailing/" "$(free_port)"
+refuses "normalized path" "refuses a trailing '/.' that would nest the artifacts" \
+    "$SCRIPT" "$WORK/trailing/." "$(free_port)"
+refuses "normalized path" "refuses a '..' component" \
+    "$SCRIPT" "$WORK/x/../trailing" "$(free_port)"
+[[ ! -e "$WORK/trailing" && ! -e "$WORK/trailing/.run-artifacts" ]] \
+    && ok "a non-normalized data dir creates nothing" \
+    || bad "a non-normalized data dir creates nothing"
+
 mkdir -p "$WORK/already-there"
 refuses "already exists" "refuses a data directory it does not own" \
     "$SCRIPT" "$WORK/already-there" "$(free_port)"
@@ -215,6 +226,11 @@ assert seen["KRONN_BACKUP_INTERVAL_HOURS"] == "0"
 assert seen["KRONN_DEV_UI_URL"] == "http://localhost:5195", seen["KRONN_DEV_UI_URL"]
 for key in ["KRONN_BACKUP_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR"]:
     assert seen[key] and os.path.commonpath([root, seen[key]]) == root, key
+# Owned too, but beside the data dir: agents cannot read inside it (KT-1585).
+artifacts = seen["KRONN_RUN_ARTIFACTS_DIR"]
+assert artifacts == root + ".run-artifacts", artifacts
+assert os.path.commonpath([root, artifacts]) != root
+assert os.path.isdir(artifacts) and stat.S_IMODE(os.stat(artifacts).st_mode) == 0o700
 sidecar = seen["KRONN_DOCS_SIDECAR"]
 assert sidecar and os.path.commonpath([root, sidecar]) == root
 assert os.path.isfile(sidecar) and os.access(sidecar, os.X_OK)

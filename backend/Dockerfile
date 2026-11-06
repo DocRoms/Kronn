@@ -218,8 +218,9 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 COPY scripts/ /app/scripts/
 
-# Data directory owned by kronn
-RUN mkdir -p /data && chown kronn:kronn /data
+# Data directory owned by kronn. Run artifacts live outside it: the vault
+# protection hides /data from every agent (KT-1585).
+RUN mkdir -p /data /run-artifacts && chown kronn:kronn /data /run-artifacts
 
 # Pre-create directories that volumes will mount into
 # A new named volume copies its mount point's owner: without these, Claude
@@ -242,6 +243,7 @@ RUN mkdir -p /home/kronn/.local/bin /home/kronn/.local/share/uv \
 RUN chmod 1777 /home
 
 ENV KRONN_DATA_DIR=/data
+ENV KRONN_RUN_ARTIFACTS_DIR=/run-artifacts
 # Explicit container marker — is_docker() must NOT key on KRONN_DATA_DIR (a
 # native user can set that too, and a false "docker" fail-opens the LAN guard).
 ENV KRONN_IN_DOCKER=1

@@ -117,6 +117,21 @@ exactly as before.
   another directory) is not covered; neither is a secret in the agent's own
   environment (the child environment is built, not inherited: `core::child_env`).
 
+### Run artifacts sit outside the vault (KT-1585)
+
+A workflow run's artifacts directory (`{{run.artifacts_dir}}`) used to live in
+the data directory, so the deny above hid it from the very agents it is for.
+It now lives in `<base>/kronn-run-artifacts/<key>`: the base is
+`KRONN_RUN_ARTIFACTS_DIR` when set (Docker: `/run-artifacts`, its own volume),
+else the platform cache directory. A base inside a protected directory, or one
+that contains it, is refused and the default is used. Details:
+[workflow-read-only-repos.md](../operations/workflow-read-only-repos.md#run-artifacts-directory).
+
+For now an Agent step can read any run's artifacts, not only its own, when its
+prompt names the path; per-run confinement is planned (KT-1587, 0.15.3). Exec
+outputs kept there are scrubbed of known secrets; reports and screenshots a
+step writes are not.
+
 ## Loopback is not the owner
 
 A request from `127.0.0.1` is trusted as the owner's (browser, desktop shell,

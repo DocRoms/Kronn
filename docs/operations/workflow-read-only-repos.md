@@ -171,7 +171,7 @@ Claude Code or Codex Agent step whose rendered prompt contains that path gets
 it as a read-only directory under the policy above, without the Git checkout
 requirement: `--add-dir`, `Edit` deny rule and sandbox `denyWrite` for Claude,
 an explicit `read` entry for Codex. Other agents receive no grant.
-[src: file: backend/src/workflows/run_artifacts.rs:46-61#ensure]
+[src: file: backend/src/workflows/run_artifacts.rs:192-201#ensure]
 [src: file: backend/src/workflows/steps.rs:126-147#artifacts_read_only_dirs]
 [src: file: backend/src/agents/read_only_repos.rs:672-702#resolve_with_dirs]
 
@@ -187,11 +187,77 @@ an explicit `read` entry for Codex. Other agents receive no grant.
 Retention: the directory exists while its run can still execute (running,
 waiting for approval, interrupted within `interrupted_worktree_ttl_days`). It
 is removed when the run ends, the same moment as its worktree, and at startup
-for a run that ended, was deleted, or stayed interrupted past that TTL. It
-lives under the Kronn data directory (`run-artifacts/<run id>`, owner-only).
+for a run that ended, was deleted, or stayed interrupted past that TTL.
 A gate rejection ends the run without executing it again: its directory goes
 at the next startup.
-[src: file: backend/src/workflows/run_artifacts.rs:79-100#keeps_directory]
+[src: file: backend/src/workflows/run_artifacts.rs:250-271#keeps_directory]
+
+Location (KT-1585): each run directory (`<root>/<run id>`, owner-only) lives
+**outside** the Kronn data directory. The vault protection (KT-1495) denies
+that directory to every agent process (Claude `Read(...)` rules and
+`denyRead`, Codex's Seatbelt profile, bubblewrap), and a deny wins over
+`--add-dir`, so an artifacts directory inside it could never be read. The root
+is always Kronn's own directory, `<base>/kronn-run-artifacts/<key>`, where
+`<key>` comes from the data directory (two instances on one account never
+sweep each other's runs). The base is `KRONN_RUN_ARTIFACTS_DIR` when set, else
+the platform cache directory (`~/Library/Caches/com.kronn.kronn` on macOS,
+`~/.cache/kronn` on Linux). A base that is relative, inside a protected
+directory (the data directory, `KRONN_BACKUP_DIR`) or containing one (`$HOME`,
+`~/.config`) is refused with a warning and the default is used; if the default
+is refused too (an `XDG_CACHE_HOME` inside the data directory), runs get no
+artifacts directory and the warning says to set `KRONN_RUN_ARTIFACTS_DIR`. The
+sweep only lists that own directory and only removes names shaped like a run
+id (a UUID), so it never reaches a directory a person chose. Steps write under
+the root while Kronn creates and deletes there, so no operation goes by a path
+checked once: the root is opened as a directory file descriptor, walking
+`kronn-run-artifacts` and `<key>` with `O_NOFOLLOW | O_DIRECTORY`, and checked
+by device and inode to be outside every protected directory. Run directories
+are created with `mkdirat` against that fd, and deleted by an `unlinkat` walk
+that opens each subdirectory with `O_NOFOLLOW` and unlinks a link as an entry:
+**a deletion never follows a link**, even one swapped in between the listing
+and the delete (the sweep holds the fd across its database reads). Migration
+moves with `renameat` and copies through fds as well. Kronn's own writes
+inside a run directory go the same way: the approved copy of repository
+scripts (`approved-scripts/`) and the full output of a cut stdout
+(`exec-output/`) are written from the run directory's fd with `mkdirat` and
+`openat(O_CREAT | O_EXCL | O_NOFOLLOW)` then `renameat`, so a link a step
+planted there is refused or replaced, never written through. Names are raw
+bytes end to end (a name that is not UTF-8 is removed and copied like any
+other), and every walk uses an explicit stack capped at 64 levels (a copy
+holds two fds per level, well under macOS's default 256 open files): a deeper
+tree is refused and logged, never followed. Kronn never deletes such a tree:
+the sweep warns at every start (`run artifacts directory not removed: deeper
+than 64 levels`) and the directory keeps its disk space. An operator removes it
+by hand once Kronn has stopped: check that `<root>/<run id>` is a real
+directory, not a link (`ls -ld`), then `rm -rf` it. If a part of the root is a link,
+the root sits in or around a protected directory, or a protected directory
+cannot be checked, Kronn logs an error and touches nothing (a run then gets no
+artifacts directory). The path a run receives is read from the directory's fd
+and checked once more. Off unix there are no directory fds: Kronn refuses to
+create, delete or move run directories there. Docker sets
+`KRONN_RUN_ARTIFACTS_DIR=/run-artifacts`, a named volume
+(`kronn-run-artifacts`) separate from `/data`, so a run resumed after a
+restart still finds its files. At startup the sweep first deals with the run
+directories an older version left in `<data dir>/run-artifacts/`: a run that
+will not read its directory again has it deleted; a live one is moved (a
+rename, or across volumes a copy that skips links, made under a temporary name
+and renamed into place, so a crash never leaves a partial run). Failures are
+logged and the directory is left where it was. The file work runs off the
+async executor.
+[src: file: backend/src/workflows/run_artifacts.rs:74-122#resolve_root]
+[src: file: backend/src/workflows/run_artifacts.rs:124-140#refusal]
+[src: file: backend/src/workflows/run_artifacts.rs:161-190#open_root]
+[src: file: backend/src/workflows/run_artifacts.rs:238-248#open_run_dir]
+[src: file: backend/src/workflows/run_artifacts_fd.rs:222-260#remove_child]
+[src: file: backend/src/workflows/run_artifacts.rs:341-382#migrate_from]
+[src: file: backend/src/workflows/run_artifacts.rs:407-425#move_into]
+[src: file: backend/src/workflows/run_artifacts.rs:432-464#sweep_root]
+
+Access across runs (decided for now, KT-1587 in 0.15.3 confines it): run
+artifacts sit outside the data directory, so agents can read them, and an
+Agent step can read **any** run's artifacts, not only its own, when its prompt
+names that path. An Exec stdout kept there is scrubbed of the secrets Kronn
+knows; reports, screenshots and other files a step writes are not.
 
 ### A cut Exec stdout (KT-1570)
 
@@ -201,7 +267,8 @@ template that interpolates `{{steps.<exec>.data.stdout}}` never hands an agent
 amputated context silently:
 `[TRUNCATED: kept 100 KB of 151 KB — full output: <path>]`. The scrubbed stdout
 (same secret scrubbing as the step record, owner-only file) is kept whole, up
-to 8 MiB, under `{{run.artifacts_dir}}/exec-output/`, and its path is
+to 8 MiB, under `{{run.artifacts_dir}}/exec-output/` (outside the data
+directory, see Location above), and its path is
 `{{steps.<exec>.data.stdout_file}}` (`null` when nothing was cut or no
 artifacts directory exists). Past 8 MiB the marker says
 `first 8192 KB: <path>`; without a file it ends after the sizes. Since the
@@ -216,7 +283,7 @@ historical `[... output tronqué — limite N KB ...]` suffix and write no file,
 so a collected value never carries a local path. The file goes with the run's
 directory.
 [src: file: backend/src/workflows/exec_step.rs:1093-1138#captured_text]
-[src: file: backend/src/workflows/exec_step.rs:1235-1252#truncation_marker]
+[src: file: backend/src/workflows/exec_step.rs:1212-1229#truncation_marker]
 
 ### Approved repository scripts (KT-918)
 
