@@ -109,7 +109,7 @@ Runs a binary listed in `Workflow.exec_allowlist` directly from the Rust engine,
 }
 ```
 
-The output exposes `{{steps.run-tests.data.exit_code}}` (number), `{{steps.run-tests.data.stdout}}` (truncated to 100 KB, or 2 MiB when a `PublishPageData` write reads the step; `data.stdout_truncated` says if it was cut), `{{steps.run-tests.data.stderr}}`, and `{{steps.run-tests.data.duration_ms}}`. Downstream `Agent` steps can read these.
+The output exposes `{{steps.run-tests.data.exit_code}}` (number), `{{steps.run-tests.data.stdout}}` (truncated to 100 KB, or 2 MiB when a `PublishPageData` write reads the step; `data.stdout_truncated` says if it was cut; a cut stdout ends with `[TRUNCATED: kept X KB of Y KB — full output: <path>]` and `{{steps.run-tests.data.stdout_file}}` is the path of the whole scrubbed stdout, readable by a later Agent step), `{{steps.run-tests.data.stderr}}`, and `{{steps.run-tests.data.duration_ms}}`. Downstream `Agent` steps can read these.
 
 **Large input → `exec_stdin` (not args).** A single argv string is capped at ~128 KB by the OS (`ARG_MAX`), so a big reshaped payload (e.g. an enriched ticket backlog) blows up `exec_args`. Set `"exec_stdin": "{{steps.fetch.data_json}}"` instead — templated like args but piped to the command's **stdin** (no size ceiling), streamed concurrently so a `jq`/`cat`-style command can't deadlock. Omitted → stdin stays `/dev/null` (unchanged).
 
