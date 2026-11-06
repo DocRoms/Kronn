@@ -1163,39 +1163,16 @@ fn save_full_output(path: &Path, text: &str, source_cut: bool) -> Option<SavedOu
     }
 }
 
-/// Exec steps write in the artifacts directory too: a link planted at `path`
-/// or as its directory is replaced or refused, never written through.
+/// Exec steps write in the artifacts directory too, so the write goes
+/// through the run directory's fd (KT-1585): a link planted at `exec-output`
+/// is refused and one at the file is replaced, never written through.
 fn write_without_following_links(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("no parent directory"))?;
-    std::fs::create_dir_all(parent)?;
-    if !std::fs::symlink_metadata(parent)?.is_dir() {
-        return Err(std::io::Error::other("the output directory is a link"));
-    }
-    let temp = parent.join(format!(
-        ".{}.{}.tmp",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    // `create_new` is O_EXCL: it never opens through an existing link.
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let written = options
-        .open(&temp)
-        .and_then(|mut file| file.write_all(bytes))
-        .and_then(|()| std::fs::rename(&temp, path));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    written
+    let missing = || std::io::Error::from(std::io::ErrorKind::NotFound);
+    let name = path.file_name().ok_or_else(missing)?;
+    let artifacts_dir = path.parent().and_then(Path::parent).ok_or_else(missing)?;
+    crate::workflows::run_artifacts::open_run_dir(artifacts_dir)?
+        .create_child(FULL_OUTPUT_DIR)?
+        .write_file(name, bytes)
 }
 
 /// Where a step's cut stdout goes in the run's artifacts directory; the hash
@@ -1298,6 +1275,15 @@ fn destructive_reason(cmd: &str, args: &[String]) -> Option<String> {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    /// A run directory laid out like a real one (`<base>/<own>/<key>/<run>`),
+    /// which Kronn opens from its root fd (KT-1585).
+    fn run_dir() -> (tempfile::TempDir, PathBuf) {
+        let base = tempfile::tempdir().unwrap();
+        let run = base.path().join("kronn-run-artifacts/key/run");
+        std::fs::create_dir_all(&run).unwrap();
+        (base, run)
+    }
 
     #[test]
     fn an_exec_step_child_gets_a_built_environment() {
@@ -1606,8 +1592,8 @@ mod tests {
         let mut step = exec_step("ctx_review", Some("cat"), vec![], Some(30));
         step.exec_stdin = Some(body.clone());
         let work = tempfile::tempdir().unwrap();
-        let artifacts = tempfile::tempdir().unwrap();
-        let artifacts_dir = artifacts.path().to_string_lossy().into_owned();
+        let (_artifacts_base, artifacts) = run_dir();
+        let artifacts_dir = artifacts.as_path().to_string_lossy().into_owned();
         let mut ctx = TemplateContext::new();
         ctx.set_builtin("run.artifacts_dir", artifacts_dir.clone());
         let outcome = execute_exec_step_inner(
@@ -1682,9 +1668,9 @@ mod tests {
         let mut step = exec_step("source", Some("cat"), vec![], Some(30));
         step.exec_stdin = Some("line\n".repeat(250_000));
         let work = tempfile::tempdir().unwrap();
-        let artifacts = tempfile::tempdir().unwrap();
+        let (_artifacts_base, artifacts) = run_dir();
         let mut ctx = TemplateContext::new();
-        ctx.set_builtin("run.artifacts_dir", artifacts.path().to_string_lossy());
+        ctx.set_builtin("run.artifacts_dir", artifacts.as_path().to_string_lossy());
         let outcome = execute_exec_step_with_output_limit(
             &step,
             &["cat".into()],
@@ -1711,11 +1697,11 @@ mod tests {
             lines.last().unwrap(),
             "[... output tronqué — limite 1024 KB ...]"
         );
-        let artifacts_dir = artifacts.path().to_string_lossy().into_owned();
+        let artifacts_dir = artifacts.as_path().to_string_lossy().into_owned();
         assert!(lines
             .iter()
             .all(|line| !line.as_str().unwrap().contains(&artifacts_dir)));
-        assert!(!artifacts.path().join(FULL_OUTPUT_DIR).exists());
+        assert!(!artifacts.as_path().join(FULL_OUTPUT_DIR).exists());
     }
 
     /// A link planted where the copy goes is replaced, never written through;
@@ -1723,11 +1709,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_full_copy_never_writes_through_a_planted_link() {
-        let artifacts = tempfile::tempdir().unwrap();
+        let (_artifacts_base, artifacts) = run_dir();
         let outside = tempfile::tempdir().unwrap();
         let target = outside.path().join("victim");
         std::fs::write(&target, "untouched").unwrap();
-        let path = full_output_path(artifacts.path(), "ctx_review");
+        let path = full_output_path(artifacts.as_path(), "ctx_review");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
         write_without_following_links(&path, b"full").unwrap();
@@ -1735,9 +1721,9 @@ mod tests {
         assert!(!std::fs::symlink_metadata(&path).unwrap().is_symlink());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "full");
 
-        let linked = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), linked.path().join(FULL_OUTPUT_DIR)).unwrap();
-        let path = full_output_path(linked.path(), "ctx_review");
+        let (_linked_base, linked) = run_dir();
+        std::os::unix::fs::symlink(outside.path(), linked.as_path().join(FULL_OUTPUT_DIR)).unwrap();
+        let path = full_output_path(linked.as_path(), "ctx_review");
         assert!(write_without_following_links(&path, b"full").is_err());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 1);
     }
@@ -2038,8 +2024,8 @@ mod tests {
     /// Past the on-disk cap too, the marker says the file is partial.
     #[test]
     fn a_stdout_past_the_disk_cap_says_its_file_is_partial() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = full_output_path(dir.path(), "big step/1");
+        let (_dir_base, dir) = run_dir();
+        let path = full_output_path(dir.as_path(), "big step/1");
         let text = "y".repeat(MAX_FULL_OUTPUT_BYTES + 10);
         let secrets = crate::core::secret_scrub::SecretSet::new();
         let marker = CutMarker::Explicit(Some(&path));
@@ -2053,7 +2039,7 @@ mod tests {
             std::fs::metadata(&path).unwrap().len(),
             MAX_FULL_OUTPUT_BYTES as u64
         );
-        assert!(path.starts_with(dir.path().join(FULL_OUTPUT_DIR)));
+        assert!(path.starts_with(dir.as_path().join(FULL_OUTPUT_DIR)));
         assert!(path_text.contains("big_step_1-"));
     }
 
@@ -2688,7 +2674,7 @@ mod tests {
     async fn a_python_script_imports_its_approved_helper_from_the_copy() {
         let home = tempfile::tempdir().unwrap();
         let worktree = tempfile::tempdir().unwrap();
-        let artifacts = tempfile::tempdir().unwrap();
+        let (_artifacts_base, artifacts) = run_dir();
         let entry = "import os, sys\nsys.path.insert(0, os.getcwd())\nimport helper\n\
             print('SENTINEL=' + helper.V + ' WT=' + os.environ['KRONN_WORKTREE'])\n";
         std::fs::write(home.path().join("entry.py"), entry).unwrap();
@@ -2709,7 +2695,7 @@ mod tests {
         crate::core::approved_scripts::validate_and_pin(home.path(), &mut step.exec_script_files)
             .unwrap();
         let mut ctx = TemplateContext::new();
-        ctx.set_builtin("run.artifacts_dir", artifacts.path().to_string_lossy());
+        ctx.set_builtin("run.artifacts_dir", artifacts.as_path().to_string_lossy());
         let allow = vec!["python3".to_string()];
         let work_dir = worktree.path().to_string_lossy().to_string();
         let home_dir = home.path().to_string_lossy().to_string();

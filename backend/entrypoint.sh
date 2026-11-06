@@ -146,7 +146,7 @@ kronn_drop_to_host_user() {
   # Named volumes keep the owner their mount point had when they were created
   # (the image's ids): fix a volume whose top directory is not ours. Only when
   # needed: a volume already owned by the right user is never walked.
-  for volume in "${KRONN_DATA_DIR:-/data}" \
+  for volume in "${KRONN_DATA_DIR:-/data}" "${KRONN_RUN_ARTIFACTS_DIR:-/run-artifacts}" \
       "$kronn_home/.npm" "$kronn_home/.cache/uv" "$kronn_home/.local/share/uv" \
       "$kronn_home/.claude/projects" "$kronn_home/.claude/sessions"; do
     [ -d "$volume" ] || continue

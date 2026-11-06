@@ -192,3 +192,6 @@ strip = true
 inherits = "release"
 lto = false
 codegen-units = 16
+
+[target.'cfg(unix)'.dependencies]
+errno = "0.3"   # errno on every unix target, to tell a readdir error from the end

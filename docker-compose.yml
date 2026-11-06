@@ -23,6 +23,9 @@ services:
       - "3140"
     volumes:
       - kronn-data:/data
+      # Run artifacts (KT-1585): outside /data, which agents cannot read, and a
+      # volume so a run resumed after a restart still finds its files.
+      - kronn-run-artifacts:/run-artifacts
       - ${HOME}:/host-home:ro
       - ${KRONN_REPOS_DIR:-${HOME}/Repositories}:/host-home/${KRONN_REPOS_REL:-Repositories}:rw  # rw for agent writes
       # 0.8.3 — Self-mount Repositories at the SAME absolute host path inside
@@ -130,6 +133,7 @@ services:
     environment:
       - KRONN_TEMPLATES_DIR=/app/templates
       - KRONN_DATA_DIR=/data
+      - KRONN_RUN_ARTIFACTS_DIR=/run-artifacts
       - KRONN_IN_DOCKER=1
       - KRONN_HOST_HOME=${HOME}
       # Default zone of crons and date templates; a container reports UTC
@@ -255,6 +259,7 @@ services:
 
 volumes:
   kronn-data:
+  kronn-run-artifacts:
   npm-cache:
   uv-cache:        # Isolated from host ~/.cache/uv to avoid uid-mismatch pollution (see TD-20260429)
   uv-tools:

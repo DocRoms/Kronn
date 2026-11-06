@@ -202,32 +202,59 @@ pub fn prepare_copy(root: &Path, files: &[ExecScriptFile], dest: &Path) -> Resul
         }
         verified.push((relative, bytes));
     }
-    match std::fs::remove_dir_all(dest) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "the previous approved copy cannot be removed: {error}"
-            ))
+    write_copy(dest, verified)
+        .map_err(|error| format!("the approved copy cannot be written: {error}"))
+}
+
+/// `dest` is `<run dir>/approved-scripts/<step key>`, and steps write in the
+/// run dir: everything goes through its fd (KT-1585), so a link planted at any
+/// level is refused or unlinked, never followed.
+fn write_copy(dest: &Path, verified: Vec<(String, Vec<u8>)>) -> std::io::Result<()> {
+    let missing = || std::io::Error::from(std::io::ErrorKind::NotFound);
+    let key = dest.file_name().ok_or_else(missing)?;
+    let copies = dest.parent().ok_or_else(missing)?;
+    let run_dir = copies.parent().ok_or_else(missing)?;
+    let copies = crate::workflows::run_artifacts::open_run_dir(run_dir)?
+        .create_child(copies.file_name().ok_or_else(missing)?)?;
+    let dest = match copies.create_new_child(key) {
+        Ok(dest) => dest,
+        // The previous copy, or a dir a step made: removed, then created anew
+        // once; one that comes back again is refused, never adopted.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            copies.remove_child(key)?;
+            after_previous_copy_removed();
+            copies.create_new_child(key)?
         }
-    }
-    std::fs::create_dir_all(dest)
-        .map_err(|error| format!("the approved copy cannot be created: {error}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o700));
-    }
+        Err(error) => return Err(error),
+    };
     for (relative, bytes) in verified {
-        let target = dest.join(&relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("`{relative}` cannot be copied: {error}"))?;
+        let mut parts: Vec<&str> = relative.split('/').collect();
+        let file = parts.pop().ok_or_else(missing)?;
+        let mut dir = None;
+        for part in parts {
+            let parent = dir.as_ref().unwrap_or(&dest);
+            dir = Some(parent.create_child(part)?);
         }
-        std::fs::write(&target, bytes)
-            .map_err(|error| format!("`{relative}` cannot be copied: {error}"))?;
+        dir.as_ref().unwrap_or(&dest).write_file(file, &bytes)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs between the removal of the previous copy and the new one: a test
+    /// recreates the dir there, as a step could.
+    static AFTER_REMOVE: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn after_previous_copy_removed() {
+    #[cfg(test)]
+    AFTER_REMOVE.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
 }
 
 #[cfg(all(test, feature = "full-tests"))]

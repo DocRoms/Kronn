@@ -11,7 +11,8 @@
 # Env:    KRONN_E2E_DEV_UI_PORT=<vite port> admits that dev UI's WebSocket
 #         Origin (the backend refuses any other port, KT-1033).
 # Stop:   kill "$PID". By pid — the process shows up as `./target/debug/kronn`,
-#         so a `pkill -f` on a worktree path matches nothing.
+#         so a `pkill -f` on a worktree path matches nothing. Then remove
+#         <data-dir> and <data-dir>.run-artifacts, which the script also owns.
 #
 # What it guarantees
 #
@@ -77,7 +78,15 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     die "port $PORT is already served — stop that process first, by pid"
 fi
 [[ "$DATA_DIR" == /* ]] || die "data directory must be absolute"
+# `/x/sb/` or `/x/sb/.` would put `<data-dir>.run-artifacts` inside the data dir.
+case "$DATA_DIR" in
+    */ | */. | */.. | *//* | */./* | */../*)
+        die "data directory must be a normalized path (no trailing slash, '.' or '..'): $DATA_DIR" ;;
+esac
 [[ -e "$DATA_DIR" || -L "$DATA_DIR" ]] && die "$DATA_DIR already exists; this script owns the directory it creates"
+# Run artifacts must sit outside the data dir, which agents cannot read (KT-1585).
+ARTIFACTS_DIR="$DATA_DIR.run-artifacts"
+[[ -e "$ARTIFACTS_DIR" || -L "$ARTIFACTS_DIR" ]] && die "$ARTIFACTS_DIR already exists; this script owns the directory it creates"
 [[ -x "$BINARY" ]] || die "no backend binary at $BINARY (cargo build --bin kronn)"
 [[ "$BINARY" == /* ]] || die "backend binary path must be absolute"
 DEV_UI_ENV=()
@@ -94,6 +103,7 @@ readonly HEALTH_TRIES="${KRONN_E2E_HEALTH_TRIES:-90}"
 # never permission to adopt its files. The parent must already exist.
 umask 077
 mkdir "$DATA_DIR" || die "data directory could not be exclusively created: $DATA_DIR"
+mkdir "$ARTIFACTS_DIR" || die "run artifacts directory could not be exclusively created: $ARTIFACTS_DIR"
 # Where the product will look for the user's CLI host configs. Inside the
 # sandbox, so a sync writes here and the developer's own files are untouched.
 mkdir "$DATA_DIR/host-home" "$DATA_DIR/cache" "$DATA_DIR/xdg-config" \
@@ -144,6 +154,7 @@ TOML
         KRONN_HOST_HOME="$DATA_DIR/host-home" \
         KRONN_BACKEND_URL="http://127.0.0.1:$PORT" KRONN_USE_KEYCHAIN=0 \
         KRONN_BACKUP_DIR="$DATA_DIR/backups" KRONN_BACKUP_INTERVAL_HOURS=0 \
+        KRONN_RUN_ARTIFACTS_DIR="$ARTIFACTS_DIR" \
         KRONN_DOCS_SIDECAR="$DATA_DIR/docs-sidecar-disabled" \
         XDG_CONFIG_HOME="$DATA_DIR/xdg-config" XDG_CACHE_HOME="$DATA_DIR/cache" \
         TMPDIR="$DATA_DIR/tmp" ${DEV_UI_ENV[@]+"${DEV_UI_ENV[@]}"} "$BINARY"
