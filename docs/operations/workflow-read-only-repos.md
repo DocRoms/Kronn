@@ -193,6 +193,31 @@ A gate rejection ends the run without executing it again: its directory goes
 at the next startup.
 [src: file: backend/src/workflows/run_artifacts.rs:79-100#keeps_directory]
 
+### A cut Exec stdout (KT-1570)
+
+An Exec stdout past its limit (100 KB, 2 MiB when a `PublishPageData` write
+reads the step) is cut, and the cut text ends with an explicit marker, so a
+template that interpolates `{{steps.<exec>.data.stdout}}` never hands an agent
+amputated context silently:
+`[TRUNCATED: kept 100 KB of 151 KB — full output: <path>]`. The scrubbed stdout
+(same secret scrubbing as the step record, owner-only file) is kept whole, up
+to 8 MiB, under `{{run.artifacts_dir}}/exec-output/`, and its path is
+`{{steps.<exec>.data.stdout_file}}` (`null` when nothing was cut or no
+artifacts directory exists). Past 8 MiB the marker says
+`first 8192 KB: <path>`; without a file it ends after the sizes. Since the
+marker names the artifacts directory, a Claude Code or Codex step reading it
+gets that directory read-only and can open the file. The step summary also
+carries `WARNING: stdout cut at 100 KB, full output in data.stdout_file`, and
+`data.stdout_truncated` stays `true`. The file is written through a temporary
+file and a rename, so a link an Exec step planted there is replaced, never
+written through. This applies to workflow Exec steps only: a cut stderr, a
+setup output, a `CollectApiData` source and a Quick Exec run keep the
+historical `[... output tronqué — limite N KB ...]` suffix and write no file,
+so a collected value never carries a local path. The file goes with the run's
+directory.
+[src: file: backend/src/workflows/exec_step.rs:1093-1138#captured_text]
+[src: file: backend/src/workflows/exec_step.rs:1235-1252#truncation_marker]
+
 ### Approved repository scripts (KT-918)
 
 An Exec step that runs a script from the repository declares it, with every

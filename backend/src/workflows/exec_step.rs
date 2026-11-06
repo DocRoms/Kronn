@@ -60,13 +60,13 @@ pub const MAX_COLLECT_OUTPUT_BYTES: usize = 1024 * 1024;
 /// document, and 2 MiB is also what `POST /api/pages/{id}/publish` accepts.
 pub const MAX_PUBLISH_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 /// Start of every truncation marker, whatever the limit.
-pub const TRUNCATION_MARKER_PREFIX: &str = "[... output tronqué — limite ";
+pub const TRUNCATION_MARKER_PREFIX: &str = "[TRUNCATED: kept ";
+
+/// The marker written before KT-1570; run records from then still carry it.
+pub const LEGACY_TRUNCATION_MARKER_PREFIX: &str = "[... output tronqué — limite ";
 
 /// Added to a failed `gh` step whose project gave it no GitHub token.
 pub const GH_NOT_CONNECTED_HINT: &str = " — this project is not connected to GitHub in Kronn, so the step received no GitHub token (Projects → Overview → GitHub)";
-
-/// Truncation suffix appended when stdout / stderr exceeds [`MAX_OUTPUT_BYTES`].
-const TRUNCATION_MARKER: &str = "\n\n[... output tronqué — limite 100 KB ...]";
 
 /// An Exec step child (setup or main command): the program with its built
 /// environment (KT-1006) and the project's GitHub variables only when the
@@ -188,7 +188,7 @@ pub async fn execute_exec_step_with_output_limit(
         workflow_allowlist,
         work_dir,
         ctx,
-        output_limit_bytes,
+        OutputPolicy::plain(output_limit_bytes),
         &github_env,
         None,
     )
@@ -286,7 +286,7 @@ pub async fn execute_exec_step_for_project(
         workflow_allowlist,
         work_dir,
         ctx,
-        output_limit_bytes,
+        OutputPolicy::workflow_step(output_limit_bytes),
         &github_env,
         carrying_repository,
     )
@@ -405,12 +405,12 @@ async fn execute_exec_step_inner(
     workflow_allowlist: &[String],
     work_dir: &str,
     ctx: &TemplateContext,
-    output_limit_bytes: usize,
+    output: OutputPolicy,
     github_env: &[(String, String)],
     carrying_repository: Option<&str>,
 ) -> StepOutcome {
     let start = Instant::now();
-    let output_limit_bytes = output_limit_bytes.clamp(1, MAX_PUBLISH_OUTPUT_BYTES);
+    let output_limit_bytes = output.limit.clamp(1, MAX_PUBLISH_OUTPUT_BYTES);
     // The step's only credential is the project's GitHub token: never let an
     // echo of it reach the run record or a published page.
     let mut secrets = crate::core::secret_scrub::SecretSet::new();
@@ -603,7 +603,7 @@ async fn execute_exec_step_inner(
             .kill_on_drop(true);
         let setup_output = match tokio::time::timeout(
             Duration::from_secs(timeout_secs),
-            run_bounded(&mut sc, None, MAX_OUTPUT_BYTES),
+            run_bounded(&mut sc, None, MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES),
         )
         .await
         {
@@ -629,8 +629,8 @@ async fn execute_exec_step_inner(
                 )
             }
         };
-        let (setup_stdout, _) = captured_text(&setup_output.stdout, &secrets, MAX_OUTPUT_BYTES);
-        let (setup_stderr, _) = captured_text(&setup_output.stderr, &secrets, MAX_OUTPUT_BYTES);
+        let setup_stdout = plain_text(setup_output.stdout, &secrets, MAX_OUTPUT_BYTES);
+        let setup_stderr = plain_text(setup_output.stderr, &secrets, MAX_OUTPUT_BYTES);
         // Surface the setup head so the operator can scroll through it
         // in the run-detail panel — useful when install logs reveal a
         // missing tool or auth issue.
@@ -659,7 +659,7 @@ async fn execute_exec_step_inner(
                 setup_cmd,
                 setup_args.join(" "),
                 code,
-                truncate_to_limit(setup_stderr),
+                setup_stderr,
                 raw_command,
             ));
         }
@@ -751,11 +751,22 @@ async fn execute_exec_step_inner(
     let main_timeout_secs = timeout_secs
         .saturating_sub(start.elapsed().as_secs())
         .max(1);
+    // A cut stdout stays whole on disk for the next steps (KT-1570); without
+    // an artifacts directory nothing past the limit is held.
+    let full_copy = ctx
+        .get("run.artifacts_dir")
+        .filter(|dir| output.template_facing && !dir.trim().is_empty())
+        .map(|dir| full_output_path(Path::new(dir), &step.name));
+    let stdout_kept = if full_copy.is_some() {
+        output_limit_bytes.max(MAX_FULL_OUTPUT_BYTES)
+    } else {
+        output_limit_bytes
+    };
     // When stdin is piped, stream it on a DETACHED task so stdout/stderr are
     // drained concurrently — a write-all-then-read sequence would deadlock the
     // moment the payload + the child's own output exceed the pipe buffers
     // (~64 KB), i.e. exactly the large-backlog case this field exists for.
-    let output_future = run_bounded(&mut cmd, stdin_bytes, output_limit_bytes);
+    let output_future = run_bounded(&mut cmd, stdin_bytes, output_limit_bytes, stdout_kept);
     let timed_out =
         match tokio::time::timeout(Duration::from_secs(main_timeout_secs), output_future).await {
             Ok(Ok(out)) => Ok(out),
@@ -772,7 +783,7 @@ async fn execute_exec_step_inner(
             Err(_) => Err(()), // timeout
         };
 
-    let output = match timed_out {
+    let child = match timed_out {
         Ok(out) => out,
         Err(()) => {
             return fail(
@@ -786,12 +797,34 @@ async fn execute_exec_step_inner(
         }
     };
 
-    let exit_code = output.status.code();
-    let (stdout, stdout_truncated) = captured_text(&output.stdout, &secrets, output_limit_bytes);
-    let (stderr, stderr_truncated) = captured_text(&output.stderr, &secrets, output_limit_bytes);
+    let exit_code = child.status.code();
+    let CapturedText {
+        text: stdout,
+        truncated: stdout_truncated,
+        full_output: stdout_file,
+    } = captured_text(
+        child.stdout,
+        &secrets,
+        output_limit_bytes,
+        if output.template_facing {
+            CutMarker::Explicit(full_copy.as_deref())
+        } else {
+            CutMarker::Legacy
+        },
+    );
+    let CapturedText {
+        text: stderr,
+        truncated: stderr_truncated,
+        ..
+    } = captured_text(
+        child.stderr,
+        &secrets,
+        output_limit_bytes,
+        CutMarker::Legacy,
+    );
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    let success = output.status.success();
+    let success = child.status.success();
     let status = if success {
         RunStatus::Success
     } else {
@@ -805,6 +838,12 @@ async fn execute_exec_step_inner(
     if needs_gh_hint(raw_command, success, github_env) {
         summary.push_str(GH_NOT_CONNECTED_HINT);
     }
+    if stdout_truncated && output.template_facing {
+        let warning = stdout_truncation_warning(output_limit_bytes, stdout_file.is_some());
+        tracing::warn!(target: "kronn::workflow_exec", step = %step.name, "{warning}");
+        summary.push_str(" — ");
+        summary.push_str(&warning);
+    }
 
     // Structured envelope so `{{steps.<name>.data.exit_code}}` etc.
     // resolve in downstream steps. Mirrors notify_step's contract.
@@ -815,6 +854,7 @@ async fn execute_exec_step_inner(
             "stderr": stderr,
             "stdout_truncated": stdout_truncated,
             "stderr_truncated": stderr_truncated,
+            "stdout_file": stdout_file,
             "duration_ms": duration_ms,
         },
         "status": if success { "OK" } else { "ERROR" },
@@ -962,13 +1002,15 @@ async fn read_bounded<R: AsyncRead + Unpin>(
 }
 
 /// Spawns `cmd` and drains stdout and stderr concurrently with the stdin
-/// feed, keeping at most `limit` plus the margin of each.
+/// feed, keeping at most `stdout_kept` / `limit` of each plus the margin.
 async fn run_bounded(
     cmd: &mut tokio::process::Command,
     stdin: Option<Vec<u8>>,
     limit: usize,
+    stdout_kept: usize,
 ) -> std::io::Result<BoundedOutput> {
     let keep = limit.saturating_add(CAPTURE_MARGIN_BYTES);
+    let stdout_keep = stdout_kept.max(limit).saturating_add(CAPTURE_MARGIN_BYTES);
     let mut child = cmd.spawn()?;
     if let (Some(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) {
         tokio::spawn(async move {
@@ -980,7 +1022,7 @@ async fn run_bounded(
     let stdout = child.stdout.take().ok_or_else(missing)?;
     let stderr = child.stderr.take().ok_or_else(missing)?;
     let (stdout, stderr, status) = tokio::try_join!(
-        read_bounded(stdout, keep),
+        read_bounded(stdout, stdout_keep),
         read_bounded(stderr, keep),
         child.wait()
     )?;
@@ -991,53 +1033,230 @@ async fn run_bounded(
     })
 }
 
-/// Scrubbed text of a captured stream cut to `limit`, and whether it was cut.
-fn captured_text(
-    captured: &Captured,
+/// Most of a cut stdout kept on disk for the next steps (`data.stdout_file`).
+const MAX_FULL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+/// Where cut stdouts are kept, inside the run's artifacts directory.
+const FULL_OUTPUT_DIR: &str = "exec-output";
+
+/// A stream as the step records it: scrubbed, cut to the limit with a marker
+/// when it overflowed, and where its fuller copy was kept, if any.
+struct CapturedText {
+    text: String,
+    truncated: bool,
+    full_output: Option<String>,
+}
+
+/// How an Exec step keeps its output: the limit, and whether its stdout is
+/// read by templates (KT-1570: explicit marker and full copy when cut).
+#[derive(Clone, Copy)]
+struct OutputPolicy {
+    limit: usize,
+    template_facing: bool,
+}
+
+impl OutputPolicy {
+    /// A workflow Exec step, whose stdout later steps interpolate.
+    fn workflow_step(limit: usize) -> Self {
+        Self {
+            limit,
+            template_facing: true,
+        }
+    }
+
+    /// Collectors and Quick Exec runs: the historical suffix, nothing on disk.
+    fn plain(limit: usize) -> Self {
+        Self {
+            limit,
+            template_facing: false,
+        }
+    }
+}
+
+/// A stream cut with the historical suffix: setup output.
+fn plain_text(
+    captured: Captured,
     secrets: &crate::core::secret_scrub::SecretSet,
     limit: usize,
-) -> (String, bool) {
-    let text = secrets.scrub(&String::from_utf8_lossy(&captured.bytes));
-    if text.len() > limit {
-        (truncate_to_limit_at(text, limit), true)
-    } else if captured.dropped > 0 {
-        (truncate_marker_appended(text, limit), true)
-    } else {
-        (text, false)
-    }
+) -> String {
+    captured_text(captured, secrets, limit, CutMarker::Legacy).text
 }
 
-fn truncate_marker_appended(mut text: String, limit: usize) -> String {
-    if limit == MAX_OUTPUT_BYTES {
-        text.push_str(TRUNCATION_MARKER);
-    } else {
-        text.push_str(&format!(
-            "\n\n[... output tronqué — limite {} KB ...]",
+/// What a cut stream ends with.
+#[derive(Clone, Copy)]
+enum CutMarker<'a> {
+    /// The historical suffix: stderr, setup output, collectors.
+    Legacy,
+    /// Sizes and, when a path is given, the full copy written there.
+    Explicit(Option<&'a Path>),
+}
+
+/// Scrubbed text of a captured stream cut to `limit`. Owned so the raw bytes
+/// are freed before the scrubbed copy is made.
+fn captured_text(
+    captured: Captured,
+    secrets: &crate::core::secret_scrub::SecretSet,
+    limit: usize,
+    marker: CutMarker<'_>,
+) -> CapturedText {
+    let Captured { bytes, dropped } = captured;
+    let total = (bytes.len() as u64).saturating_add(dropped);
+    let text = {
+        let raw = String::from_utf8(bytes)
+            .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
+        secrets.scrub(&raw)
+    };
+    if text.len() <= limit && dropped == 0 {
+        return CapturedText {
+            text,
+            truncated: false,
+            full_output: None,
+        };
+    }
+    let (saved, suffix_for) = match marker {
+        CutMarker::Legacy => (None, None),
+        CutMarker::Explicit(full_copy) => (
+            full_copy.and_then(|path| save_full_output(path, &text, dropped > 0)),
+            Some(total),
+        ),
+    };
+    let mut cut = text;
+    cut.truncate(char_boundary_at_most(&cut, limit));
+    let suffix = match suffix_for {
+        Some(total) => truncation_marker(cut.len(), total, saved.as_ref()),
+        None => format!(
+            "\n\n{LEGACY_TRUNCATION_MARKER_PREFIX}{} KB ...]",
             limit / 1024
-        ));
+        ),
+    };
+    cut.push_str(&suffix);
+    cut.shrink_to_fit();
+    CapturedText {
+        text: cut,
+        truncated: true,
+        full_output: saved.map(|saved| saved.path),
     }
-    text
 }
 
-/// Truncate to [`MAX_OUTPUT_BYTES`] on a UTF-8 boundary, appending the
-/// truncation marker. UTF-8 boundary care matters: cutting a multibyte
-/// sequence yields invalid UTF-8 and crashes downstream JSON encoding.
-fn truncate_to_limit(s: String) -> String {
-    truncate_to_limit_at(s, MAX_OUTPUT_BYTES)
+/// A cut stdout written to disk: its path and whether it holds everything.
+struct SavedOutput {
+    path: String,
+    complete: bool,
 }
 
-fn truncate_to_limit_at(s: String, limit: usize) -> String {
-    if s.len() <= limit {
-        return s;
+/// Writes the already-scrubbed `text` owner-only at `path`; a failure only
+/// costs the copy, never the step.
+fn save_full_output(path: &Path, text: &str, source_cut: bool) -> Option<SavedOutput> {
+    let end = char_boundary_at_most(text, MAX_FULL_OUTPUT_BYTES);
+    match write_without_following_links(path, &text.as_bytes()[..end]) {
+        Ok(()) => Some(SavedOutput {
+            path: path.to_string_lossy().into_owned(),
+            complete: !source_cut && end == text.len(),
+        }),
+        Err(error) => {
+            tracing::warn!(
+                target: "kronn::workflow_exec",
+                path = %path.display(),
+                "full Exec output not kept: {error}"
+            );
+            None
+        }
     }
-    // Walk back from the configured bound to the nearest char boundary.
-    let mut cut = limit;
+}
+
+/// Exec steps write in the artifacts directory too: a link planted at `path`
+/// or as its directory is replaced or refused, never written through.
+fn write_without_following_links(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+    if !std::fs::symlink_metadata(parent)?.is_dir() {
+        return Err(std::io::Error::other("the output directory is a link"));
+    }
+    let temp = parent.join(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    // `create_new` is O_EXCL: it never opens through an existing link.
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let written = options
+        .open(&temp)
+        .and_then(|mut file| file.write_all(bytes))
+        .and_then(|()| std::fs::rename(&temp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
+/// Where a step's cut stdout goes in the run's artifacts directory; the hash
+/// keeps two step names that sanitize alike apart.
+fn full_output_path(artifacts_dir: &Path, step_name: &str) -> PathBuf {
+    let readable: String = step_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect();
+    let key = crate::core::repository_resources::sha256(step_name.as_bytes());
+    artifacts_dir
+        .join(FULL_OUTPUT_DIR)
+        .join(format!("{readable}-{}.stdout.txt", &key[..8]))
+}
+
+/// The step summary's warning for a cut stdout, so the run says it too.
+fn stdout_truncation_warning(limit: usize, kept_on_disk: bool) -> String {
+    let limit = kib(limit as u64);
+    if kept_on_disk {
+        format!("WARNING: stdout cut at {limit} KB, full output in data.stdout_file")
+    } else {
+        format!("WARNING: stdout cut at {limit} KB, full output not kept")
+    }
+}
+
+fn kib(bytes: u64) -> u64 {
+    bytes.div_ceil(1024)
+}
+
+/// The line closing a cut stream, readable by an agent that only sees the
+/// interpolated text.
+fn truncation_marker(kept: usize, total: u64, saved: Option<&SavedOutput>) -> String {
+    let head = format!(
+        "\n\n{TRUNCATION_MARKER_PREFIX}{} KB of {} KB",
+        kib(kept as u64),
+        kib(total)
+    );
+    match saved {
+        Some(saved) if saved.complete => format!("{head} — full output: {}]", saved.path),
+        Some(saved) => format!(
+            "{head} — first {} KB: {}]",
+            kib(MAX_FULL_OUTPUT_BYTES as u64),
+            saved.path
+        ),
+        None => format!("{head}]"),
+    }
+}
+
+fn char_boundary_at_most(s: &str, limit: usize) -> usize {
+    let mut cut = limit.min(s.len());
     while cut > 0 && !s.is_char_boundary(cut) {
         cut -= 1;
     }
-    let mut s = s;
-    s.truncate(cut);
-    truncate_marker_appended(s, limit)
+    cut
 }
 
 /// 2026-06-11 — returns `Some(reason)` when a binary+args invocation is one
@@ -1356,7 +1575,7 @@ mod tests {
             &["cat".into()],
             dir.path().to_str().unwrap(),
             &TemplateContext::new(),
-            MAX_PUBLISH_OUTPUT_BYTES,
+            OutputPolicy::workflow_step(MAX_PUBLISH_OUTPUT_BYTES),
             &[("GH_TOKEN".into(), token.into())],
             None,
         )
@@ -1373,6 +1592,154 @@ mod tests {
             ctx.resolve_value("steps.agrege.data.stdout_truncated"),
             Some(serde_json::Value::Bool(false))
         );
+    }
+
+    /// KT-1570 — a 150 KB stdout read by a later step's template says it was
+    /// cut, warns on the step, and its full scrubbed copy is readable.
+    #[tokio::test]
+    async fn a_cut_stdout_is_marked_in_templates_and_kept_whole_on_disk() {
+        let token = "ghp_kt1570SecretTokenValue";
+        let body = format!(
+            "{}\n---TICKET---\nlate section {token}\n",
+            "a".repeat(150 * 1024)
+        );
+        let mut step = exec_step("ctx_review", Some("cat"), vec![], Some(30));
+        step.exec_stdin = Some(body.clone());
+        let work = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let artifacts_dir = artifacts.path().to_string_lossy().into_owned();
+        let mut ctx = TemplateContext::new();
+        ctx.set_builtin("run.artifacts_dir", artifacts_dir.clone());
+        let outcome = execute_exec_step_inner(
+            &step,
+            &["cat".into()],
+            work.path().to_str().unwrap(),
+            &ctx,
+            OutputPolicy::workflow_step(MAX_OUTPUT_BYTES),
+            &[("GH_TOKEN".into(), token.into())],
+            None,
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(!outcome.result.output.contains(token));
+        ctx.set_step_output("ctx_review", &outcome.result.output);
+
+        let summary = ctx.resolve_value("steps.ctx_review.summary").unwrap();
+        assert!(
+            summary
+                .as_str()
+                .unwrap()
+                .contains("WARNING: stdout cut at 100 KB, full output in data.stdout_file"),
+            "{summary}"
+        );
+        let file = ctx
+            .render_strict("{{steps.ctx_review.data.stdout_file}}")
+            .unwrap();
+        assert!(file.starts_with(&artifacts_dir), "{file}");
+        let prompt = ctx
+            .render_strict("Review:\n{{steps.ctx_review.data.stdout}}")
+            .unwrap();
+        assert!(
+            prompt.ends_with(&format!(
+                "[TRUNCATED: kept 100 KB of 151 KB — full output: {file}]"
+            )),
+            "{}",
+            &prompt[prompt.len().saturating_sub(300)..]
+        );
+        assert!(!prompt.contains("---TICKET---"));
+        // The marker names the artifacts directory, so the reading agent gets it.
+        let reader = exec_step("review", None, vec![], None);
+        assert_eq!(
+            crate::workflows::steps::artifacts_read_only_dirs(&reader, &ctx, &prompt),
+            vec![artifacts_dir.clone()]
+        );
+
+        let full = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(full, body.replace(token, "***"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        // An output under the limit keeps no file and says nothing.
+        step.exec_stdin = Some("short".into());
+        let small =
+            execute_exec_step(&step, &["cat".into()], work.path().to_str().unwrap(), &ctx).await;
+        ctx.set_step_output("ctx_review", &small.result.output);
+        assert_eq!(
+            ctx.resolve_value("steps.ctx_review.data.stdout_file"),
+            Some(serde_json::Value::Null)
+        );
+        assert!(!small.result.output.contains("WARNING"));
+    }
+
+    /// KT-1570 — a collector keeps the historical suffix and writes nothing:
+    /// a `Lines` item must never carry a marker naming a local path.
+    #[tokio::test]
+    async fn a_cut_collector_output_keeps_the_old_suffix_and_no_file() {
+        let mut step = exec_step("source", Some("cat"), vec![], Some(30));
+        step.exec_stdin = Some("line\n".repeat(250_000));
+        let work = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let mut ctx = TemplateContext::new();
+        ctx.set_builtin("run.artifacts_dir", artifacts.path().to_string_lossy());
+        let outcome = execute_exec_step_with_output_limit(
+            &step,
+            &["cat".into()],
+            work.path().to_str().unwrap(),
+            &ctx,
+            MAX_COLLECT_OUTPUT_BYTES,
+            None,
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(!outcome.result.output.contains(TRUNCATION_MARKER_PREFIX));
+        assert!(!outcome.result.output.contains("WARNING"));
+        ctx.set_step_output("source", &outcome.result.output);
+        let data = ctx.resolve_value("steps.source.data").unwrap();
+        assert_eq!(data["stdout_truncated"], true);
+        assert_eq!(data["stdout_file"], serde_json::Value::Null);
+        let lines = crate::workflows::collect_api_data_step::quick_exec_value(
+            &data,
+            crate::models::CollectQuickExecOutputFormat::Lines,
+        )
+        .unwrap();
+        let lines = lines.as_array().unwrap();
+        assert_eq!(
+            lines.last().unwrap(),
+            "[... output tronqué — limite 1024 KB ...]"
+        );
+        let artifacts_dir = artifacts.path().to_string_lossy().into_owned();
+        assert!(lines
+            .iter()
+            .all(|line| !line.as_str().unwrap().contains(&artifacts_dir)));
+        assert!(!artifacts.path().join(FULL_OUTPUT_DIR).exists());
+    }
+
+    /// A link planted where the copy goes is replaced, never written through;
+    /// a linked output directory is refused.
+    #[cfg(unix)]
+    #[test]
+    fn the_full_copy_never_writes_through_a_planted_link() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("victim");
+        std::fs::write(&target, "untouched").unwrap();
+        let path = full_output_path(artifacts.path(), "ctx_review");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        write_without_following_links(&path, b"full").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "full");
+
+        let linked = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), linked.path().join(FULL_OUTPUT_DIR)).unwrap();
+        let path = full_output_path(linked.path(), "ctx_review");
+        assert!(write_without_following_links(&path, b"full").is_err());
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 1);
     }
 
     /// KT-1047 — a stream of tens of MB is read through, never held.
@@ -1411,8 +1778,9 @@ mod tests {
         ctx.set_step_output("chatty", &outcome.result.output);
         let stdout = ctx.resolve_value("steps.chatty.data.stdout").unwrap();
         let stdout = stdout.as_str().unwrap();
-        assert!(stdout.ends_with(TRUNCATION_MARKER));
-        assert!(stdout.len() <= MAX_OUTPUT_BYTES + TRUNCATION_MARKER.len());
+        let legacy = "\n\n[... output tronqué — limite 100 KB ...]";
+        assert!(stdout.ends_with(legacy));
+        assert!(stdout.len() <= MAX_OUTPUT_BYTES + legacy.len());
         assert_eq!(
             ctx.resolve_value("steps.chatty.data.stdout_truncated"),
             Some(serde_json::Value::Bool(true))
@@ -1617,37 +1985,76 @@ mod tests {
         assert!(outcome.result.output.contains("exit 1"));
     }
 
-    #[tokio::test]
-    async fn truncation_marker_appended_when_output_huge() {
-        // Pure unit test on the helper — no spawn needed.
+    fn captured(text: &str, dropped: u64) -> Captured {
+        Captured {
+            bytes: text.as_bytes().to_vec(),
+            dropped,
+        }
+    }
+
+    #[test]
+    fn truncation_marker_appended_when_output_huge() {
         let huge = "x".repeat(MAX_OUTPUT_BYTES + 1024);
-        let truncated = truncate_to_limit(huge);
-        assert!(truncated.ends_with(TRUNCATION_MARKER));
-        assert!(truncated.len() <= MAX_OUTPUT_BYTES + TRUNCATION_MARKER.len());
+        let secrets = crate::core::secret_scrub::SecretSet::new();
+        let explicit = CutMarker::Explicit(None);
+        let cut = captured_text(captured(&huge, 0), &secrets, MAX_OUTPUT_BYTES, explicit);
+        assert!(cut.truncated);
+        assert!(cut.text.ends_with("\n\n[TRUNCATED: kept 100 KB of 101 KB]"));
+        assert_eq!(cut.full_output, None);
     }
 
     #[test]
     fn truncation_respects_utf8_boundary() {
-        // A multibyte char straddling MAX_OUTPUT_BYTES must not split
-        // mid-codepoint (would yield invalid UTF-8 → crash json
-        // encoding downstream). The "é" is 2 bytes; we craft input so
-        // the split lands inside it.
-        let prefix = "x".repeat(MAX_OUTPUT_BYTES - 1);
-        let s = format!("{}é-tail", prefix); // "é" starts at byte (MAX-1)
-        let truncated = truncate_to_limit(s);
-        // No panic = boundary check did its job. Verify the output is
-        // still valid UTF-8 (intrinsic to String, but explicit assert).
-        assert!(truncated.is_char_boundary(truncated.len()));
+        // A multibyte char straddling the limit must not split mid-codepoint
+        // (invalid UTF-8 crashes JSON encoding downstream).
+        let s = format!("{}é-tail", "x".repeat(MAX_OUTPUT_BYTES - 1));
+        let secrets = crate::core::secret_scrub::SecretSet::new();
+        let cut = captured_text(
+            captured(&s, 0),
+            &secrets,
+            MAX_OUTPUT_BYTES,
+            CutMarker::Legacy,
+        );
+        assert!(cut.text.starts_with(&"x".repeat(MAX_OUTPUT_BYTES - 1)));
+        assert!(!cut.text.contains("é-tail"));
     }
 
     #[test]
     fn collector_limit_keeps_medium_json_that_normal_exec_truncates() {
         let medium = "x".repeat(MAX_OUTPUT_BYTES + 1024);
-        assert!(truncate_to_limit(medium.clone()).ends_with(TRUNCATION_MARKER));
-        assert_eq!(
-            truncate_to_limit_at(medium.clone(), MAX_COLLECT_OUTPUT_BYTES),
-            medium
+        let secrets = crate::core::secret_scrub::SecretSet::new();
+        let legacy = CutMarker::Legacy;
+        assert!(captured_text(captured(&medium, 0), &secrets, MAX_OUTPUT_BYTES, legacy).truncated);
+        let kept = captured_text(
+            captured(&medium, 0),
+            &secrets,
+            MAX_COLLECT_OUTPUT_BYTES,
+            legacy,
         );
+        assert_eq!(kept.text, medium);
+        assert!(!kept.truncated);
+    }
+
+    /// Past the on-disk cap too, the marker says the file is partial.
+    #[test]
+    fn a_stdout_past_the_disk_cap_says_its_file_is_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = full_output_path(dir.path(), "big step/1");
+        let text = "y".repeat(MAX_FULL_OUTPUT_BYTES + 10);
+        let secrets = crate::core::secret_scrub::SecretSet::new();
+        let marker = CutMarker::Explicit(Some(&path));
+        let cut = captured_text(captured(&text, 1024), &secrets, MAX_OUTPUT_BYTES, marker);
+        let path_text = path.to_string_lossy();
+        assert!(cut.text.ends_with(&format!(
+            "[TRUNCATED: kept 100 KB of 8194 KB — first 8192 KB: {path_text}]"
+        )));
+        assert_eq!(cut.full_output.as_deref(), Some(path_text.as_ref()));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            MAX_FULL_OUTPUT_BYTES as u64
+        );
+        assert!(path.starts_with(dir.path().join(FULL_OUTPUT_DIR)));
+        assert!(path_text.contains("big_step_1-"));
     }
 
     // ─── on_result + SIGNAL emission tests ────────────────────────────

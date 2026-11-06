@@ -1282,7 +1282,7 @@ fn split_exec_stdout(output: &str) -> Option<(&str, String, &str)> {
     };
     let exec_keys = ["exit_code", "stdout", "stderr", "duration_ms"];
     // Outputs stored before the truncation flags existed lack them.
-    let flags = ["stdout_truncated", "stderr_truncated"];
+    let flags = ["stdout_truncated", "stderr_truncated", "stdout_file"];
     if !exec_keys.iter().all(|key| data.contains_key(*key))
         || !data
             .keys()
