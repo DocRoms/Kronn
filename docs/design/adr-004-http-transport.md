@@ -26,7 +26,7 @@ agent, regardless of which named connection backs it. It replaces an inline
 ternary that used to live inside `start_ollama_http`, mirroring
 `acp::resolve_acp_route` being the sole ACP route decision point.
 [src: file: backend/src/http_transport.rs:28-41]
-[src: file: backend/src/agents/runner.rs:9218-9221#resolve_chat_codec] (call site)
+[src: file: backend/src/agents/runner.rs:9285-9288#resolve_chat_codec] (call site)
 
 ### Pre-dispatch capability gate
 
@@ -49,7 +49,7 @@ named-connection model Custom connections use (`external_api_connections`,
 KT-339), but keep their own dedicated `AgentType` — so their fixed UI color
 (`AGENT_COLORS.LiteLlm` / `.Nvidia`) and their per-agent-type concurrency
 limit (`agent_concurrency_limits`'s `REMOTE` array) are untouched by this
-work. [src: file: backend/src/agents/runner.rs:3309-3361#agent_concurrency_limits]
+work. [src: file: backend/src/agents/runner.rs:3319-3371#agent_concurrency_limits]
 [src: file: frontend/src/lib/constants.ts:10-24#AGENT_COLORS] Their credential is resolved
 through `credential_slug` → `TokensConfig.active_key_for`, the same
 indirection every named connection already uses.
@@ -129,7 +129,7 @@ synthesis: [src: file: backend/src/api/discussions/orchestration.rs:1049-1057#ch
 Workflow Agent steps: the connection resolver
 [src: file: backend/src/workflows/steps.rs:1153-1193#resolve_step_connection],
 the run-start check
-[src: file: backend/src/workflows/runner.rs:1884-1932#resolve_step_connection],
+[src: file: backend/src/workflows/runner.rs:1967-2015#resolve_step_connection],
 the check immediately before dispatch
 [src: file: backend/src/workflows/steps.rs:402-414#preflight_workflow_launch]
 and the preflight on the `http:<connection-id>` target and effective model

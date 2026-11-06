@@ -43,7 +43,7 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/mod.rs:140-260#migrate_hardcoded_catalog_once]
 [src: file: backend/src/api/model_catalog.rs:242-273#update_manual]
 [src: file: backend/src/api/model_catalog.rs:275-301#delete_manual]
-[src: file: backend/src/agents/runner.rs:3456-3475#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3466-3485#resolve_model_flag]
 
 ## Discovery boundaries
 
@@ -149,7 +149,7 @@ authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1131-1162#retained_claude_model]
 [src: file: backend/src/api/discussions/streaming.rs:4179-4225#preflight_resolve]
-[src: file: backend/src/workflows/runner.rs:1884-1969#preflight_resolve]
+[src: file: backend/src/workflows/runner.rs:2009-2094#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1195-1248#preflight_workflow_launch]
 
 A comparison's TARGET decides which connection its run uses (KT-672). A row
@@ -211,17 +211,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3494-3672#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3504-3682#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13097-13114#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:13245-13276#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13320-13337#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13443-13474#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:4879-4907#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:4889-4917#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
