@@ -4,7 +4,6 @@
  * UsageSection ships agent usage / cost data via ccusage (~700 LOC).
  * Previously 0 tests. This file pins :
  *  - formatPeriod() — daily / weekly / monthly bucket presentation
- *  - rowsPerPage() — per-bucket page sizing
  *  - mount fetches the daily report
  *  - period selector switches the fetch to weekly / monthly
  *  - refresh button re-fires the same fetch
@@ -46,7 +45,7 @@ vi.mock('../../../lib/I18nContext', () => ({
 }));
 
 import { UsageSection } from '../UsageSection';
-import { formatPeriod, rowsPerPage } from '../usageFormat';
+import { formatPeriod } from '../usageFormat';
 
 beforeEach(() => {
   telemetryApi.coverage.mockResolvedValue([]);
@@ -122,22 +121,6 @@ describe('formatPeriod()', () => {
 
   it('handles invalid weekly date without crashing', () => {
     expect(formatPeriod('weekly', 'not-a-date', 'en-US')).toBe('not-a-date');
-  });
-});
-
-describe('rowsPerPage()', () => {
-  it('returns 30 for daily', () => {
-    expect(rowsPerPage('daily')).toBe(30);
-  });
-  it('returns 15 for weekly', () => {
-    expect(rowsPerPage('weekly')).toBe(15);
-  });
-  it('returns 12 for monthly', () => {
-    expect(rowsPerPage('monthly')).toBe(12);
-  });
-  it('returns 30 as fallback for unknown', () => {
-    expect(rowsPerPage('hourly')).toBe(30);
-    expect(rowsPerPage('')).toBe(30);
   });
 });
 
