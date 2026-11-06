@@ -94,6 +94,14 @@ describe('a run waiting for a provider quota', () => {
     expect(onCancel).toHaveBeenCalled();
   });
 
+  it('offers no Resume on a waiting foreach child: its parent resumes it', () => {
+    const run = { ...waitingRun({ attempt: 1, wake_at: WAKE }), run_type: 'subworkflow', parent_run_id: 'run-parent' };
+    render(<RunDetail run={run} onDelete={() => {}} onResume={vi.fn()} onCancel={vi.fn()} />);
+    expect(screen.getByTestId('wf-quota-notice')).toBeTruthy();
+    expect(screen.queryByTitle('wf.quota.resumeHint')).toBeNull();
+    expect(screen.getByTitle('wf.cancelRun')).toBeTruthy();
+  });
+
   it('names each parking reason', () => {
     const cases: Array<[NonNullable<StepResult['quota_wait']>, string]> = [
       [{ attempt: 1, parked: 'after_deadline', reset_at: RESET }, 'wf.quota.parked.afterDeadline'],

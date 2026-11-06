@@ -723,7 +723,7 @@ async fn child_succeeded(state: &crate::AppState, root: &str, item: &str) -> boo
 
 /// A root, its foreach and a child nest three runner futures: more than the
 /// default test-thread stack holds.
-fn on_big_stack<F: std::future::Future<Output = ()> + Send + 'static>(test: F) {
+pub(super) fn on_big_stack<F: std::future::Future<Output = ()> + Send + 'static>(test: F) {
     std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(|| {
