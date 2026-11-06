@@ -114,7 +114,7 @@ Every declaration is paid for on every session. The new arguments are `{"type": 
 with their contract in the `task_exec_prepare` / `task_exec_reassign` manuals; the bytes were found by
 moving the return shape of `workflow_run_status` into its manual and tightening three descriptions, and
 `CATALOGUE_MAX_BYTES` went **down** by 33 B (84,450 → 84,417).
-`[src: file: backend/scripts/ci/mcp_surface_budget.py:166#CATALOGUE_MAX_BYTES]`
+`[src: file: backend/scripts/ci/mcp_surface_budget.py:167#CATALOGUE_MAX_BYTES]`
 
 ## Tests
 

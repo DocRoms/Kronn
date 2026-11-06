@@ -463,7 +463,7 @@ and/or a `kronn-delivery` fence):
 ```
 
 **ReviewDecision v1** (principal → backend, via a new `task_exec_review` MCP tool; reuses the
-`GateDecision` enum semantics `[src: file: backend/src/workflows/runner.rs:4100-4123#GateDecision]`):
+`GateDecision` enum semantics `[src: file: backend/src/workflows/runner.rs:4180-4203#GateDecision]`):
 ```json
 { "version":"1", "task_ref":"KT-142", "decision":"approve|request_changes",
   "comment":"<required when request_changes>",
@@ -502,7 +502,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   out of V1 scope.)
 - **Budget** — as built, the run carries an optional `token_budget` (`NULL` = no ceiling) instead of
   reusing `SharedBudget`, the workflow engine's tree-wide LLM-call quota
-  `[src: file: backend/src/workflows/runner.rs:307-325#SharedBudget]`. Once the tokens used by the run's
+  `[src: file: backend/src/workflows/runner.rs:389-407#SharedBudget]`. Once the tokens used by the run's
   sub-discussions reach it, the campaign stops offering new tasks (`token_budget` candidate reason)
   `[src: file: backend/src/db/orchestration.rs:1402-1407#token_exhausted]`; it does not escalate an
   execution already running.
@@ -521,7 +521,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   An optional `escalation_notify_url` is stored on the run
   `[src: file: backend/src/models/orchestration.rs:734-734#escalation_notify_url]`; nothing fires it yet.
   The gate webhook it was meant to reuse is `fire_gate_webhook`
-  `[src: file: backend/src/workflows/runner.rs:781-802#fire_gate_webhook]`.
+  `[src: file: backend/src/workflows/runner.rs:863-884#fire_gate_webhook]`.
 
 ---
 
