@@ -43,6 +43,16 @@ const MAX_WEB_FETCH_CALLS: usize = 120;
 const MAX_API_ENUMERATION_CALLS: usize = 60;
 const MAX_ERRORS_PER_TOOL: usize = 3;
 const MAX_ERROR_ONLY_TOOL_ROUNDS: usize = 6;
+// A refusal costs the model nothing, so it may ask again at once with new
+// arguments (KT-1545). Bounds on Kronn's own anti-loop refusals: per response,
+// later refused calls are dropped; per phase, refusal-only rounds lead to
+// synthesis (not for workers), then to a hard stop.
+const MAX_LOOP_REFUSALS_PER_RESPONSE: usize = 8;
+const MAX_REFUSAL_ONLY_ROUNDS_BEFORE_SYNTHESIS: usize = 2;
+const MAX_REFUSAL_ONLY_ROUNDS: usize = 3;
+// Refused calls listed in the room transcript per tool; the ceiling card and
+// the final diagnostic carry the count, so the rest need not each be a message.
+const MAX_REFUSAL_TRACES_PER_TOOL: usize = 2;
 // Rounds an audit keeps, before its ceiling, to write its deliverable.
 const AUDIT_WRITE_RESERVE_ROUNDS: usize = 8;
 const ACP_DIAGNOSTIC_MAX_CHARS: usize = 1_024;
@@ -8231,6 +8241,63 @@ fn logged_refusal(
     logged
 }
 
+/// Whether this is one of Kronn's own anti-loop refusals: the call was never
+/// executed and the model is being told to stop asking. Stage-specific worker
+/// refusals are not included, they have budgets of their own.
+fn is_loop_refusal(outcome: &crate::agents::tools::ToolOutcome) -> bool {
+    !outcome.ok
+        && [
+            "round_ceiling_reached",
+            "undeclared_tool",
+            "tool_circuit_open",
+            "budget_exhausted",
+            "repeated_call_refused",
+        ]
+        .iter()
+        .any(|key| {
+            outcome
+                .content
+                .get(key)
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+}
+
+/// Which refusals of the current round reached the room transcript: every
+/// `[kronn-internal: …]` stderr line becomes one room message.
+#[derive(Default)]
+struct RefusalTraces {
+    written: std::collections::HashMap<String, usize>,
+}
+
+impl RefusalTraces {
+    /// Trace a refusal unless its tool already has its share. Returns whether
+    /// the caller may also write its own per-call diagnostic.
+    fn push(
+        &mut self,
+        stderr: &Arc<Mutex<Vec<String>>>,
+        backend: &str,
+        refusal: &crate::agents::tools::ToolOutcome,
+        declared: &std::collections::HashSet<String>,
+    ) -> bool {
+        let logged = logged_refusal(refusal, declared);
+        let count = self.written.entry(logged.call.name.clone()).or_insert(0);
+        *count += 1;
+        let admitted = *count <= MAX_REFUSAL_TRACES_PER_TOOL;
+        if let Ok(mut se) = stderr.lock() {
+            if admitted {
+                se.push(crate::agents::tools::trace_line(&logged));
+            } else if *count == MAX_REFUSAL_TRACES_PER_TOOL + 1 {
+                se.push(format!(
+                    "{backend} stops listing refused `{}` calls after {MAX_REFUSAL_TRACES_PER_TOOL}; later ones are counted, not traced",
+                    logged.call.name
+                ));
+            }
+        }
+        admitted
+    }
+}
+
 fn push_http_tool_exec_trace(stderr: &Arc<Mutex<Vec<String>>>, turn: u32, name: &str, ok: bool) {
     let trace = HttpToolExecTrace {
         version: 1,
@@ -9811,6 +9878,10 @@ async fn start_ollama_http_with_idle(
         // correctly worked out.
         let mut withdrawn_tools = std::collections::HashSet::<String>::new();
         let mut consecutive_error_only_rounds = 0usize;
+        // Rounds in a row where every call got one of Kronn's anti-loop
+        // refusals. Error-only rounds above do not catch a model that ignores
+        // a withdrawal: its refusals are cheap, so it asks again at once.
+        let mut consecutive_refusal_only_rounds = 0usize;
         let mut useful_tool_results = 0usize;
         let mut forced_synthesis = false;
         // Structured telemetry is also consumed by the audit artifact gate.
@@ -10546,6 +10617,8 @@ async fn start_ollama_http_with_idle(
                     // refresh even if exploration exhausted read_file.
                     worker_finalization_phase = true;
                     worker_finalization_turns = 1;
+                    // Entered from prose, not from a tool round: its rounds count afresh too.
+                    consecutive_refusal_only_rounds = 0;
                     retain_worker_finalization_tools(&mut body);
                     let checkpoint = checkpoint_worker_finalization_history(
                         &mut body,
@@ -10950,6 +11023,7 @@ async fn start_ollama_http_with_idle(
 
             // Execute, then feed the results back as the next turn's history.
             let mut results = Vec::with_capacity(calls.len());
+            let mut refusal_traces = RefusalTraces::default();
             let mut budget_refusals = 0usize;
             let mut delivered_this_turn = false;
             let mut failed_edit_this_turn = false;
@@ -10959,7 +11033,74 @@ async fn start_ollama_http_with_idle(
             let mut refused_finalization_read_this_turn = false;
             let mut repair_read_succeeded = false;
             let mut repair_edit_succeeded = false;
+            let tool_limit_of = |name: &str| {
+                if ceiling_allowance.unlimited_tools.contains(name) {
+                    usize::MAX
+                } else {
+                    max_calls_for_tool(name, tool_run_mode).saturating_add(
+                        ceiling_allowance
+                            .extra_calls
+                            .get(name)
+                            .copied()
+                            .unwrap_or(0),
+                    )
+                }
+            };
+            // Past a bound on refusals, calls that would be refused too are
+            // dropped; `answered_calls` is what the history declares, so it stays balanced.
+            let mut answered_calls = Vec::with_capacity(calls.len().min(64));
+            let mut loop_refusals_this_response = 0usize;
+            let mut counted_results = 0usize;
+            let mut dropped_calls = 0usize;
+            let mut ceiling_dirty = false;
             for call in &calls {
+                while counted_results < results.len() {
+                    if is_loop_refusal(&results[counted_results]) {
+                        loop_refusals_this_response += 1;
+                    }
+                    counted_results += 1;
+                }
+                if loop_refusals_this_response >= MAX_LOOP_REFUSALS_PER_RESPONSE {
+                    let limit = tool_limit_of(&call.name);
+                    let over_budget = calls_per_tool.get(&call.name).copied().unwrap_or(0) >= limit;
+                    let repeated_refusal = {
+                        let (_, signature) = tool_call_signature(&call.name, &call.arguments);
+                        seen_calls.contains_key(&signature)
+                            && repeated_calls.get(&signature).copied().unwrap_or(0) >= 1
+                    };
+                    if round_ceiling_reached
+                        || !declared_tools_for_turn.contains(&call.name)
+                        || open_tool_circuits.contains(&call.name)
+                        || over_budget
+                        || repeated_refusal
+                    {
+                        dropped_calls += 1;
+                        // A dropped finalization read still arms the repair stage.
+                        if !declared_tools_for_turn.contains(&call.name)
+                            && worker_run
+                            && worker_finalization_phase
+                            && !worker_delivery_phase
+                            && worker_repair_stage_for_turn == WorkerRepairStage::Inactive
+                            && call.name == "read_file"
+                        {
+                            refused_finalization_read_this_turn = true;
+                        }
+                        *refusals_per_tool
+                            .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                            .or_insert(0) += 1;
+                        if over_budget && !round_ceiling_reached {
+                            withdrawn_tools.insert(call.name.clone());
+                            if ceiling_allowance.ask_on_ceiling
+                                || tool_run_mode == crate::agents::tools::ToolRunMode::Audit
+                            {
+                                ceiling_report.record_tool_refusal(&call.name, limit, call);
+                                ceiling_dirty = true;
+                            }
+                        }
+                        continue;
+                    }
+                }
+                answered_calls.push(call.clone());
                 if round_ceiling_reached {
                     *refusals_per_tool
                         .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
@@ -10977,12 +11118,7 @@ async fn start_ollama_http_with_idle(
                             ),
                         }),
                     };
-                    if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&logged_refusal(
-                            &refusal,
-                            &declared_tools_for_turn,
-                        )));
-                    }
+                    refusal_traces.push(&stderr_clone, backend, &refusal, &declared_tools_for_turn);
                     results.push(refusal);
                     budget_refusals += 1;
                     continue;
@@ -11018,14 +11154,17 @@ async fn start_ollama_http_with_idle(
                             ),
                         }),
                     };
-                    if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&logged_refusal(
-                            &refusal,
-                            &declared_tools_for_turn,
-                        )));
-                        se.push(format!(
-                            "{backend} refused an undeclared tool ({logged}) at turn {turn}; it was absent from the request catalogue and the executor was not called"
-                        ));
+                    if refusal_traces.push(
+                        &stderr_clone,
+                        backend,
+                        &refusal,
+                        &declared_tools_for_turn,
+                    ) {
+                        if let Ok(mut se) = stderr_clone.lock() {
+                            se.push(format!(
+                                "{backend} refused an undeclared tool ({logged}) at turn {turn}; it was absent from the request catalogue and the executor was not called"
+                            ));
+                        }
                     }
                     results.push(refusal);
                     budget_refusals += 1;
@@ -11228,27 +11367,12 @@ async fn start_ollama_http_with_idle(
                             ),
                         }),
                     };
-                    if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&logged_refusal(
-                            &refusal,
-                            &declared_tools_for_turn,
-                        )));
-                    }
+                    refusal_traces.push(&stderr_clone, backend, &refusal, &declared_tools_for_turn);
                     results.push(refusal);
                     budget_refusals += 1;
                     continue;
                 }
-                let tool_limit = if ceiling_allowance.unlimited_tools.contains(&call.name) {
-                    usize::MAX
-                } else {
-                    max_calls_for_tool(&call.name, tool_run_mode).saturating_add(
-                        ceiling_allowance
-                            .extra_calls
-                            .get(&call.name)
-                            .copied()
-                            .unwrap_or(0),
-                    )
-                };
+                let tool_limit = tool_limit_of(&call.name);
                 if *used > tool_limit {
                     *refusals_per_tool
                         .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
@@ -11258,7 +11382,9 @@ async fn start_ollama_http_with_idle(
                         || tool_run_mode == crate::agents::tools::ToolRunMode::Audit
                     {
                         ceiling_report.record_tool_refusal(&call.name, tool_limit, call);
-                        ceiling_report.publish(&stderr_clone);
+                        // Published once the response is processed: the last
+                        // marker wins, and one per refusal is thousands of lines.
+                        ceiling_dirty = true;
                     }
                     tracing::warn!(
                         target: "kronn::agent::tools",
@@ -11279,9 +11405,7 @@ async fn start_ollama_http_with_idle(
                             ),
                         }),
                     };
-                    if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(crate::agents::tools::trace_line(&refusal));
-                    }
+                    refusal_traces.push(&stderr_clone, backend, &refusal, &declared_tools_for_turn);
                     results.push(refusal);
                     budget_refusals += 1;
                     continue;
@@ -11622,11 +11746,49 @@ async fn start_ollama_http_with_idle(
                     "HTTP agent tool call"
                 );
                 record_http_tool_call(&task_usage, activity.as_ref(), call);
-                if let Ok(mut se) = stderr_clone.lock() {
+                if is_loop_refusal(&outcome) {
+                    // The repeated-call refusal: it never ran, so it follows the
+                    // same bounded tracing as the other refusals.
+                    refusal_traces.push(&stderr_clone, backend, &outcome, &declared_tools_for_turn);
+                } else if let Ok(mut se) = stderr_clone.lock() {
                     se.push(trace_line(&outcome));
                 }
                 results.push(outcome);
             }
+            if ceiling_dirty {
+                ceiling_report.publish(&stderr_clone);
+            }
+            let calls = if dropped_calls > 0 {
+                if let Some(last) = results.last_mut() {
+                    let note = serde_json::json!(format!(
+                        "{dropped_calls} further call(s) in this same response were dropped \
+                         without being run or answered: their tools are withdrawn or over \
+                         their ceiling. Stop asking for them and answer with what you have."
+                    ));
+                    if let Some(payload) = last.content.as_object_mut() {
+                        payload.insert("kronn_dropped_calls".into(), note);
+                    } else {
+                        let result = last.content.take();
+                        last.content = serde_json::json!({
+                            "result": result,
+                            "kronn_dropped_calls": note,
+                        });
+                    }
+                }
+                tracing::warn!(
+                    target: "kronn::agent::tools",
+                    turn, dropped_calls,
+                    "one response asked for more refused tool calls than Kronn answers — the rest were dropped unanswered"
+                );
+                if let Ok(mut se) = stderr_clone.lock() {
+                    se.push(format!(
+                        "{backend} dropped {dropped_calls} refused tool call(s) from one response at turn {turn}; none of them was executed"
+                    ));
+                }
+                answered_calls
+            } else {
+                calls
+            };
 
             if worker_run
                 && syntax_refused_edit_this_turn
@@ -12081,6 +12243,33 @@ async fn start_ollama_http_with_idle(
             } else {
                 consecutive_error_only_rounds = 0;
             }
+            let refusal_only_round = !results.is_empty() && results.iter().all(is_loop_refusal);
+            // A new worker phase changes the catalogue: its rounds count afresh.
+            if entered_worker_repair
+                || entered_worker_finalization
+                || entered_worker_delivery
+                || !refusal_only_round
+            {
+                consecutive_refusal_only_rounds = 0;
+            } else {
+                consecutive_refusal_only_rounds += 1;
+            }
+            if consecutive_refusal_only_rounds >= MAX_REFUSAL_ONLY_ROUNDS {
+                // Only workers and audits get here: a discussion lost every tool
+                // at synthesis, and a stray call then hits the tool-free fallback.
+                // The ceiling report published above still backs the human's card.
+                let refused_total: usize = refusals_per_tool.values().sum();
+                let msg = format!(
+                    "{backend} kept requesting withdrawn or exhausted tools for \
+                     {consecutive_refusal_only_rounds} consecutive rounds \
+                     ({refused_total} refused calls, none executed) — stopping the run"
+                );
+                tracing::warn!(target: "kronn::agent::tools", "{}", msg);
+                if let Ok(mut se) = stderr_clone.lock() {
+                    se.push(msg);
+                }
+                break false;
+            }
             let withdrawn: std::collections::HashSet<String> = open_tool_circuits
                 .union(&withdrawn_tools)
                 .cloned()
@@ -12094,13 +12283,18 @@ async fn start_ollama_http_with_idle(
             // asks again, and did, eleven times over. Drop the declarations so
             // writing the answer is the only move left, same as the
             // "you used tools but wrote nothing" retry above.
-            let error_loop_exhausted = consecutive_error_only_rounds >= MAX_ERROR_ONLY_TOOL_ROUNDS;
+            let error_loop_exhausted = consecutive_error_only_rounds >= MAX_ERROR_ONLY_TOOL_ROUNDS
+                // A worker overspending one budget still has a commit to make;
+                // its hard stop is the larger bound above.
+                || (!worker_run
+                    && consecutive_refusal_only_rounds >= MAX_REFUSAL_ONLY_ROUNDS_BEFORE_SYNTHESIS);
             // Withdrawing the offending declarations above is what actually stops
             // the loop. Forcing prose on top of it is only right once there is
             // nothing left to call: a worker that overspent ONE budget still has
             // a change to write and a commit to make. When the offending tool was
             // the only one, the catalogue empties and this fires exactly as before.
             let nothing_left_to_call = body.get("tools").is_none();
+            let audit_was_writing = audit_write_phase;
             if round_ceiling_reached && !forced_synthesis {
                 // Give the model one tool-free turn to summarize its partial result.
                 if let Some(map) = body.as_object_mut() {
@@ -12215,6 +12409,10 @@ async fn start_ollama_http_with_idle(
                         }
                     }
                 }
+            }
+            // The write phase must get its own rounds before the hard stop.
+            if audit_write_phase && !audit_was_writing {
+                consecutive_refusal_only_rounds = 0;
             }
             // The messages just grew by the tool results: the window sized for turn
             // one no longer fits them. OpenAI-wire providers own their own window.
