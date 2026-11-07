@@ -1975,6 +1975,32 @@ async fn a_body_less_get_labelled_json_reaches_its_handler() {
     assert_eq!(status, 400, "{response}");
 }
 
+/// KT-1068 — a GET body that is not labelled JSON is read and refused, never
+/// forwarded unread; an empty GET stays accepted, labelled or not.
+#[tokio::test]
+async fn a_get_with_a_non_json_body_is_refused_and_an_empty_one_is_not() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let path = "/api/discussions/room-a/meta";
+    for content_type in [Some("text/plain"), Some("application/octet-stream"), None] {
+        let mut headers = vec![("authorization", format!("Bearer {}", guard.value()))];
+        if let Some(content_type) = content_type {
+            headers.push(("content-type", content_type.to_owned()));
+        }
+        let (status, response) = send(&app, "GET", path, &headers, Some("{\"x\":1}")).await;
+        assert_eq!(status, 415, "{content_type:?}: {response}");
+        assert!(
+            response.contains("a bridge-token request body must be JSON"),
+            "{content_type:?}: {response}"
+        );
+        let (status, response) = send(&app, "GET", path, &headers, None).await;
+        assert_eq!(status, 200, "empty, {content_type:?}: {response}");
+    }
+    let (status, response) =
+        raw_call(&app, "GET", path, guard.value(), "application/json", "").await;
+    assert_eq!(status, 200, "{response}");
+}
+
 // ─── Layer B round 3 (review-layer-b3) ──────────────────────────────────────
 
 async fn send(
