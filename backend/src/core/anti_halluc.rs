@@ -107,6 +107,50 @@ pub fn current_mode() -> AntiHallucMode {
     *cell().read().unwrap()
 }
 
+/// The only way a test changes the mode: it holds a process-wide lock, so two
+/// tests never interleave their modes, and puts the default back on drop.
+#[cfg(test)]
+pub struct ModeOverride {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+static MODE_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static MODE_OVERRIDE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+impl ModeOverride {
+    pub fn set(mode: &str) -> Self {
+        // A second override on the same thread would wait on itself forever.
+        assert!(
+            !MODE_OVERRIDE_HELD.get(),
+            "one ModeOverride per test: change it with switch()"
+        );
+        let lock = MODE_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        MODE_OVERRIDE_HELD.set(true);
+        set_mode(mode);
+        Self { _lock: lock }
+    }
+
+    pub fn switch(&self, mode: &str) {
+        set_mode(mode);
+    }
+}
+
+#[cfg(test)]
+impl Drop for ModeOverride {
+    fn drop(&mut self) {
+        set_mode(DEFAULT_MODE_STR);
+        MODE_OVERRIDE_HELD.set(false);
+    }
+}
+
 // ─── P3 (0.8.8 PR-B) — enforce-mode disc policy helpers ──────────────────
 //
 // Pure decision functions so the runner / streaming wiring is unit-testable
@@ -3363,15 +3407,12 @@ mod tests {
     #[serial_test::serial] // mutates the process-global anti-halluc mode
     #[test]
     fn preamble_gating_follows_global_mode() {
-        set_mode("off");
+        let mode = ModeOverride::set("off");
         assert!(preamble_if_active().is_none());
-        set_mode("warn");
+        mode.switch("warn");
         assert!(preamble_if_active().is_some());
-        set_mode("enforce");
+        mode.switch("enforce");
         assert!(preamble_if_active().is_some());
-        // Restore the process default so this test doesn't leak state into
-        // other tests in the same binary.
-        set_mode(DEFAULT_MODE_STR);
     }
 
     #[test]
@@ -4845,7 +4886,7 @@ mod tests {
         std::fs::create_dir_all(&main).unwrap();
 
         // 1. Mode off → always None, even with a perfectly-verified citation.
-        set_mode("off");
+        let mode = ModeOverride::set("off");
         assert!(
             finalize_lint_report(
                 "Implemented [src: file: src/foo.rs:2].",
@@ -4858,7 +4899,7 @@ mod tests {
         );
 
         // 2. Mode warn → a verified citation produces a stored GREEN report.
-        set_mode("warn");
+        mode.switch("warn");
         let green = finalize_lint_report(
             "Retry logic [src: file: src/foo.rs:2].",
             None,
@@ -4886,8 +4927,6 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&worktree).ok();
         std::fs::remove_dir_all(&main).ok();
-        // Leave the rollout default in place for any other test reading the mode.
-        set_mode("warn");
     }
 
     #[test]
@@ -6252,7 +6291,7 @@ mod tests {
         fn finalize_mode_off_then_warn_sequential() {
             let root = temp_project();
             // off → None even for a perfect citation.
-            set_mode("off");
+            let mode = ModeOverride::set("off");
             assert!(
                 finalize_lint_report(
                     "Retry [src: file: src/foo.rs:2].",
@@ -6264,7 +6303,7 @@ mod tests {
                 "off mode must produce no report",
             );
             // warn → green stored report.
-            set_mode("warn");
+            mode.switch("warn");
             let rep = finalize_lint_report(
                 "Retry [src: file: src/foo.rs:2].",
                 None,
@@ -6279,8 +6318,6 @@ mod tests {
                 "no-signal prose must produce no report",
             );
             std::fs::remove_dir_all(&root).ok();
-            // Restore rollout default for any sibling test reading the global mode.
-            set_mode("warn");
         }
     }
 
@@ -6550,7 +6587,7 @@ mod tests {
             // The has_signal gate in finalize_lint_report drops a no-signal
             // report. Mode-dependent → set + restore locally, kept in ONE fn.
             let root = temp_project();
-            set_mode("warn");
+            let _mode = ModeOverride::set("warn");
             let out = finalize_lint_report(
                 "Voilà, c'est terminé pour aujourd'hui. Bonne soirée.",
                 None,
@@ -6558,7 +6595,6 @@ mod tests {
                 &[],
             );
             assert!(out.is_none(), "no-signal prose must finalize to None");
-            set_mode(DEFAULT_MODE_STR);
             std::fs::remove_dir_all(&root).ok();
         }
 
@@ -7054,7 +7090,7 @@ mod lane_origin {
         let (checkout, lane) = project();
         write(&checkout, "src/main.rs", 5);
         write(&lane, "frontend/new.ts", 5);
-        set_mode("warn");
+        let _mode = ModeOverride::set("warn");
         let text = "Done [src: file: src/main.rs:2], new [src: file: frontend/new.ts:3], \
                     and [src: file: src/ghost.rs:1].";
         let report =
@@ -7346,5 +7382,78 @@ mod anchor_citations {
         ] {
             assert_eq!(defines_symbol(line, symbol), defined, "{line}");
         }
+    }
+}
+
+#[cfg(test)]
+mod mode_override_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// Every `set_mode` reference outside this file, by file. A test that
+    /// writes the mode directly leaks it into concurrent and later tests.
+    fn mode_writers_by_file() -> BTreeMap<String, usize> {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let path_ref = concat!("anti_halluc::set_", "mode");
+        let mut found = BTreeMap::new();
+        for entry in walkdir::WalkDir::new(&src) {
+            let entry = entry.unwrap();
+            if entry.path().extension().is_none_or(|ext| ext != "rs")
+                || entry.path().ends_with("core/anti_halluc.rs")
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(entry.path()).unwrap();
+            let grouped = text
+                .match_indices("anti_halluc::{")
+                .filter(|(at, _)| {
+                    let group = &text[*at..];
+                    group[..group.find('}').unwrap_or(group.len())].contains("set_mode")
+                })
+                .count();
+            let count =
+                text.matches(path_ref).count() + text.matches("anti_halluc::*").count() + grouped;
+            if count > 0 {
+                let rel = entry.path().strip_prefix(&src).unwrap();
+                found.insert(rel.to_string_lossy().replace('\\', "/"), count);
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn only_mode_override_writes_the_mode_in_tests() {
+        // lib.rs: the startup wiring plus two source assertions on it;
+        // setup.rs: the settings handler.
+        let expected = BTreeMap::from([("lib.rs".to_string(), 3), ("api/setup.rs".to_string(), 1)]);
+        assert_eq!(
+            mode_writers_by_file(),
+            expected,
+            "tests must change the anti-hallucination mode through ModeOverride"
+        );
+        let own = include_str!("anti_halluc.rs");
+        let calls = own.matches(concat!("set_", "mode(")).count();
+        assert_eq!(
+            calls, 4,
+            "only the definition and ModeOverride call set_mode here"
+        );
+    }
+
+    // Serial like every other ModeOverride holder, so the read after the drop is not raced.
+    #[serial_test::serial]
+    #[test]
+    fn mode_override_restores_the_default_even_when_the_test_panics() {
+        let panicked = std::panic::catch_unwind(|| {
+            let _mode = ModeOverride::set("enforce");
+            assert_eq!(current_mode(), AntiHallucMode::Enforce);
+            panic!("test failure while the override is held");
+        });
+        assert!(panicked.is_err());
+        assert_eq!(current_mode(), AntiHallucMode::Warn);
+        // The poisoned lock and the held flag are released for the next test.
+        let mode = ModeOverride::set("off");
+        assert_eq!(current_mode(), AntiHallucMode::Off);
+        drop(mode);
+        assert_eq!(current_mode(), AntiHallucMode::Warn);
     }
 }

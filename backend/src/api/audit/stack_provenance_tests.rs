@@ -111,6 +111,9 @@ async fn index_step_with_stream(
     watch: bool,
 ) -> IndexStep {
     let (tools, state) = (h.tools.path(), &h.state);
+    // Held for the whole run: no other test can change the mode under it.
+    let _mode =
+        crate::core::anti_halluc::ModeOverride::set(crate::core::anti_halluc::DEFAULT_MODE_STR);
     assert_eq!(
         crate::core::anti_halluc::current_mode(),
         crate::core::anti_halluc::AntiHallucMode::Warn,
@@ -126,6 +129,11 @@ async fn index_step_with_stream(
     // Every prompt (the attempts of step 1, then the later steps) writes the index.
     arm(tools, "fill", &["docs/AGENTS.md"; 3]);
     let body = run_full(state, None).await;
+    assert_eq!(
+        crate::core::anti_halluc::current_mode(),
+        crate::core::anti_halluc::AntiHallucMode::Warn,
+        "a test changed the mode without ModeOverride during the run"
+    );
     let of_step_one = |name: &str| -> Vec<Value> {
         sse_events(&body, name)
             .into_iter()

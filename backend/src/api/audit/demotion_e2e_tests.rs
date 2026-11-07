@@ -363,20 +363,6 @@ async fn a_revalidation_demotes_what_its_agent_left_stale_and_completes() {
     );
 }
 
-/// Puts the anti-hallucination mode back to what the other tests expect.
-struct EnforceMode;
-impl EnforceMode {
-    fn on() -> Self {
-        crate::core::anti_halluc::set_mode("enforce");
-        Self
-    }
-}
-impl Drop for EnforceMode {
-    fn drop(&mut self) {
-        crate::core::anti_halluc::set_mode(crate::core::anti_halluc::DEFAULT_MODE_STR);
-    }
-}
-
 #[tokio::test]
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]
@@ -387,7 +373,7 @@ async fn a_partial_step_demotes_what_the_enforce_gate_still_refuses_and_complete
         RULES,
         "\n- Errors are mapped nowhere [src: file: src/kept.rs:999]\n",
     );
-    let _mode = EnforceMode::on();
+    let _mode = crate::core::anti_halluc::ModeOverride::set("enforce");
     arm(fx.h.tools.path(), "noop", &[RULES; 3]);
     let body = fx.partial(vec![fx.step_of(RULES) as usize]).await;
     let done = sse_events(&body, "done").pop().expect("terminal done");

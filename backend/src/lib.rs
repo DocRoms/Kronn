@@ -4154,6 +4154,8 @@ mod startup_config_tests {
         crate::core::config::save(&cfg).await.unwrap();
         crate::core::timezone::apply_with(None, Tz::UTC);
 
+        // The real startup arms the global mode: own it while it does.
+        let _mode = crate::core::anti_halluc::ModeOverride::set("warn");
         let loaded = load_startup_config().await.unwrap();
         let (zone, preview) = (crate::core::timezone::current(), preview_zone());
         restore(previous);
