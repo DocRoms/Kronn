@@ -877,6 +877,9 @@ describe('OllamaCard — what the official library says (KT-930)', () => {
     // Neither the old "update available" nor a made-up "not checked": nothing.
     await waitFor(() => expect(installedRow('qwen3:8b').textContent).not.toMatch(/ollama\.fresh\./));
     expect(within(installedRow('gemma4:12b-mlx')).getByText('ollama.fresh.up_to_date')).toBeTruthy();
+    // The verdict is withheld one render before the effect asks again, so
+    // `answerAfter` only exists once that second request has been made.
+    await waitFor(() => expect(ollama.registry).toHaveBeenCalledTimes(2));
     await act(async () => answerAfter(answer([['qwen3:8b', 'up_to_date']])));
     expect(await within(installedRow('qwen3:8b')).findByText('ollama.fresh.up_to_date')).toBeTruthy();
   });
