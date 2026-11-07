@@ -2057,6 +2057,12 @@
 .mcp-portability-import-review { display: grid; gap: var(--kr-sp-4); }
 .mcp-portability-import-plugin { display: grid; gap: var(--kr-sp-2); padding: var(--kr-sp-4); border: 1px solid var(--kr-border); border-radius: var(--kr-r-lg); }
 .mcp-portability-import-plugin small { color: var(--kr-text-muted); }
+.mcp-portability-import-api { display: grid; gap: var(--kr-sp-1); font-size: var(--kr-fs-sm); }
+.mcp-portability-import-api span { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); }
+.mcp-portability-import-api code { overflow-wrap: anywhere; }
+.mcp-portability-placeholders { display: grid; gap: var(--kr-sp-2); padding: var(--kr-sp-4); border: 1px solid var(--kr-border); border-radius: var(--kr-r-md); font-size: var(--kr-fs-sm); }
+.mcp-portability-placeholders label { display: grid; gap: var(--kr-sp-1); }
+.mcp-portability-placeholders span { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); overflow-wrap: anywhere; }
 .mcp-portability-args-diff { display: grid; gap: var(--kr-sp-2); padding: var(--kr-sp-4); border: 1px solid rgba(var(--kr-warning-rgb), .35); border-radius: var(--kr-r-md); background: rgba(var(--kr-warning-rgb), .06); font-size: var(--kr-fs-sm); }
 .mcp-portability-args-diff > div { display: grid; gap: var(--kr-sp-1); }
 .mcp-portability-args-diff span { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); }

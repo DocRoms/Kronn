@@ -1112,6 +1112,10 @@ fn validate_test_endpoint(payload: &CustomApiPayload) -> Result<(), String> {
     else {
         return Ok(());
     };
+    // An export placeholder (KT-1040) is checked once the import fills it.
+    if crate::api::plugin_portability::is_export_placeholder(path) {
+        return Ok(());
+    }
     let declared: Vec<_> = payload
         .endpoints
         .iter()
@@ -1215,7 +1219,9 @@ fn validate_default_headers(payload: &CustomApiPayload) -> Result<(), String> {
         if name.is_empty() {
             return Err(format!("Default header with value `{value}` has no name"));
         }
-        if axum::http::HeaderName::from_bytes(name.as_bytes()).is_err() {
+        // A name an export withheld (KT-1040) is checked once the import fills it.
+        let withheld = crate::api::plugin_portability::is_export_placeholder(name);
+        if !withheld && axum::http::HeaderName::from_bytes(name.as_bytes()).is_err() {
             return Err(format!("`{name}` is not a valid HTTP header name"));
         }
         let lower = name.to_ascii_lowercase();
@@ -1236,7 +1242,10 @@ fn validate_default_headers(payload: &CustomApiPayload) -> Result<(), String> {
             return Err(format!("Default header `{name}` has no value"));
         }
         let references = env_references(value).map_err(|e| format!("Header `{name}`: {e}"))?;
-        if let Some(missing) = references.iter().find(|key| !declared.contains(*key)) {
+        // An export placeholder (KT-1040) is filled at import, not declared.
+        if let Some(missing) = references.iter().find(|key| {
+            !declared.contains(*key) && !crate::api::plugin_portability::placeholder_key(key)
+        }) {
             return Err(format!(
                 "Header `{name}` references `${{ENV.{missing}}}` but no field declares `{missing}`"
             ));
@@ -1258,7 +1267,7 @@ fn validate_default_headers(payload: &CustomApiPayload) -> Result<(), String> {
 
 /// Lower-snake-case slug for server-id construction. Mirrors the env-key
 /// slugifier but keeps lowercase: "Salesforce Sales API" → "salesforce-sales-api".
-fn name_slug(name: &str) -> String {
+pub(crate) fn name_slug(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut prev_dash = true;
     for ch in name.chars() {
@@ -3141,6 +3150,18 @@ pub fn build_custom_plugin_export(server: &McpServer) -> Option<CustomApiPayload
     })
 }
 
+/// A file from a configuration-only export may hold placeholders (KT-1040):
+/// the file route has no review to ask for them, so its answer names them.
+pub(crate) fn unfilled_placeholder_notice(server: &McpServer) -> Option<String> {
+    let unfilled = crate::api::plugin_portability::placeholders_in(server);
+    (!unfilled.is_empty()).then(|| {
+        format!(
+            "Imported with values still to fill in the plugin settings: {}",
+            unfilled.into_iter().collect::<Vec<_>>().join(", ")
+        )
+    })
+}
+
 /// Normalise any payload (from JSON body or multipart upload) into a
 /// safe-to-create `CustomApiPayload`: strips `fields[].value` defensively,
 /// validates required fields. Returns Err message on invalid input.
@@ -3187,7 +3208,10 @@ pub async fn export_custom_plugin_file(
                     .into_iter()
                     .find(|s| s.id == server_id)
                     .ok_or_else(|| anyhow::anyhow!("Custom plugin `{}` not found", server_id))?;
-                let payload = build_custom_plugin_export(&server)
+                // Same masking as the configuration-only bundle (KT-1040).
+                let (redacted, _) =
+                    crate::api::plugin_portability::redact_server_for_clear_export(&server);
+                let payload = build_custom_plugin_export(&redacted)
                     .ok_or_else(|| anyhow::anyhow!("Plugin has no exportable spec"))?;
                 Ok((server, payload))
             },
@@ -3269,6 +3293,7 @@ pub async fn import_custom_plugin_file(
     // matches the existing /api/mcps/configs creation flow.
     let label = payload.name.clone();
     let server = materialize_custom_server(&payload);
+    let notice = unfilled_placeholder_notice(&server);
     let server_id = server.id.clone();
     let server_id_for_log = server_id.clone();
     let result = state
@@ -3316,7 +3341,7 @@ pub async fn import_custom_plugin_file(
                 server_id_for_log,
                 cfg.id
             );
-            Json(ApiResponse::ok(cfg))
+            Json(ApiResponse::ok(cfg).with_notice(notice))
         }
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }

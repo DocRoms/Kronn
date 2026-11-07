@@ -59,6 +59,8 @@ export function PluginPortabilityModal({
   const [importFilename, setImportFilename] = useState('');
   const [importPreview, setImportPreview] = useState<ImportBundlePreview | null>(null);
   const [argsConsent, setArgsConsent] = useState<Set<string>>(() => new Set());
+  // KT-1040: values typed for the placeholders of a configuration-only bundle.
+  const [placeholderValues, setPlaceholderValues] = useState<Record<string, Record<string, string>>>({});
   const [report, setReport] = useState<ImportPluginBundleReport | null>(null);
   type ImportScope = {
     global: boolean;
@@ -168,6 +170,7 @@ export function PluginPortabilityModal({
       setImportContent(content);
       setImportPreview(null);
       setArgsConsent(new Set());
+      setPlaceholderValues({});
       const header = legacy ? { ...parsed, plugin_labels: [parsed.name as string] } : parsed;
       setImportHeader(header);
       setImportFilename(file.name);
@@ -191,6 +194,7 @@ export function PluginPortabilityModal({
         content,
         passphrase: header?.encrypted ? passphrase : null,
         accept_args_for: [],
+        placeholder_values: {},
       }));
     } catch (caught) {
       setImportPreview(null);
@@ -209,6 +213,7 @@ export function PluginPortabilityModal({
         content: importContent,
         passphrase: importHeader?.encrypted ? passphrase : null,
         accept_args_for: [...argsConsent],
+        placeholder_values: placeholderValues,
       });
       setReport(nextReport);
       setImportScopes(Object.fromEntries(nextReport.imported_configs.map(item => [
@@ -511,6 +516,45 @@ export function PluginPortabilityModal({
                   <div key={plugin.source_config_id} className="mcp-portability-import-plugin">
                     <strong>{plugin.label}</strong>
                     <small>{plugin.server_name}</small>
+                    {plugin.base_url && (
+                      <div className="mcp-portability-import-api" data-testid="mcp-import-base-url">
+                        <span>{t('mcp.portability.baseUrl')}</span>
+                        <code>{plugin.base_url}</code>
+                      </div>
+                    )}
+                    {(plugin.default_header_names ?? []).length > 0 && (
+                      <div className="mcp-portability-import-api" data-testid="mcp-import-header-names">
+                        <span>{t('mcp.portability.headerNames')}</span>
+                        <code>{(plugin.default_header_names ?? []).join(', ')}</code>
+                      </div>
+                    )}
+                    {(plugin.placeholders ?? []).length > 0 && (
+                      <div className="mcp-portability-placeholders" data-testid="mcp-import-placeholders">
+                        <p className="mcp-form-hint">{t('mcp.portability.placeholdersHint')}</p>
+                        {(plugin.placeholders ?? []).map(placeholder => (
+                          <label key={placeholder.key}>
+                            <span>
+                              <code>{placeholder.field}</code>
+                              {placeholder.required ? ` — ${t('mcp.portability.placeholderRequired')}` : ` — ${t('mcp.portability.placeholderOptional')}`}
+                              {placeholder.hint ? ` (${placeholder.hint})` : ''}
+                            </span>
+                            <input
+                              type="password"
+                              autoComplete="off"
+                              aria-label={t('mcp.portability.placeholderFor', plugin.label, placeholder.field)}
+                              value={placeholderValues[plugin.source_config_id]?.[placeholder.key] ?? ''}
+                              onChange={event => {
+                                const value = event.target.value;
+                                setPlaceholderValues(previous => ({
+                                  ...previous,
+                                  [plugin.source_config_id]: { ...previous[plugin.source_config_id], [placeholder.key]: value },
+                                }));
+                              }}
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    )}
                     {plugin.issue && (
                       <span className="mcp-form-hint" role="note">{t(`mcp.portability.issue.${plugin.issue}`)}</span>
                     )}

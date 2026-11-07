@@ -94,6 +94,26 @@ Release notes for 0.9.3 and earlier are available in the
   sandbox covers: agents Kronn launches lose the data folder while its
   protection is on, a CLI you run yourself can read it, so enrol before handing
   it tasks.
+- A safe plugin export no longer leaks a secret held in the plugin definition
+  (KT-1040). Without values the bundle replaced only environment values and
+  copied the definition whole: a token in a URL (query, path, user info, host),
+  a literal header, stdio arguments, a description, a TokenExchange body or
+  endpoint left in clear. The export is now an allow-list: names and env-key
+  names with no token-shaped word, `${ENV.…}` references, URL origins with a
+  clean host, plain endpoint paths and catalogue values stay; every other value,
+  the config label and env-key names included, becomes a named placeholder
+  `${ENV.KRONN_EXPORT_<FIELD>}` that the import review lists and asks for, and
+  that the import puts back with its JSON type (one left empty is named in a
+  warning and by the plugin's first call). Kronn's own plugin ids are kept when
+  the name they derive from is, and any other id gets a fresh one shared by the
+  configs of that server; a catalogue plugin round-trips with no placeholder.
+  The per-plugin export masks the same way, and its file import accepts the
+  placeholders and names those left; the export with values is unchanged. Hosts
+  and plain lowercase paths are only shape-checked, and so are name-like values
+  (names, labels, header names, scopes, the JSONPath, env-key and reference
+  keys, body keys, plain-slug ids): an all-letter word up to 20 characters and a
+  letter-digit word up to 8 (`OAuth2`, `GPT4`) outside a segmented run like
+  `4B7D-9F1C` are kept, so keep secrets out of them or use `${ENV.KEY}`.
 
 - A task is no longer marked `done` when its delivery is integrated into a
   campaign or feature branch that has not reached the default branch yet

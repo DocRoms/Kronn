@@ -1,7 +1,8 @@
 import { expect, test } from '../fixtures/kronn-fixture';
 import { DashboardPage } from '../pages/DashboardPage';
 
-const suffix = Date.now();
+// Letters only: a long digit run is token-shaped, and the safe export withholds it.
+const suffix = String(Date.now()).replace(/\d/g, digit => 'abcdefghij'[Number(digit)]);
 const label = `Portable Context7 PW ${suffix}`;
 const createdConfigIds = new Set<string>();
 

@@ -30,6 +30,11 @@ use crate::{
     AppState,
 };
 
+mod redaction;
+pub(crate) use redaction::placeholders_in;
+pub(crate) use redaction::{is_export_placeholder, placeholder_key};
+pub use redaction::{ExportPlaceholder, ExportValueType, PLACEHOLDER_PREFIX};
+
 const PLUGIN_BUNDLE_KIND: &str = "kronn.plugins";
 const PLUGIN_BUNDLE_VERSION: u32 = 1;
 const SECRET_CONFIRMATION: &str = "EXPORTER LES SECRETS";
@@ -94,6 +99,11 @@ pub struct ImportPluginBundleRequest {
     /// arguments are dropped.
     #[serde(default)]
     pub accept_args_for: Vec<String>,
+    /// Values the importer typed for the placeholders of a configuration-only
+    /// bundle, by source config id then placeholder key (KT-1040).
+    #[serde(default)]
+    #[ts(type = "Record<string, Record<string, string>>")]
+    pub placeholder_values: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// One plugin as the import would treat it, before anything is written.
@@ -110,6 +120,12 @@ pub struct ImportPreviewPlugin {
     pub args_differ: bool,
     pub importable: bool,
     pub issue: Option<String>,
+    /// Base URL of a custom API-only plugin; only its origin when the rest is withheld.
+    pub base_url: Option<String>,
+    /// Names of the headers a custom API plugin sends on every call; never their values.
+    pub default_header_names: Vec<String>,
+    /// Values a configuration-only export withheld, for the importer to fill.
+    pub placeholders: Vec<ExportPlaceholder>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -136,6 +152,9 @@ pub struct PortablePluginConfig {
     pub was_global: bool,
     pub include_general: bool,
     pub preferred_interface: PluginInterface,
+    /// What a configuration-only export withheld from `server` (KT-1040).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub placeholders: Vec<ExportPlaceholder>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -407,7 +426,7 @@ fn build_export(
     instance_secret: &str,
 ) -> anyhow::Result<(PluginBundleEnvelope, String)> {
     let selection = load_selection(conn, &request.config_ids)?;
-    let preview = build_preview(&selection);
+    let mut preview = build_preview(&selection);
     if request.include_values {
         if request.confirmation.as_deref() != Some(SECRET_CONFIRMATION) {
             anyhow::bail!("Type `{SECRET_CONFIRMATION}` to include values");
@@ -421,7 +440,9 @@ fn build_export(
     }
 
     let mut portable = Vec::with_capacity(selection.len());
-    for (config, server, preference) in &selection {
+    // One salt per export: a regenerated server id stays shared by its configs.
+    let salt = Uuid::new_v4().simple().to_string();
+    for (index, (config, server, preference)) in selection.iter().enumerate() {
         let decrypted = if request.include_values {
             Some(
                 db::mcps::decrypt_env(&config.env_encrypted, instance_secret).map_err(|error| {
@@ -443,11 +464,59 @@ fn build_export(
                 })
                 .collect()
         });
+        // Any literal of the definition may be a token: only the encrypted
+        // payload carries it whole.
+        // The label and the env-key names (derived from field labels) are
+        // walked with the definition, so a secret cannot leave through either.
+        let redacted = if request.include_values {
+            redaction::Redacted {
+                server: server.clone(),
+                label: config.label.clone(),
+                env_keys: config.env_keys.clone(),
+                placeholders: Vec::new(),
+                unknown: Vec::new(),
+            }
+        } else {
+            let catalogue = current_registry_server(&server.id);
+            let declared = registry::builtin_registry()
+                .into_iter()
+                .find(|definition| definition.id == server.id)
+                .map(|definition| definition.env_keys)
+                .unwrap_or_default();
+            redaction::redact_plugin(
+                server,
+                &redaction::ExportContext {
+                    catalogue: catalogue.as_ref(),
+                    declared_env_keys: &declared,
+                    salt: &salt,
+                },
+                &config.label,
+                &config.env_keys,
+            )
+        };
+        if !redacted.unknown.is_empty() {
+            // Withheld all the same; the log says a field lacks a rule.
+            tracing::warn!(paths = ?redacted.unknown, "plugin export: fields without a redaction rule were withheld");
+        }
+        if let Some(manifest) = preview.plugins.get_mut(index) {
+            manifest.label = redacted.label.clone();
+            manifest.server_id = redacted.server.id.clone();
+            manifest.server_name = redacted.server.name.clone();
+            for value in &mut manifest.values {
+                if let Some(position) = config.env_keys.iter().position(|key| *key == value.key) {
+                    value.key = redacted.env_keys[position].clone();
+                } else if !request.include_values {
+                    value.key = String::new();
+                }
+            }
+            manifest.values.retain(|value| !value.key.is_empty());
+        }
         portable.push(PortablePluginConfig {
             source_config_id: config.id.clone(),
-            server: server.clone(),
-            label: config.label.clone(),
-            env_keys: config.env_keys.clone(),
+            server: redacted.server,
+            placeholders: redacted.placeholders,
+            label: redacted.label,
+            env_keys: redacted.env_keys,
             values,
             // Arguments may embed tokens: only the encrypted payload carries them.
             args_override: if request.include_values {
@@ -805,6 +874,7 @@ fn import_payload(
     instance_secret: &str,
     fingerprint: &str,
     consent: &HashSet<String>,
+    fills: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> anyhow::Result<ImportPluginBundleReport> {
     if let Some((existing_hash, report_json)) = conn
         .query_row(
@@ -837,7 +907,40 @@ fn import_payload(
     let mut skipped_plugins = 0_u32;
     let mut existing_configs = db::mcps::list_configs(&transaction)?;
 
-    for portable in payload.plugins {
+    for mut portable in payload.plugins {
+        let empty = BTreeMap::new();
+        let values = fills.get(&portable.source_config_id).unwrap_or(&empty);
+        portable.label = redaction::fill_text(&portable.label, values);
+        for key in &mut portable.env_keys {
+            *key = redaction::fill_text(key, values);
+        }
+        let mut label_left = redaction::placeholders_of(&portable.label);
+        for key in &portable.env_keys {
+            label_left.extend(redaction::placeholders_of(key));
+        }
+        if !label_left.is_empty() {
+            warnings.push(format!(
+                "{}: still to fill in the plugin settings: {}",
+                portable.label,
+                label_left.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if current_registry_server(&portable.server.id).is_none() {
+            let types: BTreeMap<String, ExportValueType> = portable
+                .placeholders
+                .iter()
+                .map(|listed| (listed.key.clone(), listed.value_type))
+                .collect();
+            let (filled, left) = redaction::fill(&portable.server, values, &types)?;
+            if !left.is_empty() {
+                warnings.push(format!(
+                    "{}: still to fill in the plugin settings: {}",
+                    portable.label,
+                    left.join(", ")
+                ));
+            }
+            portable.server = filled;
+        }
         let Some(server) =
             resolve_import_server(&transaction, &portable, &mut warnings, &mut conflicts)?
         else {
@@ -1194,6 +1297,7 @@ fn legacy_bundle(
             was_global: false,
             include_general: true,
             preferred_interface: PluginInterface::default(),
+            placeholders: Vec::new(),
         }],
     };
     let envelope = PluginBundleEnvelope {
@@ -1230,20 +1334,58 @@ fn looks_secret(text: &str) -> bool {
     .any(|word| lower.contains(word))
 }
 
+const KNOWN_TOKEN_PREFIXES: [&str; 8] = [
+    "ghp_",
+    "gho_",
+    "github_pat_",
+    "glpat-",
+    "sk-",
+    "xox",
+    "AKIA",
+    "eyJ",
+];
+
+/// The definition a configuration-only export carries, and what it withheld.
+/// Leaves equal to the built-in catalogue's stay (KT-1040).
+pub(crate) fn redact_server_for_clear_export(
+    server: &McpServer,
+) -> (McpServer, Vec<ExportPlaceholder>) {
+    redaction::redact_server(server, current_registry_server(&server.id).as_ref())
+}
+
+/// The placeholders a bundled definition holds. Their keys are read from the
+/// definition itself; the bundle's own list only labels them.
+fn listed_placeholders(portable: &PortablePluginConfig, custom: bool) -> Vec<ExportPlaceholder> {
+    let mut keys = redaction::placeholders_of(&portable.label);
+    for key in &portable.env_keys {
+        keys.extend(redaction::placeholders_of(key));
+    }
+    if custom {
+        keys.extend(redaction::placeholders_in(&portable.server));
+    }
+    keys.into_iter()
+        .map(|key| {
+            portable
+                .placeholders
+                .iter()
+                .find(|listed| listed.key == key)
+                .cloned()
+                .unwrap_or(ExportPlaceholder {
+                    field: key.clone(),
+                    key,
+                    required: true,
+                    hint: None,
+                    value_type: ExportValueType::Text,
+                })
+        })
+        .collect()
+}
+
 /// Arguments safe to show: `--flag=value` and the value after a secret-named
 /// flag are masked, as is anything shaped like a credential.
 fn mask_secret_args(args: &[String]) -> Vec<String> {
     const MASK: &str = "••••";
-    let known_prefix = [
-        "ghp_",
-        "gho_",
-        "github_pat_",
-        "glpat-",
-        "sk-",
-        "xox",
-        "AKIA",
-        "eyJ",
-    ];
+    let known_prefix = KNOWN_TOKEN_PREFIXES;
     let mut previous_secret_flag = false;
     args.iter()
         .map(|arg| {
@@ -1317,6 +1459,14 @@ fn build_import_preview(
             let exists = configs.iter().any(|config| {
                 config.server_id == portable.server.id && config.label == portable.label
             });
+            // The catalogue replaces a registry snapshot on import, so only a
+            // custom definition is shown as the bundle states it.
+            let custom = current_registry_server(&portable.server.id).is_none()
+                && is_safe_manual_server(&portable.server);
+            let custom_api = custom
+                .then_some(portable.server.api_spec.as_ref())
+                .flatten();
+            let placeholders = listed_placeholders(portable, custom);
             ImportPreviewPlugin {
                 source_config_id: portable.source_config_id.clone(),
                 label: portable.label.clone(),
@@ -1331,6 +1481,16 @@ fn build_import_preview(
                 importable: importable && (!exists || already_imported),
                 issue: issue
                     .or_else(|| (exists && !already_imported).then(|| "exists".to_string())),
+                base_url: custom_api.map(|spec| redaction::url_for_display(&spec.base_url)),
+                default_header_names: custom_api
+                    .map(|spec| {
+                        spec.default_headers
+                            .iter()
+                            .map(|header| header.name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                placeholders,
             }
         })
         .collect();
@@ -1380,6 +1540,7 @@ pub async fn import_plugin_bundle(
         None => return Json(ApiResponse::err("No encryption secret configured")),
     };
     let consent: HashSet<String> = request.accept_args_for.into_iter().collect();
+    let fills = request.placeholder_values;
     match state
         .db
         .with_conn(move |conn| {
@@ -1390,6 +1551,7 @@ pub async fn import_plugin_bundle(
                 &instance_secret,
                 &fingerprint,
                 &consent,
+                &fills,
             )
         })
         .await
@@ -1555,6 +1717,7 @@ mod tests {
                 was_global: false,
                 include_general: true,
                 preferred_interface: PluginInterface::Api,
+                placeholders: Vec::new(),
             }],
         };
         let key_hex = crypto::generate_secret();
@@ -1679,6 +1842,7 @@ mod tests {
                     &target_secret_for_import,
                     &fingerprint,
                     &HashSet::new(),
+                    &BTreeMap::new(),
                 )
             })
             .await
@@ -1739,6 +1903,7 @@ mod tests {
                     &target_secret,
                     &replay_fingerprint,
                     &HashSet::new(),
+                    &BTreeMap::new(),
                 )
             })
             .await
@@ -1759,6 +1924,7 @@ mod tests {
                     &crypto::generate_secret(),
                     &changed_fingerprint,
                     &HashSet::new(),
+                    &BTreeMap::new(),
                 )
             })
             .await
@@ -1793,6 +1959,7 @@ mod tests {
             was_global: false,
             include_general: true,
             preferred_interface: PluginInterface::Mcp,
+            placeholders: Vec::new(),
         }
     }
 
@@ -1824,6 +1991,7 @@ mod tests {
             &crypto::generate_secret(),
             &fingerprint,
             consent,
+            &BTreeMap::new(),
         )
         .unwrap()
     }
@@ -2068,6 +2236,7 @@ mod tests {
             &secret,
             &fingerprint,
             &HashSet::new(),
+            &BTreeMap::new(),
         )
         .unwrap();
         let config_id = first.imported_config_ids[0].clone();
@@ -2086,6 +2255,7 @@ mod tests {
             &secret,
             &fingerprint,
             &HashSet::new(),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert!(again.already_imported);
@@ -2104,6 +2274,7 @@ mod tests {
             &secret,
             &fingerprint,
             &HashSet::from([source_id]),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert!(consented.already_imported);
@@ -2204,6 +2375,7 @@ mod tests {
             &crypto::generate_secret(),
             &fingerprint,
             &HashSet::new(),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(report.imported_config_ids.len(), 1);
@@ -2224,5 +2396,499 @@ mod tests {
             "{}",
             wrong_shape.1
         );
+    }
+
+    fn insert_with_secret(conn: &rusqlite::Connection, server: &McpServer, id: &str, secret: &str) {
+        db::mcps::upsert_server(conn, server).unwrap();
+        let env = HashMap::from([("API_TOKEN".to_string(), "envsecret14".to_string())]);
+        db::mcps::insert_config(
+            conn,
+            &McpConfig {
+                id: id.into(),
+                server_id: server.id.clone(),
+                label: "Exported plugin".into(),
+                env_keys: vec!["API_TOKEN".into()],
+                env_encrypted: db::mcps::encrypt_env(&env, secret).unwrap(),
+                args_override: Some(vec!["sk-argsecret123".into()]),
+                is_global: false,
+                include_general: true,
+                config_hash: db::mcps::compute_config_hash(server, &env, None),
+                project_ids: Vec::new(),
+                host_sync: HostSyncMode::None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn export_clear(
+        conn: &rusqlite::Connection,
+        ids: Vec<String>,
+        secret: &str,
+    ) -> PluginBundleEnvelope {
+        build_export(
+            conn,
+            ExportPluginBundleRequest {
+                config_ids: ids,
+                include_values: false,
+                passphrase: None,
+                confirmation: None,
+            },
+            secret,
+        )
+        .unwrap()
+        .0
+    }
+
+    /// KT-1040 — a configuration-only bundle of every transport and every
+    /// auth, each hiding a token in a different field, carries none of them.
+    #[test]
+    fn a_safe_bundle_carries_no_secret_of_any_field() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let secret = crypto::generate_secret();
+        let servers = redaction::tests::every_server();
+        let mut ids = Vec::new();
+        for (index, server) in servers.iter().enumerate() {
+            let id = format!("c{index}");
+            insert_with_secret(&conn, server, &id, &secret);
+            ids.push(id);
+        }
+        let text = serde_json::to_string(&export_clear(&conn, ids, &secret)).unwrap();
+        for leaked in redaction::tests::SECRETS.iter().chain(&["envsecret14"]) {
+            assert!(!text.contains(leaked), "{leaked} left the machine");
+        }
+    }
+
+    /// KT-1040 — export without values, review the placeholders, import with
+    /// them filled: the definition is the original again. Unfilled, the
+    /// import still succeeds and names what is left.
+    #[test]
+    fn a_safe_bundle_round_trips_once_the_placeholders_are_filled() {
+        let source = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&source).unwrap();
+        let secret = crypto::generate_secret();
+        let mut original = redaction::tests::every_server()
+            .into_iter()
+            .find(|server| server.id == redaction::tests::fixture_id("a", 0))
+            .unwrap();
+        original.source = McpSource::Manual;
+        insert_with_secret(&source, &original, "c0", &secret);
+        let envelope = export_clear(&source, vec!["c0".into()], &secret);
+        let payload = envelope.payload.clone().unwrap();
+        let fingerprint = semantic_fingerprint(&envelope).unwrap();
+
+        let target = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&target).unwrap();
+        let preview =
+            build_import_preview(&target, &envelope, &payload, &fingerprint, false).unwrap();
+        let asked = &preview.plugins[0].placeholders;
+        assert!(asked
+            .iter()
+            .any(|p| p.field == "api_spec.base_url" && p.required));
+        assert_eq!(
+            preview.plugins[0].base_url.as_deref(),
+            Some("${ENV.KRONN_EXPORT_API_SPEC_BASE_URL}")
+        );
+        assert_eq!(
+            preview.plugins[0].default_header_names[..3],
+            ["X-Static", "Authorization-Extra", "X-Raw"]
+        );
+        // A token-shaped header name is withheld like any other literal.
+        assert!(preview.plugins[0].default_header_names[3].starts_with("${ENV.KRONN_EXPORT_"));
+
+        let mut values = BTreeMap::new();
+        redaction::tests::collect_fills(
+            &serde_json::to_value(&original).unwrap(),
+            &serde_json::to_value(&payload.plugins[0].server).unwrap(),
+            &mut values,
+        );
+        assert_eq!(
+            values.keys().cloned().collect::<HashSet<_>>(),
+            asked.iter().map(|p| p.key.clone()).collect::<HashSet<_>>()
+        );
+        let fills = BTreeMap::from([("c0".to_string(), values)]);
+        let report = import_payload(
+            &target,
+            &envelope,
+            payload.clone(),
+            &crypto::generate_secret(),
+            &fingerprint,
+            &HashSet::new(),
+            &fills,
+        )
+        .unwrap();
+        assert_eq!(
+            report.imported_config_ids.len(),
+            1,
+            "{:?}",
+            report.conflicts
+        );
+        assert!(
+            report.warnings.iter().all(|w| !w.contains("to fill")),
+            "{:?}",
+            report.warnings
+        );
+        let imported = db::mcps::list_servers(&target)
+            .unwrap()
+            .into_iter()
+            .find(|server| server.id == original.id)
+            .unwrap();
+        // An import never declares a key public (KT-1249): the rest is exact.
+        assert_eq!(
+            serde_json::to_value(&imported.api_spec).unwrap(),
+            serde_json::to_value(&without_public_flags(original.clone()).api_spec).unwrap()
+        );
+        assert_eq!(imported.description, original.description);
+
+        // Nothing typed: the import goes through and lists what is left.
+        let other = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&other).unwrap();
+        let report = import_payload(
+            &other,
+            &envelope,
+            payload,
+            &crypto::generate_secret(),
+            &fingerprint,
+            &HashSet::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            report.imported_config_ids.len(),
+            1,
+            "{:?}",
+            report.conflicts
+        );
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("KRONN_EXPORT_API_SPEC_BASE_URL")));
+    }
+
+    /// KT-1040 — the per-plugin export is masked the same way, and the old
+    /// import path reads it back: the placeholders are listed, not refused.
+    #[test]
+    fn the_legacy_export_masks_and_the_legacy_import_accepts_the_placeholders() {
+        let mut server = redaction::tests::every_server()
+            .into_iter()
+            .find(|server| server.id == redaction::tests::fixture_id("a", 2))
+            .unwrap();
+        server.id = "custom-legacy".into();
+        // The per-plugin format only accepts a test endpoint without parameters.
+        server.api_spec.as_mut().unwrap().test_endpoint = None;
+        let (redacted, _) = redact_server_for_clear_export(&server);
+        let file = serde_json::to_string(
+            &crate::api::mcps::build_custom_plugin_export(&redacted).unwrap(),
+        )
+        .unwrap();
+        for leaked in redaction::tests::SECRETS {
+            assert!(!file.contains(leaked), "{leaked} in the legacy file");
+        }
+        let (envelope, payload, fingerprint, legacy) = load_bundle(&file, None).unwrap();
+        assert!(legacy);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let preview = build_import_preview(&conn, &envelope, &payload, &fingerprint, true).unwrap();
+        let keys: Vec<_> = preview.plugins[0]
+            .placeholders
+            .iter()
+            .map(|p| p.key.as_str())
+            .collect();
+        assert!(keys.contains(&"KRONN_EXPORT_API_SPEC_BASE_URL"), "{keys:?}");
+        // The file route, with no review, accepts it and names what is left.
+        let payload: crate::models::CustomApiPayload = serde_json::from_str(&file).unwrap();
+        let payload = crate::api::mcps::sanitize_imported_payload(payload).unwrap();
+        let materialized = crate::api::mcps::materialize_custom_server(&payload);
+        let notice = crate::api::mcps::unfilled_placeholder_notice(&materialized).unwrap();
+        assert!(
+            notice.contains("KRONN_EXPORT_API_SPEC_BASE_URL"),
+            "{notice}"
+        );
+        assert!(crate::api::mcps::unfilled_placeholder_notice(&server).is_none());
+        assert!(
+            keys.contains(&"KRONN_EXPORT_API_SPEC_DEFAULT_HEADERS_0_VALUE"),
+            "{keys:?}"
+        );
+    }
+
+    /// KT-1040 — a configuration label is shape-checked like any name: a
+    /// token-shaped word is withheld and the import asks for it.
+    #[test]
+    fn a_token_shaped_label_is_withheld_and_filled_back() {
+        let source = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&source).unwrap();
+        let secret = crypto::generate_secret();
+        let mut server = redaction::tests::every_server()
+            .into_iter()
+            .find(|server| server.id == redaction::tests::fixture_id("a", 0))
+            .unwrap();
+        server.source = McpSource::Manual;
+        insert_with_secret(&source, &server, "c0", &secret);
+        source
+            .execute(
+                "UPDATE mcp_configs SET label = 'Prod key9xab12cd' WHERE id = 'c0'",
+                [],
+            )
+            .unwrap();
+        let envelope = export_clear(&source, vec!["c0".into()], &secret);
+        assert!(!serde_json::to_string(&envelope)
+            .unwrap()
+            .contains("key9xab12cd"));
+        let payload = envelope.payload.clone().unwrap();
+        let fingerprint = semantic_fingerprint(&envelope).unwrap();
+        let target = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&target).unwrap();
+        let preview =
+            build_import_preview(&target, &envelope, &payload, &fingerprint, false).unwrap();
+        assert!(preview.plugins[0]
+            .placeholders
+            .iter()
+            .any(|p| p.key == "KRONN_EXPORT_LABEL"));
+        let fills = BTreeMap::from([(
+            "c0".to_string(),
+            BTreeMap::from([(
+                "KRONN_EXPORT_LABEL".to_string(),
+                "Prod key9xab12cd".to_string(),
+            )]),
+        )]);
+        let report = import_payload(
+            &target,
+            &envelope,
+            payload,
+            &crypto::generate_secret(),
+            &fingerprint,
+            &HashSet::new(),
+            &fills,
+        )
+        .unwrap();
+        assert_eq!(report.imported_configs[0].label, "Prod key9xab12cd");
+    }
+
+    /// KT-1040 — two custom plugins with Kronn's own ids export and import
+    /// side by side: an id is never a placeholder, so nothing collides; one
+    /// whose id is not in that format gets a fresh one.
+    #[test]
+    fn two_custom_plugins_import_without_colliding() {
+        let source = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&source).unwrap();
+        let secret = crypto::generate_secret();
+        let base = redaction::tests::every_server()
+            .into_iter()
+            .find(|server| server.id == redaction::tests::fixture_id("a", 2))
+            .unwrap();
+        let mut ids = Vec::new();
+        // The id's slug is the slug of the plugin's name, as Kronn makes it.
+        for (index, (id, name)) in [
+            ("custom-alpha-0a1b2c3d", "Alpha"),
+            ("custom-beta-4e5f6a7b", "Beta"),
+            ("custom-sk1live9abc-zz", "Leaky"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut server = base.clone();
+            server.id = id.into();
+            server.name = name.into();
+            server.source = McpSource::Manual;
+            let config = format!("c{index}");
+            insert_with_secret(&source, &server, &config, &secret);
+            ids.push(config);
+        }
+        let envelope = export_clear(&source, ids, &secret);
+        let payload = envelope.payload.clone().unwrap();
+        let exported: Vec<_> = payload
+            .plugins
+            .iter()
+            .map(|p| p.server.id.clone())
+            .collect();
+        assert_eq!(
+            exported[..2],
+            ["custom-alpha-0a1b2c3d", "custom-beta-4e5f6a7b"]
+        );
+        assert!(exported[2].starts_with("custom-export-"), "{exported:?}");
+        assert!(!serde_json::to_string(&envelope)
+            .unwrap()
+            .contains("sk1live9abc"));
+
+        let target = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&target).unwrap();
+        let report = import_payload(
+            &target,
+            &envelope,
+            payload,
+            &crypto::generate_secret(),
+            &semantic_fingerprint(&envelope).unwrap(),
+            &HashSet::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            report.imported_config_ids.len(),
+            3,
+            "{:?}",
+            report.conflicts
+        );
+        let mut imported: Vec<_> = report
+            .imported_configs
+            .iter()
+            .map(|config| config.server_id.clone())
+            .collect();
+        imported.sort();
+        imported.dedup();
+        assert_eq!(imported.len(), 3);
+        assert!(imported.iter().all(|id| !id.contains("${ENV.")));
+    }
+
+    fn insert_config(
+        conn: &rusqlite::Connection,
+        server: &McpServer,
+        id: &str,
+        label: &str,
+        env_keys: &[&str],
+        secret: &str,
+    ) {
+        let env: HashMap<String, String> = env_keys
+            .iter()
+            .map(|key| (key.to_string(), "envsecret14".to_string()))
+            .collect();
+        db::mcps::insert_config(
+            conn,
+            &McpConfig {
+                id: id.into(),
+                server_id: server.id.clone(),
+                label: label.into(),
+                env_keys: env_keys.iter().map(|key| key.to_string()).collect(),
+                env_encrypted: db::mcps::encrypt_env(&env, secret).unwrap(),
+                args_override: None,
+                is_global: false,
+                include_general: true,
+                config_hash: db::mcps::compute_config_hash(
+                    server,
+                    &env,
+                    Some(&vec![id.to_string()]),
+                ),
+                project_ids: Vec::new(),
+                host_sync: HostSyncMode::None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// KT-1040 — a catalogue plugin round-trips exactly: its env key and its
+    /// label are the catalogue's, so nothing is withheld or asked.
+    #[test]
+    fn a_catalogue_plugin_round_trips_with_no_placeholder() {
+        let source = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&source).unwrap();
+        let secret = crypto::generate_secret();
+        let e2b = current_registry_server("mcp-e2b").unwrap();
+        db::mcps::upsert_server(&source, &e2b).unwrap();
+        insert_config(&source, &e2b, "c0", "E2B", &["E2B_API_KEY"], &secret);
+        let envelope = export_clear(&source, vec!["c0".into()], &secret);
+        let payload = envelope.payload.clone().unwrap();
+        let plugin = &payload.plugins[0];
+        assert!(plugin.placeholders.is_empty(), "{:?}", plugin.placeholders);
+        assert_eq!(plugin.env_keys, vec!["E2B_API_KEY"]);
+        assert_eq!(plugin.label, "E2B");
+        assert_eq!(
+            serde_json::to_value(&plugin.server).unwrap(),
+            serde_json::to_value(&e2b).unwrap()
+        );
+        assert_eq!(envelope.value_manifest[0].values[0].key, "E2B_API_KEY");
+
+        let target = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&target).unwrap();
+        let report = import_payload(
+            &target,
+            &envelope,
+            payload,
+            &crypto::generate_secret(),
+            &semantic_fingerprint(&envelope).unwrap(),
+            &HashSet::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            report.imported_config_ids.len(),
+            1,
+            "{:?}",
+            report.conflicts
+        );
+        assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+        assert!(
+            report.warnings.iter().all(|w| !w.contains("to fill")),
+            "{:?}",
+            report.warnings
+        );
+        let config = db::mcps::get_config(&target, &report.imported_config_ids[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.env_keys, vec!["E2B_API_KEY"]);
+        assert_eq!(config.label, "E2B");
+    }
+
+    /// KT-1040 — two configs of one server whose id is regenerated still
+    /// share one server after the import.
+    #[test]
+    fn two_configs_of_one_server_keep_sharing_it() {
+        let source = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&source).unwrap();
+        let secret = crypto::generate_secret();
+        let mut server = redaction::tests::every_server()
+            .into_iter()
+            .find(|server| server.id == redaction::tests::fixture_id("a", 2))
+            .unwrap();
+        server.id = "sk_live_ab12cd34ef".into();
+        server.source = McpSource::Manual;
+        db::mcps::upsert_server(&source, &server).unwrap();
+        insert_config(
+            &source,
+            &server,
+            "c0",
+            "Production",
+            &["API_TOKEN"],
+            &secret,
+        );
+        // A second env key, so the import does not see two equivalent configs.
+        insert_config(
+            &source,
+            &server,
+            "c1",
+            "Staging",
+            &["API_TOKEN", "SK_LIVE_AB12CD34EF"],
+            &secret,
+        );
+        let envelope = export_clear(&source, vec!["c0".into(), "c1".into()], &secret);
+        let payload = envelope.payload.clone().unwrap();
+        let ids: Vec<_> = payload
+            .plugins
+            .iter()
+            .map(|p| p.server.id.clone())
+            .collect();
+        assert_eq!(ids[0], ids[1]);
+        assert!(ids[0].starts_with("custom-export-"));
+
+        let target = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&target).unwrap();
+        let report = import_payload(
+            &target,
+            &envelope,
+            payload,
+            &crypto::generate_secret(),
+            &semantic_fingerprint(&envelope).unwrap(),
+            &HashSet::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            report.imported_config_ids.len(),
+            2,
+            "{:?}",
+            report.conflicts
+        );
+        assert!(report
+            .imported_configs
+            .iter()
+            .all(|c| c.server_id == ids[0]));
     }
 }
