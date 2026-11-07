@@ -2106,7 +2106,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn live_peer_dynamic_connection_alias_persists_exact_target_with_static_precedence() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -2198,7 +2198,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn append_reports_peer_traffic_since_the_consumed_cursor_without_content() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -2268,7 +2268,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn append_reports_zero_peer_messages_when_only_the_caller_wrote() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -2326,7 +2326,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn append_counts_a_same_provider_sibling_but_not_the_exact_caller() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -2391,7 +2391,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn append_peer_receipt_respects_cursor_and_ignores_notes() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let cursor = state
             .db
@@ -2537,7 +2537,7 @@ mod tests {
         // 0.8.12 PR B (Copilot review): the REAL disc_append path must
         // clear only the posting session's placeholder and heartbeat. A
         // sibling Codex process in the same room must remain untouched.
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -2608,7 +2608,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn live_peer_append_commits_a_durable_native_dispatch() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -2660,7 +2660,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn native_mcp_append_with_an_unjoined_session_never_restarts_the_principal() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -2837,7 +2837,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_native_runner_post_joins_its_turn_without_restarting_scheduled_agents() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         for legacy in [false, true] {
             let (state, _tmp) = lint_state(false).await;
             let job_id = judge_room(&state).await;
@@ -2878,7 +2878,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn an_unverified_runner_context_keeps_the_peer_routing() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         for forged in [
             None,
             Some(RoomAgentAppendContext {
@@ -3002,7 +3002,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_native_runner_short_alias_reaches_the_only_joined_cli_of_that_provider() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let job_id = judge_room(&state).await;
         let cli = state
@@ -3030,7 +3030,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_native_runner_short_alias_spawns_when_no_cli_of_that_provider_is_joined() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let job_id = judge_room(&state).await;
 
@@ -3042,7 +3042,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_native_runner_post_inherits_its_job_trigger_as_reply_to() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let job_id = judge_room(&state).await;
         let reply_to =
@@ -3054,7 +3054,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn an_explicit_reply_to_wins_over_the_job_trigger() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let job_id = judge_room(&state).await;
         state
@@ -3089,7 +3089,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn no_running_job_means_no_inherited_reply_to() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         for status in ["Completed", "Failed", "Cancelled", "Pending"] {
             let (state, _tmp) = lint_state(false).await;
             let job_id = judge_room(&state).await;
@@ -3123,7 +3123,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_job_of_another_discussion_never_lends_its_trigger() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         judge_room(&state).await;
         state
@@ -3190,7 +3190,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_joined_cli_session_never_inherits_a_job_trigger() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let job_id = judge_room(&state).await;
         state
@@ -3218,7 +3218,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn an_inherited_post_shows_in_the_frozen_thread_view() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let job_id = judge_room(&state).await;
         native_post_reply_to(&state, Some(judge_context("d-lint", &job_id, "root")), None).await;
@@ -3241,7 +3241,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn unjoined_native_mcp_agent_can_still_address_an_explicit_responder() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         for typed in [false, true] {
             let (state, _tmp) = lint_state(false).await;
             state
@@ -3277,7 +3277,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn live_native_agent_session_prevents_a_duplicate_dispatch() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -3345,7 +3345,7 @@ mod tests {
         // principal (Codex) is live — which suppresses the NATIVE dispatch — the
         // structured target must still queue a durable one-shot for Ollama, or
         // the mentioned agent never answers (the peer→peer targeting gap).
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -3409,7 +3409,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn typed_cli_target_is_durable_and_never_spawns_a_native_agent() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let cli_session_id = state
             .db
@@ -3470,7 +3470,7 @@ mod tests {
         // KT-330 DoD-4(a): the `disc_append` authoring path resolves a bare
         // prose mention (no typed target — an older/plain-text bridge) into an
         // exact Cli target, and never routes the message back to its own author.
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let peer = state
             .db
@@ -3529,7 +3529,7 @@ mod tests {
     async fn a_workflow_step_report_never_wakes_the_native_principal() {
         // KT-1253: a Codex room with a Claude workflow step joined by room_id.
         // No Codex session is present, so an ordinary joined CLI wakes Codex.
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -3640,7 +3640,7 @@ mod tests {
         // KT-330 DoD-4(a): the fallback is additive — when the same peer is
         // named by BOTH an explicit typed target and a prose alias, it is
         // persisted once, not duplicated.
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let peer = state
             .db
@@ -3690,7 +3690,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn reply_to_routes_to_the_exact_cli_author_across_session_resume() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let (author_session, author_resume, responder_session) = state
             .db
@@ -3796,7 +3796,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn explicit_target_overrides_the_reply_to_cli_author() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let explicit_session = state
             .db
@@ -3872,7 +3872,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn reply_to_a_native_message_keeps_legacy_untargeted_routing() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -3932,7 +3932,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn bulk_import_reply_to_never_infers_a_local_cli_target() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -4017,7 +4017,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn typed_native_target_never_wakes_a_same_provider_cli_by_coincidence() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -4068,7 +4068,7 @@ mod tests {
         // Codex peer was actively watching. The targeted path bypassed every
         // liveness gate and spawned a second native Codex, producing two near-
         // identical replies. A live target owns the mention; no job is needed.
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -4163,7 +4163,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn expired_target_peer_falls_back_to_a_durable_targeted_dispatch() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -4237,7 +4237,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn no_agent_room_never_spawns_an_absent_mentioned_agent() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -4299,7 +4299,7 @@ mod tests {
         // Anti-loop: an agent mentioning its own type is a no-op for targeting.
         // With the native principal (Codex) live, neither the targeted nor the
         // native path fires — so a self-mention never spawns a responder.
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -4351,7 +4351,7 @@ mod tests {
         // stab-1 — agents estimated their position (+1 per post) because the
         // response carried no sort_order; concurrent posters made the
         // estimate drift and long-polls silently skipped messages.
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
 
         let first = append(&state, vec![agent_msg("s1", "un")]).await;
@@ -4390,7 +4390,7 @@ mod tests {
     #[tokio::test]
     #[serial] // global anti-halluc mode cell
     async fn live_agent_append_with_fabricated_source_carries_lint() {
-        crate::core::anti_halluc::set_mode("warn");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("warn");
         let (state, _tmp) = lint_state(true).await;
         let out = append(
             &state,
@@ -4414,13 +4414,12 @@ mod tests {
             .pop()
             .unwrap();
         assert!(msg.lint_report.is_some());
-        crate::core::anti_halluc::set_mode("off");
     }
 
     #[tokio::test]
     #[serial]
     async fn live_agent_append_with_valid_source_has_no_fabricated() {
-        crate::core::anti_halluc::set_mode("warn");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("warn");
         let (state, _tmp) = lint_state(true).await;
         let out = append(
             &state,
@@ -4434,7 +4433,6 @@ mod tests {
                 "valid citation must not read as fabricated: {l:?}"
             );
         }
-        crate::core::anti_halluc::set_mode("off");
     }
 
     #[tokio::test]
@@ -4473,7 +4471,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn bulk_import_and_user_messages_are_never_linted() {
-        crate::core::anti_halluc::set_mode("warn");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("warn");
         let (state, _tmp) = lint_state(true).await;
         // Bulk (2 messages) with a fabricated citation → no lint.
         let out = append(
@@ -4498,14 +4496,13 @@ mod tests {
         };
         let out = append(&state, vec![user]).await;
         assert!(out.lint.is_none(), "user messages must not lint");
-        crate::core::anti_halluc::set_mode("off");
     }
 
     #[tokio::test]
     #[serial]
     async fn projectless_disc_and_off_mode_skip_lint() {
         // Project-less disc: no roots → no lint, no false fabricated.
-        crate::core::anti_halluc::set_mode("warn");
+        let mode = crate::core::anti_halluc::ModeOverride::set("warn");
         let (state, _tmp) = lint_state(false).await;
         let out = append(
             &state,
@@ -4514,7 +4511,7 @@ mod tests {
         .await;
         assert!(out.lint.is_none(), "no project → no lint");
         // Mode off: bound project but lint disabled.
-        crate::core::anti_halluc::set_mode("off");
+        mode.switch("off");
         let (state2, _tmp2) = lint_state(true).await;
         let out = append(
             &state2,
@@ -4800,7 +4797,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_joined_cli_can_append_an_ordinary_message() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -4853,7 +4850,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_failed_card_takes_its_message_down_with_it() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -4925,7 +4922,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn rotating_a_session_credential_does_not_move_publication_authority() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -4979,7 +4976,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_binding_lost_between_two_appends_keeps_the_message_and_says_so() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         state
             .db
@@ -5068,7 +5065,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn disc_append_lets_a_granted_orchestrator_publish() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         let grant = state
             .db
@@ -5158,7 +5155,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn disc_append_refuses_a_worker_presenting_an_orchestrators_session_id() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         execution_room(&state, IMPORTANT_PARENT, IMPORTANT_CHILD).await;
         state
@@ -5233,7 +5230,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn disc_append_refuses_a_worker_claiming_the_user_role() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         execution_room(&state, IMPORTANT_PARENT, IMPORTANT_CHILD).await;
 
@@ -5254,7 +5251,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn disc_append_refuses_a_worker_claiming_the_system_role() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         execution_room(&state, IMPORTANT_PARENT, IMPORTANT_CHILD).await;
 
@@ -5273,7 +5270,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn disc_append_refuses_worker_fences_inside_a_bulk_import() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         execution_room(&state, IMPORTANT_PARENT, IMPORTANT_CHILD).await;
 
@@ -5292,7 +5289,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn disc_append_refuses_when_the_session_id_is_missing() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
 
         let response = append(
@@ -5316,7 +5313,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn disc_append_refuses_when_the_session_id_does_not_resolve() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
 
         let response = append_holding(
@@ -5337,7 +5334,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn disc_append_refuses_a_worker_targeting_its_parent_room() {
-        crate::core::anti_halluc::set_mode("off");
+        let _mode = crate::core::anti_halluc::ModeOverride::set("off");
         let (state, _tmp) = lint_state(false).await;
         execution_room(&state, IMPORTANT_PARENT, IMPORTANT_CHILD).await;
 
