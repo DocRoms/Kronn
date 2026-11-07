@@ -48,10 +48,10 @@ The four `cli_restart_*` tests in `backend/src/api/orchestration.rs` exercise:
 - Departed, third-room, wrong-provider and missing-child refusals, plus retained
   quota arbitration even when another same-provider CLI is present.
 - Preservation of an unaccepted offer in the principal room.
-[src: file: backend/src/api/orchestration.rs:30349-30440#cli_restart_recovers_the_exact_worker_after_accepted_child_handoff]
-[src: file: backend/src/api/orchestration.rs:30442-30563#cli_restart_same_worker_reassignment_keeps_principal_room_and_requires_acceptance]
-[src: file: backend/src/api/orchestration.rs:30567-30671#cli_restart_keeps_foreign_left_missing_and_quota_workers_gated]
-[src: file: backend/src/api/orchestration.rs:30673-30713#cli_restart_preserves_the_unaccepted_offer_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:30391-30482#cli_restart_recovers_the_exact_worker_after_accepted_child_handoff]
+[src: file: backend/src/api/orchestration.rs:30484-30605#cli_restart_same_worker_reassignment_keeps_principal_room_and_requires_acceptance]
+[src: file: backend/src/api/orchestration.rs:30609-30713#cli_restart_keeps_foreign_left_missing_and_quota_workers_gated]
+[src: file: backend/src/api/orchestration.rs:30715-30755#cli_restart_preserves_the_unaccepted_offer_in_the_parent]
 
 Run with `cargo test --manifest-path backend/Cargo.toml --lib cli_restart`.
 These are isolated SQLite/Git protocol tests, not a live provider or host-reboot
@@ -80,8 +80,8 @@ Two regression tests reproduced the resulting stale child binding on cancellatio
 and CLI-to-native reassignment; both passed after the identity fix. This is a
 separate defect from KT-615's accepted-child eligibility check and from the stale
 session catalogue observed after a reload.
-[src: file: backend/src/api/orchestration.rs:29779-29797#cli_durable_return_terminal_preserves_the_distinct_binding_identity]
-[src: file: backend/src/api/orchestration.rs:29799-29821#cli_durable_return_reassignment_preserves_the_distinct_binding_identity]
+[src: file: backend/src/api/orchestration.rs:29821-29839#cli_durable_return_terminal_preserves_the_distinct_binding_identity]
+[src: file: backend/src/api/orchestration.rs:29841-29863#cli_durable_return_reassignment_preserves_the_distinct_binding_identity]
 
 Migration 171 adds `task_execution_cli_bindings`, keyed by execution and exact CLI
 session primary key. Offer acceptance records the server-derived source identity
@@ -114,8 +114,8 @@ cannot recapture workers after completion or replacement. Already terminal
 deliveries and their evidence are never rewritten.
 [src: file: backend/src/db/cli_worker_bindings.rs:110-115#was_pinned]
 [src: file: backend/src/db/cli_worker_bindings.rs:150-165#unresolved_child_binding]
-[src: file: backend/src/api/orchestration.rs:29939-29980#cli_durable_return_legacy_worker_can_explicitly_reconfirm_its_accepted_offer]
-[src: file: backend/src/api/orchestration.rs:30025-30033#cli_durable_return_old_offer_cannot_recapture_a_terminal_worker]
+[src: file: backend/src/api/orchestration.rs:29981-30022#cli_durable_return_legacy_worker_can_explicitly_reconfirm_its_accepted_offer]
+[src: file: backend/src/api/orchestration.rs:30067-30075#cli_durable_return_old_offer_cannot_recapture_a_terminal_worker]
 
 The original KT-618 report remains a historical independent review: it did not
 execute these later regressions and did not establish the subsequently reproduced
