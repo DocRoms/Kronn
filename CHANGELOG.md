@@ -28,6 +28,18 @@ Release notes for 0.9.3 and earlier are available in the
   `kronn-run-artifacts` volume. Existing live run directories are moved at
   startup, dead ones deleted. Any Agent step can still read any run's
   artifacts; per-run confinement is KT-1587.
+- A task worker can edit its project's own `.cargo/audit.toml` and
+  `.cargo/config.toml`, and a refused tool call is no longer silent (KT-1541).
+  Claude Code's built-in sensitive-directory check asks on any path under
+  `.cargo`, even in `acceptEdits`, and a `--print` worker cannot answer: the
+  Edit came back refused with no reason. The worker's settings now answer that
+  one ask, for the worktree's own `.cargo` only, through a script that refuses
+  any path going through a symlink or leaving the worktree (the Kronn data
+  directory stays denied). A refused tool call is written into the task
+  worker's transcript with its reason, the "worker ended without a delivery"
+  notice repeats the last refusals of the current attempt, and so does the
+  delivery summary of a worker that delivers anyway. See `docs/gotchas/claude-code-sensitive-directories.md`.
+
 - One request no longer starts a cascade of media generations, and Stop is
   final (KT-1481). Every agent generation is tied to the human message at the
   base of its wake chain: a result or failure notification now says it is a

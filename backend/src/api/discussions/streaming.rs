@@ -4812,7 +4812,13 @@ pub(super) async fn make_agent_stream_inner(
                                 .into_iter()
                                 .map(|trace| trace.marker()),
                         );
-                        let parsed = runner::parse_claude_stream_line(&line);
+                        // KT-1541 — a task worker's refused tool call is written
+                        // into its transcript; no other run's stream is.
+                        let parsed = if cli_task_worker_context.is_some() {
+                            runner::parse_claude_worker_stream_line(&line)
+                        } else {
+                            runner::parse_claude_stream_line(&line)
+                        };
                         stream_json_progress(&run_progress, &line, &parsed);
                         match parsed {
                             runner::StreamJsonEvent::Text(text) => {

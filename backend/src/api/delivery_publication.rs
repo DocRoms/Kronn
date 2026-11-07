@@ -34,6 +34,10 @@ pub struct ExecutionFacts {
     pub duration_ms: u64,
     pub tokens: Option<u64>,
     pub cost_usd_micros: Option<u64>,
+    /// KT-1541 — tool calls the worker's CLI refused during the run, read from
+    /// its transcript. A worker that delivers after a refusal worked around it,
+    /// and the report says so rather than leaving the refusal in the transcript.
+    pub refused_tool_calls: Vec<String>,
 }
 
 impl ExecutionFacts {
@@ -67,6 +71,7 @@ impl ExecutionFacts {
             duration_ms,
             tokens: None,
             cost_usd_micros: None,
+            refused_tool_calls: Vec::new(),
         }
     }
 }
@@ -203,6 +208,12 @@ pub fn summary_from_manifest(
             .chain(unevidenced.iter().map(|name| {
                 format!("unverified: validation `{name}` was reported without evidence")
             }))
+            // A refusal the worker met on the way, however it got round it.
+            .chain(
+                facts.refused_tool_calls.iter().map(|reason| {
+                    format!("refused: a tool call was refused during the run: {reason}")
+                }),
+            )
             .collect();
 
     DeliverySummaryV1::build(
@@ -479,8 +490,8 @@ pub async fn publish_accepted_delivery(
     let task_id = execution.task_id.clone();
 
     let sub_discussion_id = execution.sub_discussion_id.clone();
-    let (delivery, task, assignment_started_at, review, served_model, spend) = db
-        .with_conn(move |conn| {
+    let (delivery, task, assignment_started_at, review, served_model, spend, refused_tool_calls) =
+        db.with_conn(move |conn| {
             let delivery =
                 crate::db::worker_deliveries::get_delivery(conn, &execution_id, attempt_no)?;
             let task = crate::db::planning::get_task(conn, &task_id)?;
@@ -500,6 +511,12 @@ pub async fn publish_accepted_delivery(
                 Some(child) => worker_spend(conn, child)?,
                 None => WorkerSpend::default(),
             };
+            let refused_tool_calls = match sub_discussion_id.as_deref() {
+                Some(child) => {
+                    crate::api::discussions::runtime::refused_tool_calls_of_worker(conn, child)?
+                }
+                None => Vec::new(),
+            };
             Ok((
                 delivery,
                 task,
@@ -507,6 +524,7 @@ pub async fn publish_accepted_delivery(
                 review,
                 served_model,
                 spend,
+                refused_tool_calls,
             ))
         })
         .await?;
@@ -530,6 +548,7 @@ pub async fn publish_accepted_delivery(
     let mut facts = ExecutionFacts::from_execution(execution, served_model.as_deref(), duration_ms);
     facts.tokens = spend.tokens;
     facts.cost_usd_micros = spend.cost_usd_micros;
+    facts.refused_tool_calls = refused_tool_calls;
     // KT-613 — the review that accepted THIS attempt, and only it. A decision
     // that failed to parse leaves the report without principal evidence rather
     // than without a report: publication is total once a delivery is accepted.
@@ -617,6 +636,7 @@ mod tests {
             duration_ms: 91_000,
             tokens: Some(42_000),
             cost_usd_micros: None,
+            refused_tool_calls: Vec::new(),
         }
     }
 
@@ -1162,6 +1182,37 @@ mod tests {
         );
         let markdown = summary.render_markdown();
         assert!(markdown.contains(EVIDENCE_NOT_PROVIDED));
+    }
+
+    /// KT-1541 — a worker that delivered after the CLI refused one of its tool
+    /// calls still has that refusal in its report, as an attention point.
+    #[test]
+    fn a_refusal_the_worker_met_reaches_the_delivery_summary() {
+        let mut refused = facts();
+        refused.refused_tool_calls = vec![
+            "Claude requested permissions to edit /wt/backend/.cargo/audit.toml which is a sensitive file.".into(),
+        ];
+        let summary = summary_from_manifest(
+            "KT-544",
+            "exec-1",
+            &manifest(),
+            &refused,
+            &[],
+            at("2026-09-01T10:00:00Z"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            summary
+                .attention_points
+                .iter()
+                .filter(|point| point.starts_with("refused:"))
+                .collect::<Vec<_>>(),
+            vec![
+                "refused: a tool call was refused during the run: Claude requested permissions to edit /wt/backend/.cargo/audit.toml which is a sensitive file."
+            ]
+        );
+        assert!(summary.render_markdown().contains("audit.toml"));
     }
 
     #[test]
