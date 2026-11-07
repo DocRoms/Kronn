@@ -20,6 +20,54 @@ fn the_claude_session_limit_is_quota_with_its_paris_reset() {
     assert_eq!(quota.parked, None);
 }
 
+/// KT-1556 — Claude's short wording carries no HTTP status and no plan name.
+#[test]
+fn the_short_claude_limit_wording_is_quota_with_its_paris_reset() {
+    // Paris is UTC+1 on 04/11.
+    let now = utc("2026-11-04T14:00:00Z");
+    for refusal in [
+        "limit · resets 5:30pm (Europe/Paris)",
+        "[Agent provider error] 5-hour limit reached ∙ resets 5:30pm (Europe/Paris)",
+        "You've hit your session limit · resets 5:30pm (Europe/Paris)",
+    ] {
+        let quota = classify(refusal, now).unwrap_or_else(|| panic!("quota: {refusal}"));
+        assert_eq!(
+            quota.reset_at,
+            Some(utc("2026-11-04T16:30:00Z")),
+            "{refusal}"
+        );
+    }
+    // Without a named zone the reset is not guessed.
+    let quota = classify("limit · resets 5:30pm", now).expect("still quota");
+    assert_eq!(quota.reset_at, None);
+}
+
+/// KT-1556 — Claude's weekly limit names the day of its reset (seen 2026-11-05).
+#[test]
+fn the_weekly_claude_limit_is_quota_with_its_dated_reset() {
+    let now = utc("2026-11-05T10:00:00Z");
+    let refusal = "You've hit your weekly limit · resets Nov 7 at 8pm (Europe/Paris)";
+    let quota = classify(refusal, now).expect("a weekly limit is quota");
+    assert_eq!(quota.reset_at, Some(utc("2026-11-07T19:00:00Z")));
+}
+
+/// KT-1556 — an agent error that names a limit and a reset is not a quota
+/// refusal unless it has Claude's dot separator and a reset time.
+#[test]
+fn a_limit_followed_by_a_reset_verb_is_not_quota() {
+    let now = utc("2026-11-04T14:00:00Z");
+    for error in [
+        "Context limit: reset the conversation",
+        "token limit - reset the cache",
+        "limit, resets later",
+        "limit | resets 5:30pm (Europe/Paris)",
+        "limit · reset 5:30pm (Europe/Paris)",
+        "limit · resets soon",
+    ] {
+        assert!(classify(error, now).is_none(), "{error}");
+    }
+}
+
 #[test]
 fn codex_and_openai_compatible_refusals_are_quota_with_their_reset() {
     let now = utc("2026-10-09T10:00:00Z");
@@ -81,6 +129,7 @@ fn agent_failures_and_transient_overloads_are_not_quota() {
         "Worker local total request limit reached (16/16)",
         "Agent stalled: no output for 600s",
         "processed 429 files",
+        "the rate limit resets daily at midnight",
     ] {
         assert!(classify(error, now).is_none(), "{error}");
     }

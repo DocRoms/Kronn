@@ -6,6 +6,9 @@
 //! the ordinary resume path. Without a trustworthy reset the run is parked
 //! until a human resumes it. The state lives on the run row, so it survives a
 //! backend restart.
+//!
+//! A foreach child waits the same way, but its parent mirrors the wait and
+//! owns the wake-up: resuming the parent reclaims the child at its step.
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -21,6 +24,75 @@ const RESET_MARGIN: Duration = Duration::minutes(2);
 pub const MAX_AUTOMATIC_WAKES: u32 = 4;
 /// Longest reset Kronn trusts; anything further is a misparse.
 const MAX_RESET_HORIZON: Duration = Duration::days(45);
+/// Set by a foreach on a child its parent can resume after a quota wait.
+pub const PARENT_RESUMES_KEY: &str = "__subwf_quota_resumable__";
+
+/// Whether a quota refusal in `run` may wait instead of failing: a top-level
+/// linear run, or a child whose parent marked it as resumable.
+pub fn can_wait(run: &WorkflowRun) -> bool {
+    match run.parent_run_id {
+        None => run.run_type == "linear",
+        Some(_) => {
+            run.run_type == "subworkflow"
+                && run
+                    .trigger_context
+                    .as_ref()
+                    .and_then(|ctx| ctx.get(PARENT_RESUMES_KEY))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+        }
+    }
+}
+
+/// The parent's copy of a child's planned wait, under its own identity: the
+/// child decided when to wake, the parent's claim names the parent's wait.
+pub fn mirror_child_wait(child: QuotaWait) -> QuotaWait {
+    QuotaWait {
+        id: Some(uuid::Uuid::new_v4().to_string()),
+        ..child
+    }
+}
+
+fn mirrored_child_key(step_name: &str) -> String {
+    format!("__kronn.quota_mirrored_child.{step_name}")
+}
+
+/// Records which child, and which of its waits, a foreach step mirrored, so
+/// its resume tells that wait apart from a child some other pass left waiting.
+pub fn remember_mirrored_child(
+    run_state: &mut std::collections::HashMap<String, String>,
+    step_name: &str,
+    child_run_id: Option<&str>,
+    child_wait_id: Option<&str>,
+) {
+    run_state.insert(
+        mirrored_child_key(step_name),
+        serde_json::json!({ "v": 1, "child_run_id": child_run_id, "wait_id": child_wait_id })
+            .to_string(),
+    );
+}
+
+pub fn forget_mirrored_child(
+    run_state: &mut std::collections::HashMap<String, String>,
+    step_name: &str,
+) {
+    run_state.remove(&mirrored_child_key(step_name));
+}
+
+/// The child run and wait id a foreach step mirrored, if it is resuming one.
+pub fn mirrored_child(
+    run_state: &std::collections::HashMap<String, String>,
+    step_name: &str,
+) -> Option<(String, Option<String>)> {
+    let doc: serde_json::Value =
+        serde_json::from_str(run_state.get(&mirrored_child_key(step_name))?).ok()?;
+    let child = doc.get("child_run_id")?.as_str()?.to_string();
+    let wait = doc
+        .get("wait_id")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
+    Some((child, wait))
+}
 
 /// A quota or session-limit refusal, as opposed to an agent failure. Shared
 /// capacity saturation (529, NVIDIA worker limits) is transient, not quota.
@@ -33,6 +105,18 @@ pub fn is_quota_refusal(error: &str) -> bool {
     }
     if is_transient_provider_overload(error) {
         return false;
+    }
+    // Claude's short form names no plan: "5-hour limit · resets 5:30pm (…)".
+    // Only its dot separator and a reset time, maybe dated ("resets Nov 7 at 8pm"):
+    // "limit: reset the cache" is no quota.
+    static LIMIT_RESETS: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+        regex_lite::Regex::new(
+            r"(?i)\blimit(?:\s+reached)?\s*[·∙•]\s*resets\s+(?:[a-z]{3,9}\s+)?\d",
+        )
+        .expect("static limit-resets regex")
+    });
+    if LIMIT_RESETS.is_match(error) {
+        return true;
     }
     let lower = error.to_lowercase();
     [
@@ -271,6 +355,11 @@ pub async fn wake_due_runs(state: &AppState, now: DateTime<Utc>) -> Vec<String> 
     };
     let mut resumed = Vec::new();
     for mut run in runs {
+        // A child is resumed by its parent; alone, it can only be orphaned.
+        if run.parent_run_id.is_some() {
+            fail_if_orphaned(state, &run).await;
+            continue;
+        }
         reschedule_after_deadline(state, &mut run, now).await;
         let due = pending_wait(&run)
             .and_then(|wait| wait.wake_at)
@@ -349,6 +438,36 @@ async fn reschedule_after_deadline(state: &AppState, run: &mut WorkflowRun, now:
         Ok(false) => {}
         Err(error) => {
             tracing::warn!(run_id = %run.id, "could not reschedule a parked quota wait: {error}");
+        }
+    }
+}
+
+/// Fails a waiting child whose parent can no longer resume it, so the child
+/// does not hold its workflow's concurrency slot forever.
+async fn fail_if_orphaned(state: &AppState, run: &WorkflowRun) {
+    let Some(step_index) = run.step_results.len().checked_sub(1) else {
+        return;
+    };
+    let wait_id = pending_wait(run).and_then(|wait| wait.id.clone());
+    let run_id = run.id.clone();
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::fail_orphaned_quota_wait(
+                conn,
+                &run_id,
+                step_index,
+                wait_id.as_deref(),
+            )
+        })
+        .await
+    {
+        Ok(true) => {
+            tracing::info!(run_id = %run.id, "quota-waiting child failed: its parent run ended")
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(run_id = %run.id, "orphan check of a quota-waiting child failed: {error}")
         }
     }
 }

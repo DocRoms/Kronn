@@ -791,7 +791,9 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             {t('wf.cancelRun')}
           </button>
         )}
-        {(run.status === 'Interrupted' || run.status === 'WaitingQuota') && run.run_type !== 'batch' && onResume && (
+        {/* A sub-workflow child is resumed through its parent; the backend refuses it alone. */}
+        {(run.status === 'Interrupted' || run.status === 'WaitingQuota') && run.run_type !== 'batch'
+          && run.run_type !== 'subworkflow' && !run.parent_run_id && onResume && (
           <button
             className="wf-run-cancel-btn"
             onClick={(e) => {
