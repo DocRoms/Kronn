@@ -48,13 +48,13 @@ does not mean enabling the feature without consent on a fresh installation.
 An agent start contains the provider/transport, filesystem and MCP context,
 skills/directives/profiles, tool executor, tier, explicit model override, and
 discussion identity. Switching Claude to Codex or Ollama changes more than the
-`--model` flag. [src: file: backend/src/agents/runner.rs:2973-3128#AgentStartConfig]
+`--model` flag. [src: file: backend/src/agents/runner.rs:3091-3246#AgentStartConfig]
 
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
 currently wins over the tier. [src: file: backend/src/models/setup.rs:832-878#ModelTier]
-[src: file: backend/src/agents/runner.rs:3466-3500#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3584-3618#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
 
@@ -118,7 +118,7 @@ The execution boundary currently exposes strings for start failures and only
 three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 `RuntimeUnavailable`). The richer rate-limit/auth/server detection is a
 presentation helper that scans raw output after execution; it is not a routing
-contract. [src: file: backend/src/agents/runner.rs:3786#start_agent_with_config]
+contract. [src: file: backend/src/agents/runner.rs:3904#start_agent_with_config]
 [src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
 [src: file: backend/src/api/discussions/orchestration.rs:1664-1804#detect_agent_error_hint]
 

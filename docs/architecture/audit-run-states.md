@@ -205,7 +205,7 @@ this degrades and continues.
   runs. While an audit of the project shows progress, such an agent is not
   started: its dispatch goes back to the queue with its attempts intact. A
   run clears its progress before it spawns its own validation agent.
-  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:501#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1194-1197#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1204-1225#progress] [src: file: backend/src/api/audit/full.rs:3919-3922#clear_progress]
+  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:571#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1264-1267#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1274-1295#progress] [src: file: backend/src/api/audit/full.rs:3919-3922#clear_progress]
 - **Cancel.** A cancel waits for the worker to acknowledge it. Without that
   acknowledgement it answers with an error, and the UI keeps the audit shown,
   marked "cancel pending". It deletes only the validation discussion linked to

@@ -567,7 +567,7 @@ both keep their earlier entries. Only the execution's current dispatch may add
 one, so a replaced worker cannot relabel it. `view: "compact"` carries the
 `session_id` of the latest two. An HTTP worker has no CLI session and lists none.
 [src: file: backend/src/db/orchestration.rs:2241-2315#record_worker_cli_session]
-[src: file: backend/src/api/delivery_publication.rs:242-374#ServedModelRecorder]
+[src: file: backend/src/api/delivery_publication.rs:253-385#ServedModelRecorder]
 
 `task_exec_status({task_execution_id, wait_for, timeout_secs})` blocks until
 the execution is in one of the `wait_for` statuses and adds
@@ -751,7 +751,7 @@ agent-type/alias matching or any other permissive resolution if either is missin
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration.rs:30715-30845#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration.rs:30757-30887#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:75-188#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,
@@ -823,7 +823,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:13187-13237#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2650-2678#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:13401-13451#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2768-2796#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5864-5896#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:5891-5904#_spawned_task_worker_mode]`
 
