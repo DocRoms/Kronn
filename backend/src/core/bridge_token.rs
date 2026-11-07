@@ -312,6 +312,8 @@ pub enum Rule {
     /// Reads: shared resources and the token's project are visible.
     Read,
     /// Writes to the launch's own discussions; other ids as for `Write`.
+    /// Only discussion ids are owned: `own_routes_name_only_discussion_targets`
+    /// fails if an `Own` route targets any other kind.
     Own,
     /// Mutations: the target (path ids, subject keys) must belong to the
     /// token's project and to no other; referenced ids must be visible.
