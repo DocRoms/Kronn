@@ -170,7 +170,9 @@ describe('TrustProofSection', () => {
     const help = screen.getByTestId('trust-proof-admin-hint');
     expect(help.textContent).toContain('Pour remplacer');
     expect(help.textContent).toContain(`cat "${ENROLLED.admin_secret_path}"`);
-    expect(help.textContent).not.toContain('premier démarrage');
+    // Where the secret came from, and why the current code is needed as well.
+    expect(help.textContent).toContain('au premier démarrage, ou à la dernière récupération');
+    expect(help.textContent).toContain('le code actuel que tu détiens');
     fireEvent.change(screen.getByTestId('trust-proof-admin-secret'), { target: { value: 'kr-admin-secret' } });
     fireEvent.click(screen.getByTestId('trust-proof-replace-cancel'));
     expect(screen.queryByTestId('trust-proof-admin-secret')).toBeNull();
@@ -217,6 +219,49 @@ describe('TrustProofSection', () => {
     expect(screen.getByTestId('trust-proof-admin-secret')).toHaveAttribute('type', 'password');
     expect(screen.getByTestId('trust-proof-lost').textContent).toContain('recover-admin-secret');
     expect(screen.getByTestId('trust-proof-lost').textContent).toContain(NONE.data_dir);
+  });
+
+  it('names the payload path in both hints, says where the secret came from and what the sandbox covers', async () => {
+    // A KRONN_DATA_DIR install: neither default folder, only the server knows it.
+    const custom = { admin_secret_path: '/srv/kronn-data/human-admin-secret', data_dir: '/srv/kronn-data' };
+    trustMock.overview.mockResolvedValueOnce(overview({ ...NONE, ...custom })).mockResolvedValue(overview({ ...ENROLLED, ...custom }));
+    const first = wrap();
+    const hint = await screen.findByTestId('trust-proof-admin-hint');
+    expect(hint.textContent).toContain('cat "/srv/kronn-data/human-admin-secret"');
+    expect(hint.textContent).toContain('au premier démarrage, ou à la dernière récupération');
+    expect(hint.textContent).toContain('faire tourner un secret avec lui et remplacer l\'authentificateur demandent aussi son code ; lister les identifiants, non');
+    expect(hint.textContent).toContain('dernière récupération ou rotation');
+    expect(hint.textContent).not.toContain('seulement pour le premier enrôlement');
+    const who = screen.getByText(/Seul ton compte utilisateur/);
+    expect(who.textContent).toContain('tant que sa protection est active');
+    expect(who.textContent).toContain('une CLI que tu lances toi-même');
+    expect(who.textContent).toContain('avant de lui confier des tâches');
+    first.unmount();
+
+    wrap();
+    fireEvent.click(await screen.findByTestId('trust-proof-replace-open'));
+    expect(screen.getByTestId('trust-proof-admin-hint').textContent).toContain('cat "/srv/kronn-data/human-admin-secret"');
+  });
+
+  it('words the admin-secret hints the same way in the 4 locales', async () => {
+    const { dictionaries } = await import('../../lib/i18n/testing');
+    for (const [locale, dict] of Object.entries(dictionaries)) {
+      const text = dict as Record<string, string>;
+      for (const key of ['trust.proof.adminSecretHint', 'trust.proof.adminSecretHintReplace', 'trust.proof.adminSecretHintDocker']) {
+        expect(text[key], `${locale} ${key}`).toContain('{0}');
+        expect(text[key], `${locale} ${key}`).not.toContain('.config/kronn');
+      }
+      // Same structure everywhere: the first-start sentence, then the sandbox scope with the CLI caveat.
+      expect(text['trust.proof.adminSecretHint'].split('{0}')[0].length, locale).toBeGreaterThan(40);
+      expect(text['trust.proof.adminSecretWho'], locale).toMatch(/CLI/);
+    }
+    expect(dictionaries.en['trust.proof.adminSecretHint']).toContain('at first start, or at the last recovery');
+    expect(dictionaries.en['trust.proof.adminSecretHint']).toContain("also need the authenticator's code");
+    expect(dictionaries.en['settings.credentials.intro']).toContain("authenticator's code once one is enrolled");
+    expect(dictionaries.en['trust.proof.adminSecretWho']).toContain('while its protection is on');
+    expect(dictionaries.en['trust.proof.adminSecretWho']).not.toMatch(/cannot see it/);
+    expect(dictionaries.es['trust.proof.adminSecretWho']).toContain('mientras su protección esté activa');
+    expect(dictionaries.zh['trust.proof.adminSecretWho']).toContain('保护开启期间');
   });
 
   it('points inside the container under Docker', async () => {

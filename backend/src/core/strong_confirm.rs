@@ -67,6 +67,10 @@ const ALWAYS: &[(&str, &str)] = &[
     // A human credential is revoked for good (the admin secret is its own gate
     // for who may; the code is the owner's, for whether now).
     ("POST", "/api/human-credentials/revoke"),
+    // A new grant, or a new admin secret: once an authenticator is enrolled the
+    // admin secret alone is no standing authority (KT-1534).
+    ("POST", "/api/human-credentials/enrol"),
+    ("POST", "/api/human-credentials/admin/rotate"),
     // Instance operations (owner decision, 28/10): wipe it, replace it with an
     // import, re-encrypt an import, open the host to a project's validations,
     // remove an agent CLI, or bring in a page that can carry code.
@@ -100,6 +104,9 @@ const CONDITIONAL: &[(&str, &str)] = &[
     ("PUT", "/api/external-api/connections/{id}"),
     ("POST", "/api/quick-execs"),
     ("PUT", "/api/quick-execs/{id}"),
+    // A holder renewing its own grant asks nothing; an administering rotation
+    // hands back another grant's secret, which is a mint (KT-1534).
+    ("POST", "/api/human-credentials/rotate"),
 ];
 
 /// Routes that stay open on purpose, though `is_destructive` lists them:
