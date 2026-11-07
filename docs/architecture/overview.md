@@ -525,14 +525,14 @@ pass (a frequent schedule adds no fire during the repeated hour).
   Single-mode sub-workflow children, batches and `on_failure` compensations
   are not resumed; such a child ends `Failed` with the quota classification
   on its step.
-  [src: file: backend/src/workflows/quota_wait.rs:171-201#plan_wait]
-  [src: file: backend/src/workflows/quota_wait.rs:222-256#park]
-  [src: file: backend/src/workflows/quota_wait.rs:258-298#wake_due_runs]
+  [src: file: backend/src/workflows/quota_wait.rs:255-285#plan_wait]
+  [src: file: backend/src/workflows/quota_wait.rs:306-340#park]
+  [src: file: backend/src/workflows/quota_wait.rs:342-382#wake_due_runs]
   [src: file: backend/src/workflows/quota_wait.rs:356-399#wake_one]
   [src: file: backend/src/workflows/runner.rs:4652-4702#check_resume_preconditions]
   [src: file: backend/src/workflows/runner.rs:216-261#WorkflowTimeoutClock]
   [src: file: backend/src/workflows/runner.rs:267-283#checkpoint]
-  [src: file: backend/src/workflows/quota_wait.rs:303-346#reschedule_after_deadline]
+  [src: file: backend/src/workflows/quota_wait.rs:392-435#reschedule_after_deadline]
   [src: file: backend/src/workflows/runner.rs:3108-3133#plan_wait]
 - **Worktrees nested in a run worktree (KT-985).** A step may add its own
   worktree inside the run's (`<run worktree>/.kronn/pr-N`). Deleting the run's
