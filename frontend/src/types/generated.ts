@@ -4391,7 +4391,34 @@ export type ExecutionRecoveryAction = "resume_provisioning" | "resume_worker" | 
 
 export type ExecutionTimeoutKind = "activity" | "total_duration" | "review_wait" | "human_wait";
 
+/**
+ * One value a configuration-only export withheld.
+ */
+export type ExportPlaceholder = {
+/**
+ * The env key the placeholder names: the definition holds `${ENV.<key>}`.
+ */
+key: string,
+/**
+ * Where the value stood, e.g. `api_spec.base_url`.
+ */
+field: string,
+/**
+ * The plugin cannot work without it (a URL, a header, an argument…);
+ * free text is optional.
+ */
+required: boolean,
+/**
+ * What may be shown of the withheld value: a URL's origin, nothing else.
+ */
+hint: string | null, value_type: ExportValueType, };
+
 export type ExportPluginBundleRequest = { config_ids: Array<string>, include_values?: boolean, passphrase?: string | null, confirmation?: string | null, };
+
+/**
+ * The JSON type of a withheld value, so the typed value goes back as one.
+ */
+export type ExportValueType = "text" | "number" | "boolean";
 
 /**
  * A named OpenAI-compatible API connection. This model persists only the
@@ -4895,7 +4922,12 @@ export type ImportPluginBundleRequest = { content: string, passphrase?: string |
  * They replace the plugin's whole command line, so every other plugin's
  * arguments are dropped.
  */
-accept_args_for?: Array<string>, };
+accept_args_for?: Array<string>,
+/**
+ * Values the importer typed for the placeholders of a configuration-only
+ * bundle, by source config id then placeholder key (KT-1040).
+ */
+placeholder_values?: Record<string, Record<string, string>>, };
 
 /**
  * One plugin as the import would treat it, before anything is written.
@@ -4908,7 +4940,19 @@ usual_args: Array<string> | null,
 /**
  * The bundle's proposed command line, secret-looking parts masked.
  */
-proposed_args: Array<string> | null, args_differ: boolean, importable: boolean, issue: string | null, };
+proposed_args: Array<string> | null, args_differ: boolean, importable: boolean, issue: string | null,
+/**
+ * Base URL of a custom API-only plugin; only its origin when the rest is withheld.
+ */
+base_url: string | null,
+/**
+ * Names of the headers a custom API plugin sends on every call; never their values.
+ */
+default_header_names: Array<string>,
+/**
+ * Values a configuration-only export withheld, for the importer to fill.
+ */
+placeholders: Array<ExportPlaceholder>, };
 
 export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
 /**
@@ -7097,7 +7141,11 @@ export type PortableDiscussionRevisionEvent = { target_message_id: string, previ
  */
 export type PortableExporterIdentity = { pseudo: string | null, avatar_email: string | null, };
 
-export type PortablePluginConfig = { source_config_id: string, server: McpServer, label: string, env_keys: Array<string>, values: Record<string, string> | null, args_override: Array<string> | null, was_global: boolean, include_general: boolean, preferred_interface: PluginInterface, };
+export type PortablePluginConfig = { source_config_id: string, server: McpServer, label: string, env_keys: Array<string>, values: Record<string, string> | null, args_override: Array<string> | null, was_global: boolean, include_general: boolean, preferred_interface: PluginInterface,
+/**
+ * What a configuration-only export withheld from `server` (KT-1040).
+ */
+placeholders?: Array<ExportPlaceholder>, };
 
 /**
  * 0.9.2-G — honest presence state, server-derived (never a bare "connected"

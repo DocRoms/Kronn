@@ -123,6 +123,9 @@ const plainImportPreview = (over: Record<string, unknown> = {}) => ({
     args_differ: false,
     importable: true,
     issue: null,
+    base_url: null,
+    default_header_names: [],
+    placeholders: [],
   }],
   ...over,
 });
@@ -241,6 +244,7 @@ describe('PluginPortabilityModal', () => {
       content: expect.stringContaining('"kind":"kronn.plugins"'),
       passphrase: 'long-passphrase',
       accept_args_for: [],
+      placeholder_values: {},
     }));
     expect(screen.getByRole('button', {
       name: 'Tous les projets',
@@ -580,6 +584,49 @@ describe('PluginPortabilityModal import review (KT-1010, KT-833)', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Importer le bundle' }));
     await waitFor(() => expect(mocks.importBundle).toHaveBeenCalledTimes(1));
+  });
+
+  it('shows the base URL, the header names and asks for the withheld values (KT-1040)', async () => {
+    mocks.previewImportBundle.mockResolvedValue(plainImportPreview({
+      plugins: [{
+        source_config_id: 'source-api', label: 'Acme API', server_name: 'Acme',
+        usual_args: null, proposed_args: null, args_differ: false, importable: true, issue: null,
+        base_url: '${ENV.KRONN_EXPORT_API_SPEC_BASE_URL}',
+        default_header_names: ['X-Static-Key', 'Notion-Version'],
+        placeholders: [
+          { key: 'KRONN_EXPORT_API_SPEC_BASE_URL', field: 'api_spec.base_url', required: true, hint: 'https://api.acme.test', value_type: 'text' },
+          { key: 'KRONN_EXPORT_DESCRIPTION', field: 'description', required: false, hint: null, value_type: 'text' },
+        ],
+      }],
+    }));
+    mocks.importBundle.mockResolvedValue(importReport());
+    renderModal('import');
+    dropFile({ ...clearBundle, plugin_labels: ['Acme API'] });
+    await screen.findByTestId('mcp-import-review');
+    expect(screen.getByTestId('mcp-import-base-url')).toHaveTextContent('URL de base de l\'API');
+    const headers = screen.getByTestId('mcp-import-header-names');
+    expect(headers).toHaveTextContent('En-têtes envoyés à chaque appel');
+    expect(headers).toHaveTextContent('X-Static-Key, Notion-Version');
+    const asked = screen.getByTestId('mcp-import-placeholders');
+    expect(asked).toHaveTextContent('api_spec.base_url — nécessaire (https://api.acme.test)');
+    expect(asked).toHaveTextContent('description — facultatif');
+    const input = screen.getByLabelText('Acme API : valeur de api_spec.base_url');
+    expect(input).toHaveAttribute('type', 'password');
+    fireEvent.change(input, { target: { value: 'https://api.acme.test/v1?token=typed' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Importer le bundle' }));
+    await waitFor(() => expect(mocks.importBundle).toHaveBeenCalledWith(expect.objectContaining({
+      placeholder_values: { 'source-api': { KRONN_EXPORT_API_SPEC_BASE_URL: 'https://api.acme.test/v1?token=typed' } },
+    })));
+  });
+
+  it('shows no API block for a plugin without base URL nor headers', async () => {
+    mocks.previewImportBundle.mockResolvedValue(argsPreview());
+    renderModal('import');
+    dropFile(clearBundle);
+    await screen.findByTestId('mcp-import-review');
+    expect(screen.queryByTestId('mcp-import-placeholders')).toBeNull();
+    expect(screen.queryByTestId('mcp-import-base-url')).toBeNull();
+    expect(screen.queryByTestId('mcp-import-header-names')).toBeNull();
   });
 
   it('refuses a file that is neither a bundle nor an old plugin export', async () => {
