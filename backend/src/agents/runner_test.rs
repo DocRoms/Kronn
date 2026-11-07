@@ -10218,6 +10218,346 @@ Suite de la réponse.";
         assert!(fallback["sandbox"].get("network").is_none());
     }
 
+    /// The `command` of the worker's `PermissionRequest` hook for `worktree`.
+    fn cargo_hook_command(worktree: &std::path::Path) -> String {
+        let settings: serde_json::Value =
+            serde_json::from_str(&super::super::claude_task_worker_settings(worktree).unwrap())
+                .unwrap();
+        settings["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Run the hook as Claude does — the command on `sh`, the hook input on
+    /// stdin — and say whether it answered "allow".
+    fn cargo_hook_allows(command: &str, file_path: &str) -> bool {
+        use std::io::Write;
+        let input = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": file_path, "old_string": "a", "new_string": "b"},
+        })
+        .to_string();
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        if output.stdout.is_empty() {
+            return false;
+        }
+        let decision: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            decision,
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "allow"}
+            }})
+        );
+        true
+    }
+
+    /// KT-1541 — Claude Code's built-in sensitive-directory check asks on
+    /// `.cargo` (and no `allow` rule can lift it), so a `--print` worker could not
+    /// edit `backend/.cargo/audit.toml`. The worker's settings answer that ask,
+    /// for this worktree's own `.cargo` only.
+    #[test]
+    fn claude_task_worker_can_edit_its_projects_cargo_files_only_in_its_worktree() {
+        let (_repo_dir, _repo, worktree) = managed_task_worktree();
+        let settings: serde_json::Value =
+            serde_json::from_str(&super::super::claude_task_worker_settings(&worktree).unwrap())
+                .unwrap();
+        let hooks = settings["hooks"]["PermissionRequest"].as_array().unwrap();
+        assert_eq!(hooks.len(), 1, "one matcher, the file tools only");
+        assert_eq!(hooks[0]["matcher"], "Edit|Write");
+        let hooks = hooks[0]["hooks"].as_array().unwrap();
+        let conditions: Vec<&str> = hooks
+            .iter()
+            .map(|hook| hook["if"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            conditions,
+            [
+                format!("Edit(/{}/**)", worktree.display()),
+                format!("Write(/{}/**)", worktree.display())
+            ]
+        );
+        assert!(hooks.iter().all(|hook| hook["type"] == "command"));
+
+        let command = cargo_hook_command(&worktree);
+        let root = worktree.display();
+        // The audit config of a crate, the root config, and a `.cargo` that does
+        // not exist yet (a worker that creates it).
+        std::fs::create_dir_all(worktree.join("backend/.cargo")).unwrap();
+        std::fs::write(worktree.join("backend/.cargo/audit.toml"), "x").unwrap();
+        for allowed in [
+            format!("{root}/backend/.cargo/audit.toml"),
+            format!("{root}/backend/.cargo/config.toml"),
+            format!("{root}/.cargo/config.toml"),
+        ] {
+            assert!(cargo_hook_allows(&command, &allowed), "{allowed}");
+        }
+
+        // Everything else keeps asking, so keeps being refused: other
+        // sensitive directories, plain files, and anything outside the worktree
+        // however it is spelled.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let elsewhere = elsewhere.path().canonicalize().unwrap();
+        for refused in [
+            format!("{root}/.git/hooks/pre-commit"),
+            format!("{root}/.claude/settings.json"),
+            format!("{root}/backend/src/main.rs"),
+            format!("{root}/.cargo"),
+            format!("{root}/backend/.cargo/../../../escape/.cargo/config.toml"),
+            format!("{root}/./backend/.cargo/audit.toml"),
+            format!("{root}x/.cargo/config.toml"),
+            format!("{}/.cargo/config.toml", elsewhere.display()),
+            "backend/.cargo/audit.toml".to_string(),
+            format!("{root}/backend/.cargo/a\\b.toml"),
+        ] {
+            assert!(!cargo_hook_allows(&command, &refused), "{refused}");
+        }
+
+        // The data directory stays refused by `permissions.deny`, which Claude
+        // checks before it ever asks (so before the hook): the hook adds no
+        // path of its own to it, and the deny list is the vault's, untouched.
+        assert_eq!(
+            settings["permissions"]["deny"],
+            serde_json::json!(crate::core::vault_guard::claude_permission_deny())
+        );
+        assert!(
+            settings["permissions"].get("allow").is_none(),
+            "no allow rule is added: {settings}"
+        );
+    }
+
+    /// A `.cargo` that is a link, or a directory above it that is, would spell as
+    /// inside the worktree and write outside it (a rustc wrapper in the human's
+    /// `~/.cargo/config.toml`): Edit and Write are not under the Bash sandbox.
+    #[cfg(unix)]
+    #[test]
+    fn the_cargo_hook_refuses_a_path_that_goes_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+        let (_repo_dir, _repo, worktree) = managed_task_worktree();
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        std::fs::create_dir_all(home.join(".cargo")).unwrap();
+        std::fs::write(home.join(".cargo/config.toml"), "x").unwrap();
+        std::fs::write(home.join("target.toml"), "x").unwrap();
+        let command = cargo_hook_command(&worktree);
+        let root = worktree.display();
+
+        // `wt/.cargo -> ~/.cargo`: the file exists, and a new one is created.
+        symlink(home.join(".cargo"), worktree.join(".cargo")).unwrap();
+        for through in ["config.toml", "new.toml"] {
+            let path = format!("{root}/.cargo/{through}");
+            assert!(!cargo_hook_allows(&command, &path), "{path}");
+        }
+
+        // `wt/link -> ~`, then `wt/link/.cargo/config.toml`: the link is a parent
+        // of the `.cargo`, not the `.cargo` itself.
+        symlink(&home, worktree.join("link")).unwrap();
+        let path = format!("{root}/link/.cargo/config.toml");
+        assert!(!cargo_hook_allows(&command, &path), "{path}");
+
+        // A link below a real `.cargo` (the file itself), dangling or not.
+        std::fs::create_dir_all(worktree.join("crate/.cargo")).unwrap();
+        symlink(
+            home.join("target.toml"),
+            worktree.join("crate/.cargo/config.toml"),
+        )
+        .unwrap();
+        symlink(
+            home.join("missing.toml"),
+            worktree.join("crate/.cargo/audit.toml"),
+        )
+        .unwrap();
+        for leaf in ["config.toml", "audit.toml"] {
+            let path = format!("{root}/crate/.cargo/{leaf}");
+            assert!(!cargo_hook_allows(&command, &path), "{path}");
+        }
+
+        // A hard link to a file outside is the same file.
+        std::fs::create_dir_all(worktree.join("other/.cargo")).unwrap();
+        std::fs::hard_link(
+            home.join("target.toml"),
+            worktree.join("other/.cargo/config.toml"),
+        )
+        .unwrap();
+        let path = format!("{root}/other/.cargo/config.toml");
+        assert!(!cargo_hook_allows(&command, &path), "{path}");
+
+        // None of it broke the plain case.
+        std::fs::create_dir_all(worktree.join("plain/.cargo")).unwrap();
+        let path = format!("{root}/plain/.cargo/config.toml");
+        assert!(cargo_hook_allows(&command, &path), "{path}");
+    }
+
+    /// A worktree that disappears under a running worker must not leave the hook
+    /// walking up to a directory that is gone: it ends at once with no decision,
+    /// so the ask stands, instead of waiting for Claude's hook timeout.
+    #[cfg(unix)]
+    #[test]
+    fn the_cargo_hook_ends_without_a_decision_when_the_worktree_is_gone() {
+        use std::io::Write;
+        let (_repo_dir, _repo, worktree) = managed_task_worktree();
+        let command = cargo_hook_command(&worktree);
+        let path = format!("{}/backend/.cargo/audit.toml", worktree.display());
+        std::fs::remove_dir_all(&worktree).unwrap();
+
+        let input = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": path},
+        })
+        .to_string();
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if started.elapsed() > std::time::Duration::from_secs(10) {
+                child.kill().unwrap();
+                panic!("the hook kept walking up from a vanished worktree");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let output = child.wait_with_output().unwrap();
+        assert!(status.success());
+        assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+    }
+
+    #[test]
+    fn claude_task_worker_without_a_worktree_gets_no_cargo_hook() {
+        let args = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "p",
+            false,
+            "",
+            None,
+            None,
+            true,
+            Some(std::path::Path::new("/definitely/not/a/worktree")),
+            None,
+        )
+        .2;
+        let fallback = args
+            .get(args.iter().position(|arg| arg == "--settings").unwrap() + 1)
+            .unwrap();
+        let fallback: serde_json::Value = serde_json::from_str(fallback).unwrap();
+        assert!(fallback.get("hooks").is_none());
+    }
+
+    fn claude_user_line(content: serde_json::Value) -> String {
+        serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": content}
+        })
+        .to_string()
+    }
+
+    /// KT-1541 — a refused tool call used to vanish from the stream: the CLI
+    /// reports it only as an `is_error` tool result on a `user` line.
+    #[test]
+    fn a_refused_tool_call_reaches_the_workers_transcript_with_its_reason() {
+        let line = claude_user_line(serde_json::json!([{
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "is_error": true,
+            "content": "Claude requested permissions to edit /wt/backend/.cargo/audit.toml which is a sensitive file."
+        }]));
+        match super::super::parse_claude_worker_stream_line(&line) {
+            StreamJsonEvent::Text(text) => {
+                assert!(
+                    text.contains(super::super::REFUSED_TOOL_CALL_LINE_PREFIX),
+                    "{text}"
+                );
+                assert!(text.contains("backend/.cargo/audit.toml which is a sensitive file"));
+            }
+            other => panic!("a refusal must be written to the transcript: {other:?}"),
+        }
+        // The text-block form of a tool result is read too, on one line.
+        let blocks = claude_user_line(serde_json::json!([{
+            "type": "tool_result",
+            "is_error": true,
+            "content": [{"type": "text", "text": "Permission to edit /x has been denied.\nSee the settings."}]
+        }]));
+        assert!(matches!(
+            super::super::parse_claude_worker_stream_line(&blocks),
+            StreamJsonEvent::Text(text)
+                if text.contains("Permission to edit /x has been denied. See the settings.")
+        ));
+    }
+
+    /// The refusal is a task worker's transcript line: every other Claude run
+    /// (workflow steps, summaries, ordinary discussions) goes through
+    /// `parse_claude_stream_line`, which leaves a `user` line out.
+    #[test]
+    fn a_refusal_stays_out_of_every_stream_but_a_task_workers() {
+        let line = claude_user_line(serde_json::json!([{
+            "type": "tool_result",
+            "is_error": true,
+            "content": "Claude requested permissions to edit /Users/me/wt/.cargo/config.toml which is a sensitive file."
+        }]));
+        assert!(matches!(
+            super::super::parse_claude_stream_line(&line),
+            StreamJsonEvent::Skip
+        ));
+    }
+
+    #[test]
+    fn a_tool_failure_that_is_not_a_refusal_stays_out_of_the_transcript() {
+        for content in [
+            serde_json::json!([{"type": "tool_result", "is_error": true,
+                "content": "Exit code 1\nerror[E0425]: cannot find value"}]),
+            // Command output that happens to carry the CLI's words.
+            serde_json::json!([{"type": "tool_result", "is_error": true,
+                "content": "Exit code 1\nRefusing to overwrite: this change requires approval"}]),
+            serde_json::json!([{"type": "tool_result", "is_error": true,
+                "content": "Exit code 128\nfatal: permission for this action has been denied"}]),
+            serde_json::json!([{"type": "tool_result", "is_error": true,
+                "content": "error: build failed\nRefusing to run: has been denied by the linter"}]),
+            serde_json::json!([{"type": "tool_result", "is_error": true,
+                "content": "String to replace not found in file."}]),
+            serde_json::json!([{"type": "tool_result", "is_error": false,
+                "content": "Claude requested permissions to edit x"}]),
+            serde_json::json!([{"type": "text", "text": "has been denied"}]),
+        ] {
+            assert!(
+                matches!(
+                    super::super::parse_claude_worker_stream_line(&claude_user_line(
+                        content.clone()
+                    )),
+                    StreamJsonEvent::Skip
+                ),
+                "{content}"
+            );
+        }
+    }
+
     #[test]
     fn claude_task_worker_receipt_proves_unrelated_catalogue_is_not_spawned() {
         let worktree = tempfile::tempdir().unwrap();

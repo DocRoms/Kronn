@@ -71,6 +71,75 @@ pub(crate) struct DispatchSettlement {
     batch_run: Option<crate::models::WorkflowRun>,
 }
 
+/// Most refusals the undelivered-worker notice and the delivery summary repeat.
+const REFUSED_TOOL_CALLS_MAX: usize = 3;
+
+/// KT-1541 — the tool calls the worker's CLI refused, read back from its
+/// transcript (the lines `parse_claude_worker_stream_line` writes), most recent
+/// first and without repeats. A worker that stops after a refused edit says
+/// nothing else, so the principal otherwise sees only "no delivery"; one that
+/// delivers anyway worked around a refusal its report should name. Empty when
+/// nothing was refused. The reasons come first-hand, not a count.
+///
+/// Only the current attempt counts: the worker's room outlives its review
+/// rounds, and each round opens with a User message (the brief, then the
+/// reviewer's findings), so a refusal from before the last one was met by an
+/// earlier attempt. And only a line that starts with the exact prefix the writer
+/// emits counts, so a worker that quotes the words in its prose creates none.
+pub(crate) fn refused_tool_calls_of_worker(
+    conn: &rusqlite::Connection,
+    discussion_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT content FROM messages
+         WHERE discussion_id = ?1 AND role = 'Agent' AND content LIKE ?2
+           AND sort_order > COALESCE(
+               (SELECT MAX(sort_order) FROM messages
+                 WHERE discussion_id = ?1 AND role = 'User'), -1)
+         ORDER BY sort_order DESC LIMIT 20",
+    )?;
+    let prefix = crate::agents::runner::REFUSED_TOOL_CALL_LINE_PREFIX;
+    let contents = statement
+        .query_map(
+            rusqlite::params![discussion_id, format!("%{prefix}%")],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut reasons: Vec<String> = Vec::new();
+    for content in contents {
+        for line in content.lines().rev() {
+            let Some(reason) = line.strip_prefix(prefix) else {
+                continue;
+            };
+            let reason = reason.trim().to_string();
+            if !reason.is_empty() && !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
+    }
+    reasons.truncate(REFUSED_TOOL_CALLS_MAX);
+    Ok(reasons)
+}
+
+/// The refusals as a sentence for the undelivered-worker notice; empty when the
+/// worker was refused nothing.
+fn refused_tool_calls_sentence(
+    conn: &rusqlite::Connection,
+    discussion_id: &str,
+) -> anyhow::Result<String> {
+    let reasons = refused_tool_calls_of_worker(conn, discussion_id)?;
+    if reasons.is_empty() {
+        return Ok(String::new());
+    }
+    let list = reasons
+        .iter()
+        .map(|reason| format!("\n- {reason}"))
+        .collect::<String>();
+    Ok(format!(
+        " Appels d'outil refusés au worker (du plus récent au plus ancien) :{list}\n"
+    ))
+}
+
 /// Persist a dispatch terminal state and its parent batch progress as one
 /// atomic unit. If either write fails, the job remains runnable and recovery
 /// can retry without leaving a batch permanently stuck at n-1/N.
@@ -161,10 +230,11 @@ pub(crate) fn persist_dispatch_settlement(
                 |row| row.get(0),
             )?;
             if !already_posted {
+                let refused = refused_tool_calls_sentence(&transaction, discussion_id)?;
                 let message = crate::api::orchestration::orchestrator_message(
                     message_id,
                     format!(
-                        "**{title}**\n\nLe dispatch `{job_id}` de la tâche `{}` s'est terminé sans appel valide à `task_exec_deliver`. L'exécution `{}` est maintenant `Interrupted` au lieu de rester faussement `Working`.{refusal} {instruction}",
+                        "**{title}**\n\nLe dispatch `{job_id}` de la tâche `{}` s'est terminé sans appel valide à `task_exec_deliver`. L'exécution `{}` est maintenant `Interrupted` au lieu de rester faussement `Working`.{refused}{refusal} {instruction}",
                         interrupted.task_id,
                         interrupted.execution_id,
                         refusal = interrupted
@@ -2283,5 +2353,231 @@ mod chain_render_tests {
         })
         .await
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod refused_tool_call_notice_tests {
+    use super::{persist_dispatch_settlement, refused_tool_calls_of_worker};
+    use std::sync::Arc;
+
+    const REFUSAL: &str = "Claude requested permissions to edit /wt/backend/.cargo/audit.toml which is a sensitive file.";
+
+    async fn worker_with(
+        messages: Vec<(&'static str, &'static str, &'static str)>,
+    ) -> crate::db::Database {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('d-worker', 'Worker', ?1, ?1)",
+                [&now],
+            )?;
+            for (order, (id, role, content)) in messages.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES (?1, 'd-worker', ?2, ?3, ?4, ?5, ?4)",
+                    rusqlite::params![id, role, content, now, order as i64],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        db
+    }
+
+    /// KT-1541 — the reasons the worker's CLI refused are read back from its own
+    /// transcript, most recent first.
+    #[tokio::test]
+    async fn the_refused_tool_calls_are_read_back_from_the_worker_transcript() {
+        let db = worker_with(vec![
+            ("u1", "User", "go"),
+            (
+                "a1",
+                "Agent",
+                "Editing the audit config.\n> ⚠ Tool call refused: Claude requested permissions to edit /wt/backend/.cargo/audit.toml which is a sensitive file.\nI cannot continue.",
+            ),
+        ])
+        .await;
+        let reasons = db
+            .with_conn(|conn| refused_tool_calls_of_worker(conn, "d-worker"))
+            .await
+            .unwrap();
+        assert_eq!(reasons, vec![REFUSAL.to_string()]);
+    }
+
+    /// A worker that writes or quotes the words (this ticket's own gotcha doc
+    /// does) is not a refusal: only the line the transcript writer emits counts.
+    #[tokio::test]
+    async fn prose_that_quotes_the_refusal_marker_is_not_a_refusal() {
+        let db = worker_with(vec![
+            ("u1", "User", "go"),
+            (
+                "a1",
+                "Agent",
+                "The doc says Tool call refused: is how a refusal reads.\n  > ⚠ Tool call refused: indented, so quoted\n> Tool call refused: no warning sign\nSee `> ⚠ Tool call refused: inline` too.",
+            ),
+        ])
+        .await;
+        let reasons = db
+            .with_conn(|conn| refused_tool_calls_of_worker(conn, "d-worker"))
+            .await
+            .unwrap();
+        assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    /// The worker's room outlives its review rounds: a refusal met before the
+    /// reviewer's findings belongs to an earlier attempt, not the current one.
+    #[tokio::test]
+    async fn a_refusal_from_an_earlier_attempt_is_not_reported() {
+        let db = worker_with(vec![
+            ("u1", "User", "go"),
+            (
+                "a1",
+                "Agent",
+                "> ⚠ Tool call refused: an old refusal, since worked around",
+            ),
+            ("u2", "User", "Changes requested: fix the lint"),
+            (
+                "a2",
+                "Agent",
+                "Fixed.\n> ⚠ Tool call refused: the current one\n",
+            ),
+        ])
+        .await;
+        let reasons = db
+            .with_conn(|conn| refused_tool_calls_of_worker(conn, "d-worker"))
+            .await
+            .unwrap();
+        assert_eq!(reasons, vec!["the current one".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn nothing_is_reported_when_the_worker_was_refused_nothing() {
+        let db = worker_with(vec![
+            ("u1", "User", "Tool call refused: pasted by the user"),
+            ("a1", "Agent", "Done, no tool was refused."),
+        ])
+        .await;
+        let reasons = db
+            .with_conn(|conn| refused_tool_calls_of_worker(conn, "d-worker"))
+            .await
+            .unwrap();
+        assert!(reasons.is_empty(), "{reasons:?}");
+    }
+
+    /// KT-1541 — through the real settlement: a worker that ends its turn on a
+    /// refused edit without delivering leaves the principal a notice that names
+    /// the refusal, not just "no delivery".
+    #[tokio::test]
+    async fn the_ended_without_delivery_notice_includes_the_refused_tool_calls() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let execution_id = db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                for (id, title) in [("d-parent", "Parent"), ("d-child", "Child")] {
+                    conn.execute(
+                        "INSERT INTO discussions (id, title, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?3)",
+                        rusqlite::params![id, title, now],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO planning_tasks
+                     (id, task_number, title, status, created_at, updated_at)
+                     VALUES ('t-refused', 9902, 'Refused', 'todo', ?1, ?1)",
+                    [&now],
+                )?;
+                let actor = crate::models::PlanningActor {
+                    kind: crate::models::PlanningActorKind::Backend,
+                    id: Some("orchestrator".into()),
+                    session_id: None,
+                    source_message_id: None,
+                };
+                let execution = crate::db::orchestration::launch_single_task(
+                    conn,
+                    &crate::models::LaunchSingleTaskInput::new("t-refused", "d-parent"),
+                    &actor,
+                )?
+                .execution;
+                for status in [
+                    crate::models::TaskExecutionStatus::Provisioning,
+                    crate::models::TaskExecutionStatus::Working,
+                ] {
+                    crate::db::orchestration::transition_execution(
+                        conn,
+                        &execution.id,
+                        status,
+                        &actor,
+                        serde_json::json!({}),
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('u-refused', 'd-child', 'User', 'go', ?1, 1, ?1)",
+                    [&now],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('a-refused', 'd-child', 'Agent', ?2, ?1, 2, ?1)",
+                    rusqlite::params![now, format!("Editing.\n> ⚠ Tool call refused: {REFUSAL}\n")],
+                )?;
+                crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id: "j-refused",
+                        discussion_id: "d-child",
+                        dedupe_key: "message:u-refused",
+                        agent_override: Some(&crate::models::AgentType::Ollama),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::claim(conn, "j-refused")?;
+                crate::db::orchestration::attach_execution_dispatch(
+                    conn,
+                    &execution.id,
+                    "j-refused",
+                )?;
+                Ok(execution.id)
+            })
+            .await
+            .unwrap();
+
+        let settled = db
+            .with_conn(|conn| {
+                persist_dispatch_settlement(
+                    conn,
+                    "j-refused",
+                    "d-child",
+                    None,
+                    crate::db::workflows::BatchChildOutcome::Success,
+                    None,
+                    None,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(settled.changed);
+
+        let notice = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT content FROM messages WHERE id = ?1 AND discussion_id = 'd-parent'",
+                    [format!("orch-worker-undelivered:{execution_id}")],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(notice.contains("sans livraison durable"), "{notice}");
+        assert!(notice.contains(REFUSAL), "{notice}");
     }
 }

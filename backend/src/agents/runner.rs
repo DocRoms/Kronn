@@ -1564,6 +1564,124 @@ fn cli_authored_error_text(json: &serde_json::Value) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+/// How Claude Code words a tool call it refused for permission reasons (read in
+/// the 2.1.285 binary): the sensitive-path and outside-the-directory asks, a
+/// deny rule, a hook or the classifier saying no, and a command that needs
+/// approval, which `--print` can only turn down. Anything else that fails
+/// (`Exit code 1`, a missing file, a failed edit match) is the tool's own result,
+/// not a refusal, and stays out of the transcript.
+const CLAUDE_REFUSAL_MARKERS: &[&str] = &[
+    "Claude requested permissions to",
+    "has been denied",
+    "Permission denied by",
+    "Permission for this action",
+    "requires approval",
+    "doesn't want to proceed",
+    "Refusing to",
+];
+
+/// Longest refusal reason copied into the transcript.
+const CLAUDE_REFUSAL_MAX_CHARS: usize = 400;
+
+/// KT-1541 — the reasons of the tool calls a `user` line of the stream reports
+/// as refused. The CLI hands the refusal back to the model as an `is_error` tool
+/// result and prints nothing else, so without this a worker that ended its turn
+/// on a refused edit left no trace of why (the transcript said nothing and the
+/// principal only saw "ended without delivering").
+pub fn claude_refused_tool_calls(json: &serde_json::Value) -> Vec<String> {
+    let Some(blocks) = json
+        .pointer("/message/content")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter(|block| {
+            block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+        })
+        .filter(|block| {
+            block
+                .get("is_error")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|block| match block.get("content")? {
+            serde_json::Value::String(text) => Some(text.clone()),
+            serde_json::Value::Array(parts) => Some(
+                parts
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            _ => None,
+        })
+        .map(|text| text.trim().to_string())
+        .filter(|text| is_claude_refusal(text))
+        // One line, so the transcript line the notice reads back holds the
+        // whole reason.
+        .map(|text| {
+            text.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(CLAUDE_REFUSAL_MAX_CHARS)
+                .collect()
+        })
+        .collect()
+}
+
+/// Whether the text of an `is_error` tool result is the CLI's own refusal and
+/// not the output of what ran. A command's output (`Exit code 1`, then whatever
+/// it printed) can carry the same words — `Refusing to push`, `requires
+/// approval` — and is the command's result, not a permission decision; copying
+/// it would put raw command output in the transcript. The CLI states its verdict
+/// on the first line, so that is the only place the markers count.
+fn is_claude_refusal(text: &str) -> bool {
+    if text.starts_with("Exit code") {
+        return false;
+    }
+    let verdict = text.lines().next().unwrap_or_default();
+    CLAUDE_REFUSAL_MARKERS
+        .iter()
+        .any(|marker| verdict.contains(marker))
+}
+
+/// What a refused tool call leaves at the start of its own transcript line; the
+/// undelivered-worker notice and the delivery summary read the reasons back by
+/// this exact prefix, at line start, so prose that merely quotes the words is not
+/// taken for a refusal.
+pub const REFUSED_TOOL_CALL_LINE_PREFIX: &str = "> ⚠ Tool call refused:";
+
+/// KT-1541 — [`parse_claude_stream_line`] for a task worker's stream: the same
+/// events, plus a refused tool call written into the transcript. The CLI hands a
+/// refusal back to the model as an `is_error` tool result on a `user` line and
+/// prints nothing else, so a worker that ended its turn on a refused edit left no
+/// trace of why.
+///
+/// Only the task-worker consumer calls this. The refusal carries local absolute
+/// paths and the raw reason, and every other Claude run — a workflow step whose
+/// output is posted or parsed, a summary, an ordinary discussion where most tools
+/// are refused by design — would leak them into text that is not a worker's
+/// transcript.
+pub fn parse_claude_worker_stream_line(line: &str) -> StreamJsonEvent {
+    let refused = serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()
+        .filter(|json| json.get("type").and_then(serde_json::Value::as_str) == Some("user"))
+        .map(|json| claude_refused_tool_calls(&json))
+        .unwrap_or_default();
+    if refused.is_empty() {
+        return parse_claude_stream_line(line);
+    }
+    StreamJsonEvent::Text(
+        refused
+            .iter()
+            .map(|reason| format!("\n{REFUSED_TOOL_CALL_LINE_PREFIX} {reason}\n"))
+            .collect(),
+    )
+}
+
 /// Result of parsing a single stream-json line
 #[derive(Debug)]
 pub enum StreamJsonEvent {
@@ -12644,6 +12762,101 @@ pub fn resolve_agent_work_dir(
     Ok(p)
 }
 
+/// What a `PermissionRequest` hook prints to answer "allow" to a prompt.
+const CLAUDE_HOOK_ALLOW: &str = r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#;
+
+/// KT-1541 — Claude Code lists `.cargo` among its built-in sensitive directories
+/// (`DANGEROUS_DIRECTORIES`: `.git`, `.vscode`, `.idea`, `.claude`, `.husky`,
+/// `.cargo`, `.devcontainer`, `.yarn`, `.mvn`). An edit under one asks, even in
+/// `acceptEdits`, and an `allow` rule cannot lift it: the safety check runs
+/// before the rules. A `--print` worker cannot answer, so the Edit on
+/// `backend/.cargo/audit.toml` came back refused. A `PermissionRequest` hook is
+/// the supported way to answer that prompt without a human.
+///
+/// The hook answers only for a file under a real `.cargo` directory of this
+/// worktree. It runs after the deny rules, so the Kronn data directory, whose
+/// rules are in `permissions.deny`, is still refused, and every other sensitive
+/// directory (`.git`, `.claude`, `.vscode`...) keeps asking, so keeps being
+/// refused.
+///
+/// The decision is the script's, not the `if` rule's. `if` matches the path as
+/// the model spelled it, and Edit and Write are not under the Bash sandbox: a
+/// `wt/.cargo` that is a symlink to `~/.cargo` (committed, or made by the worker)
+/// would spell as inside the worktree and write outside it. Claude's own symlink
+/// refusal only looks at the file itself, not at a directory above it. So the
+/// script (see [`CLAUDE_CARGO_HOOK_SCRIPT`]) checks the path itself and says
+/// nothing, which leaves the ask and so the refusal, unless it holds.
+fn claude_project_cargo_hooks(work_dir: &Path) -> serde_json::Value {
+    let root = work_dir.to_string_lossy();
+    let root = root.trim_end_matches('/');
+    let command = CLAUDE_CARGO_HOOK_SCRIPT
+        .replace("__ROOT__", &crate::workflows::template::shell_quote(root))
+        .replace("__ALLOW__", CLAUDE_HOOK_ALLOW);
+    let hooks: Vec<serde_json::Value> = ["Edit", "Write"]
+        .into_iter()
+        .map(|tool| {
+            serde_json::json!({
+                "type": "command",
+                // A coarse pre-filter; the script is the check.
+                "if": format!("{tool}(/{root}/**)"),
+                "command": command,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "PermissionRequest": [{ "matcher": "Edit|Write", "hooks": hooks }]
+    })
+}
+
+/// The `PermissionRequest` hook script of [`claude_project_cargo_hooks`]. It reads
+/// the hook input on stdin and prints the allow decision only when
+/// `tool_input.file_path`:
+///
+/// - is spelled with no escape, `.` or `..` component, under the canonical
+///   worktree root (`__ROOT__`, shell-quoted by the caller), and goes through a
+///   `.cargo` directory;
+/// - has no symlink among its components, the leaf and every directory above it
+///   (a component that does not exist yet is fine: a new `.cargo/config.toml`);
+/// - has a nearest existing ancestor, found in at most 64 steps (the root itself
+///   vanishing ends the walk rather than looping until the hook times out),
+///   whose canonical path is still under the root;
+/// - is not an existing file with another hard link.
+///
+/// Anything else, or a hook input it cannot read with certainty (no single
+/// `file_path`, an escaped character), exits silently: no decision, so the
+/// prompt stands and, for a `--print` worker, the call is refused.
+const CLAUDE_CARGO_HOOK_SCRIPT: &str = r#"root=__ROOT__
+input=$(cat)
+found=$(printf '%s\n' "$input" | grep -o '"file_path"[[:space:]]*:[[:space:]]*"[^"]*"')
+[ "$(printf '%s\n' "$found" | wc -l)" -eq 1 ] || exit 0
+path=$(printf '%s\n' "$found" | sed 's/^"file_path"[[:space:]]*:[[:space:]]*"//; s/"$//')
+case "$path" in *\\*) exit 0;; esac
+case "$path" in "$root"/*) ;; *) exit 0;; esac
+rel=${path#"$root"/}
+case "/$rel/" in *//*|*/./*|*/../*) exit 0;; esac
+case "$rel" in .cargo/*|*/.cargo/*) ;; *) exit 0;; esac
+cur=$root
+oldifs=$IFS
+IFS=/
+set -f
+for part in $rel; do
+  cur=$cur/$part
+  [ -L "$cur" ] && exit 0
+done
+IFS=$oldifs
+dir=${path%/*}
+steps=0
+while [ ! -d "$dir" ]; do
+  steps=$((steps + 1))
+  [ "$steps" -le 64 ] && [ -n "$dir" ] || exit 0
+  dir=${dir%/*}
+done
+canonical=$(cd "$dir" 2>/dev/null && pwd -P) || exit 0
+case "$canonical" in "$root"|"$root"/*) ;; *) exit 0;; esac
+if [ -f "$path" ] && [ -n "$(find "$path" -type f -links +1 2>/dev/null)" ]; then exit 0; fi
+printf '%s\n' '__ALLOW__'
+"#;
+
 /// Build the complete Claude sandbox policy for one task worktree.
 ///
 /// Keep this invocation-local and bounded regardless of how many unrelated
@@ -12680,7 +12893,8 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             },
             "network": { "allowLocalBinding": true }
         },
-        "permissions": { "deny": crate::core::vault_guard::claude_permission_deny() }
+        "permissions": { "deny": crate::core::vault_guard::claude_permission_deny() },
+        "hooks": claude_project_cargo_hooks(&work_dir)
     }))
     .map_err(|error| format!("Unable to encode the Claude task-worker sandbox policy: {error}"))
 }
