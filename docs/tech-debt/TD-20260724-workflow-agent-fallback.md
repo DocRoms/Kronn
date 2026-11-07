@@ -254,7 +254,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:1032-1189#synthesis_external_http] |
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:510-534#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1291-1490#generate_summary_on_demand] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1819-2060#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3779-3859#execute_step] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1819-2060#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3784-3864#execute_step] |
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1911-1925#start] |
 | Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1117-1127#start] |
 
@@ -281,7 +281,7 @@ property of each surface, not of an agent being installed. [src: file: backend/s
 concrete `model`. `StepResult` already has `step_agent` and `step_model`, and
 Run Detail renders them. [src: file: backend/src/models/discussions.rs:324-372#DiscussionMessage]
 [src: file: backend/src/models/workflows.rs:2214-2227#step_agent]
-[src: file: frontend/src/components/workflows/RunDetail.tsx:1099-1106#StepModelBadge]
+[src: file: frontend/src/components/workflows/RunDetail.tsx:1101-1108#StepModelBadge]
 
 Workflow Agent steps also keep a per-attempt trail (`StepResult.agent_provenance`:
 every retry, repair, escalation and review/author turn, with the requested and
@@ -331,7 +331,7 @@ not only a frontend estimate. [src: file: backend/src/models/workflows.rs:1821-1
 
 The current workflow budget also increments once per logical Agent step, even
 though retry, repair, escalation, or debate can perform more model invocations.
-Fallback must fix this accounting at the physical-attempt boundary. [src: file: backend/src/workflows/runner.rs:3128-3140#add_llm_calls]
+Fallback must fix this accounting at the physical-attempt boundary. [src: file: backend/src/workflows/runner.rs:3130-3145#add_llm_calls]
 
 Do not reuse the existing `native_fallback` name: that field describes the
 separate discussion-routing case where an untargeted user turn goes to the
