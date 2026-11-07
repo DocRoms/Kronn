@@ -1132,10 +1132,11 @@ async fn bridge_gate(
             };
             (axum::body::Body::from(bytes), Some(json))
         }
-    } else if multipart_upload || method == "GET" {
+    } else if multipart_upload {
         (body, None)
     } else {
-        // No Content-Type: the body is read, and refused unless it is empty.
+        // Not labelled JSON (a GET included): read, and refused unless empty,
+        // so no body reaches a handler unchecked.
         let Ok(bytes) = axum::body::to_bytes(body, BRIDGE_BODY_LIMIT).await else {
             return bridge_refusal(
                 StatusCode::PAYLOAD_TOO_LARGE,
