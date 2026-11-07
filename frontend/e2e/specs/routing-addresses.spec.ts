@@ -8,7 +8,7 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test, expect } from '../fixtures/kronn-fixture';
-import type { APIRequestContext, Locator, Page } from '@playwright/test';
+import type { APIRequestContext, Locator, Page, Request } from '@playwright/test';
 import { DashboardPage } from '../pages/DashboardPage';
 import { WorkflowsPage } from '../pages/WorkflowsPage';
 
@@ -70,6 +70,29 @@ async function projectsSettle(request: APIRequestContext): Promise<{ address: Re
   return Array.isArray(body?.data) && body.data.length > 0
     ? { address: /\/projects\/[^/]+$/, view: '.project-detail-header' }
     : { address: /\/projects$/, view: '.project-detail-empty' };
+}
+
+/** Waits for another tab's document request, not `waitForEvent('page')`: Playwright can
+ *  leave a tab Chromium opened and loaded unreported (CI, KT-1589). This tab must stay. */
+async function expectOpensInNewTab(page: Page, pathname: string, click: () => Promise<void>) {
+  const here = page.url();
+  const sameTab: string[] = [];
+  const onRequest = (request: Request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) sameTab.push(request.url());
+  };
+  page.on('request', onRequest);
+  try {
+    await Promise.all([
+      page.context().waitForEvent('request', (request) => (
+        request.isNavigationRequest() && new URL(request.url()).pathname === pathname
+      )),
+      click(),
+    ]);
+  } finally {
+    page.off('request', onRequest);
+  }
+  expect(sameTab, 'the click navigated this tab instead of opening another').toEqual([]);
+  expect(page.url()).toBe(here);
 }
 
 /** Opens `start`, then waits for Projects' final state: the view, then the address, with no history entry added. */
@@ -144,52 +167,31 @@ test.describe('Routing — addresses', () => {
     await expect(page.locator('.disc-chat-header-title')).toContainText(discA.title);
   });
 
-  test('a modified or middle click opens a page or a row in a new tab, and leaves this one where it is', async ({ page, context }) => {
+  test('a modified or middle click opens a page or a row in a new tab, and leaves this one where it is', async ({ page }) => {
     await page.goto(`/discussions/${discA.id}`);
     await expect(page.locator('.disc-chat-header-title')).toContainText(discA.title);
 
     // A nav tab is a link: Ctrl/Cmd-click is the browser's own new tab.
-    const [planningTab] = await Promise.all([
-      context.waitForEvent('page'),
-      current(page, 'nav-planning').click({ modifiers: ['ControlOrMeta'] }),
-    ]);
-    // A new tab starts on about:blank: wait for its address, not its first load.
-    await planningTab.waitForURL((url) => url.pathname === '/planning');
-    await planningTab.close();
+    await expectOpensInNewTab(page, '/planning', () => current(page, 'nav-planning').click({ modifiers: ['ControlOrMeta'] }));
 
     // A sidebar row keeps its element; the app opens the new tab itself.
     const row = page.locator(`[data-tour-disc-id="${discB.id}"] .disc-item-open`).first();
-    const [discussionTab] = await Promise.all([
-      context.waitForEvent('page'),
-      row.click({ modifiers: ['ControlOrMeta'] }),
-    ]);
-    await discussionTab.waitForURL((url) => url.pathname === `/discussions/${discB.id}`);
-    await expect(discussionTab.locator('.disc-chat-header-title')).toContainText(discB.title);
-    await discussionTab.close();
-
-    const [middleTab] = await Promise.all([
-      context.waitForEvent('page'),
-      row.click({ button: 'middle' }),
-    ]);
-    await middleTab.waitForURL((url) => url.pathname === `/discussions/${discB.id}`);
-    await middleTab.close();
+    await expectOpensInNewTab(page, `/discussions/${discB.id}`, () => row.click({ modifiers: ['ControlOrMeta'] }));
+    await expectOpensInNewTab(page, `/discussions/${discB.id}`, () => row.click({ button: 'middle' }));
 
     // This tab never moved.
     expect(new URL(page.url()).pathname).toBe(`/discussions/${discA.id}`);
     await expect(page.locator('.disc-chat-header-title')).toContainText(discA.title);
   });
 
-  test('an Artifact\'s related discussion is a link: a plain click follows it here, a modified or middle click opens it beside', async ({ page, context }) => {
+  test('an Artifact\'s related discussion is a link: a plain click follows it here, a modified or middle click opens it beside', async ({ page }) => {
     await page.goto(`/pages/${artifactId}`);
     const link = page.locator(`.live-pages-workflows a[href="/discussions/${discB.id}"]`);
     await expect(link).toContainText(discB.title);
 
     const clicks: NonNullable<Parameters<Locator['click']>[0]>[] = [{ modifiers: ['ControlOrMeta'] }, { button: 'middle' }];
     for (const options of clicks) {
-      const [tab] = await Promise.all([context.waitForEvent('page'), link.click(options)]);
-      await tab.waitForURL((url) => url.pathname === `/discussions/${discB.id}`);
-      await expect(tab.locator('.disc-chat-header-title')).toContainText(discB.title);
-      await tab.close();
+      await expectOpensInNewTab(page, `/discussions/${discB.id}`, () => link.click(options));
       // This tab never moved.
       expect(new URL(page.url()).pathname).toBe(`/pages/${artifactId}`);
     }
