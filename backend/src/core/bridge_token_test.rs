@@ -1384,3 +1384,62 @@ fn a_bridge_token_reaches_only_the_trust_writes_that_hand_back_no_secret() {
         assert!(!trust_confirm_route(method, pattern), "{method} {pattern}");
     }
 }
+
+/// KT-1069: `Rule::Own` restricts only discussion ids to the launch's own; any
+/// other target falls back to project scope. An `Own` route must therefore
+/// target nothing but a discussion (or a context file under one).
+#[test]
+fn own_routes_name_only_discussion_targets() {
+    const ALLOWED: &[Kind] = &[Kind::Discussion, Kind::ContextFile];
+    // Keys the walker always reads as a target; no Own handler reads them.
+    // A new target key must be reviewed against the Own routes before it joins.
+    const INERT_TARGET_KEYS: &[&str] =
+        &["task_execution_id", "execution_id", "offer_id", "parent_id"];
+    let own: Vec<&BridgeRoute> = BRIDGE_ROUTES
+        .iter()
+        .filter(|route| route.rule == Rule::Own)
+        .collect();
+    assert!(!own.is_empty(), "the walk found no Own route");
+    for route in own {
+        let at = format!("{} {}", route.method, route.pattern);
+        for (name, kind) in route.params {
+            assert!(
+                ALLOWED.contains(kind),
+                "{at}: Own path parameter `{name}` is a {kind:?}, not an owned kind"
+            );
+        }
+        let path_params: Vec<(String, String)> = route
+            .params
+            .iter()
+            .map(|(name, _)| ((*name).to_owned(), "x".to_owned()))
+            .collect();
+        // One id-shaped key per body: a refusal is fine, a foreign target is not.
+        // The key set is the walker's own, so a new target key is caught below.
+        for key in TARGET_KEYS {
+            assert!(
+                INERT_TARGET_KEYS.contains(key),
+                "{at}: new target key `{key}`"
+            );
+        }
+        let keys = TARGET_KEYS
+            .iter()
+            .copied()
+            .chain(ID_KEYS.iter().map(|(name, _)| *name));
+        for key in keys {
+            let body = json!({ key: "x" });
+            let Ok(ids) = collect_ids(route, &path_params, None, Some(&body)) else {
+                continue;
+            };
+            if INERT_TARGET_KEYS.contains(&key) {
+                continue;
+            }
+            for named in ids.iter().filter(|named| named.role == Role::Target) {
+                assert!(
+                    ALLOWED.contains(&named.kind),
+                    "{at}: body key `{key}` collects a {:?} target on an Own route",
+                    named.kind
+                );
+            }
+        }
+    }
+}
