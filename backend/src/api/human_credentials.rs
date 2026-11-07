@@ -153,7 +153,35 @@ pub async fn revoke(
 /// with, so possession cannot become a path to privilege.
 pub async fn rotate(
     State(state): State<AppState>,
+    strong: crate::api::strong_confirm::Strong,
     Json(request): Json<RotateRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // An administering rotation returns another grant's secret: once an
+    // authenticator is enrolled it needs the proof, like an enrolment (KT-1534).
+    let presented = request.authority.clone();
+    let target = request.credential_id.clone();
+    let holder = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(matches!(
+                human_credentials::authenticate(conn, &Secret::new(presented)),
+                Ok((id, _role, _epoch)) if id == target
+            ))
+        })
+        .await
+        .unwrap_or(false);
+    if !holder {
+        if let Err(refused) = strong.require(&state).await {
+            return refused;
+        }
+    }
+    rotate_authorised(state, request).await.into_response()
+}
+
+async fn rotate_authorised(
+    state: AppState,
+    request: RotateRequest,
 ) -> (StatusCode, Json<ApiResponse<String>>) {
     let result = state
         .db

@@ -218,7 +218,30 @@ screen, and loopback does not lift it: a command an agent approved that sends
   (`GET /api/trust/proof`, `TrustOverview.proof`) names where the secret file and
   the data directory are (`admin_secret_path` from `operator_secret::secret_path`,
   `data_dir` from `config::config_dir`, `in_docker`), never the secret, so the
-  screen shows the real path per platform. Tests:
+  screen shows the real path per platform. Both hints (first enrolment and
+  replacement) name that path, say Kronn generated the secret (at first start,
+  at the last `recover-admin-secret` recovery, or at the last `/admin/rotate`)
+  and that it proves the machine owner; once an authenticator is enrolled,
+  enrolling or revoking a publication credential, rotating a secret with it and
+  replacing the authenticator also need the authenticator's code, while listing
+  the credentials does not. The claim about readers is scoped: agents Kronn
+  launches, and the commands a level lets them run, lose the data directory only
+  while vault protection is on; a CLI the owner runs in a terminal can read the
+  file.
+- **Once enrolled, the admin secret is no standing authority** (KT-1534).
+  Minting a publication grant (`POST /api/human-credentials/enrol`) and
+  rotating the admin secret (`POST /api/human-credentials/admin/rotate`) are in
+  the strong-confirmation list, like `/revoke`; an administering rotation of a
+  grant (`POST /api/human-credentials/rotate`, which returns that grant's new
+  secret) asks from the handler, while a holder renewing its own grant asks
+  nothing. Before an enrolment they behave as before. The recovery path is
+  unchanged: `recover-admin-secret` is honoured at boot, gated by write access
+  to the data directory (hidden from Kronn-launched agents while vault
+  protection is on); an owner who also lost the authenticator uses a recovery
+  code, or removes `trust-proof.json` from the same directory. Tests
+  (`tests/strong_confirm_gate.rs`):
+  `once_enrolled_the_admin_secret_alone_mints_and_rotates_nothing`,
+  `before_an_enrolment_the_admin_secret_mints_and_rotates_as_before`. Other tests:
   `the_proof_view_names_the_admin_secret_file_and_the_data_dir_not_the_secret`,
   `the_first_enrolment_needs_the_admin_secret_and_an_agent_without_it_gets_nothing`,
   `a_pending_enrolment_is_not_replaced_until_it_expires`,

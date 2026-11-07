@@ -1031,3 +1031,129 @@ async fn granting_code_asks_nothing_when_no_confirmation_is_enrolled() {
         .await;
     assert_eq!(status, 200, "{done}");
 }
+
+/// The admin secret, the way the owner reads it from the data directory.
+async fn admin_secret(harness: &Harness) -> String {
+    harness
+        .state
+        .db
+        .with_conn(|conn| {
+            kronn::core::operator_secret::bootstrap(conn)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    kronn::core::operator_secret::read_delivered()
+        .unwrap()
+        .expose()
+        .to_string()
+}
+
+fn enrolment(authority: &str, label: &str) -> Value {
+    json!({ "authority": authority, "role": "human", "label": label })
+}
+
+/// KT-1534 — once an authenticator is enrolled the admin secret alone is no
+/// standing authority: minting a grant, rotating the admin secret and rotating
+/// another grant's secret ask for the proof. A holder renewing its own grant
+/// does not.
+#[tokio::test]
+async fn once_enrolled_the_admin_secret_alone_mints_and_rotates_nothing() {
+    let harness = Harness::new(true).await;
+    let admin = admin_secret(&harness).await;
+    let enrol = "/api/human-credentials/enrol";
+
+    let (status, refused) = harness
+        .send(req("POST", enrol, Some(enrolment(&admin, "no proof"))))
+        .await;
+    assert!(asks(status, &refused), "{status} {refused}");
+    let (status, minted) = harness
+        .send(req("POST", enrol, Some(enrolment(&admin, "with proof"))).code(&harness.codes[0]))
+        .await;
+    assert_eq!(status, 200, "{minted}");
+    let grant_id = minted["data"]["credential"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let grant = minted["data"]["secret"].as_str().unwrap().to_owned();
+
+    let rotate = "/api/human-credentials/rotate";
+    let administering = json!({ "authority": &admin, "credential_id": &grant_id });
+    let (status, refused) = harness
+        .send(req("POST", rotate, Some(administering.clone())))
+        .await;
+    assert!(asks(status, &refused), "{status} {refused}");
+    let (status, rotated) = harness
+        .send(req("POST", rotate, Some(administering)).code(&harness.codes[1]))
+        .await;
+    assert_eq!(status, 200, "{rotated}");
+    let renewed = rotated["data"].as_str().unwrap().to_owned();
+    assert_ne!(renewed, grant);
+
+    // The holder renews its own grant without the authenticator.
+    let (status, own) = harness
+        .send(req(
+            "POST",
+            rotate,
+            Some(json!({ "authority": &renewed, "credential_id": &grant_id })),
+        ))
+        .await;
+    assert_eq!(status, 200, "{own}");
+
+    let admin_rotate = "/api/human-credentials/admin/rotate";
+    let (status, refused) = harness
+        .send(req(
+            "POST",
+            admin_rotate,
+            Some(json!({ "authority": &admin })),
+        ))
+        .await;
+    assert!(asks(status, &refused), "{status} {refused}");
+    let (status, rotated) = harness
+        .send(
+            req("POST", admin_rotate, Some(json!({ "authority": &admin }))).code(&harness.codes[2]),
+        )
+        .await;
+    assert_eq!(status, 200, "{rotated}");
+    assert_ne!(
+        kronn::core::operator_secret::read_delivered()
+            .unwrap()
+            .expose(),
+        admin
+    );
+}
+
+/// Before an enrolment the admin secret works as before, without any code.
+#[tokio::test]
+async fn before_an_enrolment_the_admin_secret_mints_and_rotates_as_before() {
+    let harness = Harness::new(false).await;
+    let admin = admin_secret(&harness).await;
+    let (status, minted) = harness
+        .send(req(
+            "POST",
+            "/api/human-credentials/enrol",
+            Some(enrolment(&admin, "owner")),
+        ))
+        .await;
+    assert_eq!(status, 200, "{minted}");
+    let grant_id = minted["data"]["credential"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, rotated) = harness
+        .send(req(
+            "POST",
+            "/api/human-credentials/rotate",
+            Some(json!({ "authority": &admin, "credential_id": &grant_id })),
+        ))
+        .await;
+    assert_eq!(status, 200, "{rotated}");
+    let (status, rotated) = harness
+        .send(req(
+            "POST",
+            "/api/human-credentials/admin/rotate",
+            Some(json!({ "authority": &admin })),
+        ))
+        .await;
+    assert_eq!(status, 200, "{rotated}");
+}

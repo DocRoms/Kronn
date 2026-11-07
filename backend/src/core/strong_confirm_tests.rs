@@ -26,6 +26,8 @@ fn every_route_of_the_inventory_is_protected() {
         ("DELETE", "/api/external-api/connections/{id}"),
         ("DELETE", "/api/config/api-keys/{id}"),
         ("POST", "/api/human-credentials/revoke"),
+        ("POST", "/api/human-credentials/enrol"),
+        ("POST", "/api/human-credentials/admin/rotate"),
     ] {
         assert_eq!(
             protection(method, pattern),
@@ -78,6 +80,7 @@ fn the_routes_that_decide_in_the_handler_are_conditional() {
         ("PUT", "/api/external-api/connections/{id}"),
         ("POST", "/api/quick-execs"),
         ("PUT", "/api/quick-execs/{id}"),
+        ("POST", "/api/human-credentials/rotate"),
     ] {
         assert_eq!(
             protection(method, pattern),

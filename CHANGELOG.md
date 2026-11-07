@@ -81,7 +81,19 @@ Release notes for 0.9.3 and earlier are available in the
   to create a token that would replace the one peers use. The risk panel puts
   the missing authenticator first, links to its card and shows no
   acknowledgement until one is set up; « coffre Kronn » becomes « dossier de
-  données de Kronn ».
+  données de Kronn ». Once an authenticator is enrolled, the admin secret alone
+  no longer mints a publication grant, rotates the admin secret or rotates
+  another grant's secret: those routes ask for the strong confirmation too (a
+  holder renewing its own grant does not; before an enrolment nothing changes;
+  the `recover-admin-secret` recovery is untouched). The admin-secret hints
+  (first enrolment and replacement) say Kronn generated the secret (at first
+  start, or at the last recovery or rotation) and that it proves the machine
+  owner; once an authenticator is enrolled, enrolling or revoking a credential,
+  rotating a secret with it and replacing the authenticator also need its code
+  (listing does not). The claim about who reads the file is scoped to what the
+  sandbox covers: agents Kronn launches lose the data folder while its
+  protection is on, a CLI you run yourself can read it, so enrol before handing
+  it tasks.
 
 - A task is no longer marked `done` when its delivery is integrated into a
   campaign or feature branch that has not reached the default branch yet
