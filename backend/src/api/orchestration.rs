@@ -29241,7 +29241,7 @@ pub(crate) mod tests {
         // are gone and the execution is recovered from the database. The first
         // task is kept alive (held) as the worst case — a straggler that wakes
         // after the resumed warm-up already dispatched.
-        warming_executions().lock().unwrap().clear();
+        forget_warm_up_claim_on_restart(&launched.id);
         let after = HeldFirstBuild::succeeding();
         after.release();
         register_probe_runner(repo.path(), after.clone());
@@ -29293,6 +29293,32 @@ pub(crate) mod tests {
         );
     }
 
+    /// Simulates a backend restart for `exec_id` only: the warm-up claims live
+    /// in one process-wide registry shared by every test running in parallel.
+    fn forget_warm_up_claim_on_restart(exec_id: &str) {
+        warming_executions().lock().unwrap().remove(exec_id);
+    }
+
+    /// The replay a recovery sends for `launched`.
+    async fn replay_input(db: &Database, launched: &TaskExecution) -> ProvisionInput {
+        let task_id = launched.task_id.clone();
+        ProvisionInput {
+            task_reference: db
+                .with_conn(move |conn| {
+                    Ok(crate::db::planning::get_task(conn, &task_id)?
+                        .expect("task")
+                        .summary
+                        .reference)
+                })
+                .await
+                .unwrap(),
+            parent_discussion_id: launched.parent_discussion_id.clone(),
+            worker: native_worker(),
+            base_rev: launched.base_sha.clone(),
+            idempotency_key: launched.idempotency_key.clone(),
+        }
+    }
+
     #[tokio::test]
     async fn a_resume_while_this_process_still_warms_the_lane_does_not_warm_it_twice() {
         let repo = init_repo();
@@ -29303,28 +29329,9 @@ pub(crate) mod tests {
             launch_with_cargo_crate(&db, repo.path(), runner.clone(), "warm-twice").await;
         wait_until("the first build starts", || runner.started() == 1).await;
 
-        let again = resume_provisioning_execution(
-            &db,
-            ProvisionInput {
-                task_reference: {
-                    let task_id = launched.task_id.clone();
-                    db.with_conn(move |conn| {
-                        Ok(crate::db::planning::get_task(conn, &task_id)?
-                            .expect("task")
-                            .summary
-                            .reference)
-                    })
-                    .await
-                    .unwrap()
-                },
-                parent_discussion_id: launched.parent_discussion_id.clone(),
-                worker: native_worker(),
-                base_rev: launched.base_sha.clone(),
-                idempotency_key: launched.idempotency_key.clone(),
-            },
-            &launched.id,
-        )
-        .await;
+        let again =
+            resume_provisioning_execution(&db, replay_input(&db, &launched).await, &launched.id)
+                .await;
         // Whatever the replay answers, it started no second build.
         let _ = again;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -29335,6 +29342,36 @@ pub(crate) mod tests {
         let sub = launched.sub_discussion_id.clone().expect("child room");
         assert_eq!(dispatch_rows(&db, &sub).await, 1);
         assert_eq!(runner.started(), 1);
+    }
+
+    /// KT-1565 — another test simulating its own restart while this lane warms
+    /// must leave this execution's claim, or its replay warms the lane twice.
+    #[tokio::test]
+    async fn a_restart_simulated_for_another_execution_keeps_this_warm_up_claim() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let runner = HeldFirstBuild::succeeding();
+        let _release = ReleaseOnDrop(runner.clone());
+        let launched =
+            launch_with_cargo_crate(&db, repo.path(), runner.clone(), "warm-shared").await;
+        wait_until("the first build starts", || runner.started() == 1).await;
+
+        forget_warm_up_claim_on_restart("another-tests-execution");
+        resume_provisioning_execution(&db, replay_input(&db, &launched).await, &launched.id)
+            .await
+            .expect("replay");
+        // A second warm-up journals its start before the replay returns.
+        assert_eq!(
+            event_count(&db, &launched.id, "lane_warming").await,
+            1,
+            "one warm-up per execution"
+        );
+
+        runner.release();
+        wait_for_status(&db, &launched.id, TaskExecutionStatus::Working).await;
+        assert_eq!(runner.started(), 1);
+        let sub = launched.sub_discussion_id.clone().expect("child room");
+        assert_eq!(dispatch_rows(&db, &sub).await, 1);
     }
 
     #[tokio::test]
