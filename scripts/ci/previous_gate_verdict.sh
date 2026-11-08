@@ -16,20 +16,60 @@
 # re-run once: the caller checked the label is present now, and the re-run
 # reads labels live. Its new attempt's verdict is then repeated.
 #
+# A run still in progress is waited for longer than the slowest upstream chain
+# can take (CI Build: a 150 min macOS job, then its 30 min gate). A run that is
+# still going is NOT a failure and is never reported as one: past
+# PREVIOUS_VERDICT_WAIT_SECONDS this script only says so and keeps polling, so
+# the check stays pending. It never exits 1 or 0 for it (0 would pass a result
+# nobody saw) and never cancels the run (that would also kill the sibling
+# gate job, and a fork's read-only token could not). The job's own
+# timeout-minutes ends it, as cancelled, which blocks the merge without being
+# red; ci-verdict-rearm.yml then re-runs this job once the upstream run
+# completes (scripts/ci/rearm_verdict.sh).
+#
+# A verdict for a head the pull request has moved past is obsolete: it stops
+# holding a runner (cancelling the run, whose two jobs are then both obsolete).
+# It is never reported green. Without a write token it exits 1: red, on a
+# commit that is no longer the head.
+#
 # Usage: previous_gate_verdict.sh <workflow file> <gate job name> <label>
 # Environment: GH_TOKEN, GITHUB_REPOSITORY, GITHUB_RUN_ID, PR_NUMBER, HEAD_SHA,
-# BASE_SHA; optional PREVIOUS_VERDICT_WAIT_SECONDS, PREVIOUS_VERDICT_DISCOVERY_SECONDS.
+# BASE_SHA; optional PREVIOUS_VERDICT_WAIT_SECONDS, PREVIOUS_VERDICT_DISCOVERY_SECONDS,
+# PREVIOUS_VERDICT_CANCEL_GRACE_SECONDS.
 set -euo pipefail
 
 workflow="$1"
 job="$2"
 label="$3"
 : "${GITHUB_REPOSITORY:?}" "${GITHUB_RUN_ID:?}" "${PR_NUMBER:?}" "${HEAD_SHA:?}" "${BASE_SHA:?}"
-wait_seconds="${PREVIOUS_VERDICT_WAIT_SECONDS:-3000}"
+wait_seconds="${PREVIOUS_VERDICT_WAIT_SECONDS:-18000}"
 deadline=$(( $(date +%s) + wait_seconds ))
 identity="Gate verdict for pull_request #$PR_NUMBER head $HEAD_SHA base $BASE_SHA"
 label_step="Require the $label label"
 repo="repos/$GITHUB_REPOSITORY"
+
+# True when the pull request moved past the head this verdict was started for.
+# An unreadable head is not "moved": the verdict carries on.
+head_moved() {
+  local current
+  current="$(gh api "$repo/pulls/$PR_NUMBER" --jq .head.sha 2>/dev/null)" || return 1
+  [ -n "$current" ] && [ "$current" != "null" ] && [ "$current" != "$HEAD_SHA" ]
+}
+
+# Stops waiting for an obsolete head. Both jobs of this run are about that head,
+# so cancelling the run takes no live verdict with it.
+stop_if_obsolete() {
+  head_moved || return 0
+  echo "::warning::Pull request #$PR_NUMBER moved past head $HEAD_SHA: this verdict is obsolete, a newer head has its own."
+  if gh api -X POST "$repo/actions/runs/$GITHUB_RUN_ID/cancel" >/dev/null 2>&1; then
+    # The cancel is asynchronous: give it time to stop this step.
+    sleep "${PREVIOUS_VERDICT_CANCEL_GRACE_SECONDS:-120}"
+    echo "::error::Run $GITHUB_RUN_ID kept running after its cancel; head $HEAD_SHA is obsolete."
+  else
+    echo "::error::Could not cancel run $GITHUB_RUN_ID (a fork's token is read-only); head $HEAD_SHA is obsolete, a newer head has its own verdict."
+  fi
+  exit 1
+}
 
 discovery_seconds="${PREVIOUS_VERDICT_DISCOVERY_SECONDS:-180}"
 discovery_deadline=$(( $(date +%s) + discovery_seconds ))
@@ -37,6 +77,7 @@ if [ "$discovery_deadline" -gt "$deadline" ]; then
   discovery_deadline="$deadline"
 fi
 
+stop_if_obsolete
 while :; do
   candidates="$(gh api "$repo/actions/workflows/$workflow/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100" \
     --jq "[.workflow_runs[] | select(.event == \"pull_request\" and .head_sha == \"$HEAD_SHA\")] | sort_by(.id) | reverse | .[].id")"
@@ -103,12 +144,18 @@ for run in $candidates; do
         fi
         ;;
       running|missing)
+        stop_if_obsolete
+        poll=30
         if [ "$(date +%s)" -ge "$deadline" ]; then
-          echo "::error::Run $run is still running $job after ${wait_seconds}s."
-          exit 1
+          # The upstream run has not failed: stay pending, do not report red.
+          if [ -z "${holding:-}" ]; then
+            holding=1
+            echo "::warning::Run $run is still running $job after ${wait_seconds}s. This check stays pending; GitHub ends it as cancelled at the job timeout and CI Verdict Re-arm re-runs it when that run completes: https://github.com/$GITHUB_REPOSITORY/actions/runs/$run"
+          fi
+          poll=60
         fi
         echo "Waiting for run $run..."
-        sleep 30
+        sleep "$poll"
         ;;
       *)
         # Skipped or absent: that run tested another state.

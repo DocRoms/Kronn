@@ -137,7 +137,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
                 "test-e2e": 45,
                 "build-release": 45,
                 "test-backend-portability": "${{ matrix.os == 'macos-latest' && 150 || 45 }}",
-            }.get(job, 60 if path == VERDICT_WORKFLOW else 30)
+            }.get(job, 330 if path == VERDICT_WORKFLOW else 30)  # verdict: wait of 300 min (KT-1586)
             self.assertIn(f"timeout-minutes: {expected_timeout}", section, job)
 
     def test_backend_slo_observer_is_non_blocking_and_uses_hot_cold_measurements(self):

@@ -1,33 +1,16 @@
 #!/usr/bin/env bats
 # Runs the real CI Verdict script against a stubbed `gh` that serves fixture
-# API responses through the caller's own --jq filter.
+# API responses through the caller's own --jq filter (tests/bats/ci_stubs.bash).
 
 load test_helper
+load ci_stubs
 
 ID="Gate verdict for pull_request #7 head h7 base b7"
 
 setup() {
-    TEST_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/kronn-verdict-XXXXXX")"
-    mkdir -p "$TEST_TMPDIR/bin" "$TEST_TMPDIR/fx"
-    cat > "$TEST_TMPDIR/bin/gh" <<'GH'
-#!/usr/bin/env bash
-shift
-method=GET url="" filter="."
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -X) method="$2"; shift 2 ;;
-        --jq) filter="$2"; shift 2 ;;
-        *) url="$1"; shift ;;
-    esac
-done
-echo "$method $url" >> "$FIXTURES/calls.log"
-[ "$method" = POST ] && exit 0
-key="$(printf '%s' "$url" | sed -E 's#^repos/[^/]+/[^/]+/##; s#\?.*##; s#/#_#g')"
-jq -r "$filter" "$FIXTURES/$key.json"
-GH
-    chmod +x "$TEST_TMPDIR/bin/gh"
-    export PATH="$TEST_TMPDIR/bin:$PATH" FIXTURES="$TEST_TMPDIR/fx"
+    install_ci_stubs
     export GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1000 PR_NUMBER=7 HEAD_SHA=h7 BASE_SHA=b7
+    head_is h7
 }
 
 teardown() {
@@ -49,6 +32,31 @@ jobs() {
     printf '{"jobs":[{"name":"ci-build-gates","status":"completed","run_attempt":1,"conclusion":"%s","steps":[{"name":"%s","conclusion":"%s"}]}%s]}' \
         "$2" "$ID" "$2" "$extra" > "$FIXTURES/actions_runs_$1_jobs.json"
     printf '{"status":"completed","run_attempt":1}' > "$FIXTURES/actions_runs_$1.json"
+}
+
+# head_is <sha>: the head the pull request has now.
+head_is() {
+    printf '{"head":{"sha":"%s"}}' "$1" > "$FIXTURES/pulls_7.json"
+}
+
+# running <run id>: the gate job has not finished.
+running() {
+    printf '{"jobs":[{"name":"ci-build-gates","status":"in_progress","run_attempt":1,"conclusion":null,"steps":[]}]}' \
+        > "$FIXTURES/actions_runs_$1_jobs.json"
+    printf '{"status":"in_progress","run_attempt":1}' > "$FIXTURES/actions_runs_$1.json"
+}
+
+# finishes <run id> <conclusion>: the run is still going, then completes while the script sleeps.
+finishes() {
+    jobs "$1" "$2"
+    mv "$FIXTURES/actions_runs_$1_jobs.json" "$FIXTURES/done_jobs.json"
+    running "$1"
+    on_sleep "cp \"$FIXTURES/done_jobs.json\" \"$FIXTURES/actions_runs_$1_jobs.json\""
+}
+
+# Nothing was asked of GitHub but reads.
+no_post() {
+    ! grep -q '^POST' "$FIXTURES/calls.log"
 }
 
 verdict() {
@@ -112,6 +120,107 @@ verdict() {
     PREVIOUS_VERDICT_DISCOVERY_SECONDS=0 verdict
     assert_failure
     assert_output --partial "No ci-build.yml run tested pull request #7 at head h7, base b7"
+}
+
+@test "verdict: upstream still running after the wait is held, then repeated green" {
+    runs 1001
+    finishes 1001 success
+    PREVIOUS_VERDICT_WAIT_SECONDS=0 verdict
+    assert_success
+    assert_output --partial "still running ci-build-gates after 0s"
+    assert_output --partial "Run 1001 passed ci-build-gates"
+    # Said once, not at every poll; nothing was cancelled or re-run.
+    [ "$(grep -c 'still running ci-build-gates' <<<"$output")" -eq 1 ]
+    no_post
+}
+
+@test "verdict: upstream still running after the wait, then failed, is repeated red" {
+    runs 1001
+    finishes 1001 failure
+    PREVIOUS_VERDICT_WAIT_SECONDS=0 verdict
+    assert_failure 1
+    assert_output --partial "still running ci-build-gates after 0s"
+    assert_output --partial "Run 1001 did not pass ci-build-gates for this pull request state (failure)"
+    no_post
+}
+
+@test "verdict: upstream still running when the job is cut off never exits red or green and never cancels" {
+    runs 1001
+    running 1001
+    # The job timeout of the real run: GitHub ends the step from outside.
+    on_sleep '[ "$(wc -l < "$FIXTURES/sleeps")" -lt 4 ] || kill -TERM $PPID'
+    # A fork's token could not cancel or re-run anything either way.
+    POST_REFUSED="cancel rerun" PREVIOUS_VERDICT_WAIT_SECONDS=0 verdict
+    [ "$status" -eq 143 ]
+    assert_output --partial "This check stays pending"
+    refute_output --partial "::error::"
+    no_post
+    [ "$(sleeps)" -eq 4 ]
+}
+
+@test "verdict: a head the pull request moved past is never repeated green" {
+    runs 1001
+    jobs 1001 success
+    head_is h8
+    verdict
+    assert_failure 1
+    refute_output --partial "passed"
+    assert_output --partial "moved past head h7"
+    # Not even the upstream run was read.
+    ! grep -q 'actions/runs/1001' "$FIXTURES/calls.log"
+}
+
+@test "verdict: an obsolete head cancels its own run and stops holding a runner" {
+    runs 1001
+    running 1001
+    head_is h8
+    # The cancel stops the step during its grace period.
+    on_sleep 'kill -TERM $PPID'
+    PREVIOUS_VERDICT_CANCEL_GRACE_SECONDS=7 verdict
+    [ "$status" -eq 143 ]
+    posted "repos/o/r/actions/runs/1000/cancel"
+    grep -qx 'sleep 7' "$FIXTURES/calls.log"
+}
+
+@test "verdict: an obsolete head with a refused cancel (fork token) exits red at once" {
+    runs 1001
+    running 1001
+    head_is h8
+    POST_REFUSED=cancel verdict
+    assert_failure 1
+    assert_output --partial "Could not cancel run 1000 (a fork's token is read-only)"
+    [ "$(sleeps)" -eq 0 ]
+}
+
+@test "verdict: an obsolete head whose cancel outlasts the grace period exits red, never green" {
+    runs 1001
+    running 1001
+    head_is h8
+    PREVIOUS_VERDICT_CANCEL_GRACE_SECONDS=7 verdict
+    assert_failure 1
+    assert_output --partial "kept running after its cancel"
+    grep -qx 'sleep 7' "$FIXTURES/calls.log"
+}
+
+@test "verdict: a head that moves while the upstream run is running stops the wait" {
+    runs 1001
+    running 1001
+    # First sleep: a push lands. Second sleep (the cancel's grace period): cut off.
+    on_sleep 'if [ -f "$FIXTURES/moved" ]; then kill -TERM $PPID; else printf "{\"head\":{\"sha\":\"h8\"}}" > "$FIXTURES/pulls_7.json"; touch "$FIXTURES/moved"; fi'
+    verdict
+    [ "$status" -eq 143 ]
+    assert_output --partial "Waiting for run 1001"
+    assert_output --partial "moved past head h7"
+    posted "repos/o/r/actions/runs/1000/cancel"
+}
+
+@test "verdict: an unreadable pull request head does not stop the verdict" {
+    runs 1001
+    jobs 1001 success
+    rm "$FIXTURES/pulls_7.json"
+    verdict
+    assert_success
+    assert_output --partial "Run 1001 passed ci-build-gates"
 }
 
 @test "verdict: a run that appears while waiting is picked up" {

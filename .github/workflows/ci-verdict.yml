@@ -16,6 +16,8 @@ permissions: {}
 
 # One verdict per pull-request state: a burst of label events keeps only the
 # newest run, so a check that predates the label cannot outlive its successor.
+# A push needs no label event to retire the verdict of the old head: the script
+# stops waiting once the pull request's head is not the one it was started for.
 # A run that finishes then marks every earlier check run of the same gate on the
 # same head (earlier verdicts, cancelled ones, the red "no label" run of CI Tests
 # or CI Build) as neutral "Superseded by run <id>" (scripts/ci/supersede_verdicts.sh).
@@ -26,8 +28,12 @@ concurrency:
 jobs:
   ci-quality-gates:
     runs-on: ubuntu-latest
-    # Waits up to 50 min for the tested run's verdict.
-    timeout-minutes: 60
+    # Waits 300 min (previous_gate_verdict.sh) for the tested run's verdict:
+    # longer than CI Tests (about 2 h) and CI Build (150 min macOS job plus its
+    # gate) can take. If that run is still going, the job keeps polling (pending)
+    # until this timeout ends it as cancelled, never red; ci-verdict-rearm.yml
+    # re-runs it when the upstream run completes.
+    timeout-minutes: 330
     permissions:
       # Re-runs CI Tests when it ran before the label (read-only on forks).
       actions: write
@@ -59,7 +65,8 @@ jobs:
 
   ci-build-gates:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Same 300 min wait as above: the macOS portability job alone may take 150 min.
+    timeout-minutes: 330
     permissions:
       actions: write
       # Marks this gate's earlier check runs on the same head as superseded.
