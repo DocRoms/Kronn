@@ -79,7 +79,7 @@ For other distros, see the [official Docker docs](https://docs.docker.com/engine
 ### 2. Run Kronn
 
 ```bash
-git clone --branch 0.15.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.15.2 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd kronn
 ./kronn start
 # Open http://localhost:3140
@@ -237,7 +237,7 @@ sudo apt-get install -y nodejs
 ```bash
 # Clone inside WSL (not on /mnt/c/ — performance is much better on the Linux filesystem)
 cd ~
-git clone --branch 0.15.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.15.2 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd kronn
 ./kronn start
 # Open http://localhost:3140 in your Windows browser

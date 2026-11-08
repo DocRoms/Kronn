@@ -17,59 +17,32 @@
 <p align="center">
   <a href="https://github.com/DocRoms/Kronn/stargazers"><img src="https://img.shields.io/github/stars/DocRoms/Kronn?style=social" alt="Étoiles GitHub" /></a>
   <a href="https://github.com/DocRoms/Kronn/commits/main"><img src="https://img.shields.io/github/last-commit/DocRoms/Kronn?label=dernier%20commit" alt="Dernier commit" /></a>
+  <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/contributions-bienvenues-brightgreen" alt="Contributions bienvenues" /></a>
+  <a href="https://github.com/DocRoms/Kronn/issues?q=is%3Aopen+label%3A%22good+first+issue%22"><img src="https://img.shields.io/github/issues/DocRoms/Kronn/good%20first%20issue?label=premi%C3%A8res%20issues&color=7057ff" alt="Premières issues ouvertes (good first issue)" /></a>
 </p>
 
 **Pilote tes agents CLI (Claude Code, Codex, Gemini CLI, OpenCode…), tes modèles locaux avec Ollama et tes fournisseurs HTTP comme LiteLLM, NVIDIA et OpenRouter depuis un seul dashboard self-hosted, avec des MCP partagés, des secrets chiffrés et des workflows répétables.**
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.15.1 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.15.2 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
-## Nouveautés de la 0.15.1
+## Nouveautés de la 0.15.2
 
-La 0.15.1 rend l'audit de la doc IA fiable, permet de tester des versions de
-prompts et de skills sur de vrais runs avant de les mettre en production, et
-donne aux agents des médias locaux.
+Kronn 0.15.2 consolide les fondations : tes secrets restent à toi, les quotas ne coûtent plus de travail, et une CI verte veut enfin dire verte.
 
-- **Versions et runs shadow :** les skills personnalisés gardent l'historique
-  de leurs versions comme les Quick Prompts, et une étape peut épingler la
-  version de skill ou de Quick Prompt qu'elle charge. Un workflow peut lancer
-  un run shadow à côté de chaque run normal, sur les mêmes entrées avec
-  d'autres versions, sans rien de ce qui agit hors de Kronn ; la liste des
-  runs compare les deux et une Page promeut la meilleure version en un clic.
-  Les agents lisent et écrivent les versions ; les exports emportent les
-  skills.
-- **Un audit fiable :** l'audit vérifie ce que ses documents affirment contre
-  le dépôt, ne déclare plus absents des secrets commités, répare davantage de
-  ce sur quoi il échouait et confie le reste à un humain. « Revalider l'audit »
-  juge aussi si chaque doc est encore pertinente.
-- **Briefing et docs existantes :** le briefing enregistre les règles de
-  l'équipe, la documentation existante et les projets liés, se rouvre avec ses
-  réponses, et un dépôt qui a déjà des docs peut recevoir le template IA par
-  fusion. La dette technique se règle, ou devient des tâches, depuis la carte
-  du projet.
-- **Image et vidéo en local :** ComfyUI génère images et vidéos sur ta
-  machine, la génération d'images LiteLLM fonctionne, et un agent HTTP peut
-  partir d'une image jointe à la discussion.
-- **Rooms multi-projets :** une room n'atteint un autre projet que si un
-  humain l'accorde, en lecture ou en écriture ; l'agent Claude Code natif le
-  lit alors.
-- **Une orchestration qu'on peut laisser tourner :** les cartes d'arbitrage
-  ne se perdent plus, une Definition of Done modifiée en cours d'exécution est
-  reprise, les exécutions et lanes terminées rendent leur disque, et les
-  messages d'orchestration peuvent être masqués.
-- **Navigation :** chaque vue a sa propre adresse ; Précédent, Suivant,
-  recharger et Ctrl/Cmd-clic fonctionnent comme sur n'importe quelle page web.
-- **Un nouveau thème sombre :** Sombre (et Système sur un OS sombre) prend la
-  palette Dark Modern de VS Code ; l'ancien thème violet devient le thème
-  secret Arcade.
+- **Des secrets hors de portée des agents :** bac à sable de l'OS sur le dossier de données, confirmation forte, export de plugin sûr.
+- **Des quotas sans travail perdu :** le travail attend puis revient à son fournisseur d'origine, sans repli silencieux.
+- **Des rooms qui codent dans d'autres projets :** une room peut recevoir `code` sur le checkout d'un autre projet.
+- **Docker sans compilation :** `start` récupère les images multi-architectures publiées.
+- **Une CI digne de confiance :** tests instables corrigés à la racine, plus de rouge pendant l'attente.
 
-Les versions précédentes sont décrites dans le [CHANGELOG](CHANGELOG.md).
+La liste complète des changements est dans le [CHANGELOG](CHANGELOG.md#0152---2026-11-08).
 
 ## Sommaire
 
-- [Nouveautés de la 0.15.1](#nouveautés-de-la-0151)
+- [Nouveautés de la 0.15.2](#nouveautés-de-la-0152)
 - [Le pitch en 60 secondes](#le-pitch-en-60-secondes)
 - [L'approche Kronn : de l'ingénierie, pas de l'incantation](#lapproche-kronn--de-lingénierie-pas-de-lincantation)
 - [Démarrage rapide](#démarrage-rapide)
@@ -133,18 +106,16 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.15.1 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.15.2 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140
 ```
 
-À partir de la **0.15.2**, `./kronn start` télécharge les images publiées
-(`ghcr.io/docroms/kronn-backend` et `-frontend`, amd64 et arm64) et ne compile
-rien : une petite machine suffit. Un checkout de la **0.15.1 ou antérieure** n'a
-pas ce démarrage : son `make start` compile le backend sur ta machine, ce qui
-demande environ 20 Go de mémoire pour Docker. Avec moins, utilise l'installeur
-desktop ci-dessus en attendant la 0.15.2.
+`./kronn start` télécharge les images publiées (`ghcr.io/docroms/kronn-backend` et
+`-frontend`, amd64 et arm64) et ne compile rien : une petite machine suffit.
+Un checkout antérieur à la **0.15.2** compile le backend, ce qui demande environ
+20 Go de mémoire pour Docker : sur une machine plus modeste, utilise l'installeur desktop.
 
 Sur `main`, `VERSION` reste celle de la dernière release : `make start` lance son
 image publiée, pas le code local (`make start-build` pour tester tes modifications).
@@ -262,12 +233,12 @@ L'arborescence entière est injectée comme contexte projet dans chaque Discussi
 
 **Le drift detection est granulaire** : chaque section traque ses fichiers sources (ex. `coding-rules.md` surveille `package.json` + `tsconfig.json` + `rustfmt.toml`). Quand ces fichiers changent, la section est marquée stale et tu peux ré-auditer juste ce step. Pas besoin de relancer tout l'audit pour une seule config modifiée.
 
-**Ce que 0.8.2 durcit (à partir d'oublis réels constatés)**
+**Des baselines tirées d'oublis réels constatés**
 
 - **Checklist baseline obligatoire** : le Step 9 scanne TOUJOURS 5 catégories trop souvent oubliées (Dockerfile USER / display_errors / opcache / HEALTHCHECK, compose resource limits, CI quality gate + `StrictHostKeyChecking`, secrets dans `.env*`, a11y/CSP web). Chaque item produit une ligne explicite « verified present / verified absent / TD » — tu peux faire confiance à l'audit pour ne pas avoir détourné le regard.
 - **Mémoire anti-répétition** : chaque audit lit les TDs existants comme priors et RÉUTILISE leurs IDs au lieu de churner les slugs. Un bloc YAML `audit_history` sur chaque fichier détail trace chaque passe. Un rapport de réconciliation (`_reconciliation-<date>.md`) classifie les TDs disparus en `Fixed / Stale / Missed / Uncertain` — plus rien ne disparaît silencieusement entre audits.
 - **Statut à deux niveaux** : `Verified in source` (l'agent a ouvert le fichier et confirmé) vs `Inferred` (pattern match seulement). La Phase 3 de validation skip les Verified pour t'épargner le temps.
-- **Types d'audit spécialisés** : depuis la 0.9.0, le Full audit enchaîne les 9 steps de documentation puis les 7 passes focalisées (`Security`, `Docker`, `Performance`, `Accessibility`, `Database`, `ApiDesign`, `CodeQuality`) dans un seul lancement de 16 steps. Chaque passe commence par un test de pertinence ; `Drift`, `Rgaa`, `Custom` et les audits focalisés restent lançables séparément.
+- **Types d'audit spécialisés** : le Full audit enchaîne les 9 steps de documentation puis les 7 passes focalisées (`Security`, `Docker`, `Performance`, `Accessibility`, `Database`, `ApiDesign`, `CodeQuality`) dans un seul lancement de 16 steps. Chaque passe commence par un test de pertinence ; `Drift`, `Rgaa`, `Custom` et les audits focalisés restent lançables séparément.
 - **Health badge avec cluster recommendations** : chaque run est persisté dans `audit_runs` avec durée, comptage par sévérité (Critical × 12 + High × 4 + Medium × 1.5 + Low × 0.3 = score 0–100) et une liste `recommendations_json`. Quand ≥3 findings clusterisent sur une dimension (ex. 5 TDs Docker), le dashboard surface inline « Lance un audit Docker focus ».
 - **Gate community standards** : si ton projet a une intent OSS (LICENSE présent OU remote sur github/gitlab/codeberg OU README mentionne « contribute »), le Step 9 flag aussi les `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, templates issue/PR manquants. Les projets privés skip ce bloc entièrement.
 
@@ -275,7 +246,7 @@ C'est ce qui fait de Kronn une **couche de persistance de connaissance avec base
 
 ### 7. Boucle la boucle : audit → tickets → AutoPilot → PR
 
-L'audit n'est pas un doc qui dort dans un coin. **0.8.2 le branche à l'action.**
+L'audit n'est pas un doc qui dort dans un coin. **Kronn le branche à l'action.**
 
 Quand l'IA confirme `KRONN:VALIDATION_COMPLETE` sur la discussion de validation, la page surface deux CTAs :
 
@@ -292,7 +263,7 @@ Le préset 9 steps suit la discipline « désagentification » de Kronn : seuls 
 
 #### Les steps Exec survivent dans un worktree
 
-Le step `run_tests` c'est typiquement `npm test`, `cargo test`, `composer test`, `pytest`, … — tous ont besoin des deps vendorisées qui **n'existent pas dans un worktree git frais** (pas de `node_modules`, pas de `vendor`, pas de `target`). Chaque step `Exec` a maintenant une **phase Setup** optionnelle qui tire *juste avant* la commande principale :
+Le step `run_tests` c'est typiquement `npm test`, `cargo test`, `composer test`, `pytest`, … — tous ont besoin des deps vendorisées qui **n'existent pas dans un worktree git frais** (pas de `node_modules`, pas de `vendor`, pas de `target`). Chaque step `Exec` a une **phase Setup** optionnelle qui tire *juste avant* la commande principale :
 
 ```
 ☑ Ce step tourne dans un worktree git — installer les dépendances avant
