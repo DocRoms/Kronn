@@ -31,6 +31,35 @@ const ALLOWED_RESOLUTIONS: [&str; 3] = ["480p", "720p", "1080p"];
 /// refused here costs nothing, being refused there costs a round trip and,
 /// depending on the provider, a submission.
 const MAX_REFERENCE_BYTES: u64 = 12 * 1024 * 1024;
+/// Ceiling for all the source images of one request together.
+const MAX_REFERENCE_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The image format a file's first bytes declare, whatever its stored MIME
+/// type says: PNG, JPEG, WebP or GIF, else `None`.
+fn sniff_reference_image(head: &[u8]) -> Option<&'static str> {
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpeg")
+    } else if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+async fn read_head(path: &str) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut head = Vec::with_capacity(12);
+    tokio::fs::File::open(path)
+        .await?
+        .take(12)
+        .read_to_end(&mut head)
+        .await?;
+    Ok(head)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct GenerateMediaRequest {
@@ -43,6 +72,9 @@ pub struct GenerateMediaRequest {
     /// choices rather than selecting which provider budget to spend.
     #[serde(default)]
     pub connection_id: Option<String>,
+    /// Optimistic guard from a previously displayed slot, never a model override.
+    #[serde(default)]
+    pub expected_model: Option<String>,
     pub modality: MediaModality,
     pub prompt: String,
     /// Discussion the asset gets attached to. When absent, one is created with
@@ -229,13 +261,25 @@ pub async fn generate(
         )));
     };
 
+    if req
+        .expected_model
+        .as_deref()
+        .is_some_and(|expected| expected != model)
+    {
+        return Json(ApiResponse::err(
+            "the configured model changed; reload its capabilities before generating",
+        ));
+    }
+
     // A source image is validated BEFORE anything durable is written and long
     // before the provider is paid: it must exist, live in the very discussion
     // this generation lands in, be a real image on disk, be small enough, and
     // its mode must be one the chosen model actually advertises. Every one of
     // those failures costs nothing here and would cost a billed submission
     // there.
-    let references = match resolve_references(&state, &req, &connection, &model).await {
+    // One generation reads the catalogue once, whichever check needs it first.
+    let resolved = tokio::sync::OnceCell::new();
+    let references = match resolve_references(&state, &req, &connection, &model, &resolved).await {
         Ok(references) => references,
         Err(message) => return Json(ApiResponse::err(message)),
     };
@@ -244,7 +288,9 @@ pub async fn generate(
     // lists without is refused here, with the list, rather than at the
     // provider. An agent asking for a 15 s clip on a model that stops at 12 s
     // spent a whole turn learning what Kronn already knew.
-    if let Err(message) = refuse_unadvertised_params(&state, &connection, &model, &req).await {
+    if let Err(message) =
+        refuse_unadvertised_params(&state, &connection, &model, &req, &resolved).await
+    {
         return Json(ApiResponse::err(message));
     }
 
@@ -281,11 +327,14 @@ pub async fn generate(
         generate_audio: req.generate_audio,
         reference_asset_ids: references
             .as_ref()
-            .map(|(ids, _)| ids.clone())
+            .map(|(ids, _, _)| ids.clone())
             .unwrap_or_default(),
         // Never written again: the plural list above is the contract now.
         reference_asset_id: None,
-        reference_mode: references.as_ref().map(|(_, mode)| *mode),
+        reference_mode: references.as_ref().map(|(_, mode, _)| *mode),
+        comfyui_reference_context: references
+            .as_ref()
+            .and_then(|(_, _, context)| context.clone()),
     };
     if idempotency_key.is_some() {
         let existing_lookup = job_id.clone();
@@ -913,6 +962,27 @@ mod tests {
     use super::*;
     use crate::db::Database;
 
+    #[test]
+    fn a_source_image_is_recognised_by_its_first_bytes_only() {
+        assert_eq!(sniff_reference_image(b"\x89PNG\r\n\x1a\nrest"), Some("png"));
+        assert_eq!(
+            sniff_reference_image(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("jpeg")
+        );
+        assert_eq!(sniff_reference_image(b"GIF89a.."), Some("gif"));
+        assert_eq!(sniff_reference_image(b"GIF87a.."), Some("gif"));
+        assert_eq!(
+            sniff_reference_image(b"RIFF\x10\0\0\0WEBPVP8 "),
+            Some("webp")
+        );
+        // A WAV is RIFF too; text, SVG, truncated headers and empty files are not images.
+        assert_eq!(sniff_reference_image(b"RIFF\x10\0\0\0WAVEfmt "), None);
+        assert_eq!(sniff_reference_image(b"<svg xmlns="), None);
+        assert_eq!(sniff_reference_image(b"\x89PNG"), None);
+        assert_eq!(sniff_reference_image(b"RIFF"), None);
+        assert_eq!(sniff_reference_image(b""), None);
+    }
+
     fn connection(
         id: &str,
         name: &str,
@@ -1432,6 +1502,7 @@ mod tests {
             aspect_ratios: ratios.iter().map(|value| value.to_string()).collect(),
             frame_positions: Vec::new(),
             max_input_references: None,
+            reference_support: None,
             generate_audio: None,
         }
     }
@@ -1565,8 +1636,8 @@ pub struct MediaModelCapabilitiesResponse {
     pub capabilities: Option<crate::agents::media_capabilities::MediaModelCapabilities>,
 }
 
-/// What one catalogue read produced, and when. `None` is a real answer —
-/// "this provider advertises nothing" — not a cache miss.
+/// What one catalogue read produced, and when. `None` is "unknown" (nothing
+/// advertised, unreachable or unreadable) and expires sooner than an answer.
 type CachedCapabilities = (
     chrono::DateTime<Utc>,
     Option<crate::agents::media_capabilities::MediaModelCapabilities>,
@@ -1580,6 +1651,20 @@ static CAPABILITY_CACHE: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 const CAPABILITY_CACHE_TTL_SECS: i64 = 600;
+/// A dead host must not be re-probed (3 s connect) on every form open.
+const CAPABILITY_UNKNOWN_TTL_SECS: i64 = 60;
+
+/// Forgets every cached catalogue answer. Tests call it first: a mock server
+/// may reuse a port a previous test's catalogue was cached under.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
+pub fn clear_capability_cache() {
+    if let Some(cache) = CAPABILITY_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.clear();
+        }
+    }
+}
 
 fn cached_capabilities(
     key: &str,
@@ -1588,7 +1673,12 @@ fn cached_capabilities(
     let cache = CAPABILITY_CACHE.get_or_init(Default::default);
     let guard = cache.lock().ok()?;
     let (stored_at, value) = guard.get(key)?;
-    ((now - *stored_at).num_seconds() < CAPABILITY_CACHE_TTL_SECS).then(|| value.clone())
+    let ttl = if value.is_some() {
+        CAPABILITY_CACHE_TTL_SECS
+    } else {
+        CAPABILITY_UNKNOWN_TTL_SECS
+    };
+    ((now - *stored_at).num_seconds() < ttl).then(|| value.clone())
 }
 
 fn store_capabilities(
@@ -1623,13 +1713,6 @@ pub(crate) async fn connection_by_id(
         .db
         .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup))
         .await
-}
-
-/// Whether a source takes source images at all, asked before a job exists.
-fn accepts_reference_images(connection: &crate::models::ExternalApiConnection) -> bool {
-    !crate::api::comfyui::is_local(connection)
-        && crate::agents::media_codec::codec_for(connection.origin_preset)
-            .accepts_reference_images()
 }
 
 pub async fn model_capabilities(
@@ -1688,13 +1771,60 @@ pub(crate) async fn advertised_capabilities(
     model: &str,
     modality: MediaModality,
 ) -> Option<crate::agents::media_capabilities::MediaModelCapabilities> {
+    Some(
+        resolved_capabilities(state, connection, model, modality)
+            .await
+            .0,
+    )
+}
+
+/// The effective envelope, and whether a catalogue actually answered. An
+/// unreadable catalogue is "unknown", never "no": it is cached only briefly,
+/// and a caller must not turn its empty lists into a refusal.
+async fn resolved_capabilities(
+    state: &AppState,
+    connection: &crate::models::ExternalApiConnection,
+    model: &str,
+    modality: MediaModality,
+) -> (
+    crate::agents::media_capabilities::MediaModelCapabilities,
+    bool,
+) {
     if crate::api::comfyui::is_local(connection) {
-        return Some(crate::api::comfyui::capabilities(model, modality));
+        let config = state.config.read().await.clone();
+        let capabilities =
+            crate::api::comfyui::reference_capabilities(&config.comfyui, model, modality).await;
+        return (
+            super::media_reference_settings::resolve(
+                connection,
+                model,
+                modality,
+                Some(capabilities),
+                &config.media_reference_limits,
+            ),
+            true,
+        );
     }
     let now = Utc::now();
-    let cache_key = format!("{}::{}::{}", connection.id, modality.as_str(), model);
+    let cache_key = format!(
+        "{}::{}::{}::{}",
+        connection.id,
+        super::media_reference_settings::endpoint(connection),
+        modality.as_str(),
+        model
+    );
     if let Some(capabilities) = cached_capabilities(&cache_key, now) {
-        return capabilities;
+        let answered = capabilities.is_some();
+        return (
+            super::media_reference_settings::resolve(
+                connection,
+                model,
+                modality,
+                capabilities,
+                &state.config.read().await.media_reference_limits,
+            ),
+            answered,
+        );
     }
 
     let base = connection
@@ -1705,8 +1835,18 @@ pub(crate) async fn advertised_capabilities(
         .unwrap_or_default();
     let capabilities =
         fetch_model_capabilities(state, &base, &connection.credential_slug, model, modality).await;
+    let answered = capabilities.is_some();
     store_capabilities(cache_key, now, capabilities.clone());
-    capabilities
+    (
+        super::media_reference_settings::resolve(
+            connection,
+            model,
+            modality,
+            capabilities,
+            &state.config.read().await.media_reference_limits,
+        ),
+        answered,
+    )
 }
 
 /// Fetches one catalogue and reads the configured model out of it.
@@ -1752,6 +1892,12 @@ async fn fetch_model_capabilities(
     crate::agents::media_capabilities::capabilities_for(&body, model, modality)
 }
 
+/// A generation's catalogue read, shared by every check that needs it.
+type ResolvedCell = tokio::sync::OnceCell<(
+    crate::agents::media_capabilities::MediaModelCapabilities,
+    bool,
+)>;
+
 /// Refuses a value the model's own catalogue lists without.
 ///
 /// Deliberately narrow, exactly like the reference-mode preflight below:
@@ -1764,14 +1910,14 @@ async fn refuse_unadvertised_params(
     connection: &crate::models::ExternalApiConnection,
     model: &str,
     req: &GenerateMediaRequest,
+    resolved: &ResolvedCell,
 ) -> Result<(), String> {
-    let Some(capabilities) = advertised_capabilities(state, connection, model, req.modality).await
-    else {
-        return Ok(());
-    };
+    let (capabilities, _) = resolved
+        .get_or_init(|| resolved_capabilities(state, connection, model, req.modality))
+        .await;
     match unadvertised_param(
         model,
-        &capabilities,
+        capabilities,
         req.duration_secs,
         req.resolution.as_deref(),
         req.aspect_ratio.as_deref(),
@@ -1842,7 +1988,15 @@ async fn resolve_references(
     req: &GenerateMediaRequest,
     connection: &crate::models::ExternalApiConnection,
     model: &str,
-) -> Result<Option<(Vec<String>, MediaReferenceMode)>, String> {
+    resolved: &ResolvedCell,
+) -> Result<
+    Option<(
+        Vec<String>,
+        MediaReferenceMode,
+        Option<crate::models::ComfyReferenceContext>,
+    )>,
+    String,
+> {
     // Both forms describe the same thing, so they are merged into one list
     // rather than made to compete: a caller sending both gets what it named,
     // in the order it named it, with no duplicate reaching the provider.
@@ -1872,16 +2026,27 @@ async fn resolve_references(
                 .to_string(),
         );
     };
+    if !crate::api::comfyui::is_local(connection)
+        && !crate::agents::media_codec::codec_for(connection.origin_preset)
+            .accepts_reference_images()
+    {
+        return Err(
+            "Kronn's adapter for this connection does not implement source-image transport yet"
+                .into(),
+        );
+    }
     // Some providers take no source image on any model. Their catalogue
     // cannot say so — NVIDIA serves no media catalogue at all — so the
     // capability check below would be skipped and the refusal would surface in
     // the worker, where it looks like an outage and is retried until the
     // deadline. Refusing here says it once, before a job exists.
-    if !accepts_reference_images(connection) {
-        return Err(format!(
-            "this connection's provider does not accept a source image: '{}' cannot be used here",
-            mode.as_str()
-        ));
+    if asset_ids.len() > 64 {
+        return Err("a generation cannot take more than 64 source images".into());
+    }
+    if req.modality == MediaModality::Image && mode.frame_capability().is_some() {
+        return Err(
+            "an image generation takes visual references, not a first or last frame".into(),
+        );
     }
     // A frame is one exact picture at one end of a clip; there is no such
     // thing as several. This holds with or without a catalogue, so it is
@@ -1913,6 +2078,7 @@ async fn resolve_references(
     // thing consulted, so membership is unchanged; zero or several matches are
     // the same refusal as an unknown id, and it lists what can be used.
     let mut resolved_ids: Vec<String> = Vec::new();
+    let mut total_bytes: u64 = 0;
     for asset_id in &asset_ids {
         let lookup = asset_id.clone();
         let found = state
@@ -1942,7 +2108,8 @@ async fn resolve_references(
                 }
             }
         };
-        if !resolved_ids.contains(&file.id) {
+        let first_use = !resolved_ids.contains(&file.id);
+        if first_use {
             resolved_ids.push(file.id.clone());
         }
 
@@ -1980,6 +2147,40 @@ async fn resolve_references(
                 file.mime_type
             ));
         }
+        let metadata = tokio::fs::metadata(file.disk_path.as_deref().expect("validated above"))
+            .await
+            .map_err(|_| {
+                format!("reference asset '{asset_id}' has no readable stored file; upload it again")
+            })?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(format!(
+                "reference asset '{asset_id}' has no readable stored image; upload it again"
+            ));
+        }
+        if metadata.len() > MAX_REFERENCE_BYTES {
+            return Err(format!(
+                "reference asset '{asset_id}' exceeds the source-image size limit"
+            ));
+        }
+        let head = read_head(file.disk_path.as_deref().expect("validated above"))
+            .await
+            .map_err(|_| {
+                format!("reference asset '{asset_id}' has no readable stored file; upload it again")
+            })?;
+        if sniff_reference_image(&head).is_none() {
+            return Err(format!(
+                "reference asset '{asset_id}' is not a PNG, JPEG, WebP or GIF image"
+            ));
+        }
+        if first_use {
+            total_bytes += metadata.len();
+            if total_bytes > MAX_REFERENCE_TOTAL_BYTES {
+                return Err(format!(
+                    "the source images exceed {} MB together; send fewer or smaller ones",
+                    MAX_REFERENCE_TOTAL_BYTES / (1024 * 1024)
+                ));
+            }
+        }
         if file.original_size > MAX_REFERENCE_BYTES {
             return Err(format!(
                 "the reference image is too large ({} MB); the ceiling is {} MB",
@@ -1989,26 +2190,37 @@ async fn resolve_references(
         }
     }
 
-    // Capability preflight. An unreachable catalogue answers nothing, and a
-    // silence must not become a refusal: the provider stays the authority, and
-    // the submission is what will tell. What we DO refuse is a mode the
-    // catalogue explicitly does not list.
-    let base = connection
-        .media_endpoint
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| connection.endpoint.clone())
-        .unwrap_or_default();
-    if let Some(capabilities) = fetch_model_capabilities(
-        state,
-        &base,
-        &connection.credential_slug,
-        model,
-        req.modality,
-    )
-    .await
+    let mut reference_context = None;
+    // All callers use the same effective envelope. An unknown visual-reference
+    // limit requires an explicit operator declaration, never an invented zero.
+    // An unreadable catalogue leaves a frame request to the provider, as
+    // before multi-reference support; only an answered catalogue refuses a mode.
+    let (capabilities, answered) = resolved
+        .get_or_init(|| resolved_capabilities(state, connection, model, req.modality))
+        .await;
+    let answered = *answered;
     {
-        if !capabilities.supports_reference_mode(mode) {
+        let unknown_frame = !answered && mode != MediaReferenceMode::Reference;
+        let transport_missing = !crate::api::comfyui::is_local(connection)
+            && !crate::agents::media_codec::codec_for(connection.origin_preset)
+                .accepts_reference_images();
+        // A blocker about multiple visual references says nothing about a frame.
+        let blocker = capabilities
+            .reference_support
+            .as_ref()
+            .and_then(|support| support.blocker.clone())
+            .filter(|_| mode == MediaReferenceMode::Reference || transport_missing);
+        if !capabilities.supports_reference_mode(mode) && (!unknown_frame || transport_missing) {
+            if let Some(reason) = blocker {
+                return Err(reason);
+            }
+            if mode == MediaReferenceMode::Reference && capabilities.max_input_references.is_none()
+            {
+                if !answered {
+                    return Err(format!("the provider's model catalogue could not be read, so the reference limit for model '{model}' is unknown; retry later, or configure the limit in the connection's media settings"));
+                }
+                return Err(format!("the reference limit for model '{model}' is unknown; configure it in the connection's media settings before using source images"));
+            }
             let offered = capabilities.advertised_modes();
             let offered = if offered.is_empty() {
                 "no source image at all".to_string()
@@ -2020,6 +2232,30 @@ async fn resolve_references(
                 mode.as_str()
             ));
         }
+        if crate::api::comfyui::is_local(connection) {
+            let config = state.config.read().await.comfyui.clone();
+            let family = crate::api::comfyui::reference_family(&config, model, req.modality)
+                .ok_or("the ComfyUI reference workflow changed; reload its capabilities")?;
+            if crate::core::comfyui_references::workflow_id(Some(family))
+                != capabilities
+                    .reference_support
+                    .as_ref()
+                    .and_then(|support| support.workflow.as_deref())
+            {
+                return Err(
+                    "the ComfyUI reference workflow changed; reload its capabilities".into(),
+                );
+            }
+            reference_context = Some(crate::models::ComfyReferenceContext {
+                endpoint: crate::api::media_reference_settings::endpoint(connection),
+                family,
+                settings: if req.modality == MediaModality::Image {
+                    config.image_settings
+                } else {
+                    config.video_settings
+                },
+            });
+        }
         // The ceiling is per model, and it ranges from 1 to 16 across the
         // catalogue: a fixed one would be wrong for nearly every provider.
         // A catalogue that advertises nothing stays silent — the submission is
@@ -2027,16 +2263,16 @@ async fn resolve_references(
         if let (MediaReferenceMode::Reference, Some(maximum)) =
             (mode, capabilities.max_input_references)
         {
-            if asset_ids.len() as u32 > maximum {
+            if resolved_ids.len() as u32 > maximum {
                 return Err(format!(
                     "model '{model}' takes at most {maximum} reference image(s), {} were sent",
-                    asset_ids.len()
+                    resolved_ids.len()
                 ));
             }
         }
     }
 
-    Ok(Some((resolved_ids, mode)))
+    Ok(Some((resolved_ids, mode, reference_context)))
 }
 
 /// The refusal for a reference that is neither a context file id nor the exact

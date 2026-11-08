@@ -425,9 +425,9 @@ export function MessageAttachments({
     void Promise.all(generationSlots.map(async slot => {
       try {
         const result = await media.capabilities(slot.connectionId, slot.modality);
-        const mode = slot.modality === 'image'
-          ? (result.capabilities?.max_input_references ?? 0) > 0 ? 'reference' : null
-          : result.capabilities?.frame_positions?.[0] ?? null;
+        const mode = (result.capabilities?.max_input_references ?? 0) > 0
+          ? 'reference'
+          : slot.modality === 'video' ? result.capabilities?.frame_positions?.[0] ?? null : null;
         return [slot.key, mode] as const;
       } catch {
         return [slot.key, null] as const;

@@ -5069,6 +5069,13 @@ async fn call_confirm(
 /// channel. The routes that hand back the seed and every read stay closed to it.
 #[tokio::test]
 async fn a_bridge_token_changes_a_trust_level_only_with_a_valid_code() {
+    // It points KRONN_DATA_DIR at its own directory: never the other tests'.
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_bridge_token_changes_a_trust_level_only_with_a_valid_code",
+    ) {
+        return;
+    }
     let data = tempfile::tempdir().unwrap();
     kronn::core::child_env::set_var("KRONN_DATA_DIR", data.path());
     let (_, _repos, db) = fixture_with_db().await;

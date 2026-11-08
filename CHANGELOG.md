@@ -11,6 +11,20 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- Media: an image or a video can be generated from several source images of
+  the discussion, ordered and removable in the Creator. Each saved image/video
+  model (ComfyUI included) has a reference limit in Config: empty uses what
+  the provider advertises, zero turns references off, a number declares an
+  unknown limit or lowers the advertised one. The Creator, `agent_list` and
+  the generation preflight read the same capability. Local ComfyUI takes
+  sources through SDXL img2img (1), FLUX.1 schnell + Redux (3), FLUX.2 Klein
+  4B distilled (4) and Wan 2.1 VACE (3), and checks the nodes and model files
+  each workflow needs before queueing. A source image must start like a PNG,
+  JPEG, WebP or GIF, and one request's sources stay under 64 MB together
+  (KT-1403, #265).
+
 ## [0.15.2] - 2026-11-08
 
 ### Added

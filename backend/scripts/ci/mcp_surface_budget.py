@@ -168,7 +168,9 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # opt-in to a provider fallback on quota; the contract lives in its manual),
 # paid for by shortening five schema descriptions of the launch/prepare pair
 # that repeated their tool's manual: ceiling lowered by 36 B (84_379 -> 84_343).
-CATALOGUE_MAX_BYTES = 84_343
+# KT-1403: `media_generate` takes several references and `expected_model`, paid
+# for by tightening its media guidance: ceiling lowered by 61 B (84_343 -> 84_282).
+CATALOGUE_MAX_BYTES = 84_282
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

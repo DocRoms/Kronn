@@ -11,6 +11,52 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// An operator limit belongs to an exact serving model, not to a mutable slot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MediaReferenceLimit {
+    pub connection_id: String,
+    pub endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workflow: Option<String>,
+    pub model: String,
+    pub modality: MediaModality,
+    pub max_input_references: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum MediaReferenceLimitSource {
+    Provider,
+    Workflow,
+    Configured,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MediaReferenceSupport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workflow: Option<String>,
+    pub source: MediaReferenceLimitSource,
+    pub advertised_max: Option<u32>,
+    pub configured_max: Option<u32>,
+    /// A missing transport or dependency is not evidence about the model.
+    pub blocker: Option<String>,
+}
+
+/// The local workflow accepted with the source images, kept across queueing and retries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ComfyReferenceContext {
+    pub endpoint: String,
+    pub family: crate::core::comfyui::ComfyFamily,
+    pub settings: crate::core::comfyui::ComfyGenSettings,
+}
+
 /// What the model outputs. The execution family is the same for both, so this
 /// belongs to the job and its result — not to a separate run kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -182,6 +228,9 @@ pub struct MediaParams {
     /// What those images are for. Meaningless — and refused — without an asset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_mode: Option<MediaReferenceMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub comfyui_reference_context: Option<ComfyReferenceContext>,
 }
 
 impl MediaParams {
