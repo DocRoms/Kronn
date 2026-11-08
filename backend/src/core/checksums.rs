@@ -144,6 +144,30 @@ fn is_kronn_generated_path(path: &str, docs_dir_rel: &str) -> bool {
         || path == ".kronn.json"
         || path == ".kronn.lock"
         || path.starts_with(".kronn/")
+        || is_kronn_write_temp(path)
+}
+
+/// The temp sibling of a Kronn atomic write, present only until its rename:
+/// `mcp_scanner::write_atomic_temp` and `root_agent_files::atomic_write` names.
+fn is_kronn_write_temp(path: &str) -> bool {
+    let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+    // `.{file_name}.kronn.tmp` sits beside a root agent file only.
+    let root_agent_temp = name
+        .strip_prefix('.')
+        .and_then(|n| n.strip_suffix(".kronn.tmp"))
+        .is_some_and(|target| {
+            let target = if dir.is_empty() {
+                target.to_string()
+            } else {
+                format!("{dir}/{target}")
+            };
+            ROOT_AGENT_CONTEXT_FILES.contains(&target.as_str())
+        });
+    root_agent_temp
+        || name
+            .strip_suffix(".tmp")
+            .and_then(|stem| stem.rsplit_once(".kronn-"))
+            .is_some_and(|(_, id)| uuid::Uuid::parse_str(id).is_ok())
 }
 
 /// Strip the Kronn-managed regions from a root agent file: the
@@ -263,6 +287,16 @@ fn git_source_tree_fingerprint_observed(
     project_path: &Path,
     observation: Option<&str>,
 ) -> Option<String> {
+    git_source_tree_fingerprint_with(project_path, observation, || {})
+}
+
+/// `after_listing` runs between the git listing and the reads of the files it
+/// named; production passes a no-op, the interleaving tests a concurrent write.
+fn git_source_tree_fingerprint_with(
+    project_path: &Path,
+    observation: Option<&str>,
+    after_listing: impl FnOnce(),
+) -> Option<String> {
     let docs_dir_rel = crate::core::scanner::detect_docs_dir(project_path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -274,12 +308,17 @@ fn git_source_tree_fingerprint_observed(
     )
     .unwrap_or_default();
 
+    let tracked_paths: std::collections::HashSet<&[u8]> = tracked
+        .split(|&b| b == 0)
+        .filter(|p| !p.is_empty())
+        .collect();
     let mut paths: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
     for listing in [&tracked, &untracked] {
         for p in listing.split(|&b| b == 0).filter(|p| !p.is_empty()) {
             paths.insert(p.to_vec());
         }
     }
+    after_listing();
 
     let mut kept: Vec<Vec<u8>> = Vec::new();
     for path_bytes in &paths {
@@ -294,8 +333,11 @@ fn git_source_tree_fingerprint_observed(
         }
         let full = project_path.join(os_path_from_bytes(path_bytes));
         let Ok(meta) = std::fs::symlink_metadata(&full) else {
-            // Tracked but deleted in the worktree: the deletion IS a source
-            // change — record it so the print moves.
+            // A tracked file deleted from the worktree is a source change; an
+            // untracked one gone since the listing never was part of the tree.
+            if !tracked_paths.contains(path_bytes.as_slice()) {
+                continue;
+            }
             let mut record = b"deleted ".to_vec();
             record.extend_from_slice(path_bytes);
             kept.push(record);

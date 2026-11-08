@@ -283,6 +283,9 @@ fn is_kronn_generated_path_is_tight() {
         ".kronn.json",
         ".kronn.lock",
         ".kronn/state",
+        ".claude/agents/architect.kronn-6f1c2a3e-9d0b-4c8e-a7f5-1b2c3d4e5f60.tmp",
+        ".CLAUDE.md.kronn.tmp",
+        ".github/.copilot-instructions.md.kronn.tmp",
     ] {
         assert!(
             is_kronn_generated_path(kronn, "docs"),
@@ -302,6 +305,10 @@ fn is_kronn_generated_path_is_tight() {
         "AGENTS.md", // normalized elsewhere, not excluded
         ".github/copilot-instructions.md",
         "sub/checksums.json", // someone else's file, not ours
+        "build/cache.kronn-latest.tmp",
+        "notes.tmp",
+        "build.kronn.tmp",
+        "src/.CLAUDE.md.kronn.tmp",
     ] {
         assert!(
             !is_kronn_generated_path(source, "docs"),
@@ -314,6 +321,20 @@ fn is_kronn_generated_path_is_tight() {
         !is_kronn_generated_path("docsx/file.md", "docs"),
         "prefix must not over-match"
     );
+}
+
+// KT-1590 — only the names Kronn's writers give their temps are excluded: a
+// user file that merely ends like one is source.
+#[test]
+fn only_kronn_write_temps_are_excluded_by_name() {
+    for user in [
+        "build.kronn.tmp",
+        "docs/x.kronn.tmp",
+        "src/.notes.kronn.tmp",
+    ] {
+        assert!(!is_kronn_write_temp(user), "{user} must stay counted");
+    }
+    assert!(is_kronn_write_temp(".AGENTS.md.kronn.tmp"));
 }
 
 #[test]
@@ -433,6 +454,63 @@ fn source_tree_fingerprint_ignores_kronn_output_commits_but_not_source() {
     );
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+// KT-1590 — an agent launch writes its profile files through temp siblings
+// while a plan reads the tree: listed, or listed then renamed away, they are
+// not source.
+#[test]
+fn a_kronn_write_in_flight_never_moves_the_source_tree_fingerprint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q"]);
+    fs::write(dir.join("app.js"), "console.log(1)").unwrap();
+    let before = git_source_tree_fingerprint(dir).expect("fingerprint");
+
+    fs::create_dir_all(dir.join(".claude/agents")).unwrap();
+    let temp = crate::core::mcp_scanner::write_atomic_temp(
+        &dir.join(".claude/agents/architect.md"),
+        b"profile",
+    )
+    .unwrap();
+    fs::write(dir.join(".CLAUDE.md.kronn.tmp"), "block").unwrap();
+    assert_eq!(
+        git_source_tree_fingerprint(dir).as_deref(),
+        Some(before.as_str())
+    );
+
+    let renamed_away = git_source_tree_fingerprint_with(dir, None, || {
+        fs::remove_file(&temp).unwrap();
+        fs::remove_file(dir.join(".CLAUDE.md.kronn.tmp")).unwrap();
+    });
+    assert_eq!(renamed_away.as_deref(), Some(before.as_str()));
+}
+
+// KT-1590 — an untracked file gone between the listing and its read was never
+// source; a tracked file deleted from the worktree still is a change.
+#[test]
+fn only_a_tracked_file_missing_from_the_worktree_counts_as_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q"]);
+    git(dir, &["config", "user.email", "t@t"]);
+    git(dir, &["config", "user.name", "t"]);
+    fs::write(dir.join("app.js"), "console.log(1)").unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-qm", "src"]);
+    let before = git_source_tree_fingerprint(dir).expect("fingerprint");
+
+    fs::write(dir.join("scratch.txt"), "editor swap").unwrap();
+    let vanished = git_source_tree_fingerprint_with(dir, None, || {
+        fs::remove_file(dir.join("scratch.txt")).unwrap();
+    });
+    assert_eq!(vanished.as_deref(), Some(before.as_str()));
+
+    fs::remove_file(dir.join("app.js")).unwrap();
+    assert_ne!(
+        git_source_tree_fingerprint(dir).as_deref(),
+        Some(before.as_str())
+    );
 }
 
 #[test]

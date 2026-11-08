@@ -769,7 +769,7 @@ pub(crate) fn write_owned_mcp_json_to_subpath(
 
 /// Write content to a file atomically: write to a temp sibling then rename.
 /// This prevents agents from reading a partially-written config file.
-fn write_atomic_temp(target: &Path, content: &[u8]) -> Result<PathBuf, String> {
+pub(crate) fn write_atomic_temp(target: &Path, content: &[u8]) -> Result<PathBuf, String> {
     // A fixed `<target>.tmp` name is unsafe in a user-controlled project: a
     // pre-created symlink at that path makes `fs::write` follow it and mutate
     // an arbitrary file outside the project. Use an unpredictable sibling and

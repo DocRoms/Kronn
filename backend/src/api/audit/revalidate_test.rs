@@ -673,6 +673,41 @@ fn an_all_unanchored_doc_is_re_read_once_per_change() {
         .is_empty());
 }
 
+// KT-1590 — the validation agent a revalidation spawns writes its profile
+// files while the plan is read: the badge is clean, so must the plan be.
+#[test]
+fn a_kronn_write_in_flight_never_sends_a_re_read_doc_back() {
+    const GLOSSARY: &str = "docs/glossary.md";
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q"]);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "fn alpha() {}\n").unwrap();
+    fs::write(dir.join(GLOSSARY), PLAIN).unwrap();
+    citation_drift::record_all(dir).unwrap();
+    let fresh = plan(dir);
+    assert!(
+        fresh.sections.iter().any(|s| s.doc == GLOSSARY && s.reread),
+        "{fresh:?}"
+    );
+    run_the_pass(dir, &fresh);
+    assert!(plan(dir).sections.is_empty());
+
+    fs::create_dir_all(dir.join(".claude/agents")).unwrap();
+    crate::core::mcp_scanner::write_atomic_temp(
+        &dir.join(".claude/agents/architect.md"),
+        b"profile",
+    )
+    .unwrap();
+    assert_eq!(
+        citation_drift::check(dir).sources_state,
+        SourcesState::Clean
+    );
+    let during = plan(dir);
+    assert!(during.sections.is_empty(), "{:?}", during.sections);
+}
+
 // KT-1292 — the stamp is kept by a validation and an audit rewrite.
 #[test]
 fn the_re_read_stamp_survives_a_validation() {
