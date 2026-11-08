@@ -619,6 +619,7 @@ async fn bootstrap_refuses_with_docs_busy_and_creates_no_directory_or_project() 
         agent: crate::models::AgentType::ClaudeCode,
         mcp_config_ids: vec![],
         skill_ids: vec![],
+        tier: None,
     };
     let created = root.path().join("news-site");
     let project_count = || async {
@@ -630,10 +631,17 @@ async fn bootstrap_refuses_with_docs_busy_and_creates_no_directory_or_project() 
     };
     let lease =
         crate::api::audit::docs_write::DocsWriteLease::try_acquire(&state, "boot-1").unwrap();
-    let response =
-        crate::api::projects::bootstrap::bootstrap_as(state.clone(), request(), "boot-1".into())
-            .await
-            .0;
+    let response = crate::api::projects::bootstrap::bootstrap_as(
+        state.clone(),
+        request(),
+        "boot-1".into(),
+        &[crate::api::projects::bootstrap::usable_for_tests(
+            crate::models::AgentType::ClaudeCode,
+        )],
+    )
+    .await
+    .1
+     .0;
     assert!(!response.success, "{response:?}");
     assert_eq!(
         response.error.as_deref(),
@@ -653,10 +661,17 @@ async fn bootstrap_refuses_with_docs_busy_and_creates_no_directory_or_project() 
 
     // Released, the very same request bootstraps the project.
     drop(lease);
-    let response =
-        crate::api::projects::bootstrap::bootstrap_as(state.clone(), request(), "boot-1".into())
-            .await
-            .0;
+    let response = crate::api::projects::bootstrap::bootstrap_as(
+        state.clone(),
+        request(),
+        "boot-1".into(),
+        &[crate::api::projects::bootstrap::usable_for_tests(
+            crate::models::AgentType::ClaudeCode,
+        )],
+    )
+    .await
+    .1
+     .0;
     assert!(response.success, "{response:?}");
     assert!(created.join(".git").exists());
     assert_eq!(project_count().await, 2);

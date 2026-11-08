@@ -1336,6 +1336,8 @@ const fr: TranslationDict = {
   'projects.bootstrap.docs': 'Documents (optionnel)',
   'projects.bootstrap.docsHint': 'Glissez ou cliquez — architecture, specs, PRD...',
   'projects.bootstrap.options': 'Options avancées',
+  'projects.bootstrap.agent': 'Agent et modèle',
+  'projects.bootstrap.noAgent': 'Aucun agent installé ne peut lancer un bootstrap. Installez-en ou activez-en un dans Config › Agents.',
   'projects.bootstrap.noCreateRepo': 'Ne pas créer de dépôt Git',
   'projects.bootstrap.createRepoVia': 'Créer le dépôt via',
   'projects.bootstrap.noGeneratePlan': 'Ne pas générer de plan/issues',

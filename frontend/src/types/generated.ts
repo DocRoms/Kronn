@@ -1557,7 +1557,12 @@ program: string, };
  */
 export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_committed_elsewhere" | "integration_target_not_checked_out" | "integration_refused" | "integration_target_drifted";
 
-export type BootstrapProjectRequest = { name: string, description: string, agent: AgentType, mcp_config_ids?: Array<string>, skill_ids?: Array<string>, };
+export type BootstrapProjectRequest = { name: string, description: string, agent: AgentType, mcp_config_ids?: Array<string>, skill_ids?: Array<string>,
+/**
+ * Model capability chosen in the bootstrap form's agent picker. Missing
+ * keeps the skill-based default (Reasoning for Bootstrap++).
+ */
+tier?: ModelTier | null, };
 
 export type BootstrapProjectResponse = { project_id: string, discussion_id: string, };
 

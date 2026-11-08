@@ -1686,6 +1686,39 @@ button.dash-badge-tech-debt {
   accent-color: var(--kr-accent);
 }
 
+/* Agent + tier picker of the bootstrap form, styled like the new-discussion one. */
+.dash-agent-field {
+  margin-bottom: var(--kr-sp-8);
+}
+.dash-agent-picker {
+  min-height: 42px;
+  padding: 5px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-input);
+}
+.dash-agent-picker > .kr-agent-switch {
+  display: flex;
+  width: 100%;
+}
+.dash-agent-picker .kr-agent-switch-btn {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px 8px;
+  border-color: transparent;
+  font-size: var(--kr-fs-sm);
+  text-align: left;
+}
+.dash-agent-picker .kr-agent-switch-btn > svg:last-child {
+  margin-left: auto;
+}
+.dash-field-warn {
+  margin: var(--kr-sp-2) 0 0;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-warning-soft);
+}
+
 /* ── Docs migration banner (legacy ai/ → docs/) ───────────────────────
    Surfaces inside ProjectCard body when `proj.needs_docs_migration`
    is true. Warning amber tint to set it apart from success/error

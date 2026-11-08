@@ -1707,6 +1707,10 @@ pub struct BootstrapProjectRequest {
     pub mcp_config_ids: Vec<String>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    /// Model capability chosen in the bootstrap form's agent picker. Missing
+    /// keeps the skill-based default (Reasoning for Bootstrap++).
+    #[serde(default)]
+    pub tier: Option<crate::models::ModelTier>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
