@@ -11,6 +11,135 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-11-08
+
+### Added
+
+- Trust levels: say "I trust my agents here" at the scope you choose, with the
+  risks spelled out, instead of approving every step. Three levels (Standard,
+  Trusted, Full access) set for the instance (Settings › Trust levels), a
+  workflow or a room; the narrowest explicit setting wins. Under Trusted, an
+  agent-written Quick Exec or workflow Exec step that passes values to a CLI
+  is active at once, a room's request to read or plan in another of your
+  projects is granted, and integration validations may reach Docker; Full
+  access also runs validations without the sandbox. Choosing a level opens a
+  risk panel listing exactly what changes and needs an explicit
+  confirmation; an active level shows a badge on the room, the workflow and
+  the settings, revocable in one click, and every approval it grants is
+  journalled ("granted by trust level X"). Everything a level approves runs
+  under an OS sandbox (macOS Seatbelt, Linux bubblewrap) that hides Kronn's
+  own data (database, encryption key, recovery key, configuration, backups)
+  from those commands and leaves the network, the API port and the rest of
+  your machine open, as in your terminal; a host with no sandbox refuses Trusted and Full
+  access with the reason. Raising a level needs a code from an authenticator
+  app (TOTP, any app; ten single-use recovery codes; enrolled in Settings ›
+  Security), so a command an agent approved cannot raise its own level, even
+  from this machine; lowering never needs it. Lowering a level takes back
+  the approvals it granted and the journal lists them. The risk panel says
+  what stays reachable (project databases, the network, Docker, other
+  repositories, the credentials of other tools) and what stays closed. The
+  journal keeps 10 000 rows or 180 days. No level lets an agent change a trust
+  setting, skip a delete confirmation, or lends its trust to a P2P peer, and a
+  room that edits a workflow never takes that workflow's level. Elevation
+  cards keep refuse / this conversation / this project and now point to the
+  global setting. Code write on other projects and host access for agents are
+  in the policy table for Full
+  access; their gates ship with their own tickets (KT-1492, builds on
+  KT-1490, KT-1474, KT-1433).
+- The Page header shows the HTML weight: green up to 1 MB, orange up to 4 MB,
+  red above, with advice on how to optimize. The Pages list badges heavy Pages,
+  and a heavy write returns a notice the agent receives as `kronn_notice`
+  (#252).
+- The review-round limit is configurable and reaches every launch path (KT-1345).
+  Settings > Workers sets the default (5 out of the box, or Unlimited with a
+  token-burn warning), readable over `GET /api/config/workers` and, for MCP
+  principals, as `default_max_review_rounds` in `task_exec_prepare`. The
+  campaign dialog is pre-filled with it, single-task MCP launches take an
+  optional `max_review_rounds` (integer or `"unlimited"`; before, they were
+  stuck on 3), and workflow-delegated subtasks use it when the step sets none.
+  An unknown MCP argument is now refused instead of silently ignored, and an
+  existing execution's limit is raised with
+  `task_exec_reassign({extend_review_rounds})` (or the execution card's
+  « Extend rounds »), which also re-offers the findings of an execution the
+  limit had escalated. With unlimited rounds the campaign's `token_budget`
+  stays authoritative: once its consumed tokens reach it, a `request_changes`
+  escalates with `token_budget_exhausted` instead of scheduling another
+  correction, a worker reassignment is refused, and an extension re-offers
+  nothing. See `docs/operations/worker-review-rounds.md`.
+- A room can be granted `code` on another registered project, where Claude
+  Code edits that project's checkout like its own (KT-1491, #411). The levels
+  are now `read`, `plan` (what `write` always was: Kronn's planning tools,
+  never the files) and `code`; a stored `write` is read as `plan` (migration
+  285). A `code` grant never opens credentials or anything that runs later:
+  secrets stay closed at every level, `.git`, the hooks path, `.claude`,
+  `.envrc` and agent configs are denied, and a checkout that holds the Kronn
+  data directory is refused. `code` is enforced for Claude Code only, and
+  full-access agents are told so. Granting it needs the strong confirmation
+  when enrolled; revoking it, or lowering the trust level, stops the room's
+  running turn.
+- Kronn checks the live database schema against its migrations at boot
+  (KT-1483). A missing table, index or trigger is recreated (empty), a missing
+  column is added back when SQLite allows it, and the rest is logged and
+  listed under `schema` in `GET /api/health` (`ok`, `repaired` or
+  `degraded`). See `docs/gotchas/schema-drift-boot-check.md`.
+- The prompt limit follows the target model's context window instead of a
+  fixed 100 KB, under a configurable ceiling (`server.max_prompt_bytes`,
+  4 MB by default), on create, send and revise. The refusal names the limit
+  and the model and suggests attaching a file or a larger-context model
+  (KT-1529).
+- Discussion and Artifact pages share one full-height side panel with a
+  vertical rail (KT-1532). Their headers share one shell: ids back next to
+  the title, a primary action and « Détails » pair, the Artifact details as a
+  side-panel tab, Sync in the Invite slot and a live « Sync the N workflows »
+  count (KT-1530, KT-1344). The discussion panel has a single close button
+  and waits instead of opening under the mobile sidebar.
+- The Automation list has a « Désactivés » filter, exclusive with « Actifs »
+  (KT-1264).
+
+### Changed
+
+- An agent can now save a Quick Exec or an Exec line that passes run values to
+  a program Kronn does not model (`fastly purge --key {{surrogate_key}}`): it
+  is stored inactive, the save response says a human activates it, and the
+  agent carries on instead of stopping. The run keeps refusing it until then.
+  Shells, paths, wrappers and interpolation inside inline code are still
+  refused at save. A human activates it with one click on the room's card, in
+  « À valider », on a Page or discussion action, or on the workflow's
+  readiness list; the notice shows the exact line and sends exactly that line,
+  so a line an agent rewrote in between is refused and shown again; each argument is shown quoted, so two different argument lists never read alike; the activation checks and writes the line in one atomic step and never overwrites a concurrent edit. « Refuser »
+  is kept server-side (migration 277). Activation and refusal are the human's
+  only: a bridge token, or a request carrying the MCP bridge's `X-Kronn-Agent`
+  marker (a CLI launched from the host, whose room is restored before its first save after a reconnect), cannot do either, and that marker now
+  also keeps the other human-only routes and the Quick API access policy from
+  treating such a CLI as a person (KT-1490).
+- Live Pages no longer refuse HTML above 1 MB. A Page may weigh what its
+  author wants; a 24 MiB safety guard only stops a runaway writer, and create,
+  update and import apply the same rule. Artifact bundles go from 16 to
+  64 MiB and the bridge buffer of Kronn-launched agents from 32 to 64 MiB, so
+  a Page at the guard still exports, imports and reaches agents. The MCP
+  bridge keeps its 8 MiB request limit, so an MCP agent writes a Page of up
+  to about 8 MiB in one call (#252).
+- Above 4 MiB, the HTML editor and the revision diff show plain text instead
+  of highlighting every line on each keystroke (#252).
+- A Page's revision history no longer carries every revision's HTML; the
+  revision you compare is loaded alone (#252).
+- The backend container accepts any host user or group id from 1 to
+  4294967294 (it used to fall back to 1000 above nine digits).
+- The backend container starts as root only to give its `kronn` user your
+  `KRONN_HOST_UID` and `KRONN_HOST_GID` and to hand its volumes to that user,
+  then runs the backend and every agent as that user, never as root. The image
+  is built once for everyone instead of once per user. `docker compose exec`
+  into the backend now needs `-u kronn` to get the same user as the agents.
+- A bare `docker compose exec backend ...` now opens a root shell (root's home,
+  root-owned files): use `docker compose exec -u kronn backend ...` to act as
+  Kronn.
+- `make start` on a checkout runs the published image of `VERSION`, not your
+  local edits: use `make start-build` to run local code.
+- CI: the macOS portability leg runs on pull requests only when the tested
+  modules change, and on every push to main, with a 150-minute limit
+  (KT-1535, KT-1533). Every `backend/scripts/ci/test_*.py` must be wired in a
+  workflow, and the MCP catalogue census test now runs (KT-1180, #286).
+
 ### Fixed
 
 - A cut Exec stdout no longer reaches an agent silently (KT-1570). Past its
@@ -39,7 +168,6 @@ Release notes for 0.9.3 and earlier are available in the
   worker's transcript with its reason, the "worker ended without a delivery"
   notice repeats the last refusals of the current attempt, and so does the
   delivery summary of a worker that delivers anyway. See `docs/gotchas/claude-code-sensitive-directories.md`.
-
 - A quota refusal no longer sticks to an execution after the reset, and no longer
   sends it to another provider behind the user's back (KT-1564, regression of
   KT-838 / KT-593). A refusal that announced its reset expires at that instant:
@@ -62,59 +190,6 @@ Release notes for 0.9.3 and earlier are available in the
   disarms the callbacks of running generations in the database, so a late
   result cannot wake the stopped agent, restart included. A new human message
   is a new request with a fresh allowance.
-- The security scan is green again (KT-1533). `calamine` moves to 0.37, so `zip`
-  8.6 leaves both lockfiles and RUSTSEC-2026-0429 no longer applies to the
-  spreadsheet reader. The only remaining `zip` < 9 is the build-time copy
-  `utoipa-swagger-ui` 9 uses to unpack its own bundled Swagger UI. The advisory is
-  ignored for that path with a dated rationale in `backend/.cargo/audit.toml`, and
-  moving to `utoipa` 6 is tracked separately.
-- Settings › Security and system tells its three security mechanisms apart
-  (KT-1534). The authenticator has its own card (`#settings-authenticator`,
-  between the recovery phrase and the trust levels) with numbered enrolment
-  steps; it names the real `human-admin-secret` path from the server (macOS
-  `~/Library/Application Support/com.kronn.kronn/`, Docker `KRONN_DATA_DIR`)
-  instead of a Linux path given for every platform, says when agents can read
-  that file too, and how to get a new secret (`recover-admin-secret`). The
-  network access token card follows the server (`auth_token_set` on
-  `GET /api/config/network-exposure`) instead of this browser's stored copy:
-  after turning on network exposure it no longer says « désactivé » and offers
-  to create a token that would replace the one peers use. The risk panel puts
-  the missing authenticator first, links to its card and shows no
-  acknowledgement until one is set up; « coffre Kronn » becomes « dossier de
-  données de Kronn ». Once an authenticator is enrolled, the admin secret alone
-  no longer mints a publication grant, rotates the admin secret or rotates
-  another grant's secret: those routes ask for the strong confirmation too (a
-  holder renewing its own grant does not; before an enrolment nothing changes;
-  the `recover-admin-secret` recovery is untouched). The admin-secret hints
-  (first enrolment and replacement) say Kronn generated the secret (at first
-  start, or at the last recovery or rotation) and that it proves the machine
-  owner; once an authenticator is enrolled, enrolling or revoking a credential,
-  rotating a secret with it and replacing the authenticator also need its code
-  (listing does not). The claim about who reads the file is scoped to what the
-  sandbox covers: agents Kronn launches lose the data folder while its
-  protection is on, a CLI you run yourself can read it, so enrol before handing
-  it tasks.
-- A safe plugin export no longer leaks a secret held in the plugin definition
-  (KT-1040). Without values the bundle replaced only environment values and
-  copied the definition whole: a token in a URL (query, path, user info, host),
-  a literal header, stdio arguments, a description, a TokenExchange body or
-  endpoint left in clear. The export is now an allow-list: names and env-key
-  names with no token-shaped word, `${ENV.…}` references, URL origins with a
-  clean host, plain endpoint paths and catalogue values stay; every other value,
-  the config label and env-key names included, becomes a named placeholder
-  `${ENV.KRONN_EXPORT_<FIELD>}` that the import review lists and asks for, and
-  that the import puts back with its JSON type (one left empty is named in a
-  warning and by the plugin's first call). Kronn's own plugin ids are kept when
-  the name they derive from is, and any other id gets a fresh one shared by the
-  configs of that server; a catalogue plugin round-trips with no placeholder.
-  The per-plugin export masks the same way, and its file import accepts the
-  placeholders and names those left; the export with values is unchanged. Hosts
-  and plain lowercase paths are only shape-checked, and so are name-like values
-  (names, labels, header names, scopes, the JSONPath, env-key and reference
-  keys, body keys, plain-slug ids): an all-letter word up to 20 characters and a
-  letter-digit word up to 8 (`OAuth2`, `GPT4`) outside a segmented run like
-  `4B7D-9F1C` are kept, so keep secrets out of them or use `${ENV.KEY}`.
-
 - A task is no longer marked `done` when its delivery is integrated into a
   campaign or feature branch that has not reached the default branch yet
   (KT-1519). It stays `in_progress`, integrated and awaiting the merge; the
@@ -130,73 +205,6 @@ Release notes for 0.9.3 and earlier are available in the
   five minutes (migration 283). The Planning list, the project Tasks panel and
   the discussion monitor show the wait too: the plan counters have an
   `awaiting_merge` bucket apart from `in_progress` and `done`.
-
-### Changed
-
-- An agent can now save a Quick Exec or an Exec line that passes run values to
-  a program Kronn does not model (`fastly purge --key {{surrogate_key}}`): it
-  is stored inactive, the save response says a human activates it, and the
-  agent carries on instead of stopping. The run keeps refusing it until then.
-  Shells, paths, wrappers and interpolation inside inline code are still
-  refused at save. A human activates it with one click on the room's card, in
-  « À valider », on a Page or discussion action, or on the workflow's
-  readiness list; the notice shows the exact line and sends exactly that line,
-  so a line an agent rewrote in between is refused and shown again; each argument is shown quoted, so two different argument lists never read alike; the activation checks and writes the line in one atomic step and never overwrites a concurrent edit. « Refuser »
-  is kept server-side (migration 277). Activation and refusal are the human's
-  only: a bridge token, or a request carrying the MCP bridge's `X-Kronn-Agent`
-  marker (a CLI launched from the host, whose room is restored before its first save after a reconnect), cannot do either, and that marker now
-  also keeps the other human-only routes and the Quick API access policy from
-  treating such a CLI as a person (KT-1490).
-
-- Live Pages no longer refuse HTML above 1 MB. A Page may weigh what its
-  author wants; a 24 MiB safety guard only stops a runaway writer, and create,
-  update and import apply the same rule. Artifact bundles go from 16 to
-  64 MiB and the bridge buffer of Kronn-launched agents from 32 to 64 MiB, so
-  a Page at the guard still exports, imports and reaches agents. The MCP
-  bridge keeps its 8 MiB request limit, so an MCP agent writes a Page of up
-  to about 8 MiB in one call (#252).
-- Above 4 MiB, the HTML editor and the revision diff show plain text instead
-  of highlighting every line on each keystroke (#252).
-- A Page's revision history no longer carries every revision's HTML; the
-  revision you compare is loaded alone (#252).
-- The backend container accepts any host user or group id from 1 to
-  4294967294 (it used to fall back to 1000 above nine digits).
-- The backend container starts as root only to give its `kronn` user your
-  `KRONN_HOST_UID` and `KRONN_HOST_GID` and to hand its volumes to that user,
-  then runs the backend and every agent as that user, never as root. The image
-  is built once for everyone instead of once per user. `docker compose exec`
-  into the backend now needs `-u kronn` to get the same user as the agents.
-- A bare `docker compose exec backend ...` now opens a root shell (root's home,
-  root-owned files): use `docker compose exec -u kronn backend ...` to act as
-  Kronn.
-- `make start` on a checkout runs the published image of `VERSION`, not your
-  local edits: use `make start-build` to run local code.
-
-### Added
-
-- The Page header shows the HTML weight: green up to 1 MB, orange up to 4 MB,
-  red above, with advice on how to optimize. The Pages list badges heavy Pages,
-  and a heavy write returns a notice the agent receives as `kronn_notice`
-  (#252).
-- The review-round limit is configurable and reaches every launch path (KT-1345).
-  Settings > Workers sets the default (5 out of the box, or Unlimited with a
-  token-burn warning), readable over `GET /api/config/workers` and, for MCP
-  principals, as `default_max_review_rounds` in `task_exec_prepare`. The
-  campaign dialog is pre-filled with it, single-task MCP launches take an
-  optional `max_review_rounds` (integer or `"unlimited"`; before, they were
-  stuck on 3), and workflow-delegated subtasks use it when the step sets none.
-  An unknown MCP argument is now refused instead of silently ignored, and an
-  existing execution's limit is raised with
-  `task_exec_reassign({extend_review_rounds})` (or the execution card's
-  « Extend rounds »), which also re-offers the findings of an execution the
-  limit had escalated. With unlimited rounds the campaign's `token_budget`
-  stays authoritative: once its consumed tokens reach it, a `request_changes`
-  escalates with `token_budget_exhausted` instead of scheduling another
-  correction, a worker reassignment is refused, and an extension re-offers
-  nothing. See `docs/operations/worker-review-rounds.md`.
-
-### Fixed
-
 - The dark-theme contrast scan no longer fails on `:root`, the name axe gives
   a node it could not address once the page re-rendered it; the Settings route
   left one such node behind on any dark theme, one run in two.
@@ -252,50 +260,154 @@ Release notes for 0.9.3 and earlier are available in the
   "no task without a project". A search in the sidebar lists exactly the tasks
   the backend counted, including those matched only by their description
   (KT-1351, #237).
-
-### Fixed
-
 - Opening an audit validation from the project page (audit timeline,
   tech-debt validation or disputes link, docs check panel, a partial audit
   that re-verified unchanged sections) opens that discussion again, instead
   of the last discussion viewed, which could belong to another project
   (#421).
+- A foreach child refused for quota waits and resumes through its parent
+  instead of failing its item (KT-1556): 19 to 31 of 40 PR reviews were lost
+  this way. The parent run goes to `WaitingQuota`, reclaims the same child at
+  the refused step, and does not replay items that already failed in the same
+  sweep (no duplicate PR comments). Claude's short "limit · resets …" wordings
+  are classified as quota; "Context limit: reset the conversation" is not. The
+  run page no longer offers Resume on a sub-workflow child.
+- A quota pause no longer spends a run's Timeout guard, which now measures
+  active runner time (persisted, so a restart keeps it). A reset announced past
+  the old deadline schedules a wake like any other instead of leaving the run
+  in `WaitingQuota` for good; runs parked that way by the old engine wake from
+  a reset less than a day old (KT-1562, KT-1563).
+- A quota fallback chain remembers every provider that refused, so two
+  refusals without a reset escalate instead of bouncing (KT-1564).
+- An undelivered worker parks as a pending resume and a woken worker adopts it
+  (KT-1540).
+- A burst of peer wake-ups starts one room-agent turn instead of one turn per
+  message, which produced near-identical replies a minute apart (KT-1539).
+- A room's native agent can follow, review, stop, resume and reassign the
+  execution it launched; before, only a joined CLI session could (#241).
+- An MCP join moves the session link only after its binding is saved
+  (KT-1566).
+- An HTTP agent past a tool's per-turn ceiling stops after a few refusals:
+  within one response, refusals past 8 are dropped and the model is told how
+  many; refusal-only rounds lead to a synthesis, then a hard stop; the room
+  gets at most two trace lines per tool and round plus a summary (KT-1545).
+- Tool calls some OpenAI-compatible models write as `###Call:name{...}###`
+  text are stripped from HTTP chat replies, and a first turn made only of them
+  is retried once (KT-1543, #472).
+- A 401 on a cached OAuth2 or token-exchange bearer clears the entry, mints
+  once more and retries once, instead of failing until the guessed hour runs
+  out (KT-1067, #282).
+- The Copilot host sync keeps every hand-written MCP entry, like Codex, and
+  the user's Copilot or Codex config is copied to `.kronn-backup.1` before
+  Kronn's first write (KT-1036, #278).
+- In Docker, network exposure follows `KRONN_BIND`: Settings shows a note
+  naming it instead of a switch that changed nothing and asked for a restart,
+  and the route refuses with the same pointer (KT-1066, #281).
+- An unknown value or key in `config.toml` no longer resets every setting
+  (KT-1513). A credential this build cannot represent is never dropped: once
+  the encrypted store holds the credentials it is kept in
+  `config.toml.preserved.enc` (`0600`). See `docs/operations/key-management.md`.
+- The "Add a project" bootstrap form lets the user pick the agent and
+  reasoning tier instead of silently running the first audit-capable agent;
+  the endpoint refuses with a 422 an agent the form would not offer
+  (KT-1591).
+- A Kronn write in flight no longer sends re-read docs back to the
+  revalidation plan (KT-1590).
+- Docs edited outside Kronn on a validated project are flagged on step 4,
+  which offers to approve them as they are (human only, refused while a
+  citation is broken) or to fix the broken citations first (KT-1489, #406).
+- Audit card errors name the refused TD id and, when the central
+  `inconsistencies-tech-debt.md` exists but cannot be read, its real cause
+  (#258).
+- Commits reachable from `origin/HEAD` are no longer checked as the worker's
+  identity trailers at delivery (KT-1498).
+- An external API base keeps a host named `v1` while `/v1` normalization
+  stays pinned (KT-668).
+- The CI verdict no longer goes red while it waits: earlier gate check runs
+  on the same head are marked "Superseded", a CI run that starts after the
+  verdict is accepted (KT-1230, #288), and a verdict that outlives its
+  upstream run stays pending and is re-armed when CI completes, instead of
+  cancelling itself red (KT-1586).
+- Flaky tests fixed at the root: browser storage cleared after each frontend
+  test (KT-1057), a simulated restart that erased a parallel test's warm-up
+  claim (KT-1565), a disk-report check tripped by a temp dir name (KT-1567),
+  the anti-hallucination mode changed only through a locked, restoring
+  override (KT-1569), the OllamaCard registry re-check (KT-1588) and new-tab
+  detection in the routing e2e test (KT-1589).
+
+### Security
+
+- Settings › Security and system tells its three security mechanisms apart
+  (KT-1534). The authenticator has its own card (`#settings-authenticator`,
+  between the recovery phrase and the trust levels) with numbered enrolment
+  steps; it names the real `human-admin-secret` path from the server (macOS
+  `~/Library/Application Support/com.kronn.kronn/`, Docker `KRONN_DATA_DIR`)
+  instead of a Linux path given for every platform, says when agents can read
+  that file too, and how to get a new secret (`recover-admin-secret`). The
+  network access token card follows the server (`auth_token_set` on
+  `GET /api/config/network-exposure`) instead of this browser's stored copy:
+  after turning on network exposure it no longer says « désactivé » and offers
+  to create a token that would replace the one peers use. The risk panel puts
+  the missing authenticator first, links to its card and shows no
+  acknowledgement until one is set up; « coffre Kronn » becomes « dossier de
+  données de Kronn ». Once an authenticator is enrolled, the admin secret alone
+  no longer mints a publication grant, rotates the admin secret or rotates
+  another grant's secret: those routes ask for the strong confirmation too (a
+  holder renewing its own grant does not; before an enrolment nothing changes;
+  the `recover-admin-secret` recovery is untouched). The admin-secret hints
+  (first enrolment and replacement) say Kronn generated the secret (at first
+  start, or at the last recovery or rotation) and that it proves the machine
+  owner; once an authenticator is enrolled, enrolling or revoking a credential,
+  rotating a secret with it and replacing the authenticator also need its code
+  (listing does not). The claim about who reads the file is scoped to what the
+  sandbox covers: agents Kronn launches lose the data folder while its
+  protection is on, a CLI you run yourself can read it, so enrol before handing
+  it tasks.
+- A safe plugin export no longer leaks a secret held in the plugin definition
+  (KT-1040). Without values the bundle replaced only environment values and
+  copied the definition whole: a token in a URL (query, path, user info, host),
+  a literal header, stdio arguments, a description, a TokenExchange body or
+  endpoint left in clear. The export is now an allow-list: names and env-key
+  names with no token-shaped word, `${ENV.…}` references, URL origins with a
+  clean host, plain endpoint paths and catalogue values stay; every other value,
+  the config label and env-key names included, becomes a named placeholder
+  `${ENV.KRONN_EXPORT_<FIELD>}` that the import review lists and asks for, and
+  that the import puts back with its JSON type (one left empty is named in a
+  warning and by the plugin's first call). Kronn's own plugin ids are kept when
+  the name they derive from is, and any other id gets a fresh one shared by the
+  configs of that server; a catalogue plugin round-trips with no placeholder.
+  The per-plugin export masks the same way, and its file import accepts the
+  placeholders and names those left; the export with values is unchanged. Hosts
+  and plain lowercase paths are only shape-checked, and so are name-like values
+  (names, labels, header names, scopes, the JSONPath, env-key and reference
+  keys, body keys, plain-slug ids): an all-letter word up to 20 characters and a
+  letter-digit word up to 8 (`OAuth2`, `GPT4`) outside a segmented run like
+  `4B7D-9F1C` are kept, so keep secrets out of them or use `${ENV.KEY}`.
+- Agent processes Kronn launches lose the Kronn data directory to the OS
+  sandbox (Seatbelt, bubblewrap); the API port and the network stay open, and
+  `recovery.key` joins the secret names (KT-1495).
+- Once an authenticator is enrolled, secret and destructive routes (vault
+  reset, import, token regeneration, recovery passphrase change, sensitive
+  deletions) require the strong confirmation, through one gate for every
+  caller. The recovery routes stay open (KT-1496).
+- A bridge-token GET with a non-JSON body is refused with 415; an empty GET
+  is still accepted (KT-1068). A test keeps `Own` bridge routes on discussion
+  targets only (KT-1069, #283).
+- `minimatch` 11.0.3 for GHSA-g3hv-75wg-m249 (ReDoS through eslint).
+- The security scan is green again (KT-1533). `calamine` moves to 0.37, so `zip`
+  8.6 leaves both lockfiles and RUSTSEC-2026-0429 no longer applies to the
+  spreadsheet reader. The only remaining `zip` < 9 is the build-time copy
+  `utoipa-swagger-ui` 9 uses to unpack its own bundled Swagger UI. The advisory is
+  ignored for that path with a dated rationale in `backend/.cargo/audit.toml`, and
+  moving to `utoipa` 6 is tracked separately. `calamine` then moves to 0.38
+  for RUSTSEC-2026-0436: 0.37 panics or allocates without bound on a malformed
+  CFB/OLE2 file (a legacy `.xls`), and Kronn reads untrusted spreadsheets in
+  context files.
 
 ## [0.15.1] - 2026-10-22
 
 ### Added
 
-- Trust levels: say "I trust my agents here" at the scope you choose, with the
-  risks spelled out, instead of approving every step. Three levels (Standard,
-  Trusted, Full access) set for the instance (Settings › Trust levels), a
-  workflow or a room; the narrowest explicit setting wins. Under Trusted, an
-  agent-written Quick Exec or workflow Exec step that passes values to a CLI
-  is active at once, a room's request to read or plan in another of your
-  projects is granted, and integration validations may reach Docker; Full
-  access also runs validations without the sandbox. Choosing a level opens a
-  risk panel listing exactly what changes and needs an explicit
-  confirmation; an active level shows a badge on the room, the workflow and
-  the settings, revocable in one click, and every approval it grants is
-  journalled ("granted by trust level X"). Everything a level approves runs
-  under an OS sandbox (macOS Seatbelt, Linux bubblewrap) that closes Kronn's
-  own data (database, encryption key, recovery key, configuration, backups)
-  and its API port to those commands and leaves the rest of your machine
-  open, as in your terminal; a host with no sandbox refuses Trusted and Full
-  access with the reason. Raising a level needs a code from an authenticator
-  app (TOTP, any app; ten single-use recovery codes; enrolled in Settings ›
-  Security), so a command an agent approved cannot raise its own level, even
-  from this machine; lowering never needs it. Lowering a level takes back
-  the approvals it granted and the journal lists them. The risk panel says
-  what stays reachable (project databases, the network, Docker, other
-  repositories, the credentials of other tools) and what stays closed. The
-  journal keeps 10 000 rows or 180 days. No level lets an agent change a trust
-  setting, skip a delete confirmation, or lends its trust to a P2P peer, and a
-  room that edits a workflow never takes that workflow's level. Elevation
-  cards keep refuse / this conversation / this project and now point to the
-  global setting. Code write on other projects and host access for agents are
-  in the policy table for Full
-  access; their gates ship with their own tickets (KT-1492, builds on
-  KT-1490, KT-1474, KT-1433).
 - Custom skills keep a version history, like Quick Prompts. Every change
   is saved as a full copy of the skill; a save that changes nothing adds
   no version, and a skill written before this release gets its current

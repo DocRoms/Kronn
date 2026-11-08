@@ -17,52 +17,32 @@
 <p align="center">
   <a href="https://github.com/DocRoms/Kronn/stargazers"><img src="https://img.shields.io/github/stars/DocRoms/Kronn?style=social" alt="GitHub stars" /></a>
   <a href="https://github.com/DocRoms/Kronn/commits/main"><img src="https://img.shields.io/github/last-commit/DocRoms/Kronn?label=last%20commit" alt="Last commit" /></a>
+  <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/contributions-welcome-brightgreen" alt="Contributions welcome" /></a>
+  <a href="https://github.com/DocRoms/Kronn/issues?q=is%3Aopen+label%3A%22good+first+issue%22"><img src="https://img.shields.io/github/issues/DocRoms/Kronn/good%20first%20issue?label=good%20first%20issues&color=7057ff" alt="Open good first issues" /></a>
 </p>
 
 **Run your CLI coding agents (Claude Code, Codex, Gemini CLI, OpenCode…), local models with Ollama, and HTTP providers such as LiteLLM, NVIDIA and OpenRouter from one self-hosted dashboard, with shared MCPs, secrets and repeatable workflows.**
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.15.1 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.15.2 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
-## What's new in 0.15.1
+## What's new in 0.15.2
 
-0.15.1 makes the AI-doc audit trustworthy, lets you test prompt and skill
-versions on real runs before shipping them, and gives agents local media.
+Kronn 0.15.2 hardens the foundations: your secrets stay yours, quotas cost no work, and green CI means green.
 
-- **Versions and shadow runs:** custom skills keep a version history like
-  Quick Prompts, and a step can pin the skill or Quick Prompt version it
-  loads. A workflow can run a shadow alongside each normal run, on the same
-  inputs with other versions, skipping everything that acts outside Kronn;
-  the run list compares both and a Page promotes the better version in one
-  click. Agents read and write versions; exports carry the skills.
-- **An audit you can trust:** the audit checks what its documents claim
-  against the repository, no longer reports committed secrets as absent,
-  repairs more of what it used to fail on and hands a human the rest.
-  « Revalider l'audit » also judges whether each doc is still relevant.
-- **Briefing and existing docs:** the briefing records the team's rules,
-  existing documentation and linked projects, reopens with its answers, and a
-  repository that already has docs can receive the AI-doc template by merge.
-  Tech debt is settled, or turned into tasks, from the project card.
-- **Local image and video:** ComfyUI generates images and videos on your
-  machine, LiteLLM image generation works, and an HTTP agent can use an image
-  attached to the discussion as its source.
-- **Rooms across projects:** a room reaches another project only when a human
-  grants it, read or write; the native Claude Code agent then reads it.
-- **Orchestration you can leave running:** arbitration cards are never lost,
-  a Definition of Done edited mid-run is adopted, finished executions and
-  lanes give their disk back, and orchestration messages can be hidden.
-- **Navigation:** every view has its own address; Back, Forward, reload and
-  Ctrl/Cmd-click work as in any web page.
-- **A new dark theme:** Dark (and System on a dark OS) is now VS Code's Dark
-  Modern palette; the former purple theme becomes the secret Arcade theme.
+- **Secrets out of agents' reach:** OS sandbox on Kronn's data dir, strong confirmation, safe plugin export.
+- **Quotas without lost work:** work waits, then returns to its original provider; no silent fallback.
+- **Rooms that code across projects:** grant a room `code` on another project's checkout.
+- **Docker without compiling:** `start` pulls multi-arch release images.
+- **A CI you can trust:** flaky tests fixed at the root, no more red while it waits.
 
-Earlier releases are described in the [CHANGELOG](CHANGELOG.md).
+Full list of changes in the [CHANGELOG](CHANGELOG.md#0152---2026-11-08).
 
 ## Contents
 
-- [What's new in 0.15.1](#whats-new-in-0151)
+- [What's new in 0.15.2](#whats-new-in-0152)
 - [60-second pitch](#60-second-pitch)
 - [The Kronn way: engineering, not prompting](#the-kronn-way-engineering-not-prompting)
 - [Quick start](#quick-start)
@@ -123,17 +103,15 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.15.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.15.2 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
 
-From **0.15.2** on, `./kronn start` pulls the published images
-(`ghcr.io/docroms/kronn-backend` and `-frontend`, amd64 and arm64) and compiles
-nothing, so a small machine is fine. A checkout of **0.15.1 or earlier** has no
-such start: its `make start` compiles the backend on your machine, which needs
-about 20 GB of memory for Docker. On a machine with less, use the desktop
-installer above until 0.15.2 is out.
+`./kronn start` pulls the published images (`ghcr.io/docroms/kronn-backend` and
+`-frontend`, amd64 and arm64) and compiles nothing, so a small machine is fine.
+A checkout older than **0.15.2** compiles the backend instead, which needs about
+20 GB of memory for Docker: on a smaller machine, use the desktop installer.
 
 On `main`, `VERSION` stays at the last release: `make start` runs that release's
 published image, not your local code (use `make start-build` for your edits).
@@ -168,7 +146,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.15.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.15.2 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140
@@ -282,12 +260,12 @@ The whole tree is injected as project context into every Discussion, Quick Promp
 
 **Drift detection is granular**: each section tracks its source files (e.g. `coding-rules.md` watches `package.json` + `tsconfig.json` + `rustfmt.toml`). When those drift, the section is flagged as stale and you can re-audit just that step. No re-running the whole audit when one config changed.
 
-**What 0.8.2 hardens (from real-world misses)**
+**Baselines learned from real-world misses**
 
 - **Mandatory baseline checklist**: Step 8 now ALWAYS scans 5 categories that are too common to skip (Dockerfile USER / display_errors / opcache / HEALTHCHECK, compose resource limits, CI quality gate + `StrictHostKeyChecking`, `.env*` tracking/deploy hygiene without reading secret values, web a11y/CSP). Each item produces an explicit "verified present / verified absent / TD" line so you trust the audit didn't just look the other way.
 - **Anti-repetition memory**: each audit reads existing TDs as priors and REUSES their IDs instead of churning slugs. An `audit_history` YAML block on each TD detail file tracks every pass. A reconciliation report (`_reconciliation-<date>.md`) classifies dropped TDs as `Fixed / Stale / Missed / Uncertain` so nothing silently vanishes between audits.
 - **Two-tier Status**: `Verified in source` (the agent opened the file and confirmed) vs `Inferred` (pattern-matched only). Phase 3 validation skips Verified ones to save your time.
-- **Specialized audit kinds**: since 0.9.0 the Full audit is **chained** — 9 docs steps then every focused pass (`Security`, `Docker`, `Performance`, `Accessibility`, `Database`, `ApiDesign`, `CodeQuality`) in one launch (16 steps total), each opening with a relevance gate ("not applicable → one line and move on"). The focused kinds — plus `Drift`, `Rgaa` and a `Custom` escape hatch — remain launchable standalone. Each one writes to its own index file so it doesn't clobber the Full audit's TDs.
+- **Specialized audit kinds**: the Full audit is **chained** — 9 docs steps then every focused pass (`Security`, `Docker`, `Performance`, `Accessibility`, `Database`, `ApiDesign`, `CodeQuality`) in one launch (16 steps total), each opening with a relevance gate ("not applicable → one line and move on"). The focused kinds — plus `Drift`, `Rgaa` and a `Custom` escape hatch — remain launchable standalone. Each one writes to its own index file so it doesn't clobber the Full audit's TDs.
 - **Health badge with cluster recommendations**: every run is persisted in `audit_runs` with duration, severity counts (Critical × 12 + High × 4 + Medium × 1.5 + Low × 0.3 = score 0–100) and a `recommendations_json` list. When ≥3 findings cluster in one dimension (e.g. 5 Docker TDs), the dashboard surfaces "Run a focused Docker audit" inline.
 - **Community-standards gate**: if your project shows OSS intent (LICENSE present OR remote on github/gitlab/codeberg OR README mentions "contribute"), Step 8 also flags missing `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, issue/PR templates. Private projects skip this block entirely.
 
@@ -295,7 +273,7 @@ This is what makes Kronn a **knowledge-persistence layer with strict baselines**
 
 ### 7. Close the loop: audit → tickets → AutoPilot → PR
 
-The audit isn't a doc that sits in a folder. **0.8.2 wires it into action.**
+The audit isn't a doc that sits in a folder. **Kronn wires it into action.**
 
 When the AI confirms `KRONN:VALIDATION_COMPLETE` on the validation discussion, the page surfaces two CTAs:
 
@@ -310,9 +288,9 @@ The 9-step preset uses Kronn's `désagentification` discipline: only `analyze`, 
 
 **The killer pattern this unlocks**: create a GitHub issue from your phone → AutoPilot's Tracker trigger picks it up → the workflow drafts the PR while you're away from the keyboard, pausing at `plan_gate` for your approval and at `ready_gate` before the PR is merged. *Real autonomy with two human checkpoints.*
 
-#### Exec steps now survive worktree-only environments
+#### Exec steps survive worktree-only environments
 
-The `run_tests` step is typically `npm test`, `cargo test`, `composer test`, `pytest`, … — all of which need vendored deps that **don't exist in a fresh git worktree** (no `node_modules`, no `vendor`, no `target`). Each `Exec` step now has an optional **Setup phase** that fires *immediately before* the main command:
+The `run_tests` step is typically `npm test`, `cargo test`, `composer test`, `pytest`, … — all of which need vendored deps that **don't exist in a fresh git worktree** (no `node_modules`, no `vendor`, no `target`). Each `Exec` step has an optional **Setup phase** that fires *immediately before* the main command:
 
 ```
 ☑ This step runs in a git worktree — install dependencies first
@@ -326,15 +304,15 @@ Same allowlist + same timeout. Setup fails → main is NOT executed and you see 
 
 For dockerized projects, the `docker-in-docker` volume mismatch is solved at the infra layer (self-mount + host-path translation), so `docker compose run --rm svc <cmd>` works from a worktree without any extra config.
 
-### 8. Catch hallucinations before they spread (0.8.7)
+### 8. Catch hallucinations before they spread
 
-AI agents confidently assert file paths that don't exist, functions they invented, versions that aren't yours. When one of those lies gets persisted into `docs/AGENTS.md`, every future agent inherits it as "established truth". **0.8.7 ships a two-tier guard that runs on every agent reply.**
+AI agents confidently assert file paths that don't exist, functions they invented, versions that aren't yours. When one of those lies gets persisted into `docs/AGENTS.md`, every future agent inherits it as "established truth". **Kronn runs a two-tier guard on every agent reply.**
 
 Three modes, defaulting to `warn`, picked in **Settings → Sourcing &amp; Anti-hallucination** (or `config.toml`) :
 
-- **`off`** — no directive, no checking. The pre-0.8.7 behaviour.
+- **`off`** — no directive, no checking.
 - **`warn` (default)** — each agent receives a sourcing directive : *"cite a `file:line`, URL, or `user-confirmed` for every non-trivial claim; if you can't, say so plainly and verify before asserting."* Kronn then mechanically inspects each `[src: …]` citation the agent emits — path-jailed to the project root (no FS escape), checks the file exists and the line range is in bounds. A non-blocking per-message pill surfaces problems : **red** for fabricated citations (the cited file/line does not exist, or the source type is `training-data` = model's prior knowledge, auto-rejected), **amber** for confident claims left without any anchor. Clicking the pill opens a detail panel listing the bad citations.
-- **`enforce` (0.8.8)** — warn, plus refuses writes to `AGENTS.md curated="ai"` sections whose citations don't resolve.
+- **`enforce`** — warn, plus refuses writes to `AGENTS.md curated="ai"` sections whose citations don't resolve.
 
 **Honest by design** : `verified` means the citation *exists*, not that the claim is *true* (catching "real but irrelevant" citations is the job of a future LLM-judge layer). The pill is non-blocking — it's a signal you decide to act on, not a hard gate. Language-agnostic + compression-proof + ungameable : you can't fabricate a file or line number that actually exists in your repo.
 
@@ -347,7 +325,7 @@ The full convention is an open spec (`backend/docs/conventions/agents-md-format-
 ### Objects you create
 
 - **Project**: a git repo Kronn knows about. Tracks AI context (`docs/AGENTS.md`) plus a structured audit tree (`docs/glossary.md`, `docs/repo-map.md`, `docs/architecture/overview.md` and friends) covering legacy hotspots, test gaps, coding conventions and per-MCP capabilities. Each section has drift detection: re-audit only what's stale.
-- **Discussion**: a chat thread bound (or not) to a project. Streams in real-time via SSE, persisted in SQLite, optionally isolated in a git worktree. Three flavours: **(a)** single agent (default), **(b)** multi-agent debate (configurable rounds), **(c)** **cross-agent room (0.8.6)** — invite N CLIs (Claude Code, Codex, Gemini, Kiro, Vibe…) into the same discussion via a one-click `[+ Inviter]` button, each agent talks via MCP tools (`disc_append`, `disc_wait_for_peer`), no human messenger needed. Validated live on a 3-agent roleplay session.
+- **Discussion**: a chat thread bound (or not) to a project. Streams in real-time via SSE, persisted in SQLite, optionally isolated in a git worktree. Three flavours: **(a)** single agent (default), **(b)** multi-agent debate (configurable rounds), **(c)** **cross-agent room** — invite N CLIs (Claude Code, Codex, Gemini, Kiro, Vibe…) into the same discussion via a one-click `[+ Inviter]` button, each agent talks via MCP tools (`disc_append`, `disc_wait_for_peer`), no human messenger needed. Validated live on a 3-agent roleplay session.
 - **Task / discussion plan**: one ranked task can be global or linked to several projects and discussions. It carries subtasks, Definition of Done, links, tags and blockers; the global Planning backlog, project Tasks view, discussion panel and MCP tools all edit the same record.
 - **Quick Prompt**: reusable prompt template with `{{variables}}` and conditional sections. One-shot, fan-out, or chained.
 - **Quick Exec**: reusable shell-free CLI collector with literal arguments,
