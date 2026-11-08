@@ -15,7 +15,7 @@ escalates on the `N+1`-th (`new_rounds > max_review_rounds`).
 - **Unlimited:** no cap. It is stored in the existing `NOT NULL INTEGER` columns as a **sentinel**,
   `UNLIMITED_REVIEW_ROUNDS = u32::MAX` (4294967295) — never `0`, so the `> max` comparison simply never
   fires and no migration is needed. APIs and the UI show it as `unlimited` / `∞`.
-  `[src: file: backend/src/models/setup.rs:157#UNLIMITED_REVIEW_ROUNDS]`
+  `[src: file: backend/src/models/setup.rs:159#UNLIMITED_REVIEW_ROUNDS]`
 
 Unlimited removes the **round** cap only. The escalations for real stalls (no delivery, watchdog,
 quota, integration failures) are unchanged. What it does not bound is a worker looping on a review that
@@ -72,7 +72,7 @@ touches an execution that exists.
 channels now refuse an argument the tool does not declare, naming it and listing the accepted ones:
 the Python bridge checks against its own `inputSchema` and the native tool layer against its catalogue.
 `[src: file: backend/scripts/disc-introspection-mcp.py:6124#_refuse_unknown_arguments]`
-`[src: file: backend/src/api/agent_tools.rs:1381#unknown_argument_refusal]`
+`[src: file: backend/src/api/agent_tools.rs:1382#unknown_argument_refusal]`
 Note that `task_exec_prepare` does not declare `base_rev` / `idempotency_key`: those belong to the launch.
 
 **Absent is not `null`.** Omitting `max_review_rounds` takes the setting; an explicit `null` is refused
@@ -114,7 +114,7 @@ Every declaration is paid for on every session. The new arguments are `{"type": 
 with their contract in the `task_exec_prepare` / `task_exec_reassign` manuals; the bytes were found by
 moving the return shape of `workflow_run_status` into its manual and tightening three descriptions, and
 `CATALOGUE_MAX_BYTES` went **down** by 33 B (84,450 → 84,417).
-`[src: file: backend/scripts/ci/mcp_surface_budget.py:171#CATALOGUE_MAX_BYTES]`
+`[src: file: backend/scripts/ci/mcp_surface_budget.py:173#CATALOGUE_MAX_BYTES]`
 
 ## Tests
 

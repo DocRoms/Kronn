@@ -50,7 +50,7 @@ that quiet returns cost nothing. The bridge's runtime functions did not change.
 [src: file: backend/scripts/disc-introspection-mcp.py:10085-10121#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/disc-introspection-mcp.py:10432-10433#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/disc-introspection-mcp.py:10822-10826#ROOM_WORK_PROTOCOL]
-[src: file: backend/scripts/disc-introspection-mcp.py:12233#ROOM_WORK_PROTOCOL]
+[src: file: backend/scripts/disc-introspection-mcp.py:12236#ROOM_WORK_PROTOCOL]
 [src: file: backend/scripts/test_disc_introspection_mcp.py:12592-12642#JoinedRoomWorkProtocolTests]
 
 ## Deaf windows in the bridge wait (KT-703)

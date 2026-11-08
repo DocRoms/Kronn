@@ -12,7 +12,7 @@ calls it did not have. [src: file: backend/src/agents/runner.rs:4222-4226#is_htt
 
 So an HTTP agent that the flag excludes still has a catalogue, `disc_read`
 included, and can read a discussion back on its own.
-[src: file: backend/src/api/agent_tools.rs:1465-1484#disc_read]
+[src: file: backend/src/api/agent_tools.rs:1466-1485#disc_read]
 
 Vibe likewise has MCP: Kronn synchronises its servers into `.vibe/config.toml`.
 [src: file: backend/src/core/mcp_scanner.rs:1918-2038#sync_vibe_project_config]

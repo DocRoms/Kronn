@@ -37,7 +37,7 @@ An unknown project or discussion fails through the shared foreign-key checks;
 a failed creation does not leave a partial Page.
 [src: file: backend/src/api/agent_page_tools.rs:84-116#page_in_scope]
 [src: file: backend/src/api/agent_page_tools.rs:118-169#scoped_links]
-[src: file: backend/src/api/agent_tools.rs:4839-4841#project_is_in_scope]
+[src: file: backend/src/api/agent_tools.rs:4841-4843#project_is_in_scope]
 [src: file: backend/src/api/agent_page_tests.rs:18-99#native_pages_follow_mcp_project_scope_inheritance_and_selector_contracts]
 [src: file: backend/src/api/agent_page_tests.rs:86-88#standalone]
 [src: file: backend/src/api/agent_page_tests.rs:110-173#native_page_validation_failures_leave_no_partial_page]
@@ -56,7 +56,7 @@ Workflows also publish data through the `PublishPageData` step.
 Rendering still uses the existing Page viewer and its network-denying CSP;
 persisting an action block never launches its automation.
 [src: file: backend/src/api/agent_tools.rs:358-363#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2590-2599#declarations_for_family]
+[src: file: backend/src/api/agent_tools.rs:2591-2600#declarations_for_family]
 [src: file: backend/src/api/agent_tools.rs:1518-1542#workflow_tool_catalogue]
 [src: file: backend/src/api/agent_tools.rs:1906-1908#execute_page_tool]
 [src: file: backend/src/api/agent_tools.rs:5926-5984#workflow_catalogue_is_bounded_and_contains_no_planning_mutation]
@@ -133,4 +133,4 @@ other declaration changes, the Page delta does not. These are byte counts, not
 provider token measurements. The bridge
 declarations keep their own byte ceiling (84,396 bytes, `mcp_surface_budget.py`).
 [src: file: backend/src/api/agent_page_tests.rs:380-405#native_page_surface_has_a_bounded_measured_cost]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:171#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:173#CATALOGUE_MAX_BYTES]
