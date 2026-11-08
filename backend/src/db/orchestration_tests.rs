@@ -2728,6 +2728,74 @@ fn an_announced_reset_is_kept_for_the_outage_and_dropped_once_it_has_passed() {
     assert_eq!(escalate(&dispatches[3], None), None);
 }
 
+// ── KT-1564 — a quota refusal expires at the reset its provider announced.
+
+#[test]
+fn a_quota_escalation_stops_blocking_once_the_announced_reset_has_passed() {
+    let conn = setup();
+    let stamp = |at: chrono::DateTime<Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let exec = launch_working_execution_for(&conn, "t-kt1564-expiry", 1260, "ClaudeCode");
+    let dispatch = attach_quota_dispatch(&conn, &exec, AgentType::ClaudeCode);
+    let reset = Utc::now() + chrono::Duration::hours(2);
+    escalate_execution_for_dispatch_quota(&conn, &dispatch, "ClaudeCode", Some(reset)).unwrap();
+
+    assert!(provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+    assert!(
+        executions_past_quota_reset(&conn, Utc::now())
+            .unwrap()
+            .is_empty(),
+        "nothing is handed back before the announced instant"
+    );
+
+    let after = reset + chrono::Duration::minutes(1);
+    assert!(!provider_has_open_quota_exhaustion_at(&conn, "ClaudeCode", None, after).unwrap());
+    assert_eq!(
+        executions_past_quota_reset(&conn, after).unwrap(),
+        vec![exec.clone()]
+    );
+    // The row itself is untouched: only the sweep or a human closes it.
+    assert_eq!(
+        get_task_execution(&conn, &exec).unwrap().unwrap().status,
+        TaskExecutionStatus::Escalated
+    );
+    // A passed instant behaves the same through the live clock.
+    conn.execute(
+        "UPDATE provider_quota_generations SET reset_at = ?1 WHERE provider = 'ClaudeCode'",
+        [stamp(Utc::now() - chrono::Duration::seconds(5))],
+    )
+    .unwrap();
+    assert!(!provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+}
+
+#[test]
+fn a_refusal_that_announced_no_reset_never_expires_on_its_own() {
+    let conn = setup();
+    let exec = launch_working_execution_for(&conn, "t-kt1564-unannounced", 1261, "ClaudeCode");
+    let dispatch = attach_quota_dispatch(&conn, &exec, AgentType::ClaudeCode);
+    escalate_execution_for_dispatch_quota(&conn, &dispatch, "ClaudeCode", None).unwrap();
+
+    let far = Utc::now() + chrono::Duration::days(400);
+    assert!(provider_has_open_quota_exhaustion_at(&conn, "ClaudeCode", None, far).unwrap());
+    assert!(executions_past_quota_reset(&conn, far).unwrap().is_empty());
+}
+
+#[test]
+fn only_the_execution_still_on_the_refused_provider_is_due() {
+    let conn = setup();
+    let on_claude = launch_working_execution_for(&conn, "t-kt1564-claude", 1262, "ClaudeCode");
+    let on_codex = launch_working_execution_for(&conn, "t-kt1564-codex", 1263, "Codex");
+    let dispatch = attach_quota_dispatch(&conn, &on_claude, AgentType::ClaudeCode);
+    let reset = Utc::now() - chrono::Duration::minutes(1);
+    escalate_execution_for_dispatch_quota(&conn, &dispatch, "ClaudeCode", Some(reset)).unwrap();
+    // Escalated by something else than a quota: never returned by a quota reset.
+    escalate_with_reason(&conn, &on_codex, "activity_timeout");
+
+    assert_eq!(
+        executions_past_quota_reset(&conn, Utc::now()).unwrap(),
+        vec![on_claude]
+    );
+}
+
 #[test]
 fn same_rearm_key_is_independent_per_provider() {
     let conn = setup();

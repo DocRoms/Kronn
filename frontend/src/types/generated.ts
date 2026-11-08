@@ -6514,7 +6514,20 @@ allow_self_review: boolean, status: OrchestrationRunStatus,
  * Durable principal/campaign control. A paused or human-gated run cannot
  * launch work even though its coarse lifecycle is still `Active`.
  */
-control_state: OrchestrationControlState, control_reason?: string | null, timeout_secs?: number | null, max_cli_concurrent_executions: number, allowed_agents: Array<AgentType>, default_worker?: CampaignWorkerSelection | null, auto_continue: boolean, created_at: string, updated_at: string, };
+control_state: OrchestrationControlState, control_reason?: string | null, timeout_secs?: number | null, max_cli_concurrent_executions: number, allowed_agents: Array<AgentType>, default_worker?: CampaignWorkerSelection | null, auto_continue: boolean,
+/**
+ * Explicit opt-in (KT-1564): when a worker's provider refuses a dispatch
+ * for quota, Kronn may move the execution to another provider of
+ * `allowed_agents` (or the `quota_fallback_agents` a single-task launch
+ * named) and brings it back after the announced reset. Off by default;
+ * `allowed_agents` alone never authorizes a switch.
+ */
+quota_fallback: boolean,
+/**
+ * The alternatives a single-task launch named for its own fallback. Empty
+ * for a campaign, which falls back among `allowed_agents`.
+ */
+quota_fallback_agents: Array<AgentType>, created_at: string, updated_at: string, };
 
 /**
  * The V1 shape is one implicit run per launch (`single_task`); `campaign` is

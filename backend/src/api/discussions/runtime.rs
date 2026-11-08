@@ -746,11 +746,29 @@ fn select_quota_alternative(
         .cloned()
 }
 
+/// KT-1564 — a provider fallback on quota exhaustion needs the campaign's own,
+/// explicit `quota_fallback` opt-in. `allowed_agents` only lists the providers
+/// a worker may be given; it is never read as "switch to them when the quota
+/// is spent". The move keeps the execution's tier and profile (a model name is
+/// provider-specific and is dropped), remembers the worker it leaves and the
+/// reset the refusal announced, and the watchdog hands it back after that reset.
 async fn try_quota_provider_fallback(
     state: &AppState,
     job: &crate::db::agent_dispatch::AgentDispatchJob,
+    announced_reset: Option<chrono::DateTime<chrono::Utc>>,
 ) -> anyhow::Result<Option<(crate::models::AgentType, String)>> {
     let available_agents = crate::api::orchestration::available_agent_types_for_state(state).await;
+    try_quota_provider_fallback_among(state, job, announced_reset, available_agents).await
+}
+
+/// [`try_quota_provider_fallback`] with the providers known to be available
+/// given, so the policy is testable without the CLIs installed on the host.
+pub(crate) async fn try_quota_provider_fallback_among(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    announced_reset: Option<chrono::DateTime<chrono::Utc>>,
+    available_agents: Vec<crate::models::AgentType>,
+) -> anyhow::Result<Option<(crate::models::AgentType, String)>> {
     let dispatch_id = job.id.clone();
     let candidate = state
         .db
@@ -774,27 +792,84 @@ async fn try_quota_provider_fallback(
                 &execution.orchestration_run_id,
             )?
             .context("quota fallback orchestration run vanished")?;
-            let Some(alternative) =
-                select_quota_alternative(&run.allowed_agents, &current, &available_agents)
+            if !run.quota_fallback {
+                return Ok(None);
+            }
+            // A launch that named its own alternatives falls back among those;
+            // a campaign among the allow-list it opted in with.
+            let candidates = if run.quota_fallback_agents.is_empty() {
+                &run.allowed_agents
+            } else {
+                &run.quota_fallback_agents
+            };
+            // The provider that just refused is remembered with the reset it
+            // announced: a fallback leaves no escalation behind, and a later
+            // one must not walk back into it before it is back.
+            crate::db::orchestration::note_provider_quota_refusal(
+                conn,
+                &crate::db::orchestration::agent_type_to_db(&current),
+                announced_reset,
+            )?;
+            // Never a candidate: the worker the execution was first given (the
+            // sweep hands it back once its reset has passed, a fallback does
+            // not), and any provider whose refusal has not reset yet.
+            let origin = crate::db::orchestration::quota_origin(conn, &execution.id)?;
+            let now = chrono::Utc::now();
+            // Providers that already refused this execution during the chain.
+            // A refusal that announced no reset leaves nothing the global
+            // clock can test: without this, two such providers would hand the
+            // execution back and forth forever.
+            let refused =
+                crate::db::orchestration::execution_refused_providers(conn, &execution.id, now)?;
+            let mut usable = Vec::new();
+            for candidate in candidates {
+                let provider = crate::db::orchestration::agent_type_to_db(candidate);
+                if origin
+                    .as_ref()
+                    .is_some_and(|origin| origin.provider == provider)
+                    || refused.contains(&provider)
+                    || crate::db::orchestration::provider_quota_unavailable_at(
+                        conn, &provider, None, now,
+                    )?
+                {
+                    continue;
+                }
+                usable.push(candidate.clone());
+            }
+            let Some(alternative) = select_quota_alternative(&usable, &current, &available_agents)
             else {
                 return Ok(None);
             };
-            Ok(Some((execution.id, alternative)))
+            let tier = execution
+                .worker_model_tier
+                .as_deref()
+                .and_then(crate::api::orchestration::model_tier_from_db);
+            Ok(Some((
+                execution.id,
+                alternative,
+                tier,
+                execution.worker_profile_id,
+            )))
         })
         .await?;
-    let Some((execution_id, alternative)) = candidate else {
+    let Some((execution_id, alternative, tier, profile_id)) = candidate else {
         return Ok(None);
     };
+    let mut target = crate::models::MessageTarget::agent(alternative.clone());
+    target.tier = tier;
     let selection = crate::models::CampaignWorkerSelection {
-        target: crate::models::MessageTarget::agent(alternative.clone()),
+        target,
         model: None,
-        profile_id: None,
+        profile_id,
     };
-    let view = crate::api::orchestration::reassign_native_execution(
+    let view = crate::api::orchestration::reassign_native_execution_as(
         state,
         &execution_id,
         selection,
-        "automatic quota fallback authorized by the campaign allow-list",
+        "automatic quota fallback: the campaign opted into a provider fallback on quota exhaustion",
+        crate::api::orchestration::ReassignCause::QuotaFallback {
+            reset_at: announced_reset,
+        },
     )
     .await?;
     state.agent_dispatch_notify.notify_one();
@@ -1186,12 +1261,15 @@ async fn fail_dispatch_job_with_outcome_kind(
             .as_ref()
             .map(|agent| format!("{agent:?}"))
             .unwrap_or_else(|| "discussion provider".into());
-        match try_quota_provider_fallback(state, job).await {
+        // The provider may have said when it resets (KT-838): a fallback keeps
+        // it to come back, and the escalation below shows it.
+        let announced_reset = super::announced_quota_reset(error, chrono::Utc::now());
+        match try_quota_provider_fallback(state, job, announced_reset).await {
             Ok(Some((alternative, target_discussion))) => {
                 let message = crate::api::orchestration::orchestrator_message(
                     format!("provider-quota-fallback:{}", job.id),
                     format!(
-                        "**Bascule automatique — quota épuisé**\n\nLe provider `{provider}` a épuisé son quota sur le dispatch `{}`. La politique KT-321 autorise `{alternative:?}`, disponible : Kronn a réassigné la même exécution dans sa sous-discussion et son worktree existants, sans perdre l'historique ni les constats.",
+                        "**Bascule automatique — quota épuisé**\n\nLe provider `{provider}` a épuisé son quota sur le dispatch `{}`. La campagne a explicitement activé le repli quota (`quota_fallback`) et autorise `{alternative:?}`, disponible : Kronn a réassigné la même exécution dans sa sous-discussion et son worktree existants, sans perdre l'historique ni les constats. Le changement de provider apparaît dans la carte de livraison ; si la limite annonce sa réinitialisation, Kronn remet l'exécution sur le worker d'origine passé cet instant.",
                         job.id
                     ),
                 );
@@ -1212,9 +1290,6 @@ async fn fail_dispatch_job_with_outcome_kind(
                 }
                 let dispatch_id = job.id.clone();
                 let provider_for_db = provider.clone();
-                // The provider may have said when it resets (KT-838). Kept for
-                // display only: Kronn never re-arms on a guessed schedule.
-                let announced_reset = super::announced_quota_reset(error, chrono::Utc::now());
                 let escalation = state
                     .db
                     .with_conn(move |conn| {
@@ -1234,10 +1309,19 @@ async fn fail_dispatch_job_with_outcome_kind(
                         job.discussion_id.clone()
                     }
                 };
+                // KT-1564 — a refusal that announced its reset closes itself.
+                let return_note = announced_reset
+                    .map(|at| {
+                        format!(
+                            " La limite annonce sa réinitialisation à {} : passé cet instant, Kronn remet l'exécution sur `{provider}` (même niveau) sans changer de provider.",
+                            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                        )
+                    })
+                    .unwrap_or_default();
                 let message = crate::api::orchestration::orchestrator_message(
                     format!("provider-quota-escalation:{}", job.id),
                     format!(
-                        "**Intervention humaine requise — quota épuisé**\n\nLe provider `{provider}` a refusé le dispatch `{}` pour limite de plan/crédits. Aucun provider alternatif explicitement autorisé n'est disponible ; Kronn ne relancera pas le même compte. Bascule de compte ou réaffectation explicite requise.",
+                        "**Intervention humaine requise — quota épuisé**\n\nLe provider `{provider}` a refusé le dispatch `{}` pour limite de plan/crédits. Aucun provider alternatif explicitement autorisé n'est disponible ; Kronn ne relancera pas le même compte avant la réinitialisation.{return_note} Sans échéance annoncée : bascule de compte ou réaffectation explicite requise.",
                         job.id
                     ),
                 );

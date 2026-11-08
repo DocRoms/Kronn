@@ -164,7 +164,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # net zero, ceiling unchanged.
 # KT-1345 + KT-1351 + #252 + #241 together, merged: measured 84_380 B.
 # KT-1491: `room_scope` levels read/plan/code, its description trimmed: 84_379 B.
-CATALOGUE_MAX_BYTES = 84_379
+# KT-1564: `task_exec_launch` takes `quota_fallback_agents` (the explicit
+# opt-in to a provider fallback on quota; the contract lives in its manual),
+# paid for by shortening five schema descriptions of the launch/prepare pair
+# that repeated their tool's manual: ceiling lowered by 36 B (84_379 -> 84_343).
+CATALOGUE_MAX_BYTES = 84_343
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

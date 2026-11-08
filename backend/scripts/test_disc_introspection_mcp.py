@@ -1804,6 +1804,34 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             with self.subTest(fact=fact):
                 self.assertIn(fact, manual)
 
+    def test_quota_fallback_agents_is_the_launch_opt_in_and_is_forwarded_only_when_given(self):
+        """KT-1564 — a provider fallback on quota is its own explicit opt-in:
+        `task_exec_launch` carries it to the backend, an absent argument sends
+        nothing (never falls back), and `task_exec_prepare` does not take it."""
+        http = mock.MagicMock(return_value={"success": True, "data": {"launchable": True}})
+        worker = {"kind": "discussion_agent", "agent_type": "Ollama"}
+        base = {
+            "task_reference": "KT-1564", "worker": worker,
+            "worker_scope_intent": "generic",
+        }
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_launch({**base, "quota_fallback_agents": ["Codex"]})
+            self.mod.call_task_exec_launch(base)
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_prepare({**base, "quota_fallback_agents": ["Codex"]})
+            self.assertIn("quota_fallback_agents", str(refused.exception))
+        bodies = [call.args[2] for call in http.call_args_list]
+        self.assertEqual(len(bodies), 2, "a refused call never reaches the backend")
+        self.assertEqual(bodies[0]["quota_fallback_agents"], ["Codex"])
+        self.assertNotIn("quota_fallback_agents", bodies[1])
+        tools = {item["name"]: item for item in self.mod.TOOLS}
+        launch = tools["task_exec_launch"]["inputSchema"]
+        self.assertIn("quota_fallback_agents", launch["properties"])
+        self.assertNotIn("quota_fallback_agents", launch["required"])
+        self.assertNotIn("quota_fallback_agents", tools["task_exec_prepare"]["inputSchema"]["properties"])
+
     def test_an_explicit_null_review_limit_reaches_the_backend_to_be_refused(self):
         """KT-1345 — absent means the Settings > Workers default; `null` is not
         « absent », so it is forwarded (the backend refuses it) instead of being

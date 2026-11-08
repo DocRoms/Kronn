@@ -40,6 +40,18 @@ Release notes for 0.9.3 and earlier are available in the
   notice repeats the last refusals of the current attempt, and so does the
   delivery summary of a worker that delivers anyway. See `docs/gotchas/claude-code-sensitive-directories.md`.
 
+- A quota refusal no longer sticks to an execution after the reset, and no longer
+  sends it to another provider behind the user's back (KT-1564, regression of
+  KT-838 / KT-593). A refusal that announced its reset expires at that instant:
+  the watchdog hands the execution back to the same provider, tier, model and
+  profile and the escalation closes, unless its campaign is paused or a person
+  moved it first. Falling back to another provider is now its own explicit
+  opt-in (`quota_fallback` on the campaign, a toggle in the launch dialog;
+  `quota_fallback_agents` on `task_exec_launch`), keeps the execution's tier,
+  returns to the original worker after the reset even when the fallback
+  provider resets first, and shows in the review card and the delivery report.
+  **Migration 286 turns off the fallback that campaigns used to get implicitly
+  from `allowed_agents`**: re-enable it per campaign with `quota_fallback`.
 - One request no longer starts a cascade of media generations, and Stop is
   final (KT-1481). Every agent generation is tied to the human message at the
   base of its wake chain: a result or failure notification now says it is a

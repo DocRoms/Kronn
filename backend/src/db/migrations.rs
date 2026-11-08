@@ -1039,6 +1039,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "285_scope_access_levels",
         include_str!("sql/285_scope_access_levels.sql"),
     ),
+    (
+        "286_quota_fallback_opt_in",
+        include_str!("sql/286_quota_fallback_opt_in.sql"),
+    ),
+    (
+        "287_quota_fallback_refusals",
+        include_str!("sql/287_quota_fallback_refusals.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

@@ -147,6 +147,46 @@ describe('TaskLaunchDialog', () => {
     }));
   });
 
+  // KT-1564 — a provider fallback on quota is its own opt-in, never implied by
+  // the allowed agents; with no alternative to fall back to it cannot be set.
+  it('keeps the quota fallback off and unavailable while no other agent is allowed', async () => {
+    const props = renderDialog();
+    await waitFor(() => expect(mocks.detect).toHaveBeenCalled());
+    const toggle = screen.getByRole('checkbox', { name: 'orch.config.quotaFallback' });
+    expect(toggle).not.toBeChecked();
+    expect(toggle).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'orch.launch' }));
+    await waitFor(() => expect(props.onLaunched).toHaveBeenCalled());
+    expect(mocks.createCampaign).toHaveBeenLastCalledWith(
+      expect.objectContaining({ quota_fallback: false }),
+    );
+  });
+
+  it('sends quota_fallback: true once another agent is allowed and the toggle is turned on', async () => {
+    mocks.detect.mockResolvedValue([
+      { name: 'Codex', agent_type: 'Codex', installed: true, enabled: true, runtime_available: false, auth_ready: true },
+      { name: 'OpenCode', agent_type: 'OpenCode', installed: true, enabled: true, runtime_available: false, auth_ready: true },
+    ]);
+    const props = renderDialog();
+    const toggle = await screen.findByRole('checkbox', { name: 'orch.config.quotaFallback' });
+    expect(toggle).toBeDisabled();
+
+    // Allowing OpenCode gives the fallback somewhere to go: only then can it be set.
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'OpenCode' }));
+    await waitFor(() => expect(toggle).toBeEnabled());
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+    expect(toggle).toBeChecked();
+
+    fireEvent.click(screen.getByRole('button', { name: 'orch.launch' }));
+    await waitFor(() => expect(props.onLaunched).toHaveBeenCalled());
+    expect(mocks.createCampaign).toHaveBeenLastCalledWith(expect.objectContaining({
+      quota_fallback: true,
+      allowed_agents: expect.arrayContaining(['Codex', 'OpenCode']),
+    }));
+  });
+
   // KT-1345 — the review-round limit starts from Settings > Workers.
   it('pre-fills the review rounds from Settings > Workers and still lets the run override it', async () => {
     mocks.workers.mockResolvedValue({ default_max_review_rounds: 9, review_rounds_unlimited: false });

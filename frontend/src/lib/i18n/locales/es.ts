@@ -4377,6 +4377,8 @@ const es: TranslationDict = {
   'orch.config.validationsHint': 'p. ej. make test-class',
   'orch.config.fallbacks': 'Agentes alternativos permitidos',
   'orch.config.autoContinue': 'Iniciar automáticamente la siguiente tarea lista',
+  'orch.config.quotaFallback': 'Cambiar a otro agente permitido cuando se agote la cuota',
+  'orch.config.quotaFallbackHint': 'Desactivado por defecto: la tarea espera el reinicio de su propio agente y continúa con él. Activado, pasa a un agente permitido (visible en la entrega) y vuelve al agente original tras el reinicio.',
   'orch.resolution.resolve_git': 'Resuelve el conflicto de rama o actualiza su destino y vuelve a intentarlo.',
   'orch.resolution.fix_tests': 'Corrige la validación fallida antes de reintentar.',
   'orch.resolution.reassign_agent': 'Elige otro agente disponible o espera a que se renueve la cuota.',

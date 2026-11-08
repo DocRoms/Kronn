@@ -38,6 +38,10 @@ pub struct ExecutionFacts {
     /// its transcript. A worker that delivers after a refusal worked around it,
     /// and the report says so rather than leaving the refusal in the transcript.
     pub refused_tool_calls: Vec<String>,
+    /// KT-1564 — every provider switch of the execution, oldest first. A
+    /// delivery that ran on another provider than the one first assigned says
+    /// so in its attention points instead of passing as if it never moved.
+    pub provider_changes: Vec<crate::db::orchestration::ProviderChange>,
 }
 
 impl ExecutionFacts {
@@ -72,6 +76,7 @@ impl ExecutionFacts {
             tokens: None,
             cost_usd_micros: None,
             refused_tool_calls: Vec::new(),
+            provider_changes: Vec::new(),
         }
     }
 }
@@ -193,10 +198,18 @@ pub fn summary_from_manifest(
     // Risks and limitations are both attention points, but losing which is
     // which would make the report less useful than the manifest it came from.
     let attention_points =
-        manifest
-            .risks
+        facts
+            .provider_changes
             .iter()
-            .map(|risk| format!("risk: {risk}"))
+            .map(|change| {
+                format!(
+                    "fallback: the provider changed from {} to {} ({})",
+                    change.from,
+                    change.to,
+                    non_empty(Some(change.reason.trim()), "no reason recorded"),
+                )
+            })
+            .chain(manifest.risks.iter().map(|risk| format!("risk: {risk}")))
             .chain(
                 manifest
                     .limitations
@@ -490,8 +503,17 @@ pub async fn publish_accepted_delivery(
     let task_id = execution.task_id.clone();
 
     let sub_discussion_id = execution.sub_discussion_id.clone();
-    let (delivery, task, assignment_started_at, review, served_model, spend, refused_tool_calls) =
-        db.with_conn(move |conn| {
+    let (
+        delivery,
+        task,
+        assignment_started_at,
+        review,
+        served_model,
+        spend,
+        refused_tool_calls,
+        provider_changes,
+    ) = db
+        .with_conn(move |conn| {
             let delivery =
                 crate::db::worker_deliveries::get_delivery(conn, &execution_id, attempt_no)?;
             let task = crate::db::planning::get_task(conn, &task_id)?;
@@ -517,6 +539,7 @@ pub async fn publish_accepted_delivery(
                 }
                 None => Vec::new(),
             };
+            let provider_changes = crate::db::orchestration::provider_changes(conn, &execution_id)?;
             Ok((
                 delivery,
                 task,
@@ -525,6 +548,7 @@ pub async fn publish_accepted_delivery(
                 served_model,
                 spend,
                 refused_tool_calls,
+                provider_changes,
             ))
         })
         .await?;
@@ -549,6 +573,7 @@ pub async fn publish_accepted_delivery(
     facts.tokens = spend.tokens;
     facts.cost_usd_micros = spend.cost_usd_micros;
     facts.refused_tool_calls = refused_tool_calls;
+    facts.provider_changes = provider_changes;
     // KT-613 — the review that accepted THIS attempt, and only it. A decision
     // that failed to parse leaves the report without principal evidence rather
     // than without a report: publication is total once a delivery is accepted.
@@ -637,6 +662,7 @@ mod tests {
             tokens: Some(42_000),
             cost_usd_micros: None,
             refused_tool_calls: Vec::new(),
+            provider_changes: Vec::new(),
         }
     }
 
@@ -1107,6 +1133,43 @@ mod tests {
         assert_eq!(summary.timestamp, "2026-09-01T10:00:00+00:00");
         assert_eq!(summary.metrics.duration_ms, 91_000);
         assert_eq!(summary.metrics.tokens, Some(42_000));
+    }
+
+    #[test]
+    fn a_provider_fallback_is_named_in_the_report_and_a_straight_run_says_nothing() {
+        let mut moved = facts();
+        moved.provider_changes = vec![crate::db::orchestration::ProviderChange {
+            from: "ClaudeCode".into(),
+            to: "Codex".into(),
+            reason: "automatic quota fallback authorized by the campaign allow-list".into(),
+        }];
+        let report = |facts: &ExecutionFacts| {
+            summary_from_manifest(
+                "KT-1564",
+                "exec-1",
+                &manifest(),
+                facts,
+                &[],
+                at("2026-09-01T10:00:00Z"),
+            )
+            .unwrap()
+        };
+
+        let summary = report(&moved);
+        assert_eq!(
+            summary.attention_points.first().map(String::as_str),
+            Some(
+                "fallback: the provider changed from ClaudeCode to Codex \
+                 (automatic quota fallback authorized by the campaign allow-list)"
+            )
+        );
+        assert!(summary
+            .render_markdown()
+            .contains("fallback: the provider changed"));
+        assert!(!report(&facts())
+            .attention_points
+            .iter()
+            .any(|point| point.starts_with("fallback:")));
     }
 
     #[test]

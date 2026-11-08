@@ -4388,6 +4388,8 @@ const en: TranslationDict = {
   'orch.config.validationsHint': 'e.g. make test-class',
   'orch.config.fallbacks': 'Allowed fallback agents',
   'orch.config.autoContinue': 'Automatically start the next ready task',
+  'orch.config.quotaFallback': 'Fall back to another allowed agent when the quota runs out',
+  'orch.config.quotaFallbackHint': 'Off by default: the task waits for its own agent\'s reset and then resumes on it. When on, it moves to an allowed agent (and shows in the delivery), then returns to the original agent after the reset.',
   'orch.resolution.resolve_git': 'Resolve the branch conflict or refresh its target, then retry.',
   'orch.resolution.fix_tests': 'Fix the failing validation before retrying.',
   'orch.resolution.reassign_agent': 'Choose another available agent or wait for the quota to reset.',

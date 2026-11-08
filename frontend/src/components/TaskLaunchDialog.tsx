@@ -98,6 +98,9 @@ function TaskLaunchDialogContent({
     campaign?.run.validations.map(item => item.command).join('\n') ?? '',
   );
   const [autoContinue, setAutoContinue] = useState(campaign?.run.auto_continue ?? false);
+  // Switching provider when the quota is spent is its own choice: an allowed
+  // agent is only one the worker may be given, never one it falls back to.
+  const [quotaFallback, setQuotaFallback] = useState(campaign?.run.quota_fallback ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -167,6 +170,7 @@ function TaskLaunchDialogContent({
   const profilesForAgent = useMemo(() => availableProfiles, [availableProfiles]);
 
   const policyLocked = campaign !== null;
+  const hasFallbackAlternative = allowedAgents.some(value => value !== agent);
   const pickerAgents = useMemo(() => {
     const detected = detections.length
       ? detections.map(item => item.agent_type)
@@ -216,6 +220,7 @@ function TaskLaunchDialogContent({
         default_worker: worker,
         cancellation_cleanup_policy: 'preserve',
         auto_continue: autoContinue,
+        quota_fallback: quotaFallback && hasFallbackAlternative,
       });
       const result = await orchestration.launch(activeCampaign.run.id, taskReference, {
         idempotencyKey: `ui:${activeCampaign.run.id}:${taskReference}`,
@@ -372,6 +377,16 @@ function TaskLaunchDialogContent({
         <label className="orch-launch-auto">
           <input type="checkbox" checked={autoContinue} disabled={policyLocked} onChange={event => setAutoContinue(event.target.checked)} />
           {t('orch.config.autoContinue')}
+        </label>
+
+        <label className="orch-launch-auto" title={t('orch.config.quotaFallbackHint')}>
+          <input
+            type="checkbox"
+            checked={quotaFallback && (policyLocked || hasFallbackAlternative)}
+            disabled={policyLocked || !hasFallbackAlternative}
+            onChange={event => setQuotaFallback(event.target.checked)}
+          />
+          {t('orch.config.quotaFallback')}
         </label>
 
         {error && (
