@@ -221,6 +221,21 @@ describe('MediaGenerateForm', () => {
       .toBe(mediaApi.generate.mock.calls[0][0].idempotency_key);
   });
 
+  it('uses a new request identity when the configured model changes after an error', async () => {
+    mediaApi.generate.mockRejectedValueOnce(new Error('configured model changed'));
+    const { rerender } = render(<MediaGenerateForm discussionId="d-1" connections={[connection({ video_model: null, image_model: 'model-a' })]} t={t} />);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a lighthouse' } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ })); });
+    expect(await screen.findByText('configured model changed')).toBeInTheDocument();
+    rerender(<MediaGenerateForm discussionId="d-1" connections={[connection({ video_model: null, image_model: 'model-b' })]} t={t} />);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ })); });
+    expect(mediaApi.generate).toHaveBeenCalledTimes(2);
+    const [first, second] = mediaApi.generate.mock.calls.map(call => call[0]);
+    expect(first.expected_model).toBe('model-a');
+    expect(second.expected_model).toBe('model-b');
+    expect(second.idempotency_key).not.toBe(first.idempotency_key);
+  });
+
   it('does not send a billable request when room creation fails', async () => {
     const createDiscussion = vi.fn()
       .mockRejectedValueOnce(new Error('room creation failed'))
@@ -599,6 +614,24 @@ describe('MediaGenerateForm', () => {
     });
   });
 
+  it.each(['image', 'video'] as const)('sends three ordered references for %s and lets the user reorder and remove them', async modality => {
+    const envelope = imageCapabilities(3);
+    mediaApi.capabilities.mockResolvedValue({ ...envelope, capabilities: { ...envelope.capabilities, modality } });
+    render(<MediaGenerateForm discussionId="d-1" connections={[connection()]}
+      images={[image('a', 'a.png'), image('b', 'b.png'), image('c', 'c.png')] as never} t={t} />);
+    fireEvent.click(screen.getByTestId(`media-slot-conn-1:${modality}`));
+    await screen.findByTestId('media-reference-picker');
+    pickPicture('a'); pickPicture('b'); pickPicture('c');
+    expect(screen.queryByTestId('media-reference-select')).toBeNull();
+    fireEvent.click(screen.getAllByRole('button', { name: 'disc.media.moveReferenceUp' })[2]);
+    fireEvent.click(screen.getByTestId('media-reference-drop-a'));
+    pickPicture('a');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'compose' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.media\.generate/ }));
+    await waitFor(() => expect(mediaApi.generate).toHaveBeenCalledTimes(1));
+    expect(mediaApi.generate.mock.calls[0][0]).toMatchObject({ modality, reference_asset_ids: ['c', 'b', 'a'], reference_mode: 'reference' });
+  });
+
   it('stops at the ceiling the model advertises, and says so', async () => {
     // `microsoft/mai-image-2.5-pro` and the krea models advertise exactly one.
     // A picker that simply stopped responding would read as broken.
@@ -636,9 +669,8 @@ describe('MediaGenerateForm', () => {
     expect(screen.queryByTestId('media-reference-picker')).toBeNull();
   });
 
-  it('trims the pictures a newly selected model cannot take', async () => {
-    // Trimmed, not dropped: what the narrower model still accepts survives the
-    // switch, and only the excess goes. Two image connections, two ceilings.
+  it('retains sources and blocks generation when a newly selected model takes fewer', async () => {
+    // Changing models must never silently discard part of the request.
     mediaApi.capabilities.mockImplementation(async (connectionId: string) =>
       connectionId === 'conn-1' ? imageCapabilities(3) : imageCapabilities(1));
     render(
@@ -660,8 +692,12 @@ describe('MediaGenerateForm', () => {
 
     fireEvent.click(screen.getByTestId('media-slot-conn-2:image'));
 
-    await waitFor(() => expect(screen.queryByTestId('media-reference-drop-asset-2')).toBeNull());
-    // The first picture stays: the new model still takes one.
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'compose' } });
+    await screen.findByText('disc.media.referenceLimitExceeded:1');
+    expect(screen.getByTestId('media-reference-drop-asset-2')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /disc\.media\.generate/ })).toBeDisabled();
+    fireEvent.click(screen.getByTestId('media-reference-drop-asset-2'));
+    await waitFor(() => expect(screen.getByRole('button', { name: /disc\.media\.generate/ })).toBeEnabled());
     expect(screen.getByTestId('media-reference-drop-asset-1')).toBeInTheDocument();
   });
 

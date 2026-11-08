@@ -17,6 +17,8 @@ pub struct AppConfig {
     /// Local ComfyUI media target (KT-1381).
     #[serde(default, skip_serializing_if = "crate::models::comfyui::is_unset")]
     pub comfyui: crate::models::ComfyUiConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_reference_limits: Vec<crate::models::MediaReferenceLimit>,
     /// Output language used by agents when they write their replies.
     /// Separate from `ui_language` below which controls the Kronn UI locale.
     #[serde(default = "default_language")]

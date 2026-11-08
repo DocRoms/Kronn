@@ -28,6 +28,7 @@ import type { ToastFn } from '../../hooks/useToast';
 import { ContextHelp } from '../ContextHelp';
 import { SearchableSelect } from '../SearchableSelect';
 import { SecretField } from '../SecretField';
+import { MediaReferenceSettings } from './MediaReferenceSettings';
 import {
   AlertTriangle,
   Check,
@@ -923,6 +924,8 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
                   {t(`config.extApi.media.${modality}`)}
                 </span>
                 <code title={model}>{model}</code>
+                {modality !== 'decision' && <MediaReferenceSettings
+                  key={`${modality}:${model}`} connectionId={c.id} model={model} modality={modality} t={t} />}
               </div>
             ))}
           </div>
