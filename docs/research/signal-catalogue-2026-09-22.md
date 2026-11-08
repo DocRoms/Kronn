@@ -9,8 +9,8 @@ cells also failed, so this is not evidence of general reliability for either
 prompt style.
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]
 [src: file: backend/src/api/signal_catalog.rs:66-69#get]
-[src: file: backend/src/api/agent_tools.rs:4789-4791#signals]
-[src: file: backend/scripts/disc-introspection-mcp.py:10871-10872#signals]
+[src: file: backend/src/api/agent_tools.rs:4811-4813#signals]
+[src: file: backend/scripts/disc-introspection-mcp.py:10927-10928#signals]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:579#decision]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:275-339]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:24-72]
@@ -116,7 +116,7 @@ within its existing budget. No net workflow-token or latency improvement is clai
 [src: file: docs/research/signal-catalogue-2026-09-22.json:91#first_prompt_tokens]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:326#first_prompt_tokens]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:370#first_prompt_tokens]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:167#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:171#CATALOGUE_MAX_BYTES]
 
 ## Functional checks and limits
 
@@ -129,7 +129,7 @@ cap. Discovery covers Automation cards in version 1; historical Planning, audit
 and QP-improvement parsers remain separate.
 [src: file: backend/tests/api_tests.rs:1122-1240#discussion_action_ingests_all_four_target_families_through_the_real_message_transaction]
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:67-94#native_signal_manual_reads_the_shared_registry_without_creating_an_action]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:13218-13223#test_signal_catalogue_is_read_from_the_running_server_without_launching]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:13379-13384#test_signal_catalogue_is_read_from_the_running_server_without_launching]
 [src: file: backend/tests/api_tests.rs:1026-1120#discussion_action_http_contract_is_durable_and_idempotent]
 [src: file: backend/tests/api_tests.rs:1491-1546#discussion_action_invalid_proposals_are_actionable_through_the_real_message_transaction]
 [src: file: backend/tests/api_tests.rs:1391-1486#discussion_action_allow_manual_override_never_leaks_plaintext_through_the_api]

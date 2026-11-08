@@ -37,8 +37,8 @@ otherwise be lost to the document body; intentional outside focus is preserved.
 [src: file: frontend/src/hooks/useActivityPopover.ts:26-36#contentObserver]
 [src: file: frontend/src/hooks/useActivityPopover.ts:48-53#onPointerDown]
 [src: file: frontend/src/hooks/useActivityPopover.ts:54-69#onKeyDown]
-[src: file: frontend/src/pages/Dashboard.tsx:810-819#projectsTabRef]
-[src: file: frontend/src/pages/Dashboard.tsx:852-861#workflowsTabRef]
+[src: file: frontend/src/pages/Dashboard.tsx:830-839#projectsTabRef]
+[src: file: frontend/src/pages/Dashboard.tsx:872-881#workflowsTabRef]
 
 Cancellation uses a synchronous per-ID ref guard as well as the disabled UI.
 Failures show a localized alert, permit an explicit retry and refresh the

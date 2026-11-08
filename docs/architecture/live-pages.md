@@ -277,7 +277,7 @@ block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
 `[src: file: backend/src/api/live_pages.rs:654-664#delete_dataset]`
 `[src: file: backend/src/api/live_pages.rs:689-700#update_dataset]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:8018-8025#call_page_delete_dataset]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:8068-8075#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
 become rows, a single array inside an object envelope is expanded while scalar
@@ -607,11 +607,11 @@ tokens. Recheck the selected target with execution preflight before launching,
 preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
-[src: file: backend/src/models/orchestration.rs:1170-1193#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:12779-12968#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:14075-14117#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:14321-14363#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:14356-14426#task_exec_prepare]
+[src: file: backend/src/models/orchestration.rs:1189-1212#TaskWorkerTier]
+[src: file: backend/src/api/orchestration.rs:13110-13299#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:14414-14456#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:14660-14702#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:14695-14765#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -650,8 +650,8 @@ Agents learn this contract where they write Page HTML: the MCP manuals of
 `data-kronn-action-state`, what the card shows), `page_update_html` adds that a
 block's reference must stay stable across revisions since it ties a button to
 its past launches, and the `workflow-architect` skill carries the same rules.
-`[src: file: backend/scripts/disc-introspection-mcp.py:10077-10112#_PAGE_ACTION_CONTRACT]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10426-10435#page_update_html]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10127-10162#_PAGE_ACTION_CONTRACT]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10482-10491#page_update_html]`
 `[src: file: backend/src/skills/workflow-architect.md:384-391#data-kronn-action-state]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records

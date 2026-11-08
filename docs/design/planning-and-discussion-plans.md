@@ -201,8 +201,8 @@ Runtime parity is capability-based:
 - Vibe runs without MCP to avoid its stdio hang. It therefore emits a durable
   `kronn-plan-action` proposal for human validation instead of pretending that
   a direct task write succeeded.
-  `[src: file: backend/src/api/agent_tools.rs:2167-2374#plan_get]` `[src: file: backend/src/api/agent_tools.rs:2365-2396#task_create]` `[src: file: backend/src/api/agent_tools.rs:4156-4163#actor]`
-  `[src: file: backend/src/api/agent_tools.rs:5045-5072#unwrap_api_compact_task]`
+  `[src: file: backend/src/api/agent_tools.rs:2167-2374#plan_get]` `[src: file: backend/src/api/agent_tools.rs:2365-2396#task_create]` `[src: file: backend/src/api/agent_tools.rs:4164-4171#actor]`
+  `[src: file: backend/src/api/agent_tools.rs:5067-5094#unwrap_api_compact_task]`
   `[src: file: backend/src/api/disc_prompts.rs:278-287#agent_has_native_planning]`
 
 The first release is local-only. Actor/audit metadata must still distinguish

@@ -205,7 +205,7 @@ this degrades and continues.
   runs. While an audit of the project shows progress, such an agent is not
   started: its dispatch goes back to the queue with its attempts intact. A
   run clears its progress before it spawns its own validation agent.
-  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:571#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1264-1267#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1274-1295#progress] [src: file: backend/src/api/audit/full.rs:3919-3922#clear_progress]
+  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:571#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1348-1351#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1358-1379#progress] [src: file: backend/src/api/audit/full.rs:3919-3922#clear_progress]
 - **Cancel.** A cancel waits for the worker to acknowledge it. Without that
   acknowledgement it answers with an error, and the UI keeps the audit shown,
   marked "cancel pending". It deletes only the validation discussion linked to
@@ -309,7 +309,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 - **One name on every surface.** The MCP descriptions and manuals say
   “Verify docs” like the English label, present the full audit as an advanced
   option, and carry none of the retired CTA names.
-  [src: file: backend/scripts/test_disc_introspection_mcp.py:8446-8472#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
+  [src: file: backend/scripts/test_disc_introspection_mcp.py:8485-8511#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
 - **Header layout.** The compact header keeps the status, one next action, the
   doc-state summary and the « Détails » disclosure without overlap at 360, 768
   and 1440 px, closed and open.
@@ -365,7 +365,7 @@ sections.
   no agent and writes no doc. It is a human action only: the route is not on
   the bridge list, and the handler refuses any bridge caller. It takes the
   audit lease.
-  [src: file: backend/src/lib.rs:1939-1942#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:770-801#acknowledge_sections]
+  [src: file: backend/src/lib.rs:1939-1942#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:812-843#acknowledge_sections]
 
 ## The action offered in each state
 
