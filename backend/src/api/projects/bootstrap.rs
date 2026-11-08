@@ -3,7 +3,12 @@
 // flavours: classic (6-step linear) and Bootstrap++ (defers to the
 // `bootstrap-architect` skill for gated multi-stage work).
 
-use axum::{extract::State, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -22,25 +27,84 @@ use super::{
 pub async fn bootstrap(
     State(state): State<AppState>,
     Json(req): Json<BootstrapProjectRequest>,
-) -> Json<ApiResponse<BootstrapProjectResponse>> {
-    bootstrap_as(state, req, Uuid::new_v4().to_string()).await
+) -> Response {
+    let mut detected = crate::agents::detect_all_cached(false).await;
+    crate::agents::apply_configured_status(&mut detected, &*state.config.read().await);
+    bootstrap_as(state, req, Uuid::new_v4().to_string(), &detected)
+        .await
+        .into_response()
 }
 
-/// `bootstrap` under a caller-chosen project id, so a test can hold that
-/// project's audit lease and watch the writer refuse before touching the disk.
+/// Why `agent` cannot run a bootstrap, mirroring the form's `canAudit`: an
+/// audit-capable type that is installed (or reachable), enabled and signed in.
+pub(crate) fn bootstrap_agent_refusal(
+    agent: &AgentType,
+    detected: &[AgentDetection],
+) -> Option<String> {
+    if !crate::api::audit::agent_can_audit(agent) {
+        return Some(format!(
+            "{agent:?} cannot run a bootstrap: it has no file tools Kronn can scope to the new project."
+        ));
+    }
+    let Some(detection) = detected.iter().find(|d| &d.agent_type == agent) else {
+        return Some(format!("{agent:?} is not available on this host."));
+    };
+    if !(detection.installed || detection.runtime_available) {
+        return Some(format!("{agent:?} is not installed."));
+    }
+    if !detection.enabled {
+        return Some(format!(
+            "{agent:?} is disabled. Enable it in Config › Agents or choose another agent."
+        ));
+    }
+    if detection.auth_ready == Some(false) {
+        return Some(format!(
+            "{agent:?} is not signed in. Finish its setup in Config › Agents or choose another agent."
+        ));
+    }
+    None
+}
+
+/// `bootstrap` under a caller-chosen project id and agent detection, so a test
+/// can hold that project's audit lease or stand in for the host's agents.
 pub(crate) async fn bootstrap_as(
     state: AppState,
     req: BootstrapProjectRequest,
     project_id: String,
-) -> Json<ApiResponse<BootstrapProjectResponse>> {
+    detected: &[AgentDetection],
+) -> (StatusCode, Json<ApiResponse<BootstrapProjectResponse>>) {
     // 1. Determine parent directory: use the common parent of existing projects,
     // or fall back to KRONN_REPOS_DIR env var, or first scan path.
     // We need a writable directory — KRONN_HOST_HOME is mounted read-only.
     let parent_dir = match determine_parent_dir(&state).await {
         Ok(d) => d,
-        Err(e) => return Json(ApiResponse::err(e)),
+        Err(e) => return (StatusCode::OK, Json(ApiResponse::err(e))),
     };
+    if req.name.trim().is_empty() {
+        return (
+            StatusCode::OK,
+            Json(ApiResponse::err("Project name is required")),
+        );
+    }
+    // API clients bypass the form's agent list: refuse an agent that cannot run.
+    if let Some(refusal) = bootstrap_agent_refusal(&req.agent, detected) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiResponse::err_coded(ApiErrorCode::Validation, refusal)),
+        );
+    }
+    (
+        StatusCode::OK,
+        bootstrap_in(state, req, project_id, parent_dir).await,
+    )
+}
 
+async fn bootstrap_in(
+    state: AppState,
+    req: BootstrapProjectRequest,
+    project_id: String,
+    parent_dir: String,
+) -> Json<ApiResponse<BootstrapProjectResponse>> {
     let project_name = req.name.trim().to_string();
     if project_name.is_empty() {
         return Json(ApiResponse::err("Project name is required"));
@@ -310,11 +374,13 @@ pub(crate) async fn bootstrap_as(
         pinned: false,
         workspace_mode: "Direct".into(),
         workspace_path: None,
-        tier: if req.skill_ids.contains(&"bootstrap-architect".to_string()) {
-            crate::models::ModelTier::Reasoning
-        } else {
-            crate::models::ModelTier::Default
-        },
+        tier: req.tier.unwrap_or(
+            if req.skill_ids.contains(&"bootstrap-architect".to_string()) {
+                crate::models::ModelTier::Reasoning
+            } else {
+                crate::models::ModelTier::Default
+            },
+        ),
         model: None,
         pin_first_message: true,
         worktree_branch: None,
@@ -651,5 +717,177 @@ mod prompt_tests {
         assert!(!scanner::contains_parent_dir(
             "/home/user/.config/app..conf"
         ));
+    }
+}
+
+/// An installed, enabled, signed-in detection of `agent`, for tests.
+#[cfg(test)]
+pub(crate) fn usable_for_tests(agent: AgentType) -> AgentDetection {
+    AgentDetection {
+        name: format!("{agent:?}"),
+        agent_type: agent,
+        installed: true,
+        enabled: true,
+        path: None,
+        fallback_command: None,
+        version: None,
+        latest_version: None,
+        version_checked_at: None,
+        version_check_error: None,
+        version_source_url: None,
+        origin: "test".into(),
+        install_command: None,
+        host_managed: false,
+        host_label: None,
+        runtime_available: true,
+        auth_ready: Some(true),
+        auth_setup_command: None,
+        rtk_available: false,
+        rtk_hook_configured: false,
+        runtime_warning: None,
+        shadowed_installs: None,
+    }
+}
+
+#[cfg(all(test, feature = "full-tests"))]
+mod discussion_target_tests {
+    use super::*;
+
+    fn state() -> AppState {
+        AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap()),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    /// Bootstraps "News Site" next to a seeded project and returns its discussion.
+    async fn bootstrap_discussion(tier: Option<ModelTier>, skill_ids: Vec<String>) -> Discussion {
+        let state = state();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('p1', 'P', ?1, ?2, ?2)",
+                    rusqlite::params![path, now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request = BootstrapProjectRequest {
+            name: "News Site".into(),
+            description: "A news site".into(),
+            agent: AgentType::Codex,
+            mcp_config_ids: vec![],
+            skill_ids,
+            tier,
+        };
+        let response = bootstrap_as(
+            state.clone(),
+            request,
+            "boot-1".into(),
+            &[usable_for_tests(AgentType::Codex)],
+        )
+        .await
+        .1
+         .0;
+        assert!(response.success, "{response:?}");
+        let discussion_id = response.data.unwrap().discussion_id;
+        state
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::discussions::get_discussion(conn, &discussion_id)
+            })
+            .await
+            .unwrap()
+            .expect("bootstrap discussion stored")
+    }
+
+    #[tokio::test]
+    async fn bootstrap_discussion_keeps_the_chosen_agent_and_tier() {
+        let disc =
+            bootstrap_discussion(Some(ModelTier::Economy), vec!["bootstrap-architect".into()])
+                .await;
+        assert_eq!(disc.agent, AgentType::Codex);
+        assert_eq!(disc.participants, vec![AgentType::Codex]);
+        assert_eq!(disc.tier, ModelTier::Economy);
+        assert_eq!(
+            disc.model, None,
+            "the model resolves from the tier at run time"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_discussion_without_tier_keeps_the_skill_default() {
+        let plus = bootstrap_discussion(None, vec!["bootstrap-architect".into()]).await;
+        assert_eq!(plus.tier, ModelTier::Reasoning);
+        let classic = bootstrap_discussion(None, vec![]).await;
+        assert_eq!(classic.tier, ModelTier::Default);
+    }
+
+    #[test]
+    fn bootstrap_refuses_an_agent_the_form_would_not_offer() {
+        let usable = usable_for_tests(AgentType::Codex);
+        assert_eq!(
+            bootstrap_agent_refusal(&AgentType::Codex, std::slice::from_ref(&usable)),
+            None
+        );
+        let vibe = usable_for_tests(AgentType::Vibe);
+        assert!(bootstrap_agent_refusal(&AgentType::Vibe, &[vibe]).is_some());
+        assert!(
+            bootstrap_agent_refusal(&AgentType::ClaudeCode, std::slice::from_ref(&usable))
+                .is_some()
+        );
+        let refused = |change: fn(&mut AgentDetection)| {
+            let mut detection = usable.clone();
+            change(&mut detection);
+            bootstrap_agent_refusal(&AgentType::Codex, &[detection]).expect("refused")
+        };
+        assert!(refused(|d| d.enabled = false).contains("disabled"));
+        assert!(refused(|d| {
+            d.installed = false;
+            d.runtime_available = false;
+        })
+        .contains("not installed"));
+        assert!(refused(|d| d.auth_ready = Some(false)).contains("not signed in"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_with_an_unusable_agent_is_a_422_that_creates_nothing() {
+        let state = state();
+        let root = tempfile::tempdir().unwrap();
+        state.config.write().await.scan.paths = vec![root.path().to_string_lossy().into_owned()];
+        let request = BootstrapProjectRequest {
+            name: "News Site".into(),
+            description: "A news site".into(),
+            agent: AgentType::Vibe,
+            mcp_config_ids: vec![],
+            skill_ids: vec![],
+            tier: None,
+        };
+        let (status, response) = bootstrap_as(
+            state.clone(),
+            request,
+            "boot-1".into(),
+            &[usable_for_tests(AgentType::Vibe)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!response.0.success);
+        assert_eq!(response.0.error_code.as_deref(), Some("validation"));
+        assert!(!root.path().join("news-site").exists());
+        let projects = state
+            .db
+            .with_read_conn(|conn| Ok(crate::db::projects::list_projects(conn)?.len()))
+            .await
+            .unwrap();
+        assert_eq!(projects, 0);
     }
 }

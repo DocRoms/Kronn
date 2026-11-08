@@ -1328,6 +1328,8 @@ const zh: TranslationDict = {
   "projects.bootstrap.docs": "文档（可选）",
   "projects.bootstrap.docsHint": "拖放或点击 — 架构、规范、PRD…",
   "projects.bootstrap.options": "高级选项",
+  "projects.bootstrap.agent": "智能体与模型",
+  "projects.bootstrap.noAgent": "没有已安装的智能体可以运行 bootstrap。请在 配置 › 智能体 中安装或启用一个。",
   "projects.bootstrap.noCreateRepo": "不创建 Git 仓库",
   "projects.bootstrap.createRepoVia": "通过以下方式创建仓库",
   "projects.bootstrap.noGeneratePlan": "不生成计划/问题",

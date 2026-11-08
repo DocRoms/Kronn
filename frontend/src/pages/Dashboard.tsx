@@ -5,7 +5,7 @@ import { Outlet, useLocation } from 'react-router';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, pages as pagesApi, config as configApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
-import type { RemoteRepo, RepoSource, DiscoverSourceError, AuditProgress } from '../types/generated';
+import type { RemoteRepo, RepoSource, DiscoverSourceError, AuditProgress, AgentType, ModelTier } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { preloadPagesWhenIdle } from '../lib/lazyPage';
 import { BootHold } from '../components/LoadingState';
@@ -15,7 +15,9 @@ import { unseenBasis } from '../lib/discussionUiUtils';
 import { detectStaleStreams, abortStaleStreams } from '../lib/stream-watchdog';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useWebSocket } from '../hooks/useWebSocket';
-import { isUsable } from '../lib/constants';
+import { AGENT_LABELS, AGENT_MENTIONS, isUsable } from '../lib/constants';
+import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
+import { requiresFullAccessToRun } from '../lib/agentFullAccess';
 import { hydrateTtsVoicesFromBackend } from '../lib/tts-models';
 import { userError } from '../lib/userError';
 import { TourProvider } from '../components/tour/TourProvider';
@@ -395,6 +397,9 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [bootstrapFiles, setBootstrapFiles] = useState<File[]>([]);
   const [bootstrapRepoMcp, setBootstrapRepoMcp] = useState('');       // MCP config ID for repo creation
   const [bootstrapTrackerMcp, setBootstrapTrackerMcp] = useState(''); // MCP config ID for issue tracker
+  const [bootstrapAgent, setBootstrapAgent] = useState<AgentType | ''>('');
+  // Bootstrap++ runs gated architecture work, so it keeps its historical Reasoning default.
+  const [bootstrapTier, setBootstrapTier] = useState<ModelTier>('reasoning');
 
   // When the bootstrap modal opens, pre-select the first available repo MCP
   // and tracker MCP so the user doesn't have to remember to pick them. They
@@ -457,10 +462,25 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [discoverSourceErrors, setDiscoverSourceErrors] = useState<DiscoverSourceError[]>([]);
   const [repoSearch, setRepoSearch] = useState('');
 
+  // Same order as the new-discussion picker, which defaults to its first available agent.
+  const bootstrapAgents = useMemo(() => {
+    const rank = (type: AgentType) => {
+      const index = AGENT_MENTIONS.findIndex(mention => mention.type === type);
+      return index < 0 ? AGENT_MENTIONS.length : index;
+    };
+    return (agentList ?? []).filter(canAudit).map(a => a.agent_type).sort((a, b) => rank(a) - rank(b));
+  }, [agentList]);
+  const selectedBootstrapAgent: AgentType | null = bootstrapAgent && bootstrapAgents.includes(bootstrapAgent)
+    ? bootstrapAgent
+    : bootstrapAgents[0] ?? null;
+  const bootstrapNeedsFullAccess = selectedBootstrapAgent !== null
+    && requiresFullAccessToRun(agentAccess, selectedBootstrapAgent);
+  const bootstrapReady = selectedBootstrapAgent !== null && !bootstrapNeedsFullAccess;
+
   const handleBootstrap = async () => {
-    if (!bootstrapName.trim() || !bootstrapDesc.trim()) return;
-    const agent = agents.find(a => canAudit(a))?.agent_type;
-    if (!agent) { toast('No usable agent found', 'error'); return; }
+    if (!bootstrapName.trim() || !bootstrapDesc.trim() || !bootstrapReady) return;
+    const agent = selectedBootstrapAgent;
+    if (!agent) return;
     setBootstrapLoading(true);
     try {
       // Build description with bootstrap++ instructions
@@ -478,7 +498,7 @@ export function Dashboard({ onReset }: DashboardProps) {
       if (bootstrapRepoMcp && !allMcpIds.includes(bootstrapRepoMcp)) allMcpIds.push(bootstrapRepoMcp);
       if (bootstrapTrackerMcp && !allMcpIds.includes(bootstrapTrackerMcp)) allMcpIds.push(bootstrapTrackerMcp);
 
-      const res = await projectsApi.bootstrap({ name: bootstrapName.trim(), description: desc, agent, mcp_config_ids: allMcpIds, skill_ids: ['bootstrap-architect'] });
+      const res = await projectsApi.bootstrap({ name: bootstrapName.trim(), description: desc, agent, tier: bootstrapTier, mcp_config_ids: allMcpIds, skill_ids: ['bootstrap-architect'] });
       // Upload context files to the bootstrap discussion
       for (const file of bootstrapFiles) {
         try {
@@ -934,7 +954,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               </button>
             </div>
             {newProjectMode === 'bootstrap' && (
-              <div onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && bootstrapName.trim() && bootstrapDesc.trim() && !bootstrapLoading) handleBootstrap(); }}>
+              <div onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && bootstrapName.trim() && bootstrapDesc.trim() && bootstrapReady && !bootstrapLoading) handleBootstrap(); }}>
                 <label className="dash-field">
                   <span className="dash-field-label">{t('projects.bootstrap.name')}</span>
                   <input
@@ -953,6 +973,43 @@ export function Dashboard({ onReset }: DashboardProps) {
                     placeholder={t('projects.bootstrap.descPlaceholder')}
                   />
                 </label>
+
+                <div className="dash-field dash-agent-field">
+                  <span className="dash-field-label">{t('projects.bootstrap.agent')}</span>
+                  {selectedBootstrapAgent ? (
+                    <div className="dash-agent-picker" data-testid="bootstrap-agent-picker">
+                      <AgentSwitchPicker
+                        currentAgent={selectedBootstrapAgent}
+                        currentTier={bootstrapTier}
+                        availableAgents={bootstrapAgents}
+                        modelTiers={agentAccess?.model_tiers}
+                        defaultModelLabel={t('disc.defaultAgentModel')}
+                        tierLabels={{
+                          economy: t('disc.tier.economy'),
+                          default: t('disc.tier.default'),
+                          reasoning: t('disc.tier.reasoning'),
+                        }}
+                        title={t('disc.agentAndMode')}
+                        ariaLabel={t('disc.agentAndMode')}
+                        needsFullAccess={agent => requiresFullAccessToRun(agentAccess, agent)}
+                        disabled={bootstrapLoading}
+                        onSelectionChange={async (agent, tier) => {
+                          setBootstrapAgent(agent);
+                          setBootstrapTier(tier);
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    <p className="dash-field-warn" role="alert" data-testid="bootstrap-no-agent">
+                      {t('projects.bootstrap.noAgent')}
+                    </p>
+                  )}
+                  {bootstrapNeedsFullAccess && (
+                    <p className="dash-field-warn" role="alert" data-testid="bootstrap-full-access-required">
+                      {t('config.fullAccessRequired', AGENT_LABELS[selectedBootstrapAgent] ?? selectedBootstrapAgent)}
+                    </p>
+                  )}
+                </div>
 
                 {/* MCP selector (collapsible) */}
                 {mcpOverview.configs.length > 0 && (
@@ -1075,7 +1132,7 @@ export function Dashboard({ onReset }: DashboardProps) {
 
                 <button
                   onClick={handleBootstrap}
-                  disabled={bootstrapLoading || !bootstrapName.trim() || !bootstrapDesc.trim()}
+                  disabled={bootstrapLoading || !bootstrapReady || !bootstrapName.trim() || !bootstrapDesc.trim()}
                   className="dash-submit-btn"
                 >
                   {bootstrapLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Zap size={16} />}

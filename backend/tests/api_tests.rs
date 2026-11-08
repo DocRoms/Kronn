@@ -12985,7 +12985,11 @@ async fn bootstrap_find_common_parent_logic() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::OK);
+    // 422 = the parent was found and the host's agent detection refused ClaudeCode.
+    assert!(
+        status == StatusCode::OK || status == StatusCode::UNPROCESSABLE_ENTITY,
+        "{status}"
+    );
     // The error should NOT be about missing scan paths — find_common_parent should have worked
     if !json["success"].as_bool().unwrap_or(false) {
         let err = json["error"].as_str().unwrap_or("");
