@@ -97,7 +97,7 @@ The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
 execution, with no fallback to Custom; unknown provider strings remain errors.
 [src: file: backend/src/db/orchestration.rs:244-258#agent_type_from_db]
-[src: file: backend/src/db/orchestration_tests.rs:4271-4304#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
+[src: file: backend/src/db/orchestration_tests.rs:4340-4373#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
 
 ## Known asymmetries
 
