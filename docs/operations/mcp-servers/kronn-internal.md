@@ -682,7 +682,7 @@ recovery; every orchestration mutation stays fail-closed until the fresh bridge
 is ready.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4106-4192#_attempt_resume]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:10954-10965#_bridge_freshness]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10962-10973#_GUARDED_ORCHESTRATION_TOOLS]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10965-10976#_GUARDED_ORCHESTRATION_TOOLS]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
 process that loaded the preceding schema. After upgrading to 0.11.0, reconnect
@@ -848,7 +848,7 @@ local Ollama/LiteLLM/NVIDIA worker capable of producing the clean committed HEAD
 required by `task_exec_deliver` without turning the HTTP tool catalogue into
 arbitrary Git access.
 `[src: file: backend/src/api/agent_workspace_tools.rs:567-574#git_commit_payload] [src: file: backend/src/api/agent_workspace_tools.rs:615-692#git_commit_payload_with_data_dir_lock]`
-`[src: file: backend/src/api/agent_tools.rs:3828-3900#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1503-1514#DISCUSSION_ONLY]`
+`[src: file: backend/src/api/agent_tools.rs:3828-3900#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1509-1520#DISCUSSION_ONLY]`
 `[src: file: backend/src/db/orchestration.rs:947-979#managed_working_execution_for_workspace]`
 
 ## Rich discussion output
