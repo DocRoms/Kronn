@@ -1314,7 +1314,8 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "base_rev": {"type": "string"},
                 "idempotency_key": {"type": "string"},
                 "validations": validations_schema("Principal-owned mechanical gates run on the candidate before integration. Never read from the worker's own manifest. Refused at launch when a command could never run."),
-                "max_review_rounds": max_review_rounds_schema()
+                "max_review_rounds": max_review_rounds_schema(),
+                "quota_fallback_agents": {"type": "array", "items": {"type": "string"}}
             }),
             json!(["task_reference", "worker", "worker_scope_intent"]),
         ),
@@ -2967,6 +2968,10 @@ impl KronnToolExecutor {
                     Ok(worker) => worker,
                     Err(error) => return fail(call, format!("invalid typed worker: {error}")),
                 };
+                let quota_fallback_agents = match quota_fallback_agents_argument(call) {
+                    Ok(agents) => agents,
+                    Err(error) => return fail(call, error),
+                };
                 let (_scope_intent, worker_scope) = match task_worker_scope_contract(call) {
                     Ok(contract) => contract,
                     Err(error) => return fail(call, error),
@@ -3032,7 +3037,10 @@ impl KronnToolExecutor {
                     },
                     worker_scope,
                     validations,
-                    crate::api::orchestration::SingleTaskLaunchOptions { max_review_rounds },
+                    crate::api::orchestration::SingleTaskLaunchOptions {
+                        max_review_rounds,
+                        quota_fallback_agents,
+                    },
                 )
                 .await
                 {
@@ -4344,6 +4352,20 @@ fn required_string(call: &ToolCall, field: &str) -> Option<String> {
 /// an integer or `"unlimited"`; anything else (including `null`) is refused.
 fn max_review_rounds_argument(call: &ToolCall) -> Result<Option<u32>, String> {
     crate::api::orchestration::review_rounds_argument(call.arguments.get("max_review_rounds"))
+}
+
+/// KT-1564 — the `quota_fallback_agents` of a launch: the providers the
+/// principal explicitly lets the execution fall back to on a quota refusal.
+/// Absent means never; an explicit `null` or a non-provider is refused rather
+/// than read as "no fallback".
+fn quota_fallback_agents_argument(
+    call: &ToolCall,
+) -> Result<Vec<crate::models::AgentType>, String> {
+    match call.arguments.get("quota_fallback_agents") {
+        None => Ok(Vec::new()),
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|error| format!("invalid quota_fallback_agents: {error}")),
+    }
 }
 
 /// The `validations` argument of a principal tool, structure only. `None` is a

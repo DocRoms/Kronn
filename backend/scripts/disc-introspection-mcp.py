@@ -950,7 +950,7 @@ TOOLS = [
                 },
                 "worker_scope": {
                     "type": "object",
-                    "description": "Native-HTTP scope required when worker_scope_intent is scoped.",
+                    "description": "Required when the intent is scoped.",
                 },
                 "validations": {
                     "type": "array",
@@ -974,18 +974,18 @@ TOOLS = [
                 "task_reference": {"type": "string"},
                 "worker": {
                     "type": "object",
-                    "description": "Exact typed worker accepted by preflight.",
+                    "description": "Worker accepted by preflight.",
                 },
                 "worker_scope_intent": {
                     "type": "string",
                     "enum": ["generic", "scoped"],
-                    "description": "Must exactly match the preflighted scope intent.",
+                    "description": "As preflighted.",
                 },
                 "worker_scope": {
                     "type": "object",
-                    "description": "Exact scope accepted by preflight when intent is scoped.",
+                    "description": "Scope accepted by preflight.",
                 },
-                "base_rev": {"type": "string", "description": "Target/base branch; defaults to main."},
+                "base_rev": {"type": "string", "description": "Target branch, default main."},
                 "idempotency_key": {"type": "string", "description": "Stable retry key."},
                 "validations": {
                     "type": "array",
@@ -993,6 +993,7 @@ TOOLS = [
                     "items": {"type": "object"},
                 },
                 "max_review_rounds": {"type": ["integer", "string"]},
+                "quota_fallback_agents": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["task_reference", "worker", "worker_scope_intent"],
         },
@@ -6200,7 +6201,7 @@ def call_task_exec_launch(args):
         "worker_scope_intent": scope_intent,
         **_task_exec_principal("task_exec_launch"),
     }
-    for optional in ("base_rev", "idempotency_key", "validations"):
+    for optional in ("base_rev", "idempotency_key", "validations", "quota_fallback_agents"):
         if args.get(optional) is not None:
             body[optional] = args[optional]
     _forward_review_rounds(args, body)
@@ -10225,6 +10226,12 @@ TOOL_MANUALS = {
         "argument the tool does not declare. `task_exec_status` shows `review_rounds` as "
         "used/limit (`unlimited` has no cap; raw JSON stores it as 4294967295). Raise the limit "
         "of an existing execution with `task_exec_reassign({extend_review_rounds})`.\n\n"
+        "**Quota fallback.** By default a provider quota refusal never moves the execution to "
+        "another provider: it waits for its own provider's announced reset and resumes on it. "
+        "`task_exec_launch({quota_fallback_agents: [\"Codex\"]})` is the explicit opt-in: those "
+        "providers, in preference order, may take over on a quota refusal. The execution keeps "
+        "its tier, returns to the original worker after the reset, and the switch shows in the "
+        "review card. Absent or empty: never.\n\n"
         "**Live checks.** A DoD item that can only be proven once the code is integrated and "
         "running (a replay on a real input) is a principal live check. Only the principal of the "
         "task's execution, or a human, may declare or remove it: a worker, an HTTP agent or an "

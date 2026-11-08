@@ -3881,6 +3881,8 @@ export interface CreateCampaignRequest {
   allowed_agents?: AgentType[];
   default_worker?: CampaignWorkerSelection | null;
   auto_continue?: boolean;
+  /** Explicit opt-in: move to another allowed provider on quota exhaustion, and back after the reset. */
+  quota_fallback?: boolean;
 }
 
 export const orchestration = {

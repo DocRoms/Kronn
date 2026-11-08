@@ -75,6 +75,8 @@ struct BeginProvisioningContext<'a> {
     /// KT-1345 — the review-round limit of a single-task launch: the caller's
     /// explicit one, else Settings > Workers. `None` keeps the model default.
     max_review_rounds: Option<u32>,
+    /// KT-1564 — the launch's explicit provider-fallback alternatives.
+    quota_fallback_agents: &'a [crate::models::AgentType],
 }
 
 /// Campaign launch request. `worker_override = None` resolves the persisted
@@ -687,6 +689,109 @@ async fn resume_deferred_at_boot(
     report
 }
 
+/// KT-1564 — a quota refusal that announced its reset closes itself. Once that
+/// instant has passed, an execution goes back to the worker it was given:
+///
+/// - one still parked `Escalated` on the refused provider returns to that same
+///   provider, tier, model and profile (the same-provider retry of KT-838);
+/// - one a quota fallback (explicit campaign opt-in) moved to another provider
+///   returns to the worker it left, not to a worker rebuilt from the campaign
+///   defaults or its allow-list.
+///
+/// The escalation closes, the worker is handed its work again in its own room.
+/// Another provider is never picked here. A paused, human-gated or finished run
+/// is left alone, and the reassignment re-checks all of this in its own
+/// transaction so a person acting in the meantime is never overridden. Returns
+/// the executions it handed back.
+pub(crate) async fn return_quota_escalations_past_reset(state: &AppState) -> Vec<String> {
+    let now = chrono::Utc::now();
+    let due = match state
+        .db
+        .with_read_conn(move |conn| {
+            let mut due = crate::db::orchestration::executions_past_quota_reset(conn, now)?;
+            for id in crate::db::orchestration::fallback_executions_past_origin_reset(conn, now)? {
+                if !due.contains(&id) {
+                    due.push(id);
+                }
+            }
+            Ok(due)
+        })
+        .await
+    {
+        Ok(due) => due,
+        Err(error) => {
+            tracing::warn!("quota reset scan failed: {error}");
+            return Vec::new();
+        }
+    };
+    let mut returned = Vec::new();
+    for execution_id in due {
+        let id = execution_id.clone();
+        let selection = state
+            .db
+            .with_conn(move |conn| {
+                let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                    .context("execution vanished before its quota return")?;
+                if let Some(origin) = crate::db::orchestration::quota_origin(conn, &id)? {
+                    // Already back on the original worker (provider and tier):
+                    // nothing to hand back, and replacing a live worker with
+                    // itself would cancel its dispatch. The memory is spent.
+                    if origin.is_worker_of(&execution) {
+                        crate::db::orchestration::clear_quota_origin(conn, &id)?;
+                        return Ok(None);
+                    }
+                    if origin.is_due(now) {
+                        return Ok(Some(origin.selection));
+                    }
+                }
+                Ok(Some(crate::models::CampaignWorkerSelection {
+                    target: worker_target_from_execution(&execution)?,
+                    model: execution.worker_model.clone(),
+                    profile_id: execution.worker_profile_id.clone(),
+                }))
+            })
+            .await;
+        let selection = match selection {
+            Ok(Some(selection)) => Ok(selection),
+            Ok(None) => {
+                tracing::info!(
+                    execution_id,
+                    "quota origin spent: the execution is already on its original worker"
+                );
+                continue;
+            }
+            Err(error) => Err(error),
+        };
+        let result = match selection {
+            Ok(selection) => reassign_native_execution_as(
+                state,
+                &execution_id,
+                selection,
+                "the provider's announced quota reset has passed: back to the original provider",
+                ReassignCause::QuotaReturn,
+            )
+            .await,
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(_) => {
+                tracing::info!(
+                    execution_id,
+                    "quota reset elapsed: execution returned to its provider"
+                );
+                returned.push(execution_id);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    execution_id,
+                    "quota return to the original provider failed: {error}"
+                );
+            }
+        }
+    }
+    returned
+}
+
 /// Runtime counterpart of boot reconciliation. Four clocks remain distinct in
 /// the journal; review/human waiting can therefore be tuned without pretending
 /// that an agent was inactive, and a total campaign deadline cannot be reset by
@@ -697,6 +802,7 @@ pub fn start_resilience_watchdog(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            return_quota_escalations_past_reset(&state).await;
             let expired = match state
                 .db
                 .with_conn(|conn| {
@@ -1711,7 +1817,16 @@ pub async fn provision_single_task_execution(
     db: &Database,
     input: ProvisionInput,
 ) -> Result<TaskExecution, ProvisionError> {
-    provision_task_execution_inner(db, input, None, None, None, Vec::new(), None).await
+    provision_task_execution_inner(
+        db,
+        input,
+        None,
+        None,
+        None,
+        Vec::new(),
+        SingleTaskLaunchOptions::default(),
+    )
+    .await
 }
 
 /// Launch one task with mechanical gates selected by the authorized principal.
@@ -1722,7 +1837,16 @@ pub async fn provision_single_task_execution_with_validations(
     input: ProvisionInput,
     validations: Vec<crate::models::ValidationSpec>,
 ) -> Result<TaskExecution, ProvisionError> {
-    provision_task_execution_inner(db, input, None, None, None, validations, None).await
+    provision_task_execution_inner(
+        db,
+        input,
+        None,
+        None,
+        None,
+        validations,
+        SingleTaskLaunchOptions::default(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1732,14 +1856,28 @@ pub async fn provision_single_task_execution_with_scope_and_validations(
     worker_scope: Option<TaskWorkerScope>,
     validations: Vec<crate::models::ValidationSpec>,
 ) -> Result<TaskExecution, ProvisionError> {
-    provision_task_execution_inner(db, input, None, None, worker_scope, validations, None).await
+    provision_task_execution_inner(
+        db,
+        input,
+        None,
+        None,
+        worker_scope,
+        validations,
+        SingleTaskLaunchOptions::default(),
+    )
+    .await
 }
 
 /// KT-1345 — the review-round limit of a single-task launch. `Some` is the
 /// caller's explicit value; `None` falls back to Settings > Workers.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// KT-1564 — `quota_fallback_agents` is the launch's own, explicit opt-in to a
+/// provider fallback on quota: the providers it names, in preference order.
+/// Empty (the default) never falls back to another provider.
+#[derive(Debug, Clone, Default)]
 pub struct SingleTaskLaunchOptions {
     pub max_review_rounds: Option<u32>,
+    pub quota_fallback_agents: Vec<crate::models::AgentType>,
 }
 
 /// Launch one task with the worker scope and gates the principal chose, and the
@@ -1768,7 +1906,10 @@ pub async fn provision_single_task_execution_with_options(
         None,
         worker_scope,
         validations,
-        Some(rounds),
+        SingleTaskLaunchOptions {
+            max_review_rounds: Some(rounds),
+            quota_fallback_agents: options.quota_fallback_agents,
+        },
     )
     .await
 }
@@ -1778,8 +1919,16 @@ async fn resume_provisioning_execution(
     input: ProvisionInput,
     execution_id: &str,
 ) -> Result<TaskExecution, ProvisionError> {
-    provision_task_execution_inner(db, input, None, Some(execution_id), None, Vec::new(), None)
-        .await
+    provision_task_execution_inner(
+        db,
+        input,
+        None,
+        Some(execution_id),
+        None,
+        Vec::new(),
+        SingleTaskLaunchOptions::default(),
+    )
+    .await
 }
 
 pub async fn provision_campaign_task_execution(
@@ -1818,7 +1967,7 @@ pub async fn provision_campaign_task_execution(
         None,
         None,
         Vec::new(),
-        None,
+        SingleTaskLaunchOptions::default(),
     )
     .await?;
     Ok((execution, selection_reason))
@@ -1831,8 +1980,12 @@ async fn provision_task_execution_inner(
     resume_execution_id: Option<&str>,
     worker_scope: Option<TaskWorkerScope>,
     validations: Vec<crate::models::ValidationSpec>,
-    max_review_rounds: Option<u32>,
+    options: SingleTaskLaunchOptions,
 ) -> Result<TaskExecution, ProvisionError> {
+    let SingleTaskLaunchOptions {
+        max_review_rounds,
+        quota_fallback_agents,
+    } = options;
     // Phases A–D are worker-agnostic: the worker kind forks ONLY at Phase E (native
     // dispatch vs. CLI control offer), so a Cli worker provisions its sub-discussion
     // and worktree exactly like a native one and diverges only at the final step.
@@ -1847,6 +2000,7 @@ async fn provision_task_execution_inner(
         let campaign = campaign.clone();
         let validations = validations.clone();
         let worker_scope = worker_scope.clone();
+        let quota_fallback_agents = quota_fallback_agents.clone();
         let resume_execution_id = resume_execution_id.map(str::to_string);
         db.with_conn(move |conn| {
             begin_provisioning(
@@ -1862,6 +2016,7 @@ async fn provision_task_execution_inner(
                     resume_execution_id: resume_execution_id.as_deref(),
                     worker_scope: worker_scope.as_ref(),
                     max_review_rounds,
+                    quota_fallback_agents: &quota_fallback_agents,
                 },
                 &backend_actor(),
             )
@@ -6884,6 +7039,16 @@ async fn deliver_authorized_worker_manifest_inner(
         return Ok(DeliverOutcome::InvalidManifest(detail));
     }
     let child = exec.sub_discussion_id.clone().unwrap_or_default();
+    let provider_changes = {
+        let exec_id = exec.id.clone();
+        db.with_read_conn(move |conn| crate::db::orchestration::provider_changes(conn, &exec_id))
+            .await
+            .unwrap_or_else(|error| {
+                // The delivery itself must not fail on a missing annotation.
+                tracing::warn!("provider changes unreadable for the review card: {error}");
+                Vec::new()
+            })
+    };
     let review_request = build_review_request_message(
         &exec.id,
         exec.attempt_no,
@@ -6892,6 +7057,7 @@ async fn deliver_authorized_worker_manifest_inner(
         &child,
         &manifest.head_sha,
         &manifest.summary,
+        &provider_changes,
         room_lang(db, &exec.parent_discussion_id).await,
     );
     // The queryable obligation payload carries the exact TARGETED principal identity (DoD-3).
@@ -8684,6 +8850,7 @@ fn begin_provisioning(
         resume_execution_id,
         worker_scope,
         max_review_rounds,
+        quota_fallback_agents,
     } = context;
     let task = match crate::db::planning::get_task(conn, task_reference)? {
         Some(t) => t,
@@ -8847,6 +9014,7 @@ fn begin_provisioning(
     if let Some(rounds) = max_review_rounds {
         launch.max_review_rounds = rounds;
     }
+    launch.quota_fallback_agents = quota_fallback_agents.to_vec();
     launch.worker_target_kind = Some(worker.kind);
     launch.worker_cli_session_id = worker.cli_session_id;
     launch.worker_connection_id = worker.connection_id.clone();
@@ -8989,7 +9157,7 @@ fn model_tier_to_db(t: &ModelTier) -> &'static str {
     }
 }
 
-fn model_tier_from_db(s: &str) -> Option<ModelTier> {
+pub(crate) fn model_tier_from_db(s: &str) -> Option<ModelTier> {
     match s {
         "economy" => Some(ModelTier::Economy),
         "default" => Some(ModelTier::Default),
@@ -9467,9 +9635,10 @@ fn build_review_request_message(
     child_discussion_id: &str,
     head_sha: &str,
     summary: &str,
+    provider_changes: &[crate::db::orchestration::ProviderChange],
     lang: RoomLang,
 ) -> DiscussionMessage {
-    let content = match lang {
+    let mut content = match lang {
         RoomLang::Fr => format!(
             "**Revue demandée — {task_reference} : {task_title}**\n\n\
              Le worker a livré son travail (HEAD `{head_sha}`) dans la sous-discussion \
@@ -9491,6 +9660,33 @@ fn build_review_request_message(
              Worker summary: {summary}"
         ),
     };
+    // KT-1564 — a delivery made after a provider switch says so where the
+    // reviewer decides, not only in the report written once it is accepted.
+    for change in provider_changes {
+        let reason = change.reason.trim();
+        content.push_str(&match lang {
+            RoomLang::Fr => format!(
+                "\n\n⚠️ Repli de provider : l'exécution est passée de `{}` à `{}` ({}).",
+                change.from,
+                change.to,
+                if reason.is_empty() {
+                    "aucune raison enregistrée"
+                } else {
+                    reason
+                }
+            ),
+            RoomLang::En => format!(
+                "\n\n⚠️ Provider fallback: the execution moved from `{}` to `{}` ({}).",
+                change.from,
+                change.to,
+                if reason.is_empty() {
+                    "no reason recorded"
+                } else {
+                    reason
+                }
+            ),
+        });
+    }
     orchestrator_message(
         format!("orch-review-request:{exec_id}:{attempt_no}"),
         content,
@@ -10467,6 +10663,9 @@ pub struct CreateCampaignRequest {
     pub default_worker: Option<crate::models::CampaignWorkerSelection>,
     #[serde(default)]
     pub auto_continue: bool,
+    /// Explicit opt-in to a provider fallback on quota exhaustion (KT-1564).
+    #[serde(default)]
+    pub quota_fallback: bool,
 }
 
 fn default_campaign_concurrency() -> u32 {
@@ -10858,6 +11057,8 @@ pub async fn create_campaign(
                 allowed_agents: request.allowed_agents,
                 default_worker: request.default_worker,
                 auto_continue: request.auto_continue,
+                quota_fallback: request.quota_fallback,
+                quota_fallback_agents: Vec::new(),
             };
             let run = crate::db::orchestration::create_orchestration_run(&tx, &input)?;
             crate::db::orchestration::set_resilience_policy(&tx, &run.id, &resilience)?;
@@ -12602,6 +12803,46 @@ pub(crate) async fn reassign_native_execution(
     selection: crate::models::CampaignWorkerSelection,
     reason: &str,
 ) -> Result<ExecutionRecoveryView> {
+    reassign_native_execution_as(state, exec_id, selection, reason, ReassignCause::Human).await
+}
+
+/// Who is moving an execution to another worker (KT-1564). A person's gesture
+/// is final. The two Kronn-made moves are explicit and bounded: the quota
+/// fallback a campaign opted into, and the return to the worker that fallback
+/// (or the refused provider) left once the announced reset has passed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ReassignCause {
+    Human,
+    /// Opted-in provider fallback; the worker being left is remembered, with
+    /// the reset the refusal announced, so the sweep can bring it back.
+    QuotaFallback {
+        reset_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    /// The sweep handing an execution back after the reset. Re-validated
+    /// inside the reassignment transaction.
+    QuotaReturn,
+}
+
+impl ReassignCause {
+    /// The actor a same-provider quota re-arm is attributed to: a person's
+    /// gesture is `Human`, Kronn's own decision `Backend`, so the audit never
+    /// credits one to the other.
+    fn rearm_actor(self) -> PlanningActorKind {
+        match self {
+            Self::Human => PlanningActorKind::Human,
+            Self::QuotaFallback { .. } | Self::QuotaReturn => PlanningActorKind::Backend,
+        }
+    }
+}
+
+/// [`reassign_native_execution`] with the [`ReassignCause`] behind the move.
+pub(crate) async fn reassign_native_execution_as(
+    state: &AppState,
+    exec_id: &str,
+    selection: crate::models::CampaignWorkerSelection,
+    reason: &str,
+    cause: ReassignCause,
+) -> Result<ExecutionRecoveryView> {
     if selection.target.kind == MessageTargetKind::Cli {
         bail!("native reassignment cannot target a CLI session");
     }
@@ -12615,6 +12856,25 @@ pub(crate) async fn reassign_native_execution(
                 .context("execution vanished before worker reassignment")
         })
         .await?;
+    if matches!(cause, ReassignCause::QuotaReturn) {
+        // Same check as the one inside the reassignment transaction (which
+        // stays authoritative), run first so a return that is already stale
+        // does not persist a re-anchored scope for a worker round that will
+        // never happen.
+        let id = exec_id.to_string();
+        let provider = crate::db::orchestration::agent_type_to_db(&selection.target.agent_type);
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::orchestration::ensure_quota_return_still_due(
+                    conn,
+                    &id,
+                    &provider,
+                    chrono::Utc::now(),
+                )
+            })
+            .await?;
+    }
     let lang = room_lang(&state.db, &execution.parent_discussion_id).await;
     let scope_note = reanchor_execution_scope(&state.db, &execution)
         .await?
@@ -12642,15 +12902,43 @@ pub(crate) async fn reassign_native_execution(
                 }
             }
             let transaction = conn.unchecked_transaction()?;
+            if matches!(cause, ReassignCause::QuotaReturn) {
+                // The sweep read this execution before the git re-anchoring
+                // above. A person may have moved, paused or finished it since:
+                // refuse here, before anything is written or cancelled.
+                crate::db::orchestration::ensure_quota_return_still_due(
+                    &transaction,
+                    &id,
+                    &provider,
+                    chrono::Utc::now(),
+                )?;
+            }
             let before = crate::db::orchestration::get_task_execution(&transaction, &id)?
                 .context("execution vanished before worker reassignment")?;
             let replaced_dispatch_id = before.dispatch_job_id.clone();
-            let execution = crate::db::orchestration::reassign_execution_worker(
+            let earlier_origin = crate::db::orchestration::quota_origin(&transaction, &id)?;
+            // Read before the reassignment, which forgets them with the origin:
+            // a fallback carries the chain's refusals over to its next link.
+            let earlier_refusals =
+                crate::db::orchestration::execution_quota_refusals(&transaction, &id)?;
+            // The origin outlives the sweep's own moves until the execution is
+            // back on it. When only the fallback provider's reset has passed,
+            // the execution retries that provider and still remembers where it
+            // must return; a person's choice always ends the memory.
+            // "Back" means the original provider AND tier, not a clock reading.
+            let back_on_origin = earlier_origin
+                .as_ref()
+                .is_some_and(|origin| origin.is_worker(&provider, selection.target.tier));
+            let keep_quota_origin = matches!(cause, ReassignCause::QuotaReturn)
+                && earlier_origin.is_some()
+                && !back_on_origin;
+            let execution = crate::db::orchestration::reassign_execution_worker_keeping_origin(
                 &transaction,
                 &id,
                 &selection,
                 &persisted_reason,
                 &backend_actor(),
+                keep_quota_origin,
             )?;
             let dod_note = dod_readopted_note(&transaction, &before, &execution, lang)?;
             let child = execution
@@ -12677,6 +12965,49 @@ pub(crate) async fn reassign_native_execution(
             let recovery = crate::db::orchestration::get_execution_recovery(&transaction, &id)?
                 .context("reassignment recovery row vanished")?;
             let generation = recovery.assignment_generation;
+            // `reassign_execution_worker` forgot any earlier origin: a person's
+            // choice, or the return itself, leaves nothing to go back to. Only
+            // a quota fallback remembers the worker it is leaving, tier, model
+            // and profile included, so the sweep can hand it back. A second
+            // fallback keeps the first origin: it is the worker that was chosen.
+            if let ReassignCause::QuotaFallback { reset_at } = cause {
+                if before.worker_target_kind != Some(MessageTargetKind::Cli) && !back_on_origin {
+                    let origin = match earlier_origin {
+                        Some(origin) => origin,
+                        None => crate::db::orchestration::QuotaOrigin::new(
+                            crate::models::CampaignWorkerSelection {
+                                target: worker_target_from_execution(&before)?,
+                                model: before.worker_model.clone(),
+                                profile_id: before.worker_profile_id.clone(),
+                            },
+                            reset_at,
+                        ),
+                    };
+                    crate::db::orchestration::record_quota_origin(&transaction, &id, &origin)?;
+                    // The chain so far, plus the provider this fallback leaves:
+                    // none of them is a candidate again until the execution is
+                    // back on its origin (or, if it announced a reset, until
+                    // that reset). Without a reset nothing else would stop the
+                    // chain bouncing between two exhausted providers.
+                    for refusal in earlier_refusals {
+                        crate::db::orchestration::record_execution_quota_refusal(
+                            &transaction,
+                            &id,
+                            &refusal,
+                        )?;
+                    }
+                    if let Some(left) = before.worker_agent_type.clone() {
+                        crate::db::orchestration::record_execution_quota_refusal(
+                            &transaction,
+                            &id,
+                            &crate::db::orchestration::QuotaRefusal {
+                                provider: left,
+                                reset_at: reset_at.map(crate::db::orchestration::quota_reset_stamp),
+                            },
+                        )?;
+                    }
+                }
+            }
             if quota_retry {
                 // Same transaction as the reassignment: a refused or failed
                 // handoff leaves the provider exactly as blocked as before.
@@ -12684,7 +13015,7 @@ pub(crate) async fn reassign_native_execution(
                     &transaction,
                     &provider,
                     &format!("reassign:{id}:{generation}"),
-                    PlanningActorKind::Human.as_str(),
+                    cause.rearm_actor().as_str(),
                     Some(&format!("reassign:{id}")),
                 )?;
             }
@@ -13003,6 +13334,10 @@ pub struct ProvisionRequest {
     /// KT-1345 — integer or `"unlimited"`; absent = Settings > Workers.
     #[serde(default, deserialize_with = "explicit_review_rounds")]
     pub max_review_rounds: Option<serde_json::Value>,
+    /// KT-1564 — providers this launch explicitly lets the execution fall back
+    /// to when its provider refuses for quota. Absent or empty: never.
+    #[serde(default)]
+    pub quota_fallback_agents: Vec<crate::models::AgentType>,
 }
 
 #[derive(Deserialize)]
@@ -13074,6 +13409,10 @@ pub struct TaskExecLaunchRequest {
     /// KT-1345 — integer or `"unlimited"`; absent = Settings > Workers.
     #[serde(default, deserialize_with = "explicit_review_rounds")]
     pub max_review_rounds: Option<serde_json::Value>,
+    /// KT-1564 — providers this launch explicitly lets the execution fall back
+    /// to when its provider refuses for quota. Absent or empty: never.
+    #[serde(default)]
+    pub quota_fallback_agents: Vec<crate::models::AgentType>,
 }
 
 #[derive(Deserialize, Default)]
@@ -14521,7 +14860,10 @@ pub async fn task_exec_launch(
         },
         request.worker_scope,
         request.validations,
-        SingleTaskLaunchOptions { max_review_rounds },
+        SingleTaskLaunchOptions {
+            max_review_rounds,
+            quota_fallback_agents: request.quota_fallback_agents,
+        },
     )
     .await
     {
@@ -15461,7 +15803,10 @@ pub async fn provision(
         input,
         request.worker_scope,
         request.validations,
-        SingleTaskLaunchOptions { max_review_rounds },
+        SingleTaskLaunchOptions {
+            max_review_rounds,
+            quota_fallback_agents: request.quota_fallback_agents,
+        },
     )
     .await
     {
@@ -28726,6 +29071,7 @@ pub(crate) mod tests {
             "child",
             "abc1234",
             "summary",
+            &[],
             RoomLang::En,
         );
         assert!(
@@ -28742,6 +29088,7 @@ pub(crate) mod tests {
             "child",
             "abc1234",
             "summary",
+            &[],
             RoomLang::Fr,
         );
         assert!(review_fr.content.contains("Revue demandée"));
@@ -32493,6 +32840,1535 @@ pub(crate) mod tests {
             .unwrap()
             .iter()
             .any(|quota| quota.provider == AgentType::ClaudeCode && quota.blocked));
+    }
+
+    /// KT-1564 — the 05/11 incident: a Claude Code refusal announced its reset,
+    /// the reset passed, and the execution must come back to Claude Code, not
+    /// drift to another provider. Covers KT-838 (a quota outage must not keep
+    /// the provider refused) and KT-593 (the escalation must close).
+    async fn escalate_claude_with_reset(
+        db: &Database,
+        dispatch: String,
+        reset: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        db.with_conn(move |conn| {
+            crate::db::orchestration::escalate_execution_for_dispatch_quota(
+                conn,
+                &dispatch,
+                "ClaudeCode",
+                reset,
+            )
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_passed_quota_reset_returns_the_execution_to_its_own_provider_and_closes_the_escalation(
+    ) {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let initial = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("kt1564-return".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let refused_dispatch = initial.dispatch_job_id.clone().unwrap();
+        let reset = chrono::Utc::now() + chrono::Duration::hours(2);
+        escalate_claude_with_reset(&db, refused_dispatch.clone(), Some(reset)).await;
+        let state = quota_test_state(&db);
+
+        // Before the announced instant: nothing moves, nobody is substituted.
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+        let waiting = exec_of(&db, &initial.id).await;
+        assert_eq!(waiting.status, TaskExecutionStatus::Escalated);
+        assert!(claude_quota_blocked(&db).await);
+
+        // The announced instant passes.
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE provider_quota_generations SET reset_at = ?1 WHERE provider = 'ClaudeCode'",
+                [(chrono::Utc::now() - chrono::Duration::minutes(1))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(
+            !claude_quota_blocked(&db).await,
+            "the provider stops being refused as soon as its reset has passed"
+        );
+
+        assert_eq!(
+            return_quota_escalations_past_reset(&state).await,
+            vec![initial.id.clone()]
+        );
+        let back = exec_of(&db, &initial.id).await;
+        assert_eq!(
+            back.status,
+            TaskExecutionStatus::Working,
+            "escalation closed"
+        );
+        assert_eq!(back.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert_eq!(back.worker_model_tier, waiting.worker_model_tier);
+        assert_eq!(back.worker_model, waiting.worker_model);
+        assert_eq!(back.sub_discussion_id, waiting.sub_discussion_id);
+        let new_dispatch = back.dispatch_job_id.clone().unwrap();
+        assert_ne!(new_dispatch, refused_dispatch);
+        let job = db
+            .with_conn(move |conn| crate::db::agent_dispatch::get(conn, &new_dispatch))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.agent_override, Some(AgentType::ClaudeCode));
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM provider_quota_rearm_events WHERE provider = 'ClaudeCode' \
+                 AND actor_kind = 'backend'"
+            )
+            .await,
+            1,
+            "the audit credits Kronn's own return, not a human"
+        );
+        let changes = db
+            .with_conn({
+                let id = initial.id.clone();
+                move |conn| crate::db::orchestration::provider_changes(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert!(changes.is_empty(), "returning home is not a fallback");
+
+        // Idempotent: nothing is left to hand back.
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_announced_no_reset_stays_escalated_for_a_human() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let initial = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("kt1564-unannounced".into()),
+            },
+        )
+        .await
+        .unwrap();
+        escalate_claude_with_reset(&db, initial.dispatch_job_id.clone().unwrap(), None).await;
+        let state = quota_test_state(&db);
+
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+        let still = exec_of(&db, &initial.id).await;
+        assert_eq!(still.status, TaskExecutionStatus::Escalated);
+        assert_eq!(still.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert!(claude_quota_blocked(&db).await);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_move_to_another_provider_is_recorded_as_a_provider_change() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (initial, _sibling) =
+            two_executions_escalated_by_one_claude_outage(&db, repo.path(), false).await;
+        let state = quota_test_state(&db);
+        reassign_native_execution(
+            &state,
+            &initial.id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Codex),
+                model: None,
+                profile_id: None,
+            },
+            "ClaudeCode is out of quota",
+        )
+        .await
+        .unwrap();
+
+        let id = initial.id.clone();
+        let changes = db
+            .with_conn(move |conn| crate::db::orchestration::provider_changes(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(
+            changes,
+            vec![crate::db::orchestration::ProviderChange {
+                from: "ClaudeCode".into(),
+                to: "Codex".into(),
+                reason: "ClaudeCode is out of quota".into(),
+            }]
+        );
+    }
+
+    /// KT-1564 — real Claude Code executions at a non-default tier with an
+    /// explicit model. A bare `native_worker()` has neither, so a return that
+    /// rebuilt its worker from defaults would pass unnoticed (None == None).
+    async fn economy_claude_executions(
+        db: &std::sync::Arc<Database>,
+        repo: &Path,
+        count: usize,
+    ) -> Vec<TaskExecution> {
+        let (first_ref, parent_id, project_id) = seed(db, repo).await;
+        let mut refs = vec![first_ref];
+        for n in 1..count {
+            let (pid, title) = (project_id.clone(), format!("Autre tâche {n}"));
+            refs.push(
+                db.with_conn(move |conn| {
+                    Ok(create_todo_task(conn, &pid, &title).summary.reference)
+                })
+                .await
+                .unwrap(),
+            );
+        }
+        let mut executions = Vec::new();
+        for (n, task_ref) in refs.into_iter().enumerate() {
+            let execution = provision_single_task_execution(
+                db,
+                ProvisionInput {
+                    task_reference: task_ref,
+                    parent_discussion_id: parent_id.clone(),
+                    worker: MessageTarget::agent(AgentType::ClaudeCode)
+                        .with_tier(crate::models::ModelTier::Economy),
+                    base_rev: Some("main".into()),
+                    idempotency_key: Some(format!("kt1564-economy-{n}")),
+                },
+            )
+            .await
+            .unwrap();
+            let (id, model) = (execution.id.clone(), format!("claude-haiku-model-{n}"));
+            db.with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE task_executions SET worker_model = ?2 WHERE id = ?1",
+                    rusqlite::params![id, model],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let execution = exec_of(db, &execution.id).await;
+            assert_eq!(execution.worker_model_tier.as_deref(), Some("economy"));
+            assert_eq!(
+                execution.worker_model,
+                Some(format!("claude-haiku-model-{n}"))
+            );
+            executions.push(execution);
+        }
+        executions
+    }
+
+    /// Tempt the run of `exec_id` with an alternative a wrong return or an
+    /// implicit fallback would pick: Codex is in `allowed_agents` and is the
+    /// campaign's `default_worker`. `quota_fallback` is the explicit opt-in.
+    async fn tempt_the_run_with_codex(db: &Database, exec_id: &str, quota_fallback: bool) {
+        let allowed = serde_json::to_string(&[AgentType::ClaudeCode, AgentType::Codex]).unwrap();
+        let default_worker = serde_json::to_string(&crate::models::CampaignWorkerSelection {
+            target: MessageTarget::agent(AgentType::Codex),
+            model: None,
+            profile_id: None,
+        })
+        .unwrap();
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET allowed_agents_json = ?2, default_worker_json = ?3, \
+                        quota_fallback = ?4 \
+                 WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+                rusqlite::params![id, allowed, default_worker, i64::from(quota_fallback)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn pass_the_claude_quota_reset(db: &Database) {
+        pass_the_quota_reset_of(db, "ClaudeCode").await;
+    }
+
+    async fn pass_the_quota_reset_of(db: &Database, provider: &'static str) {
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE provider_quota_generations SET reset_at = ?1 WHERE provider = ?2",
+                rusqlite::params![
+                    (chrono::Utc::now() - chrono::Duration::minutes(1))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    provider
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// The origin's announced reset, moved into the past.
+    async fn pass_the_origin_reset(db: &Database, exec_id: &str) {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_execution_quota_origin SET reset_at = ?2 WHERE task_execution_id = ?1",
+                rusqlite::params![
+                    id,
+                    (chrono::Utc::now() - chrono::Duration::minutes(1))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// An opted-in quota fallback of `execution` from Claude Code to Codex.
+    async fn fall_back_to_codex(
+        state: &AppState,
+        db: &Database,
+        execution: &TaskExecution,
+        reset: chrono::DateTime<chrono::Utc>,
+    ) -> TaskExecution {
+        tempt_the_run_with_codex(db, &execution.id, true).await;
+        let job = dispatch_of(db, execution.dispatch_job_id.clone().unwrap()).await;
+        crate::api::discussions::runtime::try_quota_provider_fallback_among(
+            state,
+            &job,
+            Some(reset),
+            vec![AgentType::ClaudeCode, AgentType::Codex],
+        )
+        .await
+        .unwrap()
+        .expect("the opted-in campaign falls back");
+        exec_of(db, &execution.id).await
+    }
+
+    async fn set_run_state(
+        db: &Database,
+        exec_id: &str,
+        control_state: &'static str,
+        status: &'static str,
+    ) {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET control_state = ?2, status = ?3 \
+                 WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+                rusqlite::params![id, control_state, status],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    fn selection_of(before: &TaskExecution) -> crate::models::CampaignWorkerSelection {
+        crate::models::CampaignWorkerSelection {
+            target: worker_target_from_execution(before).unwrap(),
+            model: before.worker_model.clone(),
+            profile_id: before.worker_profile_id.clone(),
+        }
+    }
+
+    async fn dispatch_of(
+        db: &Database,
+        dispatch_id: String,
+    ) -> crate::db::agent_dispatch::AgentDispatchJob {
+        db.with_conn(move |conn| crate::db::agent_dispatch::get(conn, &dispatch_id))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn two_executions_escalated_together_each_return_to_their_own_tier_and_model_never_to_an_alternative(
+    ) {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let before = economy_claude_executions(&db, repo.path(), 2).await;
+        let reset = chrono::Utc::now() + chrono::Duration::hours(2);
+        let state = quota_test_state(&db);
+        for execution in &before {
+            // The run offers Codex twice over (allow-list and default worker)
+            // and has NOT opted into a fallback: the real fallback entry point,
+            // with Codex available, must still decline both.
+            tempt_the_run_with_codex(&db, &execution.id, false).await;
+            let job = dispatch_of(&db, execution.dispatch_job_id.clone().unwrap()).await;
+            assert!(
+                crate::api::discussions::runtime::try_quota_provider_fallback_among(
+                    &state,
+                    &job,
+                    Some(reset),
+                    vec![AgentType::ClaudeCode, AgentType::Codex],
+                )
+                .await
+                .unwrap()
+                .is_none(),
+                "an alternative in allowed_agents / default_worker is not an opt-in"
+            );
+            escalate_claude_with_reset(
+                &db,
+                execution.dispatch_job_id.clone().unwrap(),
+                Some(reset),
+            )
+            .await;
+        }
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+
+        pass_the_claude_quota_reset(&db).await;
+        let mut returned = return_quota_escalations_past_reset(&state).await;
+        returned.sort();
+        let mut expected = before.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(returned, expected, "both are swept in the same pass");
+
+        for was in &before {
+            let back = exec_of(&db, &was.id).await;
+            assert_eq!(back.status, TaskExecutionStatus::Working);
+            assert_eq!(back.worker_agent_type.as_deref(), Some("ClaudeCode"));
+            assert_eq!(back.worker_model_tier.as_deref(), Some("economy"));
+            assert_eq!(
+                back.worker_model, was.worker_model,
+                "each keeps its own model, not its sibling's and not a default"
+            );
+            let job = dispatch_of(&db, back.dispatch_job_id.clone().unwrap()).await;
+            assert_eq!(job.agent_override, Some(AgentType::ClaudeCode));
+            let id = was.id.clone();
+            let changes = db
+                .with_conn(move |conn| crate::db::orchestration::provider_changes(conn, &id))
+                .await
+                .unwrap();
+            assert!(changes.is_empty(), "no provider switch happened");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_human_reassignment_landing_between_the_sweep_read_and_its_move_is_not_overridden() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        tempt_the_run_with_codex(&db, &was.id, false).await;
+        escalate_claude_with_reset(
+            &db,
+            was.dispatch_job_id.clone().unwrap(),
+            Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        )
+        .await;
+        pass_the_claude_quota_reset(&db).await;
+        let state = quota_test_state(&db);
+
+        // The sweep has read the execution as due...
+        let due = db
+            .with_read_conn(|conn| {
+                crate::db::orchestration::executions_past_quota_reset(conn, chrono::Utc::now())
+            })
+            .await
+            .unwrap();
+        assert_eq!(due, vec![was.id.clone()]);
+        let stale_selection = selection_of(&exec_of(&db, &was.id).await);
+        // ...and, before it writes, a human moves the execution to Codex.
+        reassign_native_execution(
+            &state,
+            &was.id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Codex),
+                model: None,
+                profile_id: None,
+            },
+            "the human picked Codex",
+        )
+        .await
+        .unwrap();
+        let human = exec_of(&db, &was.id).await;
+        let human_dispatch = human.dispatch_job_id.clone().unwrap();
+
+        let refused = reassign_native_execution_as(
+            &state,
+            &was.id,
+            stale_selection,
+            "back to the original provider",
+            ReassignCause::QuotaReturn,
+        )
+        .await
+        .err()
+        .expect("the stale sweep must not move an execution a human moved");
+        assert!(
+            refused.to_string().contains("quota return skipped"),
+            "{refused}"
+        );
+
+        let still = exec_of(&db, &was.id).await;
+        assert_eq!(still.worker_agent_type.as_deref(), Some("Codex"));
+        assert_eq!(still.dispatch_job_id, human.dispatch_job_id);
+        assert_ne!(
+            dispatch_of(&db, human_dispatch).await.status,
+            crate::db::agent_dispatch::DispatchStatus::Cancelled,
+            "the human's dispatch is untouched"
+        );
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_paused_or_finished_campaign_is_not_restarted_by_a_passed_quota_reset() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        escalate_claude_with_reset(
+            &db,
+            was.dispatch_job_id.clone().unwrap(),
+            Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        )
+        .await;
+        pass_the_claude_quota_reset(&db).await;
+        let state = quota_test_state(&db);
+        let stale_selection = selection_of(&exec_of(&db, &was.id).await);
+
+        for (control_state, status) in [
+            ("paused", "active"),
+            ("awaiting_human", "active"),
+            ("cancelled", "cancelled"),
+        ] {
+            set_run_state(&db, &was.id, control_state, status).await;
+            assert!(
+                db.with_read_conn(|conn| {
+                    crate::db::orchestration::executions_past_quota_reset(conn, chrono::Utc::now())
+                })
+                .await
+                .unwrap()
+                .is_empty(),
+                "{control_state} run is not listed"
+            );
+            assert!(
+                return_quota_escalations_past_reset(&state).await.is_empty(),
+                "{control_state} run is not restarted"
+            );
+            reassign_native_execution_as(
+                &state,
+                &was.id,
+                stale_selection.clone(),
+                "back",
+                ReassignCause::QuotaReturn,
+            )
+            .await
+            .err()
+            .expect("the reassignment itself refuses too");
+            assert_eq!(
+                exec_of(&db, &was.id).await.status,
+                TaskExecutionStatus::Escalated,
+                "{control_state}"
+            );
+        }
+
+        set_run_state(&db, &was.id, "running", "active").await;
+        assert_eq!(
+            return_quota_escalations_past_reset(&state).await,
+            vec![was.id.clone()],
+            "resumed, the execution comes back"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_fallback_needs_its_own_opt_in_and_the_execution_comes_back_after_the_reset()
+    {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        // Codex is allowed AND the campaign default: still not an opt-in.
+        tempt_the_run_with_codex(&db, &was.id, false).await;
+        let state = quota_test_state(&db);
+        let job = dispatch_of(&db, was.dispatch_job_id.clone().unwrap()).await;
+        let reset = chrono::Utc::now() + chrono::Duration::hours(2);
+        let available = vec![AgentType::ClaudeCode, AgentType::Codex];
+
+        assert!(
+            crate::api::discussions::runtime::try_quota_provider_fallback_among(
+                &state,
+                &job,
+                Some(reset),
+                available.clone()
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let untouched = exec_of(&db, &was.id).await;
+        assert_eq!(untouched.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert_eq!(untouched.dispatch_job_id, was.dispatch_job_id);
+
+        // The explicit opt-in.
+        tempt_the_run_with_codex(&db, &was.id, true).await;
+        let (alternative, _room) =
+            crate::api::discussions::runtime::try_quota_provider_fallback_among(
+                &state,
+                &job,
+                Some(reset),
+                available,
+            )
+            .await
+            .unwrap()
+            .expect("the opted-in campaign falls back");
+        assert_eq!(alternative, AgentType::Codex);
+        let moved = exec_of(&db, &was.id).await;
+        assert_eq!(moved.status, TaskExecutionStatus::Working);
+        assert_eq!(moved.worker_agent_type.as_deref(), Some("Codex"));
+        assert_eq!(
+            moved.worker_model_tier.as_deref(),
+            Some("economy"),
+            "the tier is the execution's, not a default"
+        );
+        assert_eq!(
+            moved.worker_model, None,
+            "a model name is provider-specific"
+        );
+
+        // The worker it left is remembered, tier and model included.
+        let id = was.id.clone();
+        let (origin, changes) = db
+            .with_conn(move |conn| {
+                Ok((
+                    crate::db::orchestration::quota_origin(conn, &id)?,
+                    crate::db::orchestration::provider_changes(conn, &id)?,
+                ))
+            })
+            .await
+            .unwrap();
+        let origin = origin.expect("the fallback remembers where it came from");
+        assert_eq!(origin.provider, "ClaudeCode");
+        assert_eq!(origin.selection.model, was.worker_model);
+        assert_eq!(
+            origin.selection.target.tier,
+            Some(crate::models::ModelTier::Economy)
+        );
+        assert!(origin.reset_at.is_some());
+
+        // The switch is on the card the reviewer decides from.
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            (changes[0].from.as_str(), changes[0].to.as_str()),
+            ("ClaudeCode", "Codex")
+        );
+        for (lang, expected) in [
+            (
+                RoomLang::En,
+                "Provider fallback: the execution moved from `ClaudeCode` to `Codex`",
+            ),
+            (
+                RoomLang::Fr,
+                "Repli de provider : l'exécution est passée de `ClaudeCode` à `Codex`",
+            ),
+        ] {
+            let card = build_review_request_message(
+                &was.id, 0, "KT-1", "Title", "child", "abc1234", "summary", &changes, lang,
+            );
+            assert!(card.content.contains(expected), "{}", card.content);
+        }
+        let straight = build_review_request_message(
+            &was.id,
+            0,
+            "KT-1",
+            "Title",
+            "child",
+            "abc1234",
+            "summary",
+            &[],
+            RoomLang::En,
+        );
+        assert!(
+            !straight.content.contains("allback"),
+            "{}",
+            straight.content
+        );
+
+        // Before the announced reset nothing moves; after it, the execution is
+        // handed back to the worker it left, not to Codex, not to a default.
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+        let id = was.id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_execution_quota_origin SET reset_at = ?2 WHERE task_execution_id = ?1",
+                rusqlite::params![
+                    id,
+                    (chrono::Utc::now() - chrono::Duration::minutes(1))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let codex_dispatch = moved.dispatch_job_id.clone().unwrap();
+        assert_eq!(
+            return_quota_escalations_past_reset(&state).await,
+            vec![was.id.clone()]
+        );
+        let back = exec_of(&db, &was.id).await;
+        assert_eq!(back.status, TaskExecutionStatus::Working);
+        assert_eq!(back.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert_eq!(back.worker_model_tier.as_deref(), Some("economy"));
+        assert_eq!(back.worker_model, was.worker_model);
+        assert_eq!(
+            dispatch_of(&db, back.dispatch_job_id.clone().unwrap())
+                .await
+                .agent_override,
+            Some(AgentType::ClaudeCode)
+        );
+        assert_eq!(
+            dispatch_of(&db, codex_dispatch).await.status,
+            crate::db::agent_dispatch::DispatchStatus::Cancelled,
+            "the fallback worker's dispatch is stopped"
+        );
+        let id = was.id.clone();
+        assert!(db
+            .with_conn(move |conn| crate::db::orchestration::quota_origin(conn, &id))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_fallback_without_an_announced_reset_or_after_a_human_choice_is_never_undone() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let mut executions = economy_claude_executions(&db, repo.path(), 2).await;
+        let (silent, chosen) = (executions.remove(0), executions.remove(0));
+        let state = quota_test_state(&db);
+        let available = vec![AgentType::ClaudeCode, AgentType::Codex];
+        for (execution, reset) in [
+            (&silent, None),
+            (
+                &chosen,
+                Some(chrono::Utc::now() - chrono::Duration::minutes(5)),
+            ),
+        ] {
+            tempt_the_run_with_codex(&db, &execution.id, true).await;
+            let job = dispatch_of(&db, execution.dispatch_job_id.clone().unwrap()).await;
+            crate::api::discussions::runtime::try_quota_provider_fallback_among(
+                &state,
+                &job,
+                reset,
+                available.clone(),
+            )
+            .await
+            .unwrap()
+            .expect("opted-in fallback");
+        }
+
+        // A human takes the second one over before the sweep notices it.
+        let human_choice = crate::models::CampaignWorkerSelection {
+            target: MessageTarget::agent(AgentType::Codex),
+            model: Some("gpt-human-choice".into()),
+            profile_id: None,
+        };
+        reassign_native_execution(&state, &chosen.id, human_choice, "the human keeps Codex")
+            .await
+            .unwrap();
+
+        let far_future = chrono::Utc::now() + chrono::Duration::days(36_500);
+        let due = db
+            .with_read_conn(move |conn| {
+                crate::db::orchestration::fallback_executions_past_origin_reset(conn, far_future)
+            })
+            .await
+            .unwrap();
+        assert!(
+            due.is_empty(),
+            "no announced reset, and a human's choice: {due:?}"
+        );
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+        for id in [&silent.id, &chosen.id] {
+            assert_eq!(
+                exec_of(&db, id).await.worker_agent_type.as_deref(),
+                Some("Codex")
+            );
+        }
+        // A stale return aimed at the human-owned execution is refused as well.
+        reassign_native_execution_as(
+            &state,
+            &chosen.id,
+            selection_of(&chosen),
+            "back",
+            ReassignCause::QuotaReturn,
+        )
+        .await
+        .err()
+        .expect("a human's choice has no origin to go back to");
+        assert_eq!(
+            exec_of(&db, &chosen.id).await.worker_model.as_deref(),
+            Some("gpt-human-choice")
+        );
+    }
+
+    /// KT-1564 — the fallback provider can reset BEFORE the original one. Codex
+    /// then hits its own quota and its reset passes first: the execution retries
+    /// Codex, and must still remember the Claude worker it has to return to.
+    #[tokio::test]
+    async fn the_fallback_provider_resetting_first_never_forgets_the_original_worker() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let claude_reset = chrono::Utc::now() + chrono::Duration::hours(5);
+        let on_codex = fall_back_to_codex(&state, &db, &was, claude_reset).await;
+        assert_eq!(on_codex.worker_agent_type.as_deref(), Some("Codex"));
+
+        // Codex refuses too, announcing a much earlier reset, and that passes.
+        let codex_dispatch = on_codex.dispatch_job_id.clone().unwrap();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::escalate_execution_for_dispatch_quota(
+                conn,
+                &codex_dispatch,
+                "Codex",
+                Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            exec_of(&db, &was.id).await.status,
+            TaskExecutionStatus::Escalated
+        );
+        pass_the_quota_reset_of(&db, "Codex").await;
+
+        assert_eq!(
+            return_quota_escalations_past_reset(&state).await,
+            vec![was.id.clone()],
+            "Codex is retried: its own reset has passed"
+        );
+        let retried = exec_of(&db, &was.id).await;
+        assert_eq!(retried.status, TaskExecutionStatus::Working);
+        assert_eq!(retried.worker_agent_type.as_deref(), Some("Codex"));
+        let id = was.id.clone();
+        let origin = db
+            .with_conn(move |conn| crate::db::orchestration::quota_origin(conn, &id))
+            .await
+            .unwrap()
+            .expect("the original worker is still remembered");
+        assert_eq!(origin.provider, "ClaudeCode");
+        assert_eq!(origin.selection.model, was.worker_model);
+        assert_eq!(
+            origin.selection.target.tier,
+            Some(crate::models::ModelTier::Economy)
+        );
+
+        // Claude's reset passes later: the execution still goes back to it,
+        // with its own tier and model, and only now is the memory dropped.
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+        pass_the_origin_reset(&db, &was.id).await;
+        assert_eq!(
+            return_quota_escalations_past_reset(&state).await,
+            vec![was.id.clone()]
+        );
+        let back = exec_of(&db, &was.id).await;
+        assert_eq!(back.status, TaskExecutionStatus::Working);
+        assert_eq!(back.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert_eq!(back.worker_model_tier.as_deref(), Some("economy"));
+        assert_eq!(back.worker_model, was.worker_model);
+        let id = was.id.clone();
+        assert!(db
+            .with_conn(move |conn| crate::db::orchestration::quota_origin(conn, &id))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// KT-1564 — the fallback worker delivers between the sweep's read and its
+    /// transaction: the delivery under review is left alone, not rejected.
+    #[tokio::test]
+    async fn a_delivery_landing_between_the_sweep_read_and_the_return_is_not_rejected() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let on_codex = fall_back_to_codex(
+            &state,
+            &db,
+            &was,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+        )
+        .await;
+        pass_the_origin_reset(&db, &was.id).await;
+        let due = db
+            .with_read_conn(|conn| {
+                crate::db::orchestration::fallback_executions_past_origin_reset(
+                    conn,
+                    chrono::Utc::now(),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(due, vec![was.id.clone()], "the sweep listed it as Working");
+        let origin_selection = db
+            .with_conn({
+                let id = was.id.clone();
+                move |conn| crate::db::orchestration::quota_origin(conn, &id)
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .selection;
+
+        // The fallback worker delivers before the sweep writes.
+        let id = was.id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_executions SET status = 'AwaitingReview' WHERE id = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let refused = reassign_native_execution_as(
+            &state,
+            &was.id,
+            origin_selection,
+            "back to the original provider",
+            ReassignCause::QuotaReturn,
+        )
+        .await
+        .err()
+        .expect("a delivery awaiting review is not turned into a rejected one");
+        assert!(
+            refused.to_string().contains("quota return skipped"),
+            "{refused}"
+        );
+        let still = exec_of(&db, &was.id).await;
+        assert_eq!(still.status, TaskExecutionStatus::AwaitingReview);
+        assert_eq!(still.worker_agent_type.as_deref(), Some("Codex"));
+        assert_eq!(still.dispatch_job_id, on_codex.dispatch_job_id);
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+    }
+
+    /// Refuse the dispatch `exec_id` currently runs through the real fallback
+    /// entry point. `Some(provider)`: the opted-in fallback moved it there.
+    async fn refuse_through_the_fallback(
+        state: &AppState,
+        db: &Database,
+        exec_id: &str,
+        reset: impl Into<Option<chrono::DateTime<chrono::Utc>>>,
+        available: &[AgentType],
+    ) -> Option<AgentType> {
+        let execution = exec_of(db, exec_id).await;
+        let job = dispatch_of(db, execution.dispatch_job_id.clone().unwrap()).await;
+        crate::api::discussions::runtime::try_quota_provider_fallback_among(
+            state,
+            &job,
+            reset.into(),
+            available.to_vec(),
+        )
+        .await
+        .unwrap()
+        .map(|(alternative, _room)| alternative)
+    }
+
+    async fn origin_of(
+        db: &Database,
+        exec_id: &str,
+    ) -> Option<crate::db::orchestration::QuotaOrigin> {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| crate::db::orchestration::quota_origin(conn, &id))
+            .await
+            .unwrap()
+    }
+
+    /// KT-1564 — the production path of a second refusal. Codex's refusal goes
+    /// through the fallback first; Claude is in `allowed_agents` and is the
+    /// original worker, so a naive pick walks straight back into an account that
+    /// has not reset (Claude -> Codex -> Claude, a dispatch per refusal).
+    #[tokio::test]
+    async fn a_second_refusal_never_falls_back_to_the_original_provider() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let available = [AgentType::ClaudeCode, AgentType::Codex];
+        let on_codex = fall_back_to_codex(
+            &state,
+            &db,
+            &was,
+            chrono::Utc::now() + chrono::Duration::hours(5),
+        )
+        .await;
+
+        // Codex refuses too; both providers are allowed and available.
+        assert_eq!(
+            refuse_through_the_fallback(
+                &state,
+                &db,
+                &was.id,
+                chrono::Utc::now() + chrono::Duration::hours(1),
+                &available
+            )
+            .await,
+            None,
+            "the original provider is not a fallback candidate"
+        );
+        let after = exec_of(&db, &was.id).await;
+        assert_eq!(after.worker_agent_type.as_deref(), Some("Codex"));
+        assert_eq!(
+            after.dispatch_job_id, on_codex.dispatch_job_id,
+            "no new dispatch for a refusal nobody can absorb"
+        );
+        assert_eq!(
+            origin_of(&db, &was.id).await.map(|origin| origin.provider),
+            Some("ClaudeCode".to_string())
+        );
+
+        // The escalation that follows keeps the memory; Claude's reset passes
+        // while Codex is still refused: the execution goes home, once.
+        let codex_dispatch = on_codex.dispatch_job_id.clone().unwrap();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::escalate_execution_for_dispatch_quota(
+                conn,
+                &codex_dispatch,
+                "Codex",
+                Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            )
+        })
+        .await
+        .unwrap();
+        pass_the_origin_reset(&db, &was.id).await;
+        assert_eq!(
+            return_quota_escalations_past_reset(&state).await,
+            vec![was.id.clone()]
+        );
+        let home = exec_of(&db, &was.id).await;
+        assert_eq!(home.status, TaskExecutionStatus::Working);
+        assert_eq!(home.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert_eq!(home.worker_model_tier.as_deref(), Some("economy"));
+        assert!(origin_of(&db, &was.id).await.is_none());
+        assert!(
+            refusals_of(&db, &was.id).await.is_empty(),
+            "back on the origin: the chain's refusals end with it"
+        );
+    }
+
+    /// KT-1564 — the original provider stays out even when its refusal never
+    /// announced a reset (so no clock marks it unavailable).
+    #[tokio::test]
+    async fn the_original_provider_is_not_a_fallback_even_when_its_refusal_announced_no_reset() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let available = [AgentType::ClaudeCode, AgentType::Codex];
+        tempt_the_run_with_codex(&db, &was.id, true).await;
+        assert_eq!(
+            refuse_through_the_fallback(
+                &state,
+                &db,
+                &was.id,
+                Option::<chrono::DateTime<chrono::Utc>>::None,
+                &available
+            )
+            .await,
+            Some(AgentType::Codex)
+        );
+        assert_eq!(
+            refuse_through_the_fallback(
+                &state,
+                &db,
+                &was.id,
+                chrono::Utc::now() + chrono::Duration::hours(1),
+                &available
+            )
+            .await,
+            None,
+            "Claude announced nothing, but it is still the original worker"
+        );
+        assert_eq!(
+            exec_of(&db, &was.id).await.worker_agent_type.as_deref(),
+            Some("Codex")
+        );
+    }
+
+    /// KT-1564 — a chain of fallbacks skips every provider whose refusal has
+    /// not reset (the fallback leaves no escalation row to tell), and still uses
+    /// one that is free.
+    #[tokio::test]
+    async fn a_fallback_chain_skips_each_provider_that_has_not_reset_and_the_original() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let available = [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::GeminiCli,
+        ];
+        let allowed = serde_json::to_string(&available).unwrap();
+        let id = was.id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET allowed_agents_json = ?2, quota_fallback = 1 \
+                 WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+                rusqlite::params![id, allowed],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let hours = |n: i64| chrono::Utc::now() + chrono::Duration::hours(n);
+
+        assert_eq!(
+            refuse_through_the_fallback(&state, &db, &was.id, hours(5), &available).await,
+            Some(AgentType::Codex)
+        );
+        assert_eq!(
+            refuse_through_the_fallback(&state, &db, &was.id, hours(1), &available).await,
+            Some(AgentType::GeminiCli),
+            "Claude is the original, Gemini is free"
+        );
+        assert_eq!(
+            refuse_through_the_fallback(&state, &db, &was.id, hours(2), &available).await,
+            None,
+            "Claude is the original and Codex has not reset"
+        );
+        let last = exec_of(&db, &was.id).await;
+        assert_eq!(last.worker_agent_type.as_deref(), Some("GeminiCli"));
+        assert_eq!(last.worker_model_tier.as_deref(), Some("economy"));
+        assert_eq!(
+            origin_of(&db, &was.id).await.map(|origin| origin.provider),
+            Some("ClaudeCode".to_string()),
+            "the first worker is still what the execution returns to"
+        );
+    }
+
+    async fn refusals_of(db: &Database, exec_id: &str) -> Vec<String> {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            Ok(
+                crate::db::orchestration::execution_quota_refusals(conn, &id)?
+                    .into_iter()
+                    .map(|refusal| refusal.provider)
+                    .collect(),
+            )
+        })
+        .await
+        .unwrap()
+    }
+
+    /// KT-1564 — refusals that announce no reset. The global refusal record
+    /// holds NULL for them, so nothing on a clock marks the provider as
+    /// unavailable: Claude (origin) -> Codex -> Gemini, and Gemini's refusal
+    /// must not hand the execution back to Codex, then Gemini again, with a
+    /// dispatch and a handoff per refusal. It escalates after the second.
+    #[tokio::test]
+    async fn two_refusals_without_a_reset_escalate_instead_of_bouncing() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let available = [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::GeminiCli,
+        ];
+        let allowed = serde_json::to_string(&available).unwrap();
+        let id = was.id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET allowed_agents_json = ?2, quota_fallback = 1 \
+                 WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+                rusqlite::params![id, allowed],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let none = || Option::<chrono::DateTime<chrono::Utc>>::None;
+
+        // Claude refuses: the fallback goes to Codex.
+        assert_eq!(
+            refuse_through_the_fallback(&state, &db, &was.id, none(), &available).await,
+            Some(AgentType::Codex)
+        );
+        // Codex refuses: Gemini is the only provider left that has not refused.
+        assert_eq!(
+            refuse_through_the_fallback(&state, &db, &was.id, none(), &available).await,
+            Some(AgentType::GeminiCli)
+        );
+        let on_gemini = exec_of(&db, &was.id).await;
+        let gemini_dispatch = on_gemini.dispatch_job_id.clone().unwrap();
+        // Gemini refuses: Claude is the origin, Codex already refused. Nobody
+        // is left, so no new dispatch and no handoff: the caller escalates.
+        for _ in 0..3 {
+            assert_eq!(
+                refuse_through_the_fallback(&state, &db, &was.id, none(), &available).await,
+                None,
+                "the execution never goes back to a provider that refused during this chain"
+            );
+        }
+        let stuck = exec_of(&db, &was.id).await;
+        assert_eq!(stuck.worker_agent_type.as_deref(), Some("GeminiCli"));
+        assert_eq!(stuck.worker_model_tier.as_deref(), Some("economy"));
+        assert_eq!(
+            stuck.dispatch_job_id.as_deref(),
+            Some(gemini_dispatch.as_str())
+        );
+        let mut refused = refusals_of(&db, &was.id).await;
+        refused.sort();
+        assert_eq!(refused, vec!["ClaudeCode".to_string(), "Codex".to_string()]);
+
+        // The escalation the caller then performs parks it for a person...
+        let dispatch = gemini_dispatch.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::escalate_execution_for_dispatch_quota(
+                conn,
+                &dispatch,
+                "GeminiCli",
+                None,
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            exec_of(&db, &was.id).await.status,
+            TaskExecutionStatus::Escalated
+        );
+        // ...and nothing brings it back by itself: no provider announced a reset.
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+
+        // A person moving it ends the chain: the refusals go with the origin.
+        reassign_native_execution_as(
+            &state,
+            &was.id,
+            selection_of(&was),
+            "the quota is back",
+            ReassignCause::Human,
+        )
+        .await
+        .unwrap();
+        assert!(refusals_of(&db, &was.id).await.is_empty());
+        assert!(origin_of(&db, &was.id).await.is_none());
+    }
+
+    /// KT-1564 — a refusal that did announce a reset only excludes its provider
+    /// until that reset: the chain may use it again afterwards.
+    #[tokio::test]
+    async fn a_refusal_with_a_reset_excludes_its_provider_only_until_the_reset() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let available = [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::GeminiCli,
+        ];
+        let allowed = serde_json::to_string(&available).unwrap();
+        let id = was.id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET allowed_agents_json = ?2, quota_fallback = 1 \
+                 WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+                rusqlite::params![id, allowed],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let hours = |n: i64| chrono::Utc::now() + chrono::Duration::hours(n);
+
+        assert_eq!(
+            refuse_through_the_fallback(&state, &db, &was.id, hours(5), &available).await,
+            Some(AgentType::Codex)
+        );
+        assert_eq!(
+            refuse_through_the_fallback(&state, &db, &was.id, hours(5), &available).await,
+            Some(AgentType::GeminiCli)
+        );
+        // Codex's announced reset passes (the stored refusals are what the
+        // chain consults, not only the global record).
+        let id = was.id.clone();
+        db.with_conn(move |conn| {
+            let past = crate::db::orchestration::quota_reset_stamp(
+                chrono::Utc::now() - chrono::Duration::minutes(1),
+            );
+            conn.execute(
+                "UPDATE task_execution_quota_refusals SET reset_at = ?2 \
+                 WHERE task_execution_id = ?1 AND provider = 'Codex'",
+                rusqlite::params![id, past],
+            )?;
+            conn.execute(
+                "UPDATE provider_quota_generations SET reset_at = ?1 WHERE provider = 'Codex'",
+                [past],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            refuse_through_the_fallback(&state, &db, &was.id, hours(5), &available).await,
+            Some(AgentType::Codex),
+            "Codex has reset: it is a candidate again"
+        );
+    }
+
+    /// KT-1564 — a fallback that lands on the original provider and tier is
+    /// home: the memory of the original worker is spent, not rewritten.
+    #[tokio::test]
+    async fn landing_back_on_the_original_provider_and_tier_spends_the_origin() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        fall_back_to_codex(
+            &state,
+            &db,
+            &was,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+        )
+        .await;
+        assert!(origin_of(&db, &was.id).await.is_some());
+
+        reassign_native_execution_as(
+            &state,
+            &was.id,
+            selection_of(&was),
+            "automatic quota fallback",
+            ReassignCause::QuotaFallback {
+                reset_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            },
+        )
+        .await
+        .unwrap();
+        let home = exec_of(&db, &was.id).await;
+        assert_eq!(home.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert!(
+            origin_of(&db, &was.id).await.is_none(),
+            "back on the original provider and tier: nothing left to return to"
+        );
+    }
+
+    /// KT-1564 — an execution that is already on its original worker is not
+    /// handed back to itself: that would cancel the live worker.
+    #[tokio::test]
+    async fn an_execution_already_on_its_original_worker_is_not_handed_back_to_itself() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        // A stale memory of the worker it already runs on, long due.
+        let (id, origin) = (
+            was.id.clone(),
+            crate::db::orchestration::QuotaOrigin::new(
+                selection_of(&was),
+                Some(chrono::Utc::now() - chrono::Duration::minutes(5)),
+            ),
+        );
+        db.with_conn(move |conn| crate::db::orchestration::record_quota_origin(conn, &id, &origin))
+            .await
+            .unwrap();
+        let live_dispatch = was.dispatch_job_id.clone().unwrap();
+
+        let refused = reassign_native_execution_as(
+            &state,
+            &was.id,
+            selection_of(&was),
+            "back to the original provider",
+            ReassignCause::QuotaReturn,
+        )
+        .await
+        .err()
+        .expect("the live worker is not replaced by itself");
+        assert!(
+            refused
+                .to_string()
+                .contains("already on its original worker"),
+            "{refused}"
+        );
+
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+        let still = exec_of(&db, &was.id).await;
+        assert_eq!(still.status, TaskExecutionStatus::Working);
+        assert_eq!(
+            still.dispatch_job_id.as_deref(),
+            Some(live_dispatch.as_str())
+        );
+        assert_ne!(
+            dispatch_of(&db, live_dispatch).await.status,
+            crate::db::agent_dispatch::DispatchStatus::Cancelled,
+            "the live worker keeps running"
+        );
+        assert!(
+            origin_of(&db, &was.id).await.is_none(),
+            "the spent memory is dropped by the sweep"
+        );
+    }
+
+    /// KT-1564 — a launch names its own fallback providers (`quota_fallback_agents`);
+    /// the run persists them, the fallback uses them instead of the allow-list,
+    /// and a launch that names none never falls back.
+    #[tokio::test]
+    async fn a_launch_names_its_fallback_agents_and_only_those_are_used() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (first_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let second_ref = db
+            .with_conn(move |conn| {
+                Ok(create_todo_task(conn, &project_id, "Autre tâche")
+                    .summary
+                    .reference)
+            })
+            .await
+            .unwrap();
+        let state = quota_test_state(&db);
+        let worker = MessageTarget::agent(AgentType::ClaudeCode)
+            .with_tier(crate::models::ModelTier::Economy);
+        let launch = |task_ref: String, key: &'static str, agents: Vec<AgentType>| {
+            let (state, parent_id, worker) = (state.clone(), parent_id.clone(), worker.clone());
+            async move {
+                provision_single_task_execution_with_options(
+                    &state,
+                    ProvisionInput {
+                        task_reference: task_ref,
+                        parent_discussion_id: parent_id,
+                        worker,
+                        base_rev: Some("main".into()),
+                        idempotency_key: Some(key.into()),
+                    },
+                    None,
+                    Vec::new(),
+                    SingleTaskLaunchOptions {
+                        max_review_rounds: Some(3),
+                        quota_fallback_agents: agents,
+                    },
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let plain = launch(first_ref, "kt1564-no-fallback", Vec::new()).await;
+        let named = launch(second_ref, "kt1564-fallback", vec![AgentType::Codex]).await;
+
+        // The run carries exactly what the launch said.
+        for (execution, opted_in, agents) in [
+            (&plain, false, Vec::new()),
+            (&named, true, vec![AgentType::Codex]),
+        ] {
+            let run_id = execution.orchestration_run_id.clone();
+            let run = db
+                .with_conn(move |conn| {
+                    crate::db::orchestration::get_orchestration_run(conn, &run_id)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.quota_fallback, opted_in);
+            assert_eq!(run.quota_fallback_agents, agents);
+        }
+
+        // The allow-list offers Gemini and Codex to both runs: it is not the
+        // opt-in, and for the named launch it is not the list either.
+        for execution in [&plain, &named] {
+            let allowed = serde_json::to_string(&[
+                AgentType::ClaudeCode,
+                AgentType::GeminiCli,
+                AgentType::Codex,
+            ])
+            .unwrap();
+            let id = execution.id.clone();
+            db.with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE orchestration_runs SET allowed_agents_json = ?2 \
+                     WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+                    rusqlite::params![id, allowed],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        let available = [
+            AgentType::ClaudeCode,
+            AgentType::GeminiCli,
+            AgentType::Codex,
+        ];
+        let reset = chrono::Utc::now() + chrono::Duration::hours(2);
+        assert_eq!(
+            refuse_through_the_fallback(&state, &db, &plain.id, reset, &available).await,
+            None,
+            "a launch that named no fallback never falls back"
+        );
+        assert_eq!(
+            refuse_through_the_fallback(&state, &db, &named.id, reset, &available).await,
+            Some(AgentType::Codex),
+            "the launch's own list wins over the allow-list order"
+        );
+        let moved = exec_of(&db, &named.id).await;
+        assert_eq!(moved.worker_agent_type.as_deref(), Some("Codex"));
+        assert_eq!(
+            origin_of(&db, &named.id)
+                .await
+                .map(|origin| origin.provider),
+            Some("ClaudeCode".to_string())
+        );
+    }
+
+    /// KT-1564 — both launch routes accept `quota_fallback_agents`, and a body
+    /// that omits it asks for no fallback.
+    #[test]
+    fn the_launch_requests_carry_quota_fallback_agents() {
+        let body = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "task_reference": "KT-1",
+                "parent_discussion_id": "disc",
+                "worker": serde_json::to_value(MessageTarget::agent(AgentType::ClaudeCode)).unwrap(),
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            body
+        };
+        let named = serde_json::json!({ "quota_fallback_agents": ["Codex"] });
+        let provision: ProvisionRequest = serde_json::from_value(body(named.clone())).unwrap();
+        assert_eq!(provision.quota_fallback_agents, vec![AgentType::Codex]);
+        let launch: TaskExecLaunchRequest = serde_json::from_value(body(named)).unwrap();
+        assert_eq!(launch.quota_fallback_agents, vec![AgentType::Codex]);
+        let silent: ProvisionRequest = serde_json::from_value(body(serde_json::json!({}))).unwrap();
+        assert!(silent.quota_fallback_agents.is_empty());
+        let silent: TaskExecLaunchRequest =
+            serde_json::from_value(body(serde_json::json!({}))).unwrap();
+        assert!(silent.quota_fallback_agents.is_empty());
     }
 
     #[tokio::test]
@@ -42383,6 +44259,7 @@ pub(crate) mod tests {
                 Vec::new(),
                 SingleTaskLaunchOptions {
                     max_review_rounds: explicit,
+                    ..Default::default()
                 },
             )
             .await

@@ -754,6 +754,17 @@ pub struct OrchestrationRun {
     pub default_worker: Option<CampaignWorkerSelection>,
     #[serde(default)]
     pub auto_continue: bool,
+    /// Explicit opt-in (KT-1564): when a worker's provider refuses a dispatch
+    /// for quota, Kronn may move the execution to another provider of
+    /// `allowed_agents` (or the `quota_fallback_agents` a single-task launch
+    /// named) and brings it back after the announced reset. Off by default;
+    /// `allowed_agents` alone never authorizes a switch.
+    #[serde(default)]
+    pub quota_fallback: bool,
+    /// The alternatives a single-task launch named for its own fallback. Empty
+    /// for a campaign, which falls back among `allowed_agents`.
+    #[serde(default)]
+    pub quota_fallback_agents: Vec<AgentType>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1072,6 +1083,8 @@ pub struct OrchestrationRunInput {
     pub allowed_agents: Vec<AgentType>,
     pub default_worker: Option<CampaignWorkerSelection>,
     pub auto_continue: bool,
+    pub quota_fallback: bool,
+    pub quota_fallback_agents: Vec<AgentType>,
 }
 
 impl OrchestrationRunInput {
@@ -1094,6 +1107,8 @@ impl OrchestrationRunInput {
             allowed_agents: Vec::new(),
             default_worker: None,
             auto_continue: false,
+            quota_fallback: false,
+            quota_fallback_agents: Vec::new(),
         }
     }
 }
@@ -1124,6 +1139,9 @@ pub struct LaunchSingleTaskInput {
     /// Principal-authored mechanical gates for the implicit single-task run.
     /// These are never accepted from the worker delivery manifest.
     pub validations: Vec<ValidationSpec>,
+    /// KT-1564 — the providers this launch explicitly lets the execution fall
+    /// back to when its own provider refuses for quota. Empty: never.
+    pub quota_fallback_agents: Vec<AgentType>,
     /// A retry with the same key returns the existing execution — no duplicate.
     pub idempotency_key: Option<String>,
 }
@@ -1149,6 +1167,7 @@ impl LaunchSingleTaskInput {
             worker_dod_ids: None,
             max_review_rounds: super::setup::DEFAULT_MAX_REVIEW_ROUNDS,
             validations: Vec::new(),
+            quota_fallback_agents: Vec::new(),
             idempotency_key: None,
         }
     }

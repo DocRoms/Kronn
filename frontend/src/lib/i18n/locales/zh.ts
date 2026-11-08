@@ -4344,6 +4344,8 @@ const zh: TranslationDict = {
   "orch.config.validationsHint": "例如 make test-class",
   "orch.config.fallbacks": "允许的备用智能体",
   "orch.config.autoContinue": "自动启动下一个就绪任务",
+  "orch.config.quotaFallback": "额度用尽时切换到其他允许的智能体",
+  "orch.config.quotaFallbackHint": "默认关闭:任务会等待自己的智能体额度重置后继续使用它。开启后,任务会切换到允许的智能体(在交付中可见),额度重置后再回到原智能体。",
   "orch.resolution.resolve_git": "解决分支冲突或刷新目标后重试。",
   "orch.resolution.fix_tests": "修复失败的验证后重试。",
   "orch.resolution.reassign_agent": "选择其他可用智能体，或等待配额恢复。",

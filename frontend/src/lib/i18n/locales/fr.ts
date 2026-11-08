@@ -4399,6 +4399,8 @@ const fr: TranslationDict = {
   'orch.config.validationsHint': 'ex. make test-class',
   'orch.config.fallbacks': 'Agents de repli autorisés',
   'orch.config.autoContinue': 'Lancer automatiquement la prochaine tâche prête',
+  'orch.config.quotaFallback': 'Basculer sur un autre agent autorisé quand le quota est épuisé',
+  'orch.config.quotaFallbackHint': 'Désactivé par défaut : la tâche attend la réinitialisation de son propre agent puis y revient. Activé, elle passe sur un agent autorisé (visible dans la livraison), puis retourne à l\'agent d\'origine après la réinitialisation.',
   'orch.resolution.resolve_git': 'Résolvez le conflit de branche ou actualisez sa cible, puis réessayez.',
   'orch.resolution.fix_tests': 'Corrigez la validation en échec avant de réessayer.',
   'orch.resolution.reassign_agent': 'Choisissez un autre agent disponible ou attendez le renouvellement du quota.',

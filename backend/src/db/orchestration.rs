@@ -64,7 +64,7 @@ const RUN_COLS: &str = "id, kind, discussion_id, project_id, target_workspace_id
     integration_strategy, validation_json, escalation_notify_url, status, \
     created_at, updated_at, allow_self_review, control_state, control_reason, \
     timeout_secs, max_cli_concurrent_executions, allowed_agents_json, \
-    default_worker_json, auto_continue";
+    default_worker_json, auto_continue, quota_fallback, quota_fallback_agents_json";
 
 fn parse_dt(value: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&value)
@@ -113,6 +113,7 @@ fn row_to_run(row: &Row) -> rusqlite::Result<OrchestrationRun> {
     let control_state: String = row.get(16)?;
     let allowed_agents_json: String = row.get(20)?;
     let default_worker_json: Option<String> = row.get(21)?;
+    let quota_fallback_agents_json: String = row.get(24)?;
     Ok(OrchestrationRun {
         id: row.get(0)?,
         kind: OrchestrationRunKind::from_str(&kind).unwrap_or_default(),
@@ -140,6 +141,8 @@ fn row_to_run(row: &Row) -> rusqlite::Result<OrchestrationRun> {
             .map(|json| parse_json_column(21, json))
             .transpose()?,
         auto_continue: row.get::<_, i64>(22)? != 0,
+        quota_fallback: row.get::<_, i64>(23)? != 0,
+        quota_fallback_agents: parse_json_column(24, &quota_fallback_agents_json)?,
     })
 }
 
@@ -1006,6 +1009,7 @@ pub fn create_orchestration_run(
     let now = Utc::now().to_rfc3339();
     let validation_json = serde_json::to_string(&input.validations)?;
     let allowed_agents_json = serde_json::to_string(&input.allowed_agents)?;
+    let quota_fallback_agents_json = serde_json::to_string(&input.quota_fallback_agents)?;
     let default_worker_json = input
         .default_worker
         .as_ref()
@@ -1015,7 +1019,7 @@ pub fn create_orchestration_run(
         &format!(
             "INSERT INTO orchestration_runs ({RUN_COLS}) \
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                    ?17, NULL, ?18, ?19, ?20, ?21, ?22)"
+                    ?17, NULL, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
         ),
         params![
             id,
@@ -1042,6 +1046,8 @@ pub fn create_orchestration_run(
             allowed_agents_json,
             default_worker_json,
             i64::from(input.auto_continue),
+            i64::from(input.quota_fallback),
+            quota_fallback_agents_json,
         ],
     )?;
     get_orchestration_run(conn, &id)?
@@ -1754,6 +1760,8 @@ pub fn launch_single_task(
         run_input.target_branch = input.target_branch.clone();
         run_input.max_review_rounds = input.max_review_rounds;
         run_input.validations = input.validations.clone();
+        run_input.quota_fallback = !input.quota_fallback_agents.is_empty();
+        run_input.quota_fallback_agents = input.quota_fallback_agents.clone();
         let run = create_orchestration_run(conn, &run_input)?;
 
         let id = Uuid::new_v4().to_string();
@@ -2519,7 +2527,8 @@ pub fn adopt_woken_dispatch_for_interrupted_worker(
 ///
 /// `reset_at` is the reset instant the provider's own refusal announced, when
 /// it gave one (KT-838). It is kept only so a human can be told when to
-/// re-arm; it never re-arms anything by itself (KT-593).
+/// re-arm. Once it has passed, the watchdog returns the execution to the same
+/// provider by itself (KT-1564, [`executions_past_quota_reset`]).
 pub fn escalate_execution_for_dispatch_quota(
     conn: &Connection,
     dispatch_job_id: &str,
@@ -2615,7 +2624,8 @@ pub fn escalate_execution_for_dispatch_quota(
 /// escalated execution moves it out of `Escalated` (see
 /// `reassign_execution_worker` + the `Escalated -> Working` transition in
 /// `reassign_native_execution`), as does cancelling or otherwise completing
-/// it — never a guessed provider-side reset schedule.
+/// it — or, since KT-1564, when the reset instant the provider itself announced
+/// has passed. Kronn never invents a schedule for a refusal that gave none.
 ///
 /// `exclude_exec_id` keeps an execution from being refused by its own
 /// still-open row; a fresh `agent_list`/launch preflight for any other task
@@ -2628,6 +2638,18 @@ pub fn provider_has_open_quota_exhaustion(
     conn: &Connection,
     provider: &str,
     exclude_exec_id: Option<&str>,
+) -> Result<bool> {
+    provider_has_open_quota_exhaustion_at(conn, provider, exclude_exec_id, Utc::now())
+}
+
+/// [`provider_has_open_quota_exhaustion`] at an explicit instant. An
+/// escalation stops counting once the reset the provider announced has passed
+/// (KT-1564): the outage is over, whatever happened to the escalated row.
+pub fn provider_has_open_quota_exhaustion_at(
+    conn: &Connection,
+    provider: &str,
+    exclude_exec_id: Option<&str>,
+    now: DateTime<Utc>,
 ) -> Result<bool> {
     let marker = format!("quota_exhausted:{provider}");
     conn.query_row(
@@ -2644,16 +2666,407 @@ pub fn provider_has_open_quota_exhaustion(
                    0
                )
                AND (?3 IS NULL OR e.id <> ?3)
+               AND COALESCE(
+                   (SELECT reset_at FROM provider_quota_generations WHERE provider = ?1),
+                   ?5
+               ) > ?4
          )",
-        params![provider, marker, exclude_exec_id],
+        params![
+            provider,
+            marker,
+            exclude_exec_id,
+            quota_reset_stamp(now),
+            QUOTA_RESET_UNANNOUNCED
+        ],
         |row| row.get(0),
     )
     .map_err(Into::into)
 }
 
+/// KT-1564 — a refusal that a provider fallback walks away from. The fallback
+/// leaves no `Escalated` row behind, so without this the provider's refusal (and
+/// the reset it announced) would be forgotten the moment the execution moved on,
+/// and a later fallback could walk straight back into the exhausted account.
+/// Only the announced reset is written: it never bumps the generation a human
+/// re-arm acknowledges, and a refusal that announced nothing keeps the previous
+/// announcement only while it is still ahead (same rule as the escalation).
+pub fn note_provider_quota_refusal(
+    conn: &Connection,
+    provider: &str,
+    announced_reset: Option<DateTime<Utc>>,
+) -> Result<()> {
+    let now_stamp = quota_reset_stamp(Utc::now());
+    let reset_at = match announced_reset {
+        Some(reset) => Some(quota_reset_stamp(reset)),
+        None => provider_quota_reset_at(conn, provider)?.filter(|reset| *reset > now_stamp),
+    };
+    conn.execute(
+        "INSERT INTO provider_quota_generations (provider, latest_generation, reset_at) \
+         VALUES (?1, 0, ?2) \
+         ON CONFLICT(provider) DO UPDATE SET reset_at = excluded.reset_at",
+        params![provider, reset_at],
+    )?;
+    Ok(())
+}
+
+/// KT-1564 — true while `provider` must not be handed a fallback: it still has
+/// an open quota escalation, or a refusal announced a reset that is still ahead.
+/// A refusal that announced nothing and left no escalation is not guessed at.
+pub fn provider_quota_unavailable_at(
+    conn: &Connection,
+    provider: &str,
+    exclude_exec_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    if provider_has_open_quota_exhaustion_at(conn, provider, exclude_exec_id, now)? {
+        return Ok(true);
+    }
+    Ok(
+        provider_quota_reset_at(conn, provider)?
+            .is_some_and(|reset| reset > quota_reset_stamp(now)),
+    )
+}
+
+/// Sorts after every real reset stamp: a refusal that announced no reset never
+/// expires on its own (KT-593 — Kronn does not guess a provider's schedule).
+const QUOTA_RESET_UNANNOUNCED: &str = "9999-12-31T23:59:59Z";
+
+/// KT-1564 — executions parked `Escalated` by a quota refusal whose provider
+/// announced a reset instant that has now passed. Each one is still on the
+/// provider (and tier, model, profile) that was refused: the escalation never
+/// moves the assignment, so returning there is a same-provider retry that needs
+/// no human and no other provider. A refusal that announced nothing is never
+/// listed — only a person can say the quota is back then. Nor is an execution
+/// of a paused, human-gated or finished run.
+pub fn executions_past_quota_reset(conn: &Connection, now: DateTime<Utc>) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT e.id
+         FROM task_execution_recovery r
+         JOIN task_executions e ON e.id = r.task_execution_id
+         JOIN planning_tasks t ON t.id = e.task_id
+         JOIN provider_quota_generations g ON g.provider = e.worker_agent_type
+         WHERE e.status = 'Escalated'
+           AND r.recovery_action = 'await_human'
+           AND r.recovery_reason = 'quota_exhausted:' || e.worker_agent_type
+           AND COALESCE(e.worker_target_kind, '') <> 'cli'
+           AND g.reset_at IS NOT NULL
+           AND g.reset_at <= ?1
+           AND t.status NOT IN ('done', 'archived')
+           AND {RUN_ALLOWS_RESTART_SQL}
+         ORDER BY r.updated_at ASC, e.id ASC"
+    ))?;
+    let ids = stmt
+        .query_map([quota_reset_stamp(now)], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
+/// A campaign or run that is paused, waiting on a human, or finished must not
+/// have a worker restarted behind its back, whatever the quota clock says.
+const RUN_ALLOWS_RESTART_SQL: &str = "EXISTS(SELECT 1 FROM orchestration_runs o \
+     WHERE o.id = e.orchestration_run_id \
+       AND o.control_state = 'running' AND o.status = 'active')";
+
+/// The worker a quota fallback moved an execution away from (KT-1564).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaOrigin {
+    pub selection: CampaignWorkerSelection,
+    pub provider: String,
+    /// The reset instant the refusal announced, in the canonical stamp form.
+    /// `None`: nothing was announced, so nothing brings the execution back.
+    pub reset_at: Option<String>,
+}
+
+impl QuotaOrigin {
+    pub fn new(selection: CampaignWorkerSelection, reset_at: Option<DateTime<Utc>>) -> Self {
+        Self {
+            provider: agent_type_to_db(&selection.target.agent_type),
+            selection,
+            reset_at: reset_at.map(quota_reset_stamp),
+        }
+    }
+
+    pub fn is_due(&self, now: DateTime<Utc>) -> bool {
+        self.reset_at
+            .as_deref()
+            .is_some_and(|reset| reset <= quota_reset_stamp(now).as_str())
+    }
+
+    /// True when `provider` at `tier` is the very worker this origin records:
+    /// the execution is back home, whatever the reset clock says. A tier that
+    /// was never set is the default tier on both sides.
+    pub fn is_worker(&self, provider: &str, tier: Option<ModelTier>) -> bool {
+        self.provider == provider
+            && self.selection.target.tier.unwrap_or_default() == tier.unwrap_or_default()
+    }
+
+    /// [`Self::is_worker`] for the worker an execution currently runs on.
+    pub fn is_worker_of(&self, execution: &TaskExecution) -> bool {
+        let tier = execution
+            .worker_model_tier
+            .as_deref()
+            .and_then(crate::api::orchestration::model_tier_from_db);
+        execution
+            .worker_agent_type
+            .as_deref()
+            .is_some_and(|provider| self.is_worker(provider, tier))
+    }
+}
+
+/// Remember where a quota fallback took the execution from. The caller keeps
+/// the first origin across a second fallback (the alternative also ran dry):
+/// that one must still lead back to the worker that was originally chosen.
+pub fn record_quota_origin(conn: &Connection, exec_id: &str, origin: &QuotaOrigin) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO task_execution_quota_origin \
+         (task_execution_id, origin_json, origin_provider, reset_at, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            exec_id,
+            serde_json::to_string(&origin.selection)?,
+            origin.provider,
+            origin.reset_at,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn quota_origin(conn: &Connection, exec_id: &str) -> Result<Option<QuotaOrigin>> {
+    conn.query_row(
+        "SELECT origin_json, origin_provider, reset_at FROM task_execution_quota_origin \
+         WHERE task_execution_id = ?1",
+        [exec_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
+    )
+    .optional()?
+    .map(|(json, provider, reset_at)| {
+        Ok(QuotaOrigin {
+            selection: serde_json::from_str(&json)?,
+            provider,
+            reset_at,
+        })
+    })
+    .transpose()
+}
+
+/// A person (or the return itself) now owns the assignment: the fallback's
+/// memory of where it came from, and of who refused on the way, no longer
+/// applies.
+pub fn clear_quota_origin(conn: &Connection, exec_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM task_execution_quota_origin WHERE task_execution_id = ?1",
+        [exec_id],
+    )?;
+    conn.execute(
+        "DELETE FROM task_execution_quota_refusals WHERE task_execution_id = ?1",
+        [exec_id],
+    )?;
+    Ok(())
+}
+
+/// A provider that refused this execution during its current fallback chain,
+/// with the reset the refusal announced. `None`: nothing was announced, so the
+/// provider stays unavailable until the execution is back on its origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaRefusal {
+    pub provider: String,
+    pub reset_at: Option<String>,
+}
+
+pub fn execution_quota_refusals(conn: &Connection, exec_id: &str) -> Result<Vec<QuotaRefusal>> {
+    let mut stmt = conn.prepare(
+        "SELECT provider, reset_at FROM task_execution_quota_refusals \
+         WHERE task_execution_id = ?1 ORDER BY provider ASC",
+    )?;
+    let refusals = stmt
+        .query_map([exec_id], |row| {
+            Ok(QuotaRefusal {
+                provider: row.get(0)?,
+                reset_at: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(refusals)
+}
+
+/// Writes (or refreshes) one refusal of this fallback chain.
+pub fn record_execution_quota_refusal(
+    conn: &Connection,
+    exec_id: &str,
+    refusal: &QuotaRefusal,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO task_execution_quota_refusals (task_execution_id, provider, reset_at) \
+         VALUES (?1, ?2, ?3) \
+         ON CONFLICT(task_execution_id, provider) DO UPDATE SET reset_at = excluded.reset_at",
+        params![exec_id, refusal.provider, refusal.reset_at],
+    )?;
+    Ok(())
+}
+
+/// Providers a fallback of this execution must not hand it to: each one that
+/// already refused it during this chain and whose announced reset (if any) is
+/// still ahead. A refusal that announced nothing holds until the chain ends.
+pub fn execution_refused_providers(
+    conn: &Connection,
+    exec_id: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<String>> {
+    let now = quota_reset_stamp(now);
+    Ok(execution_quota_refusals(conn, exec_id)?
+        .into_iter()
+        .filter(|refusal| {
+            refusal
+                .reset_at
+                .as_deref()
+                .is_none_or(|reset| reset > now.as_str())
+        })
+        .map(|refusal| refusal.provider)
+        .collect())
+}
+
+/// KT-1564 — executions a quota fallback moved to another provider whose
+/// original provider announced a reset that has now passed. Only a worker that
+/// is running on the alternative (or parked on its own quota refusal) is handed
+/// back; a delivery awaiting review is left alone. Paused, human-gated and
+/// finished runs are never listed.
+pub fn fallback_executions_past_origin_reset(
+    conn: &Connection,
+    now: DateTime<Utc>,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT e.id
+         FROM task_execution_quota_origin q
+         JOIN task_executions e ON e.id = q.task_execution_id
+         JOIN planning_tasks t ON t.id = e.task_id
+         WHERE q.reset_at IS NOT NULL
+           AND q.reset_at <= ?1
+           AND COALESCE(e.worker_target_kind, '') <> 'cli'
+           AND (e.status = 'Working'
+                OR (e.status = 'Escalated'
+                    AND EXISTS(SELECT 1 FROM task_execution_recovery r
+                               WHERE r.task_execution_id = e.id
+                                 AND r.recovery_reason = 'quota_exhausted:' || e.worker_agent_type)))
+           AND t.status NOT IN ('done', 'archived')
+           AND {RUN_ALLOWS_RESTART_SQL}
+         ORDER BY q.created_at ASC, e.id ASC"
+    ))?;
+    let ids = stmt
+        .query_map([quota_reset_stamp(now)], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
+/// The worker a fallback left, once its announced reset has passed. `None`
+/// when the execution has no such origin: its own current worker is then the
+/// one a same-provider return goes back to.
+pub fn due_quota_origin(
+    conn: &Connection,
+    exec_id: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<QuotaOrigin>> {
+    Ok(quota_origin(conn, exec_id)?.filter(|origin| origin.is_due(now)))
+}
+
+/// Re-checked inside the reassignment transaction, right before the sweep (a
+/// backend actor) moves an execution. Between the sweep's read and that
+/// transaction a human may have moved, paused or finished the execution: the
+/// sweep then refuses instead of overriding them (KT-1564). `target_provider`
+/// is the provider the sweep is about to hand the execution to.
+pub fn ensure_quota_return_still_due(
+    conn: &Connection,
+    exec_id: &str,
+    target_provider: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let allowed: bool = conn.query_row(
+        &format!("SELECT {RUN_ALLOWS_RESTART_SQL} FROM task_executions e WHERE e.id = ?1"),
+        [exec_id],
+        |row| row.get(0),
+    )?;
+    if !allowed {
+        bail!("quota return skipped: the campaign or run is not running");
+    }
+    // The execution must still be what the sweep listed: a worker running on
+    // the alternative, or parked on its own provider's quota refusal. A
+    // delivery made since (`AwaitingReview`) or any other state is a decision
+    // the sweep must not turn into a rejected delivery.
+    let still_listed: bool = conn.query_row(
+        "SELECT e.status = 'Working' OR (e.status = 'Escalated' AND EXISTS( \
+             SELECT 1 FROM task_execution_recovery r \
+             WHERE r.task_execution_id = e.id \
+               AND r.recovery_reason = 'quota_exhausted:' || e.worker_agent_type)) \
+         FROM task_executions e WHERE e.id = ?1",
+        [exec_id],
+        |row| row.get(0),
+    )?;
+    if !still_listed {
+        bail!("quota return skipped: the execution is no longer working or parked on its quota");
+    }
+    if let Some(origin) = quota_origin(conn, exec_id)? {
+        let execution = get_task_execution(conn, exec_id)?
+            .ok_or_else(|| anyhow::anyhow!("execution vanished before its quota return"))?;
+        // Already back on the original worker: handing it "back" would replace
+        // a live worker with itself and cancel its dispatch.
+        if execution.status == TaskExecutionStatus::Working && origin.is_worker_of(&execution) {
+            bail!("quota return skipped: the execution is already on its original worker");
+        }
+        if origin.is_due(now) && origin.provider == target_provider {
+            return Ok(());
+        }
+    }
+    let reset_passed = provider_quota_reset_at(conn, target_provider)?
+        .is_some_and(|reset| reset <= quota_reset_stamp(now));
+    if reset_passed && is_quota_retry_on_same_provider(conn, exec_id, target_provider)? {
+        return Ok(());
+    }
+    bail!("quota return skipped: the execution is no longer parked on a passed quota reset")
+}
+
+/// One provider switch in an execution's history, oldest first (KT-1564). Read
+/// from the `worker_reassigned` journal so the delivery report can name every
+/// fallback instead of presenting the last provider as if it had always run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderChange {
+    pub from: String,
+    pub to: String,
+    pub reason: String,
+}
+
+pub fn provider_changes(conn: &Connection, exec_id: &str) -> Result<Vec<ProviderChange>> {
+    let mut stmt = conn.prepare(
+        "SELECT changes_json FROM task_execution_events \
+         WHERE task_execution_id = ?1 AND action = 'worker_reassigned' \
+         ORDER BY created_at ASC, rowid ASC",
+    )?;
+    let rows = stmt
+        .query_map([exec_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|json| {
+            let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+            let text = |key: &str| value.get(key)?.as_str().map(str::to_owned);
+            let (from, to) = (text("from_provider")?, text("provider")?);
+            (from != to).then(|| ProviderChange {
+                from,
+                to,
+                reason: text("reason").unwrap_or_default(),
+            })
+        })
+        .collect())
+}
+
 /// The canonical stored form of a reset instant. One fixed-width UTC shape, so
 /// two stamps compare correctly as plain strings.
-fn quota_reset_stamp(at: DateTime<Utc>) -> String {
+pub(crate) fn quota_reset_stamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
@@ -7586,6 +7999,21 @@ pub fn reassign_execution_worker(
     reason: &str,
     actor: &OrchestrationActor,
 ) -> Result<TaskExecution> {
+    reassign_execution_worker_keeping_origin(conn, exec_id, selection, reason, actor, false)
+}
+
+/// [`reassign_execution_worker`] that can leave the worker a quota fallback
+/// remembered in place (KT-1564). A new assignment normally ends that memory;
+/// only a move that is not yet back on the original provider keeps it, so a
+/// fallback provider's own retry never erases where the execution must return.
+pub fn reassign_execution_worker_keeping_origin(
+    conn: &Connection,
+    exec_id: &str,
+    selection: &CampaignWorkerSelection,
+    reason: &str,
+    actor: &OrchestrationActor,
+    keep_quota_origin: bool,
+) -> Result<TaskExecution> {
     in_savepoint(conn, |conn| {
         let mut execution = get_task_execution(conn, exec_id)?
             .ok_or_else(|| anyhow::anyhow!("unknown task execution"))?;
@@ -7887,11 +8315,18 @@ pub fn reassign_execution_worker(
             serde_json::json!({
                 "generation": generation,
                 "provider": agent_type_to_db(&selection.target.agent_type),
+                "from_provider": execution.worker_agent_type,
                 "identity_kind": target_kind_to_db(Some(selection.target.kind)),
                 "cli_session_id": selection.target.cli_session_id,
                 "reason": reason,
             }),
         )?;
+        // KT-1564 — a new assignment ends whatever a quota fallback remembered
+        // about the previous one; the fallback records its own again afterwards.
+        // The one exception is a move that is not back on the original worker.
+        if !keep_quota_origin {
+            clear_quota_origin(conn, exec_id)?;
+        }
         get_task_execution(conn, exec_id)?
             .ok_or_else(|| anyhow::anyhow!("execution vanished after reassignment"))
     })
