@@ -1554,12 +1554,12 @@ future_server_flag = true
 paths = ["/a", "/b"]
 
 [comfyui]
-image_model = "flux2-klein-4b.safetensors"
-image_family = "flux2_klein4b"
+image_model = "flux9-future.safetensors"
+image_family = "flux9_future"
 
 [comfyui.model_families]
 "checkpoints/known.safetensors" = "sdxl"
-"checkpoints/new.safetensors" = "flux2_klein4b"
+"checkpoints/new.safetensors" = "flux9_future"
 "#;
 
     /// KT-1513 — one value this build does not know costs that value, not the
@@ -1581,7 +1581,7 @@ image_family = "flux2_klein4b"
         assert_eq!(loaded.scan.paths, vec!["/a".to_string(), "/b".to_string()]);
         assert_eq!(
             loaded.comfyui.image_model.as_deref(),
-            Some("flux2-klein-4b.safetensors")
+            Some("flux9-future.safetensors")
         );
         // The unknown values are unset, the known ones around them kept.
         assert_eq!(loaded.comfyui.image_family, None);
@@ -1668,7 +1668,7 @@ image_family = "flux2_klein4b"
         assert_eq!(written["server"]["port"].as_integer(), Some(5555));
         assert_eq!(
             written["comfyui"]["model_families"]["checkpoints/new.safetensors"].as_str(),
-            Some("flux2_klein4b")
+            Some("flux9_future")
         );
         // The family this build now holds wins over the preserved one.
         assert_eq!(written["comfyui"]["image_family"].as_str(), Some("sdxl"));
@@ -1842,17 +1842,17 @@ image_family = "flux2_klein4b"
 
         // Untouched: both unknown values are written back.
         let kept = disk_toml(&config, &tmp, false).unwrap();
-        assert_eq!(kept.matches("flux2_klein4b").count(), 2, "{kept}");
+        assert_eq!(kept.matches("flux9_future").count(), 2, "{kept}");
 
         // Set, saved, cleared: the unknown value does not return.
         config.comfyui.image_family = Some(crate::core::comfyui::ComfyFamily::Sdxl);
         let set = disk_toml(&config, &tmp, false).unwrap();
-        assert_eq!(set.matches("flux2_klein4b").count(), 1, "{set}");
+        assert_eq!(set.matches("flux9_future").count(), 1, "{set}");
         config.comfyui.image_family = None;
         // The map is cleared as a whole.
         config.comfyui.model_families.clear();
         let cleared = disk_toml(&config, &tmp, false).unwrap();
-        assert!(!cleared.contains("flux2_klein4b"), "{cleared}");
+        assert!(!cleared.contains("flux9_future"), "{cleared}");
         // What nobody touched is still there.
         assert!(cleared.contains("future_top_level"), "{cleared}");
         assert!(cleared.contains("agent_from_the_future"), "{cleared}");
@@ -2186,7 +2186,7 @@ image_family = "flux2_klein4b"
         crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
         std::fs::write(
             tmp.join(CONFIG_FILE),
-            "broken = [\n[server]\nport = 4242\n[comfyui]\nimage_family = \"flux2_klein4b\"\n",
+            "broken = [\n[server]\nport = 4242\n[comfyui]\nimage_family = \"flux9_future\"\n",
         )
         .unwrap();
         let loaded = load().await.unwrap().expect("settings, not a first run");
@@ -2197,7 +2197,7 @@ image_family = "flux2_klein4b"
         assert!(notice.contains("config.toml.corrupt."), "{notice}");
         // The live file keeps the value for the next save.
         let live = std::fs::read_to_string(tmp.join(CONFIG_FILE)).unwrap();
-        assert!(live.contains("flux2_klein4b"), "{live}");
+        assert!(live.contains("flux9_future"), "{live}");
         crate::core::child_env::remove_var("KRONN_DATA_DIR");
         release_disk_key(&tmp);
         preserve(&tmp, Default::default());

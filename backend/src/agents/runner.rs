@@ -7523,19 +7523,23 @@ fn compact_tool_result(
         }
         result.to_string()
     };
+    // `allowance` is the size once embedded as a JSON string in `messages`:
+    // the envelope's quotes are escaped there, so its raw length undercounts.
+    let too_big =
+        |text: &str| serde_json::to_string(text).map_or(text.len(), |e| e.len()) > allowance;
     let mut rendered = render(&facts, &excerpts, false);
     // Give up the biggest excerpts first, then the least protocol-critical
     // facts, then the detail of the shape, rather than cutting the middle of
     // the JSON.
-    while rendered.len() > allowance && !excerpts.is_empty() {
+    while too_big(&rendered) && !excerpts.is_empty() {
         excerpts.pop();
         rendered = render(&facts, &excerpts, false);
     }
-    while rendered.len() > allowance && facts.len() > 1 {
+    while too_big(&rendered) && facts.len() > 1 {
         facts.pop();
         rendered = render(&facts, &excerpts, false);
     }
-    if rendered.len() > allowance {
+    if too_big(&rendered) {
         rendered = render(&facts, &excerpts, true);
     }
     (rendered.len() < raw.len()).then_some(rendered)
