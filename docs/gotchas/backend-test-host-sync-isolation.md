@@ -8,7 +8,7 @@ Codex, Copilot, Claude, and Gemini host adapters. Any router fixture that
 exercises those MCP handlers therefore needs both owned configuration and host
 roots. [src: file: backend/src/api/mcps.rs:945-953#sync_pids]
 [src: file: backend/src/api/mcps.rs:1674-1686#secrets_changed]
-[src: file: backend/src/api/mcps.rs:1743-1749#cfg]
+[src: file: backend/src/api/mcps.rs:1752-1758#cfg]
 [src: file: backend/src/api/agents.rs:6-22#resync_mcp_configs_after_install]
 [src: file: backend/src/core/mcp_scanner.rs:2655-2658#registry]
 [src: file: backend/src/core/mcp_scanner.rs:3797-3807#sync_all_projects]
