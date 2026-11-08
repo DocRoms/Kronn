@@ -2697,6 +2697,8 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("already linked to discussion disc-source-a"));
+        // The bridge moves a stale link on this code, never on the wording (KT-1566).
+        assert_eq!(conflict["error_code"], "conflict", "{conflict}");
 
         state
             .db

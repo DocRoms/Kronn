@@ -3633,27 +3633,64 @@ def _durable_session_id():
     return f"cli-{key}" if key else None
 
 
-def _bind_session_to_disc(disc_id, agent_type):
+def _bind_session_to_disc(disc_id, agent_type, follow_latest=False):
     """Link the durable CLI session to `disc_id`. Returns a dict the caller can
     hand back to the agent verbatim.
 
     Never passes `force_reassign`: stealing a session that another discussion
     owns would silently redirect that other room's reconnects.
+
+    `follow_latest` is for the two callers that hold a credential proving this
+    very session belongs to `disc_id` (a fresh join token, or the resume
+    credential persisted by one). A link naming a DIFFERENT room is then
+    superseded, not a rival owner: whichever room owns it right now is read
+    back and the link is moved with the human-confirmed transfer endpoint,
+    expecting that exact room, so a concurrent change still fails closed
+    (KT-1566). The conflict is recognised by the backend's `conflict` error
+    code, never by its wording.
     """
     session_id = _durable_session_id()
     if not session_id:
         return {"session_bound": False, "session_bind_skipped": "no durable CLI identity"}
     if not agent_type or agent_type == "Unknown":
         return {"session_bound": False, "session_bind_skipped": "unknown agent type"}
+    envelope = None
     try:
-        _unwrap(_http("POST", "/api/disc/link", {
+        envelope = _http("POST", "/api/disc/link", {
             "disc_id": disc_id,
             "source_agent": agent_type,
             "source_session_id": session_id,
-        }))
+        })
+        _unwrap(envelope)
     except Exception as exc:
         # A session already owned by ANOTHER disc lands here — reported, not
         # forced, and never fatal to the join itself.
+        link_conflict = (
+            isinstance(envelope, dict) and envelope.get("error_code") == "conflict"
+        )
+        if follow_latest and link_conflict:
+            try:
+                found = _unwrap(_http("GET", "/api/disc/find_by_session?" + urllib.parse.urlencode({
+                    "source_agent": agent_type,
+                    "source_session_id": session_id,
+                })))
+                owner_disc_id = found.get("disc_id") if isinstance(found, dict) else None
+                if owner_disc_id and owner_disc_id != disc_id:
+                    moved = _unwrap(_http("POST", "/api/disc/transfer-session", {
+                        "from_disc_id": owner_disc_id,
+                        "to_disc_id": disc_id,
+                        "source_agent": agent_type,
+                        "source_session_id": session_id,
+                        "confirm_transfer": True,
+                    }))
+                    if isinstance(moved, dict) and moved.get("session_bound") is True:
+                        return {
+                            "session_bound": True,
+                            "session_id": session_id,
+                            "session_link_moved_from": owner_disc_id,
+                        }
+            except Exception as transfer_exc:
+                return {"session_bound": False, "session_bind_error": str(transfer_exc)}
         return {"session_bound": False, "session_bind_error": str(exc)}
     return {"session_bound": True, "session_id": session_id}
 
@@ -4146,10 +4183,12 @@ def _attempt_resume():
         # between reloads (new terminal, moved project), which would leave the
         # old link pointing at a room this identity no longer uses. Rebinding the
         # disc we just re-attached to is safe by definition.
-        bind_result = _bind_session_to_disc(disc_id, agent_type)
+        bind_result = _bind_session_to_disc(disc_id, agent_type, follow_latest=True)
         if bind_result.get("session_bind_error"):
+            # The credential already re-attached us and rotated server-side, so
+            # discarding the room here would strand a session that cannot
+            # resume again (KT-1566). Keep the room; report the stale link.
             _LAST_RESUME_ERROR = bind_result["session_bind_error"]
-            return None
         _set_current_disc_id(disc_id)
         _set_read_cursor(disc_id, b.get("last_read_sort_order"))
         return disc_id
@@ -6929,18 +6968,28 @@ def call_disc_join(args):
         # 0.9.0 — stash the resume credential so a later MCP reload can
         # re-attach to THIS disc via `/peer-resume` without a fresh token.
         resume_token = result.get("resume_token") if isinstance(result, dict) else None
-        if resume_token:
-            _write_binding(
-                disc_id,
-                resume_token,
-                agent_type=agent_type,
-                last_read_sort_order=_read_cursor(disc_id),
-            )
+        binding_written = bool(resume_token) and _write_binding(
+            disc_id,
+            resume_token,
+            agent_type=agent_type,
+            last_read_sort_order=_read_cursor(disc_id),
+        )
         # KT-76 — link the DURABLE session here rather than asking the agent to
         # remember a step: a protocol that depends on the model's discipline is
         # the failure mode this room documented all day.
         if isinstance(result, dict):
-            result.update(_bind_session_to_disc(disc_id, agent_type))
+            # The link only MOVES once the binding file names this room
+            # (KT-1566): otherwise the old file resumes the previous room on the
+            # next reload and pulls the link back to it.
+            bound = _bind_session_to_disc(disc_id, agent_type, follow_latest=binding_written)
+            if not binding_written and bound.get("session_bind_error"):
+                bound["session_bind_error"] = (
+                    "the reload credential for this room could not be saved, so the "
+                    "existing session link was not moved; call disc_join again with "
+                    "a fresh token once the binding directory is writable "
+                    f"({bound['session_bind_error']})"
+                )
+            result.update(bound)
 
     # The resume credential is a secret persisted 0600 — it must NEVER reach
     # the model's context. Strip it from the value handed back to the agent.
