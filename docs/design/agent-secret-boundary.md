@@ -899,7 +899,7 @@ public config unmasked too.
 [src: file: backend/src/workflows/api_call_executor.rs:300-314#has_credential_marker]
 [src: file: backend/src/workflows/api_call_executor.rs:316-352#is_credential_free_url]
 [src: file: backend/src/workflows/api_call_executor.rs:354-378#auth_env_keys]
-[src: file: backend/src/api/plugin_portability.rs:672-681#without_public_flags]
+[src: file: backend/src/api/plugin_portability.rs:741-750#without_public_flags]
 
 Every automatic disable is recorded on the workflow (reason, who, when, a
 short summary; migration 223) and listed on the Automations page for review;

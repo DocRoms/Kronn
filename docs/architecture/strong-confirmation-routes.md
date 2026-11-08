@@ -15,7 +15,7 @@ only suggests enrolling (Settings › Security). Agents keep everything else.
 ## What is protected
 
 `core::strong_confirm::protection` decides, from the method and the matched route
-pattern. [src: file: backend/src/core/strong_confirm.rs:117-150#protection]
+pattern. [src: file: backend/src/core/strong_confirm.rs:123-156#protection]
 
 | Class | Routes |
 | --- | --- |
@@ -51,7 +51,7 @@ Checked safe and left alone: `GET /api/config/tokens` (masked),
 `POST /api/projects/{id}/remap-path` refuse a path inside the Kronn data
 directory, equal to it, or containing it (symlinks resolved), because a project's
 commands (`projects/git.rs`, `disc_git.rs`) would otherwise read the vault from
-there. [src: file: backend/src/core/strong_confirm.rs:274-277#overlaps_data_dir]
+there. [src: file: backend/src/core/strong_confirm.rs:278-281#overlaps_data_dir]
 
 Out of scope on purpose: plugin sync writes decrypted MCP env into
 `<project>/.mcp.json`. Agents need those values to run their MCP servers; a
@@ -70,7 +70,7 @@ A protected request carries one of:
    typed, and what a download that cannot carry a code header needs. A grant
    expires after two minutes, lives in memory only (a restart ends it) and is
    burnt by the first attempt that names it, even on another call.
-   [src: file: backend/src/core/strong_confirm.rs:200-240#mint]
+   [src: file: backend/src/core/strong_confirm.rs:207-247#mint]
 3. A **bridge token** carrying either: accepted for that one action. This is the
    only exception to "refused to agents" on these routes
    (`lib.rs`, `strong_code_gate`), and only when a strong confirmation is
