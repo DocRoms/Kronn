@@ -71,8 +71,8 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:8200-8202#HOSTED_STEP_CTX_BUDGET]
-[src: file: backend/src/agents/runner.rs:8204-8206#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:8204-8206#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:8208-8210#HOSTED_AUDIT_STEP_INPUT_BUDGET]
 [src: file: backend/src/agents/runner.rs:12512-12527#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
