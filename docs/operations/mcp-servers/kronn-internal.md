@@ -183,11 +183,21 @@ thread again: ask before renaming a room you did not open.
    `disc_find_by_session` and the join-time binding never pass
    `force_reassign`; `disc_link` passes it only when the caller sets it
    explicitly, and its tool contract reserves that for a user's explicit
-   request. By default a session owned by another discussion is reported,
-   never stolen.
-   When the human explicitly asks to move that durable session after joining a
-   different room, first read its current owner with
-   `disc_find_by_session({})`, then call
+   request. A bare `disc_link` on a session owned by another discussion is
+   reported (error code `conflict`), never stolen.
+   Exception (KT-1566): `disc_join` and the reload resume hold a credential that
+   proves THIS session belongs to the room, so a link naming a different room is
+   superseded. On that `conflict` code (never on the message wording) they read
+   the current owner and move the link with the guarded transfer endpoint
+   (expecting that exact owner), without `force_reassign`. A join does so only
+   after its reload credential is saved to disk; otherwise the link stays put
+   and `session_bind_error` says why, since the old binding file would resume
+   the previous room and pull the link back. A reload whose link step fails
+   keeps the room it just re-attached to (its resume credential has already
+   rotated) rather than answering "no disc bound".
+   `disc_transfer_session` is therefore only needed to move that durable session
+   WITHOUT a join, e.g. when the human explicitly asks for it: first read its
+   current owner with `disc_find_by_session({})`, then call
    `disc_transfer_session({from_disc_id: "<exact-old-id>",
    confirm_transfer: true})`. The pinned source id makes ownership races fail
    closed; the target is restricted to the room currently joined by the bridge.

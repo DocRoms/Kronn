@@ -1287,23 +1287,30 @@ pub async fn disc_link(
                 // Name the remedy the CALLER can actually reach. This surfaces
                 // through `disc_join`, which never forwards `force_reassign` —
                 // advertising that flag alone sent MCP callers down a dead end.
-                anyhow::bail!(
+                // Returned, not bailed: the caller branches on the `conflict`
+                // code (KT-1566), never on this wording.
+                return Ok(Some(format!(
                     "session already linked to discussion {} — from MCP call \
                      disc_transfer_session (human-confirmed); direct API callers \
                      may pass force_reassign=true",
                     existing.expect("checked as Some")
-                );
+                )));
             }
             crate::db::disc_source::bind_to_source(
                 conn,
                 &req.disc_id,
                 &source_agent,
                 &source_session_id,
-            )
+            )?;
+            Ok(None)
         })
         .await;
     match result {
-        Ok(_) => Json(ApiResponse::ok(true)),
+        Ok(None) => Json(ApiResponse::ok(true)),
+        Ok(Some(conflict)) => Json(ApiResponse::err_coded(
+            crate::models::ApiErrorCode::Conflict,
+            format!("DB error linking: {conflict}"),
+        )),
         Err(e) => Json(ApiResponse::err(format!("DB error linking: {}", e))),
     }
 }

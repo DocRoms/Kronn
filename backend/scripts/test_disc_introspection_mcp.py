@@ -3911,6 +3911,17 @@ def _bodies_for(mock_http, path):
     return bodies
 
 
+def _link_conflict(owner):
+    """The `/api/disc/link` refusal for a session another room owns (KT-1566).
+    The bridge branches on `error_code`, so the wording is deliberately not
+    something it may depend on."""
+    return {
+        "success": False,
+        "error": f"DB error linking: session already linked to discussion {owner}",
+        "error_code": "conflict",
+    }
+
+
 def _join_body(mock_http):
     return _bodies_for(mock_http, "/api/discussions/peer-join")[0]
 
@@ -10151,41 +10162,60 @@ class ResumeBindingTests(unittest.TestCase):
         self.assertEqual(body["resume_token"], "kr-resume-old")
         self.assertEqual(body["expected_disc_id"], "d-42")
 
-    def test_attempt_resume_link_conflict_never_claims_a_runtime_binding(self):
-        self.mod._write_binding("d-intended", "kr-resume-old", agent_type="Codex")
+    def _stale_link_responder(self, intended, stale, transfer_ok=True):
+        calls = []
 
         def respond(method, path, body=None):
+            calls.append((method, path, body))
             if path == "/api/discussions/peer-resume":
                 return self._envelope({
-                    "disc_id": "d-intended",
+                    "disc_id": intended,
                     "session_pk": 7,
                     "resume_token": body["next_resume_token"],
                 })
             if path == "/api/disc/link":
-                raise RuntimeError("session already linked to discussion d-other")
+                return _link_conflict(stale)
+            if path.startswith("/api/disc/find_by_session"):
+                return self._envelope({"disc_id": stale})
+            if path == "/api/disc/transfer-session":
+                if not transfer_ok:
+                    raise RuntimeError("session ownership changed")
+                return self._envelope({"disc_id": intended, "session_bound": True})
             raise AssertionError(f"unexpected call {method} {path}")
 
-        # Do not depend on the test runner having a discoverable terminal/CLI
-        # ancestor. Linux CI runs Python under a plain shell, while a local
-        # interactive runner can expose a durable identity. This scenario is
-        # specifically about a conflict returned by the durable-link call, so
-        # make that precondition explicit.
+        return respond, calls
+
+    def test_reload_keeps_the_room_when_the_session_link_is_stale(self):
+        # KT-1566: the session worked in d-new for days but its durable link
+        # still named the older d-old. The reload must stay in d-new and move
+        # the link, not drop the room with "no disc bound".
+        self.mod._write_binding("d-new", "kr-resume-old", agent_type="ClaudeCode")
+        respond, calls = self._stale_link_responder("d-new", "d-old")
         with mock.patch.object(
             self.mod, "_durable_session_id", return_value="cli-test-session"
         ), mock.patch.object(self.mod, "_http", side_effect=respond):
-            self.assertIsNone(self.mod._attempt_resume())
-        self.assertIsNone(self.mod._CURRENT_DISC_ID)
-        self.assertIn("d-other", self.mod._LAST_RESUME_ERROR)
+            self.assertEqual(self.mod._attempt_resume(), "d-new")
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "d-new")
+        transfer = [c[2] for c in calls if c[1] == "/api/disc/transfer-session"]
+        self.assertEqual(len(transfer), 1)
+        self.assertEqual(transfer[0]["from_disc_id"], "d-old")
+        self.assertEqual(transfer[0]["to_disc_id"], "d-new")
+        self.assertEqual(transfer[0]["source_session_id"], "cli-test-session")
+        self.assertIs(transfer[0]["confirm_transfer"], True)
+        self.assertEqual(self.mod._read_binding()["disc_id"], "d-new")
 
-        with mock.patch.dict(os.environ, {}, clear=True), \
-             mock.patch.object(
-                 self.mod, "_durable_session_id", return_value="cli-test-session"
-             ), \
-             mock.patch.object(self.mod, "_http", side_effect=respond):
-            with self.assertRaises(RuntimeError) as ctx:
-                self.mod._disc_id()
-        self.assertIn("Resume refused", str(ctx.exception))
-        self.assertIn("d-other", str(ctx.exception))
+    def test_reload_keeps_the_room_even_when_the_link_cannot_be_moved(self):
+        # The resume credential rotated server-side: dropping the room would
+        # leave a session that can neither resume nor rejoin without the human.
+        self.mod._write_binding("d-new", "kr-resume-old", agent_type="ClaudeCode")
+        respond, _ = self._stale_link_responder("d-new", "d-old", transfer_ok=False)
+        with mock.patch.object(
+            self.mod, "_durable_session_id", return_value="cli-test-session"
+        ), mock.patch.object(self.mod, "_http", side_effect=respond):
+            self.assertEqual(self.mod._attempt_resume(), "d-new")
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "d-new")
+        self.assertIn("ownership changed", self.mod._LAST_RESUME_ERROR)
+        self.assertEqual(self.mod._read_binding()["disc_id"], "d-new")
 
     def test_attempt_resume_failure_keeps_binding_and_returns_none(self):
         self.mod._write_binding("d-42", "kr-resume-old")
@@ -11343,7 +11373,8 @@ class DurableSessionLinkTests(unittest.TestCase):
 
     def _join_responder(self, link_result=None):
         """POST /peer-join then POST /disc/link. `link_result` may be an
-        Exception to simulate a session already owned by another discussion."""
+        Exception, or a failure envelope (see `_link_conflict`), to simulate a
+        session already owned by another discussion."""
         def respond(method, path, body=None):
             if path == "/api/discussions/peer-join":
                 return {"success": True, "data": {
@@ -11354,6 +11385,8 @@ class DurableSessionLinkTests(unittest.TestCase):
             if path == "/api/disc/link":
                 if isinstance(link_result, Exception):
                     raise link_result
+                if isinstance(link_result, dict):
+                    return link_result
                 return {"success": True, "data": True}
             raise AssertionError(f"unexpected call {method} {path}")
         return respond
@@ -11398,19 +11431,119 @@ class DurableSessionLinkTests(unittest.TestCase):
         # The join itself still worked.
         self.assertEqual(self.mod._CURRENT_DISC_ID, "d-linked")
 
-    def test_a_session_owned_by_another_discussion_is_reported_not_forced(self):
-        owned = RuntimeError("session already linked to discussion d-other")
-        http = mock.MagicMock(side_effect=self._join_responder(link_result=owned))
+    def test_join_moves_a_stale_link_from_an_older_room_to_the_joined_one(self):
+        # KT-1566: joining room B after an older link to room A must make the
+        # link resolve to B, so a later reload never goes back to A.
+        calls = []
+        base = self._join_responder(link_result=_link_conflict("d-old"))
+
+        def respond(method, path, body=None):
+            calls.append((method, path, body))
+            if path.startswith("/api/disc/find_by_session"):
+                return {"success": True, "data": {"disc_id": "d-old"}}
+            if path == "/api/disc/transfer-session":
+                return {"success": True, "data": {"disc_id": "d-linked", "session_bound": True}}
+            return base(method, path, body)
+
         with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-deadbeef"), \
              mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
-             mock.patch.object(self.mod, "_http", http):
+             mock.patch.object(self.mod, "_http", side_effect=respond):
+            result = self.mod.call_disc_join({"token": "kr-join-abc"})
+
+        self.assertTrue(result["session_bound"])
+        self.assertEqual(result["session_link_moved_from"], "d-old")
+        self.assertEqual(result["disc_id"], "d-linked")
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "d-linked")
+        transfer = [c[2] for c in calls if c[1] == "/api/disc/transfer-session"]
+        self.assertEqual(transfer[0]["from_disc_id"], "d-old")
+        self.assertEqual(transfer[0]["to_disc_id"], "d-linked")
+        self.assertFalse(
+            any(c[2] and c[2].get("force_reassign") for c in calls if c[2]),
+            "following the latest join must use the guarded transfer, never force_reassign",
+        )
+
+    def test_a_failed_link_move_is_reported_without_failing_the_join(self):
+        base = self._join_responder(link_result=_link_conflict("d-other"))
+
+        def respond(method, path, body=None):
+            if path.startswith("/api/disc/find_by_session"):
+                return {"success": True, "data": {"disc_id": "d-other"}}
+            if path == "/api/disc/transfer-session":
+                raise RuntimeError("session ownership changed")
+            return base(method, path, body)
+
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-deadbeef"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", side_effect=respond):
             result = self.mod.call_disc_join({"token": "kr-join-abc"})
 
         self.assertFalse(result["session_bound"])
-        self.assertIn("d-other", result["session_bind_error"])
+        self.assertIn("ownership changed", result["session_bind_error"])
         # A failed link must not fail the join, nor hide the room.
         self.assertEqual(result["disc_id"], "d-linked")
         self.assertEqual(self.mod._CURRENT_DISC_ID, "d-linked")
+
+    def test_join_does_not_move_the_link_when_the_binding_write_fails(self):
+        # KT-1566: the old binding file (room A) would stay on disk, the next
+        # reload would resume A and pull the link back from B to A. The link
+        # must stay put and the failure must be reported.
+        self.mod._write_binding("d-old", "kr-resume-old", agent_type="Codex")
+        calls = []
+        base = self._join_responder(link_result=_link_conflict("d-old"))
+
+        def respond(method, path, body=None):
+            calls.append((method, path, body))
+            if path.startswith("/api/disc/find_by_session"):
+                return {"success": True, "data": {"disc_id": "d-old"}}
+            if path == "/api/disc/transfer-session":
+                raise AssertionError("the link must not move before the binding is saved")
+            return base(method, path, body)
+
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-deadbeef"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_write_binding", return_value=False), \
+             mock.patch.object(self.mod, "_http", side_effect=respond):
+            result = self.mod.call_disc_join({"token": "kr-join-abc"})
+
+        self.assertFalse(result["session_bound"])
+        self.assertIn("could not be saved", result["session_bind_error"])
+        self.assertNotIn("session_link_moved_from", result)
+        self.assertNotIn("/api/disc/transfer-session", [c[1] for c in calls])
+        # The join itself still worked, and the old file was not touched.
+        self.assertEqual(result["disc_id"], "d-linked")
+        self.assertEqual(self.mod._read_binding()["disc_id"], "d-old")
+
+    def test_the_link_conflict_is_recognised_by_its_code_not_its_wording(self):
+        def conflict_envelope(message, **extra):
+            return {"success": False, "error": message, **extra}
+
+        for label, envelope, expect_move in (
+            ("code with reworded message",
+             conflict_envelope("link refused: someone else owns it", error_code="conflict"),
+             True),
+            ("old wording without the code",
+             conflict_envelope("session already linked to discussion d-old"),
+             False),
+        ):
+            with self.subTest(label):
+                calls = []
+                base = self._join_responder(link_result=envelope)
+
+                def respond(method, path, body=None):
+                    calls.append(path)
+                    if path.startswith("/api/disc/find_by_session"):
+                        return {"success": True, "data": {"disc_id": "d-old"}}
+                    if path == "/api/disc/transfer-session":
+                        return {"success": True, "data": {"disc_id": "d-linked", "session_bound": True}}
+                    return base(method, path, body)
+
+                with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-deadbeef"), \
+                     mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+                     mock.patch.object(self.mod, "_http", side_effect=respond):
+                    result = self.mod.call_disc_join({"token": "kr-join-abc"})
+
+                self.assertEqual("/api/disc/transfer-session" in calls, expect_move)
+                self.assertEqual(result["session_bound"], expect_move)
 
     def test_joining_twice_sends_the_same_identity(self):
         http = mock.MagicMock(side_effect=self._join_responder())
