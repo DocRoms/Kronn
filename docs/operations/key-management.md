@@ -27,7 +27,7 @@ Every encrypted column is listed in one registry, `keystore::ENCRYPTED_COLUMNS`;
 a test compares it with the schema, so a new `*_encrypted` / cipher column
 cannot be added without the reconciler seeing it.
 [src: file: backend/src/core/keystore.rs:41-61#ENCRYPTED_COLUMNS]
-[src: file: backend/src/core/keystore.rs:4357-4394#encrypted_column_registry_matches_the_schema]
+[src: file: backend/src/core/keystore.rs:4372-4409#encrypted_column_registry_matches_the_schema]
 
 The running process still reads `config.tokens.keys` and
 `config.server.auth_token`: the boot fills them from the table, and every
@@ -101,7 +101,7 @@ the previous file untouched.
      and no key in memory (fail closed: nothing new is encrypted under a key
      no vault holds). Kronn keeps running so the key can be restored from
      Settings → Recovery.
-   [src: file: backend/src/core/keystore.rs:435-682#reconcile_with]
+   [src: file: backend/src/core/keystore.rs:450-697#reconcile_with]
 3. The resolved key is mirrored into the **empty** writable vaults; a vault
    holding another key, or whose read failed, is never written. `config.toml`
    drops its copy only when the key decrypts at least one row of every
@@ -140,7 +140,7 @@ the previous file untouched.
    do"; Settings → Recovery shows the warnings, and the
    app-wide banner shows a locked key, `credentials_unavailable` and
    `config_set_aside`.
-   [src: file: backend/src/core/keystore.rs:278-332#settle_disk_copy] [src: file: backend/src/core/keystore.rs:407-413#enough_copies] [src: file: backend/src/core/keystore.rs:234-239#decrypts_every_column] [src: file: backend/src/core/keystore.rs:415-433#persist] [src: file: backend/src/core/keyvault.rs:403-422#mirror] [src: file: backend/src/core/keystore.rs:375-405#ensure_durable_copy]
+   [src: file: backend/src/core/keystore.rs:293-347#settle_disk_copy] [src: file: backend/src/core/keystore.rs:422-428#enough_copies] [src: file: backend/src/core/keystore.rs:249-254#decrypts_every_column] [src: file: backend/src/core/keystore.rs:430-448#persist] [src: file: backend/src/core/keyvault.rs:403-422#mirror] [src: file: backend/src/core/keystore.rs:390-420#ensure_durable_copy]
 4. `credential_store::boot` loads the stored credentials, moves any still in
    `config.toml` into the table, and generates an auth token only when none
    exists anywhere. Locked key: the store stays off and `config.toml` is left

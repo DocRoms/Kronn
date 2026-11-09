@@ -277,7 +277,7 @@ fallback when a saved Page was removed.
 `[src: file: frontend/src/pages/PagesPage.tsx:705-708#isSectionCollapsed]`
 Project detail restores the last valid tab across project switches and falls back to Overview
 when a stale value is found.
-`[src: file: frontend/src/components/ProjectCard.tsx:73-86#readProjectDetailView]`
+`[src: file: frontend/src/components/ProjectCard.tsx:79-92#readProjectDetailView]`
 `[src: file: frontend/src/components/ProjectCard.tsx:186-194#selectDetailView]`
 `[src: file: frontend/src/components/ProjectCard.tsx:1640-1648#selectDetailView]`
 

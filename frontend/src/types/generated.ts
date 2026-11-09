@@ -5126,6 +5126,73 @@ export type KronnOwnership = { "type": "NotManaged" } | { "type": "ManagedByMark
 
 export type KronnWrite = { writer: DocWriter, at: string, };
 
+/**
+ * A gitignored path the project's tracked code mentions: a likely seed.
+ */
+export type LaneSeedCandidate = {
+/**
+ * Repository-relative, `/` separated, no trailing slash.
+ */
+path: string,
+/**
+ * Size on disk; `None` when the directory is too large to measure.
+ */
+size_bytes: number | null,
+/**
+ * Why it is suggested.
+ */
+reason: string, };
+
+/**
+ * What the last task worktree seeding did with one path.
+ */
+export type LaneSeedReport = { path: string,
+/**
+ * `seeded`, `up_to_date` or `skipped`.
+ */
+outcome: string,
+/**
+ * Why a path was skipped, or what a seeded one left out.
+ */
+detail?: string, };
+
+/**
+ * A declared seed that is, or holds, something that looks like a secret.
+ */
+export type LaneSeedSecretFinding = {
+/**
+ * The declared seed.
+ */
+path: string,
+/**
+ * What looks secret, relative to the repository: the seed itself when its
+ * own path does, else the files and directories found under it.
+ */
+files: Array<string>,
+/**
+ * More were found than `files` lists.
+ */
+truncated: boolean,
+/**
+ * Some of these files are not confirmed by a human: the seed is not copied
+ * into task worktrees until they are.
+ */
+held: boolean, };
+
+/**
+ * The latest seeding of a task worktree of this project.
+ */
+export type LaneSeedsLastRun = { execution_id: string, at: string, seeds: Array<LaneSeedReport>, };
+
+/**
+ * Where the seeds a project is seeded with come from. The `[lane_seeds]` table
+ * of `kronn/project.toml` is not a source: it reaches the repository through a
+ * pull request, not through the human gate, so it is only *proposed* in the
+ * settings and takes effect once a human adopts it there (which declares it in
+ * Kronn).
+ */
+export type LaneSeedsSource = "project" | "none";
+
 export type LaunchAuditRequest = { agent: AgentType,
 /**
  * KT-980 — the named external API connection an HTTP agent uses. Required
@@ -7361,6 +7428,45 @@ scope: GithubScope | null,
  */
 connected_on_upgrade: boolean, updated_at: string | null, };
 
+export type ProjectLaneSeeds = {
+/**
+ * The paths seeded into each task worktree: what a human declared here.
+ */
+seeds: Array<string>, source: LaneSeedsSource,
+/**
+ * What `kronn/project.toml` on the default branch proposes, when it does.
+ * Nothing is seeded from it until a human adopts it.
+ */
+profile_seeds?: Array<string>,
+/**
+ * Why that file could not be read.
+ */
+profile_error?: string,
+/**
+ * Newly declared paths that are, or hold, a secret-looking file and were NOT
+ * saved: send their `path` back in `confirm_secret_paths` once the human
+ * has seen the files and accepted them.
+ */
+needs_confirmation: Array<LaneSeedSecretFinding>,
+/**
+ * Secret-looking files the declared seeds hold right now. A finding is
+ * `held` when some of its files are not confirmed: that seed is not copied
+ * into task worktrees until the human confirms them.
+ */
+secret_findings: Array<LaneSeedSecretFinding>,
+/**
+ * Why the declared seeds could not be checked for secrets.
+ */
+secret_scan_error?: string,
+/**
+ * A save rewrote the working copy of `kronn/project.toml` (uncommitted).
+ */
+profile_file_written: boolean,
+/**
+ * Why the working copy of `kronn/project.toml` could not be kept in step.
+ */
+profile_file_error?: string, last_run?: LaneSeedsLastRun, };
+
 export type ProjectLanguageStat = { language: string, bytes: number, };
 
 export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: string | null, synced_at: string, };
@@ -9528,6 +9634,12 @@ dir?: string | null, };
  * `PUT /api/projects/{id}/github`. `token` is read only for `stored_token`.
  */
 export type SetProjectGithubConnectionRequest = { mode: GithubConnectionMode, token?: string, };
+
+export type SetProjectLaneSeeds = { seeds: Array<string>,
+/**
+ * Newly declared seeds holding secret-looking files that the human confirmed.
+ */
+confirm_secret_paths?: Array<string>, };
 
 export type SetProjectValidationsAccess = { access: ValidationsAccess, };
 

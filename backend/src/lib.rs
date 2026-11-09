@@ -1260,6 +1260,8 @@ pub(crate) fn is_destructive(method: &axum::http::Method, path: &str) -> bool {
         || path.ends_with("/audit-attestation")
         // KT-1433: opening the host (Docker, or everything) to a project's validations.
         || (method != axum::http::Method::GET && path.ends_with("/validations-access"))
+        // KT-1438: a lane seed copies files out of the main checkout to where a worker reads them.
+        || (method != axum::http::Method::GET && path.ends_with("/lane-seeds"))
         // KT-1492: a trust level decides what agents are granted without asking.
         || (method != axum::http::Method::GET && path.starts_with("/api/trust"))
 }
@@ -1804,6 +1806,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/validations-access",
             get(api::projects::validations_access::get).put(api::projects::validations_access::set),
+        )
+        .route(
+            "/api/projects/{id}/lane-seeds",
+            get(api::projects::lane_seeds::get).put(api::projects::lane_seeds::set),
+        )
+        .route(
+            "/api/projects/{id}/lane-seeds/candidates",
+            get(api::projects::lane_seeds::candidates),
         )
         // KT-1492: trust levels. None is a bridge route: a bridge token reaches a
         // write only with the owner's confirmation code (`trust_confirm_gate`).
@@ -3792,6 +3802,28 @@ mod auth_tests {
             .is_none(),
             "an agent token cannot answer the elevation card"
         );
+    }
+
+    /// KT-1438: declaring which gitignored paths are copied into task worktrees
+    /// is a human's decision: gated like a destructive request, and absent from
+    /// every bridge token's routes.
+    #[test]
+    fn declaring_lane_seeds_is_human_only() {
+        const SEEDS: &str = "/api/projects/p1/lane-seeds";
+        assert!(super::is_destructive(&Method::PUT, SEEDS));
+        assert!(!super::is_destructive(&Method::GET, SEEDS));
+        assert!(!auth_allows(&Method::PUT, SEEDS, false, true, false, false));
+        for method in ["GET", "PUT", "POST"] {
+            for route in [
+                "/api/projects/{id}/lane-seeds",
+                "/api/projects/{id}/lane-seeds/candidates",
+            ] {
+                assert!(
+                    crate::core::bridge_token::route_for(method, route).is_none(),
+                    "{method} {route} must not be a bridge route"
+                );
+            }
+        }
     }
 
     /// KT-1492: a trust level decides what agents are granted without asking, so

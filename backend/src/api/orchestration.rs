@@ -2256,6 +2256,17 @@ async fn provision_task_execution_inner(
         .map_err(|e| ProvisionError::Internal(e.to_string()))?;
     }
 
+    // The project's generated, gitignored assets (KT-1438), whatever the worker
+    // kind: a fresh worktree has the tracked tree only. A resume refreshes them.
+    seed_lane_assets(
+        db,
+        &prepared.execution.id,
+        &prepared.project_id,
+        &repo_path,
+        &worktree_path,
+    )
+    .await;
+
     // A prelocalized scope is a mechanical promise, not prose. Validate it
     // against the exact SHA-pinned worktree before any worker dispatch exists.
     // The runner will still perform its own fresh read to obtain the edit CAS.
@@ -3425,6 +3436,10 @@ async fn validate_and_apply(
         .ok_or_else(|| ProvisionError::Internal("run has no pinned target branch".into()))?;
     let generic = BlockedReasonCode::IntegrationRefused;
     let reach = ValidationReach::of_run(db, run.project_id.as_deref(), &run.discussion_id).await;
+    // The source may have been regenerated since the worker started (KT-1438).
+    if let Some(project_id) = run.project_id.as_deref() {
+        seed_lane_assets(db, exec_id, project_id, repo, child).await;
+    }
     let mut rebuilds = 0;
     loop {
         if let Some(failure) = run_pending_validations(
@@ -5014,18 +5029,28 @@ impl ReworkReport {
 }
 
 /// How much of a failing validation's output travels in a message. The end is
-/// kept: a compiler or a test runner prints its verdict last.
+/// kept, because a compiler or a test runner prints its verdict last, and so is
+/// the start (KT-1438): the first error (a Twig exception, the first failing
+/// test) is what a worker needs, and a wrapper's last lines are only its own
+/// `make: Error 1`.
 const REWORK_OUTPUT_LIMIT: usize = 4_000;
+const REWORK_OUTPUT_HEAD: usize = 1_500;
 
 /// A fenced block that the text itself cannot close early.
 fn fenced_output(output: &str, lang: RoomLang) -> String {
+    // Redacted whole, before the cut: a credential split by it would escape the
+    // patterns, and the head kept since KT-1438 is where errors print theirs.
+    let output = crate::core::redact::redact_stored_text(output);
+    let output = output.as_str();
     let total = output.chars().count();
     let shown: String = if total > REWORK_OUTPUT_LIMIT {
-        let tail: String = output.chars().skip(total - REWORK_OUTPUT_LIMIT).collect();
+        let tail_len = REWORK_OUTPUT_LIMIT - REWORK_OUTPUT_HEAD;
+        let head: String = output.chars().take(REWORK_OUTPUT_HEAD).collect();
+        let tail: String = output.chars().skip(total - tail_len).collect();
         let omitted = total - REWORK_OUTPUT_LIMIT;
         match lang {
-            RoomLang::Fr => format!("[… {omitted} caractères omis]\n{tail}"),
-            RoomLang::En => format!("[… {omitted} characters omitted]\n{tail}"),
+            RoomLang::Fr => format!("{head}\n[… {omitted} caractères omis]\n{tail}"),
+            RoomLang::En => format!("{head}\n[… {omitted} characters omitted]\n{tail}"),
         }
     } else {
         output.to_string()
@@ -9483,6 +9508,75 @@ async fn mark_lane_target_for_worker(exec_id: &str, worktree: &std::path::Path) 
         Err(error) => {
             tracing::warn!(execution_id = %exec_id, "lane target marking did not complete: {error}");
         }
+    }
+}
+
+/// Seed a task worktree with the project's gitignored assets (KT-1438) and
+/// journal what happened. Run at provisioning and again before the integration
+/// validations, so a source that changed meanwhile is refreshed. Best-effort:
+/// a path that cannot be seeded is recorded with its reason and the worktree
+/// goes on without it; it never fails a launch or an integration.
+async fn seed_lane_assets(
+    db: &Database,
+    exec_id: &str,
+    project_id: &str,
+    repo: &std::path::Path,
+    worktree: &std::path::Path,
+) {
+    let pid = project_id.to_string();
+    // Only what a human declared in Kronn applies. The `[lane_seeds]` table of
+    // `kronn/project.toml` reaches the repository through a pull request, not
+    // through the human gate: it is proposed in the settings, never seeded here.
+    // The secret-looking files a human confirmed travel with them: a seed that
+    // gained one since is held, not copied.
+    let (seeds, confirmed) = match db
+        .with_read_conn(move |conn| {
+            Ok((
+                crate::db::projects::lane_seeds(conn, &pid)?,
+                crate::db::projects::lane_seeds_confirmed(conn, &pid)?,
+            ))
+        })
+        .await
+    {
+        Ok((declared, confirmed)) => (declared.unwrap_or_default(), confirmed),
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "lane seeds not read: {error}");
+            return;
+        }
+    };
+    let (repo, worktree) = (repo.to_path_buf(), worktree.to_path_buf());
+    let record = match tokio::task::spawn_blocking(move || {
+        if seeds.is_empty() {
+            return None;
+        }
+        Some(crate::core::task_worker_lane_seeds::seed_worktree(
+            &repo,
+            &worktree,
+            &seeds,
+            &confirmed,
+            &crate::core::task_worker_lane_warm::clone_tree,
+        ))
+    })
+    .await
+    {
+        Ok(Some(record)) => record,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "lane seeding did not complete: {error}");
+            return;
+        }
+    };
+    for (path, reason) in record.skipped() {
+        tracing::warn!(execution_id = %exec_id, "lane seed `{path}` skipped: {reason}");
+    }
+    let id = exec_id.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_lane_seeds(conn, &id, &record, &backend_actor())
+        })
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, "lane seeds record not persisted: {error}");
     }
 }
 
@@ -22799,6 +22893,64 @@ pub(crate) mod tests {
         }
     }
 
+    /// KT-1438: a long failing output reaches the room and the worker with its
+    /// start (the first error) and its end (the verdict), not only the tail.
+    #[test]
+    fn a_long_failure_output_keeps_its_head_and_its_tail() {
+        let mut output = String::from("Twig\\Error\\LoaderError: Unable to find template\n");
+        output.push_str(&"#1 /app/vendor/twig/Environment.php\n".repeat(400));
+        output.push_str("make: *** [iso-test-class] Error 1\n");
+        for lang in [RoomLang::Fr, RoomLang::En] {
+            let shown = fenced_output(&output, lang);
+            assert!(
+                shown.contains("LoaderError: Unable to find template"),
+                "{shown}"
+            );
+            assert!(
+                shown.contains("make: *** [iso-test-class] Error 1"),
+                "{shown}"
+            );
+            assert!(shown.contains("omi"), "the cut is announced: {shown}");
+            assert!(
+                shown.chars().count() < REWORK_OUTPUT_LIMIT + 200,
+                "bounded: {}",
+                shown.chars().count()
+            );
+        }
+    }
+
+    /// KT-1438: the head kept for the room and the worker is redacted, a secret
+    /// in the first lines included, and one the cut would have split.
+    #[test]
+    fn a_failure_output_is_redacted_before_it_reaches_the_room() {
+        let mut output = String::from(
+            "PDOException: postgres://app:Sup3rS3cretPw@db.internal:5432/kronn refused\n\
+             Authorization: Bearer abc123def456ghi789jkl\n",
+        );
+        output.push_str(&"#1 /app/vendor/doctrine/Connection.php\n".repeat(300));
+        output.push_str("APP_SECRET=61cc0ffee1234abcd5678\nmake: *** [test] Error 1\n");
+        for lang in [RoomLang::Fr, RoomLang::En] {
+            let shown = fenced_output(&output, lang);
+            assert!(shown.contains("PDOException: postgres://app:"), "{shown}");
+            assert!(shown.contains("make: *** [test] Error 1"), "{shown}");
+            for secret in [
+                "Sup3rS3cretPw",
+                "abc123def456ghi789jkl",
+                "61cc0ffee1234abcd5678",
+            ] {
+                assert!(!shown.contains(secret), "{secret} leaked: {shown}");
+            }
+        }
+    }
+
+    /// An output within the limit is shown whole.
+    #[test]
+    fn a_short_failure_output_is_shown_whole() {
+        let shown = fenced_output("one\ntwo\n", RoomLang::En);
+        assert!(shown.contains("one\ntwo"));
+        assert!(!shown.contains("omitted"));
+    }
+
     /// KT-1433: a discussion grant widens a sandboxed project to Docker and
     /// never narrows a project a human opened further.
     #[test]
@@ -29241,6 +29393,150 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("vitest"), "#!/bin/sh\n").unwrap();
         (exec.id, worktree)
+    }
+
+    /// KT-1438: a launch seeds the worktree with the project's declared
+    /// gitignored assets, journals the outcome on the execution, and the
+    /// project's settings read that record back with its skip reasons.
+    #[tokio::test]
+    async fn provisioning_seeds_the_declared_assets_and_the_settings_can_read_the_record() {
+        use crate::core::task_worker_lane_seeds::SeedStatus;
+        let repo = init_repo();
+        std::fs::write(repo.path().join(".gitignore"), "gen/\n.kronn/\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "ignore gen"]);
+        std::fs::create_dir_all(repo.path().join("gen")).unwrap();
+        std::fs::write(repo.path().join("gen/asset.txt"), "generated").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let (pid, declared) = (
+            project_id.clone(),
+            vec!["gen".to_string(), "missing".to_string()],
+        );
+        db.with_conn(move |conn| crate::db::projects::set_lane_seeds(conn, &pid, &declared))
+            .await
+            .unwrap();
+
+        let exec = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("lane-seeds".into()),
+            },
+        )
+        .await
+        .expect("provision");
+
+        let (worktree, _branch) =
+            worktree::task_worktree_layout(repo.path(), &task_ref, exec_short(&exec.id)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("gen/asset.txt")).unwrap(),
+            "generated",
+            "the generated asset is in the fresh worktree"
+        );
+        assert_eq!(
+            git(
+                &worktree,
+                &["status", "--porcelain", "--untracked-files=all"]
+            )
+            .stdout
+            .len(),
+            0,
+            "the seed stays out of git status"
+        );
+        let (id, pid) = (exec.id.clone(), project_id.clone());
+        let (recorded, latest) = db
+            .with_conn(move |conn| {
+                Ok((
+                    crate::db::orchestration::latest_lane_seeds(conn, &id)?,
+                    crate::db::orchestration::latest_lane_seeds_for_project(conn, &pid)?,
+                ))
+            })
+            .await
+            .unwrap();
+        let recorded = recorded.expect("the seeding is journalled on the execution");
+        assert!(matches!(
+            recorded.seeds[0].status,
+            SeedStatus::Seeded { .. }
+        ));
+        let skipped: Vec<_> = recorded
+            .skipped()
+            .map(|(path, _)| path.to_string())
+            .collect();
+        assert_eq!(skipped, ["missing"], "{recorded:?}");
+        let (exec_id, _at, record) = latest.expect("the project's settings find it");
+        assert_eq!(exec_id, exec.id);
+        assert_eq!(record, recorded);
+    }
+
+    /// KT-1438: a `.env` that appeared in an accepted seed after the human's
+    /// review is not copied into the launched worktree, and the journal says why.
+    #[tokio::test]
+    async fn provisioning_holds_back_a_seed_that_gained_an_unconfirmed_secret() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join(".gitignore"), "gen/\n.kronn/\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "ignore gen"]);
+        std::fs::create_dir_all(repo.path().join("gen")).unwrap();
+        std::fs::write(repo.path().join("gen/asset.txt"), "generated").unwrap();
+        std::fs::write(repo.path().join("gen/.env"), "TOKEN=1").unwrap();
+        std::fs::write(repo.path().join("gen/.env.production"), "TOKEN=2").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let pid = project_id.clone();
+        db.with_conn(move |conn| {
+            // The human reviewed `gen/.env` only.
+            crate::db::projects::set_lane_seeds_confirmed(
+                conn,
+                &pid,
+                &["gen".to_string()],
+                &crate::core::task_worker_lane_seeds::ConfirmedSecrets::from([(
+                    "gen".to_string(),
+                    vec!["gen/.env".to_string()],
+                )]),
+            )
+        })
+        .await
+        .unwrap();
+
+        let exec = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("lane-seeds-held".into()),
+            },
+        )
+        .await
+        .expect("provision");
+
+        let (worktree, _branch) =
+            worktree::task_worktree_layout(repo.path(), &task_ref, exec_short(&exec.id)).unwrap();
+        assert!(
+            !worktree.join("gen").exists(),
+            "nothing of the held seed is copied"
+        );
+        let id = exec.id.clone();
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &id))
+            .await
+            .unwrap()
+            .expect("the seeding is journalled");
+        let skipped: Vec<_> = recorded.skipped().collect();
+        assert_eq!(skipped.len(), 1, "{recorded:?}");
+        assert!(
+            skipped[0].1.starts_with("held:") && skipped[0].1.contains("gen/.env.production"),
+            "{skipped:?}"
+        );
+        assert!(
+            !skipped[0].1.contains("`gen/.env`"),
+            "the confirmed file is not named: {skipped:?}"
+        );
     }
 
     #[tokio::test]

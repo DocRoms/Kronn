@@ -238,12 +238,12 @@ lacks the key; a workflow that reads none is unaffected. A completed Full
 audit drafts a starter profile and stores it with the audit run, shown
 read-only with a Copy button in the audit view; it never writes into the
 checkout, and only a human publishes it
-[src: file: backend/src/core/project_profile.rs:392-460#default_branch_ref]
-[src: file: backend/src/core/project_profile.rs:187-238#schema_error]
+[src: file: backend/src/core/project_profile.rs:408-476#default_branch_ref]
+[src: file: backend/src/core/project_profile.rs:203-254#schema_error]
 [src: file: backend/src/workflows/run_pins.rs:33#PROJECT_PROFILE]
 [src: file: backend/src/workflows/run_pins.rs:263-283#record_project_profile]
 [src: file: backend/src/workflows/run_pins.rs:485-497#revision_fingerprint_with_profiles]
-[src: file: backend/src/core/project_profile.rs:739-758#draft_if_missing]
+[src: file: backend/src/core/project_profile.rs:856-875#draft_if_missing]
 [src: file: docs/guides/project-profile.md:166-177].
 
 ### Other resources

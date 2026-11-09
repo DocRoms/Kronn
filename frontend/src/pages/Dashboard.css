@@ -1092,6 +1092,58 @@ button.dash-badge-tech-debt {
   gap: var(--kr-sp-2);
 }
 
+/* KT-1438 — gitignored paths seeded into a project's task worktrees */
+.project-lane-seeds-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-lane-seeds-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-primary);
+}
+
+.project-lane-seeds-item[data-outcome='skipped'] {
+  border-color: rgba(var(--kr-error-rgb), 0.5);
+}
+
+.project-lane-seeds-candidate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-1);
+}
+
+.project-lane-seeds-candidate small {
+  color: var(--kr-text-faint);
+}
+
+.project-lane-seeds-add {
+  display: flex;
+  gap: var(--kr-sp-2);
+}
+
+.project-lane-seeds-add input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  background: transparent;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-primary);
+}
+
 /* KT-263 — project AI doc folder */
 .project-docs-location {
   margin-top: var(--kr-sp-6);

@@ -375,6 +375,26 @@ mod imp {
         }
         Ok(())
     }
+
+    pub fn rename(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
+        let (from_dir, from_name) = parent_dir(root, from, false)?;
+        let (to_dir, to_name) = parent_dir(root, to, true)?;
+        // SAFETY: both descriptors are open directories and both names
+        // NUL-terminated; the entries are renamed relative to those handles, so
+        // a parent swapped for a link after the walk is not followed.
+        let renamed = unsafe {
+            libc::renameat(
+                from_dir.as_raw_fd(),
+                from_name.as_ptr(),
+                to_dir.as_raw_fd(),
+                to_name.as_ptr(),
+            )
+        };
+        if renamed != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
@@ -516,6 +536,15 @@ mod imp {
     pub fn remove(root: &Path, rel: &Path) -> io::Result<()> {
         std::fs::remove_file(guarded(root, rel)?)
     }
+
+    pub fn rename(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
+        let from = guarded(root, from)?;
+        let to = guarded(root, to)?;
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(from, to)
+    }
 }
 
 /// Reads `rel` under `root`: a regular, single-link file reached without
@@ -566,6 +595,16 @@ pub fn append(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
 /// Removes `rel` under `root` (a link there is removed, not followed).
 pub fn remove(root: &Path, rel: &Path) -> io::Result<()> {
     imp::remove(root, rel)
+}
+
+/// Renames `from` to `to`, both under `root`, creating the missing parents of
+/// `to`. Every directory on either path is walked without following a link and
+/// the rename is made between those open directories (Unix), so a parent
+/// swapped for a symlink while this runs is never followed. A directory is
+/// replaced only when the destination is an empty one; a link is moved, not
+/// followed.
+pub fn rename(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
+    imp::rename(root, from, to)
 }
 
 #[cfg(all(test, unix))]
@@ -830,5 +869,23 @@ mod tests {
         // SAFETY: valid path; test-only.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
         assert!(read(root.path(), Path::new("pipe")).is_err());
+    }
+    #[test]
+    fn a_rename_creates_parents_and_never_follows_a_link_parent() {
+        let (root, outside) = dirs();
+        std::fs::create_dir(root.path().join("staging")).unwrap();
+        std::fs::write(root.path().join("staging/f"), "seed").unwrap();
+        rename(root.path(), Path::new("staging"), Path::new("a/b/c")).unwrap();
+        assert_eq!(std::fs::read(root.path().join("a/b/c/f")).unwrap(), b"seed");
+        assert!(!root.path().join("staging").exists());
+
+        // A parent that is a link (swapped in after any earlier check) is refused.
+        std::fs::create_dir(root.path().join("staging2")).unwrap();
+        symlink(outside.path(), root.path().join("planted")).unwrap();
+        assert!(rename(root.path(), Path::new("staging2"), Path::new("planted/c")).is_err());
+        assert!(!outside.path().join("c").exists());
+        assert!(root.path().join("staging2").exists());
+        // Nor may the source be reached through one.
+        assert!(rename(root.path(), Path::new("planted/x"), Path::new("y")).is_err());
     }
 }

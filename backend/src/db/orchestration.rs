@@ -6606,6 +6606,85 @@ pub fn record_lane_warm_start(
     )
 }
 
+/// Journal what seeding a task worktree with the project's gitignored assets
+/// did (KT-1438): which paths were cloned, refreshed, left alone or refused,
+/// and why.
+pub fn record_lane_seeds(
+    conn: &Connection,
+    exec_id: &str,
+    record: &crate::core::task_worker_lane_seeds::LaneSeedsRecord,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        crate::core::task_worker_lane_seeds::LANE_SEEDS_EVENT_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::to_value(record)?,
+    )
+}
+
+/// The most recent lane-seeds record of an execution, if any.
+pub fn latest_lane_seeds(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::core::task_worker_lane_seeds::LaneSeedsRecord>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                crate::core::task_worker_lane_seeds::LANE_SEEDS_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
+/// The most recent lane-seeds record among a project's task executions, with
+/// the execution it belongs to and when it was journalled (KT-1438): what the
+/// project's settings show of how seeding last went.
+pub fn latest_lane_seeds_for_project(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<
+    Option<(
+        String,
+        String,
+        crate::core::task_worker_lane_seeds::LaneSeedsRecord,
+    )>,
+> {
+    let latest: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT e.task_execution_id, e.created_at, e.changes_json \
+             FROM task_execution_events e \
+             JOIN task_executions x ON x.id = e.task_execution_id \
+             JOIN orchestration_runs r ON r.id = x.orchestration_run_id \
+             WHERE r.project_id = ?1 AND e.action = ?2 \
+             ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1",
+            params![
+                project_id,
+                crate::core::task_worker_lane_seeds::LANE_SEEDS_EVENT_ACTION
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    latest
+        .map(|(exec_id, at, changes)| {
+            serde_json::from_str(&changes)
+                .map(|record| (exec_id, at, record))
+                .map_err(anyhow::Error::from)
+        })
+        .transpose()
+}
+
 /// The most recent warm-start record of an execution, if any.
 pub fn latest_lane_warm_start(
     conn: &Connection,
