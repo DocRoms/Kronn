@@ -22964,37 +22964,23 @@ pub(crate) mod tests {
     /// tests are the local defaults and raise nothing.
     #[test]
     fn full_suite_validations_are_flagged_and_the_default_gates_are_not() {
-        for command in [
-            "cargo test",
-            "cargo test --no-fail-fast",
-            "cargo test --manifest-path backend/Cargo.toml --target-dir /tmp/t",
-            "cargo test --workspace -- --nocapture",
-            "rtk cargo test",
-            "cargo nextest run --workspace",
-            "cargo --offline test",
-            "make test-backend",
-            "make test-backend-cov",
-        ] {
-            assert!(is_full_suite_validation(command), "`{command}` is full");
-        }
-        for command in [
-            "cargo fmt --check",
-            "cargo clippy --all-targets -- -D warnings",
-            "cargo test --lib",
-            "cargo test --lib --manifest-path backend/Cargo.toml orchestration::",
-            "cargo test leading_thinking_filter",
-            "cargo test --manifest-path backend/Cargo.toml discussion",
-            "cargo test --test api_integration",
-            "cargo test --doc",
-            "cargo test --no-run",
-            "cargo test -- reaper",
-            "cargo nextest run --lib",
-            "cargo nextest list",
-            "make test-backend-lib",
-            "pnpm --dir frontend exec tsc -b",
-            "true",
-        ] {
-            assert!(!is_full_suite_validation(command), "`{command}` is not");
+        // The table the frontend's `isFullSuiteValidation` test reads too
+        // (`frontend/src/lib/__tests__/fullSuiteValidation.test.ts`): one rule,
+        // two detectors, one list of cases.
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/full_suite_validation_cases.json"
+        ))
+        .unwrap();
+        let cases = table["cases"].as_array().unwrap();
+        assert!(cases.len() >= 10, "the table must keep its coverage");
+        for case in cases {
+            let command = case["command"].as_str().unwrap();
+            let expected = case["full_suite"].as_bool().unwrap();
+            assert_eq!(
+                is_full_suite_validation(command),
+                expected,
+                "`{command}` full_suite should be {expected}"
+            );
         }
         let specs = |commands: &[&str]| -> Vec<crate::models::ValidationSpec> {
             commands
