@@ -81,6 +81,9 @@ pub enum Blocker {
     /// The file holds a key that still opens this many key-bound files (or
     /// their rows) the key in use does not.
     KeyBoundFiles(usize),
+    /// The key-bound files (or the data directory) could not be read or parsed:
+    /// nothing proves that none of them needs the key of this file.
+    KeyCheckUnavailable,
     /// The file holds the only copy of the key in use.
     OnlyKeyCopy,
 }
@@ -96,6 +99,7 @@ impl Blocker {
             Blocker::Unverified(_) => "unverified",
             Blocker::KeyNeeded(_) => "key_needed",
             Blocker::KeyBoundFiles(_) => "key_bound_files",
+            Blocker::KeyCheckUnavailable => "key_check_unavailable",
             Blocker::OnlyKeyCopy => "only_key_copy",
         }
     }
@@ -133,6 +137,10 @@ impl Blocker {
                  row(s) kept aside (locked secrets, sealed or preserved copies) the key in use \
                  does not: restore or re-encrypt them first."
             ),
+            Blocker::KeyCheckUnavailable => "The files kept aside next to it could not all be \
+                                             read, so it cannot be proven that none of them \
+                                             needs the key this file holds: try again."
+                .into(),
             Blocker::OnlyKeyCopy => "The file holds the only copy of the key in use: set a \
                                      recovery passphrase or KRONN_ENCRYPTION_KEK first."
                 .into(),
@@ -609,41 +617,37 @@ pub fn key_kept_elsewhere(dir: &Path, store: &KeyStore, key: &str) -> bool {
 
 /// How many key-bound things only `other` opens, not `key`: the rows of
 /// `locked-secrets-*.json`, and each `.enc` file of the data directory (the
-/// config backup, the preserved values, sealed copies). One that cannot be
-/// read counts: nothing proves it is not bound to `other`.
-fn key_bound_needing(dir: &Path, key: &str, other: &str) -> usize {
+/// config backup, the preserved values, sealed copies). `Err` when anything
+/// could not be read or parsed (the directory, an entry, a file, a key): then
+/// nothing proves that none of them is bound to `other`.
+fn key_bound_needing(dir: &Path, key: &str, other: &str) -> Result<usize, ()> {
     let (Ok(key), Ok(other)) = (crypto::parse_secret(key), crypto::parse_secret(other)) else {
-        return 0;
+        return Err(());
     };
     let opens = |cipher: &str| {
         let cipher = cipher.trim();
         crypto::decrypt(cipher, &other).is_ok() && crypto::decrypt(cipher, &key).is_err()
     };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
     let mut needing = 0;
-    for entry in entries.filter_map(|e| e.ok()) {
-        let name = entry.file_name().to_string_lossy().into_owned();
+    for entry in std::fs::read_dir(dir).map_err(|_| ())? {
+        let name = entry
+            .map_err(|_| ())?
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
         let locked = name.starts_with(keystore::LOCKED_SECRETS_PREFIX) && name.ends_with(".json");
         if !locked && !sealed(&name) {
             continue;
         }
-        let Some(text) = rooted_io::read_capped(dir, Path::new(&name), MAX_BOUND_FILE)
+        let text = rooted_io::read_capped(dir, Path::new(&name), MAX_BOUND_FILE)
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
-        else {
-            needing += 1;
-            continue;
-        };
+            .ok_or(())?;
         if !locked {
             needing += usize::from(opens(&text));
             continue;
         }
-        let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
-            needing += 1;
-            continue;
-        };
+        let items = serde_json::from_str::<Vec<serde_json::Value>>(&text).map_err(|_| ())?;
         needing += items
             .iter()
             .filter(|item| {
@@ -655,7 +659,7 @@ fn key_bound_needing(dir: &Path, key: &str, other: &str) -> usize {
             })
             .count();
     }
-    needing
+    Ok(needing)
 }
 
 /// Read a set-aside file of `dir` and decide whether it may be deleted; the
@@ -699,8 +703,9 @@ async fn assess_identified(
             }
             Some(k) => match keystore::rows_only_this_key_opens(db, key, k).await? {
                 0 => match key_bound_needing(dir, key, k) {
-                    0 => None,
-                    n => Some(Blocker::KeyBoundFiles(n)),
+                    Ok(0) => None,
+                    Ok(n) => Some(Blocker::KeyBoundFiles(n)),
+                    Err(()) => Some(Blocker::KeyCheckUnavailable),
                 },
                 n => Some(Blocker::KeyNeeded(n)),
             },
@@ -1461,12 +1466,66 @@ mod tests {
             .unwrap();
         assert!(a.deletable(), "{:?}", a.blocker);
 
-        // A key-bound file that cannot be read is not proven harmless.
+        // A key-bound file that cannot be parsed is not proven harmless.
         file(dir.path(), &locked_name, "not json at all");
         let a = assess(&db, dir.path(), Some(&in_use), NAME, &no_vault())
             .await
             .unwrap();
-        assert_eq!(a.blocker, Some(Blocker::KeyBoundFiles(1)));
+        assert_eq!(a.blocker, Some(Blocker::KeyCheckUnavailable));
+        assert!(delete(&db, dir.path(), Some(&in_use), NAME, &no_vault())
+            .await
+            .is_err());
+        assert!(dir.path().join(NAME).exists());
+    }
+
+    /// A key-bound entry that cannot be read, or a data dir that cannot be
+    /// listed, fails the check closed.
+    #[test]
+    fn an_unreadable_key_bound_entry_or_dir_fails_closed() {
+        let (key, other) = (key(), key());
+        // A missing data dir cannot be listed.
+        let gone = tempfile::tempdir().unwrap();
+        assert_eq!(
+            key_bound_needing(&gone.path().join("nope"), &key, &other),
+            Err(())
+        );
+
+        // An `.enc` entry that is not a readable file (a directory here).
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(key_bound_needing(dir.path(), &key, &other), Ok(0));
+        std::fs::create_dir(dir.path().join("config.toml.corrupt.9.enc")).unwrap();
+        assert_eq!(key_bound_needing(dir.path(), &key, &other), Err(()));
+
+        // A file that is not UTF-8.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml.corrupt.9.enc"), [0xff, 0xfe]).unwrap();
+        assert_eq!(key_bound_needing(dir.path(), &key, &other), Err(()));
+
+        // A key that does not parse.
+        assert_eq!(key_bound_needing(dir.path(), "not a key", &other), Err(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_enc_file_without_read_permission_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let (key, other) = (key(), key());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml.corrupt.9.enc");
+        std::fs::write(&path, "x").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read(&path).is_ok(); // root ignores modes
+        let got = key_bound_needing(dir.path(), &key, &other);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        if !readable {
+            assert_eq!(got, Err(()));
+        }
+    }
+
+    #[test]
+    fn the_new_blocker_has_a_code_and_a_message() {
+        assert_eq!(Blocker::KeyCheckUnavailable.code(), "key_check_unavailable");
+        assert!(!Blocker::KeyCheckUnavailable.message().is_empty());
     }
 
     #[cfg(unix)]

@@ -3294,6 +3294,7 @@ const es: TranslationDict = {
   'settings.recovery.blocker.unparsed': 'Hay líneas del archivo que no se pueden leer y podrían ocultar una credencial: no se puede demostrar que no se pierda nada.',
   'settings.recovery.blocker.unknown_value': 'Hay valores del archivo en un lugar que esta versión de Kronn no reconoce como inofensivo (un campo desconocido o un valor de tipo incorrecto): no se puede demostrar que no se pierda nada.',
   'settings.recovery.blocker.key_bound_files': 'El archivo contiene una clave de cifrado que aún abre otros archivos o filas apartados (secretos bloqueados, copias selladas o preservadas) que la clave en uso no abre: restáuralos o vuelve a cifrarlos primero.',
+  'settings.recovery.blocker.key_check_unavailable': 'No se pudieron leer todos los archivos apartados junto a este, así que no se puede demostrar que ninguno necesita la clave que contiene: inténtalo de nuevo.',
   'authLocked.remoteHint': 'Kronn está bloqueado y solo se puede desbloquear en la máquina donde se ejecuta. Abre Kronn allí (http://127.0.0.1) para restaurar la clave o definir un nuevo token de API.',
   'authLocked.tokenHint': 'La clave de cifrado está en su sitio, pero el token de API guardado se cifró con otra clave y no se puede leer. Define un nuevo token de API; los clientes remotos lo necesitarán.',
   'authLocked.newToken': 'Definir un nuevo token de API',

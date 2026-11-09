@@ -3304,6 +3304,7 @@ const fr: TranslationDict = {
   'settings.recovery.blocker.unparsed': 'Des lignes du fichier sont illisibles et pourraient cacher un identifiant : impossible de prouver que rien n\'est perdu.',
   'settings.recovery.blocker.unknown_value': 'Des valeurs du fichier se trouvent à un endroit que cette version de Kronn ne connaît pas comme inoffensif (un champ inconnu, ou une valeur du mauvais type) : impossible de prouver que rien n\'est perdu.',
   'settings.recovery.blocker.key_bound_files': 'Le fichier contient une clé de chiffrement qui ouvre encore d\'autres fichiers ou lignes mis de côté (secrets verrouillés, copies scellées ou préservées) que la clé en usage n\'ouvre pas : restaurez-les ou rechiffrez-les d\'abord.',
+  'settings.recovery.blocker.key_check_unavailable': 'Les fichiers mis de côté à ses côtés n\'ont pas tous pu être lus : impossible de prouver qu\'aucun n\'a besoin de la clé que ce fichier contient. Réessayez.',
   'authLocked.remoteHint': 'Kronn est verrouillé et ne peut être déverrouillé que sur la machine où il tourne. Ouvrez-y Kronn (http://127.0.0.1) pour restaurer la clé ou définir un nouveau jeton d\'API.',
   'authLocked.tokenHint': 'La clé de chiffrement est en place, mais le jeton d\'API enregistré a été chiffré avec une autre clé et ne peut pas être lu. Définissez un nouveau jeton d\'API ; les clients distants en auront besoin.',
   'authLocked.newToken': 'Définir un nouveau jeton d\'API',

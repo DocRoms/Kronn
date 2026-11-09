@@ -3270,6 +3270,7 @@ const zh: TranslationDict = {
   "settings.recovery.blocker.unparsed": "文件中有无法读取的行，可能藏有凭据：无法证明不会丢失任何内容。",
   "settings.recovery.blocker.unknown_value": "文件中有些值位于此版本 Kronn 无法确认为无害的位置（未知字段，或类型不符的值）：无法证明不会丢失任何内容。",
   "settings.recovery.blocker.key_bound_files": "该文件包含一个加密密钥，它仍能打开当前密钥打不开的其他已搁置文件或行（锁定的机密、加密封存或保留的副本）：请先恢复或重新加密它们。",
+  "settings.recovery.blocker.key_check_unavailable": "无法读取与之并存的所有已搁置文件，因此无法证明它们都不需要该文件所含的密钥：请重试。",
   "authLocked.remoteHint": "Kronn 已锁定，只能在其运行的机器上解锁。请在那台机器上打开 Kronn（http://127.0.0.1）以恢复密钥或设置新的 API 令牌。",
   "authLocked.tokenHint": "加密密钥正常，但已存储的 API 令牌是用另一个密钥加密的，无法读取。请设置新的 API 令牌；远程客户端将需要它。",
   "authLocked.newToken": "设置新的 API 令牌",

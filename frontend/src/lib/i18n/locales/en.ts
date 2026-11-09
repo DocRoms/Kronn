@@ -3294,6 +3294,7 @@ const en: TranslationDict = {
   'settings.recovery.blocker.unparsed': 'Some lines of the file cannot be read and could hide a credential: it cannot be proven that nothing is lost.',
   'settings.recovery.blocker.unknown_value': 'Some values of the file sit at a place this version of Kronn does not know as harmless (an unknown field, or a value of the wrong type): it cannot be proven that nothing is lost.',
   'settings.recovery.blocker.key_bound_files': 'The file holds an encryption key that still opens other files or rows kept aside (locked secrets, sealed or preserved copies) the key in use does not: restore or re-encrypt them first.',
+  'settings.recovery.blocker.key_check_unavailable': 'The files kept aside next to this one could not all be read, so it cannot be proven that none of them needs the key this file holds: try again.',
   'authLocked.remoteHint': 'Kronn is locked and can only be unlocked on the machine where it runs. Open Kronn there (http://127.0.0.1) to restore the key or set a new API token.',
   'authLocked.tokenHint': 'The encryption key is in place, but the stored API token was encrypted with another key and cannot be read. Set a new API token; remote clients will need it.',
   'authLocked.newToken': 'Set a new API token',
