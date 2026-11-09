@@ -220,7 +220,7 @@ pub struct ServerConfig {
     /// pragmatic self-hosted behaviour). Flipping to `true` is the
     /// hardening path for users who run multiple processes on the
     /// same host (one of which they don't trust) — e.g. shared dev
-    /// VMs. Once TLS lands (TD-20260314-no-tls) we'll deprecate the
+    /// VMs. Once peers reach Kronn over TLS by default we'll deprecate the
     /// bypass entirely; this flag is the early-opt-out for users who
     /// can't wait.
     #[serde(default)]
@@ -253,6 +253,22 @@ pub struct ServerConfig {
     #[serde(default = "default_true")]
     #[ts(skip)]
     pub lane_seeds_strong_confirm: bool,
+    /// KT-1596 — the owner declares that a TLS-terminating reverse proxy
+    /// (nginx, Caddy, `tailscale serve`) on THIS machine carries every peer's
+    /// traffic. Kronn cannot verify it. It lifts the plain-HTTP refusal of the
+    /// network-exposure toggle, binds the backend to loopback (only the proxy
+    /// reaches it) and withdraws the loopback auth bypass, since every proxied
+    /// request then arrives from 127.0.0.1. `KRONN_TLS_TERMINATED_BY_PROXY=1`
+    /// declares the same thing without touching this file.
+    #[serde(default)]
+    #[ts(skip)]
+    pub tls_terminated_by_proxy: bool,
+    /// KT-1596 — the proxy's public origin (`https://kronn.example.com[:port]`),
+    /// the address invite codes advertise and peers dial over wss. Required to
+    /// declare a proxy; `KRONN_PUBLIC_ORIGIN` supplies it without this file.
+    #[serde(default)]
+    #[ts(skip)]
+    pub public_origin: Option<String>,
     /// Accept federation peers (inbound `/api/ws` peers, the peer HTTP routes)
     /// and dial contacts. Off by default: a peer is identified only by its
     /// invite code until pairing secrets exist (KT-1033).

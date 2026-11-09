@@ -75,6 +75,9 @@ async fn load_startup_config_with(
     };
     crate::core::timezone::apply_with(config.server.timezone.as_deref(), detect());
     arm_mode(&config.server.anti_hallucination_mode);
+    // KT-1596 — behind a declared proxy the owner recovers with a proof read from
+    // the data directory: have it there before anything can need it.
+    crate::core::net_expose::arm_local_proof(&config.server);
     Ok(config)
 }
 
@@ -763,22 +766,46 @@ async fn auth_middleware(
     let config = state.config.read().await;
     let auth_enabled = config.server.auth_enabled;
     let expected_token = config.server.auth_token.clone();
-    let strict_localhost = config.server.auth_strict_localhost;
+    // KT-1596 — behind a TLS proxy on this machine every network request arrives
+    // from loopback, so the loopback bypass would let the whole network in:
+    // the token is then required from loopback too. Docker is no exception: a
+    // proxy on the host reaches nginx from the bridge gateway, which counts as
+    // local, and `X-Real-IP` then names that gateway, not the remote user.
+    let proxy_fronted = !crate::core::net_expose::loopback_peer_is_owner(
+        crate::core::net_expose::proxy_declared_for(&config.server),
+    );
+    let strict_localhost = config.server.auth_strict_localhost || proxy_fronted;
     let auth_locked = config.server.auth_locked && auth_enabled && expected_token.is_none();
     let key_in_use = config.encryption_secret.is_some();
     drop(config);
 
     // A stored token that cannot be decrypted is not "auth off": only the routes
     // that bring the key or a token back stay open, and only to a local caller.
-    // Strict-localhost is ignored here: no token can be checked anyway.
+    // Strict-localhost is ignored here: no token can be checked anyway. A proxy
+    // on this machine is not: its loopback peer is the network, not the owner.
     if auth_locked {
-        let local = request_is_local_ip(&headers, &request);
+        // Behind a declared proxy the peer address is the proxy: the owner at
+        // this machine proves themself with the data directory's local proof.
+        let proof_matches = proxy_fronted
+            && crate::core::config::config_dir().is_ok_and(|dir| {
+                crate::core::net_expose::local_proof_matches(
+                    &dir,
+                    headers
+                        .get(crate::core::net_expose::LOCAL_PROOF_HEADER)
+                        .and_then(|v| v.to_str().ok()),
+                )
+            });
+        let local = crate::core::net_expose::recovery_caller_is_local(
+            proxy_fronted,
+            request_is_local_ip(&headers, &request),
+            proof_matches,
+        );
         let bridge_bearer = carries_bridge_token(&headers);
         // A bridge token never reaches the recovery routes, locked or not.
         if !bridge_bearer && auth_locked_allows(request.uri().path(), local, key_in_use) {
             return Ok(next.run(request).await);
         }
-        return Ok(auth_locked_refusal());
+        return Ok(auth_locked_refusal(proxy_fronted));
     }
 
     // Trust primitives, computed once. `local_trusted` is the self-hosted bypass
@@ -839,17 +866,30 @@ fn auth_locked_allows(path: &str, local_caller: bool, key_in_use: bool) -> bool 
             || (!key_in_use && AUTH_LOCKED_ROUTES_WITHOUT_KEY.contains(&path)))
 }
 
-fn auth_locked_refusal() -> axum::response::Response {
+fn auth_locked_refusal(proxy_fronted: bool) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let mut error = "API authentication is locked: the stored auth token cannot be decrypted \
+                     until the encryption key is restored (Settings → Recovery, or POST \
+                     /api/config/recovery/restore with the recovery passphrase)."
+        .to_string();
+    if proxy_fronted {
+        // Every request comes through the declared proxy: recovery is done at
+        // the machine, carrying the proof only its owner can read.
+        error.push_str(&format!(
+            " A TLS proxy is declared, so recovery is only accepted from this machine, \
+             with the `{}` header set to the content of the `{}` file in the Kronn data \
+             directory.",
+            crate::core::net_expose::LOCAL_PROOF_HEADER,
+            crate::core::net_expose::LOCAL_PROOF_FILE
+        ));
+    }
     (
         StatusCode::LOCKED,
         axum::Json(serde_json::json!({
             "success": false,
             "data": null,
             "error_code": "auth_locked",
-            "error": "API authentication is locked: the stored auth token cannot be decrypted \
-                      until the encryption key is restored (Settings → Recovery, or POST \
-                      /api/config/recovery/restore with the recovery passphrase)."
+            "error": error
         })),
     )
         .into_response()
@@ -1241,9 +1281,15 @@ const DESTRUCTIVE_POSTS: &[&str] = &[
 ];
 
 /// POSTs that widen what this instance lets in: an allowed embed site, directly
-/// or chosen during a Page import. Gated like `DESTRUCTIVE_POSTS`; their GETs
-/// stay open.
-const PERMISSION_POSTS: &[&str] = &["/api/config/embed-origins", "/api/pages/import"];
+/// or chosen during a Page import, or the network exposure and the TLS proxy
+/// declaration (KT-1596: declaring a proxy withdraws the loopback owner trust,
+/// exposing opens the instance to the network). Gated like `DESTRUCTIVE_POSTS`;
+/// their GETs stay open.
+const PERMISSION_POSTS: &[&str] = &[
+    "/api/config/embed-origins",
+    "/api/pages/import",
+    "/api/config/network-exposure",
+];
 
 /// Passe D — the destructive-request criterion: every DELETE (no benign DELETE
 /// exists in this API), the listed POSTs, and the parameterized
@@ -1389,14 +1435,36 @@ pub(crate) fn frontend_origins(domain: &Option<String>, port: u16, in_docker: bo
     }
 }
 
-fn build_cors(domain: &Option<String>, port: u16) -> CorsLayer {
+/// The listed local origins, plus — read from the live config on each request,
+/// since the declaration is made from Settings without a restart — the one
+/// public origin a declared TLS proxy serves the UI from (KT-1596).
+fn build_cors(config: Arc<RwLock<AppConfig>>, domain: &Option<String>, port: u16) -> CorsLayer {
     let origins = frontend_origins(domain, port, crate::core::env::is_docker());
-    let parsed: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+    let parsed: Vec<axum::http::HeaderValue> =
+        origins.iter().filter_map(|o| o.parse().ok()).collect();
 
     CorsLayer::new()
-        .allow_origin(AllowOrigin::list(parsed))
+        .allow_origin(AllowOrigin::async_predicate(
+            move |origin: axum::http::HeaderValue, _parts: &axum::http::request::Parts| {
+                let config = config.clone();
+                let parsed = parsed.clone();
+                async move {
+                    parsed.contains(&origin)
+                        || cors_matches_declared_origin(
+                            crate::core::net_expose::declared_origin(&config.read().await.server)
+                                .as_deref(),
+                            &origin,
+                        )
+                }
+            },
+        ))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
+}
+
+/// Whether a request's `Origin` is exactly the declared proxy origin.
+fn cors_matches_declared_origin(declared: Option<&str>, origin: &axum::http::HeaderValue) -> bool {
+    declared.is_some_and(|declared| origin.as_bytes() == declared.as_bytes())
 }
 
 /// Build the Axum router with all routes and middleware.
@@ -3494,7 +3562,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/stats/tokens", get(api::stats::token_usage))
         .route("/api/stats/agent-usage", get(api::stats::agent_usage))
         // ── Middleware ──
-        .layer(build_cors(&domain, port))
+        .layer(build_cors(state.config.clone(), &domain, port))
         .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span));
 
     // KT-1496: inside the auth layer, so a request reaches it already admitted.
@@ -3910,6 +3978,88 @@ mod auth_tests {
             crate::core::bridge_token::route_for("POST", REGENERATE).is_none(),
             "no bridge token reaches it"
         );
+    }
+
+    /// KT-1596 review: the exposure toggle and the proxy declaration are
+    /// owner-only like every other config change that widens access. With auth
+    /// off (KRONN_ALLOW_INSECURE_LAN), a LAN client must not declare a proxy.
+    #[test]
+    fn network_exposure_post_is_owner_only_even_when_auth_is_off() {
+        const EXPOSURE: &str = "/api/config/network-exposure";
+        assert!(super::is_destructive(&Method::POST, EXPOSURE));
+        // Reading the state stays open (the Settings page polls it).
+        assert!(!super::is_destructive(&Method::GET, EXPOSURE));
+        for token_configured in [false, true] {
+            assert!(
+                !auth_allows(
+                    &Method::POST,
+                    EXPOSURE,
+                    false,
+                    token_configured,
+                    false,
+                    false
+                ),
+                "a non-loopback peer, auth off, token_configured={token_configured}"
+            );
+            assert!(
+                !auth_allows(
+                    &Method::POST,
+                    EXPOSURE,
+                    true,
+                    token_configured,
+                    false,
+                    false
+                ),
+                "a non-loopback peer, auth on, token_configured={token_configured}"
+            );
+        }
+        // The owner on this machine, or anyone with the token, may.
+        assert!(auth_allows(
+            &Method::POST,
+            EXPOSURE,
+            false,
+            true,
+            true,
+            false
+        ));
+        assert!(auth_allows(
+            &Method::POST,
+            EXPOSURE,
+            false,
+            true,
+            false,
+            true
+        ));
+        assert!(
+            crate::core::bridge_token::route_for("POST", EXPOSURE).is_none(),
+            "no bridge token reaches it"
+        );
+    }
+
+    #[test]
+    fn a_declared_origin_is_allowed_by_cors_and_nothing_else_is() {
+        let declared = Some("https://kronn.example.com");
+        let header = |v: &str| axum::http::HeaderValue::from_str(v).unwrap();
+        assert!(super::cors_matches_declared_origin(
+            declared,
+            &header("https://kronn.example.com")
+        ));
+        for foreign in [
+            "https://evil.example.com",
+            "http://kronn.example.com",
+            "https://kronn.example.com:8443",
+            "https://kronn.example.com.evil.example",
+            "null",
+        ] {
+            assert!(
+                !super::cors_matches_declared_origin(declared, &header(foreign)),
+                "{foreign}"
+            );
+        }
+        assert!(!super::cors_matches_declared_origin(
+            None,
+            &header("https://kronn.example.com")
+        ));
     }
 
     #[test]

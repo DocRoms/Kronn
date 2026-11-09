@@ -6352,9 +6352,10 @@ export type NetworkExposure = {
  */
 exposed: boolean,
 /**
- * The configured exposure differs from what the process bound at boot →
- * a restart is needed for it to take effect. Never true in Docker, where
- * the exposure is set by `KRONN_BIND` in the compose file, not by Settings.
+ * The host the next boot would bind differs from what the process bound
+ * at boot → a restart is needed for it to take effect. Never true in
+ * Docker, where the exposure is set by `KRONN_BIND` in the compose file,
+ * not by Settings.
  */
 restart_required: boolean,
 /**
@@ -6373,7 +6374,33 @@ reachable_ips: Array<DetectedIp>,
 /**
  * A network access token is in force: auth is on and a token exists.
  */
-auth_token_set: boolean, };
+auth_token_set: boolean,
+/**
+ * KT-1596 — a TLS-terminating proxy on this machine is declared (Settings
+ * or `KRONN_TLS_TERMINATED_BY_PROXY`): the only way, until Kronn serves
+ * TLS itself, to be exposed without plain HTTP.
+ */
+tls_terminated_by_proxy: boolean,
+/**
+ * The declaration comes from the environment, so Settings cannot withdraw it.
+ */
+tls_declared_by_env: boolean,
+/**
+ * The proxy's public `https://` origin, the address invites advertise.
+ */
+public_origin: string | null,
+/**
+ * The configuration, or `KRONN_HOST`, asks for exposure that nothing
+ * encrypts. The backend started (or will start) on loopback instead, and
+ * hands out no invite code; Settings says why.
+ */
+plain_http_blocked: boolean,
+/**
+ * Only in the reply to a declaration: the network access token, handed over
+ * once because the loopback bypass is withdrawn from now on and the local
+ * UI must hold it before its next call. Never part of a GET.
+ */
+issued_auth_token?: string, };
 
 /**
  * Network info for multi-user connectivity.

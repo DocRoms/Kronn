@@ -893,6 +893,16 @@ export interface NetworkExposure {
   reachable_ips: DetectedIp[];
   /** A network access token is in force (auth on and a token stored). */
   auth_token_set: boolean;
+  /** A TLS-terminating proxy on this machine is declared (Settings or env). */
+  tls_terminated_by_proxy: boolean;
+  /** The declaration comes from the environment: Settings cannot withdraw it. */
+  tls_declared_by_env: boolean;
+  /** The proxy's public `https://` origin, the address invites advertise. */
+  public_origin: string | null;
+  /** The config asks for exposure nothing encrypts: Kronn started on loopback instead. */
+  plain_http_blocked: boolean;
+  /** Only in the reply to a declaration: the token the local UI must keep. */
+  issued_auth_token?: string | null;
 }
 
 export const config = {
@@ -994,7 +1004,12 @@ export const config = {
   getNetworkExposure: () => api<NetworkExposure>('GET', '/config/network-exposure'),
   getDesktopPort: () => api<DesktopPortInfo>('GET', '/config/desktop-port'),
   setDesktopPort: (port: number) => api<DesktopPortInfo>('POST', '/config/desktop-port', { port }),
-  setNetworkExposure: (exposed: boolean) => api<NetworkExposure>('POST', '/config/network-exposure', { exposed }),
+  /** Exposing over plain HTTP is refused by the backend (409) unless a TLS proxy is declared:
+   *  declare it in the same call or before. Absent declaration fields are left as they are. */
+  setNetworkExposure: (
+    exposed: boolean,
+    proxy?: { tls_terminated_by_proxy?: boolean; public_origin?: string },
+  ) => api<NetworkExposure>('POST', '/config/network-exposure', { exposed, ...proxy }),
   /** P2 recovery passphrase — the encryption key wrapped under an Argon2id
    *  passphrase, so MCP secrets survive total machine/keychain loss. */
   getRecoveryStatus: () => api<RecoveryStatus>('GET', '/config/recovery/status'),

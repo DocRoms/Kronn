@@ -258,6 +258,11 @@ pub async fn ws_handler(
         && config.server.auth_enabled
         && config.server.auth_token.is_none();
     let strict_localhost = config.server.auth_strict_localhost;
+    // KT-1596 — behind a TLS proxy on this machine every network peer arrives
+    // from loopback: that address no longer says "the owner's own browser".
+    let proxy_fronted = !crate::core::net_expose::loopback_peer_is_owner(
+        crate::core::net_expose::proxy_declared_for(&config.server),
+    );
     let p2p_enabled = state.p2p.enabled();
     let has_valid_token =
         {
@@ -281,6 +286,7 @@ pub async fn ws_handler(
             in_docker,
             auth_required,
             strict_localhost,
+            proxy_fronted,
             has_valid_token,
         });
     if !is_local {
@@ -375,6 +381,8 @@ pub(crate) fn allowed_ws_origins(
         origins.push(dev);
     }
     origins.extend(server.frontend_origins.iter().cloned());
+    // KT-1596 — the UI a declared TLS proxy serves: exactly its public origin.
+    origins.extend(crate::core::net_expose::declared_origin(server));
     origins.iter().filter_map(|o| normalize_origin(o)).collect()
 }
 
@@ -491,6 +499,9 @@ pub(crate) struct WsTrust {
     /// `auth_enabled` and a token configured, as in `auth_middleware`.
     pub auth_required: bool,
     pub strict_localhost: bool,
+    /// A TLS proxy on this machine forwards the network's traffic (KT-1596):
+    /// a loopback peer is the proxy, not the owner, so only a token qualifies.
+    pub proxy_fronted: bool,
     pub has_valid_token: bool,
 }
 
@@ -506,6 +517,9 @@ pub(crate) struct WsTrust {
 pub(crate) fn ws_client_is_local(t: WsTrust) -> bool {
     if t.has_valid_token {
         return true;
+    }
+    if t.proxy_fronted {
+        return false;
     }
     let local_set = if t.in_docker {
         crate::is_local_ip(&t.client_ip.to_string())
@@ -1653,6 +1667,7 @@ mod handshake_tests {
                 in_docker,
                 auth_required,
                 strict_localhost: false,
+                proxy_fronted: false,
                 has_valid_token: false,
             }
         }
@@ -1675,6 +1690,19 @@ mod handshake_tests {
                 false,
                 false
             )));
+        }
+
+        #[test]
+        fn behind_a_proxy_on_this_machine_loopback_is_a_stranger_without_a_token() {
+            // KT-1596: every proxied peer arrives from loopback; only a token
+            // may make it the local frontend, with auth required or not.
+            for auth_required in [true, false] {
+                let mut t = trust(LOOP, false, auth_required);
+                t.proxy_fronted = true;
+                assert!(!ws_client_is_local(t), "auth_required={auth_required}");
+                t.has_valid_token = true;
+                assert!(ws_client_is_local(t), "auth_required={auth_required}");
+            }
         }
 
         #[test]
@@ -1960,6 +1988,27 @@ mod origin_and_admission_tests {
 
     fn classify(origin: &str, server: &crate::models::ServerConfig) -> WsOrigin {
         classify_ws_origin(Some(origin), &allowed_ws_origins(server, None, false))
+    }
+
+    #[test]
+    fn the_declared_proxy_origin_is_allowed_exactly_and_foreign_pages_still_are_not() {
+        // KT-1596 review: a remote user behind the proxy loads the UI from the
+        // proxy's public origin; without it every /api/ws upgrade was a 403.
+        let mut server = server();
+        let proxy = "https://kronn.example.com";
+        assert_eq!(classify(proxy, &server), WsOrigin::Foreign, "undeclared");
+        server.tls_terminated_by_proxy = true;
+        server.public_origin = Some("https://Kronn.Example.com:443/".into());
+        assert_eq!(classify(proxy, &server), WsOrigin::Allowed);
+        for foreign in [
+            "http://kronn.example.com",
+            "https://kronn.example.com:8443",
+            "https://evil.example.com",
+            "https://kronn.example.com.evil.example",
+            "null",
+        ] {
+            assert_eq!(classify(foreign, &server), WsOrigin::Foreign, "{foreign}");
+        }
     }
 
     #[test]

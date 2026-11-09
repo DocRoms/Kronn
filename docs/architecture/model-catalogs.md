@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:869-899#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:906-936#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -230,8 +230,8 @@ durable catalog. Bootstrap failures are logged; an unavailable projection
 does not silently authorize an effort. Discussion preflight may refresh the
 catalog afterward, but the first scheduled workflow does not depend on opening
 Settings first.
-[src: file: backend/src/main.rs:285-289#migrate_hardcoded_catalog_once]
-[src: file: desktop/src-tauri/src/main.rs:693-697#migrate_hardcoded_catalog_once]
+[src: file: backend/src/main.rs:309-313#migrate_hardcoded_catalog_once]
+[src: file: desktop/src-tauri/src/main.rs:716-720#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:140-260#refresh_runtime_cache]
 
 A Quick Prompt's explicit `agent_settings.reasoning_effort` is copied onto a

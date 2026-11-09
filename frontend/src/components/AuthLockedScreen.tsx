@@ -12,6 +12,8 @@ import { RecoveryRestorePanel } from './RecoveryRestorePanel';
 import { StartNewKeyPanel } from './StartNewKeyPanel';
 import { KeyRound } from 'lucide-react';
 
+const AUTH_AND_TLS_DOC_URL = 'https://github.com/DocRoms/Kronn/blob/main/docs/operations/auth-and-tls.md';
+
 interface AuthLockedScreenProps {
   /** Called after a successful restore or a new token (the app reloads). */
   onRestored: () => void;
@@ -72,7 +74,23 @@ export function AuthLockedScreen({ onRestored }: AuthLockedScreenProps) {
       <h1>
         <KeyRound size={18} /> {t('authLocked.title')}
       </h1>
-      {state === 'remote' && <p data-testid="auth-locked-remote">{t('authLocked.remoteHint')}</p>}
+      {state === 'remote' && (
+        <>
+          <p data-testid="auth-locked-remote">{t('authLocked.remoteHint')}</p>
+          {/* Behind a declared TLS proxy the owner cannot recover from this page: the
+              runbook explains the on-machine proof (KT-1596). */}
+          <p>
+            <a
+              href={AUTH_AND_TLS_DOC_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              data-testid="auth-locked-proxy-doc"
+            >
+              {t('authLocked.proxyDocLink')}
+            </a>
+          </p>
+        </>
+      )}
       {state === 'unreachable' && (
         <div data-testid="auth-locked-unreachable">
           <p>{t('authLocked.unreachable', loadError ?? '')}</p>

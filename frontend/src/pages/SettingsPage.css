@@ -4979,6 +4979,21 @@
   border-radius: 6px;
 }
 
+/* KT-1596 — the TLS proxy declaration under the exposure toggle. */
+.set-expose-proxy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin: var(--kr-sp-4) var(--kr-sp-6) 0;
+  font-size: var(--kr-fs-xs);
+}
+
+.set-expose-proxy-actions {
+  display: flex;
+  gap: var(--kr-sp-3);
+  flex-wrap: wrap;
+}
+
 .set-expose-restart {
   display: flex;
   align-items: center;

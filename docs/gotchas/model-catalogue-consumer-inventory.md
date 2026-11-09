@@ -12,7 +12,7 @@ again inside the serialized database write; historical seeds and configured
 overrides are imported before marking completion. Subsequent starts rebuild
 the runtime cache from durable rows, without reseeding deleted models. The
 `migrated_default` helper is test-only, not a production fallback.
-[src: file: backend/src/main.rs:285-289#migrate_hardcoded_catalog_once]
+[src: file: backend/src/main.rs:309-313#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:107-110#migrated_default]
 [src: file: backend/src/core/model_catalog/mod.rs:112-138#refresh_runtime_cache]
 [src: file: backend/src/core/model_catalog/mod.rs:140-260#migrate_hardcoded_catalog_once]

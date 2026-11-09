@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AtSign, ChevronDown, Copy, FileText, Network, ShieldCheck, UserCircle } from 'lucide-react';
-import { config as configApi, contacts as contactsApi, type NetworkExposure } from '../../lib/api';
+import { config as configApi, contacts as contactsApi, setAuthToken, type NetworkExposure } from '../../lib/api';
 import { gravatarUrl } from '../../lib/gravatar';
 import { userError } from '../../lib/userError';
 import { invokeTauri, isTauriRuntime } from '../../lib/tauri';
@@ -34,6 +34,12 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
   const [serverDomain, setServerDomain] = useState('');
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [exposure, setExposure] = useState<NetworkExposure | null>(null);
+  // KT-1596 — why the last exposure change was refused, in the backend's words,
+  // and the TLS proxy declaration being edited.
+  const [exposeRefusal, setExposeRefusal] = useState<string | null>(null);
+  const [proxyOrigin, setProxyOrigin] = useState('');
+  const [proxyBusy, setProxyBusy] = useState(false);
+  const [proxyInviteCode, setProxyInviteCode] = useState<string | null>(null);
   const [showConnectionGuide, setShowConnectionGuide] = useState(false);
   const [p2pEnabled, setP2pEnabled] = useState<boolean | null>(null);
   const [frontendOrigins, setFrontendOrigins] = useState('');
@@ -63,8 +69,52 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
   }, [pseudo, serverDomain]);
 
   useEffect(() => {
-    configApi.getNetworkExposure().then(setExposure).catch(() => {});
+    configApi.getNetworkExposure().then(loaded => {
+      setExposure(loaded);
+      setProxyOrigin(loaded?.public_origin ?? '');
+    }).catch(() => {});
   }, []);
+
+  // Behind a TLS proxy the invite names the proxy's https address, which only
+  // the backend knows how to spell.
+  const proxyDeclared = !!exposure?.tls_terminated_by_proxy;
+  useEffect(() => {
+    if (!proxyDeclared) return;
+    let live = true;
+    contactsApi.inviteCode().then(code => { if (live) setProxyInviteCode(code); })
+      .catch(() => { if (live) setProxyInviteCode(null); });
+    return () => { live = false; };
+  }, [proxyDeclared, exposure?.public_origin, pseudo]);
+
+  const refusalMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+  const adoptExposure = (updated: NetworkExposure) => {
+    // Declaring a proxy withdraws the loopback bypass: the local UI keeps the token
+    // the reply hands over, or its very next call would be refused.
+    if (updated.issued_auth_token) setAuthToken(updated.issued_auth_token);
+    const kept: NetworkExposure = { ...updated, issued_auth_token: null };
+    setExposure(kept);
+    setProxyOrigin(kept.public_origin ?? '');
+    onExposureChange?.(kept);
+  };
+
+  const declareProxy = async (declared: boolean) => {
+    setExposeRefusal(null);
+    setProxyBusy(true);
+    try {
+      // Withdrawing while exposed would leave plain-HTTP exposure: switch it off too.
+      adoptExposure(await configApi.setNetworkExposure(
+        declared ? !!exposure?.exposed : false,
+        declared
+          ? { tls_terminated_by_proxy: true, public_origin: proxyOrigin.trim() }
+          : { tls_terminated_by_proxy: false },
+      ));
+    } catch (error) {
+      setExposeRefusal(refusalMessage(error));
+    } finally {
+      setProxyBusy(false);
+    }
+  };
 
   const restartApp = async () => {
     try {
@@ -79,7 +129,12 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
   };
   const inviteHost = networkInfo?.advertised_host ?? window.location.hostname;
   const invitePort = networkInfo?.port ?? (window.location.port || '3140');
-  const inviteCode = `kronn:${pseudo}@${inviteHost}:${invitePort}`;
+  // Exposure asked for with nothing carrying TLS: this boot serves nobody, and a
+  // plain LAN invite would name a port that is closed or in clear (KT-1596).
+  const plainBlocked = !!exposure?.plain_http_blocked && !exposure.in_docker;
+  const inviteCode = proxyDeclared
+    ? (proxyInviteCode ?? '')
+    : `kronn:${pseudo}@${inviteHost}:${invitePort}`;
 
   return (
     <div id="settings-identity" className="set-card set-identity-card">
@@ -248,7 +303,7 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
                 <p>{t('settings.identityNetworkHint')}</p>
               </div>
               <span className="set-identity-network-state" data-exposed={!!exposure?.exposed}>
-                {exposure?.exposed ? t('settings.networkReachable') : t('settings.networkLocalOnly')}
+                {exposure?.exposed && !plainBlocked ? t('settings.networkReachable') : t('settings.networkLocalOnly')}
               </span>
             </div>
 
@@ -266,12 +321,13 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
                 className="set-identity-network-toggle"
                 disabled={exposure === null}
                 onClick={async () => {
+                  setExposeRefusal(null);
                   try {
-                    const updated = await configApi.setNetworkExposure(!exposure?.exposed);
-                    setExposure(updated);
-                    onExposureChange?.(updated);
+                    adoptExposure(await configApi.setNetworkExposure(!exposure?.exposed));
                   } catch (error) {
-                    reportSaveError(error);
+                    // The backend says what is needed (TLS or a declared proxy): show it
+                    // where the toggle is, not in a toast that vanishes.
+                    setExposeRefusal(refusalMessage(error));
                   }
                 }}
               >
@@ -285,8 +341,58 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
               </button>
             )}
 
-            {exposure?.exposed && (
+            {exposeRefusal && (
+              <div className="set-expose-warn" role="alert" data-testid="expose-refusal">{exposeRefusal}</div>
+            )}
+            {plainBlocked ? (
+              <div className="set-expose-warn" role="alert" data-testid="expose-plain-http-blocked">
+                {t('settings.exposePlainBlocked')}
+              </div>
+            ) : exposure?.exposed && (
               <div className="set-expose-warn" role="note">{t('settings.exposeSecurityNote')}</div>
+            )}
+            {exposure && !exposure.in_docker && (
+              <div className="set-expose-proxy" data-testid="expose-proxy">
+                <strong>{t('settings.exposeProxyTitle')}</strong>
+                <p className="set-hint-xs">{t('settings.exposeProxyHint')}</p>
+                {exposure.tls_declared_by_env ? (
+                  <div className="set-hint-xs" data-testid="expose-proxy-env">{t('settings.exposeProxyEnv')}</div>
+                ) : (
+                  <>
+                    <label className="set-form-label" htmlFor="expose-proxy-origin">{t('settings.exposeProxyOrigin')}</label>
+                    <input
+                      id="expose-proxy-origin"
+                      data-testid="expose-proxy-origin"
+                      type="url"
+                      value={proxyOrigin}
+                      placeholder={t('settings.exposeProxyOriginPlaceholder')}
+                      onChange={event => setProxyOrigin(event.target.value)}
+                    />
+                    <div className="set-expose-proxy-actions">
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        data-testid="expose-proxy-save"
+                        disabled={proxyBusy || !proxyOrigin.trim()}
+                        onClick={() => declareProxy(true)}
+                      >
+                        {t('settings.exposeProxySave')}
+                      </button>
+                      {exposure.tls_terminated_by_proxy && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          data-testid="expose-proxy-withdraw"
+                          disabled={proxyBusy}
+                          onClick={() => declareProxy(false)}
+                        >
+                          {t('settings.exposeProxyWithdraw')}
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
             )}
             {exposure?.restart_required && !exposure.in_docker && (
               <div className="set-expose-restart" role="alert">
@@ -354,7 +460,9 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
               <div className="set-hint-xs">{t('settings.frontendOriginsHint')}</div>
             </div>
 
-            {pseudo ? (
+            {pseudo && plainBlocked ? (
+              <div className="set-identity-invite-empty" data-testid="invite-blocked">{t('settings.identityInviteBlocked')}</div>
+            ) : pseudo ? (
               <div className="set-invite-box">
                 <div className="set-invite-head">
                   <div>
@@ -370,6 +478,7 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
                   <code className="set-invite-code">{inviteCode}</code>
                   <button
                     onClick={() => {
+                      if (!inviteCode) return;
                       navigator.clipboard.writeText(inviteCode);
                       toast(t('disc.copy'), 'success');
                     }}

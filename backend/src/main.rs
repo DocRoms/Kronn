@@ -137,11 +137,29 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     //      which otherwise binds 127.0.0.1 and is unreachable cross-machine).
     //   2. A real container → 0.0.0.0 so nginx can reach us.
     //   3. `config.server.host` (default 127.0.0.1 — localhost only).
-    let host = kronn::core::net_expose::resolve_bind_host(
+    let requested_host = kronn::core::net_expose::resolve_bind_host(
         kronn::core::child_env::var("KRONN_HOST").ok().as_deref(),
         kronn::core::env::is_docker(),
         &app_config.server.host,
     );
+    // KT-1596 — real container detection (KRONN_IN_DOCKER / /.dockerenv), NOT the
+    // old KRONN_DATA_DIR proxy: a native install relocating its data dir must not
+    // silently switch the guards to docker mode (where an unset KRONN_BIND reads
+    // as "not exposed" even when the actual bind host is 0.0.0.0).
+    let is_docker = kronn::core::env::is_docker();
+    let kronn_bind = kronn::core::child_env::var("KRONN_BIND").ok();
+    // KT-1596 — a requested exposure that nothing encrypts never serves the token
+    // in clear: a native instance falls back to loopback and says so (Settings
+    // shows why), Docker — whose publish is outside this process — refuses below.
+    // There is no in-process TLS yet, hence `tls_enabled = false`.
+    let boot_bind = kronn::core::net_expose::boot_bind(
+        &requested_host,
+        is_docker,
+        kronn_bind.as_deref(),
+        false,
+        kronn::core::net_expose::proxy_declared_for(&app_config.server),
+    );
+    let host = boot_bind.bind_host.clone();
     // Record what we actually bound so the "Allow connections from other
     // devices" toggle can tell the UI whether a restart is still pending.
     kronn::core::net_expose::record_bound_host(&host);
@@ -202,24 +220,26 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // a fresh `docker compose up` publishes on 127.0.0.1 (see docker-compose.yml
     // `KRONN_BIND`), so this never fires for the standard install. Exposing to
     // the LAN then requires a token, auth, or an explicit risk acknowledgment.
-    // Real container detection (KRONN_IN_DOCKER / /.dockerenv) — NOT the old
-    // KRONN_DATA_DIR proxy: a native install relocating its data dir must not
-    // silently switch the guard to docker mode (where an unset KRONN_BIND
-    // reads as "not exposed" even when the actual bind host is 0.0.0.0).
-    let is_docker = kronn::core::env::is_docker();
-    let kronn_bind = kronn::core::child_env::var("KRONN_BIND").ok();
     let ack_insecure = kronn::core::child_env::var("KRONN_ALLOW_INSECURE_LAN")
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
         .unwrap_or(false);
-    let exposed = kronn::core::net_expose::lan_exposed(is_docker, kronn_bind.as_deref(), &host);
     if let Some(msg) = kronn::core::net_expose::insecure_lan_boot_error(
-        exposed,
+        boot_bind.reachable_from_network,
         app_config.server.auth_enabled,
         app_config.server.auth_token_or_lock(),
         ack_insecure,
     ) {
         tracing::error!("{msg}");
         return Err(anyhow::anyhow!(msg));
+    }
+    // KT-1596 — Docker cannot fall back to loopback (the publish is outside this
+    // process), so a plain-HTTP publish with no declared proxy ends startup there.
+    if let Some(msg) = boot_bind.fatal.as_deref() {
+        tracing::error!("{msg}");
+        return Err(anyhow::anyhow!(msg.to_string()));
+    }
+    if let Some(notice) = boot_bind.notice() {
+        tracing::warn!("{notice}");
     }
 
     // KT-619 — an operator who lost the admin secret asks for a new one by

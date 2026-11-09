@@ -252,8 +252,17 @@ where
     // yields `kronn:@host:port`, which the peer rejects (reconnect storm, ban).
     let config = state.config.read().await;
     let our_pseudo = crate::api::contacts::invite_pseudo(&config.server);
-    let our_invite_code = crate::api::contacts::build_invite_code(&config.server).await;
+    let our_invite_code = crate::api::contacts::try_build_invite_code(&config.server).await;
     drop(config);
+    // KT-1596 — a declared proxy with no public origin has no safe code to send:
+    // end this connection (retried with backoff) rather than present a plain one.
+    let our_invite_code = match our_invite_code {
+        Ok(code) => code,
+        Err(reason) => {
+            tracing::warn!("WS client: not announcing ourselves to a peer: {reason}");
+            return false;
+        }
+    };
     let presence_msg = WsMessage::Presence {
         from_pseudo: our_pseudo,
         from_invite_code: our_invite_code,
