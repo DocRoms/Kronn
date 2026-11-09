@@ -69,6 +69,17 @@ fn path_with_front(dir: &Path, path: Option<&std::ffi::OsStr>) -> std::ffi::OsSt
 
 /// Put the guard in front of `git` for an agent about to start in `work_dir`.
 /// Best effort: a directory Kronn cannot write leaves the launch as it was.
+///
+/// The shim is a safety net against accidents, not a boundary: the agent runs
+/// as the same user, so it can call git by absolute path, use an alias, or set
+/// [`CONFIRM_ENV`] itself — the variable is read from the agent's own
+/// environment, and nothing here can tell a human's confirmation from the
+/// agent's. What it stops is the careless `git checkout --detach`.
+///
+/// The shim lives in the checkout (an agent's sandbox can read it there, not in
+/// Kronn's data directory), so `.kronn/bin/` is added to the repository's
+/// `.git/info/exclude`: the user's `git status` stays clean without a line in
+/// their tracked `.gitignore`.
 #[cfg(unix)]
 pub fn apply(command: &mut std::process::Command, work_dir: &Path) {
     let dir = match install(work_dir) {
@@ -356,6 +367,123 @@ mod tests {
             [PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
         );
         assert!(shim_dir(work.path()).join("git").is_file());
+    }
+
+    /// Run `args` through `path` (shims first), killing the process after a few
+    /// seconds: two guards that hand a command to each other never return.
+    fn run_through(path: &std::ffi::OsStr, dir: &Path, args: &[&str]) -> Option<Output> {
+        let first = std::env::split_paths(path)
+            .next()
+            .expect("a shim directory comes first");
+        let mut child = Command::new(first.join("git"))
+            .args(args)
+            .current_dir(dir)
+            .env("PATH", path)
+            .env_remove(CONFIRM_ENV)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("shim runs");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                return Some(child.wait_with_output().unwrap());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        None
+    }
+
+    #[test]
+    fn two_stacked_shims_look_past_each_other_to_the_real_git() {
+        let fx = fixture();
+        let other_work = tempfile::tempdir().unwrap();
+        let outer = install(other_work.path()).unwrap();
+        // An agent in worktree A launched another in worktree B: B's shim is
+        // first, A's second, the real git last.
+        let path = std::env::join_paths([outer.clone(), fx.shims.clone()].into_iter().chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+
+        let status = run_through(&path, &fx.main, &["status", "--short"])
+            .expect("stacked shims must not loop");
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+
+        let refused_checkout = run_through(&path, &fx.main, &["checkout", "--detach"])
+            .expect("stacked shims must not loop");
+        let message = refused(&refused_checkout);
+        assert!(message.contains("refused 'git checkout'"), "{message}");
+        assert_eq!(symbolic_head(&fx.main), "refs/heads/main");
+
+        // And the other way round.
+        let reversed = std::env::join_paths([fx.shims.clone(), outer].into_iter().chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+        let again = run_through(&reversed, &fx.main, &["reset", "--hard"])
+            .expect("stacked shims must not loop");
+        refused(&again);
+    }
+
+    #[test]
+    fn a_shim_alone_on_the_path_reports_that_no_real_git_exists() {
+        let fx = fixture();
+
+        let out = run_through(fx.shims.as_os_str(), &fx.main, &["status"])
+            .expect("a lone shim must not loop");
+
+        assert_eq!(out.status.code(), Some(127));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("no other git on PATH"));
+    }
+
+    #[test]
+    fn a_launch_leaves_the_projects_git_status_clean() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().canonicalize().unwrap();
+        git(&project, &["init", "-q", "-b", "main"]);
+        std::fs::write(project.join("a.txt"), "one").unwrap();
+        git(&project, &["add", "a.txt"]);
+        git(&project, &["commit", "-q", "-m", "one"]);
+        let mut command = Command::new("true");
+
+        apply(&mut command, &project);
+        apply(&mut command, &project);
+
+        assert!(
+            shim_dir(&project).join("git").is_file(),
+            "the shim is there"
+        );
+        let status = git(
+            &project,
+            &["status", "--porcelain", "--untracked-files=all"],
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout).trim(),
+            "",
+            "an untracked .kronn/bin/git would dirty the user's checkout"
+        );
+    }
+
+    #[test]
+    fn a_launch_in_a_linked_worktree_leaves_it_clean_too() {
+        let fx = fixture();
+        let mut command = Command::new("true");
+
+        apply(&mut command, &fx.linked);
+
+        assert!(shim_dir(&fx.linked).join("git").is_file());
+        let status = git(
+            &fx.linked,
+            &["status", "--porcelain", "--untracked-files=all"],
+        );
+        assert_eq!(String::from_utf8_lossy(&status.stdout).trim(), "");
     }
 
     #[test]

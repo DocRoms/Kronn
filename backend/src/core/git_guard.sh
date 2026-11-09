@@ -1,4 +1,5 @@
 #!/bin/sh
+# kronn-git-guard
 # Kronn git guard (KT-1645) — put in front of `git` on an agent's PATH.
 #
 # `git checkout`, `git switch`, `git reset` and `git stash` move HEAD or the
@@ -9,9 +10,28 @@
 # the real git untouched.
 #
 # A safety net against accidents (a subagent running `git checkout --detach`),
-# not a sandbox: an absolute path to git or a git alias is not seen.
+# not a sandbox: an absolute path to git or a git alias is not seen, and the
+# confirmation variable can be set by the agent itself.
 
-self_dir=$(cd "$(dirname "$0")" && pwd -P)
+# Shell builtins only up to the real git is found: the agent's PATH may hold
+# nothing but this directory, and a guard that cannot recognise itself would
+# exec itself forever.
+case $0 in
+  */*) self_dir=$(cd "${0%/*}" 2>/dev/null && pwd -P) ;;
+  *) self_dir=$(pwd -P) ;;
+esac
+
+# True when $1 is a Kronn git guard (the marker on its second line). Guards can
+# stack on one PATH (an agent in worktree A whose child launches another agent
+# in worktree B): each must look past every guard, not just its own directory,
+# or two of them would hand the command to each other forever.
+kronn_is_guard() {
+  [ -f "$1" ] || return 1
+  {
+    IFS= read -r kronn_line1 && IFS= read -r kronn_line2
+  } < "$1" 2>/dev/null || return 1
+  [ "$kronn_line2" = "# kronn-git-guard" ]
+}
 
 real_git=
 old_ifs=$IFS
@@ -20,7 +40,7 @@ for dir in $PATH; do
   [ -n "$dir" ] || continue
   dir_real=$(cd "$dir" 2>/dev/null && pwd -P) || continue
   [ "$dir_real" = "$self_dir" ] && continue
-  if [ -x "$dir/git" ]; then
+  if [ -x "$dir/git" ] && ! kronn_is_guard "$dir/git"; then
     real_git="$dir/git"
     break
   fi

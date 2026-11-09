@@ -28,15 +28,40 @@ Guards that keep it that way after creation:
 - `worktree_unlock` refuses a `Review` discussion (there is no branch to re-lock);
 - deleting the discussion removes the worktree like any other discussion worktree.
 
+### The worktree is given back when the review is over
+
+Every review creates a worktree, so they would pile up against the worktree cap
+(KT-1646). `release_review_worktree` (`crud.rs`) runs when a review discussion is
+**archived** (`PATCH /api/discussions/:id` with `archived: true`) and, for reviews
+archived earlier, in the 30-minute periodic sweep (`api::disk::spawn_periodic_sweep`).
+It removes the checkout and clears the discussion's `workspace_path`, so a later run
+is refused ("worktree is gone") rather than started in the main checkout.
+
+A review worktree is disposable only when removing it loses nothing:
+`worktree::release_review_worktree` keeps it, with the reason logged, when
+
+- HEAD is on a branch;
+- HEAD holds a commit no ref under `refs/` reaches (`--glob=refs/*`: `--all` would
+  count the worktree's own HEAD);
+- anything is modified or untracked (the agent configs copied in at creation do not
+  count);
+- an agent is still running in it.
+
+It is never force-removed, and only a `<slug>--review-<id>` directory directly under
+`.kronn/worktrees/` qualifies. A kept worktree is retried by the sweep.
+
 [src: file: backend/src/core/worktree.rs#create_review_worktree]
+[src: file: backend/src/core/worktree.rs#release_review_worktree]
 [src: file: backend/src/api/discussions/crud.rs#provision_review_workspace]
 
 ## Agents cannot move a main checkout
 
 Every CLI agent launch (`agents::runner::try_spawn`) gets a `git` shim first on its
-`PATH`, written to `<work_dir>/.kronn/bin/git` (git-ignored; inside the working
-directory because the Kronn data directory is closed to agents by
-[agent-vault-protection.md](agent-vault-protection.md)). The shim refuses
+`PATH`, written to `<work_dir>/.kronn/bin/git` (inside the working directory because
+the Kronn data directory is closed to agents by
+[agent-vault-protection.md](agent-vault-protection.md); `.kronn/bin/` is added to the
+repository's `.git/info/exclude`, so a user project's `git status` stays clean without
+touching its tracked `.gitignore` — tested). The shim refuses
 `git checkout`, `git switch`, `git reset` and `git stash` (except `stash list` and
 `stash show`) when the repository is a **main checkout** (its git dir is its common
 git dir). The agent sees:
@@ -56,7 +81,15 @@ The human's confirmation is `KRONN_MAIN_CHECKOUT_GIT_CONFIRMED=1` in the launch
 environment. Nothing sets it yet: there is no confirmation UI, so today the human
 runs the command themselves.
 
-Limits: it is a net against accidents, not a sandbox. An absolute path to git
-(`/usr/bin/git`) and git aliases are not seen, and Windows / WSL agents get no
-shim. [src: file: backend/src/core/git_guard.sh]
+Guards stack: an agent in worktree A whose child launches another in worktree B has
+two shims on `PATH`. Each shim skips every directory whose `git` carries the
+`# kronn-git-guard` marker (second line), not only its own, and uses shell builtins
+only until it has found the real git, so neither two stacked shims nor a `PATH` that
+holds nothing but the shim directory can make it exec itself forever (the latter ends
+in `git: command not found`, exit 127).
+
+Limits: it is a net against accidents, not a boundary or a sandbox. The agent runs as
+the same user, so it can set `KRONN_MAIN_CHECKOUT_GIT_CONFIRMED` itself; an absolute
+path to git (`/usr/bin/git`) and git aliases are not seen either. Windows / WSL agents
+get no shim. [src: file: backend/src/core/git_guard.sh]
 [src: file: backend/src/core/git_guard.rs]

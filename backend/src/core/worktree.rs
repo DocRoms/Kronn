@@ -1657,6 +1657,123 @@ pub fn create_review_worktree(
     })
 }
 
+/// What [`release_review_worktree`] did with a review's checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewRelease {
+    /// The checkout (and its admin entry) is gone.
+    Removed,
+    /// Left in place, with the reason: it holds something a removal would lose.
+    Kept(String),
+}
+
+/// Remove the worktree of a finished review, if it is disposable (KT-1645).
+///
+/// A review worktree is a throwaway view of a commit, so once the review is
+/// over it must not pile up against the worktree cap. "Disposable" means a
+/// removal loses nothing: HEAD is detached, every commit it holds is reachable
+/// from a ref, and nothing is modified or untracked (the agent configs Kronn
+/// copies in at creation do not count). Anything else is
+/// [`ReviewRelease::Kept`] with the reason, never force-removed.
+///
+/// Only a directory [`create_review_worktree`] makes qualifies
+/// (`<repo>/.kronn/worktrees/<slug>--review-<id>`); any other path is an `Err`.
+pub fn release_review_worktree(
+    repo_path: &Path,
+    worktree_path: &str,
+) -> Result<ReviewRelease, String> {
+    let path = Path::new(worktree_path);
+    let is_review_dir = path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().contains("--review-"))
+        && path.parent().is_some_and(|parent| {
+            let base = worktree_base_dir(repo_path);
+            parent == base
+                || matches!(
+                    (parent.canonicalize(), base.canonicalize()),
+                    (Ok(parent), Ok(base)) if parent == base
+                )
+        });
+    if !is_review_dir {
+        return Err(format!(
+            "{worktree_path} is not a review worktree of {}",
+            repo_path.display()
+        ));
+    }
+
+    // Already gone: only the admin entry may be left to prune.
+    if path.exists() {
+        if let Some(reason) = review_worktree_holds_something(path)? {
+            return Ok(ReviewRelease::Kept(reason));
+        }
+    }
+
+    remove_discussion_worktree(repo_path, worktree_path, false)?;
+    Ok(ReviewRelease::Removed)
+}
+
+/// Why removing the review checkout at `path` would lose something, if it would.
+fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String> {
+    let on_branch = crate::core::cmd::git_cmd()
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| format!("git symbolic-ref failed: {e}"))?
+        .status
+        .success();
+    if on_branch {
+        return Ok(Some("its HEAD is on a branch, not detached".to_string()));
+    }
+
+    // `--glob=refs/*`, not `--all`: `--all` also counts this worktree's own
+    // HEAD, which would make every commit it holds look reachable.
+    let unreachable = crate::core::cmd::git_cmd()
+        .args(["rev-list", "-n", "1", "HEAD", "--not", "--glob=refs/*"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| format!("git rev-list failed: {e}"))?;
+    if !unreachable.status.success() {
+        return Ok(Some(format!(
+            "its history cannot be read: {}",
+            String::from_utf8_lossy(&unreachable.stderr).trim()
+        )));
+    }
+    if !String::from_utf8_lossy(&unreachable.stdout)
+        .trim()
+        .is_empty()
+    {
+        return Ok(Some(
+            "its HEAD holds a commit no branch or tag reaches".to_string(),
+        ));
+    }
+
+    let status = crate::core::cmd::git_cmd()
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| format!("git status failed: {e}"))?;
+    if !status.status.success() {
+        return Ok(Some(format!(
+            "its state cannot be read: {}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        )));
+    }
+    let copied: Vec<String> = AGENT_CONFIG_FILES
+        .iter()
+        .map(|parts| parts.join("/"))
+        .collect();
+    let dirty: Vec<DirtyFile> = parse_porcelain(&String::from_utf8_lossy(&status.stdout))
+        .into_iter()
+        .filter(|file| !(file.status == "??" && copied.contains(&file.path)))
+        .collect();
+    Ok(dirty.first().map(|first| {
+        format!(
+            "it holds {} uncommitted change(s), e.g. {}",
+            dirty.len(),
+            first.path
+        )
+    }))
+}
+
 /// One `git worktree list --porcelain` entry.
 struct WorktreeEntry {
     path: PathBuf,
@@ -1745,17 +1862,19 @@ pub fn prune_kronn_worktrees(repo_path: &Path) -> usize {
         .count()
 }
 
+/// The agent configs [`copy_agent_configs`] puts into a new worktree.
+const AGENT_CONFIG_FILES: [&[&str]; 4] = [
+    &[".mcp.json"],
+    &[".vibe", "config.toml"],
+    &[".kiro", "settings", "mcp.json"],
+    &[".gemini", "settings.json"],
+];
+
 /// The agents' project configs are gitignored, so a new worktree lacks them:
 /// without `.mcp.json` a Claude agent gets no `--strict-mcp-config` and
 /// inherits the host's personal MCP servers instead of the project's.
 pub(crate) fn copy_agent_configs(repo_path: &Path, worktree_path: &Path) {
-    const FILES: [&[&str]; 4] = [
-        &[".mcp.json"],
-        &[".vibe", "config.toml"],
-        &[".kiro", "settings", "mcp.json"],
-        &[".gemini", "settings.json"],
-    ];
-    for parts in FILES {
+    for parts in AGENT_CONFIG_FILES {
         let relative: PathBuf = parts.iter().collect();
         let source = repo_path.join(&relative);
         if !source.is_file() {

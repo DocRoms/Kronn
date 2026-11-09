@@ -869,6 +869,111 @@ async fn provision_review_workspace(
     })
 }
 
+/// KT-1645 — release the worktree of a finished review discussion.
+///
+/// A review worktree is disposable once the review is over, and every review
+/// creates one, so they would otherwise pile up against the worktree cap. The
+/// checkout is removed only when that loses nothing (detached, clean, every
+/// commit reachable: [`crate::core::worktree::release_review_worktree`]) and no
+/// agent is running in it; then the discussion's pointer to it is cleared, so a
+/// later run is refused rather than started in the main checkout. Anything else
+/// is left in place and reported.
+pub(crate) async fn release_review_worktree(
+    db: &crate::db::Database,
+    discussion_id: &str,
+) -> crate::core::worktree::ReviewRelease {
+    use crate::core::worktree::{ReviewRelease, REVIEW_WORKSPACE_MODE};
+
+    let id = discussion_id.to_string();
+    let found = db
+        .with_conn(move |conn| {
+            let Some(disc) = crate::db::discussions::get_discussion(conn, &id)? else {
+                return Ok(None);
+            };
+            if disc.workspace_mode != REVIEW_WORKSPACE_MODE {
+                return Ok(None);
+            }
+            let (Some(workspace), Some(project_id)) = (disc.workspace_path, disc.project_id) else {
+                return Ok(None);
+            };
+            let running = crate::db::agent_dispatch::find_active_for_discussion(conn, &id)?;
+            let project = crate::db::projects::get_project(conn, &project_id)?;
+            Ok(Some((
+                workspace,
+                project.map(|p| p.path),
+                running.is_some(),
+            )))
+        })
+        .await;
+    let (workspace, project_path, running) = match found {
+        Ok(Some(found)) => found,
+        Ok(None) => return ReviewRelease::Kept("not a review with a worktree".to_string()),
+        Err(error) => return ReviewRelease::Kept(format!("DB error: {error}")),
+    };
+    if running {
+        return ReviewRelease::Kept("an agent is still running in it".to_string());
+    }
+    let Some(project_path) = project_path else {
+        return ReviewRelease::Kept("its project is gone".to_string());
+    };
+
+    let resolved = crate::core::scanner::resolve_host_path(&project_path);
+    let outcome = tokio::task::spawn_blocking({
+        let workspace = workspace.clone();
+        move || crate::core::worktree::release_review_worktree(&resolved, &workspace)
+    })
+    .await
+    .map_err(|error| format!("release task failed: {error}"))
+    .and_then(|outcome| outcome);
+    match outcome {
+        Ok(ReviewRelease::Removed) => {
+            let id = discussion_id.to_string();
+            if let Err(error) = db
+                .with_conn(move |conn| {
+                    crate::db::discussions::clear_discussion_workspace(conn, &id)
+                })
+                .await
+            {
+                tracing::warn!(
+                    "review {discussion_id}: worktree removed but its pointer was not cleared: {error}"
+                );
+            }
+            ReviewRelease::Removed
+        }
+        Ok(kept) => {
+            tracing::info!("review {discussion_id}: worktree kept ({kept:?})");
+            kept
+        }
+        Err(error) => {
+            tracing::warn!("review {discussion_id}: worktree not released: {error}");
+            ReviewRelease::Kept(error)
+        }
+    }
+}
+
+/// KT-1645 — release the worktrees of every archived review that still has one
+/// (archived before this ran, or kept at the time because an agent was live).
+/// Returns how many were removed.
+pub(crate) async fn sweep_archived_review_worktrees(db: &crate::db::Database) -> usize {
+    let ids = match db
+        .with_conn(crate::db::discussions::archived_review_ids_with_workspace)
+        .await
+    {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::warn!("review worktree sweep: {error}");
+            return 0;
+        }
+    };
+    let mut removed = 0;
+    for id in ids {
+        if release_review_worktree(db, &id).await == crate::core::worktree::ReviewRelease::Removed {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// PATCH /api/discussions/:id
 pub async fn update(
     State(state): State<AppState>,
@@ -946,7 +1051,9 @@ pub async fn update(
         }
     }
 
-    match state
+    let review_id = id.clone();
+    let archiving = archived == Some(true);
+    let updated = state
         .db
         .with_conn(move |conn| {
             // project_id: None = don't change, Some(None)/Some(Some("")) = unset, Some(Some("id")) = set
@@ -1035,9 +1142,15 @@ pub async fn update(
             }
             Ok(updated)
         })
-        .await
-    {
-        Ok(true) => Json(ApiResponse::ok(())),
+        .await;
+    match updated {
+        Ok(true) => {
+            // KT-1645 — a review that is archived is over: give its worktree back.
+            if archiving {
+                release_review_worktree(&state.db, &review_id).await;
+            }
+            Json(ApiResponse::ok(()))
+        }
         Ok(false) => Json(ApiResponse::err(
             "Discussion not found or no fields to update",
         )),
