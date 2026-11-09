@@ -42,7 +42,7 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   `[src: file: backend/src/db/orchestration.rs:4291-4300#ReviewCheckpoint]`
   `[src: file: backend/src/db/orchestration.rs:4322-4334#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
-  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:13432-13444#reassign_execution]`
+  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:13433-13445#reassign_execution]`
   `[src: file: backend/src/api/orchestration.rs:17062-17071#human_review]`
 - **Integration saga.** `run_integration` integrates an `Approved` execution
   into `run.target_branch`, through the single worktree where that branch is
@@ -78,7 +78,7 @@ branch. Checked against the code:
   the discussion, or the room's native agent during its own running turn. The
   review obligation and the escalation are messages posted to the principal of
   that discussion.
-  `[src: file: backend/src/api/orchestration.rs:13917-13930#principal_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:13918-13931#principal_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:13903-13945#room_agent_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:6809-6816#deliver_worker_manifest]`
   `[src: file: backend/src/db/orchestration.rs:4238-4245#EscalationDelivery]`

@@ -443,7 +443,7 @@ close the task.
 Delivery refuses a commit whose `Signed-off-by`, `Co-Authored-By` or similar
 identity trailer names anyone but the repository's git identity; a CLI worker
 commits with `git commit -s` and never writes such a line by hand.
-`[src: file: backend/src/api/orchestration.rs:7499-7539#validate_delivery_identity_trailers]`
+`[src: file: backend/src/api/orchestration.rs:7539-7579#validate_delivery_identity_trailers]`
 The principal is either a CLI session joined to the room or the room's own
 native agent during its turn. For the latter Kronn injects
 `KRONN_ROOM_AGENT_CONTEXT` (room, provider, running dispatch, trigger message)
@@ -721,7 +721,7 @@ event rows separately persist `actor_session_id` (the CLI session id, or
 of the same provider remain distinguishable in the audit trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5797-5812#_task_exec_identity]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5892-5901#_task_exec_principal]`
-`[src: file: backend/src/api/orchestration.rs:13854-13864#principal_cli_is_authorized]`
+`[src: file: backend/src/api/orchestration.rs:13855-13865#principal_cli_is_authorized]`
 `[src: file: backend/src/api/orchestration.rs:13903-13941#room_agent_is_authorized]`
 `[src: file: backend/src/api/agent_tools.rs:4068-4104#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`

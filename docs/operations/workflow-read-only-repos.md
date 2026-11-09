@@ -346,7 +346,7 @@ including ordinary non-strict and direct launches. Unit coverage checks host
 aliases, duplicate aliases and path escaping.
 [src: file: backend/tests/adapter_worker_policy.rs:193-223#trust_overrides]
 [src: file: backend/tests/adapter_worker_policy.rs:226-316#config_keys]
-[src: file: backend/src/agents/runner_test.rs:11633-11694#codex_project_trust_override_preserves_paths_and_host_alias]
+[src: file: backend/src/agents/runner_test.rs:11813-11874#codex_project_trust_override_preserves_paths_and_host_alias]
 [src: file: backend/src/acp/codex_adapter.rs:479-490#codex_project_mcp_override]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations

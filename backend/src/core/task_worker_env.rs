@@ -43,6 +43,13 @@ pub const PRIVATE_CARGO_HOME_ENV: &str = "KRONN_WORKER_PRIVATE_CARGO_HOME";
 /// Caps one worker's compilation (KT-1250); the host-wide cap on concurrently
 /// compiling workers is `core::task_worker_lane_warm`.
 pub const CARGO_BUILD_JOBS_ENV: &str = "CARGO_BUILD_JOBS";
+/// Threads of one `cargo test` binary (KT-1634). Unset, each binary runs one
+/// thread per logical CPU, whatever [`CARGO_BUILD_JOBS`](CARGO_BUILD_JOBS_ENV) says.
+pub const RUST_TEST_THREADS_ENV: &str = "RUST_TEST_THREADS";
+/// `cargo nextest`'s own thread count: nextest ignores `RUST_TEST_THREADS`.
+pub const NEXTEST_TEST_THREADS_ENV: &str = "NEXTEST_TEST_THREADS";
+/// Vitest's worker cap, read by its config resolution (vitest 4).
+pub const VITEST_MAX_WORKERS_ENV: &str = "VITEST_MAX_WORKERS";
 /// The port a Kronn backend started by the worker listens on (never the host's).
 pub const KRONN_PORT_ENV: &str = "KRONN_PORT";
 /// Where the worker's Vite proxies `/api`: its own backend. Never
@@ -92,6 +99,108 @@ const VITEST_CONFIG_TIMEOUT: Duration = Duration::from_secs(60);
 const VITEST_CONFIG_PROBE_FILTER: &str = "kronn-lane-config-probe-no-such-test";
 /// What a failed probe's reason keeps of the command's output.
 const PROBE_DETAIL_BYTES: usize = 300;
+
+/// The parallelism of every build and test tool the project uses, bounded by
+/// one `jobs` budget (KT-1634): Cargo's compilation, each Rust test binary
+/// (plain and nextest), and Vitest's workers.
+///
+/// `MAKEFLAGS=-jN` is deliberately absent: `-j` changes what a Makefile that is
+/// not parallel-safe does (docker or iso targets run through `make`), so unlike
+/// a thread count it is not a pure throttle. Kronn neither sets nor forwards it:
+/// a project that wants parallel `make` puts `-j` in its own Makefile or scripts.
+pub fn build_budget_env(jobs: u32) -> Vec<(&'static str, OsString)> {
+    let jobs = jobs.max(1).to_string();
+    vec![
+        (CARGO_BUILD_JOBS_ENV, OsString::from(&jobs)),
+        (RUST_TEST_THREADS_ENV, OsString::from(&jobs)),
+        (NEXTEST_TEST_THREADS_ENV, OsString::from(&jobs)),
+        (VITEST_MAX_WORKERS_ENV, OsString::from(&jobs)),
+    ]
+}
+
+/// [`build_budget_env`] with the host's budget
+/// ([`crate::core::task_worker_lane_warm::worker_build_jobs`]).
+pub fn host_build_budget_env() -> Vec<(&'static str, OsString)> {
+    build_budget_env(crate::core::task_worker_lane_warm::worker_build_jobs())
+}
+
+/// Whether `dir` is a linked Git worktree: its `.git` is a file whose `gitdir:`
+/// line points at `<common git dir>/worktrees/<name>`. A main checkout has a
+/// `.git` directory; a submodule (`.git/modules/<name>`) and a clone made with
+/// `--separate-git-dir` also have a `.git` file, but are not worktrees.
+pub fn is_linked_worktree(dir: &Path) -> bool {
+    let Ok(pointer) = std::fs::read_to_string(dir.join(".git")) else {
+        return false;
+    };
+    let Some(gitdir) = pointer
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|gitdir| !gitdir.is_empty())
+    else {
+        return false;
+    };
+    // Only the entry's name and its parent are looked at, so a relative
+    // `gitdir` needs no resolution.
+    Path::new(gitdir)
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|parent| parent == "worktrees")
+}
+
+/// What an agent process gets for one budget variable: nothing when the launch
+/// already carries it, else the operator's own value (the child's environment
+/// is built from an allow-list, so it would otherwise be lost), else the budget.
+fn budget_value(
+    command: &std::process::Command,
+    name: &str,
+    budgeted: OsString,
+    operator: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<OsString> {
+    let carried = command
+        .get_envs()
+        .any(|(carried, value)| carried == name && value.is_some());
+    if carried {
+        return None;
+    }
+    Some(
+        operator(name)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(budgeted),
+    )
+}
+
+/// Bound the build and test parallelism of an agent process working in
+/// `work_dir` (KT-1634). Every agent Kronn starts on a project worktree gets
+/// it, not only a task worker with a lane: a reviewer or a fix agent running
+/// the project's tests there loads the host just as much. An agent outside a
+/// worktree (a discussion on the main checkout) is left alone.
+pub fn apply_build_budget(command: &mut std::process::Command, work_dir: &Path) {
+    apply_build_budget_with(
+        command,
+        work_dir,
+        host_build_budget_env(),
+        &crate::core::child_env::parent_var,
+    );
+}
+
+/// [`apply_build_budget`] with the budget and the operator's environment
+/// injected. A name the command already carries, or the operator set, wins.
+pub(crate) fn apply_build_budget_with(
+    command: &mut std::process::Command,
+    work_dir: &Path,
+    budget: Vec<(&'static str, OsString)>,
+    operator: &dyn Fn(&str) -> Option<OsString>,
+) {
+    if !is_linked_worktree(work_dir) {
+        return;
+    }
+    for (name, budgeted) in budget {
+        if let Some(value) = budget_value(command, name, budgeted, operator) {
+            command.env(name, value);
+        }
+    }
+}
 
 /// One task worktree and the lane-private locations derived from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,11 +319,8 @@ impl WorkerLane {
                 self.cargo_target_dir.clone().into_os_string(),
             ),
             (CARGO_NET_OFFLINE_ENV, OsString::from("true")),
-            (
-                CARGO_BUILD_JOBS_ENV,
-                OsString::from(crate::core::task_worker_lane_warm::worker_build_jobs().to_string()),
-            ),
         ];
+        env.extend(host_build_budget_env());
         let (backend, vite) = self.ports();
         env.push((KRONN_PORT_ENV, OsString::from(backend.to_string())));
         env.push((
@@ -649,7 +755,21 @@ pub fn apply_launch_env(command: &mut std::process::Command, work_dir: &Path) {
             for warning in &provisioned.warnings {
                 tracing::warn!(lane = %lane.name, "task worker lane: {warning}");
             }
+            let budget_names: Vec<&str> = host_build_budget_env()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
             for (name, value) in lane.env(&provisioned) {
+                // The lane's budget yields to what the launch already carries
+                // and to the operator's own values.
+                let value = if budget_names.contains(&name) {
+                    match budget_value(command, name, value, &crate::core::child_env::parent_var) {
+                        Some(value) => value,
+                        None => continue,
+                    }
+                } else {
+                    value
+                };
                 command.env(name, value);
             }
         }

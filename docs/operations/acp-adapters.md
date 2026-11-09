@@ -114,7 +114,7 @@ to the displayed reply. Thought, tool-content and unknown labelled updates do
 not become answer text; tool and usage events still follow their own paths.
 Older runtimes with unlabelled content retain their compatibility path.
 An echo without an agent message therefore supplies no answer text.
-[src: file: backend/src/acp.rs:1473-1480#is_answer]
+[src: file: backend/src/acp.rs:1478-1485#is_answer]
 [ACP session updates](https://agentclientprotocol.com/protocol/v1/prompt-turn#session-updates)
 
 Native tool banners retain the reported tool name, a bounded redacted input

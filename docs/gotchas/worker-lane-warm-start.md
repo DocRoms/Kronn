@@ -64,9 +64,40 @@ smoke check nor the dispatch happens.
 
 ## Known limits
 
-- The gate governs Kronn's first build only. Builds a worker later runs itself
-  are capped by `CARGO_BUILD_JOBS` alone, so several workers compiling at once
-  can still load the host.
+- The gate governs Kronn's first build only. Builds and tests a worker later
+  runs itself are bounded by the same `build_jobs` budget (KT-1634), but several
+  workers compiling at once can still load the host.
+- The budget (`task_worker_env::build_budget_env`) sets `CARGO_BUILD_JOBS`,
+  `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `VITEST_MAX_WORKERS` from the
+  one `build_jobs` value (jest is not used by the project) [src: file:
+  backend/src/core/task_worker_env.rs:109]. `MAKEFLAGS=-jN` is deliberately not
+  part of it: `-j` changes what a Makefile that is not parallel-safe does, so it
+  is not a pure throttle like a thread count. Kronn neither sets nor forwards
+  `MAKEFLAGS`; a project that wants parallel `make` puts `-j` in its own
+  Makefile or scripts.
+- The budget reaches every agent process Kronn starts **on a linked Git
+  worktree**, whatever its role — task workers of any CLI, reviewers and fix
+  agents — not only Claude task workers. A linked worktree is a `.git` *file*
+  whose `gitdir:` line points at `<common>/worktrees/<name>`
+  (`is_linked_worktree`) [src: file: backend/src/core/task_worker_env.rs:129]:
+  an agent on the main checkout (`.git` is a directory), in a submodule
+  (`gitdir: .../.git/modules/<name>`) or in a `--separate-git-dir` clone gets
+  none (`only_a_worktrees_gitdir_makes_a_linked_worktree`). It is applied
+  in `try_spawn` [src: file: backend/src/agents/runner.rs:14608] (the direct
+  route, and the adapted ACP route: `acp/claude_adapter.rs` and
+  `acp/codex_adapter.rs` call `try_spawn` with `SpawnIo::Adapter`, so the process
+  they start is the CLI itself) and in `native_command` (native ACP) [src: file:
+  backend/src/acp.rs:897]. Tests: direct, adapted and no-worktree cases in
+  `agents/runner_test.rs` (`every_agent_on_a_worktree_gets_the_build_and_test_budget`,
+  `an_adapted_acp_cli_gets_the_build_and_test_budget`,
+  `an_agent_outside_a_worktree_gets_no_build_and_test_budget`), native in
+  `acp.rs` (`a_native_launch_receives_its_key_and_contexts_through_the_builder`).
+- A budget variable the launch already carries, or the operator set in the
+  backend's own environment, is never overwritten: the operator's value is
+  forwarded (the agent's environment is an allow-list, so it would otherwise be
+  lost) [src: file: backend/src/core/task_worker_env.rs:152]. The lane's
+  private locations (`CARGO_TARGET_DIR`, `CARGO_HOME`, ...) remain
+  Claude-task-worker only.
 - A lane target is removed with its clean worktree (integration, `RemoveIfClean`
   cancellation) and swept at boot only when it carries `.kronn-lane.json`, its
   execution is finished and its worktree is gone. A lane whose worktree is kept
@@ -107,7 +138,7 @@ The clone itself takes 14-38 s and no disk space.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `KRONN_WORKER_CARGO_JOBS` | performance cores / 2 | `CARGO_BUILD_JOBS` of a worker |
+| `KRONN_WORKER_CARGO_JOBS` | performance cores / 2 | `CARGO_BUILD_JOBS` of a worker, and the budget of its test and build tools (KT-1634) |
 | `KRONN_WORKER_MAX_CONCURRENT_BUILDS` | 2 | first builds running at once on this backend process |
 | `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` | 1800 | bound of the first build and of its queue wait |
 | `KRONN_WORKER_PRIVATE_CARGO_HOME` | unset | `1` keeps KT-1246's lane-private `CARGO_HOME` (no seeding) |

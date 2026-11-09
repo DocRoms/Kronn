@@ -893,6 +893,11 @@ fn native_command(
         &values,
         backend_url,
     )?;
+    // KT-1634 — the same build and test parallelism budget as every other route.
+    crate::core::task_worker_env::apply_build_budget(
+        command.as_std_mut(),
+        std::path::Path::new(cwd),
+    );
     // Only a project connected to GitHub hands its agent a token (D2).
     crate::core::github_connection::apply_launch_env(command.as_std_mut(), &launch.github_env);
     let mut granted = values.granted();
@@ -2240,6 +2245,53 @@ mod tests {
         )
         .unwrap();
         assert!(command_env(&command)["KRONN_WORKFLOW_STEP_CONTEXT"].contains("run-1"));
+
+        // KT-1634 — the build and test parallelism budget rides every route,
+        // for an agent on a worktree (`.git` is a file there) and no other.
+        let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
+        let on_worktree = tempfile::tempdir().unwrap();
+        std::fs::write(
+            on_worktree.path().join(".git"),
+            "gitdir: /repo/.git/worktrees/task\n",
+        )
+        .unwrap();
+        let budgeted = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
+            native_command(
+                AcpAgent::Kiro,
+                &kiro_cli_stub,
+                &[],
+                &on_worktree.path().to_string_lossy(),
+                &NativeLaunchEnv::default(),
+            )
+            .unwrap()
+        });
+        let env = command_env(&budgeted);
+        for name in [
+            "CARGO_BUILD_JOBS",
+            "RUST_TEST_THREADS",
+            "NEXTEST_TEST_THREADS",
+            "VITEST_MAX_WORKERS",
+        ] {
+            assert_eq!(env[name], jobs, "{name} on the native launch");
+        }
+        assert!(
+            !env.contains_key("MAKEFLAGS"),
+            "make's -j is never a default"
+        );
+        let off_worktree = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
+            native_command(
+                AcpAgent::Kiro,
+                &kiro_cli_stub,
+                &[],
+                &project.path().to_string_lossy(),
+                &NativeLaunchEnv::default(),
+            )
+            .unwrap()
+        });
+        assert!(
+            !command_env(&off_worktree).contains_key("RUST_TEST_THREADS"),
+            "no worktree, no budget"
+        );
 
         // A connected project's GitHub variables reach the native agent.
         let connected = NativeLaunchEnv {
