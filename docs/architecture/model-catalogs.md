@@ -129,7 +129,7 @@ session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
 [src: file: backend/src/agents/runner.rs:5682-5736#offers_model_catalogue]
-[src: file: backend/src/acp.rs:1895-1904#offers_model_catalogue]
+[src: file: backend/src/acp.rs:1900-1909#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1886-1917#select_model]
 
 ## Launch safety and UI

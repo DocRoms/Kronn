@@ -6752,6 +6752,69 @@ pub fn lane_warming_since(conn: &Connection, exec_id: &str) -> Result<Option<Dat
     Ok(since.map(parse_dt))
 }
 
+/// When the execution's lane last started warming: the latest `lane_warming`
+/// event, whether or not the warm-up has finished since (KT-1637). `None` for
+/// an execution that never deferred its warm-up.
+pub fn lane_warming_started_at(conn: &Connection, exec_id: &str) -> Result<Option<DateTime<Utc>>> {
+    let at: Option<String> = conn
+        .query_row(
+            "SELECT created_at FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY rowid DESC LIMIT 1",
+            params![exec_id, LANE_WARMING_ACTION],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(at.map(parse_dt))
+}
+
+/// Action of the event that times one sub-step of the warming phase (KT-1637).
+const WARMING_STEP_ACTION: &str = "lane_warming_step";
+
+/// Journal how long one sub-step of the warming phase took. The steps timed
+/// inside the lane warm-up itself travel in its `lane_warm_start` record; this
+/// is for the ones the launch runs around it (worktree creation, lane seeds,
+/// the smoke check).
+pub fn record_warming_step(
+    conn: &Connection,
+    exec_id: &str,
+    step: crate::models::WarmingStepKind,
+    duration_ms: u64,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        WARMING_STEP_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::json!({ "step": step, "duration_ms": duration_ms }),
+    )
+}
+
+/// The journalled warming steps of an execution, the latest of each kind (a
+/// resumed execution runs a step again), in journal order of that latest run.
+pub fn latest_warming_steps(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Vec<crate::models::TaskExecutionWarmingStep>> {
+    let mut stmt = conn.prepare(
+        "SELECT changes_json FROM task_execution_events \
+         WHERE task_execution_id = ?1 AND action = ?2 ORDER BY rowid ASC",
+    )?;
+    let rows = stmt.query_map(params![exec_id, WARMING_STEP_ACTION], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let mut steps: Vec<crate::models::TaskExecutionWarmingStep> = Vec::new();
+    for changes in rows {
+        let step: crate::models::TaskExecutionWarmingStep = serde_json::from_str(&changes?)?;
+        steps.retain(|known| known.step != step.step);
+        steps.push(step);
+    }
+    Ok(steps)
+}
+
 const WORKER_SCOPE_REANCHORED: &str = "worker_scope_reanchored";
 
 /// The prelocalized scope the execution was launched with. Re-anchoring
