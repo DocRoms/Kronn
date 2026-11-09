@@ -969,6 +969,12 @@ jobs:
         working-directory: backend
         run: cargo audit
 
+      - name: Run cargo audit (desktop)
+        # desktop/src-tauri has its own lock file, so the backend audit above
+        # never sees its graph (KT-1624). Config: desktop/src-tauri/.cargo/audit.toml.
+        working-directory: desktop/src-tauri
+        run: cargo audit
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
