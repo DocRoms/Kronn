@@ -1222,8 +1222,7 @@ pub async fn set_aside_locked_rows(
                     t = col.table,
                     c = col.column
                 ))?;
-                let names: Vec<String> =
-                    stmt.column_names().iter().map(|n| n.to_string()).collect();
+                let names: Vec<String> = stmt.column_names().map(|n| n.to_string()).collect();
                 let mut q = stmt.query([])?;
                 while let Some(row) = q.next()? {
                     let mut obj = serde_json::Map::new();
