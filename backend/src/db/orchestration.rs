@@ -7926,6 +7926,112 @@ pub fn clear_execution_recovery(conn: &Connection, exec_id: &str, applied: &str)
     Ok(())
 }
 
+/// KT-1537 — consume the decision a `/resume` has just applied, and only that
+/// one.
+///
+/// The resume moves the execution on (e.g. `Interrupted -> Working`) and only
+/// then consumes the decision, in a separate write. A worker whose woken
+/// dispatch ends at once is parked `Interrupted` with a fresh pending decision
+/// by [`interrupt_undelivered_execution_for_dispatch`] before that second
+/// write; consuming then wiped the NEW decision, leaving an `Interrupted`
+/// execution that `/resume` refused (« already consumed ») and that could not
+/// deliver (it is not `Working`).
+///
+/// Two guards, both inside one savepoint. An `Interrupted` execution carries a
+/// decision the resume did not apply (a successful resume never leaves it
+/// there), so it stays pending. And the write is keyed on the identity of the
+/// applied decision (action, reason, assignment generation): a reassignment
+/// that re-arms the row inside the resume window changes it, and is not wiped
+/// even though the execution never became `Interrupted`. `updated_at` is not a
+/// usable key, every state transition touches it. Returns whether the applied
+/// decision was consumed.
+pub fn consume_applied_recovery(
+    conn: &Connection,
+    exec_id: &str,
+    applied: &TaskExecutionRecovery,
+) -> Result<bool> {
+    in_savepoint(conn, |conn| {
+        let interrupted_again = get_task_execution(conn, exec_id)?
+            .is_some_and(|execution| execution.status == TaskExecutionStatus::Interrupted);
+        if interrupted_again {
+            return Ok(false);
+        }
+        let consumed = conn.execute(
+            "UPDATE task_execution_recovery SET pending = 0, updated_at = ?5 \
+             WHERE task_execution_id = ?1 AND recovery_action = ?2 \
+               AND recovery_reason = ?3 AND assignment_generation = ?4",
+            params![
+                exec_id,
+                applied.recovery_action.as_str(),
+                applied.recovery_reason,
+                i64::from(applied.assignment_generation),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        if consumed == 0 {
+            return Ok(false);
+        }
+        record_reconciliation_event(
+            conn,
+            "execution",
+            exec_id,
+            "recovery_applied",
+            serde_json::json!({ "action": applied.recovery_action.as_str() }),
+        )?;
+        Ok(true)
+    })
+}
+
+/// KT-1537 — arm again the consumed decision of an `Interrupted` execution, but
+/// only when it is an undelivered `resume_worker`.
+///
+/// An interruption is a new event: the decision a previous resume consumed does
+/// not answer it, and most decisions describe a state that may have moved (the
+/// Git target, the child room, the worktree, the CLI). Only the worker that
+/// ended without a delivery has nothing to re-read: its parked decision is
+/// « wake this same worker once », which `wake_recovered_worker` checks itself.
+/// It is made pending again as is. Every other case (no row, another action,
+/// another origin) returns `false` and the caller re-derives the decision. A
+/// pending decision is never touched, and a non-`Interrupted` execution (the
+/// replay of a resume that already moved it on, or a cancelled one) is never
+/// re-armed: that stays the double-resume guard.
+pub fn rearm_consumed_recovery(conn: &Connection, exec_id: &str) -> Result<bool> {
+    in_savepoint(conn, |conn| {
+        let Some(execution) = get_task_execution(conn, exec_id)? else {
+            return Ok(false);
+        };
+        let Some(origin) = execution
+            .interrupted_from_status
+            .filter(|_| execution.status == TaskExecutionStatus::Interrupted)
+        else {
+            return Ok(false);
+        };
+        let Some(recovery) = get_execution_recovery(conn, exec_id)? else {
+            return Ok(false);
+        };
+        if recovery.pending
+            || recovery.recovery_action != ExecutionRecoveryAction::ResumeWorker
+            || !is_undelivered_worker_reason(&recovery.recovery_reason)
+            || !recovery.recovery_action.resumable_from(origin)
+        {
+            return Ok(false);
+        }
+        record_reconciliation_event(
+            conn,
+            "execution",
+            exec_id,
+            "recovery_rearmed",
+            serde_json::json!({ "action": recovery.recovery_action.as_str() }),
+        )?;
+        conn.execute(
+            "UPDATE task_execution_recovery SET pending = 1, updated_at = ?2 \
+             WHERE task_execution_id = ?1",
+            params![exec_id, Utc::now().to_rfc3339()],
+        )?;
+        Ok(true)
+    })
+}
+
 /// Rebuild an integration candidate against an observed real target tip, from an
 /// interrupted row or from an `Applying` one whose target advanced. The origin
 /// guard is honoured, and all stale candidate/apply checkpoints are cleared

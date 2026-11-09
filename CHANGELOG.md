@@ -25,6 +25,12 @@ Release notes for 0.9.3 and earlier are available in the
   JPEG, WebP or GIF, and one request's sources stay under 64 MB together
   (KT-1403, #265).
 
+### Fixed
+
+- An interrupted task execution no longer stays stuck on "recovery decision
+  already consumed": it can always resume or deliver, and a resume never
+  consumes the decision of a newer interruption (KT-1537, #492).
+
 ## [0.15.2] - 2026-11-08
 
 ### Added
