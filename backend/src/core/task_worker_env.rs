@@ -41,6 +41,15 @@ pub const PRIVATE_CARGO_HOME_ENV: &str = "KRONN_WORKER_PRIVATE_CARGO_HOME";
 /// Caps one worker's compilation (KT-1250); the host-wide cap on concurrently
 /// compiling workers is `core::task_worker_lane_warm`.
 pub const CARGO_BUILD_JOBS_ENV: &str = "CARGO_BUILD_JOBS";
+/// Threads of one `cargo test` binary (KT-1634). Unset, each binary runs one
+/// thread per logical CPU, whatever [`CARGO_BUILD_JOBS`](CARGO_BUILD_JOBS_ENV) says.
+pub const RUST_TEST_THREADS_ENV: &str = "RUST_TEST_THREADS";
+/// `cargo nextest`'s own thread count: nextest ignores `RUST_TEST_THREADS`.
+pub const NEXTEST_TEST_THREADS_ENV: &str = "NEXTEST_TEST_THREADS";
+/// Parallel jobs of any `make` a build or test script starts (`-jN`).
+pub const MAKEFLAGS_ENV: &str = "MAKEFLAGS";
+/// Vitest's worker cap, read by its config resolution (vitest 4).
+pub const VITEST_MAX_WORKERS_ENV: &str = "VITEST_MAX_WORKERS";
 /// The port a Kronn backend started by the worker listens on (never the host's).
 pub const KRONN_PORT_ENV: &str = "KRONN_PORT";
 /// Where the worker's Vite proxies `/api`: its own backend. Never
@@ -90,6 +99,36 @@ const VITEST_CONFIG_TIMEOUT: Duration = Duration::from_secs(60);
 const VITEST_CONFIG_PROBE_FILTER: &str = "kronn-lane-config-probe-no-such-test";
 /// What a failed probe's reason keeps of the command's output.
 const PROBE_DETAIL_BYTES: usize = 300;
+
+/// The parallelism of every build and test tool the project uses, bounded by
+/// one `jobs` budget (KT-1634): Cargo's compilation, each Rust test binary
+/// (plain and nextest), `make`, and Vitest's workers.
+pub fn build_budget_env(jobs: u32) -> Vec<(&'static str, OsString)> {
+    let jobs = jobs.max(1).to_string();
+    vec![
+        (CARGO_BUILD_JOBS_ENV, OsString::from(&jobs)),
+        (RUST_TEST_THREADS_ENV, OsString::from(&jobs)),
+        (NEXTEST_TEST_THREADS_ENV, OsString::from(&jobs)),
+        (MAKEFLAGS_ENV, OsString::from(format!("-j{jobs}"))),
+        (VITEST_MAX_WORKERS_ENV, OsString::from(&jobs)),
+    ]
+}
+
+/// [`build_budget_env`] with the host's budget
+/// ([`crate::core::task_worker_lane_warm::worker_build_jobs`]).
+pub fn host_build_budget_env() -> Vec<(&'static str, OsString)> {
+    build_budget_env(crate::core::task_worker_lane_warm::worker_build_jobs())
+}
+
+/// Bound the build and test parallelism of an agent process (KT-1634). Every
+/// agent Kronn starts gets it, not only a task worker with a lane: a reviewer
+/// or a fix agent running the project's tests on a worktree loads the host just
+/// as much.
+pub fn apply_build_budget(command: &mut std::process::Command) {
+    for (name, value) in host_build_budget_env() {
+        command.env(name, value);
+    }
+}
 
 /// One task worktree and the lane-private locations derived from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,11 +247,8 @@ impl WorkerLane {
                 self.cargo_target_dir.clone().into_os_string(),
             ),
             (CARGO_NET_OFFLINE_ENV, OsString::from("true")),
-            (
-                CARGO_BUILD_JOBS_ENV,
-                OsString::from(crate::core::task_worker_lane_warm::worker_build_jobs().to_string()),
-            ),
         ];
+        env.extend(host_build_budget_env());
         let (backend, vite) = self.ports();
         env.push((KRONN_PORT_ENV, OsString::from(backend.to_string())));
         env.push((

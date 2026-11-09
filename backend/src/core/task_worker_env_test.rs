@@ -195,6 +195,61 @@ fn a_provisioned_lane_exports_data_dir_target_offline_and_cargo_home() {
     assert!(lane.cargo_target_dir.is_dir());
 }
 
+/// KT-1634 — one budget bounds Cargo, every Rust test binary, make and vitest.
+#[test]
+fn the_build_budget_bounds_every_tool_from_one_job_count() {
+    let env = build_budget_env(4);
+    for name in [
+        CARGO_BUILD_JOBS_ENV,
+        RUST_TEST_THREADS_ENV,
+        NEXTEST_TEST_THREADS_ENV,
+        VITEST_MAX_WORKERS_ENV,
+    ] {
+        assert_eq!(env_value(&env, name), Some(OsString::from("4")), "{name}");
+    }
+    assert_eq!(env_value(&env, MAKEFLAGS_ENV), Some(OsString::from("-j4")));
+    // A budget is never zero: `-j0` and zero threads are not "unbounded" to
+    // every tool.
+    let floor = build_budget_env(0);
+    assert_eq!(env_value(&floor, RUST_TEST_THREADS_ENV), Some("1".into()));
+    assert_eq!(env_value(&floor, MAKEFLAGS_ENV), Some("-j1".into()));
+}
+
+#[test]
+fn the_lane_environment_carries_the_whole_budget_of_the_host() {
+    let fx = fixture();
+    let lane = fx.lane();
+    let provisioned = lane.provision_with(&SharedCaches::default(), false);
+    let env = lane.env(&provisioned);
+    let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
+    for (name, expected) in build_budget_env(jobs.parse().unwrap()) {
+        assert_eq!(env_value(&env, name), Some(expected), "{name}");
+    }
+    assert_eq!(
+        env_value(&env, MAKEFLAGS_ENV),
+        Some(OsString::from(format!("-j{jobs}")))
+    );
+}
+
+#[test]
+fn apply_build_budget_sets_every_variable_on_a_command() {
+    let mut command = std::process::Command::new("true");
+    apply_build_budget(&mut command);
+    let set: std::collections::HashMap<_, _> = command
+        .get_envs()
+        .filter_map(|(name, value)| Some((name.to_str()?.to_string(), value?.to_owned())))
+        .collect();
+    for name in [
+        CARGO_BUILD_JOBS_ENV,
+        RUST_TEST_THREADS_ENV,
+        NEXTEST_TEST_THREADS_ENV,
+        MAKEFLAGS_ENV,
+        VITEST_MAX_WORKERS_ENV,
+    ] {
+        assert!(set.contains_key(name), "{name} missing: {set:?}");
+    }
+}
+
 #[test]
 fn a_private_cargo_home_can_still_be_requested() {
     let fx = fixture();

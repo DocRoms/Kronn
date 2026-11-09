@@ -11467,6 +11467,80 @@ Suite de la réponse.";
         assert!(!repo.join("target").join("wt-kt-1246-test0001").exists());
     }
 
+    /// What a spawned agent named `program` sees of the KT-1634 budget variables
+    /// when it runs in `work_dir`, with or without a task-worker capability.
+    #[cfg(unix)]
+    async fn budget_env_seen_by(
+        program: &str,
+        work_dir: &std::path::Path,
+        as_task_worker: bool,
+    ) -> Vec<String> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = tempfile::tempdir().unwrap();
+        let path = bin.path().join(program);
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s|%s|%s|%s|%s' \"${CARGO_BUILD_JOBS-unset}\" \
+             \"${RUST_TEST_THREADS-unset}\" \"${NEXTEST_TEST_THREADS-unset}\" \
+             \"${MAKEFLAGS-unset}\" \"${VITEST_MAX_WORKERS-unset}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let worker = worker_context();
+        let child = try_spawn(
+            path.to_str().unwrap(),
+            None,
+            &[],
+            work_dir,
+            "ANTHROPIC_API_KEY",
+            None,
+            SpawnIo::Direct(None),
+            None,
+            as_task_worker.then_some(&worker),
+            None,
+            None,
+            None,
+            &[],
+            None,
+        )
+        .expect("the stand-in binary starts");
+        let output = child.wait_with_output().await.expect("the child exits");
+        String::from_utf8_lossy(&output.stdout)
+            .split('|')
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// KT-1634 — task workers of every CLI kind, and the agents that are not
+    /// task workers (reviewers, fix agents, discussions on a worktree), all run
+    /// their builds and tests under the same parallelism budget.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_agent_on_a_worktree_gets_the_build_and_test_budget() {
+        let (_repo_dir, _repo, worktree) = managed_task_worktree();
+        let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
+        let expected = vec![
+            jobs.clone(),
+            jobs.clone(),
+            jobs.clone(),
+            format!("-j{jobs}"),
+            jobs,
+        ];
+        for (program, as_task_worker) in [
+            ("claude", true),
+            ("not-claude-agent", true),
+            ("claude", false),
+            ("not-claude-agent", false),
+        ] {
+            assert_eq!(
+                budget_env_seen_by(program, &worktree, as_task_worker).await,
+                expected,
+                "{program} (task worker: {as_task_worker})"
+            );
+        }
+    }
+
     fn worker_context() -> TaskWorkerBridgeContext {
         TaskWorkerBridgeContext {
             execution_id: "exec".into(),

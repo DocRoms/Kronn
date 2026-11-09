@@ -64,9 +64,16 @@ smoke check nor the dispatch happens.
 
 ## Known limits
 
-- The gate governs Kronn's first build only. Builds a worker later runs itself
-  are capped by `CARGO_BUILD_JOBS` alone, so several workers compiling at once
-  can still load the host.
+- The gate governs Kronn's first build only. Builds and tests a worker later
+  runs itself are bounded by the same `build_jobs` budget (KT-1634), but several
+  workers compiling at once can still load the host.
+- The budget (`task_worker_env::build_budget_env`) sets `CARGO_BUILD_JOBS`,
+  `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS`, `MAKEFLAGS=-jN` and
+  `VITEST_MAX_WORKERS` from the one `build_jobs` value (jest is not used by the
+  project). It reaches every agent process Kronn starts, on all routes (direct,
+  adapted ACP, native ACP) — reviewers, fix agents and discussions as well as task
+  workers of any CLI — not only Claude task workers; the lane's private
+  locations (`CARGO_TARGET_DIR`, `CARGO_HOME`, ...) remain Claude-task-worker only.
 - A lane target is removed with its clean worktree (integration, `RemoveIfClean`
   cancellation) and swept at boot only when it carries `.kronn-lane.json`, its
   execution is finished and its worktree is gone. A lane whose worktree is kept
@@ -107,7 +114,7 @@ The clone itself takes 14-38 s and no disk space.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `KRONN_WORKER_CARGO_JOBS` | performance cores / 2 | `CARGO_BUILD_JOBS` of a worker |
+| `KRONN_WORKER_CARGO_JOBS` | performance cores / 2 | `CARGO_BUILD_JOBS` of a worker, and the budget of its test and build tools (KT-1634) |
 | `KRONN_WORKER_MAX_CONCURRENT_BUILDS` | 2 | first builds running at once on this backend process |
 | `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` | 1800 | bound of the first build and of its queue wait |
 | `KRONN_WORKER_PRIVATE_CARGO_HOME` | unset | `1` keeps KT-1246's lane-private `CARGO_HOME` (no seeding) |

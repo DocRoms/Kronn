@@ -893,6 +893,8 @@ fn native_command(
         &values,
         backend_url,
     )?;
+    // KT-1634 — the same build and test parallelism budget as every other route.
+    crate::core::task_worker_env::apply_build_budget(command.as_std_mut());
     // Only a project connected to GitHub hands its agent a token (D2).
     crate::core::github_connection::apply_launch_env(command.as_std_mut(), &launch.github_env);
     let mut granted = values.granted();
@@ -2240,6 +2242,29 @@ mod tests {
         )
         .unwrap();
         assert!(command_env(&command)["KRONN_WORKFLOW_STEP_CONTEXT"].contains("run-1"));
+
+        // KT-1634 — the build and test parallelism budget rides every route.
+        let budgeted = native_command(
+            AcpAgent::Kiro,
+            &kiro_cli_stub,
+            &[],
+            &project.path().to_string_lossy(),
+            &NativeLaunchEnv::default(),
+        )
+        .unwrap();
+        let env = command_env(&budgeted);
+        for name in [
+            "CARGO_BUILD_JOBS",
+            "RUST_TEST_THREADS",
+            "NEXTEST_TEST_THREADS",
+            "MAKEFLAGS",
+            "VITEST_MAX_WORKERS",
+        ] {
+            assert!(
+                env.contains_key(name),
+                "{name} missing from the native launch"
+            );
+        }
 
         // A connected project's GitHub variables reach the native agent.
         let connected = NativeLaunchEnv {
