@@ -51,6 +51,10 @@ Release notes for 0.9.3 and earlier are available in the
 - A project file used as a reference is read through directory fds: a link on its
   path is refused, a FIFO cannot block the open, and it must be a picture by its
   first bytes, not by its extension (KT-1605, #502).
+- Every copy of `config.toml` (migration backup, snapshots, the set-aside of an
+  unreadable config, a retired key) is encrypted with the instance key, clear
+  copies left by earlier versions are encrypted at the next start, and the
+  set-aside never follows a link or replaces an existing file (KT-1528).
 
 ### Fixed
 

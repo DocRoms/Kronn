@@ -2854,11 +2854,8 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     // The old encrypted credentials go; an older config backup may hold
     // another key, so it is set aside, not deleted.
     let _ = std::fs::remove_file(dir.join(crate::core::credential_store::BACKUP_FILENAME));
-    let backup = dir.join("config.toml.backup");
-    if backup.exists() {
-        if let Err(e) = crate::db::migrations::rotate_config_backup(&dir, &backup) {
-            tracing::warn!("Reset could not set config.toml.backup aside: {e}");
-        }
+    if let Err(e) = crate::db::migrations::rotate_config_backup(&dir) {
+        tracing::warn!("Reset could not set the config.toml backup aside: {e}");
     }
     tracing::info!("Config reset");
 
@@ -4800,6 +4797,27 @@ mod tests {
         // User data preserved
         assert_eq!(exported.server.pseudo, Some("TestUser".into()));
         assert_eq!(exported.language, "fr");
+    }
+
+    /// KT-1528 — the export is the typed config serialised, never the raw file:
+    /// a credential this build has no field for cannot reach it.
+    #[test]
+    fn the_export_config_carries_no_unknown_credential() {
+        let mut table = toml::Table::try_from(config::default_config()).unwrap();
+        table
+            .get_mut("tokens")
+            .and_then(|t| t.as_table_mut())
+            .unwrap()
+            .insert("mistral".into(), "sk-mistral-clear".into());
+        let future: toml::Table = "api_key = \"fk-clear\"".parse().unwrap();
+        table.insert("future".into(), future.into());
+        let cfg: AppConfig = table.try_into().expect("a config with unknown keys parses");
+        let text = toml::to_string_pretty(&build_export_config(&cfg)).unwrap();
+        assert!(
+            !text.contains("sk-mistral-clear") && !text.contains("fk-clear"),
+            "{text}"
+        );
+        assert!(text.contains("language"));
     }
 
     #[test]

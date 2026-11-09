@@ -210,12 +210,12 @@ under an unrelated agent.
   (KT-1007). What stays open: on a host with no keychain and no verified
   recovery passphrase, the key sits in `config.toml` next to the data it
   decrypts; a locked or missing key at boot leaves pre-migration plaintext in
-  `config.toml` until restored; a set-aside `config.toml.corrupt.<timestamp>`
-  may hold credentials in clear. See
+  `config.toml` until restored; a set-aside `config.toml.corrupt.<timestamp>` is
+  encrypted whole (or reduced to its key line when no key store holds a key). See
   [key-management.md](key-management.md) and
   `docs/inconsistencies-tech-debt.md` (TD-20260901).
-  [src: file: backend/src/core/credential_store.rs:137-154#encrypt_rows]
-  [src: file: backend/src/core/credential_store.rs:346-349#sync_for_save]
+  [src: file: backend/src/core/credential_store.rs:136-153#encrypt_rows]
+  [src: file: backend/src/core/credential_store.rs:345-348#sync_for_save]
 
 ## Troubleshooting
 

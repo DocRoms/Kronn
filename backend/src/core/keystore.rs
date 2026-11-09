@@ -27,7 +27,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::core::{config, crypto, keyvault::KeyStore, recovery};
+use crate::core::{config, config_copies, crypto, keyvault::KeyStore, recovery};
 use crate::db::Database;
 use crate::models::AppConfig;
 
@@ -289,7 +289,7 @@ fn settle_disk_copy(
     columns: &[ColumnRows],
 ) -> bool {
     if let Some(old) = legacy_raw.filter(|old| !crate::core::keyvault::same_key(old, key)) {
-        match set_aside_retired_key(dir, old) {
+        match set_aside_retired_key(dir, old, key) {
             Ok(name) => tracing::warn!(
                 "keystore: config.toml held another value than the key in use; it decrypts \
                  nothing and is kept aside as {name}"
@@ -334,27 +334,24 @@ fn settle_disk_copy(
 /// File-name prefix of a config.toml value that was not the key in use.
 pub const RETIRED_KEY_PREFIX: &str = "config.toml.retired-key.";
 
-/// Keep `value` (another key, or garbage) in `config.toml.retired-key.<ts>`
-/// (owner-only) so nothing that sat in config.toml is ever dropped.
-fn set_aside_retired_key(dir: &Path, value: &str) -> std::io::Result<String> {
+/// Keep `value` (another key, or garbage) in `config.toml.retired-key.<ts>.enc`,
+/// encrypted with `key` (the key in use) and owner-only, so nothing that sat in
+/// config.toml is ever dropped and no old key lies in clear. The next starts
+/// open it with the key in use ([`file_keys`]).
+fn set_aside_retired_key(dir: &Path, value: &str, key: &str) -> std::io::Result<String> {
     #[cfg(test)]
     if FAIL_SET_ASIDE.with(|f| f.get()) {
         return Err(std::io::Error::other("set-aside failure (test)"));
     }
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
-    let mut name = format!("{RETIRED_KEY_PREFIX}{stamp}");
-    let mut n = 1;
-    while dir.join(&name).exists() {
-        name = format!("{RETIRED_KEY_PREFIX}{stamp}-{n}");
-        n += 1;
-    }
+    let base = format!("{RETIRED_KEY_PREFIX}{}", config_copies::stamp());
+    let name = config_copies::free_name(dir, &base, config_copies::SEALED_SUFFIX);
     std::fs::create_dir_all(dir)?;
     let content = format!(
         "encryption_secret = {}\n",
         toml::Value::String(value.to_string())
     );
-    let tmp = dir.join(format!(".{name}.tmp"));
-    crate::core::keyvault::write_private_atomic(&tmp, &dir.join(&name), content.as_bytes())?;
+    config_copies::write_sealed(dir, &dir.join(&name), &content, key)
+        .map_err(std::io::Error::other)?;
     Ok(name)
 }
 
@@ -493,7 +490,8 @@ pub async fn reconcile_with(
     // lowest-priority, read-only candidates of every decision: rows under such
     // a key are then seen (SeveralKeys, retirable), never silently orphaned.
     let mut file_of: Vec<(String, String)> = Vec::new();
-    for (key, source, file) in file_keys(dir) {
+    let live_keys: Vec<String> = candidates.iter().map(|(k, _)| k.clone()).collect();
+    for (key, source, file) in file_keys(dir, &live_keys) {
         if !candidates.iter().any(|(k, _)| *k == key) {
             candidates.push((key.clone(), source));
             file_of.push((key, file));
@@ -684,46 +682,44 @@ pub async fn reconcile_with(
 /// Sources whose keys sit in files kept by Kronn, read-only candidates.
 const FILE_SOURCES: &[&str] = &["config-backup", "retired-key", "corrupt-config"];
 
-/// `encryption_secret` values found in config.toml.backup, its rotated copies,
-/// the set-aside `config.toml.retired-key.<ts>` and `config.toml.corrupt.<ts>`
-/// files, canonical and de-duplicated: (key, source, file name).
-fn file_keys(dir: &Path) -> Vec<(String, &'static str, String)> {
+/// `encryption_secret` values found in the copies of config.toml (the backup,
+/// its rotations, the retired-key and set-aside files), canonical and
+/// de-duplicated: (key, source, file name). A sealed copy is opened with the
+/// `live` keys and with any key already found in another copy, so a chain (a
+/// backup sealed under a retired key) resolves.
+fn file_keys(dir: &Path, live: &[String]) -> Vec<(String, &'static str, String)> {
+    use config_copies::Kind;
     let mut keys: Vec<(String, &'static str, String)> = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return keys;
-    };
-    let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let source = if name == "config.toml.backup" || name.starts_with("config.toml.backup.") {
-            "config-backup"
-        } else if name.starts_with(RETIRED_KEY_PREFIX) {
-            "retired-key"
-        } else if name.starts_with("config.toml.corrupt.") {
-            "corrupt-config"
-        } else {
-            continue;
-        };
-        let Ok(text) = std::fs::read_to_string(entry.path()) else {
-            continue;
-        };
-        let value = text
-            .parse::<toml::Table>()
-            .ok()
-            .and_then(|t| {
-                t.get("encryption_secret")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            })
-            .or_else(|| config::salvage_key_line(&text));
-        if let Some(key) = value.and_then(|v| crypto::canonical_secret(&v).ok()) {
+    let mut openers: Vec<String> = live.to_vec();
+    let copies = config_copies::copies(dir);
+    loop {
+        let known = keys.len();
+        for copy in &copies {
+            let source = match copy.kind {
+                Kind::Backup => "config-backup",
+                Kind::RetiredKey => "retired-key",
+                Kind::Corrupt => "corrupt-config",
+            };
+            let text = if copy.sealed {
+                config_copies::open_sealed(&copy.path, &openers).ok()
+            } else {
+                // Raw bytes: a key line beside a non-UTF-8 byte still counts.
+                std::fs::read(&copy.path)
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            };
+            let Some(key) = text.as_deref().and_then(config_copies::key_of) else {
+                continue;
+            };
             if !keys.iter().any(|(k, ..)| *k == key) {
-                keys.push((key, source, name));
+                openers.push(key.clone());
+                keys.push((key, source, copy.name.clone()));
             }
         }
+        if keys.len() == known {
+            return keys;
+        }
     }
-    keys
 }
 
 /// The canonical keys the stores hold now, and the stores holding a non-key.
@@ -1070,7 +1066,7 @@ pub async fn recover_with_passphrase(
         .as_deref()
         .filter(|old| !crate::core::keyvault::same_key(old, &key))
     {
-        let name = set_aside_retired_key(dir, old).context(
+        let name = set_aside_retired_key(dir, old, &key).context(
             "config.toml holds another value that could not be set aside; nothing was changed",
         )?;
         tracing::warn!("keystore: config.toml held another value; it is kept aside as {name}");
@@ -1161,7 +1157,8 @@ fn every_candidate(dir: &Path, store: &KeyStore) -> Result<Vec<String>> {
     {
         keys.push(k);
     }
-    keys.extend(file_keys(dir).into_iter().map(|(k, ..)| k));
+    let live = keys.clone();
+    keys.extend(file_keys(dir, &live).into_iter().map(|(k, ..)| k));
     keys.dedup();
     Ok(keys)
 }
@@ -3340,28 +3337,24 @@ mod tests {
         // C3-03: the stale key decrypts nothing — set aside, never dropped —
         // and the key in use (one vault copy) gets config.toml's copy.
         assert_eq!(config::retained_disk_key(tmp.path()), Some(k.clone()));
-        assert_eq!(side_file_keys(tmp.path()), vec![stale]);
+        assert_eq!(side_file_keys(tmp.path(), &k), vec![stale]);
         assert!(boot_report(tmp.path()).file_keeps_key);
     }
 
-    fn side_file_keys(dir: &Path) -> Vec<String> {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(RETIRED_KEY_PREFIX)
-            })
-            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-            .filter_map(|t| {
-                t.parse::<toml::Table>()
-                    .ok()?
-                    .get("encryption_secret")?
-                    .as_str()
-                    .map(str::to_string)
-            })
-            .collect()
+    /// The keys the retired-key files of `dir` hold, opened with `key` (the key
+    /// in use): they are encrypted, never in clear.
+    fn side_file_keys(dir: &Path, key: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for copy in config_copies::copies(dir) {
+            if copy.kind != config_copies::Kind::RetiredKey {
+                continue;
+            }
+            assert!(copy.sealed, "{} is in clear", copy.name);
+            let text = config_copies::open_sealed(&copy.path, &[key.to_string()]).unwrap();
+            let table: toml::Table = text.parse().unwrap();
+            out.push(table["encryption_secret"].as_str().unwrap().to_string());
+        }
+        out
     }
 
     /// C3-01 — an invalid config.toml value never stops the key in use from
@@ -3383,11 +3376,11 @@ mod tests {
             let key = cfg.encryption_secret.clone().unwrap();
             assert_eq!(
                 config::retained_disk_key(tmp.path()),
-                Some(key),
+                Some(key.clone()),
                 "{sidecar:?}"
             );
             assert_eq!(
-                side_file_keys(tmp.path()),
+                side_file_keys(tmp.path(), &key),
                 vec!["日本".repeat(16)],
                 "garbage kept aside"
             );
@@ -3417,8 +3410,8 @@ mod tests {
         let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path()).await;
         crate::core::child_env::remove_var(ENV_REENCRYPT_FROM);
         assert_eq!(outcome.unwrap(), KeyOutcome::Resolved { source: "sidecar" });
-        assert_eq!(config::retained_disk_key(tmp.path()), Some(k2));
-        assert_eq!(side_file_keys(tmp.path()), vec![k1]);
+        assert_eq!(config::retained_disk_key(tmp.path()), Some(k2.clone()));
+        assert_eq!(side_file_keys(tmp.path(), &k2), vec![k1]);
     }
 
     /// C3-07 — no durable copy of a new key can be written: the boot stops
@@ -3639,6 +3632,110 @@ mod tests {
                 "{file}: {moved:?}"
             );
         }
+    }
+
+    /// KT-1528 — the same with the copies encrypted under the live key, as every
+    /// copy of config.toml is now: the reconciler opens them, finds the key and
+    /// moves the rows; the files stay, unchanged.
+    #[tokio::test]
+    async fn a_key_kept_only_in_an_encrypted_file_that_decrypts_rows_is_seen() {
+        for file in [
+            "config.toml.backup.20261005T000000Z.enc",
+            "config.toml.retired-key.20261005T000000Z.enc",
+            "config.toml.corrupt.20261005T000000Z.enc",
+        ] {
+            let db = Database::open_in_memory().unwrap();
+            let k = crypto::generate_secret();
+            let k1 = crypto::generate_secret();
+            seed_row(&db, &k).await;
+            seed_snapshot(&db, &k1).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let text = format!("encryption_secret = \"{k1}\"\nx = 1\n");
+            let path = tmp.path().join(file);
+            config_copies::write_sealed(tmp.path(), &path, &text, &k).unwrap();
+            let (sidecar, _s) = mem_vault("sidecar", Some(&k));
+            let store = KeyStore::from_vaults(vec![sidecar]);
+            let mut cfg = config::default_config();
+            cfg.encryption_secret = None;
+            let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path())
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                KeyOutcome::Resolved { source: "sidecar" },
+                "{file}"
+            );
+            let columns = collect_encrypted_rows(&db).await.unwrap();
+            assert!(
+                columns
+                    .iter()
+                    .all(|c| c.sample.iter().all(|enc| decrypts(enc, &k))),
+                "{file}: every row under the store key"
+            );
+            assert_eq!(
+                config_copies::open_sealed(&path, std::slice::from_ref(&k)).unwrap(),
+                text
+            );
+            let moved = boot_report(tmp.path()).rows_moved_from_files;
+            assert!(
+                moved.len() == 1 && moved[0].contains(file),
+                "{file}: {moved:?}"
+            );
+        }
+    }
+
+    /// KT-1528 — a key retired by one start sits encrypted under the key in
+    /// use, never in clear, and the next start reads it back; a chain of
+    /// encrypted copies (a backup under a retired key) resolves too.
+    #[test]
+    fn a_retired_key_is_encrypted_and_still_read_by_the_next_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (live, old, older) = (
+            crypto::generate_secret(),
+            crypto::generate_secret(),
+            crypto::generate_secret(),
+        );
+        let name = set_aside_retired_key(tmp.path(), &old, &live).unwrap();
+        assert!(name.ends_with(".enc"), "{name}");
+        let raw = std::fs::read_to_string(tmp.path().join(&name)).unwrap();
+        assert!(
+            !raw.contains(&old) && !raw.contains("encryption_secret"),
+            "{raw}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(tmp.path().join(&name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        // Nothing of the old key is readable without the key in use.
+        assert!(file_keys(tmp.path(), &[]).is_empty());
+        let found = file_keys(tmp.path(), std::slice::from_ref(&live));
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            (found[0].0.as_str(), found[0].1),
+            (old.as_str(), "retired-key")
+        );
+
+        // A backup sealed under the retired key hands over the key before it.
+        let backup = tmp.path().join("config.toml.backup.1.enc");
+        config_copies::write_sealed(
+            tmp.path(),
+            &backup,
+            format!("encryption_secret = \"{older}\"\n"),
+            &old,
+        )
+        .unwrap();
+        let chain = file_keys(tmp.path(), std::slice::from_ref(&live));
+        let keys: Vec<&str> = chain.iter().map(|(k, ..)| k.as_str()).collect();
+        assert!(
+            keys.contains(&old.as_str()) && keys.contains(&older.as_str()),
+            "{keys:?}"
+        );
     }
 
     /// C5-01 — two LIVE key stores that each decrypt rows still stop the boot,
@@ -3863,10 +3960,16 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with(RETIRED_KEY_PREFIX))
             .collect();
+        // Encrypted under the restored key, never in clear.
         let held = kept.iter().any(|n| {
-            std::fs::read_to_string(dir.join(n))
-                .unwrap()
-                .contains(&w_prime)
+            let raw = std::fs::read_to_string(dir.join(n)).unwrap();
+            !raw.contains(&w_prime)
+                && config_copies::open_text(
+                    &raw,
+                    std::slice::from_ref(&k),
+                    config_copies::Kind::RetiredKey,
+                )
+                .is_some_and(|text| text.contains(&w_prime))
         });
         assert!(held, "{kept:?}");
         assert_eq!(
@@ -4307,7 +4410,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(count(), before + 2, "recovery.key");
-        set_aside_retired_key(dir.path(), "old").unwrap();
+        set_aside_retired_key(dir.path(), "old", &crypto::generate_secret()).unwrap();
         assert_eq!(count(), before + 3, "retired-key");
         // C5-10: the credential and migration backups go through it too.
         let d = dir.path();
@@ -4325,16 +4428,15 @@ mod tests {
             .unwrap();
         step("reencrypt_backup", n);
         let n = count();
-        crate::db::migrations::backup_config_without_credentials(d).unwrap();
+        crate::db::migrations::backup_config_sealed(d).unwrap();
         step("config.toml.backup", n);
         let n = count();
-        crate::db::migrations::rotate_config_backup(d, &d.join("config.toml.backup")).unwrap();
+        crate::db::migrations::rotate_config_backup(d).unwrap();
         step("rotation", n);
         std::fs::write(d.join("config.toml.backup"), &plain).unwrap();
         let n = count();
-        crate::core::credential_store::scrub_one_backup(d, &d.join("config.toml.backup"), &key)
-            .unwrap();
-        step("scrub", n);
+        config_copies::protect_clear_copies(d, Some(&key));
+        step("sealing a clear copy", n);
     }
 
     /// C3-21 — a refused set (too short) leaves no recovery.previous-* copy.

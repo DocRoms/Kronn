@@ -43,10 +43,20 @@ the previous file untouched.
    `config.toml`. It never mints a key or an auth token. A missing
    `config.toml` starts from defaults **without** a key, so no random key is
    ever offered to the reconciler. Values that are not a 32-byte hex key are
-   ignored as candidates. A `config.toml` that cannot be parsed is moved to
-   `config.toml.corrupt.<timestamp>` (`0600`, kept: it may hold the key), a
-   top-level `encryption_secret` line is salvaged, and the start continues
-   as a first run. The same applies to valid TOML that is not a Kronn
+   ignored as candidates. A `config.toml` that cannot be parsed is taken out
+   of the way as `config.toml.corrupt.<timestamp>.enc` (`0600`): the whole
+   file, encrypted with the key a key store holds. With no such key at all
+   (first run: every store was read and is empty) the file is not kept: only
+   its top-level `encryption_secret` line is, in
+   `config.toml.corrupt.<timestamp>`. When a store cannot be read (locked
+   keychain, I/O error) a key may exist, so the file is kept whole, as it is,
+   in `config.toml.corrupt.<timestamp>` (`0600`) and encrypted at the next start
+   that reads the stores. The move opens the file with `O_NOFOLLOW`, sets `0600`
+   on that handle, renames relative to an open directory handle and checks that
+   what was moved is the file it opened (device and inode); a `config.toml` that
+   is a symbolic link, or that was swapped meanwhile, is not moved (a swapped
+   entry is moved back).
+   The key line is salvaged, and the start continues as a first run. The same applies to valid TOML that is not a Kronn
    configuration (a field of another type, a value from a newer Kronn); the
    log names the cause, and the setup wizard (`config_set_aside` in
    `GET /api/setup/status`), a dismissible app-wide notice and Settings →
@@ -68,9 +78,9 @@ the previous file untouched.
      damaged keychain item (bad encoding, duplicates) is reported as such,
      naming `com.kronn.kronn` / `encryption_secret_v1` and when it may be
      deleted in Keychain Access;
-   - the `encryption_secret` of `config.toml.backup`, its rotated copies,
-     every `config.toml.retired-key.<timestamp>` and every
-     `config.toml.corrupt.<timestamp>` (salvaged line) are lowest-priority,
+   - the `encryption_secret` of `config.toml.backup.enc`, its rotated copies,
+     every `config.toml.retired-key.<timestamp>.enc` and every
+     `config.toml.corrupt.<timestamp>[.enc]` (salvaged line) are lowest-priority,
      read-only candidates of every decision (sources `config-backup`,
      `retired-key`, `corrupt-config`). When one live key store decrypts data
      and the other decrypting keys survive only in such files, their rows
@@ -116,7 +126,8 @@ the previous file untouched.
    once (a restore, or replacing it in Settings → Recovery), which records
    it. Another value in `config.toml` (a retired key, or not a key at all)
    decrypts nothing at that point, so it is moved to
-   `config.toml.retired-key.<timestamp>` (`0600`) and the key in use gets the
+   `config.toml.retired-key.<timestamp>.enc` (`0600`, encrypted with the key
+   in use, which opens it at the next starts) and the key in use gets the
    file copy it needs. Before anything is encrypted, the key in use must
    have a durable copy: a vault reads it back, `config.toml` already holds
    it, or `config.toml` is written with it and read back; otherwise the boot
@@ -200,18 +211,38 @@ Safe to interrupt at any point; a rerun converges:
    oldest original). The recovery passphrase restores that key, so it also
    opens this backup; no new plaintext file is written;
 4. save `config.toml` without credentials;
-5. drop the key from `config.toml.backup` when it is the key in use and no
-   longer needed in `config.toml`. That copy, which the DB migration runner
-   writes before pending migrations, never holds credentials: it is written
-   owner-only with the auth token and provider keys already removed, so a
-   failed credential boot cannot leave them in plaintext there. An existing
-   `config.toml.backup` with other content (an older key, say) is moved to
-   `config.toml.backup.<timestamp>` (`0600`) instead of being overwritten,
-   with its credentials removed and its key kept. Every credential boot also
-   scrubs `config.toml.backup` and every rotated copy (copies rotated by an
-   earlier 0.14.3 start included), under the same copies rule for the key;
-   a copy that cannot be scrubbed does not stop the others, and the errors
-   are reported together.
+5. encrypt every copy of `config.toml` kept in the data directory (KT-1528).
+   The copy the DB migration runner writes before pending migrations is
+   `config.toml.backup.enc` (`0600`): the whole file, encrypted with the
+   instance key (the key stores', else the one `config.toml` holds), so no
+   credential, known or not, leaves a clear value there, and a failed
+   credential boot cannot leave one either. With no key to encrypt with, no
+   copy is written. An existing backup with other content (an older key, say)
+   is renamed `config.toml.backup.<timestamp>.enc` instead of being
+   overwritten. A key change (a retirement, a restore) re-encrypts these
+   copies with the shelter and the credential backup. Every credential boot,
+   locked or not, also converts once what earlier versions left in clear
+   (`config.toml.backup`, its rotations, `config.toml.corrupt.<timestamp>`,
+   `config.toml.retired-key.<timestamp>`, and the temp files of the old
+   writers): encrypted whole, the clear file removed only once the encrypted
+   one is written and read back. A copy that cannot be written (full disk) is
+   left as it is, logged, and retried at the next start; one failure does not
+   stop the others. The key lookup tells three cases apart. A key is found:
+   everything is encrypted under it. The lookup stops at the first store that
+   cannot be read: a lower store (a key file left behind) may hold an older key
+   than the locked one above it, so it never stands in for it; a value that is
+   not a key is skipped, and reported as unreadable when no store holds a valid
+   one. Every store was read and none holds a
+   key (proven): a clear copy is cut down to its `encryption_secret` line, or
+   removed when it has none, except a `retired-key` file holding a value that is
+   not a key, which is kept until a key exists to encrypt it whole. A store
+   could not be read (locked keychain, I/O error): a key may exist and a copy
+   may be the only readable one, so every copy is left exactly as it is (an
+   unreadable `config.toml` is moved aside unchanged, `0600`) and the next
+   start that reads the stores encrypts it. The raw bytes are encrypted, not a
+   lossy string, and each ciphertext carries its kind of copy (backup, corrupt,
+   retired-key) as AES-GCM associated data, so a sealed copy renamed or swapped
+   for another kind does not open.
 
 `credential_store::read_backup(path, key)` decrypts the backup.
 [src: file: backend/src/core/credential_store.rs:747-751#read_backup]
@@ -243,8 +274,8 @@ another key would split the data between two keys. A successful restore
 clears a credential failure recorded at start; one whose credential load
 fails records it, so the status and the locked screen ask for a restart.
 Another value `config.toml` held is set aside as
-`config.toml.retired-key.<timestamp>` before the restored key takes the file
-copy; if that fails, nothing changes.
+`config.toml.retired-key.<timestamp>.enc` (encrypted with the restored key)
+before the restored key takes the file copy; if that fails, nothing changes.
 
 An import keeps the source machine's encrypted rows and its recovery blob (as
 `recovery.imported-<timestamp>.key`; `recovery.key` is untouched). To read
@@ -290,7 +321,7 @@ answers unauthenticated; a failure clears nothing and is reported. When
 holding only that key (the next start is a first run with the same key);
 otherwise it is removed. A file counts as key-only only when it holds nothing
 but `encryption_secret`. The encrypted credential backup is deleted and
-`config.toml.backup` is set aside under a timestamped name (it may hold an
+`config.toml.backup.enc` is set aside under a timestamped name (it may hold an
 older key). A reset while the key is locked also deletes the token row, which
 no key can read, then resolves the key and arms the credential store at once
 (adopting a key a store holds, or minting one), as a fresh start would. This
