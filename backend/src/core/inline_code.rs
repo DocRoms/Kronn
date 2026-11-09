@@ -2243,7 +2243,7 @@ mod tests {
 
     /// Real execution: the migrated line prints a benign value exactly like
     /// the original, and a hostile one verbatim, without running any of it.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[test]
     fn migrated_lines_keep_benign_output_and_never_run_a_hostile_value() {
         for (cmd, original) in [
@@ -2984,7 +2984,7 @@ mod tests {
     /// values (those the original line itself treats as plain text), the
     /// rewritten line prints the same thing and exits the same way. The
     /// shapes include the 13 fixes found on real workflows.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[test]
     fn suggested_fixes_are_equivalent_on_a_value_corpus() {
         // Shell double quotes: everything but `"`, `$`, backtick, backslash.
@@ -3071,7 +3071,7 @@ mod tests {
 
     /// Why an unquoted value gets no automatic fix: the original word-splits
     /// it, so `"$1"` prints something else for an empty or spaced value.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[test]
     fn an_unquoted_shell_value_diverges_and_stays_manual() {
         let original = args(&["-c", "echo start {{x}} end"]);

@@ -13,6 +13,7 @@ import { orchestrationResolution } from './taskLaunchResolution';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 import { ModelCatalogPicker } from './ModelCatalogPicker';
 import { AlertTriangle } from 'lucide-react';
+import { isFullSuiteValidation } from '../lib/fullSuiteValidation';
 import {
   DEFAULT_REVIEW_ROUNDS,
   MAX_REVIEW_ROUNDS,
@@ -354,6 +355,15 @@ function TaskLaunchDialogContent({
               placeholder={t('orch.config.validationsHint')}
             />
           </label>
+          <p className="set-hint orch-launch-validations-hint" data-testid="launch-validations-default">
+            {t('orch.config.validationsDefault')}
+          </p>
+          {validations.split('\n').some(isFullSuiteValidation) && (
+            <div className="set-expose-warn orch-launch-validations-hint" role="status" data-testid="launch-full-suite-warning">
+              <AlertTriangle size={13} />
+              <span>{t('orch.config.validationsFullSuite')}</span>
+            </div>
+          )}
         </div>
 
         {!policyLocked && detections.length > 1 && (

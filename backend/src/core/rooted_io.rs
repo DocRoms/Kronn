@@ -607,7 +607,7 @@ pub fn rename(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
     imp::rename(root, from, to)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix))] // exercises rooted_io's openat/O_NOFOLLOW paths with symlinks, FIFOs, unix sockets and libc
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;

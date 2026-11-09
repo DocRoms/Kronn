@@ -223,7 +223,7 @@ fn an_empty_repository_pins_nothing() {
     assert!(ci_runtime_versions(dir.path()).is_empty());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_symlinked_pin_file_is_not_read() {
     let dir = tempfile::tempdir().unwrap();

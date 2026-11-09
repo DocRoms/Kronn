@@ -488,7 +488,7 @@ fn agent_families_are_recognised_from_a_launch() {
 }
 
 /// The direct route end to end: the spawned process's real environment.
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
 #[tokio::test]
 async fn a_direct_launch_spawns_with_the_built_environment_only() {
     use std::os::unix::fs::PermissionsExt;
@@ -518,6 +518,7 @@ async fn a_direct_launch_spawns_with_the_built_environment_only() {
                 None,
                 &[],
                 Some("kbt_direct"),
+                crate::core::background_priority::Priority::Normal,
             )
             .unwrap()
         });
@@ -570,7 +571,7 @@ async fn a_direct_launch_spawns_with_the_built_environment_only() {
 
 /// The adapter route: whatever the adapter's own launch env carries, the seal
 /// runs after it, so the admin token and another agent's key never pass.
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
 #[tokio::test]
 async fn an_adapter_launch_env_cannot_reinject_forbidden_names() {
     use std::os::unix::fs::PermissionsExt;
@@ -600,6 +601,7 @@ async fn an_adapter_launch_env_cannot_reinject_forbidden_names() {
             None,
             &[],
             Some("kbt_adapter"),
+            crate::core::background_priority::Priority::Normal,
         )
         .unwrap()
     });

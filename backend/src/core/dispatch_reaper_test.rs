@@ -151,7 +151,7 @@ fn procargs_environment_skips_the_executable_and_the_arguments() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // drives the unix-only dispatch reaper with python processes, libc signals, /proc and a unix socket
 mod processes {
     use super::*;
     use std::os::unix::process::CommandExt;

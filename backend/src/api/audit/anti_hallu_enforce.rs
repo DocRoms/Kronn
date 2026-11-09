@@ -438,7 +438,7 @@ mod tests {
 
     /// `.env -> settings-data`, `.ssh/settings-view -> ../settings-data` and
     /// `view.txt -> .env`: the written name is secret although the target is not.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_secret_written_name_remains_secret_after_resolving_to_an_ordinary_name() {
         let dir = tempdir().unwrap();
@@ -478,7 +478,7 @@ mod tests {
 
     /// `.ssh -> vault`, `keys -> .ssh`: the canonical `vault/review-key` has lost the
     /// `.ssh` name the chain passed through.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn chain_directory_component_keeps_secret_names() {
         let dir = tempdir().unwrap();

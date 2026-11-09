@@ -43,7 +43,7 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/mod.rs:140-260#migrate_hardcoded_catalog_once]
 [src: file: backend/src/api/model_catalog.rs:242-273#update_manual]
 [src: file: backend/src/api/model_catalog.rs:275-301#delete_manual]
-[src: file: backend/src/agents/runner.rs:3584-3603#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3608-3627#resolve_model_flag]
 
 ## Discovery boundaries
 
@@ -129,7 +129,7 @@ session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
 [src: file: backend/src/agents/runner.rs:5682-5736#offers_model_catalogue]
-[src: file: backend/src/acp.rs:1895-1904#offers_model_catalogue]
+[src: file: backend/src/acp.rs:1900-1909#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1886-1917#select_model]
 
 ## Launch safety and UI
@@ -148,7 +148,7 @@ this is permission to attempt execution, not proof of account access. Missing CL
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1131-1162#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:4179-4225#preflight_resolve]
+[src: file: backend/src/api/discussions/streaming.rs:4193-4239#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:2009-2094#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1195-1248#preflight_workflow_launch]
 
@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:906-936#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:945-975#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -211,17 +211,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3622-3800#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3646-3824#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13538-13555#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:13657-13688#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13567-13584#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13668-13699#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5007-5035#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5036-5064#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -258,7 +258,7 @@ when it was not. QPs with no effort or only whitespace keep the old behavior.
 [src: file: backend/src/db/discussion_effort.rs:9-54#UnresolvedQuickPromptEffort]
 [src: file: backend/src/db/sql/176_discussion_effort_snapshots.sql:1-8#discussion_effort_snapshots]
 [src: file: backend/src/api/discussions/crud.rs:653-675#capture]
-[src: file: backend/src/api/discussions/crud.rs:785-793#UnresolvedQuickPromptEffort]
+[src: file: backend/src/api/discussions/crud.rs:817-825#UnresolvedQuickPromptEffort]
 [src: file: backend/src/api/discussions/streaming.rs:4106-4159#for_run]
 [src: file: backend/src/db/discussion_effort.rs:56-76#for_run]
 

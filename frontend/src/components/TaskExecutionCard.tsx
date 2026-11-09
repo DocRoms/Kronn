@@ -2,6 +2,7 @@ import { useT } from '../lib/I18nContext';
 import type { TaskExecutionDetail, TaskExecutionUsage, WarmingStepKind } from '../types/generated';
 import { allowedActions } from '../lib/orch-actions';
 import { isUnlimitedRounds, roundsLimitLabel } from '../lib/reviewRounds';
+import { parseTaskWorkerQueue } from '../lib/taskWorkers';
 
 /** Tokens the CLI never reported are unknown, not zero. Rendering a total over
  *  partly-unmeasured sessions would read as "this is what it cost". */
@@ -68,6 +69,11 @@ export function TaskExecutionCard({
   const warmingMeasured = warmingSteps.reduce((sum, step) => sum + step.duration_ms, 0);
   const split = usage.in_app_breakdown;
   const splitCoversAll = split !== null && split.messages >= usage.in_app_messages;
+  // KT-1632 — a launch held by the cap on local task workers says why and where
+  // it stands, instead of looking like a worker that never starts.
+  const queue = detail.progress?.phase === 'queued'
+    ? parseTaskWorkerQueue(detail.progress.reason)
+    : null;
 
   return (
     <section className="orch-exec" data-testid="orch-exec-card">
@@ -196,6 +202,15 @@ export function TaskExecutionCard({
             <li key={run.id}>{run.command}</li>
           ))}
         </ul>
+      )}
+
+      {queue && (
+        <p className="orch-exec-queued" data-testid="orch-exec-queued">
+          {t('orch.exec.queued', queue.running, queue.cap)}
+          {detail.progress.queue_position != null && (
+            <> {t('orch.exec.queuedPosition', detail.progress.queue_position)}</>
+          )}
+        </p>
       )}
 
       {recovery?.pending && (

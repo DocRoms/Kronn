@@ -1,6 +1,6 @@
 //! KT-910 / KT-908: workflow Agent launch policies, read on the argv the
 //! production adapters pass to a fake CLI.
-#![cfg(unix)]
+#![cfg(unix)] // writes #!/bin/sh stand-in agents made executable with chmod mode bits through std::os::unix
 
 use std::{ffi::OsString, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 

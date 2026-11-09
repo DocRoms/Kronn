@@ -20,7 +20,7 @@ The workflow envelope defines `data`, `status`, and `summary`, requires only
 schema unchanged. The existing regression fixture also contains an object
 with an optional string field and no `additionalProperties` restriction.
 [src: file: backend/src/workflows/steps.rs:1087-1110#ollama_envelope_format]
-[src: file: backend/src/workflows/steps.rs:2280-2318#ollama_envelope_format]
+[src: file: backend/src/workflows/steps.rs:2283-2321#ollama_envelope_format]
 
 Inference from that code and the official contract: this envelope is invalid
 under OpenAI strict mode, independently of whether a proxy accepts it.
@@ -42,7 +42,7 @@ their actual type to the authored string type.
 
 Ollama still receives the same envelope through its native `format` field,
 with a non-streaming request. No change to its decoding schema is required.
-[src: file: backend/src/agents/runner.rs:8021-8075#build_ollama_chat_body]
+[src: file: backend/src/agents/runner.rs:8054-8108#build_ollama_chat_body]
 [src: file: backend/src/workflows/steps.rs:1334-1336#ollama_envelope_format]
 
 ## Guarantees and regression coverage

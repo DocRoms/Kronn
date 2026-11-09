@@ -413,7 +413,12 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             config.server.lane_seeds_copy_enabled,
             config.server.lane_seeds_adopt_suggested,
         );
+        // KT-1633 — the background-priority switch, before the first worker of this boot.
+        kronn::core::background_priority::set_enabled(config.workers.background_priority);
     }
+    // KT-1633 — ask the host once whether its priority launcher runs, off the
+    // async path, before recovery can dispatch a worker. A spawn only reads the answer.
+    kronn::core::background_priority::check_launcher_at_boot().await;
     // reply without spending tokens twice.
     match state
         .db
@@ -926,7 +931,23 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
 
     // Build router
     let deferred_resume_state = state.clone();
-    let app = build_router(state);
+    let frontend_dist = frontend_dist_dir(
+        kronn::core::child_env::var("KRONN_FRONTEND_DIST")
+            .ok()
+            .as_deref(),
+    );
+    let frontend_service = frontend_dist
+        .as_deref()
+        .map(|dist| kronn::api::live_pages::serve_app_documents(dist, state.clone()));
+    let mut app = build_router(state);
+    if let (Some(dist), Some(service)) = (frontend_dist.as_deref(), frontend_service) {
+        // Same mount as the desktop's embedded server: /api/* → API, the rest → the UI.
+        tracing::info!("Serving the built UI from {}", dist.display());
+        if let Some(problem) = frontend_dist_problem(dist) {
+            tracing::warn!("{problem}");
+        }
+        app = axum::Router::new().merge(app).fallback_service(service);
+    }
 
     // Start server
     let addr = format!("{}:{}", host, port);
@@ -989,6 +1010,28 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The built frontend a headless `kronn` serves next to its API, when
+/// `KRONN_FRONTEND_DIST` names one. Unset or empty: API only, as before. The
+/// Windows end-to-end job opens the UI through this, the way the desktop does.
+fn frontend_dist_dir(value: Option<&str>) -> Option<std::path::PathBuf> {
+    value
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Why a named `KRONN_FRONTEND_DIST` would serve nothing: a typo, or a frontend
+/// that was never built, would otherwise only show as a blank page and 404s.
+fn frontend_dist_problem(dist: &std::path::Path) -> Option<String> {
+    if dist.join("index.html").is_file() {
+        return None;
+    }
+    Some(format!(
+        "KRONN_FRONTEND_DIST={} has no index.html: the UI will not load (is it the built `frontend/dist`?)",
+        dist.display()
+    ))
+}
+
 /// URL shown in the startup banner's "→" line. Returns the dev-UI override when
 /// it is set and non-empty (`kronn start-dev` exports KRONN_DEV_UI_URL — in
 /// native dev the listen port serves the API only), otherwise the backend
@@ -1049,6 +1092,30 @@ async fn shutdown_signal() {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frontend_dist_is_served_only_when_named() {
+        assert_eq!(frontend_dist_dir(None), None);
+        assert_eq!(frontend_dist_dir(Some("  ")), None);
+        assert_eq!(
+            frontend_dist_dir(Some(" ../frontend/dist ")),
+            Some(std::path::PathBuf::from("../frontend/dist"))
+        );
+    }
+
+    #[test]
+    fn a_frontend_dist_without_an_index_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let problem = frontend_dist_problem(dir.path()).expect("an empty directory serves nothing");
+        assert!(problem.contains("no index.html"), "{problem}");
+        assert!(
+            problem.contains(&dir.path().display().to_string()),
+            "{problem}"
+        );
+        assert!(frontend_dist_problem(&dir.path().join("typo")).is_some());
+        std::fs::write(dir.path().join("index.html"), "<html></html>").unwrap();
+        assert_eq!(frontend_dist_problem(dir.path()), None);
+    }
 
     #[test]
     fn banner_uses_backend_url_without_override() {

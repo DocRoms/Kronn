@@ -170,7 +170,7 @@ fn a_marker_naming_a_secret_in_any_piece_or_encoding_is_removed_entirely() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_marker_resolving_to_a_secret_through_a_link_is_removed_entirely() {
     let dir = project();

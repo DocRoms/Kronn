@@ -817,7 +817,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn symlinks_inside_docs_are_moved_as_symlinks_never_followed() {
         // CRITICAL data-safety guard. A user might have

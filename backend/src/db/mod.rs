@@ -87,6 +87,9 @@ mod release_gate_tests;
 #[cfg(all(test, feature = "full-tests"))]
 mod large_db_measure;
 
+#[cfg(all(test, feature = "full-tests"))]
+mod upgrade_fixture_tests;
+
 /// `EXPLAIN QUERY PLAN` details of `sql`, one line per plan node.
 #[cfg(test)]
 pub(crate) fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
@@ -590,7 +593,7 @@ pub(crate) fn restrict_data_dir_to_owner(dir: &std::path::Path) {
     let _ = dir;
 }
 
-#[cfg(all(test, unix, feature = "full-tests"))]
+#[cfg(all(test, unix, feature = "full-tests"))] // asserts the data directory's chmod mode bits through std::os::unix
 mod data_dir_permission_tests {
     use std::os::unix::fs::PermissionsExt;
 

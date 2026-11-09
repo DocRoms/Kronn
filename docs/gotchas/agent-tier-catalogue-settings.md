@@ -92,7 +92,7 @@ that distinction, including an existing historical identity assigned to another
 tier and a refusal for the explicitly configured unavailable model.
 [src: file: backend/tests/model_catalog_migration.rs:220-271#an_existing_historical_identity_keeps_its_other_tier_and_explicit_configuration]
 [src: file: backend/tests/model_catalog_migration.rs:273-332#one_configured_identity_can_still_resolve_multiple_explicit_tiers]
-[src: file: backend/src/agents/runner.rs:3531-3603#configured_model_flag]
+[src: file: backend/src/agents/runner.rs:3555-3627#configured_model_flag]
 
 Qualification on backend tree `189eb0f577ac44372ea5e85540ff5052321729e7`:
 the first five migration controls produced four failures on unchanged code;
@@ -332,8 +332,8 @@ Resending the same agent no longer clears an existing connection or invalidates
 the summary cache. A lightweight agent lookup avoids loading the transcript
 merely to compare targets.
 [src: file: backend/src/models/discussions.rs:609-618#connection_id]
-[src: file: backend/src/api/discussions/crud.rs:833-863#validate_connection_target]
-[src: file: backend/src/api/discussions/crud.rs:904-928#invalidate_summary_cache]
+[src: file: backend/src/api/discussions/crud.rs:1013-1043#validate_connection_target]
+[src: file: backend/src/api/discussions/crud.rs:1086-1110#invalidate_summary_cache]
 [src: file: backend/src/db/discussions.rs:1102-1111#get_discussion_agent]
 
 Seven isolated Router/SQLite regressions cover changed and unchanged targets,

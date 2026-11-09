@@ -1846,7 +1846,7 @@ mod tests {
         assert!(facts_block(tmp.path()).is_some());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     fn a_hard_link_to_an_outside_file_is_never_a_fact() {
         let project = tempfile::tempdir().unwrap();
@@ -1865,7 +1865,7 @@ mod tests {
         assert_eq!(conflicts(project.path(), &docs), Vec::new());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlink_to_an_outside_file_or_directory_is_never_a_fact() {
         use std::os::unix::fs::symlink;
@@ -1898,7 +1898,7 @@ mod tests {
         assert_eq!(facts_block(workflows.path()), None);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_file_name_cannot_inject_a_line_into_the_facts_block() {
         let tmp = tempfile::tempdir().unwrap();

@@ -272,6 +272,24 @@ fn the_first_build_runs_with_the_jobs_cap_and_the_lane_target() {
     );
 }
 
+/// KT-1633: the lane's first build (a `cargo test --no-run` of the whole
+/// graph) reaches the probe runner as a background command, so the runner —
+/// the sandboxed one included — starts it behind the priority launcher.
+#[test]
+fn the_first_build_asks_the_runner_for_background_priority() {
+    let fx = fixture();
+    let lane = fx.lane("kt-1633-priority", LOCK_A);
+    let runner = ScriptedBuild::ok();
+    warm(&lane, &runner, &RecordingClone::new(), &BuildGate::new());
+
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].priority,
+        crate::core::background_priority::Priority::Background
+    );
+}
+
 // ── Seeding ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -547,7 +565,7 @@ fn an_existing_debug_directory_is_never_overwritten() {
 
 /// GNU `cp --reflink=always` on a file system without reflinks (ext4) makes
 /// the directories, then fails on the first file: the clone must remove them.
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
 #[test]
 fn a_failed_cp_reflink_leaves_no_partial_tree() {
     use std::os::unix::fs::PermissionsExt;
@@ -580,7 +598,7 @@ fn a_failed_cp_reflink_leaves_no_partial_tree() {
     assert!(destination.join("keep").is_dir());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // reads unix inode metadata
 #[test]
 fn clone_tree_is_copy_on_write_not_a_shared_or_a_copied_tree() {
     use std::os::unix::fs::MetadataExt;
@@ -1245,7 +1263,7 @@ fn cancelling_a_running_first_build_stops_it_and_frees_its_slot() {
     assert!(gate.try_acquire(1).is_some());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
 #[test]
 fn the_process_runner_kills_a_cancelled_build_and_what_it_started() {
     let dir = tempfile::tempdir().unwrap();
@@ -1258,6 +1276,7 @@ fn the_process_runner_kills_a_cancelled_build_and_what_it_started() {
         cwd: dir.path().to_path_buf(),
         env: Vec::new(),
         timeout: Duration::from_secs(120),
+        priority: crate::core::background_priority::Priority::Normal,
     };
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();

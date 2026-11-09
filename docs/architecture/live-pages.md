@@ -439,8 +439,8 @@ keeps its previous data. A stdout that starts with `{` or `[` is parsed and
 stored as the JSON value; if it does not parse, the step fails the same way.
 Other text is published as a string. The Exec output is scrubbed of the
 project's GitHub token before it reaches the run record or a Page.
-`[src: file: backend/src/workflows/exec_step.rs:59-61#MAX_PUBLISH_OUTPUT_BYTES]`
-`[src: file: backend/src/workflows/exec_step.rs:411-416#secrets]`
+`[src: file: backend/src/workflows/exec_step.rs:60-62#MAX_PUBLISH_OUTPUT_BYTES]`
+`[src: file: backend/src/workflows/exec_step.rs:437-442#secrets]`
 `[src: file: backend/src/workflows/publish_page_step.rs:152-165#from_exec]`
 `[src: file: backend/src/workflows/publish_page_step.rs:180-226#exec_value]`
 
@@ -608,10 +608,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1189-1212#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:13296-13485#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:14600-14642#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:14837-14879#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:14789-14859#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:13576-13765#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:14880-14922#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:15117-15159#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:15061-15131#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for

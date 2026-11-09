@@ -306,7 +306,7 @@ fn the_template_ships_and_routes_every_box_of_the_operating_docs() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_symlinked_folder_is_never_written_through() {
     let tmp = tempfile::tempdir().unwrap();

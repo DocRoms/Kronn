@@ -205,7 +205,7 @@ this degrades and continues.
   runs. While an audit of the project shows progress, such an agent is not
   started: its dispatch goes back to the queue with its attempts intact. A
   run clears its progress before it spawns its own validation agent.
-  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:571#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1348-1351#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1358-1379#progress] [src: file: backend/src/api/audit/full.rs:3919-3922#clear_progress]
+  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:568#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1348-1351#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1358-1379#progress] [src: file: backend/src/api/audit/full.rs:3919-3922#clear_progress]
 - **Cancel.** A cancel waits for the worker to acknowledge it. Without that
   acknowledgement it answers with an error, and the UI keeps the audit shown,
   marked "cancel pending". It deletes only the validation discussion linked to
@@ -440,7 +440,7 @@ Historical runs without fingerprints require a new audit before signoff.
 [src: file: backend/src/core/audit_documents.rs:11-45#capture]
 [src: file: backend/src/core/audit_documents.rs:51-65#verify]
 [src: file: backend/src/db/discussions.rs:1885-1922#insert_native_agent_message_with_audit_documents]
-[src: file: backend/src/api/discussions/streaming.rs:5149-5171#validation_documents]
+[src: file: backend/src/api/discussions/streaming.rs:5163-5185#validation_documents]
 [src: file: backend/src/db/sql/260_audit_document_fingerprints.sql:1-3#final_doc_fingerprints_json]
 
 The explicit re-anchor action sends `deterministic_only: true`. It returns the
@@ -736,7 +736,7 @@ category.
   (the backend stopped)` reason. Until then the doc would sit half-written
   with no marker. A step that never ended and has no verdict is a blocker of
   its own (`NeverEnded`): accepting it needs the override too.
-  [src: file: backend/src/api/audit/step_guard.rs:587-614#settle_unfinished_at_boot] [src: file: backend/src/db/mod.rs:293-297#stop_agents_and_settle_at_boot] [src: file: backend/src/api/audit/step_guard.rs:926-941#AcceptBlocker]
+  [src: file: backend/src/api/audit/step_guard.rs:587-614#settle_unfinished_at_boot] [src: file: backend/src/db/mod.rs:298-302#stop_agents_and_settle_at_boot] [src: file: backend/src/api/audit/step_guard.rs:926-941#AcceptBlocker]
 - **Settling never destroys what the agent did not write.** The audit
   watches the target on the activity tick and keeps the fingerprint of what it
   saw the agent write (`audit_step_snapshots.observed_hash`, migration 264).

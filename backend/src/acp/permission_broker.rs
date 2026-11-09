@@ -1438,7 +1438,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_location_reached_through_an_in_project_symlink_to_outside_is_denied() {
         use std::os::unix::fs::symlink;
@@ -1530,7 +1530,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_link_to_a_real_secret_file_is_refused_under_its_innocent_name() {
         let project = tempfile::tempdir().unwrap();

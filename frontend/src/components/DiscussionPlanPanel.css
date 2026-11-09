@@ -915,6 +915,7 @@
 .orch-launch-auto { display: grid; gap: 4px; color: var(--kr-text-secondary); font-size: var(--kr-fs-xs); }
 .orch-launch-validations { grid-column: 1 / -1; }
 .orch-launch-validations textarea { min-height: 72px; resize: vertical; }
+.orch-launch-validations-hint { grid-column: 1 / -1; margin: 0; }
 .orch-launch-fallbacks { display: flex; flex-wrap: wrap; gap: 8px 14px; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-radius-sm); }
 .orch-launch-fallbacks legend { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); }
 .orch-launch-fallbacks label,
@@ -924,7 +925,8 @@
   .orch-launch-backdrop { align-items: end; padding: 0; }
   .orch-launch-dialog { max-height: 92vh; border-radius: var(--kr-r-lg) var(--kr-r-lg) 0 0; }
   .orch-launch-grid { grid-template-columns: 1fr; }
-  .orch-launch-validations { grid-column: auto; }
+  .orch-launch-validations,
+  .orch-launch-validations-hint { grid-column: auto; }
   .orch-campaign-item { align-items: stretch; flex-direction: column; }
 }
 

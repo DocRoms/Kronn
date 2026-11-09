@@ -187,6 +187,7 @@ async fn run_cli(
         None,
         &[],
         None,
+        crate::core::background_priority::Priority::Normal,
     )
     .expect("spawn");
     let output = tokio::time::timeout(

@@ -130,7 +130,7 @@ async fn an_audit_cannot_touch_anything_outside_the_project() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[tokio::test]
 async fn an_audit_cannot_leave_the_project_through_a_symlink() {
     let outer = tempfile::tempdir().unwrap();

@@ -13,6 +13,7 @@ pub mod audit_mcp_filter;
 pub mod audit_run_state;
 pub mod audit_state;
 pub mod audit_validation;
+pub mod background_priority;
 pub mod backup;
 pub mod bridge_admit;
 pub mod bridge_token;

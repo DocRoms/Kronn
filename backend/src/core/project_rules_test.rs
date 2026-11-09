@@ -184,7 +184,7 @@ fn a_glob_matching_nothing_does_not_fire() {
     assert!(detect_ban_violations(t.path(), &rules).is_empty());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn symlinks_are_never_followed() {
     let t = tempfile::tempdir().unwrap();

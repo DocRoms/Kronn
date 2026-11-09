@@ -6005,6 +6005,8 @@ fn validation_metadata_command(
         cwd: cwd.to_path_buf(),
         env: Vec::new(),
         timeout: std::time::Duration::from_secs(15),
+        // A bounded target-dir lookup that gates a validation's refusal.
+        priority: crate::core::background_priority::Priority::Normal,
     };
     // Preserve the validation's manifest and configuration options. Validations
     // are normally launched from the repository root, including commands such
@@ -6179,10 +6181,16 @@ async fn run_one_validation_checked(
             let cancel = tokio_util::sync::CancellationToken::new();
             match launch.confinement() {
                 Some(confinement) => {
-                    crate::core::quick_exec::run_confined(&validated, None, &cancel, confinement)
-                        .await
+                    crate::core::quick_exec::run_confined(
+                        &validated,
+                        None,
+                        &cancel,
+                        confinement,
+                        crate::core::background_priority::Priority::Background,
+                    )
+                    .await
                 }
-                None => crate::core::quick_exec::run(&validated, None, &cancel).await,
+                None => crate::core::quick_exec::run_background(&validated, None, &cancel).await,
             }
         },
     )
@@ -10298,8 +10306,10 @@ fn worker_brief_markdown_in(
         "Run the **targeted** tests that cover your change and report each result \
          (`pass`/`fail`/`skipped` + non-empty evidence) in `tests`. A `pass` without a \
          verifiable command or output is refused.\n\
-         The long validations persisted by the principal (often the full suite) are run by \
-         Kronn at integration, after the review: do not replay them in full. The shell tool \
+         The default validations are fmt + clippy + targeted lib tests (`cargo test --lib \
+         <filter>`): the full suite is owned by the PR's CI, never by a local run. The long \
+         validations persisted by the principal are run by Kronn at integration, after the \
+         review: do not replay them in full. The shell tool \
          cuts a long command (Bash: 600 s): never start one in the background to wait for it, \
          because your process ends as soon as you hand the turn back and the execution ends \
          without a delivery. Chain it all in the same turn: targeted tests, commit, then \
@@ -10316,7 +10326,9 @@ fn worker_brief_markdown_in(
         "Lance les tests **ciblés** qui couvrent ton changement et reporte chaque résultat \
          (`pass`/`fail`/`skipped` + preuve non vide) dans `tests`. Un `pass` sans \
          commande ou sortie vérifiable est refusé.\n\
-         Les validations longues persistées par le principal (souvent la suite complète) sont \
+         Les validations par défaut sont fmt + clippy + tests lib ciblés (`cargo test --lib \
+         <filtre>`) : la suite complète appartient à la CI de la PR, jamais à un run local. \
+         Les validations longues persistées par le principal sont \
          jouées par Kronn à l'intégration, après la revue : ne les rejoue pas en entier. \
          L'outil shell coupe une commande longue (Bash : 600 s) : n'en lance jamais une en \
          arrière-plan pour l'attendre, car ton processus s'arrête dès que tu rends la main \
@@ -11036,6 +11048,116 @@ pub(crate) fn validations_refusal(
     validate_new_validation_specs(validations)
         .err()
         .map(|reason| preparation_reason("invalid_validations", reason))
+}
+
+/// KT-1636 — a validation that replays the whole Rust suite: bare
+/// `cargo test` / `cargo nextest run` (no `--lib`/`--bin`/`--test`/`--doc`/…
+/// target, no name filter after the subcommand or after `--`), or the
+/// `make test-backend` family. Averages ~20 min locally against 3.3 min for
+/// `cargo test --lib` (KT-1630 audit): in the CI gate model the PR owns it.
+/// Split on whitespace exactly as the runner does; not a shell parser.
+fn is_full_suite_validation(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    if let ["make", target, ..] = words.as_slice() {
+        return matches!(*target, "test-backend" | "test-backend-cov");
+    }
+    let Ok(Some(cargo)) = validation_cargo_argv(command) else {
+        return false;
+    };
+    // Global options may precede the subcommand (`cargo --offline test`).
+    let Some(subcommand) = cargo.iter().position(|word| !word.starts_with('-')) else {
+        return false;
+    };
+    let args = &cargo[subcommand + 1..];
+    let args = match cargo[subcommand] {
+        "test" => args,
+        "nextest" => match args {
+            ["run", rest @ ..] => rest,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    // Flags whose next word is their value, not a test-name filter.
+    const VALUE_FLAGS: &[&str] = &[
+        "--manifest-path",
+        "--target-dir",
+        "--config",
+        "--features",
+        "--package",
+        "--profile",
+        "--jobs",
+        "--color",
+        "--message-format",
+        "--cargo-profile",
+        "-p",
+        "-j",
+        "-F",
+        "-Z",
+    ];
+    const NARROWING_FLAGS: &[&str] = &[
+        "--lib",
+        "--bin",
+        "--bins",
+        "--test",
+        "--tests",
+        "--doc",
+        "--example",
+        "--examples",
+        "--bench",
+        "--benches",
+        "--no-run",
+        "--list",
+    ];
+    let mut index = 0;
+    while index < args.len() {
+        let word = args[index];
+        if word == "--" {
+            // Anything after the separator is a filter or a harness flag; a
+            // positional one narrows the run.
+            return !args[index + 1..].iter().any(|rest| !rest.starts_with('-'));
+        }
+        if NARROWING_FLAGS.contains(&word)
+            || NARROWING_FLAGS.iter().any(|flag| {
+                word.strip_prefix(flag)
+                    .is_some_and(|value| value.starts_with('='))
+            })
+        {
+            return false;
+        }
+        if VALUE_FLAGS.contains(&word) {
+            index += 2;
+            continue;
+        }
+        if !word.starts_with('-') {
+            return false; // a test-name filter
+        }
+        index += 1;
+    }
+    true
+}
+
+/// KT-1636 — non-blocking preflight note for each full-suite gate. The PR's CI
+/// owns the full suite; a local integration validation is fmt + clippy +
+/// targeted `--lib` tests. The gate still runs if the principal keeps it.
+pub(crate) fn full_suite_validation_warnings(
+    validations: &[crate::models::ValidationSpec],
+) -> Vec<crate::models::CampaignTaskReason> {
+    validations
+        .iter()
+        .filter(|spec| is_full_suite_validation(&spec.command))
+        .map(|spec| {
+            preparation_reason(
+                "full_suite_ci_owned",
+                format!(
+                    "`{}` replays the whole test suite (about 20 min locally, against 3.3 min for \
+                     `cargo test --lib`): the full suite belongs to the PR's CI. Prefer `cargo fmt \
+                     --check`, `cargo clippy` and targeted lib tests (`cargo test --lib <filter>`) \
+                     as integration validations.",
+                    spec.command.trim()
+                ),
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn worker_scope_refusal(
@@ -11784,11 +11906,40 @@ fn execution_phase_progress(
         });
     };
     let (phase, reason, queue_position) = match job.status {
-        DispatchStatus::Pending => (
-            TaskExecutionProgressPhase::Queued,
-            Some("concurrency_limit_or_scheduler".into()),
-            None,
-        ),
+        // KT-1632 — the task-worker cap holds this launch: the claim left the
+        // reason on the job (`task_worker_limit:<running>/<cap>`), so it is
+        // still told after a restart. It is told only while the job is really in
+        // line: one a backoff keeps out has no place, and its stored reason is
+        // stale.
+        DispatchStatus::Pending => {
+            let cap_reason = job
+                .progress_detail
+                .clone()
+                .filter(|detail| {
+                    job.progress_phase.as_deref() == Some("queued")
+                        && detail.starts_with(
+                            crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX,
+                        )
+                })
+                .map(|detail| {
+                    crate::db::agent_dispatch::task_worker_queue_position(conn, &job.id)
+                        .map(|position| position.map(|position| (detail, position)))
+                })
+                .transpose()?
+                .flatten();
+            match cap_reason {
+                Some((detail, position)) => (
+                    TaskExecutionProgressPhase::Queued,
+                    Some(detail),
+                    Some(position),
+                ),
+                None => (
+                    TaskExecutionProgressPhase::Queued,
+                    Some("concurrency_limit_or_scheduler".into()),
+                    None,
+                ),
+            }
+        }
         DispatchStatus::Running if job.agent_started_at.is_none() => (
             TaskExecutionProgressPhase::Queued,
             Some("local_concurrency_limit".into()),
@@ -15034,6 +15185,7 @@ pub async fn task_exec_prepare(
     let worker = request.worker;
     let scope_refusal = worker_scope_refusal(&worker, request.worker_scope.as_ref());
     let validations_refusal = validations_refusal(&request.validations);
+    let full_suite_warnings = full_suite_validation_warnings(&request.validations);
     let rounds_refusal = match review_rounds_argument(request.max_review_rounds.as_ref()) {
         Ok(_) => None,
         Err(detail) => Some(preparation_reason("invalid_max_review_rounds", detail)),
@@ -15053,6 +15205,7 @@ pub async fn task_exec_prepare(
             }
             let mut preparation = prepare_task_execution(conn, &task, &parent, &worker)?;
             preparation.warnings.extend(catalog_warning);
+            preparation.warnings.extend(full_suite_warnings);
             preparation.default_max_review_rounds =
                 Some(crate::models::review_limit_json(default_rounds));
             for reason in [
@@ -15295,6 +15448,10 @@ pub struct TaskExecutionCompactStatus {
     /// transcripts (KT-911). `view: full` lists them all, attempts included.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub worker_sessions: Vec<String>,
+    /// KT-1632 — why a launch waits for its worker to start: the task-worker
+    /// cap is full. Absent once the worker runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued: Option<String>,
     pub next_action: Option<CompactNextAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait: Option<ExecutionWaitOutcome>,
@@ -15376,6 +15533,26 @@ fn compact_next_action(detail: &crate::models::TaskExecutionDetail) -> Option<Co
         ),
     };
     Some(CompactNextAction { tool, reason })
+}
+
+/// The sentence a queued launch reports in place of a silent `Working`: the
+/// cap that holds it, how full it is and its place in the queue.
+fn task_worker_queue_reason(progress: &crate::models::TaskExecutionProgress) -> Option<String> {
+    if progress.phase != crate::models::TaskExecutionProgressPhase::Queued {
+        return None;
+    }
+    let counts = progress
+        .reason
+        .as_deref()?
+        .strip_prefix(crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX)?;
+    let (running, cap) = counts.split_once('/')?;
+    let place = progress
+        .queue_position
+        .map(|position| format!(", position {position}"))
+        .unwrap_or_default();
+    Some(format!(
+        "queued: {running} of {cap} local task workers running (max_concurrent_task_workers){place}; starts when a slot frees"
+    ))
 }
 
 fn compact_last_error(detail: &crate::models::TaskExecutionDetail) -> Option<String> {
@@ -15478,6 +15655,7 @@ pub(crate) fn compact_execution_status(
             .iter()
             .map(|session| session.session_id.clone())
             .collect(),
+        queued: task_worker_queue_reason(&detail.progress),
         next_action: compact_next_action(detail),
         wait,
     };
@@ -20548,6 +20726,127 @@ pub(crate) mod tests {
         );
     }
 
+    /// KT-1632 — a launch held back by the task-worker cap is `Queued` with its
+    /// reason, place and the cap on the execution detail and in the compact
+    /// status a polling principal reads; it reports `Launching` once a slot
+    /// frees, and the reason is gone.
+    #[tokio::test]
+    async fn a_launch_held_by_the_task_worker_cap_reports_why_and_where() {
+        const CAP_ONE: &str = r#"{"__task_workers":1}"#;
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (first_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let second_ref = db
+            .with_conn(move |conn| {
+                Ok(create_todo_task(conn, &project_id, "Second task")
+                    .summary
+                    .reference)
+            })
+            .await
+            .unwrap();
+        let mut launched = Vec::new();
+        for (task_reference, key) in [(first_ref, "cap-first"), (second_ref, "cap-second")] {
+            launched.push(
+                provision_single_task_execution(
+                    &db,
+                    ProvisionInput {
+                        task_reference,
+                        parent_discussion_id: parent_id.clone(),
+                        worker: native_worker(),
+                        base_rev: Some("main".into()),
+                        idempotency_key: Some(key.into()),
+                    },
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let first_dispatch = launched[0].dispatch_job_id.clone().unwrap();
+        let second_dispatch = launched[1].dispatch_job_id.clone().unwrap();
+        db.with_conn({
+            let first_dispatch = first_dispatch.clone();
+            move |conn| {
+                crate::db::agent_dispatch::claim_with_limits(conn, &first_dispatch, Some(CAP_ONE))?
+                    .unwrap();
+                crate::db::agent_dispatch::mark_agent_started(conn, &first_dispatch)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        let held = db
+            .with_conn({
+                let second_dispatch = second_dispatch.clone();
+                move |conn| {
+                    crate::db::agent_dispatch::claim_with_limits(
+                        conn,
+                        &second_dispatch,
+                        Some(CAP_ONE),
+                    )
+                }
+            })
+            .await
+            .unwrap();
+        assert!(held.is_none(), "the one slot is taken");
+
+        let second_id = launched[1].id.clone();
+        let queued = db
+            .with_conn({
+                let id = second_id.clone();
+                move |conn| execution_detail(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            queued.progress.phase,
+            crate::models::TaskExecutionProgressPhase::Queued
+        );
+        assert_eq!(
+            queued.progress.reason.as_deref(),
+            Some("task_worker_limit:1/1")
+        );
+        assert_eq!(queued.progress.queue_position, Some(1));
+        let compact = compact_execution_status(&queued, None);
+        let sentence = compact.queued.clone().expect("a queued launch says why");
+        assert!(sentence.contains("1 of 1 local task workers"), "{sentence}");
+        assert!(sentence.contains("position 1"), "{sentence}");
+        assert!(
+            compact_status_chars(&compact) <= COMPACT_STATUS_MAX_CHARS,
+            "the reason stays inside the compact budget"
+        );
+
+        // The running worker reports no queue reason.
+        let running = db
+            .with_conn({
+                let id = launched[0].id.clone();
+                move |conn| execution_detail(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(running.progress.queue_position, None);
+        assert!(compact_execution_status(&running, None).queued.is_none());
+
+        // A freed slot starts it; nothing is left of the reason.
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::mark_completed(conn, &first_dispatch)?;
+            crate::db::agent_dispatch::claim_with_limits(conn, &second_dispatch, Some(CAP_ONE))?
+                .unwrap();
+            crate::db::agent_dispatch::mark_agent_started(conn, &second_dispatch)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let started = db
+            .with_conn(move |conn| execution_detail(conn, &second_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            started.progress.phase,
+            crate::models::TaskExecutionProgressPhase::Launching
+        );
+        assert!(compact_execution_status(&started, None).queued.is_none());
+    }
+
     async fn count(db: &Database, sql: &'static str) -> i64 {
         db.with_conn(move |conn| Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))?))
             .await
@@ -21284,7 +21583,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[test]
     fn reap_child_stops_a_group_whose_leader_already_exited() {
         let dir = tempfile::tempdir().unwrap();
@@ -21296,7 +21595,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[test]
     fn reap_child_reads_early_exit_stderr_despite_a_live_descendant() {
         let dir = tempfile::tempdir().unwrap();
@@ -21316,7 +21615,7 @@ pub(crate) mod tests {
         assert_gone(descendant, "the diagnostic read must stop the group first");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn surviving_git_hook_blocks_restart_reap_until_it_exits() {
         let repo = init_repo();
@@ -22844,6 +23143,71 @@ pub(crate) mod tests {
         assert_eq!(resolved, target);
     }
 
+    /// KT-1636 — the full suite is the PR's CI's; fmt, clippy and targeted lib
+    /// tests are the local defaults and raise nothing.
+    #[test]
+    fn full_suite_validations_are_flagged_and_the_default_gates_are_not() {
+        // The table the frontend's `isFullSuiteValidation` test reads too
+        // (`frontend/src/lib/__tests__/fullSuiteValidation.test.ts`): one rule,
+        // two detectors, one list of cases.
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/full_suite_validation_cases.json"
+        ))
+        .unwrap();
+        let cases = table["cases"].as_array().unwrap();
+        assert!(cases.len() >= 10, "the table must keep its coverage");
+        for case in cases {
+            let command = case["command"].as_str().unwrap();
+            let expected = case["full_suite"].as_bool().unwrap();
+            assert_eq!(
+                is_full_suite_validation(command),
+                expected,
+                "`{command}` full_suite should be {expected}"
+            );
+        }
+        let specs = |commands: &[&str]| -> Vec<crate::models::ValidationSpec> {
+            commands
+                .iter()
+                .map(|command| crate::models::ValidationSpec {
+                    command: (*command).to_string(),
+                    quick_exec_id: None,
+                    timeout_secs: None,
+                })
+                .collect()
+        };
+        assert!(full_suite_validation_warnings(&specs(&[
+            "cargo fmt --check",
+            "cargo test --lib x"
+        ]))
+        .is_empty());
+        let warnings = full_suite_validation_warnings(&specs(&["cargo fmt --check", "cargo test"]));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "full_suite_ci_owned");
+        assert!(warnings[0].detail.contains("`cargo test`"));
+        assert!(warnings[0].detail.contains("CI"));
+        // A warning never refuses: the same command is still a valid gate.
+        assert!(validations_refusal(&specs(&["cargo test"])).is_none());
+    }
+
+    /// KT-1636 — the worker brief names the default gates and who owns the suite.
+    #[test]
+    fn shell_worker_brief_names_the_default_validations_and_the_ci_owned_suite() {
+        let brief = worker_brief_markdown(
+            "KT-1636",
+            "CI owns the suite",
+            "Objective",
+            &[],
+            "/wt/kt1636",
+            "kronn/task/KT-1636",
+            "abc1234",
+            true,
+            true,
+            None,
+        );
+        assert!(brief.contains("fmt + clippy + tests lib ciblés"), "{brief}");
+        assert!(brief.contains("appartient à la CI de la PR"), "{brief}");
+    }
+
     #[test]
     fn validation_cargo_argv_recognises_only_quick_exec_cargo_forms() {
         assert_eq!(
@@ -22921,7 +23285,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn metadata_timeout_kills_and_reaps_the_owned_child() {
         use std::process::Stdio;
@@ -23338,7 +23702,7 @@ pub(crate) mod tests {
     /// KT-1268 review — a timed-out metadata resolution takes the whole group
     /// of the confined launch down, not only its leader: a grandchild of the
     /// worker's `rustc` wrapper must not outlive the timeout.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn metadata_timeout_kills_the_grandchildren_of_a_group_leader() {
         use std::process::Stdio;
@@ -45273,6 +45637,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: false,
+                    ..Default::default()
                 }),
                 None,
                 9,
@@ -45281,6 +45646,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: true,
+                    ..Default::default()
                 }),
                 None,
                 crate::models::UNLIMITED_REVIEW_ROUNDS,
@@ -45289,6 +45655,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: true,
+                    ..Default::default()
                 }),
                 Some(2),
                 2,

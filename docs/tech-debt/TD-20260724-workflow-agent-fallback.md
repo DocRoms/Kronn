@@ -53,8 +53,8 @@ discussion identity. Switching Claude to Codex or Ollama changes more than the
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
-currently wins over the tier. [src: file: backend/src/models/setup.rs:869-915#ModelTier]
-[src: file: backend/src/agents/runner.rs:3584-3618#resolve_model_flag]
+currently wins over the tier. [src: file: backend/src/models/setup.rs:908-954#ModelTier]
+[src: file: backend/src/agents/runner.rs:3608-3642#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
 
@@ -69,7 +69,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:901-976#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:940-1015#AgentDetection]
 
 ## Policy and precedence
 
@@ -118,7 +118,7 @@ The execution boundary currently exposes strings for start failures and only
 three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 `RuntimeUnavailable`). The richer rate-limit/auth/server detection is a
 presentation helper that scans raw output after execution; it is not a routing
-contract. [src: file: backend/src/agents/runner.rs:3904#start_agent_with_config]
+contract. [src: file: backend/src/agents/runner.rs:3928#start_agent_with_config]
 [src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
 [src: file: backend/src/api/discussions/orchestration.rs:1664-1804#detect_agent_error_hint]
 
@@ -248,7 +248,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 
 | Current spawn path | What it covers |
 |---|---|
-| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4529-4572#native_http_tools] |
+| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4543-4586#native_http_tools] |
 | Debate pre-summary | Compresses the shared context before debate. [src: file: backend/src/api/discussions/orchestration.rs:695-791#ToolFreeSummary] |
 | Debate participants | Starts every participant/round independently. [src: file: backend/src/api/discussions/orchestration.rs:803-1020#start_agent_with_config] |
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:1032-1189#synthesis_external_http] |

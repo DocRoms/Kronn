@@ -951,7 +951,7 @@ async fn a_mute_startup_phase_fails_fast(mode: &str, phase: &str, bound: Duratio
     error
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
 #[tokio::test]
 #[serial]
 async fn an_acp_runtime_that_never_answers_initialize_is_stopped_with_its_phase() {
@@ -964,7 +964,7 @@ async fn an_acp_runtime_that_never_answers_initialize_is_stopped_with_its_phase(
     );
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
 #[tokio::test]
 #[serial]
 async fn an_acp_runtime_that_never_opens_its_session_names_the_project_servers() {
@@ -985,7 +985,7 @@ async fn an_acp_runtime_that_never_opens_its_session_names_the_project_servers()
 /// A run busy with tool updates for longer than the delay, with no text at
 /// all until its answer, is not cut, and it tells consumers that its own
 /// watchdog owns inactivity, so their text timers stand down.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[tokio::test]
 #[serial]
 async fn an_acp_run_busy_with_tool_updates_outlives_the_delay() {
@@ -1013,7 +1013,7 @@ async fn an_acp_run_busy_with_tool_updates_outlives_the_delay() {
 
 /// A runtime that answers `session/new` with an error is settled with that
 /// error and its phase at once, never left to a silent retry.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[tokio::test]
 #[serial]
 async fn an_acp_session_refused_by_the_runtime_is_a_settled_start_failure() {
@@ -1057,7 +1057,7 @@ async fn an_acp_session_refused_by_the_runtime_is_a_settled_start_failure() {
 }
 
 /// A stop during startup ends the start at once and kills the runtime.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[tokio::test]
 #[serial]
 async fn stopping_during_startup_ends_the_start_and_kills_the_runtime() {
@@ -1214,7 +1214,7 @@ async fn reasoning_frames_become_thoughts(
     assert_eq!(thoughts, 12, "one proof of life per frame: {events:?}");
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // fixture is a POSIX shell script (cat, printf) standing in for the agent CLI
 #[tokio::test]
 #[serial]
 async fn a_claude_turn_that_only_thinks_is_not_cut() {
@@ -1241,7 +1241,7 @@ printf '%s\n' '{"type":"result","subtype":"success","usage":{"input_tokens":1,"o
     reasoning_frames_become_thoughts(Arc::new(adapter), &project, "thought it through").await;
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // fixture is a POSIX shell script (cat, printf) standing in for the agent CLI
 #[tokio::test]
 #[serial]
 async fn a_codex_turn_that_only_reasons_is_not_cut() {
@@ -1273,7 +1273,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_
 /// The prompt half: a session that opens, then never says a word. The run
 /// fails on the configured delay with the no-first-token reason the discussion
 /// turns into its own message, and the process group is gone.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[tokio::test]
 #[serial]
 async fn an_acp_prompt_that_never_answers_fails_on_the_delay_and_is_killed() {
@@ -1306,7 +1306,7 @@ async fn an_acp_prompt_that_never_answers_fails_on_the_delay_and_is_killed() {
 /// DoD 3 for ACP, against the simulated Ollama — the agent is stopped with its
 /// whole process group, so its connection to the model server closes and the
 /// model is free again.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[tokio::test]
 #[serial]
 async fn stopping_an_acp_agent_frees_the_model_it_was_talking_to() {
@@ -1342,7 +1342,7 @@ async fn stopping_an_acp_agent_frees_the_model_it_was_talking_to() {
 /// DoD 1 for ACP, against the simulated Ollama — the incident itself. The agent
 /// holds an open, mute connection to the model server; nothing on either side
 /// would ever notice.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[tokio::test]
 #[serial]
 async fn an_acp_agent_stuck_on_a_mute_model_fails_the_run_and_frees_the_model() {
@@ -1384,7 +1384,7 @@ async fn an_acp_agent_stuck_on_a_mute_model_fails_the_run_and_frees_the_model() 
 /// DoD 3 for ACP, without a network — the same stop, observed on a pipe that the
 /// agent AND the helper it started both hold. The line closes only when the
 /// whole process group is gone, which is what lets a model server notice.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[tokio::test]
 #[serial]
 async fn stopping_an_acp_agent_closes_every_connection_its_process_group_held() {
@@ -1425,7 +1425,7 @@ async fn stopping_an_acp_agent_closes_every_connection_its_process_group_held() 
 
 /// DoD 1 for ACP, without a network — the agent goes quiet while holding the
 /// line. The run fails by itself, with its reason, and the line is released.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[tokio::test]
 #[serial]
 async fn an_acp_agent_that_goes_quiet_fails_the_run_and_releases_its_connection() {
@@ -1476,7 +1476,7 @@ async fn an_acp_agent_that_goes_quiet_fails_the_run_and_releases_its_connection(
 /// answer is 2.5 s from the start and the only TEXT is at the very end: what
 /// keeps the run alive against a 1 s delay is the thought frames, which carry
 /// nothing to show and everything to prove.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[tokio::test]
 #[serial]
 async fn a_slow_but_living_acp_agent_is_not_cut() {

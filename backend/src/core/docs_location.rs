@@ -571,7 +571,7 @@ mod tests {
         assert_eq!(r.relative(root).as_deref(), Some(".ai"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlinked_override_is_refused_and_unusable() {
         let t = tmp();
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlink_in_a_parent_component_is_refused_too() {
         let t = tmp();
@@ -696,7 +696,7 @@ mod tests {
         assert!(std::ptr::eq(interned, ai.relocate_static("docs/AGENTS.md")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_refused_override_refuses_the_pipeline_root() {
         let t = tmp();
@@ -711,7 +711,7 @@ mod tests {
         assert!(refused.unwrap_err().contains("symlink"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn guard_write_fails_closed_on_a_symlink_created_after_save() {
         let t = tmp();

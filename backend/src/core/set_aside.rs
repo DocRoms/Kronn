@@ -276,8 +276,9 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
         ["tts_voices", _] => Text,
         ["disabled_agents" | "unlocked_profiles" | "disabled_auto_skills", "[]"] => Text,
         ["embed_allowed_origins", "[]"] => Url,
-        ["workers", "default_max_review_rounds"] => Number,
+        ["workers", "default_max_review_rounds" | "max_concurrent_task_workers"] => Number,
         ["workers", "review_rounds_unlimited"] => Flag,
+        ["workers", "background_priority"] => Flag,
         ["tokens", "disabled_overrides", "[]"] => Text,
         ["tokens", "keys", "[]", "id" | "name" | "provider"] => Text,
         ["tokens", "keys", "[]", "active"] => Flag,
@@ -1508,7 +1509,7 @@ mod tests {
         assert_eq!(key_bound_needing(dir.path(), "not a key", &other), Err(()));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     #[test]
     fn an_enc_file_without_read_permission_fails_closed() {
         use std::os::unix::fs::PermissionsExt;
@@ -1531,7 +1532,7 @@ mod tests {
         assert!(!Blocker::KeyCheckUnavailable.message().is_empty());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[tokio::test]
     async fn a_linked_name_is_never_read_or_unlinked() {
         let (dir, db, k) = verified().await;

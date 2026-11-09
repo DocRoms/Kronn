@@ -10,7 +10,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     #[serial]
     async fn npx_fallback_preserves_output_records_provenance_and_reuses_probe() {
@@ -10344,7 +10344,7 @@ Suite de la réponse.";
     /// A `.cargo` that is a link, or a directory above it that is, would spell as
     /// inside the worktree and write outside it (a rustc wrapper in the human's
     /// `~/.cargo/config.toml`): Edit and Write are not under the Bash sandbox.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     fn the_cargo_hook_refuses_a_path_that_goes_through_a_symlink() {
         use std::os::unix::fs::symlink;
@@ -10406,7 +10406,7 @@ Suite de la réponse.";
     /// A worktree that disappears under a running worker must not leave the hook
     /// walking up to a directory that is gone: it ends at once with no decision,
     /// so the ask stands, instead of waiting for Claude's hook timeout.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[test]
     fn the_cargo_hook_ends_without_a_decision_when_the_worktree_is_gone() {
         use std::io::Write;
@@ -10961,7 +10961,7 @@ Suite de la réponse.";
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test(start_paused = true)]
     async fn copilot_task_worker_preflight_times_out_and_terminates_the_child() {
         let mut child = tokio::process::Command::new("sh")
@@ -11000,7 +11000,7 @@ Suite de la réponse.";
 
     /// The Copilot account preflight starts the CLI only with Copilot's saved
     /// full-access setting on, read at each attempt.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test]
     async fn copilot_preflight_never_starts_the_cli_without_its_full_access_setting() {
         let dir = tempfile::tempdir().unwrap();
@@ -11046,7 +11046,7 @@ Suite de la réponse.";
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test]
     async fn copilot_preflight_capture_keeps_stdout_stderr_and_spawn_failure() {
         let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, true);
@@ -11083,7 +11083,7 @@ Suite de la réponse.";
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test(start_paused = true)]
     async fn copilot_preflight_full_spawn_path_preserves_its_four_second_deadline() {
         let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, true);
@@ -11307,6 +11307,7 @@ Suite de la réponse.";
             None,
             &[],
             None,
+            crate::core::background_priority::Priority::Normal,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11349,6 +11350,7 @@ Suite de la réponse.";
             None,
             github_env,
             None,
+            crate::core::background_priority::Priority::Normal,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11357,7 +11359,7 @@ Suite de la réponse.";
 
     /// An unconnected project's agent gets no GitHub token, even one the
     /// backend's own environment or `gh` login holds; a connected one gets it.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn only_a_connected_project_hands_its_agent_a_github_token() {
         assert_eq!(
@@ -11413,6 +11415,7 @@ Suite de la réponse.";
             None,
             &[],
             None,
+            crate::core::background_priority::Priority::Normal,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11421,7 +11424,7 @@ Suite de la réponse.";
 
     /// A launched Claude task worker finds its lane in its environment, so no
     /// `VAR=x cmd` prefix is ever needed to build or test (KT-1246).
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn a_claude_task_worker_launches_with_its_lane_environment() {
         let (_repo_dir, repo, worktree) = managed_task_worktree();
@@ -11450,7 +11453,7 @@ Suite de la réponse.";
 
     /// Only Claude Code's sandbox was widened: another runtime's task worker
     /// keeps the environment it had.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn another_runtimes_task_worker_gets_no_lane_environment() {
         let (_repo_dir, repo, worktree) = managed_task_worktree();
@@ -11465,6 +11468,187 @@ Suite de la réponse.";
                 .to_string_lossy()
         );
         assert!(!repo.join("target").join("wt-kt-1246-test0001").exists());
+    }
+
+    /// What a spawned agent named `program` sees of the KT-1634 budget variables
+    /// when it runs in `work_dir`, with or without a task-worker capability.
+    #[cfg(unix)]
+    async fn budget_env_seen_by(
+        program: &str,
+        work_dir: &std::path::Path,
+        as_task_worker: bool,
+        io: SpawnIo<'_>,
+        operator: &[(&str, &str)],
+    ) -> Vec<String> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = tempfile::tempdir().unwrap();
+        let path = bin.path().join(program);
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s|%s|%s|%s|%s' \"${CARGO_BUILD_JOBS-unset}\" \
+             \"${RUST_TEST_THREADS-unset}\" \"${NEXTEST_TEST_THREADS-unset}\" \
+             \"${VITEST_MAX_WORKERS-unset}\" \"${MAKEFLAGS-unset}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let worker = worker_context();
+        // The backend's environment is the test's own, not the host's: the
+        // operator's values are exactly `operator`.
+        let mut parent = vec![("PATH", "/usr/bin:/bin")];
+        parent.extend_from_slice(operator);
+        let child = crate::core::child_env::with_parent_env(&parent, || {
+            try_spawn(
+                path.to_str().unwrap(),
+                None,
+                &[],
+                work_dir,
+                "ANTHROPIC_API_KEY",
+                None,
+                io,
+                None,
+                as_task_worker.then_some(&worker),
+                None,
+                None,
+                None,
+                &[],
+                None,
+                crate::core::background_priority::Priority::Normal,
+            )
+        })
+        .expect("the stand-in binary starts");
+        let output = child.wait_with_output().await.expect("the child exits");
+        String::from_utf8_lossy(&output.stdout)
+            .split('|')
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// KT-1634 — task workers of every CLI kind, and the agents that are not
+    /// task workers (reviewers, fix agents, discussions on a worktree), all run
+    /// their builds and tests under the same parallelism budget.
+    #[cfg(unix)] // sh stub chmod 0o755 reads the budget env
+    #[tokio::test]
+    async fn every_agent_on_a_worktree_gets_the_build_and_test_budget() {
+        let (_repo_dir, _repo, worktree) = managed_task_worktree();
+        std::fs::write(worktree.join(".git"), "gitdir: /repo/.git/worktrees/task\n").unwrap();
+        let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
+        // `make -j` is not a pure throttle: it is never set (last field).
+        let expected = vec![
+            jobs.clone(),
+            jobs.clone(),
+            jobs.clone(),
+            jobs,
+            "unset".to_string(),
+        ];
+        for (program, as_task_worker) in [
+            ("claude", true),
+            ("not-claude-agent", true),
+            ("claude", false),
+            ("not-claude-agent", false),
+        ] {
+            assert_eq!(
+                budget_env_seen_by(
+                    program,
+                    &worktree,
+                    as_task_worker,
+                    SpawnIo::Direct(None),
+                    &[]
+                )
+                .await,
+                expected,
+                "{program} (task worker: {as_task_worker})"
+            );
+        }
+    }
+
+    /// An operator who set a budget variable keeps it, for every kind of agent
+    /// (a Claude task worker's lane included); the others stay budgeted.
+    #[cfg(unix)] // sh stub chmod 0o755 reads the budget env
+    #[tokio::test]
+    async fn an_operators_own_value_wins_over_the_build_budget() {
+        let (_repo_dir, _repo, worktree) = managed_task_worktree();
+        std::fs::write(worktree.join(".git"), "gitdir: /repo/.git/worktrees/task\n").unwrap();
+        let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
+        let expected = vec![
+            jobs.clone(),
+            "5".to_string(),
+            jobs.clone(),
+            "2".to_string(),
+            "unset".to_string(),
+        ];
+        let operator = [
+            ("RUST_TEST_THREADS", "5"),
+            ("VITEST_MAX_WORKERS", "2"),
+            // Not a budget variable: never forwarded.
+            ("MAKEFLAGS", "-j64"),
+        ];
+        for (program, as_task_worker) in [("claude", true), ("not-claude-agent", false)] {
+            assert_eq!(
+                budget_env_seen_by(
+                    program,
+                    &worktree,
+                    as_task_worker,
+                    SpawnIo::Direct(None),
+                    &operator
+                )
+                .await,
+                expected,
+                "{program} (task worker: {as_task_worker})"
+            );
+        }
+    }
+
+    /// The adapted ACP route (`acp/claude_adapter.rs`, `acp/codex_adapter.rs`)
+    /// spawns the CLI itself through `try_spawn` with `SpawnIo::Adapter`: the
+    /// process it starts is the CLI, and it sees the budget.
+    #[cfg(unix)] // sh stub chmod 0o755 reads the budget env
+    #[tokio::test]
+    async fn an_adapted_acp_cli_gets_the_build_and_test_budget() {
+        let (_repo_dir, _repo, worktree) = managed_task_worktree();
+        std::fs::write(worktree.join(".git"), "gitdir: /repo/.git/worktrees/task\n").unwrap();
+        let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
+        let expected = vec![
+            jobs.clone(),
+            jobs.clone(),
+            jobs.clone(),
+            jobs,
+            "unset".to_string(),
+        ];
+        for (program, as_task_worker) in [
+            ("claude", true),
+            ("claude", false),
+            ("codex", true),
+            ("codex", false),
+        ] {
+            assert_eq!(
+                budget_env_seen_by(
+                    program,
+                    &worktree,
+                    as_task_worker,
+                    SpawnIo::Adapter(&[]),
+                    &[]
+                )
+                .await,
+                expected,
+                "{program} (task worker: {as_task_worker})"
+            );
+        }
+    }
+
+    /// Scoped to a project worktree: a directory that is not one (a discussion
+    /// on the main checkout, whose `.git` is a directory) gets no budget.
+    #[cfg(unix)] // sh stub chmod 0o755 reads the budget env
+    #[tokio::test]
+    async fn an_agent_outside_a_worktree_gets_no_build_and_test_budget() {
+        let (_repo_dir, _repo, checkout) = managed_task_worktree();
+        std::fs::create_dir(checkout.join(".git")).unwrap();
+        for io in [SpawnIo::Direct(None), SpawnIo::Adapter(&[])] {
+            assert_eq!(
+                budget_env_seen_by("not-claude-agent", &checkout, false, io, &[]).await,
+                vec!["unset"; 5],
+            );
+        }
     }
 
     fn worker_context() -> TaskWorkerBridgeContext {
@@ -11486,6 +11670,45 @@ Suite de la réponse.";
         }
     }
 
+    /// KT-1633: a task worker's launch always runs in the background, a launch
+    /// that asked for it (a workflow Agent step) does too, and the room
+    /// principal's or a plain turn's agent is the owner's own work.
+    #[test]
+    fn a_launch_runs_at_background_priority_only_for_a_worker_or_when_asked() {
+        use crate::core::cmd::Priority;
+        for requested in [Priority::Normal, Priority::Background] {
+            assert_eq!(
+                agent_launch_priority(Some(&worker_context()), requested),
+                Priority::Background
+            );
+        }
+        assert_eq!(
+            agent_launch_priority(None, Priority::Background),
+            Priority::Background
+        );
+        assert_eq!(
+            agent_launch_priority(None, Priority::Normal),
+            Priority::Normal
+        );
+    }
+
+    /// KT-1633: the default config does not ask for the background, so a
+    /// discussion turn keeps the backend's priority; only a workflow Agent step
+    /// (`workflows::steps`) sets it.
+    #[test]
+    fn an_agent_start_config_defaults_to_the_backends_own_priority() {
+        use crate::core::cmd::Priority;
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let config = AgentStartConfig::new(&AgentType::ClaudeCode, "/tmp", "p", &tokens);
+        assert_eq!(config.priority, Priority::Normal);
+    }
+
     fn workflow_step_context() -> WorkflowStepBridgeContext {
         WorkflowStepBridgeContext {
             discussion_id: "disc".into(),
@@ -11497,7 +11720,7 @@ Suite de la réponse.";
 
     /// The opt-in must never reach a step, a principal or a worker, so these
     /// three hold whatever the operator's environment says.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     #[serial]
     async fn claude_step_principal_and_worker_launch_without_the_workstation_memory() {
@@ -11536,7 +11759,7 @@ Suite de la réponse.";
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     #[serial]
     async fn claude_native_discussion_drops_the_workstation_memory_unless_opted_in() {
@@ -11559,7 +11782,7 @@ Suite de la réponse.";
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn the_memory_switch_is_only_set_for_claude_code() {
         // Another CLI never sees it: Kronn does not set it, and the child
@@ -14168,7 +14391,7 @@ Suite de la réponse.";
         assert!(limits.get("Nvidia").is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[test]
     fn process_group_probe_never_signals_the_callers_group_or_all_processes() {
         assert!(group_has_processes(0));
@@ -14306,7 +14529,7 @@ Suite de la réponse.";
 
     /// After a normal exit, whatever the agent left in its group (a stdio MCP
     /// server, a background command) goes with the process, by drop or kill.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn agent_process_clears_its_group_after_a_normal_exit() {
         for explicit_kill in [false, true] {
@@ -14351,7 +14574,7 @@ Suite de la réponse.";
 
     /// Regression test for KT-418: the production process primitive must kill
     /// a CLI agent's whole Unix group without touching an unrelated process.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn cli_agent_cancellation_kills_process_tree() {
         struct Witness(std::process::Child);

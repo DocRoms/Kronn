@@ -38,15 +38,15 @@ counters through `AgentProcess`, which Full and partial audits consume. Each
 provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
-[src: file: backend/src/agents/runner.rs:8897-8908#cached_prompt_tokens]
-[src: file: backend/src/agents/runner.rs:2119-2126#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10234-10264#task_usage]
+[src: file: backend/src/agents/runner.rs:8926-8937#cached_prompt_tokens]
+[src: file: backend/src/agents/runner.rs:2119-2126#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10245-10275#task_usage]
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
 per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 `None` means unknown, never zero (KT-997). If any response of the run reported
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
-[src: file: backend/src/agents/runner.rs:8190-8196#request_provider_cost]
+[src: file: backend/src/agents/runner.rs:8219-8225#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:2112-2117#cost_incomplete]
 [src: file: backend/src/api/audit/full.rs:2239#reported_cost_usd_micros]
 [src: file: backend/src/api/audit/drift.rs:1295#reported_cost_usd_micros]
@@ -71,8 +71,8 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:8204-8206#HOSTED_STEP_CTX_BUDGET]
-[src: file: backend/src/agents/runner.rs:8208-8210#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:8233-8235#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:8237-8239#HOSTED_AUDIT_STEP_INPUT_BUDGET]
 [src: file: backend/src/agents/runner.rs:12512-12527#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
@@ -114,7 +114,7 @@ Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
 [src: file: backend/src/api/audit/validation.rs:183-223#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:8939-8943#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/runner.rs:8968-8972#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the
@@ -285,7 +285,7 @@ without a project. This exception grants no directory listing or writing rights;
 `.kronn/context-files` remains read-only inside a project too. Symlink
 attachments are refused. Unrelated files outside the workspace keep the existing
 refusal. Images are never returned as lossy text by `read_file`.
-[src: file: backend/src/api/agent_tools.rs:3570-3602#read_attached_file]
+[src: file: backend/src/api/agent_tools.rs:3577-3609#read_attached_file]
 [src: file: backend/src/api/agent_workspace_tools.rs:1297-1341#read_attachment_payload]
 
 CLI agents retain the existing attachment prompt: an image's path and an
