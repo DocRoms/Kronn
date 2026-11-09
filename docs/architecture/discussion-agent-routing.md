@@ -128,8 +128,8 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/db/discussions.rs:3548-3808#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
 [src: file: backend/src/api/federation.rs:102-147#federate_message_revision]
-[src: file: backend/src/api/ws.rs:1164-1172#resolved_targets]
-[src: file: backend/src/api/ws.rs:920#target_agent]
+[src: file: backend/src/api/ws.rs:1179-1187#resolved_targets]
+[src: file: backend/src/api/ws.rs:935#target_agent]
 
 New-discussion aliases follow the same independent fan-out contract. Creation
 persists the initial typed targets and keeps every native target visible as a

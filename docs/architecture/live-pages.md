@@ -91,7 +91,7 @@ definitions and import identities, and refuses stale decisions. All resources,
 datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
-[src: file: backend/src/lib.rs:1431-1452#artifact_portability]
+[src: file: backend/src/lib.rs:1499-1520#artifact_portability]
 [src: file: backend/src/api/artifact_portability/import.rs:1119-1137#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 

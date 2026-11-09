@@ -124,7 +124,7 @@ this degrades and continues.
   refuses any bridge caller. It is refused when the target is missing, empty
   or still holds template placeholders. It is also refused when the run is not
   the latest `Interrupted` run, or while the audit lease is held.
-  [src: file: backend/src/lib.rs:2037-2042#accept_audit_step] [src: file: backend/src/api/audit/accept.rs:137-145#BridgeCaller] [src: file: backend/src/api/audit/accept.rs:59-81#check_target] [src: file: backend/src/api/audit/accept.rs:174-184#latest] [src: file: backend/src/api/audit/accept.rs:280-282#DocsWriteLease]
+  [src: file: backend/src/lib.rs:2106-2111#accept_audit_step] [src: file: backend/src/api/audit/accept.rs:137-145#BridgeCaller] [src: file: backend/src/api/audit/accept.rs:59-81#check_target] [src: file: backend/src/api/audit/accept.rs:174-184#latest] [src: file: backend/src/api/audit/accept.rs:280-282#DocsWriteLease]
 - Once no failed step is left, the resume runs no agent step and only
   finalizes the run. It goes to `Completed`, writes its validation discussion,
   which lists the accepted steps apart, and makes the project validatable.
@@ -199,7 +199,7 @@ this degrades and continues.
   `lease_orphaned`. The cleanup action (`POST /api/audit-runs/cleanup`) never
   touches a live audit. It settles the stale `Running` rows and releases the
   orphaned leases.
-  [src: file: backend/src/api/audit/full.rs:125-165#orphaned_leases] [src: file: backend/src/lib.rs:282#lease_orphaned] [src: file: backend/src/api/audit/run.rs:294#lease_orphaned] [src: file: backend/src/api/audit/run.rs:165-197#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:962-1003#reconcile_running_except]
+  [src: file: backend/src/api/audit/full.rs:125-165#orphaned_leases] [src: file: backend/src/lib.rs:285#lease_orphaned] [src: file: backend/src/api/audit/run.rs:294#lease_orphaned] [src: file: backend/src/api/audit/run.rs:165-197#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:962-1003#reconcile_running_except]
 - **Validation agents.** Before an audit touches `docs/`, it stops any agent
   still answering in a validation discussion linked to one of the project's
   runs. While an audit of the project shows progress, such an agent is not
@@ -365,7 +365,7 @@ sections.
   no agent and writes no doc. It is a human action only: the route is not on
   the bridge list, and the handler refuses any bridge caller. It takes the
   audit lease.
-  [src: file: backend/src/lib.rs:1939-1942#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:812-843#acknowledge_sections]
+  [src: file: backend/src/lib.rs:2008-2011#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:812-843#acknowledge_sections]
 
 ## The action offered in each state
 

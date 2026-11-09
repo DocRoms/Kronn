@@ -75,7 +75,7 @@ The desktop resolves it through Tauri's resource directory and sets
 `KRONN_INTERNAL_MCP_EXECUTABLE` before starting the backend. An explicitly
 configured but missing executable fails closed instead of using a developer's
 source checkout. Docker and source development keep the existing script route.
-[src: file: desktop/src-tauri/src/main.rs:1131-1148#KRONN_INTERNAL_MCP_EXECUTABLE]
+[src: file: desktop/src-tauri/src/main.rs:1153-1170#KRONN_INTERNAL_MCP_EXECUTABLE]
 [src: file: backend/src/agents/runner.rs:6344-6363#resolve_internal_mcp_command]
 
 The embedded backend exports its actual loopback port as `KRONN_BACKEND_URL`
@@ -83,7 +83,7 @@ before starting agent dispatch and MCP configuration sync. Generated desktop
 MCP configurations also carry this URL for host CLIs launched outside Kronn.
 This overrides an inherited URL belonging to another installation. Turning off
 the ACP adapter does not repair a missing bridge or an incorrect backend URL.
-[src: file: desktop/src-tauri/src/main.rs:617-623#KRONN_BACKEND_URL]
+[src: file: desktop/src-tauri/src/main.rs:635-641#KRONN_BACKEND_URL]
 
 Claude task workers require a sandbox. Native Windows launches are rejected
 with a specific diagnostic; this does not disable ordinary Claude discussions
