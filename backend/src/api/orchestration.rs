@@ -6150,7 +6150,7 @@ async fn run_one_validation_checked(
                     crate::core::quick_exec::run_confined(&validated, None, &cancel, confinement)
                         .await
                 }
-                None => crate::core::quick_exec::run(&validated, None, &cancel).await,
+                None => crate::core::quick_exec::run_background(&validated, None, &cancel).await,
             }
         },
     )

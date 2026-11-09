@@ -11486,6 +11486,18 @@ Suite de la réponse.";
         }
     }
 
+    /// KT-1633: only a task worker's launch runs in the background; the room
+    /// principal's and a plain turn's agent is the owner's own work.
+    #[test]
+    fn only_a_task_worker_launch_runs_at_background_priority() {
+        use crate::core::cmd::Priority;
+        assert_eq!(
+            agent_launch_priority(Some(&worker_context())),
+            Priority::Background
+        );
+        assert_eq!(agent_launch_priority(None), Priority::Normal);
+    }
+
     fn workflow_step_context() -> WorkflowStepBridgeContext {
         WorkflowStepBridgeContext {
             discussion_id: "disc".into(),

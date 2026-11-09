@@ -249,6 +249,46 @@ gates remain separate requirements; backend tests must run against their own
 data directory, never the real install. [src: file: docs/testing-quality.md:44-62#test-backend] [src: file: docs/testing-quality.md:98-100#ci-test.yml]
 [src: file: docs/testing-quality.md:70-75#KRONN_DATA_DIR]
 
+## Background priority of workers and validations (KT-1633)
+
+A worker's builds and a validation's test run can keep every core busy for
+minutes, and nothing used to lower their priority, so the owner's interactive
+applications competed with them. Kronn now starts them in the background:
+
+| Host | Mechanism |
+|---|---|
+| macOS | `/usr/sbin/taskpolicy -b <program> …` (background QoS: CPU, I/O, network) |
+| Linux | `/usr/bin/nice -n 10 <program> …` (`/bin/nice` when that is where it lives) |
+| Windows | the `BELOW_NORMAL_PRIORITY_CLASS` creation flag |
+
+The launcher `exec`s the program, so the process id, the process group Kronn
+kills on a timeout or a cancel, and the program's children (which inherit the
+policy) are the same as without it. It sits in front of the OS sandbox, never
+behind it.
+
+What runs in the background: the CLI agent of a **task worker** launch (a
+reviewer's `request_changes` re-dispatches the same worker, so a fix runs there
+too) and every **validation** command of a task, confined or not. What does
+not: the backend, the UI, the room principal's and any plain discussion turn's
+agent (the owner's own work), Quick Exec collectors the owner starts, and the
+short `cargo metadata` target probe.
+
+**Turning it off.** Start the backend with `KRONN_BACKGROUND_PRIORITY=0` (`false`,
+`off` and `no` work too, any case); unset or any other value keeps it on. It is
+read at each spawn, so restarting the backend is the only step.
+
+**A host that refuses the launcher.** The first background spawn runs the
+launcher once on `true`. If that fails (a backend running inside an OS sandbox
+that forbids lowering a priority gets `taskpolicy: setpriority(): Operation not
+permitted`), a warning is logged once and workers and validations keep the
+backend's priority: a worker at normal priority beats one that never starts. A
+host without the launcher binary is treated the same way.
+
+[src: file: backend/src/core/background_priority.rs:1-30#background_priority]
+[src: file: backend/src/core/cmd.rs:324-366#async_cmd_with]
+[src: file: backend/src/agents/runner.rs:14282-14290#agent_launch_priority]
+[src: file: backend/src/core/quick_exec.rs:506-535#build_command]
+
 ## Maintenance command
 
 Two routes, delivered by KT-373, let an operator inspect and reclaim the

@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::core::child_env::ChildRoute;
+use crate::core::cmd::Priority;
 use crate::core::task_worker_env::ProbeCommand;
 use crate::core::task_worker_sandbox::{
     real_path, seatbelt_literal, CommandConfinement, Mechanism,
@@ -450,9 +451,14 @@ impl LevelConfinement {
 }
 
 impl CommandConfinement for LevelConfinement {
-    fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command {
+    fn command_with(
+        &self,
+        probe: &ProbeCommand,
+        route: ChildRoute,
+        priority: Priority,
+    ) -> tokio::process::Command {
         let (program, args) = self.wrap(&probe.program, &probe.args);
-        let mut command = crate::core::cmd::async_cmd(&program, route);
+        let mut command = crate::core::cmd::async_cmd_with(&program, route, priority);
         command.args(&args).current_dir(&probe.cwd);
         for (name, value) in &probe.env {
             command.env(name, value);

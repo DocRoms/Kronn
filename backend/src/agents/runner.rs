@@ -11,7 +11,7 @@ use super::ollama_memory::{
     KvShape, MachineFacts, ModelCeiling,
 };
 use super::provenance::{self, AgentProvenanceCapture};
-use crate::core::cmd::async_cmd;
+use crate::core::cmd::{async_cmd, async_cmd_with, Priority};
 use crate::models::{AgentType, ModelTier, ModelTiersConfig, Skill, TokensConfig};
 
 const MAX_CALLS_PER_TOOL: usize = 12;
@@ -14277,6 +14277,16 @@ pub(crate) fn claude_auto_memory_opted_in() -> bool {
         == Ok("1")
 }
 
+/// The priority of one agent launch: a task worker runs in the background, any
+/// other launch keeps the backend's own priority.
+fn agent_launch_priority(task_worker_context: Option<&TaskWorkerBridgeContext>) -> Priority {
+    if task_worker_context.is_some() {
+        Priority::Background
+    } else {
+        Priority::Normal
+    }
+}
+
 fn is_claude_code_launch(binary: &str, npx_package: Option<&str>) -> bool {
     Path::new(binary)
         .file_name()
@@ -14445,7 +14455,14 @@ pub(crate) fn try_spawn(
     let route = crate::core::child_env::ChildRoute::Agent(
         crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key),
     );
-    let mut cmd = async_cmd(&final_cmd, route);
+    // KT-1633 — a task worker (and the reviewer's re-dispatch of it, a fix)
+    // builds for minutes: it yields to the owner's interactive applications.
+    // A room principal or a plain discussion turn is the owner's own work.
+    let mut cmd = async_cmd_with(
+        &final_cmd,
+        route,
+        agent_launch_priority(task_worker_context),
+    );
     // Built, never inherited: the backend's own environment holds secrets.
     crate::core::child_env::reset(cmd.as_std_mut(), route);
     let inherited = crate::core::child_env::names_of(cmd.as_std());

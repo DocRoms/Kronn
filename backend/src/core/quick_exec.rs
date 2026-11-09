@@ -10,7 +10,7 @@
 //! exposes is a security boundary — hence the allowlist, the literal argv, and
 //! the bounded cwd below.
 
-use crate::core::cmd::async_cmd;
+use crate::core::cmd::{async_cmd_with, Priority};
 use crate::core::task_worker_env::ProbeCommand;
 use crate::core::task_worker_sandbox::CommandConfinement;
 use anyhow::{Context, Result};
@@ -510,18 +510,22 @@ enum Outcome {
 /// With a [`CommandConfinement`] (KT-1268: the lane's OS sandbox; KT-1492: the
 /// sandbox of what a trust level grants) the same process runs under it,
 /// started the way the lane's first build is.
+///
+/// `priority` (KT-1633): a validation runs in the background, a collector the
+/// owner asked for keeps the backend's own priority.
 fn build_command(
     spec: &ValidatedSpec,
     confinement: Option<&dyn CommandConfinement>,
+    priority: Priority,
 ) -> tokio::process::Command {
     let route = crate::core::child_env::ChildRoute::QuickExec;
     match confinement {
         None => {
-            let mut command = async_cmd(resolve_binary(spec), route);
+            let mut command = async_cmd_with(resolve_binary(spec), route, priority);
             command.args(&spec.argv).current_dir(&spec.cwd);
             command
         }
-        Some(confinement) => confinement.command(
+        Some(confinement) => confinement.command_with(
             &ProbeCommand {
                 program: resolve_binary(spec).to_string_lossy().into_owned(),
                 args: spec.argv.clone(),
@@ -530,6 +534,7 @@ fn build_command(
                 timeout: std::time::Duration::from_secs(spec.timeout_secs),
             },
             route,
+            priority,
         ),
     }
 }
@@ -547,20 +552,38 @@ pub async fn run(
     artifact_dir: Option<&Path>,
     cancel: &CancellationToken,
 ) -> Result<QuickExecResult> {
-    run_with(spec, artifact_dir, cancel, None).await
+    run_with(spec, artifact_dir, cancel, None, Priority::Normal).await
+}
+
+/// [`run`] for a validation (KT-1633): the command yields to the owner's
+/// interactive applications, like a task worker's own build.
+pub async fn run_background(
+    spec: &ValidatedSpec,
+    artifact_dir: Option<&Path>,
+    cancel: &CancellationToken,
+) -> Result<QuickExecResult> {
+    run_with(spec, artifact_dir, cancel, None, Priority::Background).await
 }
 
 /// [`run`] under the worker's sandbox (KT-1268): what the command may write is
 /// the lane's roots and its temp dir, it reaches no network (loopback included)
 /// and has no terminal. A timeout or a cancel takes the command's whole process
-/// group down, not only its leader.
+/// group down, not only its leader. It validates a worker's tree, so it runs in
+/// the background (KT-1633).
 pub async fn run_confined(
     spec: &ValidatedSpec,
     artifact_dir: Option<&Path>,
     cancel: &CancellationToken,
     confinement: &dyn CommandConfinement,
 ) -> Result<QuickExecResult> {
-    run_with(spec, artifact_dir, cancel, Some(confinement)).await
+    run_with(
+        spec,
+        artifact_dir,
+        cancel,
+        Some(confinement),
+        Priority::Background,
+    )
+    .await
 }
 
 /// SIGKILL to the whole process group `leader` leads. Only for a child that
@@ -579,10 +602,11 @@ async fn run_with(
     artifact_dir: Option<&Path>,
     cancel: &CancellationToken,
     confinement: Option<&dyn CommandConfinement>,
+    priority: Priority,
 ) -> Result<QuickExecResult> {
     let started = std::time::Instant::now();
 
-    let mut command = build_command(spec, confinement);
+    let mut command = build_command(spec, confinement, priority);
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

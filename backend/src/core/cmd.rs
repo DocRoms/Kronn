@@ -36,6 +36,7 @@ fn resolve_windows_program(program: &OsStr) -> Option<PathBuf> {
     which::which(s).ok()
 }
 
+pub use crate::core::background_priority::{self, Priority};
 pub use crate::core::child_env::ChildRoute;
 
 /// The only place a process is constructed (clippy's `disallowed_methods`
@@ -322,8 +323,45 @@ pub(crate) mod real_agent_guard {
 ///
 /// Accepts anything `Command::new` accepts (`&str`, `String`, `&Path`, …).
 pub fn async_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> tokio::process::Command {
-    real_agent_guard::refuse_real_agent(program.as_ref(), route);
-    let mut cmd = raw_async(program.as_ref());
+    async_cmd_with(program, route, Priority::Normal)
+}
+
+/// [`async_cmd`] at `priority` (KT-1633). A background spawn runs behind the
+/// host's priority launcher (`taskpolicy -b`, `nice -n 10`) or, on Windows,
+/// with the below-normal priority class, unless the owner switched that off
+/// ([`background_priority::BACKGROUND_PRIORITY_ENV`]). Arguments the caller
+/// adds afterwards follow `program`, behind the launcher.
+pub fn async_cmd_with<S: AsRef<OsStr>>(
+    program: S,
+    route: ChildRoute,
+    priority: Priority,
+) -> tokio::process::Command {
+    async_cmd_planned(
+        program.as_ref(),
+        route,
+        background_priority::plan_here(priority),
+    )
+}
+
+/// [`async_cmd_with`] for an already decided [`background_priority::Plan`].
+pub(crate) fn async_cmd_planned(
+    program: &OsStr,
+    route: ChildRoute,
+    plan: background_priority::Plan,
+) -> tokio::process::Command {
+    real_agent_guard::refuse_real_agent(program, route);
+    let (launched, prefix_args) = plan.argv(program);
+    let mut cmd = if plan.launcher.is_some() {
+        let mut cmd = raw_async(&launched);
+        cmd.args(&prefix_args);
+        cmd
+    } else {
+        raw_async(program)
+    };
+    #[cfg(target_os = "windows")]
+    if plan.below_normal_class {
+        cmd.creation_flags(CREATE_NO_WINDOW | background_priority::BELOW_NORMAL_PRIORITY_CLASS);
+    }
     crate::core::child_env::isolate(cmd.as_std_mut(), route);
     cmd
 }
@@ -451,6 +489,49 @@ fn rebuild_for_tool(mut command: std::process::Command) -> std::process::Command
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    /// KT-1633: a background spawn starts the host's priority launcher with the
+    /// program as its argument; a normal one starts the program itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_spawn_runs_the_program_behind_the_priority_launcher() {
+        use background_priority::{plan, HostOs, Priority};
+        for (os, launcher, flags) in [
+            (HostOs::MacOs, "/usr/sbin/taskpolicy", vec!["-b"]),
+            (HostOs::Linux, "/usr/bin/nice", vec!["-n", "10"]),
+        ] {
+            let background = plan(Priority::Background, true, os, |_| true);
+            let cmd = async_cmd_planned(OsStr::new("echo"), ChildRoute::Tool, background);
+            let std_cmd = cmd.as_std();
+            assert_eq!(std_cmd.get_program(), launcher);
+            let args: Vec<_> = std_cmd.get_args().collect();
+            let mut expected: Vec<&str> = flags;
+            expected.push("echo");
+            assert_eq!(args, expected, "{os:?}");
+
+            let normal = plan(Priority::Normal, true, os, |_| true);
+            let cmd = async_cmd_planned(OsStr::new("echo"), ChildRoute::Tool, normal);
+            assert_eq!(cmd.as_std().get_program(), "echo");
+            assert_eq!(cmd.as_std().get_args().count(), 0);
+
+            let switched_off = plan(Priority::Background, false, os, |_| true);
+            let cmd = async_cmd_planned(OsStr::new("echo"), ChildRoute::Tool, switched_off);
+            assert_eq!(cmd.as_std().get_program(), "echo");
+        }
+    }
+
+    /// KT-1633: the priority launcher execs the program, so a worker's output,
+    /// exit status and arguments reach the caller unchanged on this host.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_background_spawn_still_runs_the_program_on_this_host() {
+        let plan = background_priority::plan_here(Priority::Background);
+        let mut cmd = async_cmd_planned(OsStr::new("/bin/echo"), ChildRoute::Tool, plan);
+        cmd.arg("kt-1633");
+        let output = cmd.output().await.expect("spawn");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "kt-1633");
+    }
 
     #[test]
     fn async_cmd_creates_command() {
