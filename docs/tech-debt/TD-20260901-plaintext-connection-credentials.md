@@ -49,10 +49,11 @@
   Recovery, `config_holds_key`) and leads to a recovery passphrase or
   `KRONN_ENCRYPTION_KEK`; case 2 lists the credentials still in clear while the
   key is locked; case 3 is deletable by the owner only when nothing in the
-  file can be lost (every credential-looking value verified in
-  `stored_credentials`; a sealed copy, an unreadable line that could hide a
-  secret, or a key some file still needs blocks it), behind the strong
-  confirmation (KT-1496). [src: file: backend/src/core/set_aside.rs:1-22]
+  file can be lost (every leaf value is a credential verified in
+  `stored_credentials` or sits at a place of a closed list of non-secret
+  settings; an unknown field, a webhook URL, a line that does not parse, a
+  sealed copy, or a key some file still needs blocks it), behind the strong
+  confirmation (KT-1496). [src: file: backend/src/core/set_aside.rs:1-25]
   The key itself is still kept in `config.toml` in case 1 until two durable
   copies exist.
 - **Next step**: close when case 1 no longer needs the file copy (a keychain

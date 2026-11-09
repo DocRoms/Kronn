@@ -3105,7 +3105,7 @@ pub struct SetAsideFileView {
     /// Every credential is verified and no key or row depends on the file.
     pub deletable: bool,
     /// Why it is not deletable: `unreadable`, `sealed`, `key_locked`,
-    /// `unparsed`, `unverified`, `key_needed`, `key_bound_files` or
+    /// `unparsed`, `unknown_value`, `unverified`, `key_needed`, `key_bound_files` or
     /// `only_key_copy`.
     pub blocker: Option<String>,
 }

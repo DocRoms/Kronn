@@ -483,7 +483,7 @@ fn holds_string(value: &Value) -> bool {
 /// `tokens` is a provider key), the encryption secret, a place named like one,
 /// an authorization header. It is never written to `config.toml` once the
 /// encrypted store holds the credentials.
-pub(crate) fn whole_credential(path: &[String], value: &Value) -> bool {
+fn whole_credential(path: &[String], value: &Value) -> bool {
     let token_store = match path {
         [first] => first == "tokens",
         [first, second, ..] => first == "tokens" && second != "disabled_overrides",

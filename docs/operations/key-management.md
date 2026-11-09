@@ -152,16 +152,23 @@ the previous file untouched.
    A set-aside `config.toml.corrupt.<ts>` is never deleted by Kronn. The owner
    deletes one in Settings → Recovery (`DELETE
    /api/config/recovery/set-aside-files/{name}`, behind the strong
-   confirmation), only when Kronn can prove nothing in it is lost. Every
-   credential-looking value of the file (the known fields, any place the
-   config salvage treats as a credential, the webhook URL, the theme secrets)
-   must be in `stored_credentials` and decrypt with the key in use; the places
-   that store cannot hold are never verified. The check is made again on the
-   request, on the bytes read through the data directory without following a
-   link, and the file is unlinked only if its name still names that file. A
+   confirmation), only when Kronn can prove nothing in it is lost. The rule
+   is closed: every leaf value of the file is either a credential verified in
+   `stored_credentials` (it decrypts with the key in use and equals the value
+   of the file), or sits at a place a closed list from the config model knows
+   to hold no secret (ports, flags, names, language; an address with no user
+   info, query or fragment), with the type that place has. Nothing is judged by
+   what a field is called: an unknown field, a non-text value at a credential
+   place, the webhook URL, a theme secret or an `encryption_secret` that is not
+   a valid key is never verified and blocks. A file that is not valid TOML is
+   read line by line under the section it sat in; any line that does not parse
+   (a header, a value with no quote, a cut string) blocks. The check is made
+   again on the request, on the bytes read through the data directory without
+   following a link, and the file is unlinked only if its name still names
+   that file (on Windows that identity is only the size and the write time,
+   see `core/rooted_io.rs`). A
    file is kept when it is a sealed (`.enc`) copy, unreadable (a link, a hard
-   link, not text, too big), when the key is locked, when a line of a file
-   that is not valid TOML cannot be read and holds a quote, when it holds a
+   link, not text, too big), when the key is locked, when it holds a
    key that still opens database rows, `locked-secrets-*.json` rows or `.enc`
    files (the config backup, the preserved values, sealed copies) the key in
    use does not, or when it holds the only copy of the key in use (vault

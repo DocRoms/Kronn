@@ -26,6 +26,16 @@
 //! and relinked between the checks on Unix, deletion of a hard link while
 //! the file is open on Windows). Closing it needs OS isolation or protected
 //! staging, i.e. the rooted primitive planned in KT-1055.
+//!
+//! Known residual of `remove_if_same` (KT-1609, named by the KT-1594 review):
+//! the name is compared with the identity of the file that was read just
+//! before the unlink, so a swap in the instant between that check and
+//! `unlinkat` is still possible (there is no unlink-if-same system call). On
+//! Windows the identity is only the size and the last write time, weaker than
+//! the device, inode and change time of Unix: a file rewritten to the same
+//! size within the timestamp's resolution passes. The one caller (deleting a
+//! set-aside `config.toml`, `core::set_aside`) acts on the owner's request, on
+//! a file only Kronn writes, and re-assesses it from the bytes it unlinks.
 
 use std::io;
 use std::path::{Component, Path};

@@ -3302,6 +3302,7 @@ const fr: TranslationDict = {
   'settings.recovery.blocker.only_key_copy': 'Le fichier contient la seule copie de la clé en usage : définissez d\'abord une phrase de récupération ou KRONN_ENCRYPTION_KEK.',
   'settings.recovery.blocker.sealed': 'Une copie scellée n\'est jamais supprimée ici : elle peut être la seule copie de ce qu\'elle contient.',
   'settings.recovery.blocker.unparsed': 'Des lignes du fichier sont illisibles et pourraient cacher un identifiant : impossible de prouver que rien n\'est perdu.',
+  'settings.recovery.blocker.unknown_value': 'Des valeurs du fichier se trouvent à un endroit que cette version de Kronn ne connaît pas comme inoffensif (un champ inconnu, ou une valeur du mauvais type) : impossible de prouver que rien n\'est perdu.',
   'settings.recovery.blocker.key_bound_files': 'Le fichier contient une clé de chiffrement qui ouvre encore d\'autres fichiers ou lignes mis de côté (secrets verrouillés, copies scellées ou préservées) que la clé en usage n\'ouvre pas : restaurez-les ou rechiffrez-les d\'abord.',
   'authLocked.remoteHint': 'Kronn est verrouillé et ne peut être déverrouillé que sur la machine où il tourne. Ouvrez-y Kronn (http://127.0.0.1) pour restaurer la clé ou définir un nouveau jeton d\'API.',
   'authLocked.tokenHint': 'La clé de chiffrement est en place, mais le jeton d\'API enregistré a été chiffré avec une autre clé et ne peut pas être lu. Définissez un nouveau jeton d\'API ; les clients distants en auront besoin.',
