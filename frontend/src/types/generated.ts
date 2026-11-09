@@ -5191,7 +5191,7 @@ export type LaneSeedsLastRun = { execution_id: string, at: string, seeds: Array<
  * settings and takes effect once a human adopts it there (which declares it in
  * Kronn).
  */
-export type LaneSeedsSource = "project" | "none";
+export type LaneSeedsSource = "project" | "adopted" | "none";
 
 export type LaunchAuditRequest = { agent: AgentType,
 /**
@@ -7434,6 +7434,25 @@ export type ProjectLaneSeeds = {
  */
 seeds: Array<string>, source: LaneSeedsSource,
 /**
+ * Settings > Worktrees: copying lane seeds is on (off = nothing is copied,
+ * whatever is declared here).
+ */
+copy_enabled: boolean,
+/**
+ * Settings > Worktrees: Kronn's suggestions seed a project that declared none.
+ */
+adopt_suggested: boolean,
+/**
+ * What the adoption seeds right now (`source` is `adopted`): Kronn's
+ * suggestions. One holding an unconfirmed secret-looking file is in
+ * `secret_findings` as `held` and is not copied.
+ */
+adopted_seeds: Array<string>,
+/**
+ * Why the suggestions could not be read.
+ */
+adopted_error?: string,
+/**
  * What `kronn/project.toml` on the default branch proposes, when it does.
  * Nothing is seeded from it until a human adopts it.
  */
@@ -9467,6 +9486,18 @@ disk_launch_min_free_gib: number,
  * KT-1318 - hours a lane build dir must be idle before a sweep may take it.
  */
 disk_sweep_idle_hours: number, p2p_enabled: boolean, frontend_origins: Array<string>,
+/**
+ * KT-1438 - copy lane seeds into task worktrees (default on).
+ */
+lane_seeds_copy_enabled: boolean,
+/**
+ * KT-1438 - seed Kronn's secret-free suggestions for a project that declared none.
+ */
+lane_seeds_adopt_suggested: boolean,
+/**
+ * KT-1438 - changing a project's lane seeds asks for the strong confirmation.
+ */
+lane_seeds_strong_confirm: boolean,
 /**
  * The zone set in Settings; `None` follows the machine.
  */

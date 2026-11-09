@@ -204,6 +204,12 @@ fn families() -> Vec<(&'static str, &'static str, Option<Value>)> {
             "/api/projects/p1/validations-access",
             Some(json!({"access": "host"})),
         ),
+        // KT-1438: the gitignored paths copied into a project's task worktrees.
+        (
+            "PUT",
+            "/api/projects/p1/lane-seeds",
+            Some(json!({"seeds": ["public/images"]})),
+        ),
         ("POST", "/api/config/agent-access", Some(json!({}))),
         ("POST", "/api/config/server", Some(json!({}))),
         ("PUT", "/api/projects/p1/github", Some(json!({}))),
@@ -623,6 +629,93 @@ async fn a_bridge_token_reaches_a_protected_route_only_with_a_valid_code() {
             .any(|line| line.event == "proof" && line.detail.contains("bridge channel")),
         "{journal:?}"
     );
+}
+
+/// KT-1438 (DoD 5): declaring lane seeds asks for the code by default; the owner
+/// may release that one route (`lane_seeds_strong_confirm = false`); changing the
+/// setting is itself a protected `POST /api/config/server`, which asks whatever
+/// the setting says; and a bridge token keeps the gate when the setting is off.
+#[tokio::test]
+async fn lane_seeds_ask_for_the_code_unless_the_owner_released_them() {
+    let harness = Harness::new(true).await;
+    let seeds = || {
+        req(
+            "PUT",
+            "/api/projects/p1/lane-seeds",
+            Some(json!({"seeds": ["public/images"]})),
+        )
+    };
+    assert!(
+        harness
+            .state
+            .config
+            .read()
+            .await
+            .server
+            .lane_seeds_strong_confirm
+    );
+    let (status, refused) = harness.send(seeds()).await;
+    assert!(asks(status, &refused), "default: {status} {refused}");
+    // The read of the same path never asks.
+    let (status, read) = harness
+        .send(req("GET", "/api/projects/p1/lane-seeds", None))
+        .await;
+    assert!(!asks(status, &read), "GET: {status} {read}");
+
+    // Turning the setting off is a protected change: it asks for the code, and
+    // with one it is applied (the code is spent here, not on the seeds).
+    let turn_off = || {
+        req(
+            "POST",
+            "/api/config/server",
+            Some(json!({"lane_seeds_strong_confirm": false})),
+        )
+    };
+    let (status, refused) = harness.send(turn_off()).await;
+    assert!(asks(status, &refused), "turning it off: {status} {refused}");
+    assert!(
+        harness
+            .state
+            .config
+            .read()
+            .await
+            .server
+            .lane_seeds_strong_confirm
+    );
+    let (status, done) = harness.send(turn_off().code(&harness.codes[0])).await;
+    assert!(!asks(status, &done), "{status} {done}");
+    assert!(
+        !harness
+            .state
+            .config
+            .read()
+            .await
+            .server
+            .lane_seeds_strong_confirm
+    );
+
+    // Released: the save reaches its handler (the project does not exist), and
+    // nothing was spent: a protected route still takes the next code.
+    let (status, answered) = harness.send(seeds()).await;
+    assert!(!asks(status, &answered), "released: {status} {answered}");
+    // Turning it back on asks for the code too.
+    let turn_on = || {
+        req(
+            "POST",
+            "/api/config/server",
+            Some(json!({"lane_seeds_strong_confirm": true})),
+        )
+    };
+    let (status, refused) = harness.send(turn_on()).await;
+    assert!(asks(status, &refused), "turning it on: {status} {refused}");
+    // A bridge token keeps the full gate while the route is released.
+    let guard = bridge();
+    let (status, refused) = harness.send(seeds().bearer(guard.value())).await;
+    assert_eq!(status, 403, "{refused}");
+    let (status, done) = harness.send(turn_on().code(&harness.codes[1])).await;
+    assert!(!asks(status, &done), "{status} {done}");
+    let (status, refused) = harness.send(seeds()).await;
+    assert!(asks(status, &refused), "back on: {status} {refused}");
 }
 
 /// With no enrolment a bridge token carrying a code is still refused, as today.

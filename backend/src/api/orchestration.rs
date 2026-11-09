@@ -9524,12 +9524,18 @@ async fn seed_lane_assets(
     worktree: &std::path::Path,
 ) {
     let pid = project_id.to_string();
-    // Only what a human declared in Kronn applies. The `[lane_seeds]` table of
-    // `kronn/project.toml` reaches the repository through a pull request, not
-    // through the human gate: it is proposed in the settings, never seeded here.
-    // The secret-looking files a human confirmed travel with them: a seed that
-    // gained one since is held, not copied.
-    let (seeds, confirmed) = match db
+    let policy = crate::core::task_worker_lane_seeds::seed_policy();
+    if !policy.copy_enabled {
+        // The owner turned copying off (Settings > Worktrees): nothing is seeded.
+        return;
+    }
+    // Only what a human declared in Kronn applies, or, when the owner turned
+    // adoption on, Kronn's suggestions for a project that declared nothing. The
+    // `[lane_seeds]` table of `kronn/project.toml` reaches the repository through
+    // a pull request, not through the human gate: it is proposed in the settings,
+    // never seeded here. The secret-looking files a human confirmed travel with
+    // them: a seed that gained one since is held, not copied.
+    let (declared, confirmed) = match db
         .with_read_conn(move |conn| {
             Ok((
                 crate::db::projects::lane_seeds(conn, &pid)?,
@@ -9538,7 +9544,7 @@ async fn seed_lane_assets(
         })
         .await
     {
-        Ok((declared, confirmed)) => (declared.unwrap_or_default(), confirmed),
+        Ok(read) => read,
         Err(error) => {
             tracing::warn!(execution_id = %exec_id, "lane seeds not read: {error}");
             return;
@@ -9546,6 +9552,16 @@ async fn seed_lane_assets(
     };
     let (repo, worktree) = (repo.to_path_buf(), worktree.to_path_buf());
     let record = match tokio::task::spawn_blocking(move || {
+        let (seeds, _) =
+            match crate::core::task_worker_lane_seeds::effective_seeds(policy, declared, || {
+                crate::core::task_worker_lane_seeds::suggest_seeds(&repo)
+            }) {
+                Ok(effective) => effective,
+                Err(reason) => {
+                    tracing::warn!("lane seed suggestions not read: {reason}");
+                    return None;
+                }
+            };
         if seeds.is_empty() {
             return None;
         }
@@ -29537,6 +29553,148 @@ pub(crate) mod tests {
             !skipped[0].1.contains("`gen/.env`"),
             "the confirmed file is not named: {skipped:?}"
         );
+    }
+
+    /// A repo whose ignored `gen/` is mentioned by tracked code, so it is a
+    /// suggested seed.
+    fn repo_with_a_suggestible_gen() -> tempfile::TempDir {
+        let repo = init_repo();
+        std::fs::write(repo.path().join(".gitignore"), "gen/\n.kronn/\n").unwrap();
+        std::fs::write(
+            repo.path().join("page.twig"),
+            "{% include 'gen/asset.txt' %}",
+        )
+        .unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "gen is referenced"]);
+        std::fs::create_dir_all(repo.path().join("gen")).unwrap();
+        std::fs::write(repo.path().join("gen/asset.txt"), "generated").unwrap();
+        repo
+    }
+
+    async fn provision_for_seeds(
+        db: &Database,
+        repo: &std::path::Path,
+        key: &str,
+        task_ref: String,
+        parent_id: String,
+    ) -> (String, std::path::PathBuf) {
+        let exec = provision_single_task_execution(
+            db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some(key.into()),
+            },
+        )
+        .await
+        .expect("provision");
+        let (worktree, _branch) =
+            worktree::task_worktree_layout(repo, &task_ref, exec_short(&exec.id)).unwrap();
+        (exec.id, worktree)
+    }
+
+    /// KT-1438 (DoD 4): with "Copy generated assets into task worktrees" off,
+    /// nothing is seeded anywhere, a declared seed included, and nothing is
+    /// journalled.
+    #[tokio::test]
+    async fn provisioning_seeds_nothing_when_the_owner_turned_copying_off() {
+        let _policy = crate::core::task_worker_lane_seeds::TestSeedPolicy::set(false, true);
+        let repo = repo_with_a_suggestible_gen();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        db.with_conn(move |conn| {
+            crate::db::projects::set_lane_seeds(conn, &project_id, &["gen".to_string()])
+        })
+        .await
+        .unwrap();
+
+        let (exec_id, worktree) =
+            provision_for_seeds(&db, repo.path(), "seeds-off", task_ref, parent_id).await;
+
+        assert!(!worktree.join("gen").exists());
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &exec_id))
+            .await
+            .unwrap();
+        assert!(recorded.is_none(), "{recorded:?}");
+    }
+
+    /// KT-1438 (DoD 4): with adoption on, a project that declared nothing is
+    /// seeded with Kronn's suggestion; with it off (the default) it is not.
+    #[tokio::test]
+    async fn provisioning_adopts_suggestions_when_the_owner_turned_adoption_on() {
+        let repo = repo_with_a_suggestible_gen();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _project_id) = seed(&db, repo.path()).await;
+        let _policy = crate::core::task_worker_lane_seeds::TestSeedPolicy::set(true, true);
+        let (exec_id, worktree) =
+            provision_for_seeds(&db, repo.path(), "adopt-on", task_ref, parent_id).await;
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("gen/asset.txt")).unwrap(),
+            "generated"
+        );
+        assert_eq!(
+            git(
+                &worktree,
+                &["status", "--porcelain", "--untracked-files=all"]
+            )
+            .stdout
+            .len(),
+            0,
+            "an adopted seed stays out of git status"
+        );
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &exec_id))
+            .await
+            .unwrap()
+            .expect("the seeding is journalled");
+        assert_eq!(recorded.seeds.len(), 1, "{recorded:?}");
+    }
+
+    /// KT-1438 (DoD 4): adoption is off by default: a project that declared
+    /// nothing is not seeded with a suggestion.
+    #[tokio::test]
+    async fn provisioning_adopts_nothing_by_default() {
+        let repo = repo_with_a_suggestible_gen();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _project_id) = seed(&db, repo.path()).await;
+        assert_eq!(
+            crate::core::task_worker_lane_seeds::seed_policy(),
+            crate::core::task_worker_lane_seeds::SeedPolicy {
+                copy_enabled: true,
+                adopt_suggested: false
+            }
+        );
+        let (_, worktree) =
+            provision_for_seeds(&db, repo.path(), "adopt-off", task_ref, parent_id).await;
+        assert!(!worktree.join("gen").exists(), "the default adopts nothing");
+    }
+
+    /// KT-1438 (DoD 4): an adopted suggestion holding a secret-looking file is
+    /// held, not copied, until a human confirms the file.
+    #[tokio::test]
+    async fn provisioning_holds_an_adopted_suggestion_that_holds_a_secret() {
+        let _policy = crate::core::task_worker_lane_seeds::TestSeedPolicy::set(true, true);
+        let repo = repo_with_a_suggestible_gen();
+        std::fs::write(repo.path().join("gen/.env"), "TOKEN=1").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _project_id) = seed(&db, repo.path()).await;
+
+        let (exec_id, worktree) =
+            provision_for_seeds(&db, repo.path(), "adopt-held", task_ref, parent_id).await;
+
+        assert!(!worktree.join("gen").exists());
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &exec_id))
+            .await
+            .unwrap()
+            .expect("the seeding is journalled");
+        let skipped: Vec<_> = recorded.skipped().collect();
+        assert_eq!(skipped.len(), 1, "{recorded:?}");
+        assert!(skipped[0].1.starts_with("held:"), "{skipped:?}");
     }
 
     #[tokio::test]

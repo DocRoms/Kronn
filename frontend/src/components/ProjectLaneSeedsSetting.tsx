@@ -100,6 +100,14 @@ export function ProjectLaneSeedsSetting({ projectId, t }: Props) {
       </h4>
       <p className="project-agent-files-help">{t('projects.laneSeeds.help')}</p>
 
+      {state && !state.copy_enabled && (
+        <p className="project-agent-files-error" role="status" data-testid="project-lane-seeds-copy-off">{t('projects.laneSeeds.copyOff')}</p>
+      )}
+      {state && state.copy_enabled && state.source === 'adopted' && state.adopted_seeds.length > 0 && (
+        <p className="project-agent-files-where" data-testid="project-lane-seeds-adopted">
+          {t('projects.laneSeeds.adopted', state.adopted_seeds.join(', '))}
+        </p>
+      )}
       {state && state.seeds.length === 0 && (
         <p className="project-agent-files-where" data-testid="project-lane-seeds-empty">{t('projects.laneSeeds.empty')}</p>
       )}
@@ -212,7 +220,8 @@ export function ProjectLaneSeedsSetting({ projectId, t }: Props) {
                     <button
                       type="button"
                       className="btn btn-secondary"
-                      onClick={() => void save(state.seeds, [finding.path])}
+                      // Confirming a held suggestion declares the adopted list, with that file accepted.
+                      onClick={() => void save(state.source === 'adopted' ? state.adopted_seeds : state.seeds, [finding.path])}
                       disabled={saving}
                       data-testid={`project-lane-seeds-confirm-held-${finding.path}`}
                     >

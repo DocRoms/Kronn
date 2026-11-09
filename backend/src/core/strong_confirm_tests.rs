@@ -19,6 +19,7 @@ fn every_route_of_the_inventory_is_protected() {
         ("POST", "/api/setup/reset"),
         ("POST", "/api/config/import"),
         ("PUT", "/api/projects/{id}/validations-access"),
+        ("PUT", "/api/projects/{id}/lane-seeds"),
         ("POST", "/api/agents/uninstall"),
         // The sensitive deletions, an explicit list.
         ("DELETE", "/api/projects/{id}"),
@@ -274,10 +275,6 @@ const OPEN_ON_PURPOSE: &[(&str, &str)] = &[
     ("POST", "/api/projects/{id}/context-audit/baseline"),
     ("POST", "/api/projects/{id}/audit-attestation"),
     ("POST", "/api/mcps/custom/{server_id}/cleanup-orphan-env"),
-    // The gitignored paths copied into a project's task worktrees (KT-1438): no
-    // bridge token has the route, and the handler holds a secret-looking file
-    // until the human confirms it, so a one-time code on top adds nothing.
-    ("PUT", "/api/projects/{id}/lane-seeds"),
     // Everyday deletions: a message, a discussion, a task, a workflow, a page, a
     // Quick Prompt / API / Exec, a skill, a profile, a directive, a contact, …
     ("DELETE", "/api/contacts/{id}"),
@@ -391,9 +388,35 @@ fn a_maintenance_route_is_open_and_an_instance_operation_asks() {
         ("POST", "/api/config/import"),
         ("POST", "/api/config/recovery/reencrypt"),
         ("PUT", "/api/projects/{id}/validations-access"),
+        ("PUT", "/api/projects/{id}/lane-seeds"),
         ("POST", "/api/agents/uninstall"),
         ("POST", "/api/pages/import"),
     ] {
         assert_eq!(protection(method, pattern), Protection::Always, "{pattern}");
     }
+}
+
+/// KT-1438: only the lane-seeds save is governed by the owner's setting, and a
+/// GET of the same path is not that call.
+#[test]
+fn only_the_lane_seeds_save_is_waivable_by_the_setting() {
+    assert!(is_lane_seeds_save("PUT", "/api/projects/{id}/lane-seeds"));
+    assert!(is_lane_seeds_save("put", "/api/projects/{id}/lane-seeds"));
+    assert!(!is_lane_seeds_save("GET", "/api/projects/{id}/lane-seeds"));
+    assert!(!is_lane_seeds_save(
+        "PUT",
+        "/api/projects/{id}/lane-seeds/candidates"
+    ));
+    assert!(!is_lane_seeds_save(
+        "PUT",
+        "/api/projects/{id}/validations-access"
+    ));
+    assert_eq!(
+        protection("PUT", "/api/projects/{id}/lane-seeds"),
+        Protection::Always
+    );
+    assert_eq!(
+        protection("GET", "/api/projects/{id}/lane-seeds"),
+        Protection::Open
+    );
 }

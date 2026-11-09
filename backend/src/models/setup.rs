@@ -234,6 +234,25 @@ pub struct ServerConfig {
     #[serde(default = "default_protect_vault_from_agents")]
     #[ts(skip)]
     pub protect_vault_from_agents: bool,
+    /// KT-1438 — copy a project's lane seeds (gitignored generated assets, such
+    /// as `public/images`) from its main checkout into each task worktree. On by
+    /// default; off seeds nothing anywhere, whatever a project declared.
+    #[serde(default = "default_true")]
+    #[ts(skip)]
+    pub lane_seeds_copy_enabled: bool,
+    /// KT-1438 — seed Kronn's suggested candidates into the task worktrees of a
+    /// project that declared no seeds of its own. Off by default. A candidate
+    /// holding a secret-looking file stays held until a human confirms that file.
+    #[serde(default)]
+    #[ts(skip)]
+    pub lane_seeds_adopt_suggested: bool,
+    /// KT-1438 — `PUT /api/projects/{id}/lane-seeds` asks for the strong
+    /// confirmation (when one is enrolled). On by default; off waives it for that
+    /// route only. Changing this flag is itself a `POST /api/config/server`, which
+    /// always asks.
+    #[serde(default = "default_true")]
+    #[ts(skip)]
+    pub lane_seeds_strong_confirm: bool,
     /// Accept federation peers (inbound `/api/ws` peers, the peer HTTP routes)
     /// and dial contacts. Off by default: a peer is identified only by its
     /// invite code until pairing secrets exist (KT-1033).
@@ -1268,6 +1287,12 @@ pub struct ServerConfigPublic {
     pub disk_sweep_idle_hours: u64,
     pub p2p_enabled: bool,
     pub frontend_origins: Vec<String>,
+    /// KT-1438 - copy lane seeds into task worktrees (default on).
+    pub lane_seeds_copy_enabled: bool,
+    /// KT-1438 - seed Kronn's secret-free suggestions for a project that declared none.
+    pub lane_seeds_adopt_suggested: bool,
+    /// KT-1438 - changing a project's lane seeds asks for the strong confirmation.
+    pub lane_seeds_strong_confirm: bool,
     /// The zone set in Settings; `None` follows the machine.
     pub timezone: Option<String>,
     /// The zone in effect: `timezone`, else `timezone_detected`.
@@ -1322,6 +1347,15 @@ pub struct UpdateServerConfigRequest {
     /// KT-1318 - `server.disk_sweep_idle_hours`.
     #[serde(default)]
     pub disk_sweep_idle_hours: Option<u64>,
+    /// KT-1438 - `server.lane_seeds_copy_enabled`.
+    #[serde(default)]
+    pub lane_seeds_copy_enabled: Option<bool>,
+    /// KT-1438 - `server.lane_seeds_adopt_suggested`.
+    #[serde(default)]
+    pub lane_seeds_adopt_suggested: Option<bool>,
+    /// KT-1438 - `server.lane_seeds_strong_confirm`.
+    #[serde(default)]
+    pub lane_seeds_strong_confirm: Option<bool>,
     #[serde(default)]
     pub p2p_enabled: Option<bool>,
     /// Replaces the whole list; every entry must be an exact origin.
