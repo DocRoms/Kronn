@@ -7,8 +7,8 @@ auto-bypass enabled by default for self-hosted comfort. This page
 covers:
 
 1. How auth is gated today
-2. The transport guard: a LAN-exposed instance refuses plain HTTP
-   (KT-1596)
+2. The transport guard: Kronn is never exposed over plain HTTP — TLS
+   terminated by a declared proxy, or nothing (KT-1596)
 3. The early-opt-out for users who want a token even on loopback
    (`server.auth_strict_localhost`)
 4. The migration path when in-process TLS lands
@@ -47,32 +47,64 @@ landing on the box.
 ## Plain HTTP on the LAN: refused unless TLS is carried elsewhere
 
 Kronn itself (the backend, and the nginx gateway on `:80`) speaks plain
-HTTP. When the instance is exposed beyond loopback (native bind host
-`0.0.0.0` / a LAN IP, or Docker with `KRONN_BIND` not loopback), the Bearer
-token and P2P invite codes would cross the network in clear. The backend
-therefore **refuses to start** in that situation, in addition to the
-unauthenticated-API guard (`insecure_lan_boot_error`), unless one of the two
-paths below applies. Loopback-only use is never refused.
+HTTP. When it is reachable beyond loopback, the Bearer token and P2P invite
+codes would cross the network in clear, so Kronn only accepts to be exposed
+through one of two paths. Loopback-only use is never affected.
 
 | Path | Status | How |
 |------|--------|-----|
-| **TLS terminated by a proxy, or Tailscale only** | Shipped | Set `KRONN_TLS_TERMINATED_BY_PROXY=1` (`true`/`yes` also accepted). It is a declaration by the operator: a TLS-terminating reverse proxy sits in front of Kronn, or peers only reach it over Tailscale (WireGuard-encrypted). Kronn cannot verify it. In Docker the variable is passed through by `docker-compose.yml`. |
-| **In-process TLS** (rustls, generated certificate, fingerprint carried in the P2P invite) | Not shipped | The guard already takes a `tls_enabled` input (`plain_http_lan_boot_error`), currently always `false`. The certificate generation and serving need dependencies that are not in the workspace yet. |
+| **TLS terminated by a proxy** (nginx, Caddy, `tailscale serve`) | Shipped | Run a TLS-terminating reverse proxy **on the same machine**, then declare it: Settings › Identity › "TLS proxy in front of Kronn" (the declaration and the proxy's public `https://` address are stored in `config.toml` as `server.tls_terminated_by_proxy` / `server.public_origin`), or the environment: `KRONN_TLS_TERMINATED_BY_PROXY=1` + `KRONN_PUBLIC_ORIGIN=https://kronn.example.com`. It is a declaration by the operator: Kronn cannot verify the proxy is there. |
+| **In-process TLS** (rustls, generated certificate, fingerprint carried in the P2P invite) | Not shipped | `boot_bind` / the toggle already take a `tls_enabled` input, currently always `false`. Generating and serving the certificate needs `rcgen` and `axum-server`, which are not in the workspace yet. Tracked by the reduced `TD-20260314-no-tls`. |
+
+Tailscale: `tailscale serve --bg 3140` is a TLS-terminating proxy on loopback
+(real certificates, `https://<machine>.<tailnet>.ts.net`), so it is the first
+path with the machine's tailnet address as the public origin. Binding the
+Tailscale interface directly is not offered: it would still leave plain HTTP
+open on the physical LAN and the machine's own loopback address would stop
+answering.
+
+### What each runtime does
+
+| Situation | Native / desktop | Docker |
+|-----------|------------------|--------|
+| Loopback only | Binds as asked. | `KRONN_BIND` loopback: starts. |
+| Exposure asked, **no** TLS and **no** declared proxy | The Settings toggle **refuses** (HTTP 409, with what is needed; nothing is written). A config that already asks for it (written by an older Kronn, by hand, or `KRONN_HOST`) **starts on `127.0.0.1`** and Settings shows a banner saying why: the owner is never locked out of the UI that can fix it. | The publish is outside the process: refuses to start, naming `KRONN_TLS_TERMINATED_BY_PROXY` and `KRONN_PUBLIC_ORIGIN`. |
+| Exposure asked + **declared proxy** | Binds `127.0.0.1` (the proxy on this machine is the only way in, the P2P socket included). | Starts. Keep `KRONN_BIND=127.0.0.1` for a proxy on the Docker host, `0.0.0.0` for a proxy on another machine. |
+
+Behind a declared proxy:
+
+- **Invites advertise the proxy.** The code is `kronns:pseudo@host:port` on
+  the public origin (`kronn:` stays plain http/ws; `kronns:` is https/wss). A
+  declared proxy with no public origin has **no** invite code: the invite
+  endpoint answers an error and the peer broadcasts carry an empty code, which
+  peers refuse. A peer that predates `kronns:` rejects the code (fail-closed).
+- **Loopback is no longer the owner.** Every proxied request arrives from
+  `127.0.0.1`, so the loopback auth bypass would let the whole network in:
+  natively, a declared proxy requires the token from loopback too (the same
+  rule as `server.auth_strict_localhost`) and the WebSocket "local frontend"
+  shortcut is withdrawn. Declaring from Settings creates the token if needed
+  and hands it to the UI in the same reply; a browser or desktop webview that
+  loses it must paste it again (Settings › Server & network access). Docker is
+  unchanged: its gateway sets `X-Real-IP`.
+- The proxy must forward WebSocket upgrades (`/api/ws`) for P2P.
 
 `KRONN_ALLOW_INSECURE_LAN=1` (an *unauthenticated* API on a trusted LAN) does
-**not** waive this guard: authentication and transport are checked separately,
-and an exposed instance needs an answer to both.
+**not** waive any of this: authentication and transport are checked separately.
 
-The refusal message names the variable to set. The check lives in
-`backend/src/core/net_expose.rs::plain_http_lan_boot_error` and is called by
-the standalone backend (`backend/src/main.rs`) and the embedded desktop server
-(`desktop/src-tauri/src/main.rs`). Tests: `core::net_expose::tests`
-(`plain_http_guard_refuses_an_exposed_instance_without_tls_or_the_proxy_flag`).
+The logic lives in `backend/src/core/net_expose.rs` (`boot_bind`,
+`plain_http_exposure_refusal`, `proxy_declared_for`), called by the standalone
+backend (`backend/src/main.rs`), the embedded desktop server
+(`desktop/src-tauri/src/main.rs`) and the toggle
+(`backend/src/api/setup.rs::set_network_exposure`). Tests:
+`core::net_expose::tests`, `api_tests::network_exposure_*`,
+`api::contacts::tests` (proxy invites), the desktop `embedded_*` tests and
+`IdentitySection.test.tsx`.
 
-**Upgrading:** an install that already publishes on the LAN (`KRONN_BIND=0.0.0.0`,
-or the Settings "Allow connections from other devices" toggle) fails its next
-boot with the message above until it sets the variable (or goes back to
-loopback).
+**Upgrading:** an install whose `config.toml` already says `host = "0.0.0.0"`
+(the old toggle) now boots on loopback with a banner until a proxy is
+declared; a Docker install published on the network (`KRONN_BIND` not
+loopback) fails its next boot until it sets the two variables (or goes back to
+loopback). Existing `kronn:` contacts keep working.
 
 ## Strict-localhost opt-in
 
@@ -101,9 +133,10 @@ on first boot, and the Tauri build reads it from the same
 
 ## What changes when in-process TLS ships
 
-The transport guard above closed the old `TD-20260314-no-tls` debt entry:
-an exposed instance can no longer run in clear by accident. In-process TLS
-itself (the second path in the table) is the remaining step. Once
+The transport guard above *reduced* the old `TD-20260314-no-tls` debt entry
+(it stays open): an exposed instance can no longer run in clear by accident,
+but it needs a proxy you run yourself. In-process TLS itself (the second path
+in the table) is the remaining step. Once
 that's in place, the localhost auto-bypass becomes redundant — the
 threat model it mitigated (HTTP-on-loopback) goes away. The plan:
 
@@ -181,4 +214,5 @@ the predicate behaviour is unchanged.
 - `frontend/src/pages/SettingsPage.tsx:1240-1275` — Settings UI
 - `.docker/nginx.conf` — CSP + security headers (gateway, Docker mode)
 - `desktop/src-tauri/src/main.rs:desktop_app` — desktop router (no COOP/COEP)
-- `backend/src/core/net_expose.rs:plain_http_lan_boot_error` — transport guard (KT-1596)
+- `backend/src/core/net_expose.rs:boot_bind` — transport guard and bind plan (KT-1596)
+- `backend/src/api/setup.rs:set_network_exposure` — the toggle that refuses plain HTTP

@@ -43,14 +43,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Security
 
-- A LAN-exposed instance (bind-all host, or Docker with a non-loopback
-  `KRONN_BIND`) now refuses to start over plain HTTP, since the Bearer token and
-  P2P invite codes would cross the network in clear. Set
-  `KRONN_TLS_TERMINATED_BY_PROXY=1` to declare that a TLS proxy fronts Kronn or
-  that peers only reach it over Tailscale. `KRONN_ALLOW_INSECURE_LAN` does not
-  waive it, and loopback-only use is unchanged. An install that already
-  publishes on the LAN must set the variable on its next boot. In-process TLS
-  is not shipped yet (KT-1596).
+- Kronn is no longer exposed over plain HTTP. The Settings « Allow connections
+  from other devices » toggle now refuses (409, with what is needed) unless a
+  TLS-terminating proxy on the machine (nginx, Caddy, `tailscale serve`) is
+  declared there with its public `https://` address (`server.tls_terminated_by_proxy`
+  / `server.public_origin`, or `KRONN_TLS_TERMINATED_BY_PROXY=1` +
+  `KRONN_PUBLIC_ORIGIN`). A config that already asks for exposure with no
+  declaration starts on `127.0.0.1` with a banner instead of refusing to start;
+  Docker, whose publish is outside the process, refuses to start on a
+  non-loopback `KRONN_BIND` without the declaration. Behind a declared proxy the
+  backend listens on loopback only, invites become `kronns:` (https/wss on the
+  proxy's origin), and the loopback auth bypass is withdrawn since every proxied
+  request comes from `127.0.0.1`. `KRONN_ALLOW_INSECURE_LAN` does not waive any of
+  it. In-process TLS is not shipped (`TD-20260314-no-tls`, reduced) (KT-1596).
 - The copy of a generated asset into a run's artifacts directory is written
   through the directory's file descriptor, so a link an Exec step planted at
   the asset's name is replaced, never written through. A press of a step's

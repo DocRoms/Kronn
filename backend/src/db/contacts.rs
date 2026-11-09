@@ -122,15 +122,23 @@ pub const MAX_PSEUDO_CHARS: usize = 64;
 pub const MAX_PENDING_REQUESTS: i64 = 20;
 pub const REQUEST_TTL_DAYS: i64 = 7;
 
-/// Parse invite code format: kronn:pseudo@host:port. The address must be a
-/// bare host and port: no path, query, fragment or credentials, so the URL
-/// built from it cannot point anywhere else.
+/// Prefix of an invite code whose peer is dialled over TLS (https / wss).
+pub const TLS_INVITE_PREFIX: &str = "kronns:";
+
+/// Parse invite code format: `kronn:pseudo@host:port` (plain http / ws) or
+/// `kronns:pseudo@host:port` (https / wss: the peer sits behind a TLS proxy,
+/// KT-1596). The address must be a bare host and port: no path, query,
+/// fragment or credentials, so the URL built from it cannot point anywhere
+/// else.
 pub fn parse_invite_code(code: &str) -> Option<(String, String)> {
     let code = code.trim();
     if code.len() > MAX_INVITE_CODE_LEN {
         return None;
     }
-    let rest = code.strip_prefix("kronn:")?;
+    let (scheme, rest) = match code.strip_prefix(TLS_INVITE_PREFIX) {
+        Some(rest) => ("https", rest),
+        None => ("http", code.strip_prefix("kronn:")?),
+    };
     let (pseudo, url_part) = rest.rsplit_once('@')?;
     if pseudo.is_empty()
         || pseudo.chars().count() > MAX_PSEUDO_CHARS
@@ -139,7 +147,39 @@ pub fn parse_invite_code(code: &str) -> Option<(String, String)> {
         return None;
     }
     let authority = canonical_authority(url_part)?;
-    Some((pseudo.to_string(), format!("http://{authority}")))
+    Some((pseudo.to_string(), format!("{scheme}://{authority}")))
+}
+
+/// `host:port` (port 443 when the origin has none) of a proxy's public
+/// `https://` origin, or None unless it is exactly an https scheme, a DNS name
+/// or IP and an optional port: no path, query, fragment or credentials.
+pub fn public_origin_authority(origin: &str) -> Option<String> {
+    let origin = origin.trim().trim_end_matches('/');
+    let scheme_len = "https://".len();
+    if origin.len() <= scheme_len
+        || !origin.is_char_boundary(scheme_len)
+        || !origin[..scheme_len].eq_ignore_ascii_case("https://")
+    {
+        return None;
+    }
+    let rest = &origin[scheme_len..];
+    let has_port = match rest.strip_prefix('[') {
+        Some(v6) => v6.contains("]:"),
+        None => rest.contains(':'),
+    };
+    if has_port {
+        canonical_authority(rest)
+    } else {
+        canonical_authority(&format!("{rest}:443"))
+    }
+}
+
+/// The canonical form of a proxy's public origin (`https://host`, the port
+/// shown only when it is not 443), or None when it is not a bare https origin.
+pub fn normalize_public_origin(origin: &str) -> Option<String> {
+    let authority = public_origin_authority(origin)?;
+    let shown = authority.strip_suffix(":443").unwrap_or(&authority);
+    Some(format!("https://{shown}"))
 }
 
 /// `host:port` in canonical form, or None unless it is exactly a DNS name,

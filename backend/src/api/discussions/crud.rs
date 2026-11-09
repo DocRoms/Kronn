@@ -1126,15 +1126,22 @@ pub async fn share(
             // unwrap_or_default() leaked an empty pseudo (`kronn:@host`).
             let config = state.config.read().await;
             let pseudo = crate::api::contacts::invite_pseudo(&config.server);
-            let invite_code = crate::api::contacts::build_invite_code(&config.server).await;
+            let invite_code = crate::api::contacts::try_build_invite_code(&config.server).await;
             drop(config);
 
-            let _ = state.ws_broadcast.send(WsMessage::DiscussionInvite {
-                shared_discussion_id: shared_id.clone(),
-                title,
-                from_pseudo: pseudo,
-                from_invite_code: invite_code,
-            });
+            // KT-1596 — a declared proxy with no public origin has no safe code:
+            // the share exists, the peers just are not told over the wire yet.
+            match invite_code {
+                Ok(invite_code) => {
+                    let _ = state.ws_broadcast.send(WsMessage::DiscussionInvite {
+                        shared_discussion_id: shared_id.clone(),
+                        title,
+                        from_pseudo: pseudo,
+                        from_invite_code: invite_code,
+                    });
+                }
+                Err(reason) => tracing::warn!("Shared discussion not announced to peers: {reason}"),
+            }
 
             Json(ApiResponse::ok(shared_id))
         }

@@ -763,16 +763,25 @@ async fn auth_middleware(
     let config = state.config.read().await;
     let auth_enabled = config.server.auth_enabled;
     let expected_token = config.server.auth_token.clone();
-    let strict_localhost = config.server.auth_strict_localhost;
+    // KT-1596 — behind a TLS proxy on this machine every network request arrives
+    // from loopback, so the loopback bypass would let the whole network in:
+    // the token is then required from loopback too (Docker's gateway sets
+    // `X-Real-IP`, already read below).
+    let proxy_fronted = !crate::core::net_expose::loopback_peer_is_owner(
+        crate::core::net_expose::proxy_declared_for(&config.server),
+        crate::core::env::is_docker(),
+    );
+    let strict_localhost = config.server.auth_strict_localhost || proxy_fronted;
     let auth_locked = config.server.auth_locked && auth_enabled && expected_token.is_none();
     let key_in_use = config.encryption_secret.is_some();
     drop(config);
 
     // A stored token that cannot be decrypted is not "auth off": only the routes
     // that bring the key or a token back stay open, and only to a local caller.
-    // Strict-localhost is ignored here: no token can be checked anyway.
+    // Strict-localhost is ignored here: no token can be checked anyway. A proxy
+    // on this machine is not: its loopback peer is the network, not the owner.
     if auth_locked {
-        let local = request_is_local_ip(&headers, &request);
+        let local = !proxy_fronted && request_is_local_ip(&headers, &request);
         let bridge_bearer = carries_bridge_token(&headers);
         // A bridge token never reaches the recovery routes, locked or not.
         if !bridge_bearer && auth_locked_allows(request.uri().path(), local, key_in_use) {

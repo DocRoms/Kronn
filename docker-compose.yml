@@ -178,9 +178,13 @@ services:
       # KRONN_ALLOW_INSECURE_LAN=1 to keep it open on a trusted home network.
       - KRONN_BIND=${KRONN_BIND:-127.0.0.1}
       - KRONN_ALLOW_INSECURE_LAN=${KRONN_ALLOW_INSECURE_LAN:-}
-      # KT-1596 — the gateway speaks plain HTTP, so a LAN publish ALSO needs
-      # KRONN_TLS_TERMINATED_BY_PROXY=1 (a TLS proxy in front, or Tailscale only).
+      # KT-1596 — the gateway speaks plain HTTP, so a LAN publish ALSO needs a TLS
+      # proxy in front (nginx, Caddy, `tailscale serve`), declared with
+      # KRONN_TLS_TERMINATED_BY_PROXY=1 and its public address in
+      # KRONN_PUBLIC_ORIGIN (https://…, what invite codes advertise). Without
+      # both, a non-loopback KRONN_BIND ends startup.
       - KRONN_TLS_TERMINATED_BY_PROXY=${KRONN_TLS_TERMINATED_BY_PROXY:-}
+      - KRONN_PUBLIC_ORIGIN=${KRONN_PUBLIC_ORIGIN:-}
       - KRONN_AUTH_TOKEN=${KRONN_AUTH_TOKEN:-}
       # 0.8.11 (B6) — failure webhook (Slack/Teams/generic) + scheduled backups.
       # A backup dir OUTSIDE the data volume needs a host bind-mount (see the

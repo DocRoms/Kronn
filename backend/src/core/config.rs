@@ -880,6 +880,8 @@ pub fn default_config() -> AppConfig {
             auth_locked: false,
             auth_token_session_only: false,
             auth_strict_localhost: false,
+            tls_terminated_by_proxy: false,
+            public_origin: None,
             protect_vault_from_agents: true,
             p2p_enabled: false,
             frontend_origins: vec![],
