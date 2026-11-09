@@ -624,6 +624,34 @@ describe('discussions.sendMessageStream / reviseMessageStream / runAgent', () =>
     });
   });
 
+  // KT-1607 — `/run` on a job that is not streamable: a settled failure is a
+  // terminal `error`, a job still owed its automatic retry is only a `log`.
+  it('runAgent reports a settled failure as an error', async () => {
+    mockStreamingFetch([
+      sse('error', { error: 'The agent run failed: HTTP 413', dispatch_id: 'j-1' }),
+      sse('complete', {}),
+    ]);
+    const { discussions } = await import('../api');
+    const onLog = vi.fn(); const onError = vi.fn();
+    await discussions.runAgent('d-1', vi.fn(), vi.fn(), onError, undefined, onLog);
+    expect(onError).toHaveBeenCalledWith('The agent run failed: HTTP 413');
+    expect(onLog).not.toHaveBeenCalled();
+  });
+
+  it('runAgent shows a job waiting to retry as a log, not as an error', async () => {
+    const retry = 'Retrying: the agent run failed (boom); next attempt at 2026-11-10T10:00:00+00:00';
+    mockStreamingFetch([
+      sse('log', { text: retry, dispatch_id: 'j-1', retry_at: '2026-11-10T10:00:00+00:00' }),
+      sse('complete', {}),
+    ]);
+    const { discussions } = await import('../api');
+    const onLog = vi.fn(); const onError = vi.fn(); const onDone = vi.fn();
+    await discussions.runAgent('d-1', vi.fn(), onDone, onError, undefined, onLog);
+    expect(onLog).toHaveBeenCalledWith(retry);
+    expect(onError).not.toHaveBeenCalled();
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
   it('reviseMessageStream forwards the atomic revision receipt', async () => {
     const receipt = {
       event_id: 'revision-event',

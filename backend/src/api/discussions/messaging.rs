@@ -1212,11 +1212,15 @@ pub async fn run_agent(
     sse_events(events)
 }
 
-/// The `error` event for a dispatch `/run` could not start: why it is not
-/// running, and which dispatch it concerns. `None` while it is queued, running
-/// or done, where the absence of a stream is not a failure.
+/// The event for a dispatch `/run` could not start. A settled failure (failed,
+/// cancelled, or pending with its attempts used up) is a terminal `error` with
+/// the cause and the dispatch it concerns. A pending job still owed an automatic
+/// retry is NOT a failure — the client treats `error` as terminal, so it gets a
+/// non-terminal `log` event with the reason and the next attempt time instead.
+/// `None` while it is queued, running or done, where the absence of a stream is
+/// not a failure.
 fn run_not_started_event(job: &crate::db::agent_dispatch::AgentDispatchJob) -> Option<Event> {
-    use crate::db::agent_dispatch::DispatchStatus;
+    use crate::db::agent_dispatch::{DispatchStatus, MAX_DISPATCH_ATTEMPTS};
     let last_error = job.last_error.as_deref().filter(|e| !e.trim().is_empty());
     let reason = match (job.status, last_error) {
         (DispatchStatus::Failed, Some(error)) => format!("The agent run failed: {error}"),
@@ -1225,15 +1229,34 @@ fn run_not_started_event(job: &crate::db::agent_dispatch::AgentDispatchJob) -> O
             format!("The agent run was cancelled before it started ({cause})")
         }
         (DispatchStatus::Cancelled, None) => "The agent run was cancelled".into(),
+        (DispatchStatus::Pending, Some(error)) if job.attempts >= MAX_DISPATCH_ATTEMPTS => {
+            format!(
+                "The agent run failed after {} attempts: {error}",
+                job.attempts
+            )
+        }
         (DispatchStatus::Pending, Some(error)) => {
-            format!("The agent run is waiting to retry after: {error}")
+            let retry = format!(
+                "Retrying: the agent run failed ({error}); next attempt at {}",
+                job.available_at.to_rfc3339()
+            );
+            return Some(
+                Event::default().event("log").data(
+                    serde_json::json!({
+                        "text": retry,
+                        "dispatch_id": job.id,
+                        "retry_at": job.available_at.to_rfc3339(),
+                    })
+                    .to_string(),
+                ),
+            );
         }
         _ => return None,
     };
     Some(
-        Event::default().event("error").data(
-            serde_json::json!({ "error": reason, "dispatch_id": job.id }).to_string(),
-        ),
+        Event::default()
+            .event("error")
+            .data(serde_json::json!({ "error": reason, "dispatch_id": job.id }).to_string()),
     )
 }
 
@@ -3444,17 +3467,20 @@ mod tests {
         )
         .await;
         let body = sse_body_to_string(resp).await;
-        assert!(body.contains("event: error"), "must report an error: {body}");
+        assert!(
+            body.contains("event: error"),
+            "must report an error: {body}"
+        );
         assert!(body.contains("HTTP 413 from the provider"), "{body}");
         assert!(body.contains("job-run-replay"), "{body}");
     }
 
     /// The counterpart: a dispatch that is merely queued or running is not a
     /// failure, so the absence of a stream there stays a plain `complete`.
-    #[test]
-    fn a_queued_or_running_dispatch_is_not_reported_as_a_failed_run() {
-        use crate::db::agent_dispatch::{AgentDispatchJob, DispatchStatus};
-        let job = |status, last_error: Option<&str>| {
+    #[tokio::test]
+    async fn a_queued_or_running_dispatch_is_not_reported_as_a_failed_run() {
+        use crate::db::agent_dispatch::{AgentDispatchJob, DispatchStatus, MAX_DISPATCH_ATTEMPTS};
+        let job_after = |status, last_error: Option<&str>, attempts: u32| {
             let now = Utc::now();
             AgentDispatchJob {
                 id: "j".into(),
@@ -3469,7 +3495,7 @@ mod tests {
                 group_id: None,
                 group_concurrency_limit: None,
                 status,
-                attempts: 0,
+                attempts,
                 turn_attempts: 0,
                 available_at: now,
                 claimed_at: None,
@@ -3486,12 +3512,45 @@ mod tests {
                 connection_id: None,
             }
         };
+        let job = |status, last_error: Option<&str>| job_after(status, last_error, 0);
         assert!(run_not_started_event(&job(DispatchStatus::Running, None)).is_none());
         assert!(run_not_started_event(&job(DispatchStatus::Pending, None)).is_none());
         assert!(run_not_started_event(&job(DispatchStatus::Completed, None)).is_none());
         assert!(run_not_started_event(&job(DispatchStatus::Failed, None)).is_some());
         assert!(run_not_started_event(&job(DispatchStatus::Cancelled, None)).is_some());
-        assert!(run_not_started_event(&job(DispatchStatus::Pending, Some("boom"))).is_some());
+        // What the client actually receives, `complete` included.
+        let wire = |event: Event| sse_body_to_string(sse_events(vec![event]));
+        // Failed and cancelled are settled: a terminal `error`.
+        for settled in [DispatchStatus::Failed, DispatchStatus::Cancelled] {
+            let body = wire(run_not_started_event(&job(settled, Some("boom"))).unwrap()).await;
+            assert!(body.contains("event: error"), "{body}");
+        }
+        // Pending with attempts left is waiting for its automatic retry: the
+        // client treats `error` as terminal, so it must NOT be one.
+        let retrying = job_after(
+            DispatchStatus::Pending,
+            Some("boom"),
+            MAX_DISPATCH_ATTEMPTS - 1,
+        );
+        let body = wire(run_not_started_event(&retrying).unwrap()).await;
+        assert!(
+            !body.contains("event: error"),
+            "retry-pending is not an error: {body}"
+        );
+        assert!(body.contains("event: log"), "{body}");
+        assert!(body.contains("Retrying") && body.contains("boom"), "{body}");
+        assert!(body.contains("retry_at"), "{body}");
+        // Pending with the attempts used up will never retry: settled failure.
+        let exhausted = job_after(DispatchStatus::Pending, Some("boom"), MAX_DISPATCH_ATTEMPTS);
+        let body = wire(run_not_started_event(&exhausted).unwrap()).await;
+        assert!(
+            body.contains("event: error"),
+            "exhausted is an error: {body}"
+        );
+        assert!(
+            body.contains("boom") && !body.contains("event: log"),
+            "{body}"
+        );
     }
 
     /// A BATCH child is pre-marked awaiting_agent=1 at enqueue

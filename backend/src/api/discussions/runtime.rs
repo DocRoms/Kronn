@@ -1830,7 +1830,10 @@ mod chain_render_tests {
             cards[0].contains("agent finished without a durable reply"),
             "{cards:?}"
         );
-        assert!(cards[0].contains("j-vis"), "retryable from the room: {cards:?}");
+        assert!(
+            cards[0].contains("j-vis"),
+            "retryable from the room: {cards:?}"
+        );
 
         ensure_failure_visible(&state, &job, "agent finished without a durable reply").await;
         assert_eq!(

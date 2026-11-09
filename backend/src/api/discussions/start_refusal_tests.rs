@@ -515,7 +515,14 @@ async fn a_litellm_run_refused_as_too_large_leaves_a_card_with_the_size_and_the_
         .mount(&proxy)
         .await;
     let room = room().await;
-    discussion(&room.db, "d-big", "LiteLlm", "reasoning", Some("gemini-4-argon")).await;
+    discussion(
+        &room.db,
+        "d-big",
+        "LiteLlm",
+        "reasoning",
+        Some("gemini-4-argon"),
+    )
+    .await;
     room.db
         .with_conn(|conn| {
             conn.execute(

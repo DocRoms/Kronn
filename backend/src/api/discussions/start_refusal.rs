@@ -5,8 +5,8 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::core::endpoint_reachability::{StartRefusal, UnreachableReason, SHARED, START_BUDGET};
 use super::prompt_limit::PromptLimit;
+use crate::core::endpoint_reachability::{StartRefusal, UnreachableReason, SHARED, START_BUDGET};
 use crate::models::setup::HttpEndpoints;
 use crate::models::{
     AgentType, CatalogPreflightFailure, DiscussionMessage, MessageChannel, MessageRole, ModelTier,
@@ -341,7 +341,14 @@ pub(crate) fn prompt_too_large_card(
             code(", ")
         ),
     };
-    card("agent_error", status, &summary, detail, tier, retry_dispatch_id)
+    card(
+        "agent_error",
+        status,
+        &summary,
+        detail,
+        tier,
+        retry_dispatch_id,
+    )
 }
 
 /// KT-1607 — the card for a run that ended with nothing written to the
@@ -366,7 +373,14 @@ pub(crate) fn unexplained_end_card(
             "The run ended without a reply: {shown}. Retry it, or pick another model or agent."
         ),
     };
-    card("agent_error", None, &summary, reason, tier, retry_dispatch_id)
+    card(
+        "agent_error",
+        None,
+        &summary,
+        reason,
+        tier,
+        retry_dispatch_id,
+    )
 }
 
 /// Who a refused start belongs to, for the System card it leaves.
