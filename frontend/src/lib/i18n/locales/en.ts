@@ -95,7 +95,7 @@ const en: TranslationDict = {
   "pages.import.methodUnspecified": "Method not specified",
   "pages.exportArtifact": "Artifact JSON",
   "pages.import.title": "Import an Artifact",
-  "pages.import.hint": "Keep the HTML, retained data and linked automation definitions. Review dependencies before creating a new Artifact.",
+  "pages.import.hint": "Keep the HTML, dataset definitions and linked automation definitions. Datasets start empty unless the file predates bare exports. Review dependencies before creating a new Artifact.",
   "pages.import.file": "Kronn Artifact JSON file",
   "pages.import.tooLarge": "The file exceeds the 64 MiB limit.",
   "pages.import.invalidFile": "Choose a Kronn Artifact bundle (version 1).",

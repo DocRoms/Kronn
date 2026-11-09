@@ -95,7 +95,7 @@ const zh: TranslationDict = {
   "pages.import.methodUnspecified": "未指定方法",
   "pages.exportArtifact": "Artifact JSON",
   "pages.import.title": "导入 Artifact",
-  "pages.import.hint": "保留 HTML、已保存的数据和关联自动化定义。创建新的 Artifact 前请检查依赖项。",
+  "pages.import.hint": "保留 HTML、数据集定义和关联自动化定义。数据集导入后为空，除非文件早于无数据导出。创建新的 Artifact 前请检查依赖项。",
   "pages.import.file": "Kronn Artifact JSON 文件",
   "pages.import.tooLarge": "文件超过 64 MiB 限制。",
   "pages.import.invalidFile": "请选择 Kronn Artifact 包（版本 1）。",

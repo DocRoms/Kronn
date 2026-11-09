@@ -61,6 +61,13 @@ Release notes for 0.9.3 and earlier are available in the
   worktrees) resolve through directory file descriptors with `O_NOFOLLOW`, so a
   parent folder swapped for a link after the check never lets a write leave
   the project; Windows keeps the check-then-write by path (KT-1595).
+- An exported Artifact no longer carries its data. Each dataset keeps its
+  name, kind, schema and limits, without its snapshot or its time-series
+  points, so sharing the file shares the page, not what it published (API
+  answers, names, links), nor when it last published. The export does not
+  load those values either. A file exported before keeps importing with its
+  values, and importing it again reuses the pages it already created.
+  Project repository resources are unchanged (#273).
 
 ### Fixed
 
@@ -69,6 +76,15 @@ Release notes for 0.9.3 and earlier are available in the
 - An interrupted task execution no longer stays stuck on "recovery decision
   already consumed": it can always resume or deliver, and a resume never
   consumes the decision of a newer interruption (KT-1537, #492).
+- Importing an Artifact or a workflow whose step pins a version of a custom
+  skill the file carries (`custom-x@1`) no longer fails with "this version
+  does not exist" on a Kronn that never had the skill: the pin is checked
+  once the import has created it (#273).
+- A custom skill a JsonData step lists by id (say, per-repository skills
+  that an Exec script loads through the API) is now exported with the
+  workflow or Artifact, and the imported payload names the created copy.
+  Before, the file left it out and the script failed on the other Kronn
+  with "skills absent" (#273).
 
 ## [0.15.2] - 2026-11-08
 
