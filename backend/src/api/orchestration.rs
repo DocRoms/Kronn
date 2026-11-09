@@ -1139,6 +1139,46 @@ async fn refresh_integration_recovery(
     .await
 }
 
+/// KT-1537 — give an `Interrupted` execution whose decision is consumed (or
+/// absent) a fresh pending one, so `/resume` never answers « already consumed »
+/// to an interruption nobody has decided yet.
+///
+/// Only an undelivered `resume_worker` is re-armed as is (a restart
+/// classification would instead park it for a human, and it has no state to
+/// re-read). Every other decision predates this interruption and is re-derived:
+/// from the real Git target for an integration origin, from the child room, the
+/// worktree and the CLI for any other.
+async fn rearm_stranded_interruption(state: &AppState, exec_id: &str) -> Result<()> {
+    let db = &state.db;
+    let id = exec_id.to_string();
+    if db
+        .with_conn(move |conn| crate::db::orchestration::rearm_consumed_recovery(conn, &id))
+        .await?
+    {
+        return Ok(());
+    }
+    let id = exec_id.to_string();
+    let origin = db
+        .with_conn(move |conn| {
+            Ok(crate::db::orchestration::get_task_execution(conn, &id)?
+                .and_then(|execution| execution.interrupted_from_status))
+        })
+        .await?
+        .context("Interrupted execution has no durable origin")?;
+    if matches!(
+        origin,
+        TaskExecutionStatus::Integrating
+            | TaskExecutionStatus::Validating
+            | TaskExecutionStatus::Applying
+    ) {
+        refresh_integration_recovery(db, exec_id).await?;
+    } else {
+        let available_agents = available_agent_types_for_state(state).await;
+        classify_interrupted_execution(db, exec_id, &available_agents).await?;
+    }
+    Ok(())
+}
+
 async fn classify_interrupted_execution(
     db: &Database,
     exec_id: &str,
@@ -12288,6 +12328,38 @@ async fn resume_claimed_execution(
             )),
         };
     }
+    // KT-1537 — an `Interrupted` execution whose decision was consumed was
+    // interrupted again after that resume: arm a fresh decision instead of
+    // refusing it. A replayed resume finds the execution moved on, not here.
+    let snapshot = if snapshot.execution.status == TaskExecutionStatus::Interrupted
+        && snapshot
+            .recovery
+            .as_ref()
+            .is_none_or(|recovery| !recovery.pending)
+    {
+        if let Err(error) = rearm_stranded_interruption(&state, &exec_id).await {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Conflict,
+                format!("interrupted execution has no recoverable decision: {error}"),
+            ));
+        }
+        let id = exec_id.clone();
+        match state
+            .db
+            .with_conn(move |conn| recovery_view(conn, &id))
+            .await
+        {
+            Ok(rearmed) => rearmed,
+            Err(error) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::Internal,
+                    error.to_string(),
+                ))
+            }
+        }
+    } else {
+        snapshot
+    };
     let Some(recovery) = snapshot.recovery else {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Conflict,
@@ -12461,11 +12533,14 @@ async fn resume_claimed_execution(
         }
     };
     let id = exec_id.clone();
-    let applied = action.as_str().to_string();
+    let applied = recovery.clone();
     let refreshed = state
         .db
         .with_conn(move |conn| {
-            crate::db::orchestration::clear_execution_recovery(conn, &id, &applied)?;
+            // KT-1537 — an execution interrupted again meanwhile keeps its
+            // fresh decision, and so does a decision re-armed meanwhile; only
+            // the exact one this resume applied is consumed.
+            crate::db::orchestration::consume_applied_recovery(conn, &id, &applied)?;
             let mut view = recovery_view(conn, &id)?;
             view.outcome = Some(outcome);
             Ok(view)
@@ -42512,6 +42587,355 @@ pub(crate) mod tests {
             working.dispatch_job_id,
             "the replay woke nobody"
         );
+    }
+
+    async fn recovery_of(
+        db: &std::sync::Arc<Database>,
+        exec_id: &str,
+    ) -> crate::models::TaskExecutionRecovery {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| crate::db::orchestration::get_execution_recovery(conn, &id))
+            .await
+            .unwrap()
+            .expect("recovery row")
+    }
+
+    /// KT-1537 — makes the dispatch a `/resume` just woke end at once. The trigger
+    /// fires on the last write of the wake's own transaction (the
+    /// `Interrupted -> Working` event) and leaves what
+    /// `interrupt_undelivered_execution_for_dispatch` leaves: `Interrupted` again,
+    /// with a fresh pending `resume_worker`. The handler then reaches its consume
+    /// step in its real order, which a hand-called consume cannot show.
+    async fn woken_worker_ends_at_once(db: &std::sync::Arc<Database>) {
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER kt1537_woken_worker_ends_at_once \
+                 AFTER INSERT ON task_execution_events \
+                 WHEN NEW.action = 'transition' AND NEW.from_status = 'Interrupted' \
+                      AND NEW.to_status = 'Working' \
+                 BEGIN \
+                     UPDATE task_executions SET status = 'Interrupted', \
+                            interrupted_from_status = 'Working' \
+                     WHERE id = NEW.task_execution_id; \
+                     UPDATE task_execution_recovery SET recovery_action = 'resume_worker', \
+                            recovery_reason = 'worker_failed_without_delivery: ended at once', \
+                            pending = 1, updated_at = NEW.created_at \
+                     WHERE task_execution_id = NEW.task_execution_id; \
+                 END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn reconciliation_events(
+        db: &std::sync::Arc<Database>,
+        exec_id: &str,
+        action: &str,
+    ) -> i64 {
+        let (id, action) = (exec_id.to_string(), action.to_string());
+        db.with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM orchestration_reconciliation_events \
+                 WHERE subject_id = ?1 AND action = ?2",
+                rusqlite::params![id, action],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// KT-1537 — the resume wakes the worker, whose new dispatch ends at once and
+    /// parks the execution again, BEFORE the resume consumes its decision. The
+    /// handler must not wipe the decision of that second interruption: the
+    /// execution is `Interrupted`, not `Working`, so it could neither deliver nor
+    /// (« already consumed ») be resumed again.
+    #[tokio::test]
+    async fn a_worker_that_ends_before_the_resume_is_consumed_stays_resumable() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution = undelivered_native_worker(&db, repo.path(), "rearmed-race").await;
+        woken_worker_ends_at_once(&db).await;
+
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(resumed.success, "first resume refused: {:?}", resumed.error);
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Interrupted,
+            "the woken worker ended before the resume finished"
+        );
+        let recovery = recovery_of(&db, &execution.id).await;
+        assert!(recovery.pending, "the new interruption's decision survived");
+        assert!(recovery.recovery_reason.contains("ended at once"));
+        assert!(
+            resumed.data.unwrap().recovery.unwrap().pending,
+            "and the answer says so"
+        );
+
+        db.with_conn(|conn| {
+            conn.execute_batch("DROP TRIGGER kt1537_woken_worker_ends_at_once")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(
+            resumed.success,
+            "second resume refused: {:?}",
+            resumed.error
+        );
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Working,
+            "the worker is back on a dispatch that can deliver"
+        );
+        assert!(!recovery_of(&db, &execution.id).await.pending);
+    }
+
+    /// KT-1537 — an execution already stranded `Interrupted` with a consumed
+    /// decision (written before the consume was guarded) is not refused: the next
+    /// `/resume` arms a fresh decision and applies it once. The replay of that
+    /// resume still finds a consumed decision on a moved-on execution.
+    #[tokio::test]
+    async fn an_interrupted_execution_with_a_consumed_decision_is_rearmed_and_resumes_once() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution = undelivered_native_worker(&db, repo.path(), "rearmed-stranded").await;
+        let id = execution.id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::clear_execution_recovery(conn, &id, "stranded")
+        })
+        .await
+        .unwrap();
+        assert!(!recovery_of(&db, &execution.id).await.pending);
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Interrupted
+        );
+
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(
+            resumed.success,
+            "stranded resume refused: {:?}",
+            resumed.error
+        );
+        let working = exec_of(&db, &execution.id).await;
+        assert_eq!(working.status, TaskExecutionStatus::Working);
+        assert_ne!(working.dispatch_job_id, execution.dispatch_job_id);
+        assert!(!recovery_of(&db, &execution.id).await.pending);
+        assert_eq!(
+            reconciliation_events(&db, &execution.id, "recovery_rearmed").await,
+            1,
+            "an undelivered worker is re-armed as is"
+        );
+
+        let Json(replay) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(!replay.success);
+        assert!(
+            replay
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("already consumed")),
+            "{:?}",
+            replay.error
+        );
+        assert_eq!(
+            exec_of(&db, &execution.id).await.dispatch_job_id,
+            working.dispatch_job_id,
+            "the replay woke nobody"
+        );
+    }
+
+    /// KT-1537 — an integration origin never reuses its consumed decision: it
+    /// predates the new interruption, so it is re-read from Git. Here the stale
+    /// decision claims the apply already landed (`idempotent_close`); it did not,
+    /// and the resume must apply it instead of closing on a claim.
+    #[tokio::test]
+    async fn a_stranded_integration_decision_is_rederived_from_git_not_reused() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (execution, target_sha, merge_sha) =
+            interrupted_applying_with_stale_decision(&db, repo.path(), "stranded-integration")
+                .await;
+        let id = execution.id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_execution_recovery SET recovery_action = 'idempotent_close', \
+                        pending = 0 WHERE task_execution_id = ?1",
+                rusqlite::params![id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(git_rev(repo.path(), "main"), target_sha, "nothing landed");
+
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(resumed.success, "resume failed: {:?}", resumed.error);
+        assert_eq!(
+            reconciliation_events(&db, &execution.id, "recovery_rearmed").await,
+            0,
+            "the stale decision was not re-armed as is"
+        );
+        let done = exec_of(&db, &execution.id).await;
+        assert_eq!(done.status, TaskExecutionStatus::Done);
+        assert_eq!(done.integrated_sha.as_deref(), Some(merge_sha.as_str()));
+        assert_eq!(git_rev(repo.path(), "main"), merge_sha);
+        assert_eq!(
+            resumed.data.unwrap().recovery.unwrap().recovery_action,
+            ExecutionRecoveryAction::ApplyFastForward
+        );
+    }
+
+    /// KT-1537 — an `Interrupted` execution that lost its decision row altogether
+    /// gets one derived from its lineage, then resumes once.
+    #[tokio::test]
+    async fn an_interrupted_execution_without_a_decision_gets_one_and_resumes() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution = undelivered_native_worker(&db, repo.path(), "rearmed-absent").await;
+        let id = execution.id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "DELETE FROM task_execution_recovery WHERE task_execution_id = ?1",
+                rusqlite::params![id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(resumed.success, "resume refused: {:?}", resumed.error);
+        assert_ne!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Interrupted,
+            "the derived decision was applied"
+        );
+        assert!(
+            !recovery_of(&db, &execution.id).await.pending,
+            "and consumed once"
+        );
+
+        let Json(replay) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(!replay.success, "a replay is still refused");
+    }
+
+    /// KT-1537 — a cancelled execution is final: its consumed decision is never
+    /// armed again.
+    #[tokio::test]
+    async fn a_cancelled_execution_is_never_rearmed() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution = undelivered_native_worker(&db, repo.path(), "rearmed-cancelled").await;
+        let id = execution.id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &id,
+                TaskExecutionStatus::Cancelled,
+                &backend_actor(),
+                serde_json::json!({ "reason": "cancelled by the principal" }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(!recovery_of(&db, &execution.id).await.pending);
+
+        let Json(resumed) =
+            resume_execution(State(recovery_test_state(&db)), Path(execution.id.clone())).await;
+        assert!(!resumed.success);
+        assert!(
+            resumed
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("already consumed")),
+            "{:?}",
+            resumed.error
+        );
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Cancelled
+        );
+        assert!(!recovery_of(&db, &execution.id).await.pending);
+        assert_eq!(
+            reconciliation_events(&db, &execution.id, "recovery_rearmed").await,
+            0
+        );
+        let id = execution.id.clone();
+        let rearmed = db
+            .with_conn(move |conn| crate::db::orchestration::rearm_consumed_recovery(conn, &id))
+            .await
+            .unwrap();
+        assert!(!rearmed);
+    }
+
+    /// KT-1537 — the guard still holds on the consume itself: a resume that moved
+    /// the execution on consumes its decision once; a decision re-armed meanwhile
+    /// (a reassignment bumps the generation) is not the applied one and is kept;
+    /// and a decision of a non-interrupted execution is never re-armed.
+    #[tokio::test]
+    async fn the_applied_decision_is_consumed_once_and_a_newer_one_is_kept() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let execution = undelivered_native_worker(&db, repo.path(), "rearmed-guard").await;
+        let applied = recovery_of(&db, &execution.id).await;
+        wake_recovered_worker(&db, &execution.id).await.unwrap();
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Working
+        );
+
+        // A reassignment re-arms the row inside the resume window, without the
+        // execution ever being `Interrupted`.
+        let id = execution.id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE task_execution_recovery SET assignment_generation = \
+                        assignment_generation + 1, recovery_reason = 'reassigned', pending = 1 \
+                 WHERE task_execution_id = ?1",
+                rusqlite::params![id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (id, stale) = (execution.id.clone(), applied.clone());
+        let consumed = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::consume_applied_recovery(conn, &id, &stale)
+            })
+            .await
+            .unwrap();
+        assert!(!consumed, "the reassignment's decision is not the resume's");
+        assert!(recovery_of(&db, &execution.id).await.pending);
+
+        let (id, current) = (execution.id.clone(), recovery_of(&db, &execution.id).await);
+        let (consumed, rearmed) = db
+            .with_conn(move |conn| {
+                let consumed =
+                    crate::db::orchestration::consume_applied_recovery(conn, &id, &current)?;
+                let rearmed = crate::db::orchestration::rearm_consumed_recovery(conn, &id)?;
+                Ok((consumed, rearmed))
+            })
+            .await
+            .unwrap();
+        assert!(consumed);
+        assert!(
+            !rearmed,
+            "a Working execution has no interruption to decide"
+        );
+        assert!(!recovery_of(&db, &execution.id).await.pending);
     }
 
     /// KT-1540 — a message in the child room wakes the worker on a NEW dispatch
