@@ -238,6 +238,94 @@ fn committed_repo_with_profile(profile: &str) -> (tempfile::TempDir, std::path::
     (dir, repo)
 }
 
+/// KT-1438: the settings say what the global switches do to a project that
+/// declared nothing, and a human's declaration (even an empty one) overrides it.
+#[tokio::test]
+async fn the_view_reports_the_global_switches_and_what_adoption_seeds() {
+    let state = test_state();
+    let (_dir, repo) = committed_repo_with_profile("schema_version = 1\n");
+    std::fs::write(repo.join(".gitignore"), "gen/\n").unwrap();
+    std::fs::write(repo.join("page.twig"), "{% include 'gen/asset.txt' %}").unwrap();
+    for args in [
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.email=t@t.com",
+            "-c",
+            "user.name=T",
+            "commit",
+            "-m",
+            "gen",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(&args)
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::create_dir_all(repo.join("gen")).unwrap();
+    std::fs::write(repo.join("gen/asset.txt"), "generated").unwrap();
+    std::fs::write(repo.join("gen/.env"), "TOKEN=1").unwrap();
+    seed_project(&state, "p1", &repo).await;
+
+    let default = get(State(state.clone()), Path("p1".into()))
+        .await
+        .0
+        .data
+        .unwrap();
+    assert!(default.copy_enabled && !default.adopt_suggested);
+    assert_eq!(default.source, LaneSeedsSource::None);
+    assert!(default.adopted_seeds.is_empty());
+
+    let adopting = {
+        let _policy = task_worker_lane_seeds::TestSeedPolicy::set(true, true);
+        get(State(state.clone()), Path("p1".into()))
+            .await
+            .0
+            .data
+            .unwrap()
+    };
+    assert_eq!(adopting.source, LaneSeedsSource::Adopted);
+    assert_eq!(adopting.adopted_seeds, vec!["gen".to_string()]);
+    assert!(adopting.seeds.is_empty(), "nothing is declared");
+    assert_eq!(
+        adopting.secret_findings.len(),
+        1,
+        "{:?}",
+        adopting.secret_findings
+    );
+    assert!(
+        adopting.secret_findings[0].held,
+        "the adopted candidate holding a .env is held"
+    );
+
+    let off = {
+        let _policy = task_worker_lane_seeds::TestSeedPolicy::set(false, true);
+        get(State(state.clone()), Path("p1".into()))
+            .await
+            .0
+            .data
+            .unwrap()
+    };
+    assert!(!off.copy_enabled);
+
+    // A declaration, even an empty one, ends the adoption for that project.
+    let saved = set(State(state.clone()), Path("p1".into()), declared(&[])).await;
+    assert!(saved.0.success, "{:?}", saved.0.error);
+    let declared_none = {
+        let _policy = task_worker_lane_seeds::TestSeedPolicy::set(true, true);
+        get(State(state.clone()), Path("p1".into()))
+            .await
+            .0
+            .data
+            .unwrap()
+    };
+    assert_eq!(declared_none.source, LaneSeedsSource::Project);
+    assert!(declared_none.adopted_seeds.is_empty());
+}
+
 /// The table the default branch carries is only proposed: nothing is seeded from
 /// it until a human adopts it. A human's declaration (even an empty one) is what
 /// applies, and a save keeps the working copy of the file in step with it.

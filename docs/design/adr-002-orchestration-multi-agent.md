@@ -420,7 +420,7 @@ restart. Boot first quiesces due dispatches and moves non-terminal executions to
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:296-396#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:7390-7461#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:7453-7524#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
 dead worker `[src: file: backend/src/api/orchestration.rs:795-966#start_resilience_watchdog]`.
 
@@ -428,7 +428,7 @@ Cancellation and reassignment preserve the same lineage. Cancellation first canc
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:12769-12922#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:8520-8566#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:13280-13469#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:8180-8487#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:12951-13104#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:8583-8629#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:13462-13651#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:8243-8550#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:388-485#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
@@ -511,7 +511,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   Across a parent discussion / OrchestrationRun, a configurable `max_concurrent_executions`, enforced
   when the campaign selects launchable tasks (`remaining_slots`, from the count of non-terminal
   executions) `[src: file: backend/src/db/orchestration.rs:1302-1319#active_execution_counts]`. The
-  `agent_dispatch_jobs` `group_id` concurrency limit `[src: file: backend/src/db/agent_dispatch.rs:678-687#group_concurrency_limit]`
+  `agent_dispatch_jobs` `group_id` concurrency limit `[src: file: backend/src/db/agent_dispatch.rs:728-735#group_concurrency_limit]`
   exists for batch fan-out; orchestration dispatches enqueue with `group_id: None`.
 - **Human escalation** — `Escalated` surfaces in the parent discussion, as the workflow Human Gate does
   with its decide endpoint `[src: file: backend/src/api/workflows.rs:5986-6173#decide_run]`, but the
@@ -561,8 +561,8 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
   explicit resume/cancel/reassign, independent timeout clocks and orphan-managed-workspace collection**
   is implemented by **KT-322** `[src: file: backend/src/api/orchestration.rs:293-393#reconcile_at_boot]`
   `[src: file: backend/src/api/orchestration.rs:795-966#start_resilience_watchdog]`
-  `[src: file: backend/src/api/orchestration.rs:12769-12922#cancel_execution]`
-  `[src: file: backend/src/api/orchestration.rs:13280-13469#reassign_execution]`.
+  `[src: file: backend/src/api/orchestration.rs:12951-13104#cancel_execution]`
+  `[src: file: backend/src/api/orchestration.rs:13462-13651#reassign_execution]`.
 - **Actor-kind schema change** (`backend`/`system`) is a shared prerequisite, surfaced in KT-317.
 - The ADR began as a decision record; KT-317–KT-322 now implement its durable aggregate,
   provisioning, review, protected integration, coordination and recovery boundaries.

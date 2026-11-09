@@ -15,14 +15,39 @@ only suggests enrolling (Settings › Security). Agents keep everything else.
 ## What is protected
 
 `core::strong_confirm::protection` decides, from the method and the matched route
-pattern. [src: file: backend/src/core/strong_confirm.rs:123-156#protection]
+pattern. [src: file: backend/src/core/strong_confirm.rs:139-172#protection]
 
 | Class | Routes |
 | --- | --- |
-| Always | `POST /api/config/recovery/set` (the passphrase that wraps the encryption key), `GET /api/config/export`, the three `…/reveal` routes (plugin env, provider API key, run variables), `POST /api/config/auth-token/regenerate`, `POST /api/config/network-exposure`, `POST /api/config/sync-agent-tokens`, `POST /api/config/agent-access`, `POST /api/config/server`, `PUT /api/projects/{id}/github`, `POST /api/agents/install`, `POST /api/human-credentials/revoke`, the instance operations (`POST /api/setup/reset`, `POST /api/config/import`, `POST /api/config/recovery/reencrypt`, `PUT /api/projects/{id}/validations-access`, which opens the host, `POST /api/agents/uninstall`, `POST /api/pages/import`, which can bring code) and **the sensitive deletions** below |
+| Always | `POST /api/config/recovery/set` (the passphrase that wraps the encryption key), `GET /api/config/export`, the three `…/reveal` routes (plugin env, provider API key, run variables), `POST /api/config/auth-token/regenerate`, `POST /api/config/network-exposure`, `POST /api/config/sync-agent-tokens`, `POST /api/config/agent-access`, `POST /api/config/server`, `PUT /api/projects/{id}/github`, `POST /api/agents/install`, `POST /api/human-credentials/revoke`, the instance operations (`POST /api/setup/reset`, `POST /api/config/import`, `POST /api/config/recovery/reencrypt`, `PUT /api/projects/{id}/validations-access`, which opens the host, `PUT /api/projects/{id}/lane-seeds` (KT-1438, which copies files of the main checkout into task worktrees; the owner may release this one route, see **Lane seeds** below), `POST /api/agents/uninstall`, `POST /api/pages/import`, which can bring code) and **the sensitive deletions** below |
 | Conditional (the handler decides) | `POST /api/mcps/bundles/export` with `include_values` (a passphrase the caller chooses is the same as plaintext); `PUT /api/mcps/custom/{server_id}` when `base_url` changes and `PUT /api/external-api/connections/{id}` when `endpoint` or `media_endpoint` changes (the stored credentials are then sent to the new place); `POST /api/quick-execs` and `PUT /api/quick-execs/{id}` when the request sets the human approval flag (`unmodelled_args_approved`) on a line a human has not already approved |
-| Asked by the handler, human-only (KT-1491) | `POST /api/discussions/{id}/scope/grants` and `POST /api/discussions/{id}/scope/requests/{request_id}/approve` when the access granted is `code` (a room then edits another project's files); a planning grant, or narrowing a code request to planning, asks nothing. These routes are not in the gate's list on purpose: they stay human-only, so a bridge token is refused before the handler even with a code, and the proof is read from the headers (`X-Kronn-Confirm`, `X-Kronn-Grant`) `PUT /api/projects/{id}/lane-seeds` (KT-1438) saves nothing for a newly declared path that is, or holds (bounded walk of its tree), a secret-looking file (`.env`, a key) until the request names that seed in `confirm_secret_paths`, and refuses the save when the tree cannot be checked. The confirmation is stored per file (`lane_seeds_confirmed_json`): provisioning scans the seed again (cached by the source fingerprint) and does not copy a seed holding a secret-looking file nobody confirmed, naming it in the seeding record, until the human confirms it in the settings. A lane seed copies the path where a task worker and its validations read it. The `[lane_seeds]` table of `kronn/project.toml` is only proposed (`profile_seeds`): it never seeds on its own, and adopting it is this same save. The route is `is_destructive`-gated and on no bridge token. |
+| Asked by the handler, human-only (KT-1491) | `POST /api/discussions/{id}/scope/grants` and `POST /api/discussions/{id}/scope/requests/{request_id}/approve` when the access granted is `code` (a room then edits another project's files); a planning grant, or narrowing a code request to planning, asks nothing. These routes are not in the gate's list on purpose: they stay human-only, so a bridge token is refused before the handler even with a code, and the proof is read from the headers (`X-Kronn-Confirm`, `X-Kronn-Grant`) |
 | Open on purpose | the non-secret maintenance routes `is_destructive` gates (debug log clear, API call log purge, provider quota rearm, audit-runs cleanup, rtk deactivate, `embed-origins`, context-audit baseline, audit attestation, `cleanup-orphan-env`) and every everyday `DELETE` (below); `/api/trust/*` (the trust routes ask for the code themselves; asking twice would spend two codes), `POST /api/config/recovery/restore` (it carries the recovery passphrase, its own proof), `POST /api/config/recovery/start-new-key` (the key is lost, so is the seed that would be checked) |
+
+**Lane seeds (KT-1438).** `PUT /api/projects/{id}/lane-seeds` is in `ALWAYS`: a
+seed puts files of the main checkout where a task worker and its validations
+read them. It is on no bridge token's route list (a bridge token reaches it only
+with a code, like every `ALWAYS` route). Three global settings in Settings ›
+Worktrees (`server.lane_seeds_*` in `config.toml`) govern it:
+
+- `lane_seeds_copy_enabled` (default on): off seeds nothing into any task
+  worktree, whatever a project declared;
+- `lane_seeds_adopt_suggested` (default off): on seeds Kronn's suggested
+  candidates (`suggest_seeds`) into every project that declared no seeds of its
+  own (an empty declaration is a declaration and stops it). A candidate holding a
+  secret-looking file is held by the same per-file confirmation as a declared
+  seed, until a human confirms that file;
+- `lane_seeds_strong_confirm` (default on): off waives the code for the
+  lane-seeds save only, and only for the human's own request (`is_lane_seeds_save`
+  in `api::strong_confirm::strong_gate`; a bridge token keeps the gate). The
+  route stays behind the destructive gate (`is_destructive`: local or token).
+
+Changing any of the three is a `POST /api/config/server`, which is `ALWAYS`: it
+asks for the code whatever the setting says, so releasing the lane-seeds route
+needs the code once. A reset keeps the owner's three values.
+[src: file: backend/src/core/strong_confirm.rs:88-97#LANE_SEEDS_ROUTE]
+
+The handler's own secret check stays on top of the code. `PUT /api/projects/{id}/lane-seeds` saves nothing for a newly declared path that is, or holds (bounded walk of its tree), a secret-looking file (`.env`, a key) until the request names that seed in `confirm_secret_paths`, and refuses the save when the tree cannot be checked. The confirmation is stored per file (`lane_seeds_confirmed_json`): provisioning scans the seed again (cached by the source fingerprint) and does not copy a seed holding a secret-looking file nobody confirmed, naming it in the seeding record, until the human confirms it in the settings. The `[lane_seeds]` table of `kronn/project.toml` is only proposed (`profile_seeds`): it never seeds on its own, and adopting it is this same save.
 
 **What asks (owner decision, 28/10).** The code is for secrets and instance
 operations, not for everyday maintenance. `ALWAYS` is an explicit list: being in
@@ -41,7 +66,7 @@ code: a message, a discussion, a task link, a workflow and its runs, a page, a
 Quick Prompt, a Quick API, a Quick Exec, a skill, a profile, a directive, a
 contact. They stay behind the destructive gate of `auth_allows` (local or token),
 which is unchanged. A new `DELETE` route is open until it is added to the list on
-purpose. [src: file: backend/src/core/strong_confirm.rs:87-92#SENSITIVE_DELETES]
+purpose. [src: file: backend/src/core/strong_confirm.rs:105-112#SENSITIVE_DELETES]
 
 Checked safe and left alone: `GET /api/config/tokens` (masked),
 `GET /api/config/server`, host discovery (env names), the custom export file
@@ -51,7 +76,7 @@ Checked safe and left alone: `GET /api/config/tokens` (masked),
 `POST /api/projects/{id}/remap-path` refuse a path inside the Kronn data
 directory, equal to it, or containing it (symlinks resolved), because a project's
 commands (`projects/git.rs`, `disc_git.rs`) would otherwise read the vault from
-there. [src: file: backend/src/core/strong_confirm.rs:280-283#overlaps_data_dir]
+there. [src: file: backend/src/core/strong_confirm.rs:294-297#overlaps_data_dir]
 
 Out of scope on purpose: plugin sync writes decrypted MCP env into
 `<project>/.mcp.json`. Agents need those values to run their MCP servers; a
@@ -70,12 +95,12 @@ A protected request carries one of:
    typed, and what a download that cannot carry a code header needs. A grant
    expires after two minutes, lives in memory only (a restart ends it) and is
    burnt by the first attempt that names it, even on another call.
-   [src: file: backend/src/core/strong_confirm.rs:207-247#mint]
+   [src: file: backend/src/core/strong_confirm.rs:223-263#mint]
 3. A **bridge token** carrying either: accepted for that one action. This is the
    only exception to "refused to agents" on these routes
    (`lib.rs`, `strong_code_gate`), and only when a strong confirmation is
    enrolled. A bridge request on a route of its own list (`BRIDGE_ROUTES`) keeps
-   that list's scoping, as before. [src: file: backend/src/lib.rs:1050-1099#strong_code_gate]
+   that list's scoping, as before. [src: file: backend/src/lib.rs:1090-1139#strong_code_gate]
 
 A passkey stays UI-only by nature; the TOTP code works everywhere.
 

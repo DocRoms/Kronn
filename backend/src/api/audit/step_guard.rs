@@ -1674,6 +1674,7 @@ mod tests {
             Some(run_id),
             &[],
             None,
+            crate::core::background_priority::Priority::Normal,
         )
         .expect("the scripted agent starts")
     }

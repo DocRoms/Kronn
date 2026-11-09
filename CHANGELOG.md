@@ -59,6 +59,25 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Security
 
+- Kronn is no longer exposed over plain HTTP. The Settings « Allow connections
+  from other devices » toggle now refuses (409, with what is needed) unless a
+  TLS-terminating proxy on the machine (nginx, Caddy, `tailscale serve`) is
+  declared there with its public `https://` address (`server.tls_terminated_by_proxy`
+  / `server.public_origin`, or `KRONN_TLS_TERMINATED_BY_PROXY=1` +
+  `KRONN_PUBLIC_ORIGIN`). A config that already asks for exposure with no
+  declaration starts on `127.0.0.1` with a banner instead of refusing to start;
+  Docker, whose publish is outside the process, refuses to start on a
+  non-loopback `KRONN_BIND`, with or without the declaration (a declared proxy
+  must reach Kronn through `KRONN_BIND=127.0.0.1`). Behind a declared proxy the
+  backend listens on loopback only, invites become `kronns:` (https/wss on the
+  proxy's origin; none are handed out while exposure is blocked), CORS and the
+  WebSocket origin check accept the declared public origin, and the loopback auth
+  bypass is withdrawn since every proxied request comes from `127.0.0.1`: the
+  declaration (`POST /api/config/network-exposure`) is owner-only even with auth
+  off, a reset refuses while it is set, and recovery of a locked token needs the
+  `X-Kronn-Local-Proof` header read from the data directory's `local-proof` file.
+  `KRONN_ALLOW_INSECURE_LAN` does not waive any of it. In-process TLS is not
+  shipped (`TD-20260314-no-tls`, reduced) (KT-1596).
 - The copy of a generated asset into a run's artifacts directory is written
   through the directory's file descriptor, so a link an Exec step planted at
   the asset's name is replaced, never written through. A press of a step's

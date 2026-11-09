@@ -10,6 +10,7 @@ fn probe(program: &str, args: &[&str], cwd: &Path) -> ProbeCommand {
         cwd: cwd.to_path_buf(),
         env: Vec::new(),
         timeout: std::time::Duration::from_secs(20),
+        priority: crate::core::background_priority::Priority::Normal,
     }
 }
 

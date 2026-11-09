@@ -871,6 +871,7 @@ async fn a_step_without_max_review_rounds_takes_the_workers_setting() {
         fixture.state.config.write().await.workers = crate::models::WorkersConfig {
             default_max_review_rounds: 7,
             review_rounds_unlimited: unlimited,
+            ..Default::default()
         };
         let world = FakeWorld::new(fixture.state.db.clone(), Box::new(approve));
         let mut step = config(1, 3);

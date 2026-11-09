@@ -276,8 +276,9 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
         ["tts_voices", _] => Text,
         ["disabled_agents" | "unlocked_profiles" | "disabled_auto_skills", "[]"] => Text,
         ["embed_allowed_origins", "[]"] => Url,
-        ["workers", "default_max_review_rounds"] => Number,
+        ["workers", "default_max_review_rounds" | "max_concurrent_task_workers"] => Number,
         ["workers", "review_rounds_unlimited"] => Flag,
+        ["workers", "background_priority"] => Flag,
         ["tokens", "disabled_overrides", "[]"] => Text,
         ["tokens", "keys", "[]", "id" | "name" | "provider"] => Text,
         ["tokens", "keys", "[]", "active"] => Flag,
@@ -332,6 +333,9 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
             "auth_enabled"
             | "auth_strict_localhost"
             | "protect_vault_from_agents"
+            | "lane_seeds_copy_enabled"
+            | "lane_seeds_adopt_suggested"
+            | "lane_seeds_strong_confirm"
             | "p2p_enabled"
             | "continual_learning_enabled"
             | "discussion_notes_enabled"

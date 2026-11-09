@@ -5191,7 +5191,7 @@ export type LaneSeedsLastRun = { execution_id: string, at: string, seeds: Array<
  * settings and takes effect once a human adopts it there (which declares it in
  * Kronn).
  */
-export type LaneSeedsSource = "project" | "none";
+export type LaneSeedsSource = "project" | "adopted" | "none";
 
 export type LaunchAuditRequest = { agent: AgentType,
 /**
@@ -6352,9 +6352,10 @@ export type NetworkExposure = {
  */
 exposed: boolean,
 /**
- * The configured exposure differs from what the process bound at boot →
- * a restart is needed for it to take effect. Never true in Docker, where
- * the exposure is set by `KRONN_BIND` in the compose file, not by Settings.
+ * The host the next boot would bind differs from what the process bound
+ * at boot → a restart is needed for it to take effect. Never true in
+ * Docker, where the exposure is set by `KRONN_BIND` in the compose file,
+ * not by Settings.
  */
 restart_required: boolean,
 /**
@@ -6373,7 +6374,33 @@ reachable_ips: Array<DetectedIp>,
 /**
  * A network access token is in force: auth is on and a token exists.
  */
-auth_token_set: boolean, };
+auth_token_set: boolean,
+/**
+ * KT-1596 — a TLS-terminating proxy on this machine is declared (Settings
+ * or `KRONN_TLS_TERMINATED_BY_PROXY`): the only way, until Kronn serves
+ * TLS itself, to be exposed without plain HTTP.
+ */
+tls_terminated_by_proxy: boolean,
+/**
+ * The declaration comes from the environment, so Settings cannot withdraw it.
+ */
+tls_declared_by_env: boolean,
+/**
+ * The proxy's public `https://` origin, the address invites advertise.
+ */
+public_origin: string | null,
+/**
+ * The configuration, or `KRONN_HOST`, asks for exposure that nothing
+ * encrypts. The backend started (or will start) on loopback instead, and
+ * hands out no invite code; Settings says why.
+ */
+plain_http_blocked: boolean,
+/**
+ * Only in the reply to a declaration: the network access token, handed over
+ * once because the loopback bypass is withdrawn from now on and the local
+ * UI must hold it before its next call. Never part of a GET.
+ */
+issued_auth_token?: string, };
 
 /**
  * Network info for multi-user connectivity.
@@ -7433,6 +7460,25 @@ export type ProjectLaneSeeds = {
  * The paths seeded into each task worktree: what a human declared here.
  */
 seeds: Array<string>, source: LaneSeedsSource,
+/**
+ * Settings > Worktrees: copying lane seeds is on (off = nothing is copied,
+ * whatever is declared here).
+ */
+copy_enabled: boolean,
+/**
+ * Settings > Worktrees: Kronn's suggestions seed a project that declared none.
+ */
+adopt_suggested: boolean,
+/**
+ * What the adoption seeds right now (`source` is `adopted`): Kronn's
+ * suggestions. One holding an unconfirmed secret-looking file is in
+ * `secret_findings` as `held` and is not copied.
+ */
+adopted_seeds: Array<string>,
+/**
+ * Why the suggestions could not be read.
+ */
+adopted_error?: string,
 /**
  * What `kronn/project.toml` on the default branch proposes, when it does.
  * Nothing is seeded from it until a human adopts it.
@@ -9468,6 +9514,18 @@ disk_launch_min_free_gib: number,
  */
 disk_sweep_idle_hours: number, p2p_enabled: boolean, frontend_origins: Array<string>,
 /**
+ * KT-1438 - copy lane seeds into task worktrees (default on).
+ */
+lane_seeds_copy_enabled: boolean,
+/**
+ * KT-1438 - seed Kronn's secret-free suggestions for a project that declared none.
+ */
+lane_seeds_adopt_suggested: boolean,
+/**
+ * KT-1438 - changing a project's lane seeds asks for the strong confirmation.
+ */
+lane_seeds_strong_confirm: boolean,
+/**
  * The zone set in Settings; `None` follows the machine.
  */
 timezone: string | null,
@@ -10544,7 +10602,21 @@ warnings?: Array<CampaignTaskReason>, active_execution: TaskExecution | null,
  */
 default_max_review_rounds?: number | "unlimited" | undefined, };
 
-export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode, };
+export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode,
+/**
+ * KT-1637 — how long each sub-step of the warming phase took, for the steps
+ * that have finished, in the order they run. Present in every phase (the
+ * worker's own phase included), so the time spent before the dispatch stays
+ * readable once it is over.
+ */
+warming_steps: Array<TaskExecutionWarmingStep>,
+/**
+ * KT-1637 — wall time from the creation of the execution to its worker's
+ * dispatch (to now, while it is still provisioning), for a deferred warm-up.
+ * What `warming_steps` leaves unaccounted for is `warming_total_ms` minus
+ * their sum.
+ */
+warming_total_ms?: number, };
 
 export type TaskExecutionProgressPhase = "warming" | "queued" | "launching" | "upstream_wait" | "tool_activity" | "delivering" | "completed" | "failed" | "unknown";
 
@@ -10592,6 +10664,8 @@ in_app_cost_unknown_reasons: Array<string>, cli_traffic_tokens: number | null, c
  * One recorded validation run (ADR §6). `exit_code` IS the verdict.
  */
 export type TaskExecutionValidationRun = { id: string, task_execution_id: string, candidate_merge_sha: string | null, command: string, exit_code: number | null, duration_ms: number | null, output: string | null, quick_exec_id: string | null, created_at: string, };
+
+export type TaskExecutionWarmingStep = { step: WarmingStepKind, duration_ms: number, };
 
 /**
  * A durable CLI worker control offer (KT-328). Links a TaskExecution + attempt to
@@ -11886,6 +11960,11 @@ withheld_by_routing: number, };
 export type WakeMode = "native_dispatch" | "external_poll";
 
 /**
+ * A sub-step of the warming phase (KT-1637), in the order they run.
+ */
+export type WarmingStepKind = "worktree_creation" | "lane_provision" | "seed_clone" | "lane_seeds" | "gate_wait" | "first_build" | "smoke_check";
+
+/**
  * How a `Watch` poll decides the source changed. Every mode sends the
  * stored `If-None-Match` / `If-Modified-Since` first: a 304 is "unchanged".
  */
@@ -11969,7 +12048,24 @@ default_max_review_rounds: number,
  * `token_budget`, when set, still stops every further correction attempt; the
  * cost is tokens spent on a review that may never converge.
  */
-review_rounds_unlimited: boolean, };
+review_rounds_unlimited: boolean,
+/**
+ * KT-1632 — local task workers (a CLI agent in its own worktree) running at
+ * once. A launch or re-dispatch beyond it waits `Queued`, in launch order,
+ * and starts when a slot frees. Remote (HTTP) and Ollama workers do not
+ * count. `max_concurrent_agents` counts agent processes, not the builds
+ * behind them, so it cannot bound the machine load on its own.
+ */
+max_concurrent_task_workers: number,
+/**
+ * KT-1633 — run task workers (first dispatch and re-dispatch), their
+ * validations and workflow Agent / Exec steps at background priority
+ * (`taskpolicy -b`, `nice -n 10`, below-normal on Windows), so the owner's
+ * applications and Kronn's own UI stay responsive. On by default; off keeps
+ * every spawn at the backend's priority. `KRONN_BACKGROUND_PRIORITY=0` turns
+ * it off too, whatever this says.
+ */
+background_priority: boolean, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

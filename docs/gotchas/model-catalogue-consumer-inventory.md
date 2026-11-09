@@ -12,7 +12,7 @@ again inside the serialized database write; historical seeds and configured
 overrides are imported before marking completion. Subsequent starts rebuild
 the runtime cache from durable rows, without reseeding deleted models. The
 `migrated_default` helper is test-only, not a production fallback.
-[src: file: backend/src/main.rs:285-289#migrate_hardcoded_catalog_once]
+[src: file: backend/src/main.rs:309-313#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:107-110#migrated_default]
 [src: file: backend/src/core/model_catalog/mod.rs:112-138#refresh_runtime_cache]
 [src: file: backend/src/core/model_catalog/mod.rs:140-260#migrate_hardcoded_catalog_once]
@@ -21,8 +21,8 @@ Normal resolution prefers explicit configuration and then available durable
 tier assignments. HTTP agents may use their explicit/durable default tier;
 they do not revive the old embedded model list. Frontend display fallback is
 also configuration/caller supplied, rather than a second embedded catalogue.
-[src: file: backend/src/agents/runner.rs:3531-3582#configured_model_flag]
-[src: file: backend/src/agents/runner.rs:3584-3603#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3555-3606#configured_model_flag]
+[src: file: backend/src/agents/runner.rs:3608-3627#resolve_model_flag]
 [src: file: frontend/src/lib/constants.ts:60-75#modelForAgentTier]
 
 The production-library migration tests cover file-backed reopen, deletion

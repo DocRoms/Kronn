@@ -183,7 +183,9 @@ impl Mechanism {
 /// ([`Confinement`]) or the profile of what a trust level grants
 /// ([`crate::core::trust_sandbox::LevelConfinement`]).
 pub trait CommandConfinement: Send + Sync {
-    /// The process `probe` becomes under this confinement, not yet started.
+    /// The process `probe` becomes under this confinement, not yet started, at
+    /// `probe.priority` (KT-1633): the priority launcher goes in front of the
+    /// sandbox's own.
     fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command;
 }
 
@@ -463,6 +465,7 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
         cwd: probe.cwd.clone(),
         env,
         timeout: probe.timeout,
+        priority: probe.priority,
     }
 }
 
@@ -667,10 +670,11 @@ impl Confinement {
     /// The process that runs `probe` confined: the sealed environment of
     /// `route`, in a session of its own with no controlling terminal
     /// ([`crate::core::task_worker_env::detach_from_terminal`], the launcher of
-    /// the lane's first build). Not started.
+    /// the lane's first build), at `probe.priority` (KT-1633). Not started.
     pub fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command {
         let wrapped = self.wrap(probe);
-        let mut command = crate::core::cmd::async_cmd(&wrapped.program, route);
+        let mut command =
+            crate::core::cmd::async_cmd_with(&wrapped.program, route, wrapped.priority);
         command.args(&wrapped.args).current_dir(&wrapped.cwd);
         for (name, value) in &wrapped.env {
             command.env(name, value);

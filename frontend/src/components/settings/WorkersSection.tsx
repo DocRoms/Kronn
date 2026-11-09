@@ -7,6 +7,13 @@
 // carry its own. « Unlimited » lifts the cap — stalls (no delivery, watchdog) still
 // escalate and a campaign's token budget still stops it, but a worker looping on a
 // review that never converges burns tokens, which the warning says.
+//
+// KT-1633 — the same card holds the « background priority » switch: workers, their
+// validations and workflow Agent / Exec steps run at a lower CPU priority so the
+// owner's applications stay responsive. On by default; saved with the same button.
+// KT-1632 — the same section holds the cap on local task workers running at once
+// (default 2): builds, not agent processes, load the machine, so a launch beyond
+// the cap waits `Queued` and starts when a slot frees.
 import { useEffect, useState } from 'react';
 import { AlertTriangle, Bot } from 'lucide-react';
 import { config as configApi } from '../../lib/api';
@@ -14,6 +21,7 @@ import type { WorkersConfig } from '../../types/generated';
 import { userError } from '../../lib/userError';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { MAX_REVIEW_ROUNDS, MIN_REVIEW_ROUNDS } from '../../lib/reviewRounds';
+import { DEFAULT_TASK_WORKERS, MAX_TASK_WORKERS, MIN_TASK_WORKERS } from '../../lib/taskWorkers';
 import '../../pages/SettingsPage.css';
 
 interface Props {
@@ -24,6 +32,8 @@ export function WorkersSection({ t }: Props) {
   const [saved, setSaved] = useState<WorkersConfig | null>(null);
   const [rounds, setRounds] = useState('5');
   const [unlimited, setUnlimited] = useState(false);
+  const [background, setBackground] = useState(true);
+  const [taskWorkers, setTaskWorkers] = useState(String(DEFAULT_TASK_WORKERS));
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -35,6 +45,9 @@ export function WorkersSection({ t }: Props) {
         setSaved(value);
         setRounds(String(value.default_max_review_rounds));
         setUnlimited(value.review_rounds_unlimited);
+        // A server that predates the switch leaves it on, as the server's own default does.
+        setBackground(value.background_priority !== false);
+        setTaskWorkers(String(value.max_concurrent_task_workers));
       })
       .catch(cause => { if (live) setError(userError(cause)); });
     return () => { live = false; };
@@ -42,12 +55,18 @@ export function WorkersSection({ t }: Props) {
 
   const count = Number(rounds);
   const validCount = Number.isInteger(count) && count >= MIN_REVIEW_ROUNDS && count <= MAX_REVIEW_ROUNDS;
+  const workerCap = Number(taskWorkers);
+  const validWorkerCap = Number.isInteger(workerCap)
+    && workerCap >= MIN_TASK_WORKERS && workerCap <= MAX_TASK_WORKERS;
   // Unlimited keeps the integer for when the box is unticked again, so an
   // unparseable field only blocks the save while it would actually be used.
-  const valid = unlimited || validCount;
-  const unchanged = saved !== null
+  const valid = (unlimited || validCount) && validWorkerCap;
+  const roundsUnchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
+    && background === (saved.background_priority !== false)
     && (unlimited || count === saved.default_max_review_rounds);
+  const unchanged = roundsUnchanged
+    && saved !== null && workerCap === saved.max_concurrent_task_workers;
 
   const save = useAsyncGuard(async () => {
     if (!saved || !valid) return;
@@ -56,10 +75,14 @@ export function WorkersSection({ t }: Props) {
       const next = await configApi.saveWorkers({
         default_max_review_rounds: validCount ? count : saved.default_max_review_rounds,
         review_rounds_unlimited: unlimited,
+        background_priority: background,
+        max_concurrent_task_workers: workerCap,
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));
       setUnlimited(next.review_rounds_unlimited);
+      setBackground(next.background_priority !== false);
+      setTaskWorkers(String(next.max_concurrent_task_workers));
     } catch (cause) {
       setError(userError(cause));
     }
@@ -131,6 +154,48 @@ export function WorkersSection({ t }: Props) {
             <AlertTriangle size={13} />
             <span>{t('config.workers.unlimitedWarning')}</span>
           </div>
+        )}
+        <div className="flex-row gap-4 mt-4">
+          <label className="flex-row gap-3">
+            <input
+              type="checkbox"
+              checked={background}
+              disabled={saved === null}
+              onChange={event => setBackground(event.target.checked)}
+              data-testid="workers-background-priority"
+            />
+            <span className="text-sm">{t('config.workers.backgroundPriority')}</span>
+          </label>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-background-hint">
+          {t('config.workers.backgroundPriorityHint')}
+        </p>
+
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.maxConcurrent')}</span>
+          <span className="text-base font-semibold text-accent" style={{ marginLeft: 'auto' }} data-testid="workers-cap-current">
+            {saved === null ? '…' : t('config.workers.maxConcurrentCurrent', saved.max_concurrent_task_workers)}
+          </span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-cap-hint">{t('config.workers.maxConcurrentHint')}</p>
+        <div className="flex-row gap-3">
+          <input
+            type="number"
+            className="set-input set-input-sm"
+            min={MIN_TASK_WORKERS}
+            max={MAX_TASK_WORKERS}
+            aria-label={t('config.workers.maxConcurrent')}
+            value={taskWorkers}
+            disabled={saved === null}
+            onChange={event => setTaskWorkers(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-cap-input"
+          />
+        </div>
+        {!validWorkerCap && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-cap-invalid">
+            {t('config.workers.maxConcurrentInvalid', MIN_TASK_WORKERS, MAX_TASK_WORKERS)}
+          </p>
         )}
         {error && <p role="alert" className="default-docs-dir-error" data-testid="workers-error">{error}</p>}
       </div>

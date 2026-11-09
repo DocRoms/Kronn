@@ -24,6 +24,9 @@ const t = (key: string, ...args: (string | number)[]) =>
 const view = (over: Record<string, unknown> = {}) => ({
   seeds: [],
   source: 'none',
+  copy_enabled: true,
+  adopt_suggested: false,
+  adopted_seeds: [],
   needs_confirmation: [],
   secret_findings: [],
   profile_file_written: false,
@@ -233,6 +236,31 @@ describe('ProjectLaneSeedsSetting (KT-1438)', () => {
     getMock.mockResolvedValue(view({ seeds: ['gen'], source: 'project', secret_scan_error: 'cannot list `gen/inner`' }));
     render(<ProjectLaneSeedsSetting projectId="p1" t={t} />);
     await waitFor(() => expect(screen.getByTestId('project-lane-seeds-scan-error')).toHaveTextContent('cannot list `gen/inner`'));
+  });
+
+  it('says copying is off globally, and what the adoption seeds when it is on (DoD 4)', async () => {
+    getMock.mockResolvedValue(view({ copy_enabled: false, seeds: ['gen'], source: 'project' }));
+    const off = render(<ProjectLaneSeedsSetting projectId="p1" t={t} />);
+    await screen.findByTestId('project-lane-seeds-copy-off');
+    off.unmount();
+
+    getMock.mockResolvedValue(view({ adopt_suggested: true, source: 'adopted', adopted_seeds: ['gen', 'build'] }));
+    render(<ProjectLaneSeedsSetting projectId="p1" t={t} />);
+    expect(await screen.findByTestId('project-lane-seeds-adopted')).toHaveTextContent('gen, build');
+    expect(screen.queryByTestId('project-lane-seeds-copy-off')).toBeNull();
+  });
+
+  it('confirming an adopted suggestion that holds a secret declares the adopted list with that file confirmed', async () => {
+    getMock.mockResolvedValue(view({
+      source: 'adopted',
+      adopted_seeds: ['gen'],
+      secret_findings: [{ path: 'gen', files: ['gen/.env'], truncated: false, held: true }],
+    }));
+    setMock.mockResolvedValue(view({ seeds: ['gen'], source: 'project' }));
+    render(<ProjectLaneSeedsSetting projectId="p1" t={t} />);
+
+    fireEvent.click(await screen.findByTestId('project-lane-seeds-confirm-held-gen'));
+    await waitFor(() => expect(setMock).toHaveBeenCalledWith('p1', ['gen'], ['gen']));
   });
 
   it('shows a file that cannot be kept in step', async () => {

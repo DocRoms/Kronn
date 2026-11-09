@@ -1635,6 +1635,47 @@ pub struct TaskExecutionProgress {
     pub process_alive: Option<bool>,
     pub last_reliable_signal_at: Option<DateTime<Utc>>,
     pub telemetry_mode: TaskExecutionTelemetryMode,
+    /// KT-1637 — how long each sub-step of the warming phase took, for the steps
+    /// that have finished, in the order they run. Present in every phase (the
+    /// worker's own phase included), so the time spent before the dispatch stays
+    /// readable once it is over.
+    #[serde(default)]
+    pub warming_steps: Vec<TaskExecutionWarmingStep>,
+    /// KT-1637 — wall time from the creation of the execution to its worker's
+    /// dispatch (to now, while it is still provisioning), for a deferred warm-up.
+    /// What `warming_steps` leaves unaccounted for is `warming_total_ms` minus
+    /// their sum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub warming_total_ms: Option<u64>,
+}
+
+/// A sub-step of the warming phase (KT-1637), in the order they run.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum WarmingStepKind {
+    /// `git worktree add` of the task's checkout (and its submodules).
+    WorktreeCreation,
+    /// Provisioning the worker lane (Cargo home, shared caches).
+    LaneProvision,
+    /// Cloning the warm `target/debug` into the lane target.
+    SeedClone,
+    /// Copying the project's gitignored assets into the worktree (KT-1438).
+    LaneSeeds,
+    /// Waiting for a slot of the host's first-build gate.
+    GateWait,
+    /// The lane's first `cargo test --no-run`.
+    FirstBuild,
+    /// The toolchain smoke check that follows the first build.
+    SmokeCheck,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export)]
+pub struct TaskExecutionWarmingStep {
+    pub step: WarmingStepKind,
+    pub duration_ms: u64,
 }
 
 /// Compact sidebar edge. The canonical relation already lives on

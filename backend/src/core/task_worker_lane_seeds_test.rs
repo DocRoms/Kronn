@@ -1063,3 +1063,129 @@ fn a_new_file_in_the_source_moves_its_fingerprint() {
         fingerprint(&fx.main.join("public/images")).unwrap().0
     );
 }
+
+// ─── The global switches (Settings > Worktrees) ──────────────────────────
+
+fn policy(copy_enabled: bool, adopt_suggested: bool) -> SeedPolicy {
+    SeedPolicy {
+        copy_enabled,
+        adopt_suggested,
+    }
+}
+
+fn never_suggest() -> Result<Vec<LaneSeedCandidate>, String> {
+    panic!("suggestions are only read for an adopting project with no declaration")
+}
+
+#[test]
+fn the_defaults_copy_declared_seeds_and_adopt_nothing() {
+    assert_eq!(seed_policy(), policy(true, false));
+    let _guard = TestSeedPolicy::set(false, true);
+    assert_eq!(seed_policy(), policy(false, true));
+}
+
+#[test]
+fn copying_off_seeds_nothing_anywhere() {
+    for declared in [None, Some(seeds(&["public/images"])), Some(Vec::new())] {
+        let (paths, source) =
+            effective_seeds(policy(false, true), declared, never_suggest).unwrap();
+        assert!(paths.is_empty());
+        assert_eq!(source, LaneSeedsSource::None);
+    }
+}
+
+#[test]
+fn a_declaration_wins_over_adoption_and_an_empty_one_clears() {
+    let (paths, source) = effective_seeds(
+        policy(true, true),
+        Some(seeds(&["public/build"])),
+        never_suggest,
+    )
+    .unwrap();
+    assert_eq!(
+        (paths, source),
+        (seeds(&["public/build"]), LaneSeedsSource::Project)
+    );
+    let (paths, source) =
+        effective_seeds(policy(true, true), Some(Vec::new()), never_suggest).unwrap();
+    assert_eq!((paths, source), (Vec::new(), LaneSeedsSource::Project));
+}
+
+#[test]
+fn without_adoption_a_project_with_no_declaration_is_not_seeded() {
+    let (paths, source) = effective_seeds(policy(true, false), None, never_suggest).unwrap();
+    assert!(paths.is_empty());
+    assert_eq!(source, LaneSeedsSource::None);
+}
+
+#[test]
+fn adoption_takes_kronns_suggestions_for_a_project_with_no_declaration() {
+    let fx = fixture();
+    let (paths, source) =
+        effective_seeds(policy(true, true), None, || suggest_seeds(&fx.main)).unwrap();
+    assert_eq!(source, LaneSeedsSource::Adopted);
+    assert_eq!(paths, seeds(&["public/images"]));
+
+    let record = seed_worktree(&fx.main, &fx.worktree, &paths, &no_clone);
+    assert!(
+        matches!(only(&record).status, SeedStatus::Seeded { .. }),
+        "{record:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fx.worktree.join("public/images/icon.svg")).unwrap(),
+        "<svg/>"
+    );
+}
+
+/// A suggestion that holds a secret-looking file is adopted as a path, and the
+/// seeding holds it back until a human confirms that file.
+#[test]
+fn an_adopted_suggestion_holding_a_secret_stays_held_until_a_human_confirms_it() {
+    let fx = fixture();
+    write(&fx.main.join("public/images/deep/server.key"), "k");
+    let (paths, _) = effective_seeds(policy(true, true), None, || suggest_seeds(&fx.main)).unwrap();
+    assert_eq!(paths, seeds(&["public/images"]));
+
+    let record = seed_worktree(&fx.main, &fx.worktree, &paths, &no_clone);
+    assert!(
+        skipped_reason(only(&record)).starts_with("held:"),
+        "{record:?}"
+    );
+    assert!(!fx.worktree.join("public/images").exists());
+
+    // The human confirms that one file: the next seeding copies it.
+    let record = super::seed_worktree(
+        &fx.main,
+        &fx.worktree,
+        &paths,
+        &confirm("public/images", &["public/images/deep/server.key"]),
+        &no_clone,
+    );
+    assert!(
+        matches!(only(&record).status, SeedStatus::Seeded { .. }),
+        "{record:?}"
+    );
+}
+
+#[test]
+fn nested_suggestions_are_reduced_to_the_outer_one() {
+    let (paths, _) = effective_seeds(policy(true, true), None, || {
+        Ok(["a/b", "a", "c"]
+            .iter()
+            .map(|path| LaneSeedCandidate {
+                path: path.to_string(),
+                size_bytes: None,
+                reason: String::new(),
+            })
+            .collect())
+    })
+    .unwrap();
+    assert_eq!(paths, seeds(&["a", "c"]));
+    assert!(normalize_seed_list(&paths).is_ok());
+}
+
+#[test]
+fn unreadable_suggestions_are_an_error_not_an_empty_list() {
+    let result = effective_seeds(policy(true, true), None, || Err("git failed".into()));
+    assert_eq!(result.unwrap_err(), "git failed");
+}

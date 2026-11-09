@@ -64,6 +64,19 @@ pub struct ProjectLaneSeeds {
     /// The paths seeded into each task worktree: what a human declared here.
     pub seeds: Vec<String>,
     pub source: LaneSeedsSource,
+    /// Settings > Worktrees: copying lane seeds is on (off = nothing is copied,
+    /// whatever is declared here).
+    pub copy_enabled: bool,
+    /// Settings > Worktrees: Kronn's suggestions seed a project that declared none.
+    pub adopt_suggested: bool,
+    /// What the adoption seeds right now (`source` is `adopted`): Kronn's
+    /// suggestions. One holding an unconfirmed secret-looking file is in
+    /// `secret_findings` as `held` and is not copied.
+    pub adopted_seeds: Vec<String>,
+    /// Why the suggestions could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub adopted_error: Option<String>,
     /// What `kronn/project.toml` on the default branch proposes, when it does.
     /// Nothing is seeded from it until a human adopts it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,22 +171,46 @@ async fn view(
         })
         .await
         .map_err(|error| error.to_string())?;
+    let policy = task_worker_lane_seeds::seed_policy();
     let source = if declared.is_some() {
         LaneSeedsSource::Project
+    } else if policy.copy_enabled && policy.adopt_suggested {
+        LaneSeedsSource::Adopted
     } else {
         LaneSeedsSource::None
     };
-    let seeds = declared.unwrap_or_default();
+    let seeds = declared.clone().unwrap_or_default();
     let repo = crate::core::scanner::resolve_host_path(&project.path);
-    let to_scan = seeds.clone();
-    let (profile, findings) = tokio::task::spawn_blocking(move || {
+    let (profile, adopted, findings) = tokio::task::spawn_blocking(move || {
+        // What the global switch adopts for a project that declared nothing; a
+        // declared project never asks for suggestions. The secret check below
+        // covers whichever set applies, so a held candidate is listed.
+        let adopted = match source {
+            LaneSeedsSource::Adopted => {
+                task_worker_lane_seeds::effective_seeds(policy, None, || {
+                    task_worker_lane_seeds::suggest_seeds(&repo)
+                })
+                .map(|(paths, _)| paths)
+            }
+            _ => Ok(Vec::new()),
+        };
+        let to_scan = match &adopted {
+            Ok(paths) if !paths.is_empty() => paths.clone(),
+            _ => seeds.clone(),
+        };
         (
             crate::core::project_profile::declared_lane_seeds(&repo),
+            adopted,
             task_worker_lane_seeds::secret_findings_against(&repo, &to_scan, &confirmed),
         )
     })
     .await
     .map_err(|error| format!("the declaration could not be read: {error}"))?;
+    let seeds = declared.unwrap_or_default();
+    let (adopted_seeds, adopted_error) = match adopted {
+        Ok(paths) => (paths, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
     let (profile_seeds, profile_error) = match profile {
         Ok(found) => (found, None),
         Err(error) => (None, Some(error)),
@@ -189,6 +226,10 @@ async fn view(
     Ok(ProjectLaneSeeds {
         seeds,
         source,
+        copy_enabled: policy.copy_enabled,
+        adopt_suggested: policy.adopt_suggested,
+        adopted_seeds,
+        adopted_error,
         profile_seeds,
         profile_error,
         needs_confirmation,

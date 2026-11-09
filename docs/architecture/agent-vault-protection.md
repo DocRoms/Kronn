@@ -142,7 +142,7 @@ every channel, loopback included (see `strong-confirmation-routes.md`):
 
 `POST` on `/api/setup/reset`, `/api/config/import`,
 `/api/config/auth-token/regenerate`, `/api/config/recovery/{set,reencrypt}`.
-[src: file: backend/src/core/strong_confirm.rs:43-79#ALWAYS]
+[src: file: backend/src/core/strong_confirm.rs:43-85#ALWAYS]
 
 - The code goes in the `X-Kronn-Confirm` header, a `kronn_confirm` body field or a
   single-use grant; the UI asks for it in `StrongConfirmDialog`.
@@ -155,10 +155,10 @@ every channel, loopback included (see `strong-confirmation-routes.md`):
   (`OWN_PROOF`, owner decision 03/11): a restore needs the recovery passphrase, and
   `start-new-key` only acts while the key is absent (it refuses while the key is in
   use), when the seed that would check a code is unreadable too.
-  [src: file: backend/src/core/strong_confirm.rs:112-121#OWN_PROOF]
+  [src: file: backend/src/core/strong_confirm.rs:126-137#OWN_PROOF]
 - `POST /api/config/auth-token/regenerate` is also in `DESTRUCTIVE_POSTS`
   (`lib.rs`): a remote peer is refused even while auth is off, like a reset.
-  [src: file: backend/src/lib.rs:1231-1247#DESTRUCTIVE_POSTS]
+  [src: file: backend/src/lib.rs:1271-1293#DESTRUCTIVE_POSTS]
 
 ## Files
 

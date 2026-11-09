@@ -174,10 +174,10 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1141-1205#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:5739-5796#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:5944-6040#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:5743-5760#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:6160-6226#run_one_validation_checked_with_runner]
+[src: file: backend/src/api/orchestration.rs:5771-5828#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:5976-6072#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:5775-5792#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:6200-6266#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -248,6 +248,78 @@ The combined unfiltered backend, frontend, Python, shell, desktop and browser
 gates remain separate requirements; backend tests must run against their own
 data directory, never the real install. [src: file: docs/testing-quality.md:44-62#test-backend] [src: file: docs/testing-quality.md:98-100#ci-test.yml]
 [src: file: docs/testing-quality.md:70-75#KRONN_DATA_DIR]
+
+## Background priority of workers and validations (KT-1633)
+
+A worker's builds and a validation's test run can keep every core busy for
+minutes, and nothing used to lower their priority, so the owner's interactive
+applications competed with them. Kronn now starts them in the background:
+
+| Host | Mechanism |
+|---|---|
+| macOS | `/usr/sbin/taskpolicy -b <program> …` (background QoS: CPU, I/O, network) |
+| Linux | `/usr/bin/nice -n 10 <program> …` (`/bin/nice` when that is where it lives) |
+| Windows | the `BELOW_NORMAL_PRIORITY_CLASS` creation flag |
+
+The launcher `exec`s the program, so the process id, the process group Kronn
+kills on a timeout or a cancel, and the program's children (which inherit the
+policy) are the same as without it. It sits in front of the OS sandbox, never
+behind it.
+
+**What runs in the background**
+
+- A **task worker**'s CLI agent, on its first dispatch and on every re-dispatch
+  after a reviewer's `request_changes` (a fix is the same worker again).
+- The lane's **first build** (`cargo test --no-run`, the warm-up), including
+  under the OS sandbox: the priority travels on the probe command and the
+  process runner applies it beneath the sandbox's own launcher.
+- Every **validation** command of a task, confined or not.
+- A workflow **Agent** step's CLI agent and a workflow **Exec** step's command
+  (a heavy autoCode build runs there).
+
+**What does not**
+
+- The backend and the UI.
+- Interactive discussions: the room principal's agent and any plain discussion
+  turn. Reviews now run as read-only discussions that never build, so there is
+  no separate review launch to lower.
+- Quick Exec collectors the owner starts.
+- The short bounded probes: `cargo metadata` (the validation target lookup),
+  `cargo nextest --version` / `cargo fetch --offline` and the `vitest` smoke
+  checks.
+- Native ACP launches that carry no workflow-step or worker context.
+
+**Turning it off.** Settings > Workers > « Run workers at background priority »
+(`workers.background_priority` in `config.toml`, on by default). Saving it takes
+effect at the next spawn, with no restart. `KRONN_BACKGROUND_PRIORITY=0`
+(`false`, `off` and `no` work too, any case) in the backend's environment turns
+it off as well: the mechanism runs only when both the setting and the
+environment allow it.
+
+**A host that refuses the launcher.** At boot, before any worker can be
+dispatched, the backend runs the launcher once on `true`, on a blocking thread
+(`check_launcher_at_boot`); a spawn only reads the stored answer and never waits
+on a process. Only a definitive answer is kept. If the launcher is missing or
+exits non-zero (a backend running inside an OS sandbox that forbids lowering a
+priority gets `taskpolicy: setpriority(): Operation not permitted`), a warning
+is logged once and workers and validations keep the backend's priority: a worker
+at normal priority beats one that never starts. A transient failure (no process
+slot, an interrupted call) is not stored: the boot probe retries, and until an
+answer is known a spawn runs at normal priority while a re-check, at most every
+30 seconds, runs on a thread of its own.
+
+[src: file: backend/src/core/background_priority.rs:104-133#background_priority]
+[src: file: backend/src/core/background_priority.rs:168-182#plan_here]
+[src: file: backend/src/core/background_priority.rs:283-286#check_launcher_at_boot]
+[src: file: backend/src/core/cmd.rs:334-345#async_cmd_with]
+[src: file: backend/src/core/cmd.rs:370-379#sync_cmd_with]
+[src: file: backend/src/core/task_worker_env.rs:719-719#ProbeCommand.priority]
+[src: file: backend/src/core/task_worker_lane_warm.rs:782-782#first-build-priority]
+[src: file: backend/src/agents/runner.rs:14312-14321#agent_launch_priority]
+[src: file: backend/src/core/quick_exec.rs:516-540#build_command]
+[src: file: backend/src/workflows/steps.rs:1393-1393#agent-step-priority]
+[src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
+[src: file: backend/src/core/config.rs:604-604#publish-setting]
 
 ## Maintenance command
 

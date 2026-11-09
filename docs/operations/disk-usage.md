@@ -25,7 +25,7 @@ orphan sweeper**, a **free-space guard on launch**, and **visibility** (API, MCP
 A lane's env is set in `WorkerLane::for_worktree`: a managed worktree gets `<repo>/target/wt-<lane>`, and the
 worker runs with it as `CARGO_TARGET_DIR`. The scratch dir, the private `CARGO_HOME` and the Vite cache live
 inside the lane or the worktree, so they go with it.
-[src: file: backend/src/core/task_worker_env.rs:112-167#for_worktree]
+[src: file: backend/src/core/task_worker_env.rs:221-276#for_worktree]
 
 **Ownership is a manifest, not a name.** `wt-*` proves nothing: humans and other tooling build in
 `target/wt-0151-integration`. Kronn writes `.kronn-lane.json` (execution id, lane, worktree) when it
@@ -75,8 +75,8 @@ worktree's index is only copied, never written. If a patch cannot be written, ex
 holds unmerged paths, nothing is removed. Each distinct *kept* reason is recorded once as a
 `worktree_release_kept` event, a release as `worktree_released`. Evidence patches are not cleaned up by Kronn.
 
-[src: file: backend/src/api/orchestration.rs:4377-4389#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:12655-12666#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:4409-4421#cleanup_integrated_execution]
+[src: file: backend/src/api/orchestration.rs:12829-12840#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -118,7 +118,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:791-857#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:9442-9465#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:9481-9504#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.

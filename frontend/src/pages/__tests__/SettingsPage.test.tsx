@@ -934,7 +934,7 @@ describe('SettingsPage', () => {
 });
 
 describe('SettingsPage — security and system', () => {
-  const notExposed = { exposed: false, restart_required: false, in_docker: false, kronn_bind: null, port: 3140, reachable_ips: [], auth_token_set: false };
+  const notExposed = { exposed: false, restart_required: false, in_docker: false, kronn_bind: null, port: 3140, reachable_ips: [], auth_token_set: false, tls_terminated_by_proxy: false, tls_declared_by_env: false, public_origin: null, plain_http_blocked: false };
   // Identity reads the exposure too: every read in the spec gets the same answer.
   const exposeWithToken = () => vi.mocked(configApi.getNetworkExposure)
     .mockResolvedValue({ ...notExposed, exposed: true, auth_token_set: true });

@@ -2199,17 +2199,24 @@ async fn provision_task_execution_inner(
         // (D2) Physical checkout from the EXACT pinned SHA. A prior attempt may
         // already have created it (resume): adopt it only after proving HEAD==base,
         // else create it fresh (fail-closed on any foreign/stale collision).
+        // KT-1637 — only a checkout this launch really makes is timed: adopting
+        // the one a prior attempt made would overwrite its duration with the
+        // few milliseconds of a HEAD check.
+        let mut worktree_created_ms: Option<u64> = None;
         let create_result = if worktree_path.exists() {
             worktree::verify_worktree_head(&worktree_path, &base_sha)
                 .and_then(|_| worktree::materialize_task_submodules(&repo_path, &worktree_path))
         } else {
-            worktree::create_task_worktree(
+            let creating = std::time::Instant::now();
+            let created = worktree::create_task_worktree(
                 &repo_path,
                 &prepared.task_reference,
                 exec_short(&prepared.execution.id),
                 &base_sha,
             )
-            .map(|_| ())
+            .map(|_| ());
+            worktree_created_ms = Some(creating.elapsed().as_millis() as u64);
+            created
         };
 
         if let Err(e) = create_result {
@@ -2254,18 +2261,36 @@ async fn provision_task_execution_inner(
         })
         .await
         .map_err(|e| ProvisionError::Internal(e.to_string()))?;
+        if let Some(duration_ms) = worktree_created_ms {
+            record_warming_step(
+                db,
+                &prepared.execution.id,
+                crate::models::WarmingStepKind::WorktreeCreation,
+                duration_ms,
+            )
+            .await;
+        }
     }
 
     // The project's generated, gitignored assets (KT-1438), whatever the worker
     // kind: a fresh worktree has the tracked tree only. A resume refreshes them.
-    seed_lane_assets(
+    if let Some(duration_ms) = seed_lane_assets(
         db,
         &prepared.execution.id,
         &prepared.project_id,
         &repo_path,
         &worktree_path,
     )
-    .await;
+    .await
+    {
+        record_warming_step(
+            db,
+            &prepared.execution.id,
+            crate::models::WarmingStepKind::LaneSeeds,
+            duration_ms,
+        )
+        .await;
+    }
 
     // A prelocalized scope is a mechanical promise, not prose. Validate it
     // against the exact SHA-pinned worktree before any worker dispatch exists.
@@ -2667,15 +2692,22 @@ async fn finish_native_provisioning(
                 "cancelled while the lane warmed".into(),
             ));
         }
-        Some(
-            record_toolchain_smoke_check(
-                db,
-                &prepared.execution.id,
-                &worktree_path,
-                worker_probe_runner(&prepared.repo_path, &worktree_path),
-            )
-            .await,
+        let smoke_check = std::time::Instant::now();
+        let capabilities = record_toolchain_smoke_check(
+            db,
+            &prepared.execution.id,
+            &worktree_path,
+            worker_probe_runner(&prepared.repo_path, &worktree_path),
         )
+        .await;
+        record_warming_step(
+            db,
+            &prepared.execution.id,
+            crate::models::WarmingStepKind::SmokeCheck,
+            smoke_check.elapsed().as_millis() as u64,
+        )
+        .await;
+        Some(capabilities)
     } else {
         None
     };
@@ -5973,6 +6005,8 @@ fn validation_metadata_command(
         cwd: cwd.to_path_buf(),
         env: Vec::new(),
         timeout: std::time::Duration::from_secs(15),
+        // A bounded target-dir lookup that gates a validation's refusal.
+        priority: crate::core::background_priority::Priority::Normal,
     };
     // Preserve the validation's manifest and configuration options. Validations
     // are normally launched from the repository root, including commands such
@@ -6147,10 +6181,16 @@ async fn run_one_validation_checked(
             let cancel = tokio_util::sync::CancellationToken::new();
             match launch.confinement() {
                 Some(confinement) => {
-                    crate::core::quick_exec::run_confined(&validated, None, &cancel, confinement)
-                        .await
+                    crate::core::quick_exec::run_confined(
+                        &validated,
+                        None,
+                        &cancel,
+                        confinement,
+                        crate::core::background_priority::Priority::Background,
+                    )
+                    .await
                 }
-                None => crate::core::quick_exec::run(&validated, None, &cancel).await,
+                None => crate::core::quick_exec::run_background(&validated, None, &cancel).await,
             }
         },
     )
@@ -9516,20 +9556,28 @@ async fn mark_lane_target_for_worker(exec_id: &str, worktree: &std::path::Path) 
 /// validations, so a source that changed meanwhile is refreshed. Best-effort:
 /// a path that cannot be seeded is recorded with its reason and the worktree
 /// goes on without it; it never fails a launch or an integration.
+///
+/// Returns how long the copy took (KT-1637), `None` when nothing was seeded.
 async fn seed_lane_assets(
     db: &Database,
     exec_id: &str,
     project_id: &str,
     repo: &std::path::Path,
     worktree: &std::path::Path,
-) {
+) -> Option<u64> {
     let pid = project_id.to_string();
-    // Only what a human declared in Kronn applies. The `[lane_seeds]` table of
-    // `kronn/project.toml` reaches the repository through a pull request, not
-    // through the human gate: it is proposed in the settings, never seeded here.
-    // The secret-looking files a human confirmed travel with them: a seed that
-    // gained one since is held, not copied.
-    let (seeds, confirmed) = match db
+    let policy = crate::core::task_worker_lane_seeds::seed_policy();
+    if !policy.copy_enabled {
+        // The owner turned copying off (Settings > Worktrees): nothing is seeded.
+        return None;
+    }
+    // Only what a human declared in Kronn applies, or, when the owner turned
+    // adoption on, Kronn's suggestions for a project that declared nothing. The
+    // `[lane_seeds]` table of `kronn/project.toml` reaches the repository through
+    // a pull request, not through the human gate: it is proposed in the settings,
+    // never seeded here. The secret-looking files a human confirmed travel with
+    // them: a seed that gained one since is held, not copied.
+    let (declared, confirmed) = match db
         .with_read_conn(move |conn| {
             Ok((
                 crate::db::projects::lane_seeds(conn, &pid)?,
@@ -9538,32 +9586,44 @@ async fn seed_lane_assets(
         })
         .await
     {
-        Ok((declared, confirmed)) => (declared.unwrap_or_default(), confirmed),
+        Ok(read) => read,
         Err(error) => {
             tracing::warn!(execution_id = %exec_id, "lane seeds not read: {error}");
-            return;
+            return None;
         }
     };
     let (repo, worktree) = (repo.to_path_buf(), worktree.to_path_buf());
-    let record = match tokio::task::spawn_blocking(move || {
+    let (record, duration_ms) = match tokio::task::spawn_blocking(move || {
+        let (seeds, _) =
+            match crate::core::task_worker_lane_seeds::effective_seeds(policy, declared, || {
+                crate::core::task_worker_lane_seeds::suggest_seeds(&repo)
+            }) {
+                Ok(effective) => effective,
+                Err(reason) => {
+                    tracing::warn!("lane seed suggestions not read: {reason}");
+                    return None;
+                }
+            };
         if seeds.is_empty() {
             return None;
         }
-        Some(crate::core::task_worker_lane_seeds::seed_worktree(
+        let copying = std::time::Instant::now();
+        let record = crate::core::task_worker_lane_seeds::seed_worktree(
             &repo,
             &worktree,
             &seeds,
             &confirmed,
             &crate::core::task_worker_lane_warm::clone_tree,
-        ))
+        );
+        Some((record, copying.elapsed().as_millis() as u64))
     })
     .await
     {
-        Ok(Some(record)) => record,
-        Ok(None) => return,
+        Ok(Some(seeded)) => seeded,
+        Ok(None) => return None,
         Err(error) => {
             tracing::warn!(execution_id = %exec_id, "lane seeding did not complete: {error}");
-            return;
+            return None;
         }
     };
     for (path, reason) in record.skipped() {
@@ -9577,6 +9637,32 @@ async fn seed_lane_assets(
         .await
     {
         tracing::warn!(execution_id = %exec_id, "lane seeds record not persisted: {error}");
+    }
+    Some(duration_ms)
+}
+
+/// Journal how long a sub-step of the warming phase took (KT-1637). Never
+/// raised: a timing that is not recorded only leaves a hole in the breakdown.
+async fn record_warming_step(
+    db: &Database,
+    exec_id: &str,
+    step: crate::models::WarmingStepKind,
+    duration_ms: u64,
+) {
+    let id = exec_id.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_warming_step(
+                conn,
+                &id,
+                step,
+                duration_ms,
+                &backend_actor(),
+            )
+        })
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, "warming step {step:?} not recorded: {error}");
     }
 }
 
@@ -11591,7 +11677,66 @@ pub(crate) fn execution_detail(
     })
 }
 
+/// The execution's progress, with the timing of its warming sub-steps (KT-1637)
+/// on top of the phase it is in.
 fn execution_progress(
+    conn: &rusqlite::Connection,
+    execution: &crate::models::TaskExecution,
+) -> Result<crate::models::TaskExecutionProgress> {
+    let mut progress = execution_phase_progress(conn, execution)?;
+    let (steps, total_ms) = warming_timings(conn, execution)?;
+    progress.warming_steps = steps;
+    progress.warming_total_ms = total_ms;
+    Ok(progress)
+}
+
+/// How long each warming sub-step took, in the order they run, and the wall time
+/// from the execution's creation to the worker's dispatch (to now while it is
+/// still provisioning). What the steps do not add up to is time nobody measured.
+fn warming_timings(
+    conn: &rusqlite::Connection,
+    execution: &crate::models::TaskExecution,
+) -> Result<(Vec<crate::models::TaskExecutionWarmingStep>, Option<u64>)> {
+    use crate::models::{TaskExecutionWarmingStep, WarmingStepKind};
+    let mut timed = crate::db::orchestration::latest_warming_steps(conn, &execution.id)?;
+    if let Some(record) = crate::db::orchestration::latest_lane_warm_start(conn, &execution.id)? {
+        for (step, duration_ms) in record.timed_steps() {
+            timed.retain(|known| known.step != step);
+            timed.push(TaskExecutionWarmingStep { step, duration_ms });
+        }
+    }
+    const ORDER: [WarmingStepKind; 7] = [
+        WarmingStepKind::WorktreeCreation,
+        WarmingStepKind::LaneSeeds,
+        WarmingStepKind::LaneProvision,
+        WarmingStepKind::SeedClone,
+        WarmingStepKind::GateWait,
+        WarmingStepKind::FirstBuild,
+        WarmingStepKind::SmokeCheck,
+    ];
+    timed.sort_by_key(|known| ORDER.iter().position(|step| *step == known.step));
+
+    // The clock starts with the execution, not with the `lane_warming` event: the
+    // worktree and the lane seeds are timed before that event is written. Only a
+    // deferred warm-up has a total (the others dispatch at once).
+    let deferred =
+        crate::db::orchestration::lane_warming_started_at(conn, &execution.id)?.is_some();
+    let end = match execution.dispatch_job_id.as_deref() {
+        Some(dispatch_id) => {
+            crate::db::agent_dispatch::get(conn, dispatch_id)?.map(|job| job.created_at)
+        }
+        None if execution.status == crate::models::TaskExecutionStatus::Provisioning => {
+            Some(chrono::Utc::now())
+        }
+        None => None,
+    };
+    let total_ms = end
+        .filter(|_| deferred)
+        .map(|end| (end - execution.created_at).num_milliseconds().max(0) as u64);
+    Ok((timed, total_ms))
+}
+
+fn execution_phase_progress(
     conn: &rusqlite::Connection,
     execution: &crate::models::TaskExecution,
 ) -> Result<crate::models::TaskExecutionProgress> {
@@ -11615,6 +11760,8 @@ fn execution_progress(
                 process_alive: None,
                 last_reliable_signal_at: Some(since),
                 telemetry_mode: TaskExecutionTelemetryMode::Unavailable,
+                warming_steps: Vec::new(),
+                warming_total_ms: None,
             });
         }
     }
@@ -11627,6 +11774,8 @@ fn execution_progress(
             process_alive: None,
             last_reliable_signal_at: None,
             telemetry_mode: TaskExecutionTelemetryMode::Unavailable,
+            warming_steps: Vec::new(),
+            warming_total_ms: None,
         });
     };
     let Some(job) = crate::db::agent_dispatch::get(conn, dispatch_id)? else {
@@ -11638,14 +11787,45 @@ fn execution_progress(
             process_alive: None,
             last_reliable_signal_at: None,
             telemetry_mode: TaskExecutionTelemetryMode::Unavailable,
+            warming_steps: Vec::new(),
+            warming_total_ms: None,
         });
     };
     let (phase, reason, queue_position) = match job.status {
-        DispatchStatus::Pending => (
-            TaskExecutionProgressPhase::Queued,
-            Some("concurrency_limit_or_scheduler".into()),
-            None,
-        ),
+        // KT-1632 — the task-worker cap holds this launch: the claim left the
+        // reason on the job (`task_worker_limit:<running>/<cap>`), so it is
+        // still told after a restart. It is told only while the job is really in
+        // line: one a backoff keeps out has no place, and its stored reason is
+        // stale.
+        DispatchStatus::Pending => {
+            let cap_reason = job
+                .progress_detail
+                .clone()
+                .filter(|detail| {
+                    job.progress_phase.as_deref() == Some("queued")
+                        && detail.starts_with(
+                            crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX,
+                        )
+                })
+                .map(|detail| {
+                    crate::db::agent_dispatch::task_worker_queue_position(conn, &job.id)
+                        .map(|position| position.map(|position| (detail, position)))
+                })
+                .transpose()?
+                .flatten();
+            match cap_reason {
+                Some((detail, position)) => (
+                    TaskExecutionProgressPhase::Queued,
+                    Some(detail),
+                    Some(position),
+                ),
+                None => (
+                    TaskExecutionProgressPhase::Queued,
+                    Some("concurrency_limit_or_scheduler".into()),
+                    None,
+                ),
+            }
+        }
         DispatchStatus::Running if job.agent_started_at.is_none() => (
             TaskExecutionProgressPhase::Queued,
             Some("local_concurrency_limit".into()),
@@ -11690,6 +11870,8 @@ fn execution_progress(
         } else {
             TaskExecutionTelemetryMode::Unavailable
         },
+        warming_steps: Vec::new(),
+        warming_total_ms: None,
     })
 }
 
@@ -15150,6 +15332,10 @@ pub struct TaskExecutionCompactStatus {
     /// transcripts (KT-911). `view: full` lists them all, attempts included.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub worker_sessions: Vec<String>,
+    /// KT-1632 — why a launch waits for its worker to start: the task-worker
+    /// cap is full. Absent once the worker runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued: Option<String>,
     pub next_action: Option<CompactNextAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait: Option<ExecutionWaitOutcome>,
@@ -15231,6 +15417,26 @@ fn compact_next_action(detail: &crate::models::TaskExecutionDetail) -> Option<Co
         ),
     };
     Some(CompactNextAction { tool, reason })
+}
+
+/// The sentence a queued launch reports in place of a silent `Working`: the
+/// cap that holds it, how full it is and its place in the queue.
+fn task_worker_queue_reason(progress: &crate::models::TaskExecutionProgress) -> Option<String> {
+    if progress.phase != crate::models::TaskExecutionProgressPhase::Queued {
+        return None;
+    }
+    let counts = progress
+        .reason
+        .as_deref()?
+        .strip_prefix(crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX)?;
+    let (running, cap) = counts.split_once('/')?;
+    let place = progress
+        .queue_position
+        .map(|position| format!(", position {position}"))
+        .unwrap_or_default();
+    Some(format!(
+        "queued: {running} of {cap} local task workers running (max_concurrent_task_workers){place}; starts when a slot frees"
+    ))
 }
 
 fn compact_last_error(detail: &crate::models::TaskExecutionDetail) -> Option<String> {
@@ -15333,6 +15539,7 @@ pub(crate) fn compact_execution_status(
             .iter()
             .map(|session| session.session_id.clone())
             .collect(),
+        queued: task_worker_queue_reason(&detail.progress),
         next_action: compact_next_action(detail),
         wait,
     };
@@ -20401,6 +20608,127 @@ pub(crate) mod tests {
             running.progress.phase,
             crate::models::TaskExecutionProgressPhase::Launching
         );
+    }
+
+    /// KT-1632 — a launch held back by the task-worker cap is `Queued` with its
+    /// reason, place and the cap on the execution detail and in the compact
+    /// status a polling principal reads; it reports `Launching` once a slot
+    /// frees, and the reason is gone.
+    #[tokio::test]
+    async fn a_launch_held_by_the_task_worker_cap_reports_why_and_where() {
+        const CAP_ONE: &str = r#"{"__task_workers":1}"#;
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (first_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let second_ref = db
+            .with_conn(move |conn| {
+                Ok(create_todo_task(conn, &project_id, "Second task")
+                    .summary
+                    .reference)
+            })
+            .await
+            .unwrap();
+        let mut launched = Vec::new();
+        for (task_reference, key) in [(first_ref, "cap-first"), (second_ref, "cap-second")] {
+            launched.push(
+                provision_single_task_execution(
+                    &db,
+                    ProvisionInput {
+                        task_reference,
+                        parent_discussion_id: parent_id.clone(),
+                        worker: native_worker(),
+                        base_rev: Some("main".into()),
+                        idempotency_key: Some(key.into()),
+                    },
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let first_dispatch = launched[0].dispatch_job_id.clone().unwrap();
+        let second_dispatch = launched[1].dispatch_job_id.clone().unwrap();
+        db.with_conn({
+            let first_dispatch = first_dispatch.clone();
+            move |conn| {
+                crate::db::agent_dispatch::claim_with_limits(conn, &first_dispatch, Some(CAP_ONE))?
+                    .unwrap();
+                crate::db::agent_dispatch::mark_agent_started(conn, &first_dispatch)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        let held = db
+            .with_conn({
+                let second_dispatch = second_dispatch.clone();
+                move |conn| {
+                    crate::db::agent_dispatch::claim_with_limits(
+                        conn,
+                        &second_dispatch,
+                        Some(CAP_ONE),
+                    )
+                }
+            })
+            .await
+            .unwrap();
+        assert!(held.is_none(), "the one slot is taken");
+
+        let second_id = launched[1].id.clone();
+        let queued = db
+            .with_conn({
+                let id = second_id.clone();
+                move |conn| execution_detail(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            queued.progress.phase,
+            crate::models::TaskExecutionProgressPhase::Queued
+        );
+        assert_eq!(
+            queued.progress.reason.as_deref(),
+            Some("task_worker_limit:1/1")
+        );
+        assert_eq!(queued.progress.queue_position, Some(1));
+        let compact = compact_execution_status(&queued, None);
+        let sentence = compact.queued.clone().expect("a queued launch says why");
+        assert!(sentence.contains("1 of 1 local task workers"), "{sentence}");
+        assert!(sentence.contains("position 1"), "{sentence}");
+        assert!(
+            compact_status_chars(&compact) <= COMPACT_STATUS_MAX_CHARS,
+            "the reason stays inside the compact budget"
+        );
+
+        // The running worker reports no queue reason.
+        let running = db
+            .with_conn({
+                let id = launched[0].id.clone();
+                move |conn| execution_detail(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(running.progress.queue_position, None);
+        assert!(compact_execution_status(&running, None).queued.is_none());
+
+        // A freed slot starts it; nothing is left of the reason.
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::mark_completed(conn, &first_dispatch)?;
+            crate::db::agent_dispatch::claim_with_limits(conn, &second_dispatch, Some(CAP_ONE))?
+                .unwrap();
+            crate::db::agent_dispatch::mark_agent_started(conn, &second_dispatch)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let started = db
+            .with_conn(move |conn| execution_detail(conn, &second_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            started.progress.phase,
+            crate::models::TaskExecutionProgressPhase::Launching
+        );
+        assert!(compact_execution_status(&started, None).queued.is_none());
     }
 
     async fn count(db: &Database, sql: &'static str) -> i64 {
@@ -29539,6 +29867,148 @@ pub(crate) mod tests {
         );
     }
 
+    /// A repo whose ignored `gen/` is mentioned by tracked code, so it is a
+    /// suggested seed.
+    fn repo_with_a_suggestible_gen() -> tempfile::TempDir {
+        let repo = init_repo();
+        std::fs::write(repo.path().join(".gitignore"), "gen/\n.kronn/\n").unwrap();
+        std::fs::write(
+            repo.path().join("page.twig"),
+            "{% include 'gen/asset.txt' %}",
+        )
+        .unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "gen is referenced"]);
+        std::fs::create_dir_all(repo.path().join("gen")).unwrap();
+        std::fs::write(repo.path().join("gen/asset.txt"), "generated").unwrap();
+        repo
+    }
+
+    async fn provision_for_seeds(
+        db: &Database,
+        repo: &std::path::Path,
+        key: &str,
+        task_ref: String,
+        parent_id: String,
+    ) -> (String, std::path::PathBuf) {
+        let exec = provision_single_task_execution(
+            db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some(key.into()),
+            },
+        )
+        .await
+        .expect("provision");
+        let (worktree, _branch) =
+            worktree::task_worktree_layout(repo, &task_ref, exec_short(&exec.id)).unwrap();
+        (exec.id, worktree)
+    }
+
+    /// KT-1438 (DoD 4): with "Copy generated assets into task worktrees" off,
+    /// nothing is seeded anywhere, a declared seed included, and nothing is
+    /// journalled.
+    #[tokio::test]
+    async fn provisioning_seeds_nothing_when_the_owner_turned_copying_off() {
+        let _policy = crate::core::task_worker_lane_seeds::TestSeedPolicy::set(false, true);
+        let repo = repo_with_a_suggestible_gen();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        db.with_conn(move |conn| {
+            crate::db::projects::set_lane_seeds(conn, &project_id, &["gen".to_string()])
+        })
+        .await
+        .unwrap();
+
+        let (exec_id, worktree) =
+            provision_for_seeds(&db, repo.path(), "seeds-off", task_ref, parent_id).await;
+
+        assert!(!worktree.join("gen").exists());
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &exec_id))
+            .await
+            .unwrap();
+        assert!(recorded.is_none(), "{recorded:?}");
+    }
+
+    /// KT-1438 (DoD 4): with adoption on, a project that declared nothing is
+    /// seeded with Kronn's suggestion; with it off (the default) it is not.
+    #[tokio::test]
+    async fn provisioning_adopts_suggestions_when_the_owner_turned_adoption_on() {
+        let repo = repo_with_a_suggestible_gen();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _project_id) = seed(&db, repo.path()).await;
+        let _policy = crate::core::task_worker_lane_seeds::TestSeedPolicy::set(true, true);
+        let (exec_id, worktree) =
+            provision_for_seeds(&db, repo.path(), "adopt-on", task_ref, parent_id).await;
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("gen/asset.txt")).unwrap(),
+            "generated"
+        );
+        assert_eq!(
+            git(
+                &worktree,
+                &["status", "--porcelain", "--untracked-files=all"]
+            )
+            .stdout
+            .len(),
+            0,
+            "an adopted seed stays out of git status"
+        );
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &exec_id))
+            .await
+            .unwrap()
+            .expect("the seeding is journalled");
+        assert_eq!(recorded.seeds.len(), 1, "{recorded:?}");
+    }
+
+    /// KT-1438 (DoD 4): adoption is off by default: a project that declared
+    /// nothing is not seeded with a suggestion.
+    #[tokio::test]
+    async fn provisioning_adopts_nothing_by_default() {
+        let repo = repo_with_a_suggestible_gen();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _project_id) = seed(&db, repo.path()).await;
+        assert_eq!(
+            crate::core::task_worker_lane_seeds::seed_policy(),
+            crate::core::task_worker_lane_seeds::SeedPolicy {
+                copy_enabled: true,
+                adopt_suggested: false
+            }
+        );
+        let (_, worktree) =
+            provision_for_seeds(&db, repo.path(), "adopt-off", task_ref, parent_id).await;
+        assert!(!worktree.join("gen").exists(), "the default adopts nothing");
+    }
+
+    /// KT-1438 (DoD 4): an adopted suggestion holding a secret-looking file is
+    /// held, not copied, until a human confirms the file.
+    #[tokio::test]
+    async fn provisioning_holds_an_adopted_suggestion_that_holds_a_secret() {
+        let _policy = crate::core::task_worker_lane_seeds::TestSeedPolicy::set(true, true);
+        let repo = repo_with_a_suggestible_gen();
+        std::fs::write(repo.path().join("gen/.env"), "TOKEN=1").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _project_id) = seed(&db, repo.path()).await;
+
+        let (exec_id, worktree) =
+            provision_for_seeds(&db, repo.path(), "adopt-held", task_ref, parent_id).await;
+
+        assert!(!worktree.join("gen").exists());
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &exec_id))
+            .await
+            .unwrap()
+            .expect("the seeding is journalled");
+        let skipped: Vec<_> = recorded.skipped().collect();
+        assert_eq!(skipped.len(), 1, "{recorded:?}");
+        assert!(skipped[0].1.starts_with("held:"), "{skipped:?}");
+    }
+
     #[tokio::test]
     async fn a_successful_smoke_check_is_recorded_on_the_execution() {
         let repo = init_repo();
@@ -29899,6 +30369,20 @@ pub(crate) mod tests {
             "a stuck warm-up is visible to the principal"
         );
         assert!(detail.progress.queued_since.is_some());
+        // KT-1637 — while the build runs, the steps already behind it are timed
+        // and the warm-up's wall clock is running.
+        let steps: Vec<_> = detail
+            .progress
+            .warming_steps
+            .iter()
+            .map(|step| step.step)
+            .collect();
+        assert_eq!(
+            steps,
+            vec![crate::models::WarmingStepKind::WorktreeCreation],
+            "only the finished steps are reported"
+        );
+        assert!(detail.progress.warming_total_ms.is_some());
 
         runner.release();
         wait_for_status(&db, &launched.id, TaskExecutionStatus::Working).await;
@@ -29931,6 +30415,39 @@ pub(crate) mod tests {
             detail.progress.phase,
             crate::models::TaskExecutionProgressPhase::Warming,
             "the warming phase ends with the warm-up"
+        );
+        // KT-1637 — and the breakdown outlives it, in run order, with the wall
+        // time of the whole warm-up so what is unmeasured can be read off.
+        use crate::models::WarmingStepKind as Step;
+        let steps: Vec<_> = detail
+            .progress
+            .warming_steps
+            .iter()
+            .map(|step| step.step)
+            .collect();
+        assert_eq!(
+            steps,
+            vec![
+                Step::WorktreeCreation,
+                Step::LaneProvision,
+                // No seed step: the test host has no warm target to clone.
+                Step::GateWait,
+                Step::FirstBuild,
+                Step::SmokeCheck,
+            ],
+            "{:?}",
+            detail.progress.warming_steps
+        );
+        let measured: u64 = detail
+            .progress
+            .warming_steps
+            .iter()
+            .map(|step| step.duration_ms)
+            .sum();
+        let total = detail.progress.warming_total_ms.expect("warm-up wall time");
+        assert!(
+            total >= measured,
+            "the wall time ({total} ms) covers the measured steps ({measured} ms)"
         );
     }
 
@@ -44939,6 +45456,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: false,
+                    ..Default::default()
                 }),
                 None,
                 9,
@@ -44947,6 +45465,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: true,
+                    ..Default::default()
                 }),
                 None,
                 crate::models::UNLIMITED_REVIEW_ROUNDS,
@@ -44955,6 +45474,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: true,
+                    ..Default::default()
                 }),
                 Some(2),
                 2,

@@ -365,6 +365,7 @@ impl AcpTransport for ClaudeAcpAdapter {
             self.launch.audit_run_id.as_deref(),
             &self.launch.github_env,
             self.launch.bridge_token.as_deref(),
+            self.launch.priority,
         )
         .map_err(AcpError::Transport)?;
         let mut stdin = child
