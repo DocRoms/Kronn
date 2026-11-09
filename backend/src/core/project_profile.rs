@@ -43,6 +43,18 @@ pub struct ProjectProfile {
     pub tracker: Option<Tracker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<Delivery>,
+    /// Gitignored paths copied from the main checkout into each task worktree
+    /// (KT-1438).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_seeds: Option<LaneSeeds>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaneSeeds {
+    /// Repository-relative paths, `/` separated.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +192,10 @@ pub fn parse_profile(text: &str) -> Result<ProjectProfile, String> {
     .flatten()
     {
         check_repository_path(path)?;
+    }
+    if let Some(seeds) = &profile.lane_seeds {
+        crate::core::task_worker_lane_seeds::normalize_seed_list(&seeds.paths)
+            .map_err(|reason| format!("{PROFILE_PATH}: [lane_seeds] {reason}"))?;
     }
     Ok(profile)
 }
@@ -734,6 +750,104 @@ pub fn run_template_values(
     placeholders: &BTreeMap<String, bool>,
 ) -> Result<BTreeMap<String, String>, String> {
     values_for(&snapshot(repo), placeholders)
+}
+
+/// The lane seeds the default branch's profile declares (KT-1438): `None` when
+/// there is no profile or it has no `[lane_seeds]` table, an error when the
+/// profile is malformed.
+pub fn declared_lane_seeds(repo: &Path) -> Result<Option<Vec<String>>, String> {
+    match load_from_default_branch(repo)? {
+        ProfileSource::Loaded { profile, .. } => Ok(profile.lane_seeds.map(|seeds| {
+            crate::core::task_worker_lane_seeds::normalize_seed_list(&seeds.paths)
+                .unwrap_or(seeds.paths)
+        })),
+        ProfileSource::Absent { .. } => Ok(None),
+    }
+}
+
+/// `text` with its `[lane_seeds]` table replaced by `paths` (the table removed
+/// when `paths` is empty), every other line kept as it was.
+fn with_lane_seeds_table(text: &str, paths: &[String]) -> String {
+    const HEADER: &str = "[lane_seeds]";
+    let lines: Vec<&str> = text.lines().collect();
+    let begin = lines.iter().position(|line| {
+        let line = line.trim();
+        line == HEADER
+            || line
+                .strip_prefix(HEADER)
+                .is_some_and(|rest| rest.trim_start().starts_with('#'))
+    });
+    let mut block = String::new();
+    if !paths.is_empty() {
+        block.push_str(HEADER);
+        block.push_str("\npaths = [\n");
+        for path in paths {
+            block.push_str(&format!("  {path:?},\n"));
+        }
+        block.push_str("]\n");
+    }
+    let Some(begin) = begin else {
+        let mut out = text.trim_end().to_string();
+        out.push('\n');
+        if !block.is_empty() {
+            out.push('\n');
+            out.push_str(&block);
+        }
+        return out;
+    };
+    let end = lines[begin + 1..]
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .map_or(lines.len(), |offset| begin + 1 + offset);
+    let mut out = String::new();
+    for line in &lines[..begin] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&block);
+    if end < lines.len() {
+        if !block.is_empty() {
+            out.push('\n');
+        }
+        for line in &lines[end..] {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Mirror the declared lane seeds into the main checkout's `kronn/project.toml`
+/// (KT-1438), so the file and Kronn's own declaration say the same thing. Only
+/// an existing, valid profile is edited, only its `[lane_seeds]` table changes,
+/// and nothing is committed: the file is a working-tree edit for a human to
+/// review and publish. Returns whether the file changed.
+pub fn write_lane_seeds(repo: &Path, paths: &[String]) -> Result<bool, String> {
+    let rel = Path::new(PROFILE_PATH);
+    let bytes = match crate::core::rooted_io::read_capped(repo, rel, MAX_PROFILE_BYTES as u64) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("cannot read {PROFILE_PATH}: {error}")),
+    };
+    let text = String::from_utf8(bytes).map_err(|_| format!("{PROFILE_PATH} is not UTF-8"))?;
+    parse_profile(&text)?;
+    let updated = with_lane_seeds_table(&text, paths);
+    if updated == text {
+        return Ok(false);
+    }
+    let reparsed = parse_profile(&updated)?;
+    let written = reparsed
+        .lane_seeds
+        .map(|seeds| seeds.paths)
+        .unwrap_or_default();
+    if written != paths {
+        return Err(format!(
+            "{PROFILE_PATH} has a `[lane_seeds]` table this edit cannot rewrite safely"
+        ));
+    }
+    crate::core::rooted_io::write(repo, rel, updated.as_bytes())
+        .map_err(|error| format!("cannot write {PROFILE_PATH}: {error}"))?;
+    Ok(true)
 }
 
 /// A starter profile for a repository whose default branch has none. It is

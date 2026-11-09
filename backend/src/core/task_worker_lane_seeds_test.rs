@@ -156,13 +156,11 @@ fn a_seed_is_put_in_a_fresh_worktree_and_stays_out_of_git_status() {
         "the seed is gitignored: nothing for a delivery to pick up"
     );
     assert!(
-        std::fs::read_dir(fx.worktree.join("public"))
+        std::fs::read_dir(&fx.worktree).unwrap().all(|entry| !entry
             .unwrap()
-            .all(|entry| !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .contains("kronn-seeding")),
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".kronn-seed")),
         "no staging left behind"
     );
 }
@@ -365,6 +363,7 @@ fn the_record_survives_the_journal() {
                     method: SeedMethod::Clone,
                     refreshed: false,
                     ms: 3,
+                    dropped_links: vec![],
                 },
             },
             LaneSeedOutcome::skipped("b", "why"),
@@ -425,4 +424,223 @@ fn an_ignored_directory_nothing_mentions_is_not_suggested() {
     let found = suggest_seeds(&fx.main).unwrap();
 
     assert!(found.iter().all(|c| c.path != "scratch"), "{found:?}");
+}
+
+// ── KT-1438 review round: links, ignore rules, fingerprint, delivery ────
+
+#[cfg(unix)]
+fn link(target: &str, at: &Path) {
+    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(target, at).unwrap();
+}
+
+/// A symlink of the source that points out of the seed is not handed to the
+/// worker (absolute, or climbing past the seed's root); one that stays inside is.
+#[cfg(unix)]
+#[test]
+fn a_symlink_pointing_out_of_the_seed_is_dropped_and_named() {
+    for use_clone in [true, false] {
+        let fx = fixture();
+        let images = fx.main.join("public/images");
+        link("/etc/hosts", &images.join("absolute"));
+        link("../../../outside", &images.join("climbs"));
+        link("vector/../icon.svg", &images.join("through-a-name"));
+        link("../../.env", &images.join("vector/deep-climb"));
+        link("icon.svg", &images.join("sibling"));
+        link("../icon.svg", &images.join("vector/up-one"));
+        let declared = seeds(&["public/images"]);
+
+        let record = if use_clone {
+            seed_worktree(&fx.main, &fx.worktree, &declared, &clone_tree)
+        } else {
+            seed_worktree(&fx.main, &fx.worktree, &declared, &no_clone)
+        };
+
+        let dropped = match &only(&record).status {
+            SeedStatus::Seeded { dropped_links, .. } => dropped_links.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            dropped,
+            vec![
+                "absolute".to_string(),
+                "climbs".to_string(),
+                "through-a-name".to_string(),
+                "vector/deep-climb".to_string(),
+            ],
+            "clone={use_clone}"
+        );
+        let copy = fx.worktree.join("public/images");
+        for gone in ["absolute", "climbs", "through-a-name", "vector/deep-climb"] {
+            assert!(
+                std::fs::symlink_metadata(copy.join(gone)).is_err(),
+                "{gone} must not be copied (clone={use_clone})"
+            );
+        }
+        for kept in ["sibling", "vector/up-one"] {
+            assert!(
+                std::fs::symlink_metadata(copy.join(kept))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{kept} stays inside the seed (clone={use_clone})"
+            );
+        }
+        assert!(
+            copy.join("icon.svg").is_file(),
+            "the rest of the copy is intact"
+        );
+    }
+}
+
+/// The record names what was dropped, so the project's settings can show it.
+#[cfg(unix)]
+#[test]
+fn the_dropped_links_survive_the_journal() {
+    let fx = fixture();
+    link("/etc/hosts", &fx.main.join("public/images/absolute"));
+    let record = seed_worktree(
+        &fx.main,
+        &fx.worktree,
+        &seeds(&["public/images"]),
+        &clone_tree,
+    );
+    let json = serde_json::to_string(&record).unwrap();
+    assert!(json.contains("dropped_links"), "{json}");
+    let back: LaneSeedsRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, record);
+}
+
+/// A rewrite that keeps the size and restores the modification time (`cp -p`,
+/// `rsync -t`) still changes the change time: the copy is refreshed.
+#[cfg(unix)]
+#[test]
+fn a_same_size_rewrite_with_a_preserved_mtime_refreshes_the_copy() {
+    let fx = fixture();
+    let declared = seeds(&["public/images"]);
+    seed_worktree(&fx.main, &fx.worktree, &declared, &clone_tree);
+    let file = fx.main.join("public/images/icon.svg");
+    let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&file, "<svg!>").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), mtime);
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().len(),
+        "<svg/>".len() as u64
+    );
+
+    let again = seed_worktree(&fx.main, &fx.worktree, &declared, &clone_tree);
+
+    match &only(&again).status {
+        SeedStatus::Seeded { refreshed, .. } => assert!(refreshed),
+        other => panic!("the rewrite went unseen: {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(fx.worktree.join("public/images/icon.svg")).unwrap(),
+        "<svg!>"
+    );
+}
+
+/// Two trees with the same entry count and total size but other names do not
+/// share a fingerprint.
+#[test]
+fn the_fingerprint_tells_a_renamed_entry_apart() {
+    let one = tempfile::tempdir().unwrap();
+    let two = tempfile::tempdir().unwrap();
+    write(&one.path().join("a.svg"), "12345");
+    write(&two.path().join("b.svg"), "12345");
+    assert_ne!(
+        fingerprint(one.path()).unwrap().0,
+        fingerprint(two.path()).unwrap().0
+    );
+    assert_eq!(
+        fingerprint(one.path()).unwrap().0,
+        fingerprint(one.path()).unwrap().0
+    );
+}
+
+/// The worktree is the worker's to write: a `.gitignore` it edited after the
+/// seeding is noticed on the next provisioning, and the copy then shown by
+/// `git status` is taken back out.
+#[test]
+fn a_gitignore_the_worker_edited_is_seen_on_the_up_to_date_path() {
+    let fx = fixture();
+    let declared = seeds(&["public/images"]);
+    seed_worktree(&fx.main, &fx.worktree, &declared, &clone_tree);
+    write(&fx.worktree.join(".gitignore"), "public/build/\n.kronn/\n");
+    assert!(
+        run_git(
+            &fx.worktree,
+            &["status", "--porcelain", "--untracked-files=all"]
+        )
+        .contains("public/images"),
+        "the edit makes the copy visible to git"
+    );
+
+    let again = seed_worktree(&fx.main, &fx.worktree, &declared, &clone_tree);
+
+    let reason = skipped_reason(only(&again));
+    assert!(reason.contains("no longer gitignored"), "{reason}");
+    assert!(!fx.worktree.join("public/images").exists());
+    assert_eq!(
+        run_git(
+            &fx.worktree,
+            &["status", "--porcelain", "--untracked-files=all"]
+        )
+        .trim(),
+        "M .gitignore",
+        "only the worker's own edit is left"
+    );
+}
+
+/// A seed never enters a delivery: committed through the path a spawned worker
+/// commits by (explicit files, no `-f`), the copy is not staged, whether it is
+/// named, or reached through a directory that also holds tracked files.
+#[test]
+fn a_seed_never_enters_a_worker_commit() {
+    let fx = fixture();
+    run_git(&fx.main, &["config", "user.email", "t@t.com"]);
+    run_git(&fx.main, &["config", "user.name", "T"]);
+    seed_worktree(
+        &fx.main,
+        &fx.worktree,
+        &seeds(&["public/images"]),
+        &clone_tree,
+    );
+    write(&fx.worktree.join("NOTES.md"), "worker notes");
+    write(&fx.worktree.join("public/index.txt"), "tracked, edited");
+
+    let notes = crate::api::agent_workspace_tools::git_commit_payload(
+        &fx.worktree,
+        &["NOTES.md".to_string()],
+        "test: a worker commit",
+    );
+    assert!(notes.is_ok(), "{notes:?}");
+
+    // Naming a seeded file, or the directory around it: refused, or committed
+    // without the seed; never with it.
+    for named in ["public/images/icon.svg", "public/images", "public"] {
+        let _ = crate::api::agent_workspace_tools::git_commit_payload(
+            &fx.worktree,
+            &[named.to_string()],
+            "test: a worker commit naming a seed",
+        );
+        let tracked = run_git(&fx.worktree, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(
+            !tracked.contains("public/images"),
+            "{named} staged the seed: {tracked}"
+        );
+        assert_eq!(
+            run_git(&fx.worktree, &["ls-files", "--", "public/images"]),
+            ""
+        );
+    }
+    assert!(fx.worktree.join("public/images/icon.svg").is_file());
 }

@@ -948,6 +948,9 @@ fn first_error_lines(stdout: &str, stderr: &str, tail: &[String]) -> Vec<String>
         })
         .filter(|line| !tail.iter().any(|shown| shown == line))
         .take(FIRST_ERROR_LINES)
+        // Error lines are where a connection string or a token turns up: they
+        // leave to the room and the worker redacted, before being cut.
+        .map(crate::core::redact::redact_stored_text)
         .map(|line| {
             if line.chars().count() > ERROR_LINE_MAX_CHARS {
                 let cut: String = line.chars().take(ERROR_LINE_MAX_CHARS).collect();

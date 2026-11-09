@@ -612,6 +612,43 @@ fn the_first_error_section_cannot_push_the_tail_out_of_the_summary() {
     );
 }
 
+/// KT-1438: error lines are where connection strings and tokens appear, and the
+/// first errors leave to the room and the worker.
+#[test]
+fn the_first_errors_of_a_red_run_are_redacted() {
+    let stdout =
+        "PDOException: could not connect to postgres://app:Sup3rS3cretPw@db.internal:5432/kronn\n\
+                  fatal: Authorization: Bearer abc123def456ghi789jkl was rejected\n\
+                  APP_SECRET=61cc0ffee1234abcd5678 error while booting\n"
+            .to_string();
+    let extracted = summarise(
+        Summariser::Generic,
+        &stdout,
+        "make: *** [test] Error 1\n",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(
+        extracted.summary.contains("first errors"),
+        "{}",
+        extracted.summary
+    );
+    assert!(extracted
+        .summary
+        .contains("could not connect to postgres://app:"));
+    for secret in [
+        "Sup3rS3cretPw",
+        "abc123def456ghi789jkl",
+        "61cc0ffee1234abcd5678",
+    ] {
+        assert!(
+            !extracted.summary.contains(secret),
+            "{secret} leaked: {}",
+            extracted.summary
+        );
+    }
+}
+
 // ── idempotency key ─────────────────────────────────────────────────
 
 #[test]

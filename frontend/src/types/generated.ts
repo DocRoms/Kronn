@@ -5113,6 +5113,46 @@ export type KronnOwnership = { "type": "NotManaged" } | { "type": "ManagedByMark
 
 export type KronnWrite = { writer: DocWriter, at: string, };
 
+/**
+ * A gitignored path the project's tracked code mentions: a likely seed.
+ */
+export type LaneSeedCandidate = {
+/**
+ * Repository-relative, `/` separated, no trailing slash.
+ */
+path: string,
+/**
+ * Size on disk; `None` when the directory is too large to measure.
+ */
+size_bytes: number | null,
+/**
+ * Why it is suggested.
+ */
+reason: string, };
+
+/**
+ * What the last task worktree seeding did with one path.
+ */
+export type LaneSeedReport = { path: string,
+/**
+ * `seeded`, `up_to_date` or `skipped`.
+ */
+outcome: string,
+/**
+ * Why a path was skipped, or what a seeded one left out.
+ */
+detail?: string, };
+
+/**
+ * The latest seeding of a task worktree of this project.
+ */
+export type LaneSeedsLastRun = { execution_id: string, at: string, seeds: Array<LaneSeedReport>, };
+
+/**
+ * Where the seeds a project is seeded with come from.
+ */
+export type LaneSeedsSource = "project" | "profile" | "none";
+
 export type LaunchAuditRequest = { agent: AgentType,
 /**
  * KT-980 — the named external API connection an HTTP agent uses. Required
@@ -7348,6 +7388,33 @@ scope: GithubScope | null,
  */
 connected_on_upgrade: boolean, updated_at: string | null, };
 
+export type ProjectLaneSeeds = {
+/**
+ * The paths seeded into each task worktree, whichever way they are declared.
+ */
+seeds: Array<string>, source: LaneSeedsSource,
+/**
+ * What `kronn/project.toml` on the default branch declares, when it does.
+ */
+profile_seeds?: Array<string>,
+/**
+ * Why that file could not be read.
+ */
+profile_error?: string,
+/**
+ * Declared paths that look like a secret file and were NOT saved: send them
+ * back in `confirm_secret_paths` once the human accepted them.
+ */
+needs_confirmation: Array<string>,
+/**
+ * A save rewrote the working copy of `kronn/project.toml` (uncommitted).
+ */
+profile_file_written: boolean,
+/**
+ * Why the working copy of `kronn/project.toml` could not be kept in step.
+ */
+profile_file_error?: string, last_run?: LaneSeedsLastRun, };
+
 export type ProjectLanguageStat = { language: string, bytes: number, };
 
 export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: string | null, synced_at: string, };
@@ -9486,6 +9553,12 @@ dir?: string | null, };
  * `PUT /api/projects/{id}/github`. `token` is read only for `stored_token`.
  */
 export type SetProjectGithubConnectionRequest = { mode: GithubConnectionMode, token?: string, };
+
+export type SetProjectLaneSeeds = { seeds: Array<string>,
+/**
+ * Secret-looking paths of `seeds` the human confirmed.
+ */
+confirm_secret_paths?: Array<string>, };
 
 export type SetProjectValidationsAccess = { access: ValidationsAccess, };
 

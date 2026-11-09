@@ -139,9 +139,11 @@ pub fn set_validations_access(
     Ok(changed > 0)
 }
 
-/// The gitignored paths this project declares as lane seeds (KT-1438). An
-/// unknown project, an empty column or an unreadable value reads as none.
-pub fn lane_seeds(conn: &Connection, project_id: &str) -> Result<Vec<String>> {
+/// The gitignored paths this project declares as lane seeds (KT-1438): `None`
+/// when a human never declared any (the project's `kronn/project.toml` may),
+/// `Some(empty)` when they were cleared. An unknown project or an unreadable
+/// value reads as never declared.
+pub fn lane_seeds(conn: &Connection, project_id: &str) -> Result<Option<Vec<String>>> {
     let value: Option<Option<String>> = conn
         .query_row(
             "SELECT lane_seeds_json FROM projects WHERE id = ?1",
@@ -151,19 +153,16 @@ pub fn lane_seeds(conn: &Connection, project_id: &str) -> Result<Vec<String>> {
         .optional()?;
     Ok(value
         .flatten()
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default())
+        .and_then(|json| serde_json::from_str(&json).ok()))
 }
 
-/// Replace the project's lane seeds; an empty list clears them. Returns false
+/// Replace the project's lane seeds; an empty list is stored as such, so that
+/// clearing them is not mistaken for never having declared any. Returns false
 /// when the project does not exist.
 pub fn set_lane_seeds(conn: &Connection, project_id: &str, seeds: &[String]) -> Result<bool> {
-    let json = (!seeds.is_empty())
-        .then(|| serde_json::to_string(seeds))
-        .transpose()?;
     let changed = conn.execute(
         "UPDATE projects SET lane_seeds_json = ?2 WHERE id = ?1",
-        params![project_id, json],
+        params![project_id, serde_json::to_string(seeds)?],
     )?;
     Ok(changed > 0)
 }

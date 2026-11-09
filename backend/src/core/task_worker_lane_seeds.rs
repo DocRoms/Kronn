@@ -122,6 +122,62 @@ pub fn normalize_seed_list(raw: &[String]) -> Result<Vec<String>, String> {
     Ok(seeds)
 }
 
+// ─── Which seeds apply ────────────────────────────────────────────────────
+
+/// Where the seeds a project is seeded with come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum LaneSeedsSource {
+    /// A human declared them in Kronn (they may have cleared them).
+    Project,
+    /// Nobody declared any in Kronn: the `[lane_seeds]` table of the default
+    /// branch's `kronn/project.toml` applies.
+    Profile,
+    /// None declared anywhere.
+    None,
+}
+
+/// The declared paths of `seeds` that look like a secret file (`.env`, a key, a
+/// credentials directory), by [`crate::acp::secret_files::is_secret_path`] on the
+/// path as it sits in `repo`. A seed copies files to where a worker reads them.
+pub fn secret_looking(repo: &Path, seeds: &[String]) -> Vec<String> {
+    seeds
+        .iter()
+        .filter(|seed| crate::acp::secret_files::is_secret_path(&repo.join(seed.as_str())))
+        .cloned()
+        .collect()
+}
+
+/// The seeds to apply to a project's worktrees: what a human declared in Kronn
+/// when they did, else what the default branch's `kronn/project.toml` declares.
+/// A path out of the file is never trusted to name a secret: a profile reaches
+/// the repository through a pull request, not through the human gate, so a
+/// secret-looking one is left out (a human may still declare it in Kronn).
+pub fn effective_lane_seeds(
+    declared: Option<Vec<String>>,
+    profile: Option<Vec<String>>,
+    repo: &Path,
+) -> (Vec<String>, LaneSeedsSource) {
+    if let Some(declared) = declared {
+        return (declared, LaneSeedsSource::Project);
+    }
+    match profile {
+        Some(paths) if !paths.is_empty() => {
+            let secret = secret_looking(repo, &paths);
+            let kept: Vec<String> = paths
+                .into_iter()
+                .filter(|path| !secret.contains(path))
+                .collect();
+            for path in &secret {
+                tracing::warn!("lane seed `{path}` of kronn/project.toml left out: it looks like a secret file");
+            }
+            (kept, LaneSeedsSource::Profile)
+        }
+        _ => (Vec::new(), LaneSeedsSource::None),
+    }
+}
+
 // ─── Outcomes ─────────────────────────────────────────────────────────────
 
 /// How a seed was put in place.
@@ -142,6 +198,10 @@ pub enum SeedStatus {
         method: SeedMethod,
         refreshed: bool,
         ms: u64,
+        /// Symlinks of the source left out of the copy because they point
+        /// outside the seed (named relative to it).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dropped_links: Vec<String>,
     },
     /// Already there, and its source has not changed since.
     UpToDate,
@@ -249,12 +309,24 @@ fn worktree_git_dir(worktree: &Path) -> Result<PathBuf, String> {
 
 // ─── Source fingerprint ───────────────────────────────────────────────────
 
-/// A cheap fingerprint of a tree — entries, bytes and the newest modification
-/// time — and its size: equal fingerprints mean the seed need not be redone.
+/// FNV-1a: stable across runs and Rust versions, which the persisted marker needs.
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(seed, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// A cheap fingerprint of a tree and its size in bytes: entries, bytes, the
+/// newest modification and change times, and an order-independent hash of every
+/// entry's relative name, kind and size. Equal fingerprints mean the seed need
+/// not be redone. The change time and the hash catch what the modification time
+/// alone cannot: a same-size rewrite whose mtime was preserved (`cp -p`, `rsync`).
 fn fingerprint(root: &Path) -> Result<(String, u64), String> {
-    let mut stack = vec![root.to_path_buf()];
-    let (mut entries, mut bytes, mut newest) = (0u64, 0u64, 0u128);
-    while let Some(path) = stack.pop() {
+    let mut stack = vec![(root.to_path_buf(), String::new())];
+    let (mut entries, mut bytes) = (0u64, 0u64);
+    let (mut newest_mtime, mut newest_ctime) = (0u128, 0u128);
+    let mut names = 0u64;
+    while let Some((path, relative)) = stack.pop() {
         let meta = std::fs::symlink_metadata(&path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
         entries += 1;
@@ -265,22 +337,44 @@ fn fingerprint(root: &Path) -> Result<(String, u64), String> {
         }
         if let Ok(modified) = meta.modified() {
             if let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH) {
-                newest = newest.max(since.as_nanos());
+                newest_mtime = newest_mtime.max(since.as_nanos());
             }
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let ctime = i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec());
+            newest_ctime = newest_ctime.max(ctime.max(0) as u128);
+        }
+        let kind: u8 = if meta.is_dir() {
+            b'd'
+        } else if meta.file_type().is_symlink() {
+            b'l'
+        } else {
+            b'f'
+        };
+        let size = if meta.is_dir() { 0 } else { meta.len() };
+        let mut entry_hash = fnv1a(0xcbf2_9ce4_8422_2325, relative.as_bytes());
+        entry_hash = fnv1a(entry_hash, &[0, kind]);
+        entry_hash = fnv1a(entry_hash, &size.to_le_bytes());
+        names = names.wrapping_add(entry_hash);
         if meta.is_dir() {
             let children = std::fs::read_dir(&path)
                 .map_err(|error| format!("cannot list {}: {error}", path.display()))?;
             for child in children {
                 let child =
                     child.map_err(|error| format!("cannot list {}: {error}", path.display()))?;
-                stack.push(child.path());
+                let name = child.file_name().to_string_lossy().into_owned();
+                stack.push((child.path(), format!("{relative}/{name}")));
             }
         } else {
             bytes += meta.len();
         }
     }
-    Ok((format!("{entries}:{bytes}:{newest}"), bytes))
+    Ok((
+        format!("{entries}:{bytes}:{newest_mtime}:{newest_ctime}:{names:x}"),
+        bytes,
+    ))
 }
 
 // ─── Placing a copy ───────────────────────────────────────────────────────
@@ -336,6 +430,93 @@ fn symlinked_component(root: &Path, rel: &str) -> Option<PathBuf> {
     None
 }
 
+/// Longest list of dropped link names kept in a record.
+const MAX_DROPPED_NAMES: usize = 10;
+
+/// Whether a symlink living `depth` directories below the seed root, pointing at
+/// `target`, stays inside the seed. Only a relative target made of leading `..`
+/// (no more than `depth`) followed by plain names qualifies: a `..` after a name
+/// would be resolved through whatever link that name is, which a lexical check
+/// cannot follow, so it is refused too.
+fn link_stays_inside(target: &Path, depth: usize) -> bool {
+    let (mut ups, mut named) = (0usize, false);
+    for component in target.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if !named => ups += 1,
+            Component::Normal(_) => named = true,
+            _ => return false,
+        }
+    }
+    ups <= depth
+}
+
+/// Remove, from the fresh copy at `staging`, every symlink that points out of
+/// the seed (absolute, or climbing past its root): copied as-is, it would hand
+/// the worker a window onto the host. Returns their names relative to the seed.
+fn drop_escaping_links(staging: &Path) -> io::Result<Vec<String>> {
+    let mut dropped = Vec::new();
+    let mut stack = vec![(staging.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        for child in std::fs::read_dir(&dir)? {
+            let path = child?.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.is_dir() {
+                stack.push((path, depth + 1));
+            } else if meta.file_type().is_symlink() {
+                let target = std::fs::read_link(&path)?;
+                if !link_stays_inside(&target, depth) {
+                    std::fs::remove_file(&path)?;
+                    dropped.push(
+                        path.strip_prefix(staging)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+        }
+    }
+    dropped.sort();
+    Ok(dropped)
+}
+
+/// A fresh, unguessable name directly under the worktree root, for a copy being
+/// built or an older one being set aside.
+fn transient_name(kind: &str) -> String {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    format!(".kronn-{kind}-{}", &id[..16])
+}
+
+const STAGING_KIND: &str = "seeding";
+const TRASH_KIND: &str = "seeded-old";
+
+/// Take `rel` out of the worktree: set aside by a rooted rename (a parent
+/// swapped for a link is not followed), then deleted from its one-component name.
+fn discard(worktree: &Path, rel: &str) -> io::Result<()> {
+    let aside = transient_name(TRASH_KIND);
+    match crate::core::rooted_io::rename(worktree, Path::new(rel), Path::new(&aside)) {
+        Ok(()) => remove_any(&worktree.join(aside)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Leftovers of a seeding interrupted by a crash.
+fn sweep_transients(worktree: &Path) {
+    let Ok(children) = std::fs::read_dir(worktree) else {
+        return;
+    };
+    for child in children.flatten() {
+        let name = child.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&format!(".kronn-{STAGING_KIND}-"))
+            || name.starts_with(&format!(".kronn-{TRASH_KIND}-"))
+        {
+            let _ = remove_any(&child.path());
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct SeedMarker {
     /// Source fingerprint of each seed Kronn put in this worktree.
@@ -385,6 +566,7 @@ pub fn seed_worktree(
             }
         }
     };
+    sweep_transients(worktree);
     let mut marker = read_marker(&git_dir);
     let mut outcomes = Vec::with_capacity(seeds.len());
     for declared in seeds {
@@ -457,10 +639,20 @@ fn seed_one(
         Err(error) => return skip(format!("the worktree path cannot be read: {error}")),
         Ok(_) => match marker.seeds.get(rel) {
             Some(known) if *known == current => {
-                return LaneSeedOutcome {
-                    path: rel.to_string(),
-                    status: SeedStatus::UpToDate,
-                }
+                // Up to date, but the worktree is the worker's to write: its
+                // `.gitignore` may have stopped ignoring the copy since, and a
+                // copy `git status` shows could enter a delivery.
+                return match status_under(worktree, rel) {
+                    Ok(status) if status.is_empty() => LaneSeedOutcome {
+                        path: rel.to_string(),
+                        status: SeedStatus::UpToDate,
+                    },
+                    Ok(_) => {
+                        let _ = discard(worktree, rel);
+                        skip("it is no longer gitignored in the worktree, so it would enter a delivery".into())
+                    }
+                    Err(reason) => skip(reason),
+                };
             }
             Some(_) => true,
             None => {
@@ -469,20 +661,10 @@ fn seed_one(
         },
     };
 
-    let Some(parent) = destination.parent() else {
-        return skip("the destination has no parent directory".into());
-    };
-    if let Err(error) = std::fs::create_dir_all(parent) {
-        return skip(format!("cannot create {}: {error}", parent.display()));
-    }
-    let staging = parent.join(format!(
-        ".{}.kronn-seeding",
-        destination
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
-    let _ = remove_any(&staging);
+    // The copy is built under a fresh name at the worktree root (a directory
+    // Kronn chose), then published into place by a rooted rename.
+    let staging_name = transient_name(STAGING_KIND);
+    let staging = worktree.join(&staging_name);
     let started = Instant::now();
     let method = match clone(&source, &staging) {
         Ok(()) => SeedMethod::Clone,
@@ -503,15 +685,35 @@ fn seed_one(
             SeedMethod::Copy
         }
     };
+    let mut dropped_links = match drop_escaping_links(&staging) {
+        Ok(dropped) => dropped,
+        Err(error) => {
+            let _ = remove_any(&staging);
+            return skip(format!("the copy's links cannot be checked: {error}"));
+        }
+    };
+    dropped_links.truncate(MAX_DROPPED_NAMES);
+
+    let aside = transient_name(TRASH_KIND);
     if refreshing {
-        if let Err(error) = remove_any(&destination) {
+        if let Err(error) =
+            crate::core::rooted_io::rename(worktree, Path::new(rel), Path::new(&aside))
+        {
             let _ = remove_any(&staging);
             return skip(format!("the older copy cannot be replaced: {error}"));
         }
     }
-    if let Err(error) = std::fs::rename(&staging, &destination) {
+    if let Err(error) =
+        crate::core::rooted_io::rename(worktree, Path::new(&staging_name), Path::new(rel))
+    {
         let _ = remove_any(&staging);
+        if refreshing {
+            let _ = crate::core::rooted_io::rename(worktree, Path::new(&aside), Path::new(rel));
+        }
         return skip(format!("the copy cannot be put in place: {error}"));
+    }
+    if refreshing {
+        let _ = remove_any(&worktree.join(&aside));
     }
 
     // Whatever the worktree's own ignore rules say: a seed that would show up
@@ -519,13 +721,13 @@ fn seed_one(
     match status_under(worktree, rel) {
         Ok(status) if status.is_empty() => {}
         Ok(_) => {
-            let _ = remove_any(&destination);
+            let _ = discard(worktree, rel);
             return skip(
                 "it is not gitignored in the worktree, so it would enter a delivery".into(),
             );
         }
         Err(reason) => {
-            let _ = remove_any(&destination);
+            let _ = discard(worktree, rel);
             return skip(reason);
         }
     }
@@ -536,6 +738,7 @@ fn seed_one(
             method,
             refreshed: refreshing,
             ms: started.elapsed().as_millis() as u64,
+            dropped_links,
         },
     }
 }
