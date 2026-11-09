@@ -642,6 +642,30 @@ pass (a frequent schedule adds no fire during the repeated hour).
 - **Host secrets hidden from the container** — `$HOME` is mounted read-only at `/host-home` and the container runs with the user's UID, so a `0600` file there is readable by every agent. `make start` therefore generates, in `docker-compose.override.yml`, an empty read-only mount over each credential path that exists on the host (`scripts/docker-secret-masks.sh`: `~/.config/kronn`, `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.docker`, `~/.kube`, `~/.gnupg`, `~/.password-store`, `~/.netrc`, `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`, `~/.pgpass`, `~/.config/hub`). `~/.azure` and the Fastly config stay visible because the Microsoft 365 and Fastly integrations read them there; only one container per agent removes that residual exposure.
 - **Worktree volume parity in Docker** — `docker-compose.yml` ajoute un self-mount `${KRONN_REPOS_DIR}:${KRONN_REPOS_DIR}:rw` pour que les paths host (`/home/<user>/Repositories/...`) restent valides dans le container. `exec_step.rs` traduit `/host-home/` → `${KRONN_HOST_HOME}/` quand le `work_dir` cible un worktree créé côté host. Plus un mount `${KRONN_RUSTUP_HOME}` + `RUSTUP_HOME` env propagation pour que les shims cargo trouvent leur toolchain. `Makefile` auto-détecte `~/.cargo/bin`, `~/.rustup`, `~/.bun/bin` et écrit dans `.env`.
 
+#### Exec setup phase in a fresh worktree
+
+A test step is typically `npm test`, `cargo test`, `composer test` or `pytest`,
+and all of them need dependencies that **do not exist in a fresh git worktree**
+(no `node_modules`, no `vendor`, no `target`). Each `Exec` step therefore has an
+optional **setup phase** that runs immediately before its main command. In the
+wizard:
+
+```
+☑ This step runs in a git worktree — install dependencies first
+    Setup command: composer install --no-interaction --prefer-dist
+                   (auto-detected from composer.json — edit if needed)
+
+Main command:     bin/phpunit -c phpunit.xml.dist
+```
+
+The setup uses the same allowlist and the same timeout as the main command. If
+it fails, the main command does not run and the step shows the install logs; if
+it succeeds, the main command runs in the prepared worktree. Common setups are
+listed (composer, `npm ci`, pnpm, yarn, poetry, pip): pick one and adjust it.
+For dockerized projects, the Docker-in-Docker volume mismatch is handled by the
+infrastructure (the self-mount and host-path translation above), so
+`docker compose run --rm svc <cmd>` works from a worktree without extra config.
+
 ### MCP system (3-tier architecture)
 
 Kronn manages MCPs with a 3-tier model:
@@ -889,4 +913,4 @@ definition from the database — keep it, and the step provenance names the agen
 actually used. Only agent, model and effort are replaced; tier, budget, tools
 stay, and a named connection stays only while the agent does.
 `[src: file: backend/src/workflows/step_agents.rs:58-134#validate]` `[src: file: backend/src/workflows/step_agents.rs:181-238#apply_to_step]` `[src: file: backend/src/workflows/runner.rs:1150-1170#apply_from_run]`
-`[src: file: backend/src/api/workflows.rs:5056-5114#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5199-5204#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5113-5118#TRIGGER_CONTEXT_KEY]`
+`[src: file: backend/src/api/workflows.rs:5056-5114#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5203-5208#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5113-5118#TRIGGER_CONTEXT_KEY]`

@@ -4,9 +4,9 @@
   <!-- Diagramme de décomposition — illustre la philosophie « L'approche Kronn ».
        Palette dark-only pour matcher le banner Kronn_Hero (toujours sombre).
        Le jaune des steps IA (#fbbf24) reprend l'éclair du logo. -->
-  <title id="decomp-title">Mega-prompt vs workflow Kronn — même résultat, 5× moins cher</title>
+  <title id="decomp-title">Mega-prompt vs workflow Kronn — des tokens dépensés seulement là où il faut raisonner</title>
   <desc id="decomp-desc">
-    Diagramme sur deux lignes. Ligne du haut : l'anti-pattern habituel du mega-prompt — un seul prompt rouge volumineux demandant à un agent de faire douze choses d'un coup, produisant environ douze mille tokens, une sortie instable et un debug opaque. Ligne du bas : l'approche Kronn — cinq steps séquentiels verts et jaunes (ApiCall récupération zéro token, Agent rédaction N tokens, Exec test zéro token, Agent review N tokens, Notify webhook zéro token). Même résultat avec trois steps déterministes à zéro token et deux steps IA bornés, 5 fois moins cher, sortie prédictible, debuggable quand ça casse.
+    Diagramme sur deux lignes. Ligne du haut : l'anti-pattern habituel du mega-prompt — un seul prompt rouge volumineux demandant à un agent de faire douze choses d'un coup, dépensant des tokens sur chaque sujet, une sortie instable et un debug opaque. Ligne du bas : l'approche Kronn — cinq steps séquentiels verts et jaunes (ApiCall récupération zéro token, Agent rédaction N tokens, Exec test zéro token, Agent review N tokens, Notify webhook zéro token). Même résultat avec trois steps déterministes à zéro token et deux steps IA bornés, des tokens dépensés seulement pour raisonner, sortie prédictible, debuggable quand ça casse.
   </desc>
 
   <rect x="0" y="0" width="1000" height="460" fill="#0d1117"/>
@@ -29,7 +29,7 @@
           fill="#f87171" fill-opacity="0.12" stroke="#f87171" stroke-width="1.5"/>
     <text x="240" y="92" text-anchor="middle" class="label">« Fais les 12 choses »</text>
     <text x="240" y="113" text-anchor="middle" class="small">récupère + analyse + écris + teste + review + commit + notifie…</text>
-    <text x="240" y="135" text-anchor="middle" class="cost cost-bad">💸 ~12k tokens · instable · opaque · non-déterministe</text>
+    <text x="240" y="135" text-anchor="middle" class="cost cost-bad">💸 des tokens sur chaque sujet · instable · opaque</text>
 
     <path d="M 425 104 L 525 104" stroke="#f87171" stroke-width="1.8" fill="none" aria-hidden="true"/>
     <polygon points="525,104 515,99 515,109" fill="#f87171" aria-hidden="true"/>
@@ -95,7 +95,7 @@
     <polygon points="850,302 842,298 842,306" fill="#34d399" aria-hidden="true"/>
     <text x="900" y="288" text-anchor="middle" class="label">Même</text>
     <text x="900" y="306" text-anchor="middle" class="label">résultat</text>
-    <text x="900" y="324" text-anchor="middle" class="cost cost-good">5× moins cher</text>
+    <text x="900" y="324" text-anchor="middle" class="cost cost-good">moins de tokens</text>
   </g>
 
   <text x="500" y="395" text-anchor="middle" class="small">

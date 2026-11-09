@@ -9,6 +9,26 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 
 ## Current release: 0.15.2
 
+- Trust levels (Standard, Trusted, Full access) approve what you trust your
+  agents to do at the scope you choose; what a level grants runs under an OS
+  sandbox that hides Kronn's data directory, and raising a level or reading a
+  secret through the API needs an authenticator code. See
+  [trust levels](architecture/trust-levels.md),
+  [agent vault protection](architecture/agent-vault-protection.md) and
+  [strong confirmation routes](architecture/strong-confirmation-routes.md).
+- A provider quota no longer costs work: the work waits, then returns to its
+  original provider, with no silent fallback. See
+  [provider quota rearm](operations/provider-quota-rearm.md).
+- A room can be granted `code` on another project's checkout, and
+  `./kronn start` pulls the published multi-architecture images instead of
+  compiling. See [discussion project scope](design/discussion-project-scope.md),
+  [install](install.md#published-images-and-source-builds) and the
+  [0.15.2 release notes](../CHANGELOG.md).
+- New guides: [the Kronn way](guides/the-kronn-way.md) and
+  [auditing a repository](guides/ai-audit.md).
+
+## Earlier releases
+
 - A Live Page action can run without its card once a human approves it, and
   Kronn ships « Ma Todo », a task board that runs without an agent. See
   [Live Pages](architecture/live-pages.md).
@@ -24,8 +44,6 @@ This folder is the project's living knowledge base, shared by humans and AI agen
   [kronn-internal](operations/mcp-servers/kronn-internal.md) and the
   [0.15.0 release notes](../CHANGELOG.md), with their upgrade notes and known
   limitations.
-
-## Earlier releases
 
 - Every process Kronn starts gets a built environment, each agent launch gets
   its own bridge token scoped to its project, and secrets leave `config.toml`

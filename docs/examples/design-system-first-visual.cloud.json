@@ -1,0 +1,137 @@
+{
+  "kind": "kronn.workflow",
+  "version": 4,
+  "exported_at": "2026-11-08T00:00:00Z",
+  "workflow": {
+    "id": "example-design-system-first-visual-cloud",
+    "name": "Design system → first visual (cloud)",
+    "project_id": null,
+    "trigger": {
+      "type": "Manual"
+    },
+    "variables": [
+      {
+        "name": "design_system_paths",
+        "label": "Design system files",
+        "placeholder": "design/tokens.json, docs/brand-guidelines.md",
+        "description": "Repository paths of the design tokens and the brand guidelines, comma-separated.",
+        "required": true,
+        "control": {
+          "type": "text"
+        }
+      },
+      {
+        "name": "brand_asset_paths",
+        "label": "Reference images",
+        "placeholder": "public/logo.png, design/palette.png",
+        "description": "Repository paths of the brand images the visual must follow (logo, palette sample), comma-separated.",
+        "required": true,
+        "control": {
+          "type": "text"
+        }
+      },
+      {
+        "name": "room_id",
+        "label": "Room",
+        "placeholder": "id of the discussion that receives the media",
+        "description": "The discussion the image and the video land in. Steps 3 and 4 join it, attach the reference images there and generate from them.",
+        "required": true,
+        "control": {
+          "type": "text"
+        }
+      },
+      {
+        "name": "image_connection",
+        "label": "Image connection",
+        "placeholder": "openrouter",
+        "description": "Alias of the HTTP connection whose image slot generates the visual.",
+        "required": true,
+        "control": {
+          "type": "select",
+          "options": [
+            {
+              "value": "openrouter",
+              "label": "OpenRouter"
+            },
+            {
+              "value": "litellm",
+              "label": "LiteLLM"
+            }
+          ],
+          "default_value": "openrouter"
+        }
+      },
+      {
+        "name": "video_connection",
+        "label": "Video connection",
+        "placeholder": "openrouter",
+        "description": "Alias of the HTTP connection whose video slot turns the image into a teaser.",
+        "required": true,
+        "control": {
+          "type": "text"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "name": "write_prompt",
+        "step_type": {
+          "type": "Agent"
+        },
+        "description": "Reads the design tokens and the brand guidelines, writes the image prompt.",
+        "agent": "ClaudeCode",
+        "agent_settings": {
+          "model": "sonnet"
+        },
+        "prompt_template": "You write the image prompt for this project's first visual.\n\nRead these repository files: {{design_system_paths}}. Extract the palette (exact hex values), the typography mood, the shapes, the tone of voice and every rule about what the brand must never look like.\n\nThen write ONE image prompt, in English, under 120 words, for a hero visual that presents the project. Name the colours by hex value, describe the composition, the light and the style, and leave room for the logo, which is passed as a reference image. No text inside the image.\n\nAnswer with the prompt only."
+      },
+      {
+        "name": "review_prompt",
+        "step_type": {
+          "type": "Agent"
+        },
+        "description": "Checks the prompt against the brand and returns the final version.",
+        "agent": "Codex",
+        "prompt_template": "Review this image prompt against the brand.\n\nPrompt:\n{{steps.write_prompt.output}}\n\nBrand sources in the repository: {{design_system_paths}}. Read them. Check that every colour is a brand colour, that the style and tone match the guidelines, and that nothing the guidelines forbid is asked for.\n\nAnswer with the final prompt only: the same prompt if it complies, otherwise the corrected one."
+      },
+      {
+        "name": "generate_image",
+        "step_type": {
+          "type": "Agent"
+        },
+        "description": "Generates the image with the brand assets as reference images.",
+        "agent": "ClaudeCode",
+        "agent_settings": {
+          "tier": "economy"
+        },
+        "room_id": "{{room_id}}",
+        "external_effect": true,
+        "prompt_template": "Generate the project's first visual with Kronn's media tools.\n\n1. Attach these repository images to the room with `disc_append` (`attachments`): {{brand_asset_paths}}. Note the context file id Kronn gives each one; if the room already holds them, reuse those ids.\n2. Call `agent_list` and read the `media` entry of connection `{{image_connection}}`: its capabilities say how many reference images the model takes.\n3. Call `media_generate` with `connection_id: \"{{image_connection}}\"`, `modality: \"image\"`, `reference_mode: \"reference\"`, `reference_asset_ids` set to those ids (logo first, as many as the model takes), `wait: true`, and this prompt:\n\n{{steps.review_prompt.output}}\n\nEnd your answer with one line: `IMAGE_CONTEXT_FILE_ID: <context_file_id of the generated image>`."
+      },
+      {
+        "name": "generate_video",
+        "step_type": {
+          "type": "Agent"
+        },
+        "description": "Turns the image into a short teaser, the image as first frame.",
+        "agent": "ClaudeCode",
+        "agent_settings": {
+          "tier": "economy"
+        },
+        "room_id": "{{room_id}}",
+        "external_effect": true,
+        "prompt_template": "Turn the project's first visual into a short teaser.\n\nThe previous step ended with the image's context file id:\n{{steps.generate_image.output}}\n\n1. Call `agent_list` and read the `media` entry of connection `{{video_connection}}`: take the shortest duration it lists, and check that `capabilities.frame_positions` lists `first_frame`.\n2. Call `media_generate` with `connection_id: \"{{video_connection}}\"`, `modality: \"video\"`, `reference_asset_ids: [<that id>]`, `reference_mode: \"first_frame\"`, `generate_audio: false`, that duration, and a prompt of at most 60 words that animates the image slowly (camera move, light), adds nothing off-brand and keeps the composition. If `first_frame` is not listed, say so and stop instead of generating without the image.\n\nAnswer with the job id."
+      }
+    ],
+    "actions": [],
+    "safety": {
+      "sandbox": false,
+      "require_approval": false
+    },
+    "workspace_config": null,
+    "concurrency_limit": 1,
+    "enabled": false,
+    "created_at": "2026-11-08T00:00:00Z",
+    "updated_at": "2026-11-08T00:00:00Z"
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "kind": "kronn.workflow",
+  "version": 4,
+  "exported_at": "2026-11-08T00:00:00Z",
+  "workflow": {
+    "id": "example-design-system-first-visual-hybrid",
+    "name": "Design system → first visual (hybrid)",
+    "project_id": null,
+    "trigger": {
+      "type": "Manual"
+    },
+    "variables": [
+      {
+        "name": "design_system_paths",
+        "label": "Design system files",
+        "placeholder": "design/tokens.json, docs/brand-guidelines.md",
+        "description": "Repository paths of the design tokens and the brand guidelines, comma-separated.",
+        "required": true,
+        "control": {
+          "type": "text"
+        }
+      },
+      {
+        "name": "brand_asset_paths",
+        "label": "Reference images",
+        "placeholder": "public/logo.png, design/palette.png",
+        "description": "Paths of the brand images the visual must follow (logo first, then the palette sample), comma-separated: png, jpg, webp or gif files inside the project, relative to its root.",
+        "required": true,
+        "control": {
+          "type": "text"
+        }
+      },
+      {
+        "name": "video_connection",
+        "label": "Video connection",
+        "placeholder": "openrouter",
+        "description": "Alias of the HTTP connection whose video slot turns the image into a teaser.",
+        "required": true,
+        "control": {
+          "type": "text"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "name": "write_prompt",
+        "step_type": {
+          "type": "Agent"
+        },
+        "description": "A strong CLI agent reads the design tokens and the brand guidelines and writes the image prompt.",
+        "agent": "ClaudeCode",
+        "agent_settings": {
+          "model": "sonnet"
+        },
+        "prompt_template": "You write the image prompt for this project's first visual.\n\nRead these repository files: {{design_system_paths}}. Extract the palette (exact hex values), the typography mood, the shapes, the tone of voice and every rule about what the brand must never look like.\n\nThen write ONE image prompt, in English, under 120 words, for a hero visual that presents the project. Name the colours by hex value, describe the composition, the light and the style, and leave room for the logo, which is passed as a reference image. No text inside the image.\n\nAnswer with the prompt only."
+      },
+      {
+        "name": "review_prompt",
+        "step_type": {
+          "type": "Agent"
+        },
+        "description": "A local model checks the prompt against the brand, free and in private.",
+        "agent": "Ollama",
+        "prompt_template": "Review this image prompt against the brand.\n\nPrompt:\n{{steps.write_prompt.output}}\n\nBrand sources in the repository: {{design_system_paths}}. Read them. Check that every colour is a brand colour, that the style and tone match the guidelines, and that nothing the guidelines forbid is asked for.\n\nAnswer with the final prompt only: the same prompt if it complies, otherwise the corrected one.",
+        "agent_settings": {
+          "tier": "reasoning"
+        }
+      },
+      {
+        "name": "generate_image",
+        "step_type": {
+          "type": "Agent"
+        },
+        "description": "Generates the image on the local ComfyUI: the brand files (logo, palette) never leave the machine.",
+        "agent": "Ollama",
+        "agent_settings": {
+          "tier": "default"
+        },
+        "external_effect": true,
+        "prompt_template": "Generate the project's first visual with Kronn's media tools.\n\n1. Call `media_generate` with `connection_id: \"comfyui\"`, `modality: \"image\"`, `reference_mode: \"reference\"` and `reference_asset_ids` set to these project paths, in this order: {{brand_asset_paths}}. Kronn reads each file inside the project and attaches it to this run's room. Use this prompt:\n\n{{steps.review_prompt.output}}\n\nIf Kronn refuses the references (the model takes fewer images, or none), say so and stop: never generate without them.\n2. Call `media_job_status` with the job id and `wait_secs: 300` until `settled` is true. Never call `media_generate` again for this image.\n\nEnd your answer with one line: `IMAGE_JOB_ID: <job_id of the generated image>`. If the generation failed, say why instead."
+      },
+      {
+        "name": "generate_video",
+        "step_type": {
+          "type": "Agent"
+        },
+        "description": "Turns the image into a short teaser on a cloud video model, where local hardware is lacking.",
+        "agent": "Ollama",
+        "agent_settings": {
+          "tier": "default"
+        },
+        "external_effect": true,
+        "prompt_template": "Turn the project's first visual into a short teaser.\n\nThe previous step ended with the image's job id:\n{{steps.generate_image.output}}\n\n1. Call `media_generate` with `connection_id: \"{{video_connection}}\"`, `modality: \"video\"`, `reference_asset_ids: [<that job id>]`, `reference_mode: \"first_frame\"`, `generate_audio: false`, no duration (the model's default applies), and a prompt of at most 60 words that animates the image slowly (camera move, light), adds nothing off-brand and keeps the composition. If Kronn refuses `first_frame` because the model does not take one, say so and stop instead of generating without the image.\n2. Call `media_job_status` with the job id and `wait_secs: 300`. A video may take longer: if `settled` is false, do not generate again.\n\nAnswer with the job id and its status."
+      }
+    ],
+    "actions": [],
+    "safety": {
+      "sandbox": false,
+      "require_approval": false
+    },
+    "workspace_config": null,
+    "concurrency_limit": 1,
+    "enabled": false,
+    "created_at": "2026-11-08T00:00:00Z",
+    "updated_at": "2026-11-08T00:00:00Z"
+  }
+}

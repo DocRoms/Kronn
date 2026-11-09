@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 330"
+     role="img" aria-labelledby="orch-title orch-desc"
+     font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <!-- Task orchestration, simplified from the state machine of
+       docs/design/adr-002-orchestration-multi-agent.md. Own dark backdrop, so it
+       reads the same on a light or a dark GitHub theme. -->
+  <title id="orch-title">Task orchestration: from a room to one pull request</title>
+  <desc id="orch-desc">
+    One flow from left to right. A room is a discussion several agents join. Its principal agent splits the work. Worker lanes each run in their own git worktree. The principal reviews each delivery against its Definition of Done and sends it back to the same worker when changes are needed. Kronn validates and integrates the approved work. The result is one pull request that you merge.
+  </desc>
+
+  <rect x="0" y="0" width="1200" height="330" fill="#0d1117"/>
+
+  <style>
+    .title  { font-size: 22px; font-weight: 700; fill: #f9fafb; }
+    .label  { font-size: 15px; font-weight: 700; fill: #f9fafb; }
+    .small  { font-size: 12px; fill: #d1d5db; }
+    .tiny   { font-size: 11px; fill: #9ca3af; font-style: italic; }
+    .kind   { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+    .loop   { font-size: 11px; font-weight: 600; fill: #f87171; }
+    .chip   { font-size: 12px; font-weight: 600; fill: #f9fafb; }
+  </style>
+
+  <text x="600" y="36" text-anchor="middle" class="title">One room, several workers, one pull request</text>
+
+  <g role="group" aria-label="Room: a discussion several agents join">
+    <rect x="30" y="72" width="165" height="112" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="46" y="93" class="kind" fill="#fbbf24">Agents</text>
+    <text x="46" y="116" class="label">Room</text>
+    <text x="46" y="137" class="small">a discussion several</text>
+    <text x="46" y="154" class="small">agents join</text>
+  </g>
+  <g role="group" aria-label="Principal: splits the work, one brief per task">
+    <rect x="225" y="72" width="165" height="112" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="241" y="93" class="kind" fill="#fbbf24">Agents</text>
+    <text x="241" y="116" class="label">Principal</text>
+    <text x="241" y="137" class="small">splits the work,</text>
+    <text x="241" y="154" class="small">one brief per task</text>
+  </g>
+  <g role="group" aria-label="Worker lanes: each in its own git worktree">
+    <rect x="420" y="72" width="165" height="112" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="436" y="93" class="kind" fill="#fbbf24">Agents</text>
+    <text x="436" y="116" class="label">Worker lanes</text>
+    <text x="436" y="137" class="small">each in its own</text>
+    <text x="436" y="154" class="small">git worktree</text>
+  </g>
+  <g role="group" aria-label="Review: against the Definition of Done">
+    <rect x="615" y="72" width="165" height="112" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="631" y="93" class="kind" fill="#fbbf24">Agents</text>
+    <text x="631" y="116" class="label">Review</text>
+    <text x="631" y="137" class="small">against the</text>
+    <text x="631" y="154" class="small">Definition of Done</text>
+  </g>
+  <g role="group" aria-label="Integration: the approved work, validated, then merged">
+    <rect x="810" y="72" width="165" height="112" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="826" y="93" class="kind" fill="#34d399">Kronn</text>
+    <text x="826" y="116" class="label">Integration</text>
+    <text x="826" y="137" class="small">the approved work,</text>
+    <text x="826" y="154" class="small">validated, then merged</text>
+  </g>
+  <g role="group" aria-label="Pull request: one PR, that you merge">
+    <rect x="1005" y="72" width="165" height="112" rx="10" fill="#a78bfa" fill-opacity="0.14" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="1021" y="93" class="kind" fill="#a78bfa">You</text>
+    <text x="1021" y="116" class="label">Pull request</text>
+    <text x="1021" y="137" class="small">one PR,</text>
+    <text x="1021" y="154" class="small">that you merge</text>
+  </g>
+  <g aria-hidden="true">
+    <path d="M 195 128 L 219 128" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="225,128 216,124 216,132" fill="#d1d5db"/>
+    <path d="M 390 128 L 414 128" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="420,128 411,124 411,132" fill="#d1d5db"/>
+    <path d="M 585 128 L 609 128" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="615,128 606,124 606,132" fill="#d1d5db"/>
+    <path d="M 780 128 L 804 128" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="810,128 801,124 801,132" fill="#d1d5db"/>
+    <path d="M 975 128 L 999 128" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="1005,128 996,124 996,132" fill="#d1d5db"/>
+    <path d="M 697 184 C 697 228 502 228 502 192" stroke="#f87171" stroke-width="1.8" fill="none" stroke-dasharray="5 3"/>
+    <polygon points="502,186 498,195 506,195" fill="#f87171"/>
+  </g>
+  <text x="599" y="240" text-anchor="middle" class="loop">changes requested → same worker</text>
+
+  <g role="group" aria-label="Legend">
+    <rect x="300" y="292" width="14" height="14" rx="3" fill="#fbbf24"/>
+    <text x="322" y="304" class="small">Agents do the work</text>
+    <rect x="530" y="292" width="14" height="14" rx="3" fill="#34d399"/>
+    <text x="552" y="304" class="small">Kronn integrates</text>
+    <rect x="760" y="292" width="14" height="14" rx="3" fill="#a78bfa"/>
+    <text x="782" y="304" class="small">You merge</text>
+  </g>
+</svg>

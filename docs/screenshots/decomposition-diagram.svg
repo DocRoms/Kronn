@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 460"
      role="img" aria-labelledby="decomp-title decomp-desc"
      font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-  <!-- Decomposition diagram — illustrates "The Kronn way" philosophy.
+  <!-- Decomposition diagram (illustrative, not a measurement) — illustrates "The Kronn way" philosophy.
        Dark-only palette to match the always-dark Kronn_Hero banner.
        AI/N-token color (#fbbf24) matches the logo's lightning yellow. -->
-  <title id="decomp-title">Mega-prompt vs Kronn workflow — same outcome, 5× cheaper</title>
+  <title id="decomp-title">Mega-prompt vs Kronn workflow — tokens spent only where reasoning matters</title>
   <desc id="decomp-desc">
-    Diagram with two rows. Top row: the usual mega-prompt anti-pattern — one large red prompt asking an agent to do twelve things at once, producing roughly twelve thousand tokens, flaky output, and an opaque debugging path. Bottom row: the Kronn approach — five sequential green and yellow steps (ApiCall fetch zero tokens, Agent draft N tokens, Exec test zero tokens, Agent review N tokens, Notify webhook zero tokens). Same outcome with three deterministic zero-token steps and two bounded AI steps, five times cheaper, predictable output, debuggable when it breaks.
+    Diagram with two rows. Top row: the usual mega-prompt anti-pattern — one large red prompt asking an agent to do twelve things at once, spending tokens on every concern, flaky output, and an opaque debugging path. Bottom row: the Kronn approach — five sequential green and yellow steps (ApiCall fetch zero tokens, Agent draft N tokens, Exec test zero tokens, Agent review N tokens, Notify webhook zero tokens). Same outcome with three deterministic zero-token steps and two bounded AI steps, tokens spent only on reasoning, predictable output, debuggable when it breaks.
   </desc>
 
   <!-- Dark backdrop -->
@@ -30,7 +30,7 @@
           fill="#f87171" fill-opacity="0.12" stroke="#f87171" stroke-width="1.5"/>
     <text x="240" y="92" text-anchor="middle" class="label">"Do all 12 things"</text>
     <text x="240" y="113" text-anchor="middle" class="small">fetch + analyse + write + test + review + commit + notify…</text>
-    <text x="240" y="135" text-anchor="middle" class="cost cost-bad">💸 ~12k tokens · flaky · opaque · non-deterministic</text>
+    <text x="240" y="135" text-anchor="middle" class="cost cost-bad">💸 tokens on every concern · flaky · opaque</text>
 
     <path d="M 425 104 L 525 104" stroke="#f87171" stroke-width="1.8" fill="none" aria-hidden="true"/>
     <polygon points="525,104 515,99 515,109" fill="#f87171" aria-hidden="true"/>
@@ -96,7 +96,7 @@
     <polygon points="850,302 842,298 842,306" fill="#34d399" aria-hidden="true"/>
     <text x="900" y="288" text-anchor="middle" class="label">Same</text>
     <text x="900" y="306" text-anchor="middle" class="label">outcome</text>
-    <text x="900" y="324" text-anchor="middle" class="cost cost-good">5× cheaper</text>
+    <text x="900" y="324" text-anchor="middle" class="cost cost-good">fewer tokens</text>
   </g>
 
   <text x="500" y="395" text-anchor="middle" class="small">

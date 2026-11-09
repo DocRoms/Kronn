@@ -670,6 +670,14 @@
       display: block;
     }
 
+    /* Newer sections: engine lanes, a subsection title, links in body text */
+    .quickstart-stages.lanes-grid { grid-template-columns: repeat(3, 1fr); }
+    .quickstart-stages + .plugin-flow-note { margin-top: 24px; }
+    .subsection-title { margin-top: 56px; }
+    .section-intro a, .qs-note a, .plugin-flow-note a, .concept-def a { color: var(--electric); text-underline-offset: 3px; }
+    .decomp-wrap + .plugin-flow-note, .concepts-grid + .decomp-wrap { margin-top: 28px; }
+    @media (max-width: 980px) { .quickstart-stages.lanes-grid { grid-template-columns: 1fr; } }
+
     /* MANIFESTO pull-quote */
     .manifesto {
       padding: 110px 0;
@@ -1443,7 +1451,7 @@
         </div>
         <div class="loop-edge loop-mcp">
           <span class="loop-glyph">▼</span>
-          <span class="loop-tag"><span class="sk-pk">MCP · 91 herramientas</span> · un agente pilota Kronn (workflow, room, planificación, API y Pages) sin abrir la UI.</span>
+          <span class="loop-tag"><span class="sk-pk">MCP</span> · un agente pilota Kronn (workflow, room, planificación, API y Pages) sin abrir la UI.</span>
         </div>
       </div>
 
@@ -1474,7 +1482,7 @@
         </div>
         <div class="leaf">
           <div class="title">Workflows desagentificados</div>
-          <p class="body"><strong>Desagentificar</strong> es sustituir los pasos mecánicos por steps deterministas (<code>Exec</code> · <code>Gate</code> · <code>Notify</code> · <code>ApiCall</code>…) a <span class="sk-pk">0 tokens</span>. <strong>12 tipos de pasos</strong>, incluida la recopilación, transformación, publicación de Pages y <code>SubWorkflow</code>; el agente solo interviene cuando es necesario.</p>
+          <p class="body"><strong>Desagentificar</strong> es sustituir los pasos mecánicos por steps deterministas (<code>Exec</code> · <code>Gate</code> · <code>Notify</code> · <code>ApiCall</code>…) a <span class="sk-pk">0 tokens</span>. <strong>15 tipos de pasos</strong>, incluida la recopilación, transformación, publicación de Pages y <code>SubWorkflow</code>; el agente solo interviene cuando es necesario.</p>
         </div>
         <div class="leaf">
           <div class="title">Plugins MCP &amp; API</div>
@@ -1490,6 +1498,43 @@
         </div>
       </div>
     </div>
+  </section>
+
+  <!-- WARP ZONE · ANY ENGINE -->
+  <section class="section" id="any-engine">
+    <a class="level-tag" href="#any-engine">WARP ZONE · ANY ENGINE</a>
+    <h2 class="section-title">Un workflow.<br><span class="li">Cualquier motor</span> en cada paso.</h2>
+    <p class="section-intro">
+      Kronn mezcla agentes CLI, proveedores HTTP y modelos locales <strong>en cada paso de un mismo workflow</strong>. Ejemplo: crear el primer visual del proyecto a partir de su design system. ① lee los design tokens y la guía de marca y escribe el prompt, ② comprueba que respeta la marca, ③ genera la imagen con el logo y una muestra de paleta como imágenes de referencia, ④ la convierte en un teaser corto. Cada paso trabaja con <strong>el contexto del proyecto</strong>, no con una llamada en bruto a un modelo.
+    </p>
+
+    <div class="decomp-wrap">
+      <div class="decomp-wrap-label">▸ Fig. I · tres carriles</div>
+      <a href="diagrams/engines-workflow.es.svg" target="_blank" rel="noopener"><img class="decomp-diagram" src="diagrams/engines-workflow.es.svg" width="1200" height="640" loading="lazy" decoding="async"
+           alt="Un workflow, tres carriles para los mismos cuatro pasos. Cloud: Claude Code escribe el prompt, Codex lo revisa, LiteLLM u OpenRouter genera la imagen a partir del prompt y de imágenes de referencia, OpenRouter hace el vídeo. 100 % local: Ollama con Qwen, un segundo modelo de Ollama, ComfyUI para la imagen y el vídeo. Híbrido: Claude Code, Ollama, ComfyUI y luego OpenRouter para el vídeo."></a>
+    </div>
+
+    <div class="quickstart-stages lanes-grid">
+      <div class="qs-stage">
+        <div class="qs-num">LANE 01</div>
+        <div class="qs-title">Cloud</div>
+        <p class="qs-body">Proveedores de pago, nada que instalar: Claude Code escribe, Codex revisa, LiteLLM u OpenRouter genera la imagen, OpenRouter el vídeo.</p>
+        <p class="qs-note"><a href="https://github.com/DocRoms/Kronn/blob/main/docs/examples/design-system-first-visual.cloud.json" target="_blank" rel="noopener">Importar el carril cloud</a></p>
+      </div>
+      <div class="qs-stage">
+        <div class="qs-num">LANE 02</div>
+        <div class="qs-title">100 % local</div>
+        <p class="qs-body">Cada modelo en tu máquina: Ollama escribe y revisa, ComfyUI genera la imagen y el vídeo*.</p>
+        <p class="qs-note"><a href="https://github.com/DocRoms/Kronn/blob/main/docs/examples/design-system-first-visual.local.json" target="_blank" rel="noopener">Importar el carril local</a></p>
+      </div>
+      <div class="qs-stage">
+        <div class="qs-num">LANE 03</div>
+        <div class="qs-title">Híbrido</div>
+        <p class="qs-body">La lógica: un agente CLI sólido donde el razonamiento importa; local donde es gratis y privado, para que los archivos de marca (logo, paleta) nunca salgan de la máquina; cloud donde falta el hardware, para el vídeo.</p>
+        <p class="qs-note"><a href="https://github.com/DocRoms/Kronn/blob/main/docs/examples/design-system-first-visual.hybrid.json" target="_blank" rel="noopener">Importar el carril híbrido</a></p>
+      </div>
+    </div>
+    <p class="plugin-flow-note">* El vídeo local necesita una máquina muy potente; es casi imposible incluso en un buen Mac. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/examples/README.md#design-system-first-visual" target="_blank" rel="noopener">Qué hay que configurar (en inglés)</a></p>
   </section>
 
   <!-- LEVEL 2 · REALITY CHECK -->
@@ -1527,9 +1572,19 @@
       </div>
     </div>
 
+  </section>
+
+  <!-- SIDE QUEST · THE KRONN WAY -->
+  <section class="section" id="kronn-way">
+    <a class="level-tag" href="#kronn-way">SIDE QUEST · THE KRONN WAY</a>
+    <h2 class="section-title">Ingeniería,<br><span class="li">no conjuros</span>.</h2>
+    <p class="section-intro">
+      <strong>Descomponer</strong>: el código hace lo que el código sabe hacer (obtener, transformar, ejecutar un comando) a 0 tokens, y el agente solo interviene donde hace falta criterio, con un prompt corto y acotado. <strong>Medir</strong>: los skills y los Quick Prompts están versionados, y un run shadow muestra si una nueva versión es realmente mejor antes de ponerla en marcha. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/guides/the-kronn-way.md" target="_blank" rel="noopener">El enfoque Kronn en detalle (en inglés)</a>.
+    </p>
+
     <!-- Decomposition diagram : mega-prompt vs Kronn workflow -->
     <div class="decomp-wrap">
-      <div class="decomp-wrap-label">▸ Fig. I · descomposición</div>
+      <div class="decomp-wrap-label">▸ Fig. II · descomposición</div>
       <svg viewBox="0 0 1000 460" xmlns="http://www.w3.org/2000/svg"
            role="img" aria-labelledby="decomp-title decomp-desc"
            class="decomp-diagram"
@@ -1630,6 +1685,17 @@
           → menos alucinaciones · más rápido · coste predecible · debuggable
         </text>
       </svg>
+    </div>
+
+    <h3 class="qs-title subsection-title">Probar una nueva versión sin riesgo (runs shadow)</h3>
+    <p class="section-intro">
+      Cada run normal de un workflow puede lanzar un <strong>run shadow</strong> con las mismas entradas reales, que carga la versión del skill o del Quick Prompt que estás probando. Cada paso marcado como que actúa fuera de Kronn (publicar, enviar, escribir en otro sitio) se salta, igual que cada Gate: no publica ni rompe nada. La lista de runs compara los dos runs paso a paso, y un clic promueve la mejor versión. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/guides/shadow-runs.md" target="_blank" rel="noopener">La guía de los runs shadow (en inglés)</a>.
+    </p>
+
+    <div class="decomp-wrap">
+      <div class="decomp-wrap-label">▸ Fig. III · runs shadow</div>
+      <a href="diagrams/shadow-runs.es.svg" target="_blank" rel="noopener"><img class="decomp-diagram" src="diagrams/shadow-runs.es.svg" width="1200" height="380" loading="lazy" decoding="async"
+           alt="Las mismas entradas reales lanzan un run normal, publicado, con Prompt v2 y Skill v1, y un run shadow sin efectos secundarios, con Prompt v2 y Skill v2. Los dos alimentan una comparación paso a paso y luego se promueve la mejor versión en un clic."></a>
     </div>
   </section>
 
@@ -1839,9 +1905,9 @@
         <ul class="inv-list">
           <li>Discusiones persistidas en local (SQLite)</li>
           <li>Planificación global + planes de discusión compartidos con los agentes</li>
-          <li>Continuación cross-CLI: Claude exporta, Codex retoma (0.8.4)</li>
-          <li><strong>Multi-CLI en vivo</strong>: N agentes en una misma discusión (0.8.6)</li>
-          <li>Inventario <strong>Assets</strong> por discusión: imágenes, archivos y uploads, búsqueda + descarga (0.10.0)</li>
+          <li>Continuación cross-CLI: Claude exporta, Codex retoma</li>
+          <li><strong>Multi-CLI en vivo</strong>: N agentes en una misma discusión, entre proyectos</li>
+          <li>Inventario <strong>Assets</strong> por discusión: imágenes, archivos y uploads, búsqueda + descarga</li>
           <li>Adjuntos de mensaje + galería de imágenes a pantalla completa (agente o humano)</li>
           <li><code>docs/AGENTS.md</code> generado por auditoría</li>
           <li>Inyección user-context <code>~/.kronn/user-context/</code></li>
@@ -1867,9 +1933,10 @@
       <div class="inventory-col">
         <div class="inv-cat"><span class="num">03</span>Workflows</div>
         <ul class="inv-list">
-          <li>12 step types, incluidos CollectApiData · TransformData · PublishPageData</li>
+          <li>15 tipos de step, incluidos CollectApiData · TransformData · PublishPageData · TaskBoard</li>
+          <li>Disparadores: manual · CRON · tracker · <strong>Watch</strong> (solo lanza un run si una fuente cambió)</li>
           <li>0 tokens en los pasos mecánicos (por definición)</li>
-          <li><strong>Quick Execs (CLI)</strong> reutilizables: tests · lint · recogida PR/CI, sin shell, salida acotada (0.10.0)</li>
+          <li><strong>Quick Execs (CLI)</strong> reutilizables: tests · lint · recogida PR/CI, sin shell, salida acotada</li>
           <li>Live Pages: HTML aislado + datasets JSON persistentes + historial</li>
           <li>Exportación <strong>PDF / DOCX</strong> de las Pages: CSS, SVG y canvas renderizados con fidelidad</li>
           <li>AI Workflow Architect: dry-run + 1 clic</li>
@@ -1886,15 +1953,15 @@
       <div class="inventory-col">
         <div class="inv-cat"><span class="num">04</span>Agentes · plugins · local</div>
         <ul class="inv-list">
-          <li>8 agentes: Claude Code · Codex · Gemini · Ollama · LiteLLM · Vibe…</li>
-          <li>MCP <code>kronn-internal</code>: 91 herramientas para que el agente pilote Kronn</li>
+          <li>11 tipos de agente: Claude Code · Codex · OpenCode · Gemini · Ollama · LiteLLM · NVIDIA · HTTP genérico…</li>
+          <li>MCP <code>kronn-internal</code>: las herramientas con las que un agente pilota Kronn</li>
           <li>Aprendizaje continuo beta: pruebas + validación humana, desactivado por defecto</li>
           <li><strong>Eco mode</strong> vía <a href="https://github.com/rtk-ai/rtk" target="_blank" rel="noopener">RTK</a>: proxy token-killer en 1 clic en agentes soportados</li>
           <li>Ollama 100% local + proxy LiteLLM · UI en ES · EN · FR · 简体中文</li>
           <li>Plugins <strong>MCP</strong>: Atlassian · Linear · Notion · …</li>
           <li>Plugins <strong>API</strong>: Resend · Mailjet · webhooks</li>
           <li>Custom API plugin · declara tus propios endpoints</li>
-          <li>Multi-usuario P2P (chat + discs compartidos)</li>
+          <li>P2P opcional con tus contactos (chat + discusiones compartidas), desactivado por defecto</li>
           <li>Rust core · React/TS UI · empaquetado con Tauri (Mac · Windows · Linux)</li>
           <li>AGPL-3.0 · sin telemetría · sin cookies</li>
         </ul>
@@ -1932,6 +1999,45 @@
 
   </section>
 
+  <!-- BONUS LEVEL · POWER-UPS -->
+  <section class="section" id="power-ups">
+    <a class="level-tag" href="#power-ups">BONUS LEVEL · POWER-UPS</a>
+    <h2 class="section-title"><span class="li">Cuatro power-ups</span><br>para partidas serias.</h2>
+    <p class="section-intro">
+      Lo que ha cambiado desde los primeros niveles: agentes que entregan código en equipo, una bóveda que tus propios agentes no pueden abrir, medios en local y modelos de decisión.
+    </p>
+
+    <div class="concepts-grid">
+
+      <div class="concept-card">
+        <div class="concept-term">Rooms y orquestación</div>
+        <p class="concept-def">Una <strong>room</strong> es una discusión a la que se unen varios agentes, entre proyectos si lo permites. El orquestador reparte el trabajo en carriles de workers, cada uno en su propio worktree git, revisa cada entrega según su <strong>Definition of Done</strong> y luego integra el resultado en <strong>una sola PR</strong>. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/guides/task-orchestration.md" target="_blank" rel="noopener">La guía de la orquestación (en inglés)</a>.</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">Niveles de confianza y sandbox</div>
+        <p class="concept-def"><strong>Estándar</strong>, <strong>De confianza</strong> o <strong>Acceso total</strong>, por instancia, workflow o room. Lo que aprueba un nivel se ejecuta en un sandbox del SO (Seatbelt en macOS, bubblewrap en Linux) que oculta el directorio de datos de Kronn; subir un nivel, o leer un secreto por la API, requiere un código de autenticación.</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">Medios en local</div>
+        <p class="concept-def">Los agentes generan imágenes y clips de vídeo en una discusión y encadenan los clips en una sola película, mediante un proveedor o un <strong>ComfyUI</strong> local, a partir de varias imágenes fuente (hasta cuatro con FLUX.2 Klein 4B). Un paso de workflow en un agente local o HTTP (Ollama, LiteLLM…) también genera sus medios.</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">Modelos de decisión</div>
+        <p class="concept-def">Un <strong>modelo de decisión</strong> de Ollama responde a preguntas tipadas (sí/no, elección, puntuación) con una probabilidad, en lugar de conversar. Kronn lee las capacidades de cada modelo local y solo ofrece lo que el modelo sabe hacer.</p>
+      </div>
+
+    </div>
+
+    <div class="decomp-wrap">
+      <div class="decomp-wrap-label">▸ Fig. IV · orquestación</div>
+      <a href="diagrams/orchestration-flow.es.svg" target="_blank" rel="noopener"><img class="decomp-diagram" src="diagrams/orchestration-flow.es.svg" width="1200" height="330" loading="lazy" decoding="async"
+           alt="Orquestación de tareas de izquierda a derecha: una room, su principal, carriles de workers cada uno en un worktree git, una revisión según la Definition of Done que puede devolver el trabajo al mismo worker, la integración por Kronn y una sola pull request que tú fusionas."></a>
+    </div>
+  </section>
+
   <!-- LEVEL 4 · COMPOUND EFFECTS -->
   <section class="section" id="level-4">
     <a class="level-tag" href="#level-4">LEVEL 4 · COMPOUND EFFECTS</a>
@@ -1949,7 +2055,7 @@
       <div class="compound-item">
         <div class="compound-num">02</div>
         <div class="compound-title">Memoria</div>
-        <p class="compound-body">Discusiones persistidas en local + <strong>10 herramientas MCP</strong> <code>disc_*</code> para continuación <strong>bidireccional</strong> cross-CLI. El siguiente CLI lee Y enriquece el hilo, no solo consulta.</p>
+        <p class="compound-body">Discusiones persistidas en local + las <strong>herramientas MCP</strong> <code>disc_*</code> para continuación <strong>bidireccional</strong> cross-CLI. El siguiente CLI lee Y enriquece el hilo, no solo consulta.</p>
       </div>
       <div class="compound-item">
         <div class="compound-num">03</div>
@@ -2051,7 +2157,7 @@
     <a class="level-tag" href="#level-7">LEVEL 7 · CONCEPTS</a>
     <h2 class="section-title">El <span class="li">vocabulario</span><br>técnico.</h2>
     <p class="section-intro">
-      Ocho términos que aparecen por todas partes en Kronn. Glosario rápido para descifrar el resto: qué es, para qué sirve.
+      Once términos que aparecen por todas partes en Kronn. Glosario rápido para descifrar el resto: qué es, para qué sirve.
     </p>
 
     <div class="concepts-grid">
@@ -2073,7 +2179,7 @@
 
       <div class="concept-card">
         <div class="concept-term">StepType</div>
-        <p class="concept-def">Los 12 tipos de step: 2 IA (<code>Agent</code>, <code>BatchQuickPrompt</code>), 9 <strong>mecánicos</strong> a 0 tokens (incluidos <code>CollectApiData</code>, <code>TransformData</code> y <code>PublishPageData</code>) y <code>SubWorkflow</code> para componer pipelines.</p>
+        <p class="concept-def">Los 15 tipos de step: 2 IA (<code>Agent</code>, <code>BatchQuickPrompt</code>), 10 <strong>mecánicos</strong> a 0 tokens (incluidos <code>CollectApiData</code>, <code>TransformData</code>, <code>PublishPageData</code> y <code>TaskBoard</code>) y 3 para componer (<code>SubWorkflow</code>, <code>TriggerWorkflow</code>, <code>DelegateSubtasks</code>).</p>
       </div>
 
       <div class="concept-card">
@@ -2096,6 +2202,21 @@
         <p class="concept-def">4 sabores: <strong>MCP</strong> (vendor expone un servidor, ej. Atlassian), <strong>API</strong> (vendor API-only empaquetado, ej. Resend), <strong>Hybrid</strong> (ambos), <strong>Custom API</strong> (declaras tus propios endpoints).</p>
       </div>
 
+      <div class="concept-card">
+        <div class="concept-term">Shadow run</div>
+        <p class="concept-def">Un run lanzado junto a un run normal, con las mismas entradas y otras versiones de skills o de Quick Prompts. Se saltan los Gates y los pasos que actúan fuera de Kronn: <strong>primero comparas</strong>, luego cambias (<a href="#kronn-way">cómo</a>).</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">Nivel de confianza</div>
+        <p class="concept-def"><strong>Estándar</strong> (cada acción sensible pregunta), <strong>De confianza</strong> o <strong>Acceso total</strong>: lo que tus agentes pueden hacer sin preguntar, por instancia, workflow o room. Subir uno requiere un código de autenticación.</p>
+      </div>
+
+      <div class="concept-card">
+        <div class="concept-term">Worker</div>
+        <p class="concept-def">Un agente que ejecuta <strong>una tarea</strong> en su propio worktree git y su subdiscusión, y la entrega al principal de la room, que la revisa frente a la Definition of Done.</p>
+      </div>
+
     </div>
   </section>
 
@@ -2112,7 +2233,7 @@
       <div class="sec-panel">
         <div class="sec-title">Local-first</div>
         <ul class="sec-list good">
-          <li>DB SQLite local en <code>~/.kronn/</code></li>
+          <li>DB SQLite local en el directorio de datos de Kronn (<code>~/Library/Application Support/com.kronn.kronn</code> en macOS, <code>~/.config/kronn</code> en Linux, <code>%APPDATA%\kronn\kronn\config</code> en Windows)</li>
           <li>Discusiones, QPs, auditorías, configs: todo en tu máquina</li>
           <li>Sin sincronización cloud, sin telemetría, sin cookies</li>
           <li>Tus datos solo salen si TÚ lanzas un workflow que llame a un LLM cloud</li>
@@ -2122,7 +2243,8 @@
       <div class="sec-panel">
         <div class="sec-title">Secretos y claves</div>
         <ul class="sec-list good">
-          <li>API keys almacenadas en el keychain del SO (Mac/Windows/Linux)</li>
+          <li>Credenciales cifradas (AES-256-GCM) en la base de datos; la clave viene de <code>KRONN_ENCRYPTION_KEK</code>, si no del llavero del SO (macOS y Windows), si no de un archivo <code>0600</code> en el directorio de datos; una frase de recuperación Argon2id sobrevive a la pérdida de la máquina</li>
+          <li>Directorio de datos de Kronn oculto a los agentes por un sandbox del SO (macOS, Linux)</li>
           <li>Filtro anti-secretos en la auditoría: <code>.env</code> y prefijos de vendor filtrados antes de <code>docs/AGENTS.md</code></li>
           <li>Ninguna variable env Kronn empujada hacia los CLI terceros</li>
         </ul>
@@ -2134,6 +2256,7 @@
           <li>Paso <code>Exec</code> restringido a una allowlist (argv literal, sin shell)</li>
           <li>Paso <code>Gate</code> human-in-the-loop: el agente espera tu validación explícita</li>
           <li>Audit log: cada run persistido con timestamp, tokens, steps ejecutados</li>
+          <li>Niveles de confianza (Estándar · De confianza · Acceso total): subir uno requiere un código de autenticación</li>
         </ul>
       </div>
 
@@ -2142,7 +2265,7 @@
         <ul class="sec-list warn">
           <li><strong>Aún no en v1.0 estable.</strong> Versión actual v0.15.2, early access. La API, los step types y los esquemas pueden evolucionar entre versiones.</li>
           <li>Sin certificación SOC2 ni GDPR a día de hoy</li>
-          <li>Single-user · sin RBAC ni gestión de equipos</li>
+          <li>Monousuario: compartir con contactos P2P es opcional y está desactivado por defecto; sin RBAC ni gestión de equipos</li>
           <li>Si usas Anthropic / OpenAI / Google, tus prompts van a ellos: su responsabilidad, no la nuestra</li>
           <li>AGPL-3.0 → código auditable, pero sin auditoría de seguridad externa en este momento</li>
         </ul>

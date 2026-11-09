@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 330"
+     role="img" aria-labelledby="orch-title orch-desc"
+     font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <!-- Orquestación de tareas, simplificada a partir de la máquina de estados de
+       docs/design/adr-002-orchestration-multi-agent.md. Fondo oscuro propio,
+       legible igual con un tema claro u oscuro. -->
+  <title id="orch-title">Orquestación de tareas: de una room a una sola pull request</title>
+  <desc id="orch-desc">
+    Un solo flujo de izquierda a derecha. Una room es una discusión a la que se unen varios agentes. Su agente principal reparte el trabajo. Los carriles de workers trabajan cada uno en su propio worktree git. El principal revisa cada entrega según su Definition of Done y la devuelve al mismo worker si hacen falta cambios. Kronn valida e integra el trabajo aprobado. El resultado es una sola pull request que tú fusionas.
+  </desc>
+
+  <rect x="0" y="0" width="1200" height="330" fill="#0d1117"/>
+
+  <style>
+    .title  { font-size: 22px; font-weight: 700; fill: #f9fafb; }
+    .label  { font-size: 15px; font-weight: 700; fill: #f9fafb; }
+    .small  { font-size: 12px; fill: #d1d5db; }
+    .tiny   { font-size: 11px; fill: #9ca3af; font-style: italic; }
+    .kind   { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+    .loop   { font-size: 11px; font-weight: 600; fill: #f87171; }
+    .chip   { font-size: 12px; font-weight: 600; fill: #f9fafb; }
+  </style>
+
+  <text x="600" y="36" text-anchor="middle" class="title">Una room, varios workers, una sola pull request</text>
+
+  <g role="group" aria-label="Room: una discusión con varios agentes">
+    <rect x="30" y="72" width="165" height="112" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="46" y="93" class="kind" fill="#fbbf24">Agentes</text>
+    <text x="46" y="116" class="label">Room</text>
+    <text x="46" y="137" class="small">una discusión con</text>
+    <text x="46" y="154" class="small">varios agentes</text>
+  </g>
+  <g role="group" aria-label="Principal: reparte el trabajo, un brief por tarea">
+    <rect x="225" y="72" width="165" height="112" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="241" y="93" class="kind" fill="#fbbf24">Agentes</text>
+    <text x="241" y="116" class="label">Principal</text>
+    <text x="241" y="137" class="small">reparte el trabajo,</text>
+    <text x="241" y="154" class="small">un brief por tarea</text>
+  </g>
+  <g role="group" aria-label="Workers: cada uno en su propio worktree git">
+    <rect x="420" y="72" width="165" height="112" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="436" y="93" class="kind" fill="#fbbf24">Agentes</text>
+    <text x="436" y="116" class="label">Workers</text>
+    <text x="436" y="137" class="small">cada uno en su</text>
+    <text x="436" y="154" class="small">worktree git</text>
+  </g>
+  <g role="group" aria-label="Revisión: según la Definition of Done">
+    <rect x="615" y="72" width="165" height="112" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="631" y="93" class="kind" fill="#fbbf24">Agentes</text>
+    <text x="631" y="116" class="label">Revisión</text>
+    <text x="631" y="137" class="small">según la</text>
+    <text x="631" y="154" class="small">Definition of Done</text>
+  </g>
+  <g role="group" aria-label="Integración: el trabajo aprobado, validado y fusionado">
+    <rect x="810" y="72" width="165" height="112" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="826" y="93" class="kind" fill="#34d399">Kronn</text>
+    <text x="826" y="116" class="label">Integración</text>
+    <text x="826" y="137" class="small">el trabajo aprobado,</text>
+    <text x="826" y="154" class="small">validado y fusionado</text>
+  </g>
+  <g role="group" aria-label="Pull request: una sola PR, que tú fusionas">
+    <rect x="1005" y="72" width="165" height="112" rx="10" fill="#a78bfa" fill-opacity="0.14" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="1021" y="93" class="kind" fill="#a78bfa">Tú</text>
+    <text x="1021" y="116" class="label">Pull request</text>
+    <text x="1021" y="137" class="small">una sola PR,</text>
+    <text x="1021" y="154" class="small">que tú fusionas</text>
+  </g>
+  <g aria-hidden="true">
+    <path d="M 195 128 L 219 128" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="225,128 216,124 216,132" fill="#d1d5db"/>
+    <path d="M 390 128 L 414 128" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="420,128 411,124 411,132" fill="#d1d5db"/>
+    <path d="M 585 128 L 609 128" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="615,128 606,124 606,132" fill="#d1d5db"/>
+    <path d="M 780 128 L 804 128" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="810,128 801,124 801,132" fill="#d1d5db"/>
+    <path d="M 975 128 L 999 128" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="1005,128 996,124 996,132" fill="#d1d5db"/>
+    <path d="M 697 184 C 697 228 502 228 502 192" stroke="#f87171" stroke-width="1.8" fill="none" stroke-dasharray="5 3"/>
+    <polygon points="502,186 498,195 506,195" fill="#f87171"/>
+  </g>
+  <text x="599" y="240" text-anchor="middle" class="loop">cambios pedidos → mismo worker</text>
+
+  <g role="group" aria-label="Leyenda">
+    <rect x="300" y="292" width="14" height="14" rx="3" fill="#fbbf24"/>
+    <text x="322" y="304" class="small">Los agentes trabajan</text>
+    <rect x="530" y="292" width="14" height="14" rx="3" fill="#34d399"/>
+    <text x="552" y="304" class="small">Kronn integra</text>
+    <rect x="760" y="292" width="14" height="14" rx="3" fill="#a78bfa"/>
+    <text x="782" y="304" class="small">Tú fusionas</text>
+  </g>
+</svg>

@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380"
+     role="img" aria-labelledby="shadow-title shadow-desc"
+     font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <!-- A normal run and its shadow run. Own dark backdrop, so it reads the
+       same on a light or a dark GitHub theme. -->
+  <title id="shadow-title">Shadow runs: test a new version on real inputs without side effects</title>
+  <desc id="shadow-desc">
+    The same real inputs start two runs. The normal run is published and loads Prompt v2 and Skill v1. The shadow run loads Prompt v2 and Skill v2, the version under test, and skips every step that acts outside Kronn. Both runs feed a side-by-side comparison, step by step. If the shadow's version is better, one click promotes it to the normal runs.
+  </desc>
+
+  <rect x="0" y="0" width="1200" height="380" fill="#0d1117"/>
+
+  <style>
+    .title  { font-size: 22px; font-weight: 700; fill: #f9fafb; }
+    .label  { font-size: 15px; font-weight: 700; fill: #f9fafb; }
+    .small  { font-size: 12px; fill: #d1d5db; }
+    .tiny   { font-size: 11px; fill: #9ca3af; font-style: italic; }
+    .kind   { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+    .loop   { font-size: 11px; font-weight: 600; fill: #f87171; }
+    .chip   { font-size: 12px; font-weight: 600; fill: #f9fafb; }
+  </style>
+
+  <text x="600" y="36" text-anchor="middle" class="title">Test a new version without risk</text>
+
+  <g role="group" aria-label="Same real inputs">
+    <rect x="30" y="128" width="212" height="96" rx="10" fill="#38bdf8" fill-opacity="0.10" stroke="#38bdf8" stroke-width="1.5"/>
+    <text x="46" y="153" class="label">Same real inputs</text>
+    <text x="46" y="174" class="small">trigger, variables,</text>
+    <text x="46" y="191" class="small">the same ticket or PR</text>
+  </g>
+  <g role="group" aria-label="Normal run, published: Prompt v2 and Skill v1">
+    <rect x="290" y="70" width="280" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="306" y="91" class="kind" fill="#34d399">Published</text>
+    <text x="306" y="114" class="label">Normal run</text>
+    <text x="306" y="135" class="small">Prompt v2 · Skill v1</text>
+  </g>
+  <g role="group" aria-label="Shadow run, no side effects: Prompt v2 and Skill v2">
+    <rect x="290" y="190" width="280" height="96" rx="10" fill="#a78bfa" fill-opacity="0.14" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <text x="306" y="211" class="kind" fill="#a78bfa">No side effects</text>
+    <text x="306" y="234" class="label">Shadow run</text>
+    <text x="306" y="255" class="small">Prompt v2 · Skill v2</text>
+  </g>
+  <text x="306" y="306" class="tiny">✕ steps acting outside Kronn are skipped</text>
+  <g role="group" aria-label="Side-by-side comparison">
+    <rect x="640" y="128" width="240" height="96" rx="10" fill="#f9fafb" fill-opacity="0.06" stroke="#f9fafb" stroke-width="1.5"/>
+    <text x="656" y="153" class="label">Comparison</text>
+    <text x="656" y="174" class="small">step by step: identical,</text>
+    <text x="656" y="191" class="small">different or skipped</text>
+  </g>
+  <g role="group" aria-label="Promote the better version in one click">
+    <rect x="940" y="128" width="230" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="956" y="153" class="label">Promote</text>
+    <text x="956" y="174" class="small">the better version,</text>
+    <text x="956" y="191" class="small">in one click</text>
+  </g>
+  <g aria-hidden="true">
+    <path d="M 242 176 C 266 176 266 118 284 118" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="290,118 281,114 281,122" fill="#d1d5db"/>
+    <path d="M 242 176 C 266 176 266 238 284 238" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="290,238 281,234 281,242" fill="#d1d5db"/>
+    <path d="M 570 118 C 605 118 605 176 634 176" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="640,176 631,172 631,180" fill="#d1d5db"/>
+    <path d="M 570 238 C 605 238 605 176 634 176" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="640,176 631,172 631,180" fill="#d1d5db"/>
+    <path d="M 880 176 L 934 176" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="940,176 931,172 931,180" fill="#d1d5db"/>
+  </g>
+
+  <text x="600" y="352" text-anchor="middle" class="small">
+    Measure whether a new skill or prompt version is really better, on real data, without publishing or breaking anything.
+  </text>
+</svg>
