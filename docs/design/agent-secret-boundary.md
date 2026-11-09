@@ -304,8 +304,10 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    decrypts every non-empty column and two independent copies remain without
    it (two persisted vaults, keychain and sidecar, or one plus a
    `recovery.key` whose fingerprint matches); a different legacy value is moved to
-   `config.toml.retired-key.<ts>` and the key in use gets the file copy.
-   Config backups, retired-key and corrupt-config files are read-only
+   `config.toml.retired-key.<ts>.enc` (encrypted with the key in use) and the
+   key in use gets the file copy.
+   Config backups, retired-key and corrupt-config files (all encrypted with
+   the instance key, KT-1528) are read-only
    candidates of every decision; rows under such a file key are moved under
    the live key (or, with none, the file key decrypting the most rows) at
    boot once that key has a durable copy, the file kept. `mirror()` never writes a vault
@@ -320,8 +322,9 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    reads back, writes an encrypted backup of the old file
    (`config.toml.pre-credential-store.enc`, `0600`, under the instance key,
    hence recoverable through the recovery passphrase), then rewrites
-   `config.toml`; it also scrubs the DB migration runner's plaintext
-   `config.toml.backup`. Readers keep using the live config, filled from the
+   `config.toml`; it also encrypts the DB migration runner's `config.toml.backup` (now
+   written as `config.toml.backup.enc`) and every other copy of `config.toml`
+   (KT-1528). Readers keep using the live config, filled from the
    table at boot and written back by every `config::save`. Reveal routes are
    unchanged.
 5. **Done (passphrase proof).** `recovery/set` refuses to replace an existing

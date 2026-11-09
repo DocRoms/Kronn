@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::core::keystore::{self, KeyOutcome};
-use crate::core::keyvault::{KeyStore, SidecarFile};
+use crate::core::keyvault::{KeyStore, KeyVault, SidecarFile};
 use crate::core::{config, crypto};
 use serial_test::serial;
 
@@ -74,12 +74,8 @@ impl Drop for DataDir {
 fn write_0142_config(dir: &Path, key: &str) -> String {
     let text = write_0142_config_text(key);
     std::fs::write(dir.join("config.toml"), &text).unwrap();
-    // The DB migration runner's copy: credentials already out, key still in.
-    std::fs::write(
-        dir.join("config.toml.backup"),
-        without_credentials(&text).unwrap(),
-    )
-    .unwrap();
+    // The copy 0.14.2's migration runner made: the whole file, in clear.
+    std::fs::write(dir.join("config.toml.backup"), &text).unwrap();
     text
 }
 
@@ -241,12 +237,20 @@ async fn a_0142_config_migrates_without_loss_and_keeps_no_secret() {
     assert_eq!(cfg.tokens.active_key_for("anthropic"), Some(ANTHROPIC));
     assert_eq!(cfg.server.auth_token.as_deref(), Some(AUTH_TOKEN));
 
-    // Nothing secret left in either config file; the key lives in the sidecar.
+    // Nothing secret left in config.toml; the key lives in the sidecar. The
+    // clear copy the 0.14.2 runner made is now encrypted whole (KT-1528).
     assert_no_secret_in(&dir.config_text(), &key, "config.toml");
+    assert!(!dir.path().join("config.toml.backup").exists());
+    let sealed_backup = dir.path().join("config.toml.backup.enc");
     assert_no_secret_in(
-        &std::fs::read_to_string(dir.path().join("config.toml.backup")).unwrap(),
+        &std::fs::read_to_string(&sealed_backup).unwrap(),
         &key,
-        "config.toml.backup",
+        "config.toml.backup.enc",
+    );
+    assert_eq!(
+        crate::core::config_copies::open_sealed(&sealed_backup, std::slice::from_ref(&key))
+            .unwrap(),
+        original
     );
     assert_eq!(
         std::fs::read_to_string(dir.path().join(crate::core::keyvault::SIDECAR_FILENAME))
@@ -546,23 +550,6 @@ async fn forget_all_clears_the_store() {
 }
 
 #[test]
-fn secret_detection_covers_every_field() {
-    assert!(!toml_holds_secrets(
-        "language = \"fr\"\n[server]\nport = 1\n"
-    ));
-    assert!(toml_holds_secrets("encryption_secret = \"ab\"\n"));
-    assert!(toml_holds_secrets("[server]\nauth_token = \"t\"\n"));
-    assert!(toml_holds_secrets("[tokens]\nanthropic = \"x\"\n"));
-    assert!(toml_holds_secrets(
-        "[tokens]\n[[tokens.keys]]\nid = \"a\"\nvalue = \"v\"\n"
-    ));
-    assert!(!toml_holds_secrets(
-        "[tokens]\n[[tokens.keys]]\nid = \"a\"\nvalue = \"\"\n"
-    ));
-    assert!(toml_holds_secrets("not = [valid"));
-}
-
-#[test]
 fn merge_prefers_the_file_and_keeps_table_order() {
     let cred = |id: &str, v: &str| PlainCredential {
         kind: KIND_PROVIDER_KEY.into(),
@@ -748,7 +735,8 @@ async fn a_locked_auth_token_refuses_ordinary_routes_and_keeps_recovery_open() {
 }
 
 /// Sidecar-only ladder without a recovery passphrase: the credentials leave
-/// config.toml, the key stays there and in config.toml.backup (two copies).
+/// config.toml, the key stays there; the copy of config.toml is encrypted, so
+/// it holds no clear value.
 #[tokio::test]
 #[serial]
 async fn a_sidecar_only_install_keeps_a_second_copy_of_the_key() {
@@ -775,9 +763,9 @@ async fn a_sidecar_only_install_keeps_a_second_copy_of_the_key() {
     let text = dir.config_text();
     assert!(text.contains(&key), "config.toml keeps the second copy");
     assert!(!text.contains(ANTHROPIC) && !text.contains(AUTH_TOKEN));
-    let backup = std::fs::read_to_string(dir.path().join("config.toml.backup")).unwrap();
-    assert!(backup.contains(&key), "the backup keeps it too");
-    assert!(!backup.contains(ANTHROPIC));
+    assert!(!dir.path().join("config.toml.backup").exists());
+    let backup = std::fs::read_to_string(dir.path().join("config.toml.backup.enc")).unwrap();
+    assert!(!backup.contains(&key) && !backup.contains(ANTHROPIC));
 }
 
 /// Migrate a 0.14.2 install on the macOS-like ladder, then lose every vault
@@ -1529,6 +1517,8 @@ async fn a_reset_keeps_auth_and_removes_the_credential_backups() {
     assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
     assert!(!dir.path().join(BACKUP_FILENAME).exists());
     assert!(!dir.path().join("config.toml.backup").exists());
+    // The snapshot is set aside under a timestamped name, still encrypted.
+    assert!(!dir.path().join("config.toml.backup.enc").exists());
 }
 
 /// C2-22 — config.toml lost after the migration, key lost too: the stored
@@ -1717,55 +1707,170 @@ async fn an_unreadable_credential_store_fails_closed() {
     let _ = dir;
 }
 
-/// C3-06 — copies rotated by an earlier boot (0.14.2 credentials in clear)
-/// are scrubbed at the next credential boot; their key follows the copies rule.
+/// C3-06 — copies rotated by an earlier boot (0.14.2 credentials in clear) are
+/// encrypted whole at the next credential boot (KT-1528): no clear value stays,
+/// and the content, key included, is kept.
 #[tokio::test]
 #[serial]
-async fn already_rotated_backups_are_scrubbed() {
+async fn already_rotated_backups_are_encrypted() {
     let dir = DataDir::new();
     let key = crypto::generate_secret();
     let old = write_0142_config_text(&key);
-    std::fs::write(
-        dir.path()
-            .join("config.toml.backup.20261005T203513.668601Z"),
-        &old,
-    )
-    .unwrap();
+    let rotated = "config.toml.backup.20261005T203513.668601Z";
+    std::fs::write(dir.path().join(rotated), &old).unwrap();
     write_0142_config(dir.path(), &key);
     let db = Arc::new(Database::open_in_memory().unwrap());
     seed_ciphertext(&db, &key).await;
     boot_like_main(&dir, &db).await;
-    let rotated = std::fs::read_to_string(
-        dir.path()
-            .join("config.toml.backup.20261005T203513.668601Z"),
-    )
-    .unwrap();
+    assert!(!dir.path().join(rotated).exists());
+    let sealed = dir.path().join(format!("{rotated}.enc"));
+    let raw = std::fs::read_to_string(&sealed).unwrap();
     assert!(
-        !rotated.contains(ANTHROPIC) && !rotated.contains(AUTH_TOKEN),
-        "{rotated}"
+        !raw.contains(ANTHROPIC) && !raw.contains(AUTH_TOKEN) && !raw.contains(&key),
+        "{raw}"
     );
-    // Two vault copies on this ladder: the key in use may go from it too.
-    assert!(!rotated.contains(&key));
+    assert_eq!(
+        crate::core::config_copies::open_sealed(&sealed, std::slice::from_ref(&key)).unwrap(),
+        old
+    );
 }
 
-/// C3-15 — the key in use in another spelling is still removed from the backup.
+/// KT-1528 — a locked start (no key in use) leaves no copy of config.toml in
+/// clear: sealed under a key the stores still hold, else cut down to its key
+/// line; a second start changes nothing.
 #[tokio::test]
 #[serial]
-async fn the_backup_scrub_compares_keys_canonically() {
+async fn a_locked_start_leaves_no_clear_copy_of_config_toml() {
+    let locked = KeyOutcome::Locked { encrypted_rows: 1 };
+    for vault_key in [None, Some(crypto::generate_secret())] {
+        let dir = DataDir::new();
+        let key = crypto::generate_secret();
+        let text = write_0142_config_text(&key);
+        if let Some(held) = &vault_key {
+            SidecarFile::in_dir(dir.path()).store(held).unwrap();
+        }
+        let copies = [
+            "config.toml.corrupt.20261005T000000Z",
+            "config.toml.backup.1",
+            "config.toml.retired-key.20261005T000000Z",
+        ];
+        for name in copies {
+            std::fs::write(dir.path().join(name), &text).unwrap();
+        }
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        for _ in 0..2 {
+            let mut cfg = config::default_config_without_key();
+            cfg.server.auth_token = Some("session".into());
+            let armed = boot(
+                &mut cfg,
+                db.clone(),
+                dir.path(),
+                &locked,
+                None,
+                BootMode::Startup,
+            )
+            .await
+            .unwrap();
+            assert!(armed.is_none());
+        }
+        for entry in std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+        {
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            assert!(
+                !text.contains(ANTHROPIC) && !text.contains(AUTH_TOKEN),
+                "{:?}",
+                entry.file_name()
+            );
+        }
+        match &vault_key {
+            Some(held) => {
+                for name in copies {
+                    assert!(!dir.path().join(name).exists(), "{name}");
+                    let sealed = dir.path().join(format!("{name}.enc"));
+                    let opened = crate::core::config_copies::open_sealed(
+                        &sealed,
+                        std::slice::from_ref(held),
+                    )
+                    .unwrap();
+                    assert_eq!(opened, text);
+                }
+            }
+            None => {
+                // The key line stays: a later start recovers the key from it.
+                for name in copies {
+                    assert_eq!(
+                        std::fs::read_to_string(dir.path().join(name)).unwrap(),
+                        format!("encryption_secret = \"{key}\"\n")
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// KT-1528 — a locked start whose key store cannot be READ (as opposed to read
+/// and empty) does not know that no key exists: the copies stay exactly as they
+/// are, the key lines and settings included, and the start that reads the store
+/// encrypts them.
+#[tokio::test]
+#[serial]
+async fn a_locked_start_with_an_unreadable_key_store_keeps_the_copies() {
+    let locked = KeyOutcome::Locked { encrypted_rows: 1 };
     let dir = DataDir::new();
     let key = crypto::generate_secret();
     let text = write_0142_config_text(&key);
-    write_0142_config(dir.path(), &key);
-    std::fs::write(
-        dir.path().join("config.toml.backup"),
-        text.replace(&key, &key.to_uppercase()),
-    )
-    .unwrap();
+    let sidecar = dir.path().join(crate::core::keyvault::SIDECAR_FILENAME);
+    std::fs::create_dir(&sidecar).unwrap();
+    let copies = [
+        "config.toml.corrupt.20261005T000000Z",
+        "config.toml.backup.1",
+        "config.toml.retired-key.20261005T000000Z",
+    ];
+    for name in copies {
+        std::fs::write(dir.path().join(name), &text).unwrap();
+    }
     let db = Arc::new(Database::open_in_memory().unwrap());
-    seed_ciphertext(&db, &key).await;
-    boot_like_main(&dir, &db).await;
-    let backup = std::fs::read_to_string(dir.path().join("config.toml.backup")).unwrap();
-    assert!(!backup.contains(&key.to_uppercase()), "{backup}");
+    let mut cfg = config::default_config_without_key();
+    cfg.server.auth_token = Some("session".into());
+    let armed = boot(
+        &mut cfg,
+        db.clone(),
+        dir.path(),
+        &locked,
+        None,
+        BootMode::Startup,
+    )
+    .await
+    .unwrap();
+    assert!(armed.is_none());
+    for name in copies {
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(name)).unwrap(),
+            text,
+            "{name}"
+        );
+        assert!(!dir.path().join(format!("{name}.enc")).exists());
+    }
+
+    // The store reads again: the next start encrypts them whole.
+    std::fs::remove_dir(&sidecar).unwrap();
+    let held = crypto::generate_secret();
+    SidecarFile::in_dir(dir.path()).store(&held).unwrap();
+    let mut cfg = config::default_config_without_key();
+    cfg.server.auth_token = Some("session".into());
+    boot(&mut cfg, db, dir.path(), &locked, None, BootMode::Startup)
+        .await
+        .unwrap();
+    for name in copies {
+        assert!(!dir.path().join(name).exists(), "{name}");
+        let sealed = dir.path().join(format!("{name}.enc"));
+        assert_eq!(
+            crate::core::config_copies::open_sealed(&sealed, std::slice::from_ref(&held)).unwrap(),
+            text
+        );
+    }
 }
 
 /// C3-16 — a write whose read-back fails commits nothing.
@@ -1804,42 +1909,6 @@ async fn a_failed_read_back_commits_nothing() {
 }
 
 // ── review round 5 ──────────────────────────────────────────────────────────
-
-/// C4-07 — one unreadable backup copy does not stop the others from being
-/// scrubbed; the error is still returned.
-#[test]
-fn every_backup_copy_is_scrubbed_even_when_one_fails() {
-    let dir = tempfile::tempdir().unwrap();
-    let key = crypto::generate_secret();
-    let text = write_0142_config_text(&key);
-    std::fs::create_dir(dir.path().join("config.toml.backup.20261001T000000Z")).unwrap();
-    std::fs::write(
-        dir.path().join("config.toml.backup.20261002T000000Z"),
-        &text,
-    )
-    .unwrap();
-    std::fs::write(
-        dir.path().join("config.toml.backup.20260930T000000Z"),
-        &text,
-    )
-    .unwrap();
-    let err = scrub_migration_backup(dir.path(), &key).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("could not scrub every config backup"),
-        "{err}"
-    );
-    for name in [
-        "config.toml.backup.20261002T000000Z",
-        "config.toml.backup.20260930T000000Z",
-    ] {
-        let scrubbed = std::fs::read_to_string(dir.path().join(name)).unwrap();
-        assert!(
-            !scrubbed.contains(ANTHROPIC) && !scrubbed.contains(AUTH_TOKEN),
-            "{name}"
-        );
-    }
-}
 
 /// C4-04 — after "Re-encrypt imported secrets", re-encrypted stored
 /// credentials appear at once and no longer count as locked.
@@ -2190,6 +2259,12 @@ async fn failed_discovered_keys_are_not_kept_live() {
 async fn credentials_of_a_schema_invalid_config_are_recovered() {
     let dir = DataDir::new();
     let key = crypto::generate_secret();
+    // The key file of an installed Kronn: the kept file is encrypted with it.
+    crate::core::keyvault::KeyVault::store(
+        &crate::core::keyvault::SidecarFile::in_dir(dir.path()),
+        &key,
+    )
+    .unwrap();
     // Valid TOML, but the key is of the wrong type: the file is set aside (a
     // wrong type elsewhere only costs that value, KT-1513).
     let text = write_0142_config_text(&key).replacen(
@@ -2210,7 +2285,25 @@ async fn credentials_of_a_schema_invalid_config_are_recovered() {
         cfg.tokens.keys
     );
     let notice = config::set_aside_notice(dir.path()).unwrap();
-    assert!(notice.contains("credentials in clear"), "{notice}");
+    assert!(
+        notice.contains("encrypted with the encryption key") && !notice.contains("in clear"),
+        "{notice}"
+    );
+    // No clear credential outside config.toml, the kept file included.
+    for entry in std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_name() == "config.toml" {
+            continue;
+        }
+        let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        assert!(
+            !text.contains(ANTHROPIC) && !text.contains(AUTH_TOKEN),
+            "{:?}",
+            entry.file_name()
+        );
+    }
 }
 
 // ── review round 8 ──────────────────────────────────────────────────────────
