@@ -26,8 +26,8 @@
 # It does not call `ZipArchive::extract` (0368/0369/0429); it walks `by_index` and
 # writes the `dist/` entries itself, and applies each entry's unix mode (the
 # 0367 class) to files under its own build output directory.
-# Follow-up: upgrade utoipa to 6 and utoipa-swagger-ui to >= 10.0.2 in the backend
-# (ticket to be created by the principal; reference it here once it exists).
+# Follow-up: KT-1647 — upgrade utoipa to 6 and utoipa-swagger-ui to >= 10.0.2 in the
+# backend, which removes zip 3.0.0 from both lock files.
 # Review by 2026-11-16, or as soon as utoipa-swagger-ui is upgraded.
 #
 # RUSTSEC-2026-0459 (libsqlite3-sys) is deliberately NOT ignored: the rusqlite bump
