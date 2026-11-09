@@ -27,7 +27,7 @@ Every encrypted column is listed in one registry, `keystore::ENCRYPTED_COLUMNS`;
 a test compares it with the schema, so a new `*_encrypted` / cipher column
 cannot be added without the reconciler seeing it.
 [src: file: backend/src/core/keystore.rs:41-61#ENCRYPTED_COLUMNS]
-[src: file: backend/src/core/keystore.rs:4357-4394#encrypted_column_registry_matches_the_schema]
+[src: file: backend/src/core/keystore.rs:4459-4496#encrypted_column_registry_matches_the_schema]
 
 The running process still reads `config.tokens.keys` and
 `config.server.auth_token`: the boot fills them from the table, and every
@@ -35,7 +35,7 @@ The running process still reads `config.tokens.keys` and
 writes `config.toml` without them. A failure there fails the save and leaves
 the previous file untouched.
 [src: file: backend/src/core/credential_store.rs:346-403#sync_for_save]
-[src: file: backend/src/core/config.rs:564-598#save]
+[src: file: backend/src/core/config.rs:571-605#save]
 
 ## Boot order
 
@@ -148,7 +148,7 @@ the previous file untouched.
    do"; Settings → Recovery shows the warnings, and the
    app-wide banner shows a locked key, `credentials_unavailable` and
    `config_set_aside`.
-   [src: file: backend/src/core/keystore.rs:278-332#settle_disk_copy] [src: file: backend/src/core/keystore.rs:407-413#enough_copies] [src: file: backend/src/core/keystore.rs:234-239#decrypts_every_column] [src: file: backend/src/core/keystore.rs:415-433#persist] [src: file: backend/src/core/keyvault.rs:403-422#mirror] [src: file: backend/src/core/keystore.rs:375-405#ensure_durable_copy]
+   [src: file: backend/src/core/keystore.rs:278-332#settle_disk_copy] [src: file: backend/src/core/keystore.rs:404-410#enough_copies] [src: file: backend/src/core/keystore.rs:234-239#decrypts_every_column] [src: file: backend/src/core/keystore.rs:415-433#persist] [src: file: backend/src/core/keyvault.rs:455-474#mirror] [src: file: backend/src/core/keystore.rs:372-402#ensure_durable_copy]
 4. `credential_store::boot` loads the stored credentials, moves any still in
    `config.toml` into the table, and generates an auth token only when none
    exists anywhere. Locked key: the store stays off and `config.toml` is left
@@ -245,7 +245,7 @@ Safe to interrupt at any point; a rerun converges:
    for another kind does not open.
 
 `credential_store::read_backup(path, key)` decrypts the backup.
-[src: file: backend/src/core/credential_store.rs:747-751#read_backup]
+[src: file: backend/src/core/credential_store.rs:753-757#read_backup]
 
 Not migrated in this release: rows that do not decrypt with the current key
 are kept untouched (logged as locked) and never deleted by later saves.
@@ -410,4 +410,4 @@ rebuild, so macOS would prompt on every restart). To exercise the keychain
 path, including a denied prompt, start the dev backend with
 `KRONN_USE_KEYCHAIN=1`; `KRONN_USE_KEYCHAIN=0` forces the sidecar in a release
 build. Outside macOS and Windows the default is off (no keychain backend).
-[src: file: backend/src/core/keyvault.rs:289-307#use_os_keychain]
+[src: file: backend/src/core/keyvault.rs:301-319#use_os_keychain]
