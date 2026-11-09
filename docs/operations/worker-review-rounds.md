@@ -60,7 +60,7 @@ defaults. `[src: file: backend/src/models/setup.rs:100-110#WorkersConfig]`
 |---|---|
 | Campaign dialog (`TaskLaunchDialog`) | pre-filled from the setting, editable per run, `unlimited` checkbox with the same warning; an existing campaign shows its own. While the setting is loading, or if reading it fails, the field stays empty and the dialog **omits** the limit (the server then applies the setting); it never substitutes a built-in figure, and a value the human typed is always sent |
 | `POST /api/orchestration/campaigns` | `max_review_rounds` omitted → the setting; an integer or `"unlimited"` otherwise; anything else is a 400 |
-| `task_exec_prepare` / `task_exec_launch` (MCP, native tool, REST) | optional `max_review_rounds` (integer or `"unlimited"`); omitted → the setting `[src: file: backend/src/api/orchestration.rs:1882-1907#provision_single_task_execution_with_options]` |
+| `task_exec_prepare` / `task_exec_launch` (MCP, native tool, REST) | optional `max_review_rounds` (integer or `"unlimited"`); omitted → the setting `[src: file: backend/src/api/orchestration.rs:1922-1947#provision_single_task_execution_with_options]` |
 | `DelegateSubtasks` workflow step | its own `max_review_rounds` (1-10) when set, else the setting `[src: file: backend/src/workflows/delegate_subtasks_step.rs:621]` |
 
 The value is read **at launch** and copied onto the run and the execution: changing the setting never
@@ -72,7 +72,7 @@ touches an execution that exists.
 channels now refuse an argument the tool does not declare, naming it and listing the accepted ones:
 the Python bridge checks against its own `inputSchema` and the native tool layer against its catalogue.
 `[src: file: backend/scripts/disc-introspection-mcp.py:6124#_refuse_unknown_arguments]`
-`[src: file: backend/src/api/agent_tools.rs:1382#unknown_argument_refusal]`
+`[src: file: backend/src/api/agent_tools.rs:1432#unknown_argument_refusal]`
 Note that `task_exec_prepare` does not declare `base_rev` / `idempotency_key`: those belong to the launch.
 
 **Absent is not `null`.** Omitting `max_review_rounds` takes the setting; an explicit `null` is refused
@@ -103,7 +103,7 @@ The browser's « Extend rounds » button on the execution card calls
   `request_changes` never delivered them) are posted to its worker's room, then it takes the ordinary
   reassignment to the *same* worker, unless the campaign's token budget is spent (see above). Only the
   LATEST entry into `Escalated` counts: a watchdog or quota stall after an older budget escalation is
-  extended but not re-offered. `[src: file: backend/src/api/orchestration.rs:15549#extend_execution_review_rounds]`
+  extended but not re-offered. `[src: file: backend/src/api/orchestration.rs:15624#extend_execution_review_rounds]`
 - Refused once the execution is Done, Failed or Cancelled, when it already has no cap, and without a reason.
 
 The escalation message posted to the principal names this option.

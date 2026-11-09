@@ -244,7 +244,7 @@ trimmed and case-insensitively, so a caller is never refused over `720P`.
 
 The same read serves both surfaces. `agent_list` sweeps every configured media
 slot concurrently, each under its own 8 s window, and attaches what came back
-[src: file: backend/src/api/orchestration.rs:14466-14519#bounded_media_capabilities]; the catalogue builder
+[src: file: backend/src/api/orchestration.rs:14541-14594#bounded_media_capabilities]; the catalogue builder
 itself stays pure and is handed the result, like the reachability and quota
 preflights beside it. An envelope is attached only when the model it was read
 for is still the configured one — a connection whose model changed between the
@@ -305,7 +305,7 @@ in Config before source images can be queued; an explicit zero refuses them.
 An unreadable catalogue is "unknown", never "no": it is not cached, a frame
 request goes to the provider as before, and a visual-reference request is
 refused naming the unreadable catalogue.
-[src: file: backend/src/api/media.rs:1986-2276#resolve_references]
+[src: file: backend/src/api/media.rs:2021-2311#resolve_references]
 
 Only the id is persisted, in `media_jobs.params_json`. The worker re-reads the
 file on each attempt, so a job resumed after a restart uses the same picture
@@ -439,7 +439,7 @@ credential, no text tier), and every media path resolves it: generation and
 its preflights, `/api/media/models`, the estimate, the worker, the bridge
 guard and the `agent_list` catalogue.
 [src: file: backend/src/api/comfyui.rs:1283-1307#local_connection]
-[src: file: backend/src/api/orchestration.rs:14516-14522#with_local_media_source]
+[src: file: backend/src/api/orchestration.rs:14591-14597#with_local_media_source]
 
 ComfyUI runs a node graph, so a model is usable only when Kronn has a
 compatible integrated workflow for its family (FLUX.1 schnell, SDXL such as

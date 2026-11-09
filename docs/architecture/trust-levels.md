@@ -113,7 +113,7 @@ reaches the route and is refused for want of a code (see below).
   directory or a parent as a volume is refused, `argv_reaches_protected`; every
   source is compared as written **and** with its symlinks resolved, so a worktree
   link to the data directory is caught).
-  [src: file: backend/src/api/orchestration.rs:5653-5671#launch_for_reach]
+  [src: file: backend/src/api/orchestration.rs:5693-5711#launch_for_reach]
 - A human's approval is not marked and runs as before. A mark survives only on the
   very lines a level approved: an edit of the line, or a request that forges the
   mark, drops it (`mark_line_writers`, `update_as_in`).

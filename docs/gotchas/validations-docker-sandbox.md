@@ -15,7 +15,7 @@ itself is stopped.
 - A validation that fails because of its environment (Docker unreachable or
   closed, a launch the sandbox refused) is not sent back to the worker: the
   execution is held with a card naming the fix, and its approval stays.
-  [src: file: backend/src/api/orchestration.rs:5438-5476#environment_cause]
+  [src: file: backend/src/api/orchestration.rs:5478-5516#environment_cause]
 - When the sandbox kept Docker closed, Kronn also posts an elevation card:
   refuse, allow for this discussion, or allow for the project. An answer that
   allows records the grant and resumes the integration on its own. Only a

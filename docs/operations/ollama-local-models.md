@@ -32,11 +32,11 @@ references for the lifecycle actions they steer. A worker is still offered
 `task_exec_status`, but it accepts a task reference as well as an execution id,
 so a local model never has to reconstruct an opaque UUID, and it answers only
 the execution's principal or its own native worker.
-`[src: file: backend/src/api/agent_tools.rs:1649-1792#worker_room_catalogue]`
-`[src: file: backend/src/api/agent_tools.rs:3074-3098#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:4268-4290#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api/agent_tools.rs:3024-3057#task_exec_status]`
-`[src: file: backend/src/api/agent_tools.rs:4230-4266#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:1658-1801#worker_room_catalogue]`
+`[src: file: backend/src/api/agent_tools.rs:2912-2936#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4106-4128#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:2862-2895#task_exec_status]`
+`[src: file: backend/src/api/agent_tools.rs:4068-4104#native_execution_for_caller]`
 
 The discussion SSE path resolves this scope from the durable
 `task_executions.sub_discussion_id` lineage before it constructs the HTTP tool
@@ -212,8 +212,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:2801-2869#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:2920-2977#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:2845-2913#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:2964-3021#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -595,7 +595,7 @@ can select: a 198 KB answer, the full catalogue and a 32,768-token window ended 
    validation are unchanged.
    Missing required line fields are reported separately from present-but-invalid
    values so the model can correct the shape instead of guessing a new number.
-   [src: file: backend/src/api/agent_tools.rs:4313-4341#count_arg] [src: file: backend/src/api/agent_tools.rs:3967-4010#edit_lines]
+   [src: file: backend/src/api/agent_tools.rs:4151-4179#count_arg] [src: file: backend/src/api/agent_tools.rs:3805-3848#edit_lines]
 5. **Rust edits are structurally atomic** — `write_file`, `edit_file` and
    `edit_lines` parse a proposed `.rs` file in memory before the first durable
    byte. A refusal reports the exact parser position and leaves the prior bytes
