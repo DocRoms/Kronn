@@ -336,6 +336,9 @@ jobs:
           KRONN_DOCS_CITATIONS_REPORT_DIR: ${{ runner.temp }}/docs-citations
           KRONN_TEMPLATES_DIR: ${{ github.workspace }}/templates
           LLVM_PROFILE_FILE: ${{ runner.temp }}/profraw/shard-${{ matrix.shard }}-%8m.profraw
+          # An integration test starts the runner's own OS sandbox only when
+          # opted in; plain `cargo test` on a laptop leaves it unset (KT-1608).
+          KRONN_TEST_REAL_SANDBOX: "1"
         run: |
           cargo nextest run --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst" \
             --workspace-remap "$PWD" \
