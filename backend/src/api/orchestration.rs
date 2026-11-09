@@ -30247,7 +30247,7 @@ pub(crate) mod tests {
             vec![
                 Step::WorktreeCreation,
                 Step::LaneProvision,
-                Step::SeedClone,
+                // No seed step: the test host has no warm target to clone.
                 Step::GateWait,
                 Step::FirstBuild,
                 Step::SmokeCheck,

@@ -24,9 +24,9 @@ const WARMING_STEP_LABELS: Record<WarmingStepKind, string> = {
 /** `850 ms`, `12.4 s`, `6 min 48 s`: a step is read at the scale it took. */
 export function formatStepDuration(ms: number): string {
   if (ms < 1000) return `${ms} ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+  if (ms < 60_000) return `${(Math.floor(ms / 100) / 10).toFixed(1)} s`;
   const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.round((ms % 60_000) / 1000);
+  const seconds = Math.floor((ms % 60_000) / 1000);
   return `${minutes} min ${seconds} s`;
 }
 
@@ -176,6 +176,13 @@ export function TaskExecutionCard({
               {warmingTotal > warmingMeasured && (
                 <span className="orch-exec-partial" data-testid="orch-exec-warming-unmeasured">
                   {t('orch.exec.warming.unmeasured', formatStepDuration(warmingTotal - warmingMeasured))}
+                </span>
+              )}
+              {/* The total is wall-clock, the steps are monotonic: when they
+                  disagree, say so instead of hiding the gap. */}
+              {warmingMeasured > warmingTotal && (
+                <span className="orch-exec-partial" data-testid="orch-exec-warming-disagree">
+                  {t('orch.exec.warming.disagree', formatStepDuration(warmingMeasured))}
                 </span>
               )}
             </p>

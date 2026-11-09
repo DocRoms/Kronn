@@ -739,8 +739,8 @@ fn the_warm_start_record_roundtrips_as_json() {
             duration_ms: 90_000,
         },
         queued_ms: 5,
-        provision_ms: 7,
-        seed_ms: 13,
+        provision_ms: Some(7),
+        seed_ms: Some(13),
     };
     let json = serde_json::to_value(&record).unwrap();
     assert_eq!(json["seed"]["outcome"], "cloned");
@@ -765,7 +765,14 @@ fn a_warm_start_row_journalled_before_the_timings_still_reads() {
         "queued_ms": 2
     }))
     .unwrap();
-    assert_eq!((record.provision_ms, record.seed_ms), (0, 0));
+    assert_eq!((record.provision_ms, record.seed_ms), (None, None));
+    // An old row cannot say how long it provisioned or seeded: the breakdown
+    // leaves both out rather than reporting 0 ms.
+    use crate::models::WarmingStepKind as Step;
+    assert_eq!(
+        record.timed_steps(),
+        vec![(Step::GateWait, 2), (Step::FirstBuild, 1)]
+    );
 }
 
 fn timed(first_build: FirstBuild, queued_ms: u64) -> WarmStartRecord {
@@ -779,8 +786,8 @@ fn timed(first_build: FirstBuild, queued_ms: u64) -> WarmStartRecord {
         build_jobs: 4,
         first_build,
         queued_ms,
-        provision_ms: 11,
-        seed_ms: 35,
+        provision_ms: Some(11),
+        seed_ms: Some(35),
     }
 }
 
@@ -831,19 +838,27 @@ fn a_step_that_did_not_run_is_absent_not_zero() {
         .timed_steps()
         .iter()
         .any(|(step, _)| *step == Step::FirstBuild));
-    // Nothing prepared, nothing seeded.
+    // Nothing prepared, nothing seeded, nothing provisioned.
     let none = WarmStartRecord::not_applicable("no Cargo.toml", 4);
-    assert!(!none
+    assert!(none.timed_steps().is_empty());
+    // No warm target to clone from: no seed step either, even though the lane
+    // was provisioned.
+    let mut no_source = timed(FirstBuild::Succeeded { duration_ms: 9 }, 0);
+    no_source.seed = SeedOutcome::NoSource {
+        reason: "no warm target".into(),
+    };
+    assert!(!no_source
         .timed_steps()
         .iter()
         .any(|(step, _)| *step == Step::SeedClone));
+    assert!(no_source.timed_steps().contains(&(Step::LaneProvision, 11)));
 }
 
 #[test]
 fn a_row_journalled_before_seed_ms_falls_back_to_its_clone_time() {
     use crate::models::WarmingStepKind as Step;
     let mut record = timed(FirstBuild::Succeeded { duration_ms: 1 }, 0);
-    record.seed_ms = 0;
+    record.seed_ms = None;
     assert!(record.timed_steps().contains(&(Step::SeedClone, 30)));
 }
 

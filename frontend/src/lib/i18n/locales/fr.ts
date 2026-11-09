@@ -4472,6 +4472,7 @@ const fr: TranslationDict = {
   'orch.exec.warming.smoke_check': 'Smoke check',
   'orch.exec.warming.total': 'Total : {0}',
   'orch.exec.warming.unmeasured': ' ({0} non mesurés)',
+  'orch.exec.warming.disagree': ' (les étapes totalisent {0}, plus que le total : les horloges divergent)',
   'orch.exec.tokens': 'Tokens',
   'orch.exec.cost': 'Coût in-app',
   'orch.exec.costPartial': '(partiel)',

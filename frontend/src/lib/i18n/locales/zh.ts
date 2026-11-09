@@ -4417,6 +4417,7 @@ const zh: TranslationDict = {
   "orch.exec.warming.smoke_check": "冒烟检查",
   "orch.exec.warming.total": "总计：{0}",
   "orch.exec.warming.unmeasured": "（{0} 未测量）",
+  "orch.exec.warming.disagree": "（各步骤合计 {0}，超过总计：时钟不一致）",
   "orch.exec.tokens": "Token",
   "orch.exec.cost": "应用内费用",
   "orch.exec.costPartial": "（部分）",

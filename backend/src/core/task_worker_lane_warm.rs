@@ -339,12 +339,14 @@ pub struct WarmStartRecord {
     /// How long the first build waited for a slot of the host's gate.
     pub queued_ms: u64,
     /// KT-1637 — how long provisioning the lane took (Cargo home, caches).
+    /// `None` when the lane was not provisioned or the row predates the timing.
     #[serde(default)]
-    pub provision_ms: u64,
-    /// KT-1637 — how long seeding the lane target took, whatever its outcome
-    /// (`SeedOutcome::Cloned::clone_ms` is the clone alone).
+    pub provision_ms: Option<u64>,
+    /// KT-1637 — how long seeding the lane target took
+    /// (`SeedOutcome::Cloned::clone_ms` is the clone alone). `None` when no seed
+    /// was attempted or the row predates the timing.
     #[serde(default)]
-    pub seed_ms: u64,
+    pub seed_ms: Option<u64>,
 }
 
 impl WarmStartRecord {
@@ -352,14 +354,18 @@ impl WarmStartRecord {
     /// A step that did not run is absent, never reported as zero: a lane with no
     /// first build has no gate wait, a lane the warm-up never prepared has no seed.
     pub fn timed_steps(&self) -> Vec<(WarmingStepKind, u64)> {
-        let mut steps = vec![(WarmingStepKind::LaneProvision, self.provision_ms)];
-        let seeded = !matches!(self.seed, SeedOutcome::NotApplicable { .. });
-        if seeded {
-            // A row journalled before `seed_ms` only knows its clone.
-            let seed_ms = match &self.seed {
-                SeedOutcome::Cloned { clone_ms, .. } if self.seed_ms == 0 => *clone_ms,
-                _ => self.seed_ms,
-            };
+        let mut steps = Vec::new();
+        if let Some(provision_ms) = self.provision_ms {
+            steps.push((WarmingStepKind::LaneProvision, provision_ms));
+        }
+        // Only an outcome that went looking at a warm target spent seed time; a
+        // row journalled before `seed_ms` still knows its clone.
+        let seed_ms = match &self.seed {
+            SeedOutcome::Cloned { clone_ms, .. } => Some(self.seed_ms.unwrap_or(*clone_ms)),
+            SeedOutcome::AlreadyPresent | SeedOutcome::Unsupported { .. } => self.seed_ms,
+            SeedOutcome::NoSource { .. } | SeedOutcome::NotApplicable { .. } => None,
+        };
+        if let Some(seed_ms) = seed_ms {
             steps.push((WarmingStepKind::SeedClone, seed_ms));
         }
         // A build cancelled in the queue never started: it has no build time.
@@ -392,8 +398,8 @@ impl WarmStartRecord {
                 reason: reason.into(),
             },
             queued_ms: 0,
-            provision_ms: 0,
-            seed_ms: 0,
+            provision_ms: None,
+            seed_ms: None,
         }
     }
 }
@@ -719,8 +725,8 @@ pub fn warm_lane_cancellable(
             build_jobs: jobs,
             first_build: FirstBuild::Cancelled { duration_ms: 0 },
             queued_ms: 0,
-            provision_ms: 0,
-            seed_ms: 0,
+            provision_ms: None,
+            seed_ms: None,
         };
     }
     let seeding = Instant::now();
@@ -744,8 +750,8 @@ pub fn warm_lane_cancellable(
                     .into(),
             },
             queued_ms: 0,
-            provision_ms: 0,
-            seed_ms,
+            provision_ms: None,
+            seed_ms: Some(seed_ms),
         };
     }
 
@@ -763,8 +769,8 @@ pub fn warm_lane_cancellable(
                 reason: "the lane target was already built for this Cargo.lock".into(),
             },
             queued_ms: 0,
-            provision_ms: 0,
-            seed_ms,
+            provision_ms: None,
+            seed_ms: Some(seed_ms),
         };
     }
 
@@ -787,8 +793,8 @@ pub fn warm_lane_cancellable(
                 build_jobs: jobs,
                 first_build: FirstBuild::Cancelled { duration_ms: 0 },
                 queued_ms: queued.elapsed().as_millis() as u64,
-                provision_ms: 0,
-                seed_ms,
+                provision_ms: None,
+                seed_ms: Some(seed_ms),
             };
         }
         // Never stall a worker behind a queue that does not drain: it starts
@@ -806,8 +812,8 @@ pub fn warm_lane_cancellable(
                     ),
                 },
                 queued_ms: queued.elapsed().as_millis() as u64,
-                provision_ms: 0,
-                seed_ms,
+                provision_ms: None,
+                seed_ms: Some(seed_ms),
             };
         }
     };
@@ -862,8 +868,8 @@ pub fn warm_lane_cancellable(
         build_jobs: jobs,
         first_build,
         queued_ms,
-        provision_ms: 0,
-        seed_ms,
+        provision_ms: None,
+        seed_ms: Some(seed_ms),
     }
 }
 
@@ -899,7 +905,7 @@ pub fn warm_worktree(
         Ok((lane, provisioned)) => {
             let provision_ms = provisioning.elapsed().as_millis() as u64;
             WarmStartRecord {
-                provision_ms,
+                provision_ms: Some(provision_ms),
                 ..warm_lane_cancellable(
                     &lane,
                     &provisioned,
