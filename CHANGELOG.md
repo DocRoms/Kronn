@@ -43,6 +43,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Security
 
+- rusqlite 0.41 bundles libsqlite3-sys 0.39, past the vulnerable SQLite of
+  RUSTSEC-2026-0459 (KT-1620).
 - The copy of a generated asset into a run's artifacts directory is written
   through the directory's file descriptor, so a link an Exec step planted at
   the asset's name is replaced, never written through. A press of a step's

@@ -189,11 +189,11 @@ impl Database {
 
     /// Open an in-memory database (useful for testing).
     pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().context("Failed to open in-memory database")?;
+        let mut conn = Connection::open_in_memory().context("Failed to open in-memory database")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         migrations::run(&conn)?;
         let resource_changes = Arc::new(resource_changes::ResourceChanges::default());
-        resource_changes::watch(&conn, &resource_changes);
+        resource_changes::watch(&mut conn, &resource_changes);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             read_conn: None,
@@ -218,7 +218,7 @@ impl Database {
     }
 
     fn open_path_internal(path: &PathBuf, recover_commit_leases: bool) -> Result<Self> {
-        let conn = Connection::open(path)
+        let mut conn = Connection::open(path)
             .with_context(|| format!("Failed to open database at {}", path.display()))?;
 
         // WAL mode for better concurrent read performance.
@@ -386,7 +386,7 @@ impl Database {
         // Watched once everything the open itself writes (migrations, the
         // boot reconcile) is behind: the warm-up starts from what is there.
         let resource_changes = Arc::new(resource_changes::ResourceChanges::default());
-        resource_changes::watch(&conn, &resource_changes);
+        resource_changes::watch(&mut conn, &resource_changes);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             read_conn,
