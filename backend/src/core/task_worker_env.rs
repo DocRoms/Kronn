@@ -122,10 +122,28 @@ pub fn host_build_budget_env() -> Vec<(&'static str, OsString)> {
     build_budget_env(crate::core::task_worker_lane_warm::worker_build_jobs())
 }
 
-/// Whether `dir` is a linked Git worktree: its `.git` is a file pointing at the
-/// owner's git directory, where a main checkout has a directory.
+/// Whether `dir` is a linked Git worktree: its `.git` is a file whose `gitdir:`
+/// line points at `<common git dir>/worktrees/<name>`. A main checkout has a
+/// `.git` directory; a submodule (`.git/modules/<name>`) and a clone made with
+/// `--separate-git-dir` also have a `.git` file, but are not worktrees.
 pub fn is_linked_worktree(dir: &Path) -> bool {
-    dir.join(".git").is_file()
+    let Ok(pointer) = std::fs::read_to_string(dir.join(".git")) else {
+        return false;
+    };
+    let Some(gitdir) = pointer
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|gitdir| !gitdir.is_empty())
+    else {
+        return false;
+    };
+    // Only the entry's name and its parent are looked at, so a relative
+    // `gitdir` needs no resolution.
+    Path::new(gitdir)
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|parent| parent == "worktrees")
 }
 
 /// What an agent process gets for one budget variable: nothing when the launch

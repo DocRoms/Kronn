@@ -11527,7 +11527,7 @@ Suite de la réponse.";
     #[tokio::test]
     async fn every_agent_on_a_worktree_gets_the_build_and_test_budget() {
         let (_repo_dir, _repo, worktree) = managed_task_worktree();
-        std::fs::write(worktree.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: /repo/.git/worktrees/task\n").unwrap();
         let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
         // `make -j` is not a pure throttle: it is never set (last field).
         let expected = vec![
@@ -11564,7 +11564,7 @@ Suite de la réponse.";
     #[tokio::test]
     async fn an_operators_own_value_wins_over_the_build_budget() {
         let (_repo_dir, _repo, worktree) = managed_task_worktree();
-        std::fs::write(worktree.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: /repo/.git/worktrees/task\n").unwrap();
         let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
         let expected = vec![
             jobs.clone(),
@@ -11602,7 +11602,7 @@ Suite de la réponse.";
     #[tokio::test]
     async fn an_adapted_acp_cli_gets_the_build_and_test_budget() {
         let (_repo_dir, _repo, worktree) = managed_task_worktree();
-        std::fs::write(worktree.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: /repo/.git/worktrees/task\n").unwrap();
         let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
         let expected = vec![
             jobs.clone(),

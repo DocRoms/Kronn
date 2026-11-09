@@ -239,7 +239,11 @@ fn command_env_of(command: &std::process::Command) -> std::collections::HashMap<
 /// A worktree as Git lays it out: `.git` is a file, not a directory.
 fn linked_worktree_fixture() -> Fixture {
     let fx = fixture();
-    std::fs::write(fx.worktree.join(".git"), "gitdir: /elsewhere\n").unwrap();
+    std::fs::write(
+        fx.worktree.join(".git"),
+        "gitdir: /repo/.git/worktrees/task\n",
+    )
+    .unwrap();
     fx
 }
 
@@ -304,6 +308,54 @@ fn the_build_budget_is_only_for_agents_on_a_worktree() {
     apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| None);
     assert!(command_env_of(&command).is_empty(), "a main checkout");
     assert!(!is_linked_worktree(&fx.worktree));
+}
+
+/// A `.git` file is not enough: a submodule and a `--separate-git-dir` clone have
+/// one too, and are not worktrees. Only `gitdir: <common>/worktrees/<name>` is.
+#[test]
+fn only_a_worktrees_gitdir_makes_a_linked_worktree() {
+    let fx = fixture();
+    let dot_git = fx.worktree.join(".git");
+    let linked = |pointer: &str| {
+        std::fs::write(&dot_git, pointer).unwrap();
+        is_linked_worktree(&fx.worktree)
+    };
+
+    assert!(linked("gitdir: /repo/.git/worktrees/task\n"));
+    assert!(linked("gitdir: ../../../.git/worktrees/task"), "relative");
+    assert!(
+        linked("gitdir: /repo/.git/worktrees/task/\n"),
+        "trailing slash"
+    );
+    assert!(
+        linked("gitdir: /repo/.git/modules/sub/worktrees/task\n"),
+        "a worktree of a submodule is still a worktree"
+    );
+
+    assert!(!linked("gitdir: /repo/.git/modules/sub\n"), "a submodule");
+    assert!(
+        !linked("gitdir: ../.git/modules/sub\n"),
+        "a relative submodule"
+    );
+    assert!(
+        !linked("gitdir: /elsewhere/clone.git\n"),
+        "--separate-git-dir"
+    );
+    assert!(!linked("gitdir: /repo/.git/worktrees\n"), "no entry name");
+    assert!(
+        !linked("gitdir: /repo/.git/worktrees/task/sub\n"),
+        "too deep"
+    );
+    assert!(!linked("gitdir:\n"), "empty");
+    assert!(!linked("not a pointer\n"), "no gitdir line");
+
+    let mut command = std::process::Command::new("true");
+    std::fs::write(&dot_git, "gitdir: /repo/.git/modules/sub\n").unwrap();
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| None);
+    assert!(
+        command_env_of(&command).is_empty(),
+        "a submodule gets no budget"
+    );
 }
 
 #[test]

@@ -2250,7 +2250,11 @@ mod tests {
         // for an agent on a worktree (`.git` is a file there) and no other.
         let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
         let on_worktree = tempfile::tempdir().unwrap();
-        std::fs::write(on_worktree.path().join(".git"), "gitdir: /elsewhere\n").unwrap();
+        std::fs::write(
+            on_worktree.path().join(".git"),
+            "gitdir: /repo/.git/worktrees/task\n",
+        )
+        .unwrap();
         let budgeted = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
             native_command(
                 AcpAgent::Kiro,

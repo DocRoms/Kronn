@@ -76,9 +76,13 @@ smoke check nor the dispatch happens.
   `MAKEFLAGS`; a project that wants parallel `make` puts `-j` in its own
   Makefile or scripts.
 - The budget reaches every agent process Kronn starts **on a linked Git
-  worktree** (`.git` is a file, `is_linked_worktree`), whatever its role — task
-  workers of any CLI, reviewers and fix agents — not only Claude task workers.
-  An agent on the main checkout (`.git` is a directory) gets none. It is applied
+  worktree**, whatever its role — task workers of any CLI, reviewers and fix
+  agents — not only Claude task workers. A linked worktree is a `.git` *file*
+  whose `gitdir:` line points at `<common>/worktrees/<name>`
+  (`is_linked_worktree`) [src: file: backend/src/core/task_worker_env.rs:129]:
+  an agent on the main checkout (`.git` is a directory), in a submodule
+  (`gitdir: .../.git/modules/<name>`) or in a `--separate-git-dir` clone gets
+  none (`only_a_worktrees_gitdir_makes_a_linked_worktree`). It is applied
   in `try_spawn` [src: file: backend/src/agents/runner.rs:14608] (the direct
   route, and the adapted ACP route: `acp/claude_adapter.rs` and
   `acp/codex_adapter.rs` call `try_spawn` with `SpawnIo::Adapter`, so the process
@@ -91,7 +95,7 @@ smoke check nor the dispatch happens.
 - A budget variable the launch already carries, or the operator set in the
   backend's own environment, is never overwritten: the operator's value is
   forwarded (the agent's environment is an allow-list, so it would otherwise be
-  lost) [src: file: backend/src/core/task_worker_env.rs:134]. The lane's
+  lost) [src: file: backend/src/core/task_worker_env.rs:152]. The lane's
   private locations (`CARGO_TARGET_DIR`, `CARGO_HOME`, ...) remain
   Claude-task-worker only.
 - A lane target is removed with its clean worktree (integration, `RemoveIfClean`
