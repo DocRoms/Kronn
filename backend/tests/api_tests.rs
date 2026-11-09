@@ -31457,7 +31457,8 @@ async fn workflow_export_carries_skills_a_json_data_payload_lists_by_id() {
         serde_json::json!({
             "name": "Per repo", "project_id": null, "trigger": {"type": "Manual"},
             "steps": [{"name": "skills", "step_type": {"type": "JsonData"},
-                       "json_data_payload": {"org/repo": [skill], "note": "custom- not an id"}}],
+                       "json_data_payload": {"org/repo": [skill], "note": "custom- not an id",
+                                             "classes": ["custom-header"]}}],
         }),
     )
     .await;
@@ -31470,14 +31471,29 @@ async fn workflow_export_carries_skills_a_json_data_payload_lists_by_id() {
 
     fresh_skill_dir(&root, "target");
     let target = build_router_with_auth(test_state(), false);
-    let (_, imported) = post_json(
+    let request = serde_json::json!({"content": serde_json::to_string(&exported).unwrap(),
+                                     "project_id": null, "skill_choices": []});
+    // A payload value no step loads is never reported as a missing skill.
+    let (_, preview) = post_json(
         target.clone(),
-        "/api/workflows/import",
-        serde_json::json!({"content": serde_json::to_string(&exported).unwrap(),
-                           "project_id": null, "skill_choices": []}),
+        "/api/workflows/import/preview",
+        request.clone(),
     )
     .await;
+    assert_eq!(
+        preview["data"]["missing_skills"],
+        serde_json::json!([]),
+        "{preview}"
+    );
+    let (_, imported) = post_json(target.clone(), "/api/workflows/import", request).await;
     assert_eq!(imported["success"], true, "{imported}");
+    assert!(
+        !imported["notice"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("custom-header"),
+        "{imported}"
+    );
     let payload = &imported["data"]["steps"][0]["json_data_payload"];
     let local = payload["org/repo"][0].as_str().unwrap();
     assert_eq!(payload["note"], "custom- not an id");
