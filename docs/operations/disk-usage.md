@@ -76,7 +76,7 @@ holds unmerged paths, nothing is removed. Each distinct *kept* reason is recorde
 `worktree_release_kept` event, a release as `worktree_released`. Evidence patches are not cleaned up by Kronn.
 
 [src: file: backend/src/api/orchestration.rs:4377-4389#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:12671-12682#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:12785-12796#settle_cancelled_workspace]
 
 ### The sweeper's rules
 

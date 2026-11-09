@@ -181,7 +181,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3370-3437#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3375-3442#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -227,7 +227,7 @@ So the boundary today is **not** "HTTP agents cannot write". It is:
 One trap in that sentence, worth naming because the catalogue says otherwise: `git_commit`
 IS declared to a discussion agent, and its handler refuses every caller that is not the
 active native worker in its managed task worktree
-`[src: file: backend/src/api/agent_tools.rs:3695-3743#git_commit]`. So an ordinary `@ollama` in a room
+`[src: file: backend/src/api/agent_tools.rs:3700-3748#git_commit]`. So an ordinary `@ollama` in a room
 sees the tool and is turned away by it. The refusal is correct; the declaration is the part
 that misleads, and it is kept declared only because a worker room is built by narrowing the
 same catalogue.
@@ -461,7 +461,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:934-962#extract]
-  [src: file: backend/src/api/agent_tools.rs:4837-4861#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4850-4874#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down

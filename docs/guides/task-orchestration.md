@@ -161,7 +161,7 @@ Kronn derives one fixed-layout report; replay does not produce another.
 [src: file: backend/src/api/orchestration.rs:9987-9991#has_room_publication]
 [src: file: backend/src/api/orchestration.rs:10001-10050#parent_milestones]
 [src: file: backend/src/api/orchestration.rs:8537-8561#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:37431-37532#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:37626-37727#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -416,7 +416,7 @@ commits. What happens to the child worktree is the campaign's
 `cancellation_cleanup_policy`, which defaults to `remove_if_clean` [src: file: backend/src/api/orchestration.rs:9483]:
 a clean worktree is removed (its provenance is kept), while one with
 uncommitted work, or whose removal Git refuses, is preserved
-[src: file: backend/src/api/orchestration.rs:10929]. Set the policy to
+[src: file: backend/src/api/orchestration.rs:10933]. Set the policy to
 `preserve` to keep the worktree whatever its state. Stop does not force-delete
 local work. It never changes the task's
 status (KT-1267): an `in_progress` or `done` task stays so, because the work may
