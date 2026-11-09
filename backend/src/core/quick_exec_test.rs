@@ -835,7 +835,7 @@ fn a_quick_exec_child_carries_a_built_environment() {
             ("OPENAI_API_KEY", "sk"),
             ("GH_TOKEN", "ghp"),
         ],
-        || build_command(&validated, None),
+        || build_command(&validated, None, Priority::Normal),
     );
     let env: Vec<String> = command
         .as_std()
@@ -855,4 +855,44 @@ fn a_quick_exec_child_carries_a_built_environment() {
             "{gone} reached Quick Exec"
         );
     }
+}
+
+/// KT-1633: a validation starts behind the host's priority launcher and keeps
+/// its own argv after the program; a collector keeps the backend's priority.
+#[test]
+#[serial_test::serial(background_launcher)]
+fn a_background_validation_runs_behind_the_priority_launcher() {
+    use crate::core::background_priority::{self, HostOs, LauncherCheck, LauncherGuard};
+    // The launcher state is process-wide: pin it, so the plan below is the one
+    // the spawn uses whatever the host (un)checked.
+    background_priority::set_enabled(true);
+    let _launcher = LauncherGuard::set(LauncherCheck::Works);
+    let root = tempfile::tempdir().unwrap();
+    let roots = vec![root.path().to_path_buf()];
+    let validated = validate(&spec("git", &["status"], root.path()), &roots).unwrap();
+    let plan = background_priority::plan_here(Priority::Background);
+    if crate::core::background_priority::enabled()
+        && background_priority::launcher_for(HostOs::CURRENT, |path| Path::new(path).is_file())
+            .is_some()
+    {
+        assert!(
+            plan.launcher.is_some(),
+            "an installed launcher is used: {plan:?}"
+        );
+    }
+
+    let background = build_command(&validated, None, Priority::Background);
+    let normal = build_command(&validated, None, Priority::Normal);
+    let program = normal.as_std().get_program().to_os_string();
+    assert_eq!(normal.as_std().get_args().count(), 1, "normal: argv only");
+
+    let (expected_program, mut expected_args) = plan.argv(&program);
+    expected_args.push("status".into());
+    assert_eq!(background.as_std().get_program(), expected_program);
+    let args: Vec<_> = background
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_os_string())
+        .collect();
+    assert_eq!(args, expected_args);
 }

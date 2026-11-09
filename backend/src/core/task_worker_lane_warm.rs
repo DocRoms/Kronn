@@ -29,11 +29,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::models::WarmingStepKind;
-
+use crate::core::background_priority::Priority;
 use crate::core::task_worker_env::{
     prepare_launch, ProbeCommand, ProbeRunner, Provisioned, WorkerLane,
 };
+use crate::models::WarmingStepKind;
 
 /// Overrides the `CARGO_BUILD_JOBS` a worker gets.
 pub const BUILD_JOBS_OVERRIDE_ENV: &str = "KRONN_WORKER_CARGO_JOBS";
@@ -839,6 +839,8 @@ pub fn warm_lane_cancellable(
             cwd: manifest_dir,
             env,
             timeout: settings.first_build_timeout,
+            // The lane's first build compiles the whole dependency graph.
+            priority: Priority::Background,
         },
         cancel,
     );

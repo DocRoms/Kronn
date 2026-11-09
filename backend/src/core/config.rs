@@ -600,6 +600,8 @@ pub async fn save(config: &AppConfig) -> Result<()> {
         config.server.lane_seeds_copy_enabled,
         config.server.lane_seeds_adopt_suggested,
     );
+    // KT-1633 — Settings > Workers: background priority of the workers' processes.
+    crate::core::background_priority::set_enabled(config.workers.background_priority);
 
     tracing::info!("Config saved to {}", path.display());
     Ok(())

@@ -820,10 +820,18 @@ async fn an_approved_quick_exec_runs_and_an_unapproved_one_is_refused() {
 /// KT-1492 — a line a trust level approved runs under the level's sandbox
 /// through the real route: it cannot read the installation key, while the same
 /// line approved by a human (the control) can. Self-skips only on a host that
-/// cannot apply a sandbox.
+/// cannot apply a sandbox, or when `KRONN_TEST_REAL_SANDBOX=1` did not opt this
+/// binary in to starting the machine's sandbox (KT-1608). It sets
+/// `KRONN_DATA_DIR` and the vault setting, so it owns its process.
 #[tokio::test]
 #[serial]
 async fn a_level_approved_quick_exec_cannot_read_the_encryption_key_through_the_run_route() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_level_approved_quick_exec_cannot_read_the_encryption_key_through_the_run_route",
+    ) {
+        return;
+    }
     if let Err(reason) = kronn::core::trust_sandbox::host_sandbox() {
         eprintln!("skipped: no sandbox can be applied here ({reason})");
         return;

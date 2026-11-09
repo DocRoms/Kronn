@@ -112,6 +112,21 @@ pub struct WorkersConfig {
     /// cost is tokens spent on a review that may never converge.
     #[serde(default)]
     pub review_rounds_unlimited: bool,
+    /// KT-1633 — run task workers (first dispatch and re-dispatch), their
+    /// validations and workflow Agent / Exec steps at background priority
+    /// (`taskpolicy -b`, `nice -n 10`, below-normal on Windows), so the owner's
+    /// applications and Kronn's own UI stay responsive. On by default; off keeps
+    /// every spawn at the backend's priority. `KRONN_BACKGROUND_PRIORITY=0` turns
+    /// it off too, whatever this says.
+    #[serde(default = "default_true")]
+    pub background_priority: bool,
+    /// KT-1632 — local task workers (a CLI agent in its own worktree) running at
+    /// once. A launch or re-dispatch beyond it waits `Queued`, in launch order,
+    /// and starts when a slot frees. Remote (HTTP) and Ollama workers do not
+    /// count. `max_concurrent_agents` counts agent processes, not the builds
+    /// behind them, so it cannot bound the machine load on its own.
+    #[serde(default = "default_workers_max_concurrent_task_workers")]
+    pub max_concurrent_task_workers: u32,
 }
 
 impl Default for WorkersConfig {
@@ -119,12 +134,18 @@ impl Default for WorkersConfig {
         Self {
             default_max_review_rounds: DEFAULT_MAX_REVIEW_ROUNDS,
             review_rounds_unlimited: false,
+            background_priority: true,
+            max_concurrent_task_workers: DEFAULT_MAX_CONCURRENT_TASK_WORKERS,
         }
     }
 }
 
 fn default_workers_review_rounds() -> u32 {
     DEFAULT_MAX_REVIEW_ROUNDS
+}
+
+fn default_workers_max_concurrent_task_workers() -> u32 {
+    DEFAULT_MAX_CONCURRENT_TASK_WORKERS
 }
 
 impl WorkersConfig {
@@ -139,8 +160,21 @@ impl WorkersConfig {
         }
     }
 
+    /// The cap the dispatcher enforces: never 0 (a 0 would queue every worker
+    /// for ever), whatever a hand-edited `config.toml` holds.
+    pub fn effective_max_concurrent_task_workers(&self) -> usize {
+        self.max_concurrent_task_workers
+            .clamp(1, MAX_CONCURRENT_TASK_WORKERS_LIMIT) as usize
+    }
+
     /// Refuse what the Settings form must never persist.
     pub fn validate(&self) -> Result<(), String> {
+        if !(1..=MAX_CONCURRENT_TASK_WORKERS_LIMIT).contains(&self.max_concurrent_task_workers) {
+            return Err(format!(
+                "max_concurrent_task_workers must be between 1 and \
+                 {MAX_CONCURRENT_TASK_WORKERS_LIMIT}"
+            ));
+        }
         if !(1..=MAX_REVIEW_ROUNDS_INTEGER).contains(&self.default_max_review_rounds) {
             return Err(format!(
                 "default_max_review_rounds must be between 1 and {MAX_REVIEW_ROUNDS_INTEGER}"
@@ -150,6 +184,11 @@ impl WorkersConfig {
     }
 }
 
+/// Default cap on local task workers running at once (KT-1632). Builds, not
+/// agent processes, are what loads the machine: two lanes is what it carries.
+pub const DEFAULT_MAX_CONCURRENT_TASK_WORKERS: u32 = 2;
+/// Largest cap the Settings form accepts.
+pub const MAX_CONCURRENT_TASK_WORKERS_LIMIT: u32 = 64;
 /// Default review-round limit (KT-1345; it was a hard-coded 3).
 pub const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 5;
 /// Largest explicit integer; above it, say « unlimited ».

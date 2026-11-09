@@ -48,11 +48,11 @@ host probe confirmed that Python, Write and shell redirection were all refused.
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
-[src: file: backend/src/agents/runner.rs:4604-4608#read_only_repos]
-[src: file: backend/src/agents/runner.rs:4635-4637#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4629-4633#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4660-4662#read_only_repos]
 [src: file: backend/src/agents/read_only_repos.rs:972-979#apply]
-[src: file: backend/src/agents/runner.rs:14361-14366#sandbox_required]
-[src: file: backend/src/agents/runner.rs:14578-14588#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:14405-14410#sandbox_required]
+[src: file: backend/src/agents/runner.rs:14629-14639#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -60,8 +60,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:14299-14318#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:14374-14388#is_codex]
+[src: file: backend/src/agents/runner.rs:14342-14361#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:14418-14432#is_codex]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -282,8 +282,8 @@ setup output, a `CollectApiData` source and a Quick Exec run keep the
 historical `[... output tronqué — limite N KB ...]` suffix and write no file,
 so a collected value never carries a local path. The file goes with the run's
 directory.
-[src: file: backend/src/workflows/exec_step.rs:1093-1138#captured_text]
-[src: file: backend/src/workflows/exec_step.rs:1212-1229#truncation_marker]
+[src: file: backend/src/workflows/exec_step.rs:1119-1164#captured_text]
+[src: file: backend/src/workflows/exec_step.rs:1238-1255#truncation_marker]
 
 ### Approved repository scripts (KT-918)
 
@@ -316,10 +316,10 @@ runs with the copy as its working directory, so `node <declared path>` and a
 helper loaded through `process.cwd()` or the script's own directory come from
 the copy. The run's checkout is in `KRONN_WORKTREE`, the copy in
 `KRONN_APPROVED_SCRIPTS_DIR`. The setup command still runs in the checkout.
-[src: file: backend/src/workflows/exec_step.rs:107-127#approved_script_child]
-[src: file: backend/src/workflows/exec_step.rs:131-155#prepare_approved_scripts]
-[src: file: backend/src/workflows/exec_step.rs:476-487#approved_copy]
-[src: file: backend/src/workflows/exec_step.rs:727-733#approved_script_child]
+[src: file: backend/src/workflows/exec_step.rs:133-153#approved_script_child]
+[src: file: backend/src/workflows/exec_step.rs:157-181#prepare_approved_scripts]
+[src: file: backend/src/workflows/exec_step.rs:502-513#approved_copy]
+[src: file: backend/src/workflows/exec_step.rs:753-759#approved_script_child]
 
 Limits: only the declared files are verified. Absolute imports, paths built
 from `KRONN_WORKTREE` and interpreter search paths outside the copy are not
@@ -346,7 +346,7 @@ including ordinary non-strict and direct launches. Unit coverage checks host
 aliases, duplicate aliases and path escaping.
 [src: file: backend/tests/adapter_worker_policy.rs:193-223#trust_overrides]
 [src: file: backend/tests/adapter_worker_policy.rs:226-316#config_keys]
-[src: file: backend/src/agents/runner_test.rs:11591-11652#codex_project_trust_override_preserves_paths_and_host_alias]
+[src: file: backend/src/agents/runner_test.rs:11814-11875#codex_project_trust_override_preserves_paths_and_host_alias]
 [src: file: backend/src/acp/codex_adapter.rs:479-490#codex_project_mcp_override]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations

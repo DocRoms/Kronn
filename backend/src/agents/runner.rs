@@ -11,7 +11,7 @@ use super::ollama_memory::{
     KvShape, MachineFacts, ModelCeiling,
 };
 use super::provenance::{self, AgentProvenanceCapture};
-use crate::core::cmd::async_cmd;
+use crate::core::cmd::{async_cmd, async_cmd_with, Priority};
 use crate::models::{AgentType, ModelTier, ModelTiersConfig, Skill, TokensConfig};
 
 const MAX_CALLS_PER_TOOL: usize = 12;
@@ -3193,6 +3193,11 @@ pub struct AgentStartConfig<'a> {
     pub room_agent_context: Option<&'a RoomAgentBridgeContext>,
     /// A workflow step's room capability. Ignored when a worker context is present.
     pub workflow_step_context: Option<&'a WorkflowStepBridgeContext>,
+    /// KT-1633 — how urgently the agent's CLI process wants the CPU. A workflow
+    /// Agent step asks for [`Priority::Background`]; a task worker runs there
+    /// whatever this says; every other launch keeps the default (the backend's
+    /// own priority).
+    pub priority: Priority,
     /// The audit run this agent works for (KT-1324): its processes carry the
     /// run's tag so boot can stop them after a backend stop.
     pub audit_run_id: Option<&'a str>,
@@ -3317,6 +3322,7 @@ impl<'a> AgentStartConfig<'a> {
             task_worker_context: None,
             room_agent_context: None,
             workflow_step_context: None,
+            priority: Priority::Normal,
             audit_run_id: None,
             ollama_format: None,
             model_override: None,
@@ -3486,6 +3492,24 @@ pub(crate) fn agent_concurrency_limits(
         }
     }
     serde_json::Value::Object(map).to_string()
+}
+
+/// The limits the dispatcher admits a job under: the per-agent and local-pool
+/// caps of [`agent_concurrency_limits`], plus KT-1632's cap on local task
+/// workers (Settings > Workers), which no per-agent cap can express.
+pub(crate) fn dispatch_concurrency_limits(config: &crate::models::AppConfig) -> String {
+    let mut limits: serde_json::Value = serde_json::from_str(&agent_concurrency_limits(
+        &config.agents,
+        config.server.max_concurrent_agents,
+    ))
+    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(map) = limits.as_object_mut() {
+        map.insert(
+            crate::db::agent_dispatch::TASK_WORKER_LIMIT_KEY.into(),
+            serde_json::json!(config.workers.effective_max_concurrent_task_workers()),
+        );
+    }
+    limits.to_string()
 }
 
 pub(crate) fn is_http_chat_agent(agent_type: &AgentType) -> bool {
@@ -4597,6 +4621,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 step_tools: config.step_tools.cloned(),
                 github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
                 bridge_token: bridge_value.clone(),
+                priority: config.priority,
             };
             // Read-only repositories need the adapter's restricted policy.
             return start_adapted_acp(
@@ -4740,6 +4765,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.audit_run_id,
         &github_env,
         bridge_value.as_deref(),
+        config.priority,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -4773,6 +4799,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     config.audit_run_id,
                     &github_env,
                     bridge_value.as_deref(),
+                    config.priority,
                 )
                 .map_err(|error| {
                     format!("Direct CLI launch failed: {e}; npx fallback failed: {error}")
@@ -5002,6 +5029,8 @@ pub(crate) struct AdapterLaunchOptions {
     pub(crate) github_env: Vec<(String, String)>,
     /// The launch's scoped bridge token (layer B); revoked with the launch.
     pub(crate) bridge_token: Option<String>,
+    /// KT-1633 — see [`AgentStartConfig::priority`].
+    pub(crate) priority: Priority,
 }
 
 /// Reuse the authoritative direct worker policy, including its isolated MCP
@@ -14277,6 +14306,20 @@ pub(crate) fn claude_auto_memory_opted_in() -> bool {
         == Ok("1")
 }
 
+/// The priority of one agent launch: a task worker runs in the background
+/// whatever the caller asked, any other launch at the priority its caller asked
+/// for (a workflow Agent step: background; a discussion turn: the backend's own).
+fn agent_launch_priority(
+    task_worker_context: Option<&TaskWorkerBridgeContext>,
+    requested: Priority,
+) -> Priority {
+    if task_worker_context.is_some() {
+        Priority::Background
+    } else {
+        requested
+    }
+}
+
 fn is_claude_code_launch(binary: &str, npx_package: Option<&str>) -> bool {
     Path::new(binary)
         .file_name()
@@ -14352,6 +14395,7 @@ pub(crate) fn try_spawn(
     audit_run_id: Option<&str>,
     github_env: &[(String, String)],
     bridge_token: Option<&str>,
+    priority: Priority,
 ) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
@@ -14445,7 +14489,14 @@ pub(crate) fn try_spawn(
     let route = crate::core::child_env::ChildRoute::Agent(
         crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key),
     );
-    let mut cmd = async_cmd(&final_cmd, route);
+    // KT-1633 — a task worker (and its re-dispatch after a review) and a workflow
+    // Agent step build for minutes: they yield to the owner's interactive
+    // applications. A room principal or a plain discussion turn is the owner's own work.
+    let mut cmd = async_cmd_with(
+        &final_cmd,
+        route,
+        agent_launch_priority(task_worker_context, priority),
+    );
     // Built, never inherited: the backend's own environment holds secrets.
     crate::core::child_env::reset(cmd.as_std_mut(), route);
     let inherited = crate::core::child_env::names_of(cmd.as_std());
@@ -14602,6 +14653,10 @@ pub(crate) fn try_spawn(
             cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
         }
     }
+    // KT-1634 — every agent process on a project worktree, whatever its CLI and
+    // role (task worker, reviewer, fix agent), builds and tests under the same
+    // parallelism budget; the lane below only adds its private locations.
+    crate::core::task_worker_env::apply_build_budget(cmd.as_std_mut(), work_dir);
     // KT-1246 — a Claude task worker builds and tests in its own lane: private
     // Cargo target and home, offline Cargo, a scratch Kronn data dir, and the
     // main checkout's frontend dependencies linked read-only. Other runtimes

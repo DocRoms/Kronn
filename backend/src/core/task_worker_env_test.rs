@@ -195,6 +195,169 @@ fn a_provisioned_lane_exports_data_dir_target_offline_and_cargo_home() {
     assert!(lane.cargo_target_dir.is_dir());
 }
 
+/// KT-1634 — one budget bounds Cargo, every Rust test binary and vitest.
+#[test]
+fn the_build_budget_bounds_every_tool_from_one_job_count() {
+    let env = build_budget_env(4);
+    for name in [
+        CARGO_BUILD_JOBS_ENV,
+        RUST_TEST_THREADS_ENV,
+        NEXTEST_TEST_THREADS_ENV,
+        VITEST_MAX_WORKERS_ENV,
+    ] {
+        assert_eq!(env_value(&env, name), Some(OsString::from("4")), "{name}");
+    }
+    // `make -j` changes what a non-parallel-safe Makefile does: never a default.
+    assert_eq!(env_value(&env, "MAKEFLAGS"), None);
+    assert_eq!(env.len(), 4);
+    // A budget is never zero: zero threads is not "unbounded" to every tool.
+    let floor = build_budget_env(0);
+    assert_eq!(env_value(&floor, RUST_TEST_THREADS_ENV), Some("1".into()));
+}
+
+#[test]
+fn the_lane_environment_carries_the_whole_budget_of_the_host() {
+    let fx = fixture();
+    let lane = fx.lane();
+    let provisioned = lane.provision_with(&SharedCaches::default(), false);
+    let env = lane.env(&provisioned);
+    let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
+    for (name, expected) in build_budget_env(jobs.parse().unwrap()) {
+        assert_eq!(env_value(&env, name), Some(expected), "{name}");
+    }
+    assert_eq!(env_value(&env, "MAKEFLAGS"), None);
+}
+
+/// The environment a command carries, by name.
+fn command_env_of(command: &std::process::Command) -> std::collections::HashMap<String, OsString> {
+    command
+        .get_envs()
+        .filter_map(|(name, value)| Some((name.to_str()?.to_string(), value?.to_owned())))
+        .collect()
+}
+
+/// A worktree as Git lays it out: `.git` is a file, not a directory.
+fn linked_worktree_fixture() -> Fixture {
+    let fx = fixture();
+    std::fs::write(
+        fx.worktree.join(".git"),
+        "gitdir: /repo/.git/worktrees/task\n",
+    )
+    .unwrap();
+    fx
+}
+
+#[test]
+fn apply_build_budget_sets_every_variable_on_a_worktree_command() {
+    let fx = linked_worktree_fixture();
+    let mut command = std::process::Command::new("true");
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| None);
+    let set = command_env_of(&command);
+    for name in [
+        CARGO_BUILD_JOBS_ENV,
+        RUST_TEST_THREADS_ENV,
+        NEXTEST_TEST_THREADS_ENV,
+        VITEST_MAX_WORKERS_ENV,
+    ] {
+        assert_eq!(set.get(name), Some(&OsString::from("3")), "{name}: {set:?}");
+    }
+    assert!(!set.contains_key("MAKEFLAGS"), "{set:?}");
+}
+
+/// The nothing-is-clobbered guarantee is a rule here, not an accident of what
+/// the environment allow-list happens to omit.
+#[test]
+fn an_explicit_value_wins_over_the_build_budget() {
+    let fx = linked_worktree_fixture();
+
+    // The command already carries the name: it is kept.
+    let mut command = std::process::Command::new("true");
+    command.env(RUST_TEST_THREADS_ENV, "99");
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| None);
+    let set = command_env_of(&command);
+    assert_eq!(set[RUST_TEST_THREADS_ENV], OsString::from("99"));
+    assert_eq!(set[CARGO_BUILD_JOBS_ENV], OsString::from("3"));
+
+    // The operator set the name: their value reaches the agent, the rest is budgeted.
+    let mut command = std::process::Command::new("true");
+    let operator = |name: &str| (name == VITEST_MAX_WORKERS_ENV).then(|| OsString::from("7"));
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &operator);
+    let set = command_env_of(&command);
+    assert_eq!(set[VITEST_MAX_WORKERS_ENV], OsString::from("7"));
+    assert_eq!(set[NEXTEST_TEST_THREADS_ENV], OsString::from("3"));
+
+    // An empty operator value is not a value.
+    let mut command = std::process::Command::new("true");
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| {
+        Some(OsString::new())
+    });
+    assert_eq!(command_env_of(&command)[CARGO_BUILD_JOBS_ENV], "3");
+}
+
+/// A discussion on the main checkout (`.git` is a directory) or outside any
+/// repository is not an agent on a project worktree: it keeps its environment.
+#[test]
+fn the_build_budget_is_only_for_agents_on_a_worktree() {
+    let fx = fixture();
+    let mut command = std::process::Command::new("true");
+
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| None);
+    assert!(command_env_of(&command).is_empty(), "no .git at all");
+
+    std::fs::create_dir(fx.worktree.join(".git")).unwrap();
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| None);
+    assert!(command_env_of(&command).is_empty(), "a main checkout");
+    assert!(!is_linked_worktree(&fx.worktree));
+}
+
+/// A `.git` file is not enough: a submodule and a `--separate-git-dir` clone have
+/// one too, and are not worktrees. Only `gitdir: <common>/worktrees/<name>` is.
+#[test]
+fn only_a_worktrees_gitdir_makes_a_linked_worktree() {
+    let fx = fixture();
+    let dot_git = fx.worktree.join(".git");
+    let linked = |pointer: &str| {
+        std::fs::write(&dot_git, pointer).unwrap();
+        is_linked_worktree(&fx.worktree)
+    };
+
+    assert!(linked("gitdir: /repo/.git/worktrees/task\n"));
+    assert!(linked("gitdir: ../../../.git/worktrees/task"), "relative");
+    assert!(
+        linked("gitdir: /repo/.git/worktrees/task/\n"),
+        "trailing slash"
+    );
+    assert!(
+        linked("gitdir: /repo/.git/modules/sub/worktrees/task\n"),
+        "a worktree of a submodule is still a worktree"
+    );
+
+    assert!(!linked("gitdir: /repo/.git/modules/sub\n"), "a submodule");
+    assert!(
+        !linked("gitdir: ../.git/modules/sub\n"),
+        "a relative submodule"
+    );
+    assert!(
+        !linked("gitdir: /elsewhere/clone.git\n"),
+        "--separate-git-dir"
+    );
+    assert!(!linked("gitdir: /repo/.git/worktrees\n"), "no entry name");
+    assert!(
+        !linked("gitdir: /repo/.git/worktrees/task/sub\n"),
+        "too deep"
+    );
+    assert!(!linked("gitdir:\n"), "empty");
+    assert!(!linked("not a pointer\n"), "no gitdir line");
+
+    let mut command = std::process::Command::new("true");
+    std::fs::write(&dot_git, "gitdir: /repo/.git/modules/sub\n").unwrap();
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| None);
+    assert!(
+        command_env_of(&command).is_empty(),
+        "a submodule gets no budget"
+    );
+}
+
 #[test]
 fn a_private_cargo_home_can_still_be_requested() {
     let fx = fixture();
@@ -798,6 +961,7 @@ fn the_process_runner_reports_success_failure_and_a_missing_program() {
         cwd: dir.path().to_path_buf(),
         env: Vec::new(),
         timeout: Duration::from_secs(10),
+        priority: crate::core::background_priority::Priority::Normal,
     };
     let runner = ProcessProbeRunner;
 

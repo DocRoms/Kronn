@@ -452,7 +452,7 @@ impl LevelConfinement {
 impl CommandConfinement for LevelConfinement {
     fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command {
         let (program, args) = self.wrap(&probe.program, &probe.args);
-        let mut command = crate::core::cmd::async_cmd(&program, route);
+        let mut command = crate::core::cmd::async_cmd_with(&program, route, probe.priority);
         command.args(&args).current_dir(&probe.cwd);
         for (name, value) in &probe.env {
             command.env(name, value);

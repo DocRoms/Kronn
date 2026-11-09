@@ -413,7 +413,12 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             config.server.lane_seeds_copy_enabled,
             config.server.lane_seeds_adopt_suggested,
         );
+        // KT-1633 — the background-priority switch, before the first worker of this boot.
+        kronn::core::background_priority::set_enabled(config.workers.background_priority);
     }
+    // KT-1633 — ask the host once whether its priority launcher runs, off the
+    // async path, before recovery can dispatch a worker. A spawn only reads the answer.
+    kronn::core::background_priority::check_launcher_at_boot().await;
     // reply without spending tokens twice.
     match state
         .db
