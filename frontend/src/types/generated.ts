@@ -2121,6 +2121,19 @@ export type CleanupOrphanEnvRequest = { keys: Array<string>, };
 
 export type CleanupOrphanEnvResponse = { configs_updated: number, total_keys_removed: number, };
 
+/**
+ * A credential found in clear in a file, without its value.
+ */
+export type ClearCredentialView = {
+/**
+ * `provider_key` or `auth_token`.
+ */
+kind: string, name: string, provider: string,
+/**
+ * The same value is in `stored_credentials` and the key in use decrypts it.
+ */
+verified: boolean, };
+
 export type CliReleaseInfo = { installed: string | null, latest: string | null, checked_at: string | null, check_error: string | null, update_available: boolean, };
 
 /**
@@ -8100,7 +8113,17 @@ recovery_unverified: boolean,
  * recovery.key parses but its payload is damaged: replaced without a
  * passphrase (kept aside).
  */
-recovery_damaged: boolean, };
+recovery_damaged: boolean,
+/**
+ * Credentials config.toml still carries in clear (names only, never
+ * values): a locked or missing key at boot leaves them there (KT-1594).
+ */
+clear_credentials: Array<ClearCredentialView>,
+/**
+ * The `config.toml.corrupt.*` files kept aside, each with the credentials
+ * it holds and whether the owner may delete it now (KT-1594).
+ */
+set_aside_files: Array<SetAsideFileView>, };
 
 export type RedactedField = {
 /**
@@ -9427,6 +9450,24 @@ color?: string | null, };
  * `PUT /api/mcps/servers/{id}/access-policy`; `policy: null` removes it.
  */
 export type SetApiAccessPolicyRequest = { policy?: ApiAccessPolicy | null, };
+
+/**
+ * A set-aside `config.toml.corrupt.<ts>` and what deleting it would lose.
+ */
+export type SetAsideFileView = { name: string, credentials: Array<ClearCredentialView>,
+/**
+ * The file carries an encryption key.
+ */
+holds_key: boolean,
+/**
+ * Every credential is verified and no key or row depends on the file.
+ */
+deletable: boolean,
+/**
+ * Why it is not deletable: `unreadable`, `key_locked`, `unverified`,
+ * `key_needed` or `only_key_copy`.
+ */
+blocker: string | null, };
 
 export type SetBriefingRequest = { notes?: string | null, };
 

@@ -231,6 +231,21 @@ pub async fn undecryptable_rows(db: &Database, key: &str) -> Result<usize> {
         .sum())
 }
 
+/// Encrypted rows `other` decrypts and `key` does not: what is lost if `other`
+/// is the only copy of its key and that copy goes (KT-1594).
+pub async fn rows_only_this_key_opens(db: &Database, key: &str, other: &str) -> Result<usize> {
+    Ok(collect_encrypted_rows(db)
+        .await?
+        .iter()
+        .map(|col| {
+            col.sample
+                .iter()
+                .filter(|enc| decrypts(enc, other) && !decrypts(enc, key))
+                .count()
+        })
+        .sum())
+}
+
 /// True when `key` decrypts at least one sampled row of every non-empty column.
 fn decrypts_every_column(key: &str, columns: &[ColumnRows]) -> bool {
     columns

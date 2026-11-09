@@ -998,6 +998,10 @@ export const config = {
   /** P2 recovery passphrase — the encryption key wrapped under an Argon2id
    *  passphrase, so MCP secrets survive total machine/keychain loss. */
   getRecoveryStatus: () => api<RecoveryStatus>('GET', '/config/recovery/status'),
+  /** Deletes a kept `config.toml.corrupt.<ts>`; the backend checks again that
+   *  every credential in it is verified, and the strong confirmation applies (KT-1594). */
+  deleteSetAsideFile: (name: string) =>
+    api<void>('DELETE', `/config/recovery/set-aside-files/${encodeURIComponent(name)}`),
   /** Returns the recovery code the user MUST save off-machine. */
   // Replacing an existing passphrase requires the current one (KT-1007).
   setRecovery: (passphrase: string, currentPassphrase?: string, replaceUnverified?: boolean) => api<{ recovery_code: string }>('POST', '/config/recovery/set', {

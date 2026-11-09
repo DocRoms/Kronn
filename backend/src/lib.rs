@@ -1650,6 +1650,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::setup::start_new_key),
         )
         .route(
+            "/api/config/recovery/set-aside-files/{name}",
+            delete(api::setup::delete_set_aside_file),
+        )
+        .route(
             "/api/config/scan-paths",
             get(api::setup::get_scan_paths).post(api::setup::set_scan_paths),
         )

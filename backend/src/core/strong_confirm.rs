@@ -84,7 +84,7 @@ const ALWAYS: &[(&str, &str)] = &[
 
 /// The deletions that ask for the proof (owner decision, 28/10): an
 /// irreversible loss of value. A project; a plugin or a connection together with
-/// its credentials; a stored provider API key. Every other `DELETE` is an
+/// its credentials; a stored provider API key; a set-aside `config.toml.corrupt.<ts>` (KT-1594). Every other `DELETE` is an
 /// everyday deletion (a message, a discussion, a task, a workflow, a page, a
 /// Quick Prompt, a Quick Exec, a skill, …) and goes through: it stays behind the
 /// destructive gate of `auth_allows` (local or token), which this does not touch.
@@ -93,6 +93,8 @@ const SENSITIVE_DELETES: &[&str] = &[
     "/api/mcps/configs/{id}",
     "/api/external-api/connections/{id}",
     "/api/config/api-keys/{id}",
+    // A kept config.toml that may hold the last copy of a credential or a key.
+    "/api/config/recovery/set-aside-files/{name}",
 ];
 
 /// Routes where the handler decides, because only part of the calls matter:

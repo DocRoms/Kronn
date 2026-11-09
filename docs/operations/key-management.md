@@ -131,7 +131,10 @@ the previous file untouched.
    key, never overwritten; also refreshed after a restore),
    `invalid_sources`, `locked_credentials`, `kept_recovery_blobs`,
    `credentials_unavailable`, `recovery_other_key`, `recovery_unverified`,
-   `recovery_damaged`, `config_set_aside`, `rows_moved_from_files`,
+   `recovery_damaged`, `clear_credentials` (names of the credentials
+   `config.toml` still carries in clear, never values), `set_aside_files` (each
+   `config.toml.corrupt.<ts>` with its credentials, whether the owner may delete
+   it, and why not), `config_set_aside`, `rows_moved_from_files`,
    `file_key_moves_pending`, `file_key_rows_pending`, `undecryptable_rows`
    and `locked_file_rows`; pending file-key moves are shown as "nothing to
    do"; Settings → Recovery shows the warnings, and the
@@ -145,6 +148,18 @@ the previous file untouched.
    stored, auth is locked (below), never open. The stored token row also
    records whether auth is enabled, so a lost `config.toml` does not turn
    auth off. [src: file: backend/src/core/credential_store.rs:465-612#boot] [src: file: backend/src/lib.rs:130-150#stored_auth_token_exists]
+
+   A set-aside `config.toml.corrupt.<ts>` is never deleted by Kronn. The owner
+   deletes one in Settings → Recovery (`DELETE
+   /api/config/recovery/set-aside-files/{name}`, behind the strong
+   confirmation), only once every credential in it is in `stored_credentials`
+   and decrypts with the key in use. The check is made again on the request.
+   A file is kept when it is unreadable, when the key is locked, when it holds
+   a key that still opens rows the key in use does not, or when it holds the
+   only copy of the key in use. The banner and Settings → Recovery flag
+   `config_holds_key` ("key stored beside its data") and point to a recovery
+   passphrase or `KRONN_ENCRYPTION_KEK`; a locked-key banner lists the
+   credentials still in clear (KT-1594).
 
 An operator-set `KRONN_AUTH_TOKEN` is read and removed from the process
 environment before the database opens (`config::take_env_auth_token`). Step 4

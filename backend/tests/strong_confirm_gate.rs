@@ -188,6 +188,12 @@ fn families() -> Vec<(&'static str, &'static str, Option<Value>)> {
         ("DELETE", "/api/mcps/configs/c1", None),
         ("DELETE", "/api/external-api/connections/x1", None),
         ("DELETE", "/api/config/api-keys/k1", None),
+        // KT-1594: a kept config.toml that may hold the last copy of a credential
+        (
+            "DELETE",
+            "/api/config/recovery/set-aside-files/config.toml.corrupt.gate-test",
+            None,
+        ),
         (
             "POST",
             "/api/human-credentials/revoke",
@@ -355,8 +361,8 @@ async fn a_maintenance_route_goes_through_even_when_enrolled() {
 }
 
 /// A sensitive deletion is refused without the proof and accepted once with
-/// it, family by family (project, plugin, connection, provider key, human
-/// credential).
+/// it, family by family (project, plugin, connection, provider key, set-aside
+/// config.toml, human credential).
 #[tokio::test]
 async fn a_sensitive_deletion_needs_the_proof_each_family() {
     let harness = Harness::new(true).await;
@@ -366,7 +372,7 @@ async fn a_sensitive_deletion_needs_the_proof_each_family() {
             *method == "DELETE" || path.ends_with("/human-credentials/revoke")
         })
         .collect();
-    assert_eq!(sensitive.len(), 5, "{sensitive:?}");
+    assert_eq!(sensitive.len(), 6, "{sensitive:?}");
     for (index, (method, path, body)) in sensitive.into_iter().enumerate() {
         let (status, refused) = harness.send(req(method, path, body.clone())).await;
         assert!(

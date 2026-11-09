@@ -25,6 +25,7 @@ fn every_route_of_the_inventory_is_protected() {
         ("DELETE", "/api/mcps/configs/{id}"),
         ("DELETE", "/api/external-api/connections/{id}"),
         ("DELETE", "/api/config/api-keys/{id}"),
+        ("DELETE", "/api/config/recovery/set-aside-files/{name}"),
         ("POST", "/api/human-credentials/revoke"),
         ("POST", "/api/human-credentials/enrol"),
         ("POST", "/api/human-credentials/admin/rotate"),
