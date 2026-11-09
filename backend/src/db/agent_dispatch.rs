@@ -548,25 +548,38 @@ fn older_runnable_in_discussion(alias: &str) -> String {
     )
 }
 
+/// Due `Pending` jobs the dispatcher should try now, oldest first. Local task
+/// workers and every other job are windowed apart: `limit` of each. Task
+/// workers waiting on the KT-1632 cap stay `Pending` and are re-tried every scan,
+/// so one shared window would let a long queue of them hide the reviews and
+/// ordinary turns created after it — which the cap must never hold back.
 pub fn list_runnable_ids(conn: &Connection, limit: usize) -> Result<Vec<String>> {
     let older = older_runnable_in_discussion("candidate");
+    let task_worker = local_task_worker_job("candidate");
     let mut statement = conn.prepare(&format!(
-        "SELECT candidate.id
-         FROM agent_dispatch_jobs AS candidate
-         JOIN discussions AS discussion ON discussion.id = candidate.discussion_id
-         WHERE candidate.status = 'Pending'
-           AND candidate.available_at <= ?1
-           AND (
-               (discussion.no_agent = 0 AND candidate.attempts < ?2)
-               OR discussion.no_agent = 1
-               OR EXISTS (
-                   SELECT 1 FROM task_executions AS owner
-                   WHERE owner.sub_discussion_id = candidate.discussion_id
-                     AND owner.worker_target_kind = 'cli'
+        "SELECT id FROM (
+             SELECT candidate.id AS id, candidate.created_at AS created_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY {task_worker}
+                        ORDER BY candidate.created_at, candidate.id
+                    ) AS place
+             FROM agent_dispatch_jobs AS candidate
+             JOIN discussions AS discussion ON discussion.id = candidate.discussion_id
+             WHERE candidate.status = 'Pending'
+               AND candidate.available_at <= ?1
+               AND (
+                   (discussion.no_agent = 0 AND candidate.attempts < ?2)
+                   OR discussion.no_agent = 1
+                   OR EXISTS (
+                       SELECT 1 FROM task_executions AS owner
+                       WHERE owner.sub_discussion_id = candidate.discussion_id
+                         AND owner.worker_target_kind = 'cli'
+                   )
                )
-           )
-           AND NOT {older}
-         ORDER BY candidate.created_at, candidate.id LIMIT ?3",
+               AND NOT {older}
+         )
+         WHERE place <= ?3
+         ORDER BY created_at, id",
     ))?;
     let rows = statement.query_map(
         params![
@@ -834,20 +847,24 @@ fn note_task_worker_queued(conn: &Connection, id: &str, limits: Option<&str>) ->
     Ok(())
 }
 
-/// 1-based place of a `Pending` local task worker in the queue of its peers,
-/// in launch order. Only workers actually waiting count ahead of it (not one in
-/// a backoff, or past its attempts). `None` when the job is not a pending local
-/// task worker.
+/// 1-based place of a local task worker in the queue of its peers, in launch
+/// order. Only workers actually waiting count ahead of it (not one in a backoff,
+/// or past its attempts). `None` when the job is not itself waiting — not a
+/// local task worker, not `Pending`, or in a backoff — so it has no place.
 pub fn task_worker_queue_position(conn: &Connection, id: &str) -> Result<Option<u32>> {
     let own: Option<(String, i64)> = conn
         .query_row(
             &format!(
                 "SELECT candidate.created_at, candidate.rowid
                  FROM agent_dispatch_jobs AS candidate
-                 WHERE candidate.id = ?1 AND candidate.status = 'Pending' AND {}",
-                local_task_worker_job("candidate")
+                 WHERE candidate.id = ?1 AND {}",
+                waiting_task_worker("candidate")
             ),
-            [id],
+            params![
+                id,
+                Utc::now().to_rfc3339(),
+                i64::from(MAX_DISPATCH_ATTEMPTS)
+            ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
@@ -903,7 +920,17 @@ pub fn claim_with_limits(
                  turn_attempts = turn_attempts + 1,
                  claimed_at = ?2,
                  updated_at = ?2,
-                 last_error = NULL
+                 last_error = NULL,
+                 progress_phase = CASE
+                     WHEN progress_phase = 'queued'
+                          AND substr(progress_detail, 1, length('{TASK_WORKER_QUEUED_DETAIL_PREFIX}'))
+                              = '{TASK_WORKER_QUEUED_DETAIL_PREFIX}'
+                     THEN NULL ELSE progress_phase END,
+                 progress_detail = CASE
+                     WHEN progress_phase = 'queued'
+                          AND substr(progress_detail, 1, length('{TASK_WORKER_QUEUED_DETAIL_PREFIX}'))
+                              = '{TASK_WORKER_QUEUED_DETAIL_PREFIX}'
+                     THEN NULL ELSE progress_detail END
              WHERE id = ?1
                AND status = 'Pending'
                AND available_at <= ?2
@@ -3777,5 +3804,83 @@ mod tests {
             task_worker_queue_position(&connection, "job-b-reassigned").unwrap(),
             Some(1)
         );
+    }
+
+    /// The path a real job takes into a backoff: queued by the cap, claimed by
+    /// the scanner when a slot frees, then sent back for a delay. The cap's
+    /// reason must not outlive the claim, or the job would keep telling "2/2"
+    /// while it sits out its backoff (the scanner skips it, so nothing else
+    /// would ever rewrite it).
+    #[test]
+    fn a_queued_worker_put_into_backoff_after_its_claim_drops_the_cap_reason() {
+        let connection = connection();
+        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
+        let c = task_worker(&connection, "c", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &a));
+        assert!(claim_capped(&connection, &b));
+        assert!(!claim_capped(&connection, &c));
+        assert_eq!(
+            progress_of(&connection, &c).1.as_deref(),
+            Some("task_worker_limit:2/2")
+        );
+
+        // A slot frees; the scanner offers `c`, and the claim wins it.
+        assert!(cancel_for_discussion_by_id(&connection, "room-a", &a).unwrap());
+        assert!(list_runnable_ids(&connection, 64).unwrap().contains(&c));
+        assert!(claim_capped(&connection, &c));
+        assert_eq!(progress_of(&connection, &c), (None, None));
+
+        // The run could not start: back to `Pending`, in a backoff.
+        assert!(retry_after(&connection, &c, 3600, "spawn failed").unwrap());
+        assert_eq!(progress_of(&connection, &c), (None, None));
+        assert!(
+            !list_runnable_ids(&connection, 64).unwrap().contains(&c),
+            "the scanner skips a job in backoff"
+        );
+        assert_eq!(task_worker_queue_position(&connection, &c).unwrap(), None);
+    }
+
+    /// A reason already stored on a job that is out of line (a backoff set
+    /// without a claim) is not given a place in the queue, which is what the
+    /// execution status keys its wording on.
+    #[test]
+    fn a_worker_in_backoff_has_no_place_in_the_queue() {
+        let connection = connection();
+        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
+        let c = task_worker(&connection, "c", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &a));
+        assert!(claim_capped(&connection, &b));
+        assert!(!claim_capped(&connection, &c));
+        assert_eq!(
+            task_worker_queue_position(&connection, &c).unwrap(),
+            Some(1)
+        );
+        put_in_backoff(&connection, &c);
+        assert_eq!(task_worker_queue_position(&connection, &c).unwrap(), None);
+    }
+
+    /// Queued task workers are re-tried every scan, so a long queue of them
+    /// must not push a review or an ordinary turn out of the scan window.
+    #[test]
+    fn a_long_task_worker_queue_does_not_hide_a_review_from_the_scan() {
+        let connection = connection();
+        let workers: Vec<String> = (0..70)
+            .map(|i| task_worker(&connection, &format!("w{i:02}"), "ClaudeCode", "agent"))
+            .collect();
+        enqueue_default(&connection, "review", "orch-recovery-review:w:1");
+
+        let scanned = list_runnable_ids(&connection, 64).unwrap();
+        assert!(
+            scanned.contains(&"review".to_string()),
+            "the review is scanned behind 70 queued workers"
+        );
+        assert_eq!(
+            scanned.iter().filter(|id| workers.contains(id)).count(),
+            64,
+            "workers keep a window of their own"
+        );
+        assert!(claim_capped(&connection, "review"));
     }
 }

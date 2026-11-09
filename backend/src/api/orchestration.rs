@@ -11643,24 +11643,38 @@ fn execution_progress(
     let (phase, reason, queue_position) = match job.status {
         // KT-1632 — the task-worker cap holds this launch: the claim left the
         // reason on the job (`task_worker_limit:<running>/<cap>`), so it is
-        // still told after a restart.
-        DispatchStatus::Pending
-            if job.progress_phase.as_deref() == Some("queued")
-                && job.progress_detail.as_deref().is_some_and(|detail| {
-                    detail.starts_with(crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX)
-                }) =>
-        {
-            (
-                TaskExecutionProgressPhase::Queued,
-                job.progress_detail.clone(),
-                crate::db::agent_dispatch::task_worker_queue_position(conn, &job.id)?,
-            )
+        // still told after a restart. It is told only while the job is really in
+        // line: one a backoff keeps out has no place, and its stored reason is
+        // stale.
+        DispatchStatus::Pending => {
+            let cap_reason = job
+                .progress_detail
+                .clone()
+                .filter(|detail| {
+                    job.progress_phase.as_deref() == Some("queued")
+                        && detail.starts_with(
+                            crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX,
+                        )
+                })
+                .map(|detail| {
+                    crate::db::agent_dispatch::task_worker_queue_position(conn, &job.id)
+                        .map(|position| position.map(|position| (detail, position)))
+                })
+                .transpose()?
+                .flatten();
+            match cap_reason {
+                Some((detail, position)) => (
+                    TaskExecutionProgressPhase::Queued,
+                    Some(detail),
+                    Some(position),
+                ),
+                None => (
+                    TaskExecutionProgressPhase::Queued,
+                    Some("concurrency_limit_or_scheduler".into()),
+                    None,
+                ),
+            }
         }
-        DispatchStatus::Pending => (
-            TaskExecutionProgressPhase::Queued,
-            Some("concurrency_limit_or_scheduler".into()),
-            None,
-        ),
         DispatchStatus::Running if job.agent_started_at.is_none() => (
             TaskExecutionProgressPhase::Queued,
             Some("local_concurrency_limit".into()),

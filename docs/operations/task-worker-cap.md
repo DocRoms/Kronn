@@ -32,8 +32,15 @@ discussion turns do not go through this gate.
 - A claim refused **by the cap alone** leaves `progress_phase = 'queued'` and
   `progress_detail = 'task_worker_limit:<running>/<cap>'` on the job (written
   only when it changes). A job something else holds back gets no such reason,
-  and loses a stale one. The queue position counts only workers actually waiting
-  (`waiting_task_worker`), not one in a backoff.
+  and loses a stale one. The claim that finally wins the job clears the reason
+  too, so a job sent back into a backoff after its claim (`retry_after`…) does
+  not keep telling "2/2" while the scanner skips it. The queue position counts
+  only workers actually waiting (`waiting_task_worker`), not one in a backoff,
+  and a job that is not itself waiting has none: the progress reader shows the
+  cap reason only for a job with a place in line.
+- `list_runnable_ids` windows local task workers apart from every other job
+  (`limit` each), so a long queue of capped workers, re-tried every scan, never
+  hides a review or an ordinary turn created after it.
 - The local-agent lists differ on purpose and share one base (`local_cli_agents!`):
   the `__local_global` pool is those CLIs plus Ollama; the task-worker cap is
   those CLIs plus OpenCode and never Ollama.
