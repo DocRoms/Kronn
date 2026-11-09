@@ -898,7 +898,6 @@ fn legacy_upgrade_snapshot(conn: &Connection, tables: &[&str]) -> LegacyUpgradeS
                 .unwrap();
             let columns = statement
                 .column_names()
-                .iter()
                 .map(|name| name.to_string())
                 .collect::<Vec<_>>();
             let rows = statement

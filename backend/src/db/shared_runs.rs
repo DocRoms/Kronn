@@ -204,11 +204,14 @@ pub(crate) fn lifecycle(conn: &Connection, id: &str) -> Result<Option<SharedRunL
 /// Only `$.steps` is touched, and only when it is an array — the other kinds
 /// (quick prompt, quick API, media) carry a small, differently shaped result
 /// that a list does render.
+///
+/// The aggregate is wrapped in `json()`: SQLite 3.54 drops the JSON subtype of
+/// a scalar subquery, so without it `json_set` stores the array as a string.
 const RESULT_WITHOUT_STEP_OUTPUTS: &str = "CASE \
     WHEN json_valid(result_json) AND json_type(result_json, '$.steps') = 'array' \
     THEN json_set(result_json, '$.steps', \
-        (SELECT json_group_array(json_set(value, '$.output', '')) \
-         FROM json_each(result_json, '$.steps'))) \
+        json((SELECT json_group_array(json_set(value, '$.output', '')) \
+              FROM json_each(result_json, '$.steps')))) \
     ELSE result_json END";
 
 pub fn list(

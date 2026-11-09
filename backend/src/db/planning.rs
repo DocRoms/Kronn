@@ -5254,7 +5254,7 @@ mod tests {
     #[test]
     fn get_discussion_plan_statement_count_is_invariant_to_plan_size() {
         use std::sync::atomic::Ordering;
-        let conn = connection();
+        let mut conn = connection();
 
         // Small plan (2 relations) WITH an active blocker so every query family fires.
         seed_disc(&conn, "small");
@@ -5315,14 +5315,19 @@ mod tests {
         conn.trace_v2(
             rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
             Some(count_stmt),
-        );
+        )
+        .unwrap();
         STMT_COUNT.store(0, Ordering::Relaxed);
         let small = get_discussion_plan(&conn, "small").unwrap();
         let small_stmts = STMT_COUNT.load(Ordering::Relaxed);
         STMT_COUNT.store(0, Ordering::Relaxed);
         let large = get_discussion_plan(&conn, "large").unwrap();
         let large_stmts = STMT_COUNT.load(Ordering::Relaxed);
-        conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        conn.trace_v2(
+            rusqlite::trace::TraceEventCodes::empty(),
+            None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+        )
+        .unwrap();
 
         // Correctness at scale: all 1 000 relations present, plan order preserved,
         // nothing truncated.
