@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     async fn dropping_a_turn_releases_its_registered_process() {
         let dir = tempfile::tempdir().unwrap();
         let process = AdapterProcess::default();
@@ -347,7 +347,7 @@ mod tests {
     /// A turn that exits normally still takes its group with it: a stdio MCP
     /// server or background command must not outlive the per-turn process.
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     async fn a_normal_exit_clears_the_turn_s_process_group() {
         let dir = tempfile::tempdir().unwrap();
         let child = crate::agents::runner::try_spawn(
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     async fn cancellation_before_registration_rejects_and_reaps_the_child() {
         let dir = tempfile::tempdir().unwrap();
         let process = AdapterProcess::default();
@@ -428,7 +428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     async fn cancellation_interrupts_a_wait_that_already_owns_the_child() {
         let dir = tempfile::tempdir().unwrap();
         let process = AdapterProcess::default();

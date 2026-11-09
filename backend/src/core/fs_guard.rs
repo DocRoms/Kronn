@@ -283,7 +283,7 @@ mod tests {
         assert!(resolve_contained_read(&root, Path::new("src/é漢.md")).is_ok());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlink_leaving_the_project_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -330,7 +330,7 @@ mod tests {
         assert!(no_temp_left(&proj.join("docs")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     fn dangling_symlink_appearing_at_publish_is_never_followed() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -395,7 +395,7 @@ mod tests {
         assert!(no_temp_left(&proj.join("docs")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn write_new_mode_matches_fs_write_parity() {
         use std::os::unix::fs::PermissionsExt;
@@ -413,7 +413,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     #[ignore = "KNOWN HOLE until the A1 rooted primitive (openat walk, fs_guard migrates in A1.2): run with --ignored, fails today for the documented reason"]
     fn parent_swapped_to_symlink_after_walk_is_refused() {
@@ -449,7 +449,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     fn refuses_symlinked_component_and_dangling_target() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -474,7 +474,7 @@ mod tests {
             .is_symlink());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     fn copy_preserves_src_mode_and_stays_create_only() {
         use std::os::unix::fs::PermissionsExt;

@@ -1447,7 +1447,7 @@ mod tests {
         assert!(killed_reason(4, &settled).contains(&kept));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_planted_symlink_is_never_written_through() {
         use std::os::unix::fs::symlink;
@@ -1695,7 +1695,7 @@ mod tests {
     /// the step it was writing, and the agent then wrote on. Boot now stops it
     /// first (nothing is recorded on the run to find it by), so what boot puts
     /// back is the last word.
-    #[cfg(unix)]
+    #[cfg(unix)] // drives the unix-only agent reaper (libc getsid, /proc environ tag) with a python agent
     #[tokio::test]
     async fn an_agent_that_outlived_the_backend_is_stopped_before_its_step_is_settled() {
         let root = project();
@@ -1810,7 +1810,7 @@ mod tests {
     /// Boot names only the runs of its own database: the agent of another
     /// backend on the same machine (a lane, a second install) is none of its
     /// business.
-    #[cfg(unix)]
+    #[cfg(unix)] // drives the unix-only agent reaper (libc getsid, /proc environ tag) with a python agent
     #[tokio::test]
     async fn boot_leaves_the_agents_of_other_runs_alone() {
         let root = project();
@@ -2094,7 +2094,7 @@ mod tests {
 
     /// The agents of another instance — a bench backend's, started on a copy
     /// of this database, so with the same run id — are not this boot's.
-    #[cfg(unix)]
+    #[cfg(unix)] // drives the unix-only agent reaper (libc getsid, /proc environ tag) with a python agent
     #[tokio::test]
     async fn boot_leaves_the_agents_of_another_instance_alone() {
         let root = project();
@@ -2135,7 +2135,7 @@ mod tests {
     /// An agent the previous version started — tagged `audit-run:<run id>`,
     /// with no instance in it — and that outlived the upgrade is still stopped
     /// before its step is settled.
-    #[cfg(unix)]
+    #[cfg(unix)] // drives the unix-only agent reaper (libc getsid, /proc environ tag) with a python agent
     #[tokio::test]
     async fn boot_stops_an_agent_started_under_the_former_tag() {
         let root = project();

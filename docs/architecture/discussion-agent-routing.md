@@ -14,7 +14,7 @@ responders may all be Codex without being interchangeable:
 `message_targets` preserves those identities in textual order.
 `messages.target_agent` and `target_agents` remain compatibility projections
 for older clients and peers.
-[src: file: backend/src/models/discussions.rs:742-768#MessageTargetKind]
+[src: file: backend/src/models/discussions.rs:754-780#MessageTargetKind]
 [src: file: backend/src/db/sql/099_typed_message_targets.sql:1-37#message_targets]
 
 The composer parses prose once and submits the typed target list. The backend
@@ -123,9 +123,9 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
 [src: file: backend/src/db/discussions.rs:1313-1333#insert_user_message_with_dispatches]
 [src: file: backend/src/db/agent_dispatch.rs:997-1146#recover_after_restart]
-[src: file: backend/src/db/discussions.rs:3597-3599#DispatchInProgress]
+[src: file: backend/src/db/discussions.rs:3614-3616#DispatchInProgress]
 [src: file: backend/src/api/discussions/messaging.rs:1050-1058#DispatchInProgress]
-[src: file: backend/src/db/discussions.rs:3548-3808#revise_message_with_dispatch]
+[src: file: backend/src/db/discussions.rs:3565-3825#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
 [src: file: backend/src/api/federation.rs:102-147#federate_message_revision]
 [src: file: backend/src/api/ws.rs:1179-1187#resolved_targets]
@@ -164,11 +164,11 @@ mention that launched nobody is annotated with its reason (already scheduled
 on the root turn, or no marker), computed from `message_targets`.
 [src: file: frontend/src/lib/agentDelegation.ts:62-149#detectDelegation]
 [src: file: backend/src/db/discussions.rs:1768-1812#native_agents_scheduled_for_root_turn]
-[src: file: backend/src/api/discussions/crud.rs:582-590#initial_participants]
+[src: file: backend/src/api/discussions/crud.rs:596-608#initial_participants]
 [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/api/discussions/crud.rs:953-957#attach_discussion_participants]
-[src: file: backend/src/api/discussions/streaming.rs:2236-2348#independent_sibling_notice]
-[src: file: backend/src/api/discussions/streaming.rs:2129-2184#discussion_at_dispatch_trigger]
+[src: file: backend/src/api/discussions/crud.rs:1135-1139#attach_discussion_participants]
+[src: file: backend/src/api/discussions/streaming.rs:2269-2381#independent_sibling_notice]
+[src: file: backend/src/api/discussions/streaming.rs:2162-2217#discussion_at_dispatch_trigger]
 [src: file: backend/src/api/discussions/streaming.rs:2191-2226#thread_under_trigger]
 [src: file: backend/src/db/discussions.rs:2024-2048#already_scheduled]
 
@@ -268,7 +268,7 @@ Two distinctions the reason must not blur, and does not:
   the untracked path alone changes nothing a room user sees — which is exactly how the
   second producer of the generic string survived the first fix. `strings` on the built
   binary, not a source grep, is what proved a second one existed.
-[src: file: backend/src/api/discussions/streaming.rs:1270-1315#AgentExecutionOutcome] [src: file: backend/src/api/discussions/streaming.rs:1481-1496#finish_tracked_preflight]
+[src: file: backend/src/api/discussions/streaming.rs:1270-1315#AgentExecutionOutcome] [src: file: backend/src/api/discussions/streaming.rs:1513-1528#finish_tracked_preflight]
 
 ## Persistence and interruption
 
@@ -277,7 +277,7 @@ Two distinctions the reason must not blur, and does not:
   New-discussion `@alias` routing is persisted on the initial user message
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
-  [src: file: backend/src/api/discussions/crud.rs:655-698#replace_message_targets]
+  [src: file: backend/src/api/discussions/crud.rs:673-716#replace_message_targets]
   [src: file: backend/src/api/discussions/runtime.rs:711-730#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.

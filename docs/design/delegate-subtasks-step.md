@@ -42,14 +42,14 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   `[src: file: backend/src/db/orchestration.rs:4291-4300#ReviewCheckpoint]`
   `[src: file: backend/src/db/orchestration.rs:4322-4334#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
-  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:13462-13474#reassign_execution]`
-  `[src: file: backend/src/api/orchestration.rs:17116-17125#human_review]`
+  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:13576-13588#reassign_execution]`
+  `[src: file: backend/src/api/orchestration.rs:17232-17241#human_review]`
 - **Integration saga.** `run_integration` integrates an `Approved` execution
   into `run.target_branch`, through the single worktree where that branch is
   checked out (or by moving the ref when no worktree has it), refusing a dirty
   checkout, and sends a conflict back to the worker.
   `[src: file: backend/src/api/orchestration.rs:3189-3447#run_integration]`
-  `[src: file: backend/src/core/worktree.rs:2253-2275#IntegrationTarget]`
+  `[src: file: backend/src/core/worktree.rs:2466-2488#IntegrationTarget]`
 - **Workflow side.** `on_result` routes on a `[SIGNAL: X]` line among the last
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
@@ -78,8 +78,8 @@ branch. Checked against the code:
   the discussion, or the room's native agent during its own running turn. The
   review obligation and the escalation are messages posted to the principal of
   that discussion.
-  `[src: file: backend/src/api/orchestration.rs:13947-13960#principal_is_authorized]`
-  `[src: file: backend/src/api/orchestration.rs:13932-13974#room_agent_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:14061-14074#principal_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:14046-14088#room_agent_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:6809-6816#deliver_worker_manifest]`
   `[src: file: backend/src/db/orchestration.rs:4238-4245#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
@@ -142,7 +142,7 @@ Behaviour:
    500 ms, capped at 170 s).
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:42-45#IDLE_POLL]`
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:279-289#idle]`
-   `[src: file: backend/src/api/orchestration.rs:15245-15283#wait_for_execution_status]`
+   `[src: file: backend/src/api/orchestration.rs:15361-15399#wait_for_execution_status]`
 4. On each `AwaitingReview`: start **one fresh reviewer session** with a
    compact context (task title, DoD, delivered diff against `base_sha`, the
    worker's manifest and the validation results), no room history and no MCP

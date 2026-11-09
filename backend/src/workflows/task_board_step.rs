@@ -413,6 +413,8 @@ async fn discuss(
         directive_ids: vec![],
         workspace_mode: None,
         base_branch: None,
+        review_head: None,
+        review_base: None,
         tier: Default::default(),
         originating_qp_id: None,
         launch_variables: HashMap::new(),

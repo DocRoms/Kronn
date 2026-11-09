@@ -61,7 +61,7 @@ pub mod nvidia;
 pub mod ollama;
 pub mod openapi;
 pub mod orchestration;
-#[cfg(all(test, unix, feature = "full-tests"))]
+#[cfg(all(test, feature = "full-tests"))]
 pub(crate) mod other_projects_fixture;
 pub mod planning;
 pub mod plugin_portability;

@@ -1,5 +1,5 @@
 //! Real process boundaries, with isolated fake CLIs and no provider requests.
-#![cfg(unix)]
+#![cfg(unix)] // writes #!/bin/sh stand-in agents made executable with chmod mode bits through std::os::unix
 
 use std::{ffi::OsString, os::unix::fs::PermissionsExt, sync::Arc, time::Duration};
 

@@ -373,7 +373,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     #[tokio::test]
     #[serial(db_maintenance)]
     async fn perform_backup_file_is_owner_only() {

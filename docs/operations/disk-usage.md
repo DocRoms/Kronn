@@ -76,7 +76,7 @@ holds unmerged paths, nothing is removed. Each distinct *kept* reason is recorde
 `worktree_release_kept` event, a release as `worktree_released`. Evidence patches are not cleaned up by Kronn.
 
 [src: file: backend/src/api/orchestration.rs:4409-4421#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:12829-12840#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:12943-12954#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -143,7 +143,7 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
   those entries, and only with `confirm: true`; each is re-judged at deletion time, so a report never
   authorises a delete. **Human / UI only**: the route is deliberately not on `BRIDGE_ROUTES`, so a bridge
   token is refused (403). It deletes host files; even an own-project orphan purge was not worth giving to
-  an agent, which can tell the user instead. [src: file: backend/src/api/disk.rs:932-944#run_purge]
+  an agent, which can tell the user instead. [src: file: backend/src/api/disk.rs:938-950#run_purge]
 - MCP tool **`disk_usage`** (`project_id`) — the scoped report above, read-only, bounded to the 25 largest
   entries. It never calls the purge; a leftover `purge_orphans: true` argument returns a note that purging
   is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7809-7841#call_disk_usage]

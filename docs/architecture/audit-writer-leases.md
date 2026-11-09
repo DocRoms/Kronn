@@ -35,7 +35,7 @@ claimed validation job is returned to the queue without consuming an attempt.
 After preflight, cancellation-token registration and a second lease check share
 the tracker mutex, so a writer can either reject that admission or cancel its
 registered token. A dispatch already stopped by a writer cannot start afterward.
-[src: file: backend/src/api/discussions/runtime.rs:1348-1407#hold_validation_during_audit]
+[src: file: backend/src/api/discussions/runtime.rs:1415-1474#hold_validation_during_audit]
 [src: file: backend/src/api/audit/docs_write.rs:57-96#validation_cancel_guard]
 
 Human audit validation is deliberately different: it takes the lease first but

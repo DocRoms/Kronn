@@ -382,7 +382,7 @@ fn every_claude_launch_denies_the_data_dir_to_its_file_tools() {
 /// The wrap is more than argv: a real shell under it cannot read the data dir,
 /// and still reads and writes everywhere else. Only where this process may
 /// start a sandbox of its own.
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")] // runs /bin/sh as the wrapped shell, a POSIX shell Windows lacks
 #[test]
 #[serial]
 fn a_shell_under_the_wrap_loses_the_data_dir_and_keeps_the_rest() {
@@ -424,7 +424,7 @@ fn a_shell_under_the_wrap_loses_the_data_dir_and_keeps_the_rest() {
 /// The replacement of Codex's sandbox is more than argv: under its profile a
 /// real shell writes what the mode allows and nothing else, and never reads the
 /// data dir. Only where this process may start a sandbox of its own.
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")] // runs /bin/sh as the wrapped shell, a POSIX shell Windows lacks
 #[test]
 #[serial]
 fn a_shell_under_the_codex_replacement_keeps_the_mode_and_loses_the_data_dir() {
@@ -527,7 +527,7 @@ fn a_work_dir_next_to_the_data_dir_is_not_closed_by_any_profile() {
 /// The same, with a real shell: a command started in the work dir reads its
 /// files by absolute path (both spellings of the temp root), by relative path,
 /// and lists the directory, while the sibling data dir stays closed.
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")] // runs /bin/sh as the wrapped shell, a POSIX shell Windows lacks
 #[test]
 #[serial]
 fn a_shell_in_a_work_dir_next_to_the_data_dir_reads_it_and_loses_the_data_dir() {

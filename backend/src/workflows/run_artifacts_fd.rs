@@ -621,7 +621,7 @@ mod fallback {
     }
 }
 
-#[cfg(all(test, unix, feature = "full-tests"))]
+#[cfg(all(test, unix, feature = "full-tests"))] // exercises the unix-only fd-relative copy (run_artifacts_fd::unix, openat) with symlinks and raw-byte names
 mod tests {
     use super::unix::BEFORE_REMOVE;
     use super::*;
@@ -787,7 +787,7 @@ mod tests {
 
     /// A name that is not UTF-8 is carried as bytes: listed, copied and
     /// removed, never mistaken for an absent entry. APFS refuses such names.
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")] // creates a non-UTF-8 name from raw bytes with OsStrExt, and symlinks
     #[test]
     fn a_non_utf8_name_is_copied_and_removed() {
         use std::os::unix::ffi::OsStrExt;

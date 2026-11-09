@@ -1139,10 +1139,11 @@ fn push_unique(roots: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
-#[cfg(all(test, unix, feature = "full-tests"))]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
+    #[cfg(unix)] // used only by tests that call ReadOnlyRepos::resolve*, see above
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let work = temp.path().join("work");
@@ -1175,6 +1176,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn read_only_repos_rejects_missing_relative_non_git_and_overlapping_paths() {
         let (temp, work, repo) = fixture();
@@ -1207,6 +1209,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn read_only_repos_canonicalizes_aliases_and_deduplicates() {
         let (temp, work, repo) = fixture();
@@ -1222,6 +1225,7 @@ mod tests {
         assert_eq!(policy.roots, vec![repo]);
     }
 
+    #[cfg(unix)] // ReadOnlyRepos::resolve* refuses Windows in check_platform
     #[test]
     fn read_only_repos_claude_blocks_tools_and_subprocess_writes_without_disabling_read_block() {
         let (_temp, work, repo) = fixture();
@@ -1270,6 +1274,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // ReadOnlyRepos::resolve* refuses Windows in check_platform
     #[test]
     fn read_only_repos_codex_uses_read_entries_even_under_writable_temporary_roots() {
         let (_temp, work, repo) = fixture();
@@ -1307,6 +1312,7 @@ mod tests {
         assert!(profile["workspace_roots"].as_table().unwrap().is_empty());
     }
 
+    #[cfg(unix)] // ReadOnlyRepos::resolve* refuses Windows in check_platform
     #[test]
     fn read_only_repos_includes_external_git_history_for_a_linked_worktree() {
         let (temp, work, repo) = fixture();
@@ -1354,6 +1360,7 @@ mod tests {
             .contains(&repo.join(".git").canonicalize().unwrap()));
     }
 
+    #[cfg(unix)] // ReadOnlyRepos::resolve* refuses Windows in check_platform
     #[test]
     fn a_plain_directory_is_readable_and_never_writable() {
         let (temp, work, _repo) = fixture();

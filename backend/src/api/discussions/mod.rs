@@ -17,6 +17,7 @@ use futures::stream::Stream;
 
 pub(crate) mod ceilings;
 #[cfg(all(test, unix, feature = "full-tests"))]
+// scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 mod companion_privacy_tests;
 pub mod context;
 pub mod crud;
@@ -24,6 +25,8 @@ pub mod messaging;
 pub mod monitor;
 pub mod orchestration;
 pub(crate) mod prompt_limit;
+#[cfg(all(test, unix))]
+mod review_workspace_tests;
 pub(crate) mod routing;
 pub mod runtime;
 pub mod slash_markers;

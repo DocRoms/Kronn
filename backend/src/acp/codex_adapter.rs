@@ -998,7 +998,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(unix)] // fixture is a POSIX shell script (printf, cat) standing in for the codex CLI
     async fn a_prompt_write_to_a_dead_process_reports_its_exit_and_stderr() {
         // More than a pipe buffer: the write cannot complete once the child is gone.
         let prompt = "x".repeat(1 << 20);
@@ -1020,7 +1020,7 @@ mod tests {
     /// KT-667 — Codex's "upgrade" advice for a model it will not serve is
     /// replaced by the model and the CLI constraint before it reaches anyone.
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(unix)] // fixture is a POSIX shell script (printf, cat) standing in for the codex CLI
     async fn a_model_refusal_names_the_model_instead_of_advising_an_upgrade() {
         let error = prompt_fixture(
             "cat >/dev/null\ncat <<'JSON'\n{\"type\":\"error\",\"message\":\"The 'gpt-5.6-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.\"}\nJSON\nexit 1",
@@ -1037,7 +1037,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(unix)] // fixture is a POSIX shell script (printf, cat) standing in for the codex CLI
     async fn a_failed_exit_surfaces_the_stderr_tail() {
         let error = prompt_fixture(
             "cat >/dev/null\nprintf '%s\\n' 'early noise' >&2\nprintf '%s\\n' 'fatal: model not available' >&2\nexit 3",
@@ -1051,7 +1051,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(unix)] // fixture is a POSIX shell script (printf, cat) standing in for the codex CLI
     async fn stderr_is_drained_and_never_reaches_the_event_stream() {
         // Far past a pipe buffer before stdin is read: an undrained pipe would stall here.
         let events = prompt_fixture(

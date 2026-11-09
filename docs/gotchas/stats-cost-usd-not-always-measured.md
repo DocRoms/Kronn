@@ -10,7 +10,7 @@ confirmed rate the cost is NULL (unknown), and `message_usage.cost_unknown_reaso
 says why. Rows written before KT-894 keep their old figure, and nothing marks
 which ones those are.
 [src: file: backend/src/core/pricing.rs:340-363#price_reply]
-[src: file: backend/src/api/discussions/streaming.rs:5459-5465#price_reply]
+[src: file: backend/src/api/discussions/streaming.rs:5511-5517#price_reply]
 [src: file: backend/src/db/message_usage.rs:17-24#MessageUsage]
 [src: file: backend/src/db/message_usage.rs:26-61#record]
 
@@ -19,7 +19,7 @@ which ones those are.
 measurement — but there is no column recording whether a given `ClaudeCode`
 row actually got one, or fell back to the same estimate as everyone else.
 [src: file: backend/src/agents/runner.rs:14741-14794#total_cost_usd]
-[src: file: backend/src/api/discussions/streaming.rs:4875-4901#stream_json_cost]
+[src: file: backend/src/api/discussions/streaming.rs:4921-4947#stream_json_cost]
 [src: file: backend/src/db/message_usage.rs:38-48#message_usage]
 
 So a non-null `cost_usd`, for ANY agent_type, is data whose provenance is

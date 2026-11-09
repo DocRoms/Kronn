@@ -2417,7 +2417,7 @@ mod tests {
         assert_eq!(data["items"].as_array().map(Vec::len), Some(2), "{data}");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn foreach_never_writes_through_a_planted_symlink() {
         let (state, tokens, agents, ws, step) = foreach_fixture().await;

@@ -2554,6 +2554,18 @@ connection_id?: string | null, language?: string, initial_prompt: string,
  */
 initial_targets?: Array<MessageTarget>, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, workspace_mode?: string | null, base_branch?: string | null,
 /**
+ * KT-1645 — the commit a review discussion looks at. Setting it gives the
+ * discussion its own detached worktree at that commit (workspace mode
+ * `Review`): the agent never runs in the project's main checkout, whatever
+ * `workspace_mode` asked for. Needs a `project_id`.
+ */
+review_head?: string,
+/**
+ * KT-1645 — start of the reviewed range (`review_base..review_head`).
+ * Checked to exist; only valid together with `review_head`.
+ */
+review_base?: string,
+/**
  * Model capability tier (economy / default / reasoning).
  */
 tier?: ModelTier,

@@ -820,10 +820,18 @@ async fn an_approved_quick_exec_runs_and_an_unapproved_one_is_refused() {
 /// KT-1492 — a line a trust level approved runs under the level's sandbox
 /// through the real route: it cannot read the installation key, while the same
 /// line approved by a human (the control) can. Self-skips only on a host that
-/// cannot apply a sandbox.
+/// cannot apply a sandbox, or when `KRONN_TEST_REAL_SANDBOX=1` did not opt this
+/// binary in to starting the machine's sandbox (KT-1608). It sets
+/// `KRONN_DATA_DIR` and the vault setting, so it owns its process.
 #[tokio::test]
 #[serial]
 async fn a_level_approved_quick_exec_cannot_read_the_encryption_key_through_the_run_route() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_level_approved_quick_exec_cannot_read_the_encryption_key_through_the_run_route",
+    ) {
+        return;
+    }
     if let Err(reason) = kronn::core::trust_sandbox::host_sandbox() {
         eprintln!("skipped: no sandbox can be applied here ({reason})");
         return;
@@ -6185,7 +6193,7 @@ async fn workflow_http_optional_input_preserves_empty_value_in_gate() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // the Exec step runs `cat`, which Windows lacks as a program
 #[tokio::test]
 async fn workflow_http_optional_input_preserves_empty_value_in_exec_stdin() {
     for supplied in [
@@ -6245,7 +6253,7 @@ async fn workflow_http_optional_input_does_not_hide_unknown_template_variables()
 
 /// A reference guarded by `??` survives a Goto that skips its step, and an
 /// Exec's multi-line markers and `{{run.id}}` reach the next step as printed.
-#[cfg(unix)]
+#[cfg(unix)] // the Exec step runs `cat`, which Windows lacks as a program
 #[tokio::test]
 async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
     use kronn::models::{ConditionAction, RunStatus, StepConditionRule, StepType, WorkflowStep};
@@ -6821,7 +6829,7 @@ async fn a_trigger_step_launches_a_workflow_with_required_variables_and_links_bo
 /// KT-807: an isolated workflow with a SubWorkflow foreach accepts a
 /// concurrency above one, and two overlapping runs each work in their own
 /// worktree, their foreach still sequential and complete.
-#[cfg(unix)]
+#[cfg(unix)] // its Exec step runs `pwd` as a program, which Windows lacks
 #[tokio::test]
 async fn isolated_foreach_runs_overlap_in_their_own_worktrees() {
     let state = test_state();
@@ -31918,7 +31926,7 @@ async fn run_exec_output(state: &AppState, workflow_id: &str) -> String {
 /// KT-1448 — refs are checked at save, render into inline code and the
 /// environment of an Exec step, travel with the export and are remapped by
 /// the import; a ref the file does not carry fails the import.
-#[cfg(unix)]
+#[cfg(unix)] // runs a POSIX shell script fixture
 #[tokio::test]
 async fn workflow_refs_are_validated_rendered_exported_and_remapped() {
     let state = test_state();

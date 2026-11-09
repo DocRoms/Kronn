@@ -203,6 +203,18 @@ describe('TaskLaunchDialog', () => {
     expect(rounds).toHaveValue(2);
   });
 
+  // KT-1636 — fmt + clippy + targeted lib tests by default; the full suite is the PR's CI's.
+  it('names the default gates and flags a full-suite validation as CI-owned', () => {
+    renderDialog();
+    expect(screen.getByTestId('launch-validations-default')).toHaveTextContent('orch.config.validationsDefault');
+    expect(screen.queryByTestId('launch-full-suite-warning')).not.toBeInTheDocument();
+    const field = screen.getByPlaceholderText('orch.config.validationsHint');
+    fireEvent.change(field, { target: { value: 'cargo fmt --check\ncargo test --lib orchestration' } });
+    expect(screen.queryByTestId('launch-full-suite-warning')).not.toBeInTheDocument();
+    fireEvent.change(field, { target: { value: 'cargo fmt --check\ncargo test' } });
+    expect(screen.getByTestId('launch-full-suite-warning')).toHaveTextContent('orch.config.validationsFullSuite');
+  });
+
   it('sends the per-run override instead of the default', async () => {
     mocks.workers.mockResolvedValue({ default_max_review_rounds: 9, review_rounds_unlimited: false });
     const props = renderDialog();

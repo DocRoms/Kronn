@@ -497,7 +497,7 @@ mod tests {
         assert!(!docs.exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn subfolder_scaffold_refuses_a_symlinked_docs_dir() {
         // Copilot r4 — same class as ensure_docs_index: docs/ itself being
@@ -730,7 +730,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn install_orchestration_writes_zero_bytes_outside_a_boobytrapped_project() {
         // Codex A2 end-to-end — the FULL install sequence (copy, anti-hallu
@@ -824,7 +824,7 @@ mod tests {
         assert!(project.join("CLAUDE.md").is_file());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn copy_nondestructive_never_follows_a_symlinked_subdir() {
         // Codex A2 symlink hardening — a destination subdir that is a
@@ -849,7 +849,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn copy_nondestructive_skips_a_dangling_symlink_file() {
         // A dangling symlink reports exists()=false but IS a pre-existing
@@ -873,7 +873,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn copy_nondestructive_refuses_a_symlinked_destination_root() {
         let tmp = tempfile::TempDir::new().unwrap();

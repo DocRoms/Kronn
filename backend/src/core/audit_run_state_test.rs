@@ -223,7 +223,7 @@ fn a_target_outside_the_project_has_no_digest() {
     assert_eq!(file_digest(dir.path(), "Final review"), None);
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_target_reached_through_a_symlinked_directory_outside_the_project_has_no_digest() {
     let outside = tempfile::tempdir().unwrap();

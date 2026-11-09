@@ -18,6 +18,15 @@ fn controlled_roots() -> Vec<PathBuf> {
     ]
 }
 
+/// A program present on every host and under no directory a test controls.
+fn machine_program() -> &'static str {
+    if cfg!(windows) {
+        r"C:\Windows\System32\cmd.exe"
+    } else {
+        "/bin/ls"
+    }
+}
+
 fn is_controlled(path: &Path) -> bool {
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     controlled_roots().iter().any(|root| path.starts_with(root))
@@ -61,19 +70,18 @@ async fn the_detection_sweep_reports_no_agent_cli_of_the_machine() {
 /// The guard is armed here, in a build without `cfg(test)`: starting a program
 /// that is not under a test-controlled directory on an agent route panics, with
 /// every builder the launches go through.
-#[cfg(unix)]
 #[test]
 fn a_real_agent_binary_cannot_be_started_from_an_integration_test() {
     let route = ChildRoute::Agent(AgentFamily::Copilot);
     let refused = [
         std::panic::catch_unwind(|| {
-            let _ = kronn::core::cmd::async_cmd("/bin/ls", route);
+            let _ = kronn::core::cmd::async_cmd(machine_program(), route);
         }),
         std::panic::catch_unwind(|| {
-            let _ = kronn::core::cmd::sync_cmd("/bin/ls", route);
+            let _ = kronn::core::cmd::sync_cmd(machine_program(), route);
         }),
         std::panic::catch_unwind(|| {
-            let _ = kronn::core::cmd::discovery_cmd("/bin/ls", AgentFamily::Vibe);
+            let _ = kronn::core::cmd::discovery_cmd(machine_program(), AgentFamily::Vibe);
         }),
     ];
     assert!(refused.iter().all(Result::is_err), "{refused:?}");
@@ -81,7 +89,7 @@ fn a_real_agent_binary_cannot_be_started_from_an_integration_test() {
 
 /// A stub under the temporary directory — what a test puts on an agent route
 /// instead of the real CLI — still starts.
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
 #[tokio::test]
 async fn a_stub_agent_still_starts_from_an_integration_test() {
     use std::os::unix::fs::PermissionsExt;
@@ -104,7 +112,6 @@ async fn a_stub_agent_still_starts_from_an_integration_test() {
 /// The detached launch runs in a child process — the abort would otherwise
 /// take the whole test binary with it — and the parent asserts it died with the
 /// guard's message instead of finishing.
-#[cfg(unix)]
 #[test]
 fn a_real_agent_started_in_a_detached_task_fails_the_run() {
     const CHILD: &str = "KT1189_DETACHED_CHILD";
@@ -112,8 +119,10 @@ fn a_real_agent_started_in_a_detached_task_fails_the_run() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let _detached = tokio::spawn(async {
-                let _ =
-                    kronn::core::cmd::async_cmd("/bin/ls", ChildRoute::Agent(AgentFamily::Vibe));
+                let _ = kronn::core::cmd::async_cmd(
+                    machine_program(),
+                    ChildRoute::Agent(AgentFamily::Vibe),
+                );
             });
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         });
@@ -137,4 +146,21 @@ fn a_real_agent_started_in_a_detached_task_fails_the_run() {
         stderr.contains("a test started the real agent binary"),
         "the run died, but not through the guard: {stderr}"
     );
+}
+
+/// KT-1608 — the machine's OS sandbox (`sandbox-exec`, `bwrap`) is not started
+/// from an integration test unless `KRONN_TEST_REAL_SANDBOX=1` opted in: an
+/// agent launch is then not wrapped in it (wrapped, the KT-1189 guard refuses
+/// the launcher on an agent route and aborts the binary).
+#[test]
+fn the_os_sandbox_of_the_machine_needs_an_opt_in() {
+    use kronn::core::cmd::REAL_SANDBOX_ENV;
+    if std::env::var(REAL_SANDBOX_ENV).is_ok_and(|value| value == "1") {
+        return;
+    }
+    let refusal = kronn::core::task_worker_sandbox::Mechanism::usable_on_host()
+        .expect_err("no opt-in: the sandbox of the machine is not usable");
+    assert!(refusal.contains(REAL_SANDBOX_ENV), "{refusal}");
+    assert!(kronn::core::vault_guard::launch_confinement().is_none());
+    assert!(kronn::core::trust_sandbox::host_sandbox().is_err());
 }

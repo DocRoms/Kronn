@@ -2752,10 +2752,14 @@ impl KronnToolExecutor {
                 // Optional here, like a scope: when the principal already knows its
                 // gates, an unrunnable one makes the preflight refuse, not the
                 // integration hours later.
-                let validations_refusal = match validations_argument(call) {
-                    Ok(validations) => crate::api::orchestration::validations_refusal(
-                        &validations.unwrap_or_default(),
-                    ),
+                let (validations_refusal, full_suite_warnings) = match validations_argument(call) {
+                    Ok(validations) => {
+                        let validations = validations.unwrap_or_default();
+                        (
+                            crate::api::orchestration::validations_refusal(&validations),
+                            crate::api::orchestration::full_suite_validation_warnings(&validations),
+                        )
+                    }
                     Err(error) => return fail(call, error),
                 };
                 let parent = discussion_id;
@@ -2769,6 +2773,7 @@ impl KronnToolExecutor {
                             &parent,
                             &worker,
                         )?;
+                        preparation.warnings.extend(full_suite_warnings);
                         preparation.default_max_review_rounds =
                             Some(crate::models::review_limit_json(default_rounds));
                         for reason in [scope_refusal, validations_refusal, rounds_refusal]
@@ -4592,6 +4597,14 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              --pretty false`, `cargo test --manifest-path backend/Cargo.toml --target-dir <dir>` \
              (there is no `CARGO_TARGET_DIR=` prefix; `--target-dir` is its form);\n\
              • `timeout_secs` defaults to 600 and is capped at 1800.\n\n\
+             **Default gates** — propose `cargo fmt --manifest-path backend/Cargo.toml --all -- \
+             --check`, `cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D \
+             warnings` and targeted lib tests (`cargo test --lib --manifest-path \
+             backend/Cargo.toml <filter>`). The FULL suite (bare `cargo test`, `cargo nextest \
+             run`, `make test-backend`: ~20 min locally against 3.3 min for `--lib`) belongs to \
+             the PR's CI, not to a local integration validation: a gate that replays it is \
+             still accepted, but the preflight adds a non-blocking `full_suite_ci_owned` entry \
+             to `warnings`.\n\n\
              A command that breaks this contract makes the preflight answer `launchable: false` \
              with reason `invalid_validations` and the form that runs, and makes \
              task_exec_launch refuse it the same way — it is never accepted to fail at \

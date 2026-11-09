@@ -14570,6 +14570,12 @@ pub(crate) fn try_spawn(
         api_key: api_key.map(|key| (env_key, key)),
     };
     crate::core::child_env::apply_agent_launch(cmd.as_std_mut(), work_dir, &launch, backend_url)?;
+    // KT-1645 — no agent moves the owner's main checkout (checkout, switch, reset,
+    // stash) without the human's confirmation. Not for an agent in WSL, whose
+    // `PATH` is the Linux side's.
+    if !(runs_in_wsl || resolved_via_wsl) {
+        crate::core::git_guard::apply(cmd.as_std_mut(), work_dir);
+    }
 
     // In Docker, HOME=/home/kronn (the container user) and EVERY agent's auth
     // dir is mounted there by docker-compose: `${HOME}/.claude → /home/kronn/.claude`,

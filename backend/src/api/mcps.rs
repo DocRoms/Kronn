@@ -3375,6 +3375,7 @@ mod tests {
     /// A probed MCP server, possibly chosen by a repository's `.mcp.json`,
     /// sees its own configured values and no backend secret (B4-04).
     #[cfg(unix)]
+    // dumps the child environment with probe::env_dumping_program, a #!/bin/sh script made executable through unix mode bits
     #[test]
     fn a_probed_mcp_server_sees_no_backend_secret() {
         use crate::core::child_env::probe;
@@ -3552,7 +3553,7 @@ mod tests {
         assert!(!unavailable.ready);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test]
     async fn stdio_probe_requires_a_real_initialize_response() {
         let args = vec![
@@ -3564,7 +3565,7 @@ mod tests {
             .expect("valid MCP initialize response");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test]
     async fn stdio_probe_never_surfaces_server_output_or_secrets() {
         let secret = "never-return-this-secret";
@@ -3581,7 +3582,7 @@ mod tests {
         assert_eq!(error, "MCP server rejected the initialize handshake");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test]
     async fn stdio_probe_is_bounded_by_a_timeout() {
         let args = vec!["-c".into(), "sleep 2".into()];

@@ -518,7 +518,7 @@ fn frontend_deps_are_linked_entry_by_entry_and_never_a_write_root() {
     assert!(lane.read_roots(&caches_of(&home, &fx)).contains(&source));
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix; runs a POSIX shell script fixture
 #[test]
 fn a_whole_directory_link_from_before_is_replaced_by_the_layer() {
     let fx = fixture();
