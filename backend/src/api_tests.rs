@@ -5641,6 +5641,49 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
+    /// KT-1647: the Swagger UI mount (`utoipa-swagger-ui`) keeps serving the
+    /// spec at `/api/openapi.json` and the UI shell under `/api/docs/`, with
+    /// the same documented paths as `api::openapi::openapi_spec()`.
+    #[tokio::test]
+    async fn swagger_ui_serves_spec_and_ui_shell() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/openapi.json")
+            .body(Body::empty())
+            .unwrap();
+        let (status, spec) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        let served: std::collections::BTreeSet<&str> = spec["paths"]
+            .as_object()
+            .expect("spec has a paths object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let built = crate::api::openapi::openapi_spec();
+        let expected: std::collections::BTreeSet<&str> =
+            built.paths.paths.keys().map(String::as_str).collect();
+        assert_eq!(served, expected, "served spec lists the documented paths");
+        assert!(served.contains("/api/version/check"));
+
+        let app = build_router_with_auth(test_state(), false);
+        for uri in ["/api/docs/", "/api/docs/index.html"] {
+            let req = Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.expect("oneshot failed");
+            assert_eq!(resp.status(), StatusCode::OK, "[{uri}]");
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let html = String::from_utf8_lossy(&bytes);
+            assert!(
+                html.contains("swagger-ui"),
+                "[{uri}] is the Swagger UI page"
+            );
+        }
+    }
+
     // ─── Auto-trigger opt-out (GET endpoint edge cases) ─────────────
 
     /// The GET endpoint returns an empty array when no skill has been
