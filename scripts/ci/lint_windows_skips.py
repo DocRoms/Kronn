@@ -9,7 +9,11 @@ hide a real Windows bug. So:
     with `#[cfg(unix)]` (or `all(unix, ...)`, `all(test, unix, ...)`). A
     `target_os = "linux"` / `"macos"` gate is accepted for what only that OS has.
     Every other way to skip on Windows (`not(windows)`, `target_family = "unix"`,
-    `cfg_attr(windows, ignore)`, `if cfg!(windows) { return }`) is refused;
+    `cfg_attr(windows, ignore)`) is refused, and so is a skip decided at run time:
+    inside a test body, an `if`/`match` on `cfg!(..)` naming a platform, or on
+    `std::env::consts::OS`/`FAMILY`, whose branches (nested blocks and `else`
+    chains included) `return`. A skip hidden in a helper the test calls, or in a
+    flag computed on an earlier line, is not seen: gate that test instead;
   * the gate carries its reason as a `//` comment on the SAME line:
     `#[cfg(unix)] // creates symlinks through std::os::unix`. When rustfmt moves
     a comment that runs past the line width, the plain `//` line directly below
@@ -43,7 +47,8 @@ CONCRETE = re.compile(
     r"windows (lacks|has no|cannot|does not|ignores)|\bwhich windows\b|unix-only|"
     r"cannot exec|as a program|\bunix\b.*\bonly\b|only\b.*\bunix\b|"
     r"cannot exist on windows|non-utf-?8|raw bytes|windows has neither|caffeinate|launchd|"
-    r"only (on |in )?(macos|linux)",
+    r"only (on |in )?(macos|linux)|"
+    r"\brefuses? windows\b",  # code that rejects Windows by design, named: `refuses Windows in check_platform`
     re.IGNORECASE,
 )
 VAGUE = re.compile(
@@ -56,11 +61,13 @@ KNOWN_DEFECT = re.compile(r"\bsee KT-\d+\b")
 TEST_ATTR = re.compile(r"^(?:\w+::)*test\b")
 FN_HEAD = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:default\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+\"[^\"]*\"\s+)?fn\s+(?P<name>\w+)")
 MOD_HEAD = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>\w+)")
-EARLY_RETURN = re.compile(
-    r"if\s+(?:cfg!\(\s*windows\s*\)|cfg!\(\s*target_os\s*=\s*\"windows\"\s*\)|"
-    r"!\s*cfg!\(\s*unix\s*\)|cfg!\(\s*not\(\s*unix\s*\)\s*\)|"
-    r"!\s*cfg!\(\s*target_family\s*=\s*\"unix\"\s*\))\s*\{[^}]*?\breturn\b"
-)
+# A run-time platform test: `cfg!(<anything naming a platform>)`, or a read of
+# `std::env::consts::OS` / `FAMILY` (also when `use`d bare and compared to a string).
+RUNTIME_CFG = re.compile(r"\bcfg\s*!\s*\(")
+PLATFORM_WORD = re.compile(r"\b(?:windows|unix|target_os|target_family|target_env)\b|\"(?:windows|linux|macos|unix|msvc)\"")
+RUNTIME_CONSTS = re.compile(r"\bconsts::(?:OS|FAMILY)\b|\b(?:OS|FAMILY)\s*[!=]=\s*\"|\"[a-z]+\"\s*[!=]=\s*(?:OS|FAMILY)\b")
+BRANCH_KEYWORD = re.compile(r"\b(?:if|match)\b")
+RETURN = re.compile(r"\breturn\b")
 
 WINDOWS = {"unix": False, "windows": True, "target_os": "windows", "target_family": "windows", "target_env": "msvc"}
 LINUX = {"unix": True, "windows": False, "target_os": "linux", "target_family": "unix", "target_env": "gnu"}
@@ -72,15 +79,18 @@ def rust_files():
         yield from sorted(base.rglob("*.rs"))
 
 
-def mask(text):
+def mask(text, keep_strings=False):
     """`text` with comments and the inside of string and char literals blanked,
     newlines and offsets kept: structure can be read from it without being
-    fooled by a brace or an attribute inside a string."""
+    fooled by a brace or an attribute inside a string. `keep_strings` blanks the
+    comments only, for a check that reads a literal (`OS == "windows"`)."""
     out = list(text)
     n = len(text)
     i = 0
 
-    def blank(a, b):
+    def blank(a, b, literal=False):
+        if literal and keep_strings:
+            return
         for k in range(a, b):
             if out[k] != "\n":
                 out[k] = " "
@@ -109,22 +119,22 @@ def mask(text):
             close = "\"" + "#" * hashes
             j = text.find(close, i + 2 + hashes)
             j = n if j < 0 else j + len(close)
-            blank(i + 1, j - 1)
+            blank(i + 1, j - 1, literal=True)
             i = j
         elif c == "\"":
             j = i + 1
             while j < n and text[j] != "\"":
                 j += 2 if text[j] == "\\" else 1
-            blank(i + 1, min(j, n))
+            blank(i + 1, min(j, n), literal=True)
             i = j + 1
         elif c == "'":
             if text[i + 1 : i + 2] == "\\":
                 j = text.find("'", i + 2)
                 j = n if j < 0 else j
-                blank(i + 1, j)
+                blank(i + 1, j, literal=True)
                 i = j + 1
             elif text[i + 2 : i + 3] == "'":
-                blank(i + 1, i + 2)
+                blank(i + 1, i + 2, literal=True)
                 i += 3
             else:
                 i += 1  # a lifetime
@@ -161,6 +171,66 @@ def item_end(masked, start):
         elif c == "{" and depth <= 0:
             return match_close(masked, i, "{", "}")
     return len(masked)
+
+
+def block_after(masked, pos):
+    """(condition_end, block_end) of the `{ .. }` that follows the condition
+    starting at `pos`: the first `{` outside `()`/`[]`. None when there is none."""
+    depth = 0
+    for i in range(pos, len(masked)):
+        c = masked[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif c == ";" and depth <= 0:
+            return None
+        elif c == "{" and depth <= 0:
+            return i, match_close(masked, i, "{", "}")
+    return None
+
+
+def is_platform_condition(cond):
+    if RUNTIME_CONSTS.search(cond):
+        return True
+    return bool(RUNTIME_CFG.search(cond) and PLATFORM_WORD.search(cond))
+
+
+def runtime_skip(masked, smasked, start, end):
+    """Offset of an `if`/`match` on the platform whose branches `return`, inside
+    the item `[start, end)`; None when there is none. `smasked` is the text with
+    comments blanked and string contents kept (the condition is read there, to
+    see `"windows"`); `masked` blanks strings too, so a keyword inside a string
+    literal is not code. Branch bodies are read with balanced braces, so a
+    block, a nested block or an `else` chain before the `return` does not hide it."""
+    pos = start
+    while True:
+        kw = BRANCH_KEYWORD.search(smasked, pos, end)
+        if not kw:
+            return None
+        pos = kw.end()
+        if masked[kw.start()] == " ":
+            continue
+        found = block_after(smasked, kw.end())
+        if not found or found[1] > end:
+            continue
+        cond_end, block_end = found
+        if not is_platform_condition(smasked[kw.end() : cond_end]):
+            continue
+        blocks = [(cond_end, block_end)]
+        if kw.group() == "if":
+            tail = block_end
+            while True:
+                m = re.compile(r"\s*else\b").match(smasked, tail)
+                if not m:
+                    break
+                nxt = block_after(smasked, m.end())
+                if not nxt or nxt[1] > end:
+                    break
+                blocks.append(nxt)
+                tail = nxt[1]
+        if any(RETURN.search(smasked, a, b) for a, b in blocks):
+            return kw.start()
 
 
 def parse_pred(src):
@@ -290,8 +360,8 @@ def attribute_groups(text, masked):
             j = end
             while j < n and masked[j].isspace():
                 j += 1
-        head = masked[j : j + 160]
-        yield (attrs, j, item_end(masked, j), head)
+        stop = item_end(masked, j)
+        yield (attrs, j, stop, masked[j:stop])
         i = j if j > m.start() else m.end()
 
 
@@ -342,6 +412,7 @@ def scan(path):
     findings, unix_tests = [], []
     text = path.read_text(encoding="utf-8", errors="replace")
     masked = mask(text)
+    smasked = mask(text, keep_strings=True)
     try:
         rel = path.relative_to(ROOT)
     except ValueError:
@@ -389,12 +460,10 @@ def scan(path):
             gate = check_gates(attrs, name, start)
             if gate:
                 unix_tests.append((rel, gate[0], name, gate[1]))
-            # The raw text, because the mask blanks the `"windows"` of a target_os
-            # test; a hit inside a comment or string is dropped by the mask check.
-            hit = next((m for m in EARLY_RETURN.finditer(text, start, end) if masked[m.start()] != " "), None)
-            if hit:
-                line = text.count("\n", 0, start) + 1
-                findings.append(f"{rel}:{line}: {name}: skips itself on Windows at run time; gate it with #[cfg(unix)] and a reason")
+            hit = runtime_skip(masked, smasked, start, end)
+            if hit is not None:
+                line = text.count("\n", 0, hit) + 1
+                findings.append(f"{rel}:{line}: {name}: skips itself on a platform check at run time (cfg!, consts::OS); gate it with #[cfg(unix)] and a reason")
             continue
         mod = MOD_HEAD.match(head)
         if mod and any(cfg_pred(inner) is not None for _, inner, _ in attrs):

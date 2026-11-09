@@ -326,11 +326,9 @@ fn the_seatbelt_profile_cannot_write_or_ioctl_a_terminal() {
     );
 }
 
+#[cfg(target_os = "macos")] // runs /usr/bin/sandbox-exec, which only macOS has
 #[test]
 fn the_seatbelt_profile_is_valid_sbpl() {
-    if !cfg!(target_os = "macos") {
-        return;
-    }
     let profile = seatbelt_profile(&[
         PathBuf::from("/lane/worktree"),
         PathBuf::from("/lane/target"),

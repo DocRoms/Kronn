@@ -110,13 +110,57 @@ A skip that is not visible and justified hides real Windows bugs, so the nightly
   `see KT-<n>` and is accepted on that ground alone;
 - any form that skips on Windows but is not `unix`: `cfg(not(windows))`,
   `cfg(not(target_os = "windows"))`, `cfg(target_family = "unix")`,
-  `cfg_attr(windows, ignore)`, or `if cfg!(windows) { return }` in the body
-  (`all(unix, ...)` and `all(test, unix, ...)` are `unix`; `target_os = "linux"` or
-  `"macos"` is accepted for what only that OS has);
+  `cfg_attr(windows, ignore)` (`all(unix, ...)` and `all(test, unix, ...)` are
+  `unix`; `target_os = "linux"` or `"macos"` is accepted for what only that OS has);
+- a skip decided at run time: in a test body, an `if` or `match` on a `cfg!(..)`
+  that names a platform (`windows`, `unix`, `target_os`, `target_family`,
+  `target_env`, any nesting of `not`/`all`/`any`), or on `std::env::consts::OS` /
+  `FAMILY`, whose branch returns. Branches are read with balanced braces, so a
+  nested block, an `else` chain or a `match` arm before the `return` does not hide
+  it. A skip hidden in a helper, or in a flag computed on an earlier line, is not
+  seen: gate that test instead;
 - the same on a module that holds tests (an inline `mod tests { .. }`, a
   `mod x;` or `#[path = ".."]` file, a whole-file `#![cfg(unix)]`). A gate on a
   helper, a `use` or production code is not checked: a helper only gates the
   tests that call it, and those carry a reason.
+
+A reason may also name code that rejects Windows by design
+(`// VerifiedCheckout::verify refuses Windows in check_platform`): the lint accepts
+"refuses Windows" for exactly that, and the named function is the thing to check.
+
+Un-gating a module makes every test in it build on Windows, so it is also a
+compile check: a test that calls `std::os::unix` without its own gate breaks the
+whole nightly build, not one test. The lint does not see that; read the module
+(or search it for `os::unix`, `PermissionsExt`, `MetadataExt`) before removing a
+module gate.
+
+### Which tests in `read_only_repos` and `room_reach` run on Windows
+
+`ReadOnlyRepos` is Claude Code's and Codex's file sandbox, which Kronn only wires
+on macOS and Linux. `check_platform` (`backend/src/agents/read_only_repos.rs`)
+returns an error when `cfg!(windows)`, and `identity` has a non-unix arm that
+errors too. So a test that reaches `ReadOnlyRepos::resolve*`,
+`VerifiedCheckout::verify`, or `room_reach::plan` with Claude Code and no full
+access cannot pass there: `plan` swallows the `verify` error and returns
+`Files::Closed`, so a test asserting an open checkout fails, and one asserting a
+closed checkout would pass for the wrong reason. Those are `#[cfg(unix)]`; only
+the tests that never get past an earlier, platform-independent return stay:
+
+| test | why it passes on Windows |
+| --- | --- |
+| `read_only_repos_empty_preserves_legacy_providers` | `resolve_with_dirs` returns `Ok(None)` for empty input before `check_platform` |
+| `a_room_that_reaches_nothing_and_can_ask_for_nothing_has_no_block` | `RoomReachPlan::default().prompt()`, no I/O |
+| `names_cannot_forge_lines_in_the_block` | `prompt()` on a plan with only requestable names, no I/O |
+| `nothing_granted_opens_nothing_and_says_what_can_be_asked_without_naming_it` | an empty `granted` list never reaches `verify` |
+| `a_full_access_agent_is_told_a_code_grant_is_not_enforced_for_it` | `full_access = true` skips `verify` (`room_reach.rs` `plan`); the prompt is text |
+| `a_full_access_agent_keeps_its_launch_and_is_still_told_what_it_reaches` | same: `full_access = true` |
+| `providers_without_the_policy_and_missing_work_dirs_open_nothing` | Ollama, OpenCode and Gemini are refused by the agent-type check that runs before the platform check, and Claude Code with no working directory never calls `verify` |
+
+The two helpers those tests use, `checkout` and `reached`, stay portable; every
+other helper in the module is `#[cfg(unix)]` so the Windows build has no dead code.
+This split was checked by compiling the two modules with every `#[cfg(unix)]` in
+them switched off and `check_platform` forced to refuse: those seven tests (and
+only those) build and pass. It is a simulation on macOS, not a Windows run.
 
 A module gate hides every test in it, so prefer gating the few tests that need
 the POSIX feature over the module, and prefer a portable fixture (a tempdir path,

@@ -262,6 +262,7 @@ impl RoomReachPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     use crate::agents::read_only_repos::{ReadOnlyRepos, ROOM_SETTINGS_MAX_BYTES};
 
     fn checkout(parent: &Path, name: &str) -> String {
@@ -286,6 +287,7 @@ mod tests {
     }
 
     /// The roots the launch would open, as strings.
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     fn opened(plan: &RoomReachPlan) -> Vec<String> {
         plan.checkouts()
             .iter()
@@ -293,6 +295,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     fn one_reach(path: &str) -> RoomReach {
         RoomReach {
             granted: vec![reached("p1", "granted", path, ScopeAccess::Read)],
@@ -300,6 +303,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_granted_checkout_is_opened_read_only_even_with_a_plan_grant() {
         let temp = tempfile::tempdir().unwrap();
@@ -362,16 +366,19 @@ mod tests {
         assert!(ReadOnlyRepos::resolve_room(&AgentType::Codex, &work, &claude_checkouts).is_err());
     }
 
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     fn plan_for_codex(work: &Path, reach: RoomReach) -> RoomReachPlan {
         plan(&AgentType::Codex, Some(work), false, reach)
     }
 
     /// The `--settings` document of a Claude Code launch.
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     fn settings_of(args: &[String]) -> serde_json::Value {
         let at = args.iter().position(|arg| arg == "--settings").unwrap();
         serde_json::from_str(&args[at + 1]).unwrap()
     }
 
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     fn added_dirs(args: &[String]) -> Vec<String> {
         args.windows(2)
             .filter(|pair| pair[0] == "--add-dir")
@@ -379,6 +386,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     fn strings(value: &serde_json::Value) -> Vec<String> {
         value
             .as_array()
@@ -390,6 +398,7 @@ mod tests {
             .unwrap_or_default()
     }
 
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     fn path_list_covers(paths: &[String], work: &Path, target: &Path) -> bool {
         let target = target.canonicalize().unwrap();
         paths.iter().filter(|path| !path.contains('*')).any(|path| {
@@ -404,6 +413,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_code_grant_opens_the_checkout_writable_and_a_plan_grant_stays_read_only() {
         let temp = tempfile::tempdir().unwrap();
@@ -477,6 +487,7 @@ mod tests {
     /// CLI's own command builder, policy applied, prompt last) and the ACP adapter
     /// one (`runner::adapter_policy_args`, the function the adapter route calls to
     /// build its `worker_args`).
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     fn route_args(policy: &ReadOnlyRepos, work: &Path) -> (Vec<String>, Vec<String>) {
         let mut direct = crate::agents::runner::direct_policy_args(
             &AgentType::ClaudeCode,
@@ -490,6 +501,7 @@ mod tests {
         (direct, adapter)
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_code_grant_reaches_both_launch_routes_and_its_revoke_closes_both() {
         use crate::db::discussion_scope::{grant, revoke, room_reach, scope_of};
@@ -558,6 +570,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_code_grant_never_opens_the_checkouts_credentials() {
         let temp = tempfile::tempdir().unwrap();
@@ -696,6 +709,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_code_root_cannot_write_what_a_later_program_runs_even_before_it_exists() {
         let temp = tempfile::tempdir().unwrap();
@@ -760,6 +774,7 @@ mod tests {
             .any(|rule| rule.starts_with(&format!("Edit(/{infra}/src"))));
     }
 
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     fn code_policy_of(work: &Path, repo: &str) -> ReadOnlyRepos {
         let plan = plan(
             &AgentType::ClaudeCode,
@@ -775,6 +790,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_hooks_directory_inside_the_checkout_stays_read_only_for_a_code_root() {
         let temp = tempfile::tempdir().unwrap();
@@ -856,6 +872,7 @@ mod tests {
 
     /// The deny rules and the sandbox `denyWrite` of a code root, with its
     /// `core.hooksPath` set to `value`.
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     fn hook_denials(work: &Path, infra: &str, value: &str) -> (Vec<String>, Vec<String>) {
         let output = crate::core::cmd::git_cmd()
             .args(["-C", infra, "config", "core.hooksPath", value])
@@ -924,6 +941,7 @@ mod tests {
         assert!(!deny_write.contains(&format!("{infra}/scripts")));
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_checkout_whose_hooks_directory_is_its_root_gets_the_code_grant_read_only() {
         let temp = tempfile::tempdir().unwrap();
@@ -993,6 +1011,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_repository_full_of_secret_fixtures_keeps_the_settings_argument_small() {
         let temp = tempfile::tempdir().unwrap();
@@ -1028,6 +1047,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn two_code_roots_share_one_settings_byte_budget() {
         let temp = tempfile::tempdir().unwrap();
@@ -1090,6 +1110,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_code_root_agent_is_told_it_cannot_commit_there() {
         let temp = tempfile::tempdir().unwrap();
@@ -1118,6 +1139,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_secret_no_pattern_names_survives_a_cap_blown_by_fixtures() {
         let temp = tempfile::tempdir().unwrap();
@@ -1172,6 +1194,7 @@ mod tests {
         assert!(args.iter().find(|a| a.starts_with('{')).unwrap().len() <= ROOM_SETTINGS_MAX_BYTES);
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn unnamed_secrets_that_fit_or_collapse_are_never_dropped() {
         let temp = tempfile::tempdir().unwrap();
@@ -1411,8 +1434,10 @@ mod tests {
 
     /// Points `KRONN_DATA_DIR` somewhere for one test and puts it back, even on a
     /// failed assertion.
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     struct DataDirRestore(Option<std::ffi::OsString>);
 
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     impl DataDirRestore {
         fn set(dir: &Path) -> Self {
             let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
@@ -1421,6 +1446,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // used only by tests that need VerifiedCheckout::verify, refused on Windows
     impl Drop for DataDirRestore {
         fn drop(&mut self) {
             match self.0.take() {
@@ -1430,6 +1456,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     #[serial_test::serial] // KRONN_DATA_DIR is process-wide
     fn a_checkout_holding_the_data_directory_is_never_opened_for_editing() {
@@ -1499,6 +1526,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_code_grant_is_journalled_applies_at_the_next_turn_and_a_revoke_closes_it() {
         use crate::db::discussion_scope::{grant, revoke, room_reach, scope_of};
@@ -1585,6 +1613,7 @@ mod tests {
         assert!(scope.grants.is_empty() && scope.revoked[0].access == ScopeAccess::Code);
     }
 
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_path_that_is_or_goes_through_a_symlink_is_never_opened() {
         let temp = tempfile::tempdir().unwrap();
@@ -1616,6 +1645,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_checkout_swapped_between_the_plan_and_the_launch_is_refused() {
         let temp = tempfile::tempdir().unwrap();
@@ -1695,6 +1725,7 @@ mod tests {
         assert!(RoomReachPlan::default().prompt().is_empty());
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_path_that_is_not_a_git_checkout_root_is_closed_not_opened() {
         let temp = tempfile::tempdir().unwrap();
@@ -1771,6 +1802,7 @@ mod tests {
         assert!(prompt.contains(&repo) && prompt.contains("plan (planning"));
     }
 
+    #[cfg(unix)] // VerifiedCheckout::verify refuses Windows in check_platform
     #[test]
     fn a_grant_opens_the_directory_at_the_next_turn_and_a_revoke_closes_it() {
         use crate::db::discussion_scope::{grant, revoke, room_reach, scope_of};

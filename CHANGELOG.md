@@ -23,8 +23,10 @@ Release notes for 0.9.3 and earlier are available in the
   runs the full backend lib suite on Windows; a test skipped there must be
   `#[cfg(unix)]` with a concrete POSIX reason on the gate line, never
   "unverified" (`scripts/ci/lint_windows_skips.py`, which also covers module and
-  whole-file gates; 343 gated tests carry a reason). Gates that only hid portable
-  tests were dropped, so the nightly decides. See
+  whole-file gates and a `cfg!`/`consts::OS` check that returns inside a test;
+  366 gated tests carry a reason). Gates that only hid portable tests were
+  dropped, so the nightly decides; the room-reach and read-only-repo tests that
+  need `VerifiedCheckout::verify`, which refuses Windows, stay gated. See
   `docs/operations/windows-boot-gate.md` (KT-1629).
 
 - Media: an image or a video can be generated from several source images of

@@ -77,6 +77,8 @@ class Reasons(unittest.TestCase):
             "runs `sleep` as a program, which Windows lacks",
             "builds non-UTF-8 names from raw bytes",
             "reads /proc/self",
+            "VerifiedCheckout::verify refuses Windows in check_platform",
+            "ReadOnlyRepos::resolve* refuses Windows in check_platform",
         ):
             findings, _ = scan(test_fn(f"#[cfg(unix)] // {reason}"))
             self.assertEqual(findings, [], reason)
@@ -175,6 +177,83 @@ class RuntimeSkips(unittest.TestCase):
     def test_an_early_return_after_other_statements_is_refused(self):
         findings, _ = scan("#[test]\nfn a() {\n    if cfg!(windows) {\n        eprintln!(\"skipped\");\n        return;\n    }\n}\n")
         self.assertEqual(len(findings), 1)
+
+    def test_a_nested_block_before_the_return_does_not_hide_it(self):
+        for body in (
+            "if cfg!(windows) {\n        { let _ = 1; }\n        return;\n    }",
+            "if cfg!(windows) {\n        let v = vec![1].iter().map(|x| { x + 1 }).count();\n        assert_eq!(v, 1);\n        return;\n    }",
+            "if cfg!(windows) {\n        if true { eprintln!(\"skipped\"); }\n        return;\n    }",
+            "if cfg!(windows) {\n        match 1 { _ => { let _ = 2; } }\n        return Ok(());\n    }",
+        ):
+            findings, _ = scan(f"#[test]\nfn a() {{\n    {body}\n}}\n")
+            self.assertEqual(len(findings), 1, body)
+
+    def test_the_os_constant_is_a_platform_check_too(self):
+        for check in (
+            'std::env::consts::OS == "windows"',
+            'std::env::consts::OS != "linux"',
+            'env::consts::OS.eq("windows")',
+            'matches!(std::env::consts::OS, "windows")',
+            'std::env::consts::FAMILY == "windows"',
+            'OS == "windows"',
+            '"windows" == OS',
+        ):
+            findings, _ = scan(f"#[test]\nfn a() {{\n    if {check} {{ return; }}\n}}\n")
+            self.assertEqual(len(findings), 1, check)
+            self.assertIn("consts::OS", findings[0])
+
+    def test_every_cfg_macro_form_naming_a_platform_is_a_platform_check(self):
+        for check in (
+            'cfg!(target_os = "windows")',
+            'cfg!(target_family = "windows")',
+            'cfg!(not(target_family = "unix"))',
+            'cfg!(all(windows, target_env = "msvc"))',
+            'cfg!(any(windows, target_os = "freebsd"))',
+            'cfg!(not(any(target_os = "linux", target_os = "macos")))',
+            '!cfg!(target_os = "macos")',
+            'cfg!(not(target_os = "macos"))',
+            "cfg ! ( windows )",
+        ):
+            findings, _ = scan(f"#[test]\nfn a() {{\n    if {check} {{ return; }}\n}}\n")
+            self.assertEqual(len(findings), 1, check)
+
+    def test_a_return_in_the_else_branch_or_a_match_arm_is_refused(self):
+        for body in (
+            "if cfg!(unix) {\n        let _ = 1;\n    } else {\n        return;\n    }",
+            "if cfg!(unix) { let _ = 1; } else if cfg!(target_os = \"windows\") { return; }",
+            'match std::env::consts::OS {\n        "windows" => return,\n        _ => {}\n    }',
+            "if let true = cfg!(windows) {\n        return;\n    }",
+        ):
+            findings, _ = scan(f"#[test]\nfn a() {{\n    {body}\n}}\n")
+            self.assertEqual(len(findings), 1, body)
+
+    def test_an_async_test_and_a_test_returning_a_result_are_read_to_the_end(self):
+        source = "#[tokio::test]\nasync fn a() -> Result<(), String> {\n    let x = [0u8; 4];\n    if cfg!(windows) {\n        return Ok(());\n    }\n    Ok(())\n}\n"
+        self.assertEqual(len(scan(source)[0]), 1)
+
+    def test_a_platform_check_that_does_not_return_is_not_a_skip(self):
+        for body in (
+            'let sep = if cfg!(windows) { ";" } else { ":" };',
+            'let exe = if std::env::consts::OS == "windows" { "cmd.exe" } else { "sh" };',
+            'let n = match std::env::consts::OS { "windows" => 1, _ => 2 };',
+            "if cfg!(debug_assertions) { return; }",
+            "if some_flag { return; }",
+        ):
+            findings, _ = scan(f"#[test]\nfn a() {{\n    {body}\n}}\n")
+            self.assertEqual(findings, [], body)
+
+    def test_a_return_after_the_platform_branch_is_not_inside_it(self):
+        source = "#[test]\nfn a() {\n    let p = if cfg!(windows) { 1 } else { 2 };\n    if p == 3 {\n        return;\n    }\n}\n"
+        self.assertEqual(scan(source)[0], [])
+
+    def test_a_platform_check_in_a_string_or_comment_is_ignored(self):
+        source = '#[test]\nfn a() {\n    // if cfg!(windows) { return; }\n    let _ = "if cfg!(windows) { return; }";\n}\n'
+        self.assertEqual(scan(source)[0], [])
+
+    def test_a_long_signature_does_not_hide_the_test_from_the_head_match(self):
+        params = ", ".join(f"p{i}: u32" for i in range(40))
+        source = f"#[test]\nfn a({params}) {{\n    if cfg!(windows) {{ return; }}\n}}\n"
+        self.assertEqual(len(scan(source)[0]), 1)
 
     def test_an_early_return_in_a_later_test_is_not_blamed_on_this_one(self):
         source = "mod t {\n    #[test]\n    fn a() {\n    }\n\n    #[test]\n    fn b() {\n        if cfg!(windows) { return; }\n    }\n}\n"
