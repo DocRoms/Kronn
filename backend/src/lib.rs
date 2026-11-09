@@ -768,11 +768,11 @@ async fn auth_middleware(
     let expected_token = config.server.auth_token.clone();
     // KT-1596 — behind a TLS proxy on this machine every network request arrives
     // from loopback, so the loopback bypass would let the whole network in:
-    // the token is then required from loopback too (Docker's gateway sets
-    // `X-Real-IP`, already read below).
+    // the token is then required from loopback too. Docker is no exception: a
+    // proxy on the host reaches nginx from the bridge gateway, which counts as
+    // local, and `X-Real-IP` then names that gateway, not the remote user.
     let proxy_fronted = !crate::core::net_expose::loopback_peer_is_owner(
         crate::core::net_expose::proxy_declared_for(&config.server),
-        crate::core::env::is_docker(),
     );
     let strict_localhost = config.server.auth_strict_localhost || proxy_fronted;
     let auth_locked = config.server.auth_locked && auth_enabled && expected_token.is_none();

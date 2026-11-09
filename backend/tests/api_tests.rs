@@ -20102,6 +20102,161 @@ async fn recovery_behind_a_declared_proxy_needs_the_proof_read_at_the_machine() 
 }
 
 #[tokio::test]
+async fn a_declared_proxy_never_makes_the_docker_bridge_gateway_the_owner() {
+    // KT-1596 round 3: a proxy on the Docker host reaches nginx from the bridge
+    // gateway (172.x.0.1), which `is_local_ip` counts as local. With a declared
+    // proxy that peer is the network, Docker or not: it needs the token (or, for
+    // recovery, the on-machine proof).
+    const DESTRUCTIVE: &str = "/api/config/auth-token/regenerate";
+    let state = test_state();
+    {
+        let mut cfg = state.config.write().await;
+        cfg.server.auth_enabled = true;
+        cfg.server.auth_token = Some("tok".into());
+        cfg.server.tls_terminated_by_proxy = true;
+        cfg.server.public_origin = Some("https://kronn.example.com".into());
+    }
+    let gateway = [172, 18, 0, 1];
+    for (peer, label) in [(gateway, "bridge gateway"), ([127, 0, 0, 1], "loopback")] {
+        let app = kronn::build_router_with_auth(state.clone(), true);
+        let (status, _) = send_from(app, "POST", DESTRUCTIVE, peer, &[], Value::Null).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: destructive");
+        let app = kronn::build_router_with_auth(state.clone(), true);
+        let (status, _) = send_from(app, "GET", "/api/projects", peer, &[], Value::Null).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: read");
+    }
+    // The token still opens it: the owner reaches Kronn through the proxy.
+    let app = kronn::build_router_with_auth(state.clone(), true);
+    let (status, _) = send_from(
+        app,
+        "GET",
+        "/api/projects",
+        gateway,
+        &[("authorization", "Bearer tok")],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Auth locked: the gateway without the proof is refused recovery.
+    {
+        let mut cfg = state.config.write().await;
+        cfg.server.auth_token = None;
+        cfg.server.auth_locked = true;
+    }
+    let app = kronn::build_router_with_auth(state.clone(), true);
+    let (status, _) = send_from(app, "POST", DESTRUCTIVE, gateway, &[], Value::Null).await;
+    assert_eq!(status, StatusCode::LOCKED, "no proof, no recovery");
+    let app = kronn::build_router_with_auth(state.clone(), true);
+    let (status, _) = send_from(
+        app,
+        "GET",
+        "/api/config/recovery/status",
+        gateway,
+        &[("x-real-ip", "127.0.0.1")],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::LOCKED, "a forged X-Real-IP is no proof");
+
+    // Control: with no proxy declared the gateway is still the local owner.
+    {
+        let mut cfg = state.config.write().await;
+        cfg.server.tls_terminated_by_proxy = false;
+        cfg.server.auth_locked = false;
+        cfg.server.auth_token = Some("tok".into());
+    }
+    let app = kronn::build_router_with_auth(state, true);
+    let (status, _) = send_from(app, "GET", "/api/projects", gateway, &[], Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial]
+async fn in_docker_a_declared_proxy_request_from_the_bridge_gateway_is_not_trusted() {
+    // The same round-3 hole through the Docker path: `X-Real-IP` (set by nginx)
+    // names the bridge gateway, which is "local", so the old Docker exemption
+    // gave every proxied request owner trust.
+    let previous = kronn::core::child_env::var_os("KRONN_IN_DOCKER");
+    kronn::core::child_env::set_var("KRONN_IN_DOCKER", "1");
+    let state = test_state();
+    {
+        let mut cfg = state.config.write().await;
+        cfg.server.auth_enabled = true;
+        cfg.server.auth_token = Some("tok".into());
+        cfg.server.tls_terminated_by_proxy = true;
+        cfg.server.public_origin = Some("https://kronn.example.com".into());
+    }
+    let via_gateway = [("x-real-ip", "172.18.0.1")];
+    let app = kronn::build_router_with_auth(state.clone(), true);
+    let destructive = send_from(
+        app,
+        "POST",
+        "/api/config/auth-token/regenerate",
+        [172, 18, 0, 2],
+        &via_gateway,
+        Value::Null,
+    )
+    .await
+    .0;
+    let app = kronn::build_router_with_auth(state.clone(), true);
+    let read = send_from(
+        app,
+        "GET",
+        "/api/projects",
+        [172, 18, 0, 2],
+        &via_gateway,
+        Value::Null,
+    )
+    .await
+    .0;
+    // Auth locked: recovery needs the proof, a gateway X-Real-IP is not one.
+    {
+        let mut cfg = state.config.write().await;
+        cfg.server.auth_token = None;
+        cfg.server.auth_locked = true;
+    }
+    let app = kronn::build_router_with_auth(state.clone(), true);
+    let recovery = send_from(
+        app,
+        "GET",
+        "/api/config/recovery/status",
+        [172, 18, 0, 2],
+        &via_gateway,
+        Value::Null,
+    )
+    .await
+    .0;
+    // Control, still in Docker: no proxy declared, the gateway is the owner.
+    {
+        let mut cfg = state.config.write().await;
+        cfg.server.tls_terminated_by_proxy = false;
+        cfg.server.auth_locked = false;
+        cfg.server.auth_token = Some("tok".into());
+    }
+    let app = kronn::build_router_with_auth(state, true);
+    let control = send_from(
+        app,
+        "GET",
+        "/api/projects",
+        [172, 18, 0, 2],
+        &via_gateway,
+        Value::Null,
+    )
+    .await
+    .0;
+    match previous {
+        Some(previous) => kronn::core::child_env::set_var("KRONN_IN_DOCKER", previous),
+        None => kronn::core::child_env::remove_var("KRONN_IN_DOCKER"),
+    }
+
+    assert_eq!(destructive, StatusCode::UNAUTHORIZED, "destructive");
+    assert_eq!(read, StatusCode::UNAUTHORIZED, "read");
+    assert_eq!(recovery, StatusCode::LOCKED, "recovery without the proof");
+    assert_eq!(control, StatusCode::OK, "control: no proxy declared");
+}
+
+#[tokio::test]
 async fn a_reset_is_refused_while_a_proxy_is_declared_and_changes_nothing() {
     // KT-1596 review: the reset must not forget a live proxy declaration (the
     // proxy keeps forwarding the network from 127.0.0.1).

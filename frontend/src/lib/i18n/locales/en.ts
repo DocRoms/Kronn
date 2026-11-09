@@ -3272,6 +3272,7 @@ const en: TranslationDict = {
   'settings.recovery.staleWarning': 'A key store holds another key than the one in use ({0}). Set a recovery passphrase before any downgrade: an older Kronn could adopt that key.',
   'keyLocked.banner': 'Stored secrets are locked: no key on this machine decrypts them. Nothing was deleted.',
   'authLocked.remoteHint': 'Kronn is locked and can only be unlocked on the machine where it runs. Open Kronn there (http://127.0.0.1) to restore the key or set a new API token.',
+  'authLocked.proxyDocLink': 'Behind a TLS proxy? Recovery then needs a proof read on the machine (runbook: auth-and-tls)',
   'authLocked.tokenHint': 'The encryption key is in place, but the stored API token was encrypted with another key and cannot be read. Set a new API token; remote clients will need it.',
   'authLocked.newToken': 'Set a new API token',
   'authLocked.newTokenDone': 'New API token (shown once, copy it for remote clients):',

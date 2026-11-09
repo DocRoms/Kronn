@@ -262,7 +262,6 @@ pub async fn ws_handler(
     // from loopback: that address no longer says "the owner's own browser".
     let proxy_fronted = !crate::core::net_expose::loopback_peer_is_owner(
         crate::core::net_expose::proxy_declared_for(&config.server),
-        in_docker,
     );
     let p2p_enabled = state.p2p.enabled();
     let has_valid_token =

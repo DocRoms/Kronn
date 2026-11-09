@@ -3248,6 +3248,7 @@ const zh: TranslationDict = {
   "settings.recovery.staleWarning": "某个密钥存储中保存的密钥与当前使用的不同（{0}）。降级前请先设置恢复密码：旧版 Kronn 可能会采用该密钥。",
   "keyLocked.banner": "已存储的机密被锁定：本机没有任何密钥能解密它们。没有删除任何内容。",
   "authLocked.remoteHint": "Kronn 已锁定，只能在其运行的机器上解锁。请在那台机器上打开 Kronn（http://127.0.0.1）以恢复密钥或设置新的 API 令牌。",
+  "authLocked.proxyDocLink": "位于 TLS 代理之后？此时恢复需要在本机读取的凭证（文档：auth-and-tls）",
   "authLocked.tokenHint": "加密密钥正常，但已存储的 API 令牌是用另一个密钥加密的，无法读取。请设置新的 API 令牌；远程客户端将需要它。",
   "authLocked.newToken": "设置新的 API 令牌",
   "authLocked.newTokenDone": "新的 API 令牌（仅显示一次，请复制给远程客户端）：",

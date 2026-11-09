@@ -192,11 +192,16 @@ pub fn declared_origin(server: &crate::models::ServerConfig) -> Option<String> {
 
 /// Whether a request that arrives from a loopback peer may be trusted as the
 /// owner: never when a proxy on this machine forwards the network's traffic
-/// (every proxied request then comes from 127.0.0.1). Docker is exempt: its
-/// gateway sets `X-Real-IP`, which the auth middleware already reads.
-pub fn loopback_peer_is_owner(proxy_declared: bool, is_docker: bool) -> bool {
-    is_docker || !proxy_declared
+/// (every proxied request then comes from 127.0.0.1). Docker is not exempt: a
+/// proxy on the host reaches nginx from the bridge gateway (172.x.0.1), which
+/// counts as local too, and nginx's `X-Real-IP` then names that gateway, not
+/// the remote user. Pure + tested.
+pub fn loopback_peer_is_owner(proxy_declared: bool) -> bool {
+    !proxy_declared
 }
+
+/// Shortest on-machine proof ever minted or accepted.
+const LOCAL_PROOF_MIN_LEN: usize = 32;
 
 /// Header carrying the on-machine proof (see [`local_proof`]).
 pub const LOCAL_PROOF_HEADER: &str = "x-kronn-local-proof";
@@ -214,7 +219,7 @@ pub fn local_proof(dir: &std::path::Path) -> std::io::Result<String> {
     let path = dir.join(LOCAL_PROOF_FILE);
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let existing = existing.trim();
-        if existing.len() >= 32 {
+        if existing.len() >= LOCAL_PROOF_MIN_LEN {
             return Ok(existing.to_string());
         }
     }
@@ -243,10 +248,10 @@ pub fn arm_local_proof(server: &crate::models::ServerConfig) {
     }
 }
 
-/// Whether `presented` is the on-machine proof of `dir`. A missing or empty
-/// proof never matches, and the comparison does not stop at the first
-/// differing byte. The file is only created by [`local_proof`], never here, so
-/// a request cannot make it appear.
+/// Whether `presented` is the on-machine proof of `dir`. A missing, empty or
+/// shorter-than-minted (hand-written, truncated) proof file never matches, and
+/// the comparison does not stop at the first differing byte. The file is only
+/// created by [`local_proof`], never here, so a request cannot make it appear.
 pub fn local_proof_matches(dir: &std::path::Path, presented: Option<&str>) -> bool {
     let Some(presented) = presented.map(str::trim).filter(|p| !p.is_empty()) else {
         return false;
@@ -255,7 +260,7 @@ pub fn local_proof_matches(dir: &std::path::Path, presented: Option<&str>) -> bo
         return false;
     };
     let expected = expected.trim();
-    !expected.is_empty()
+    expected.len() >= LOCAL_PROOF_MIN_LEN
         && crate::core::bridge_token::operator_token_matches(Some(expected), presented)
 }
 
@@ -601,12 +606,25 @@ mod tests {
 
     #[test]
     fn a_proxy_on_this_machine_withdraws_the_loopback_owner_trust() {
-        // Native + declared proxy: a loopback peer is the proxy, not the owner.
-        assert!(!loopback_peer_is_owner(true, false));
-        assert!(loopback_peer_is_owner(false, false));
-        // Docker reads X-Real-IP from its gateway instead.
-        assert!(loopback_peer_is_owner(true, true));
-        assert!(loopback_peer_is_owner(false, true));
+        // A declared proxy: a loopback peer (the bridge gateway in Docker, as a
+        // host proxy reaches nginx from it) is the proxy, not the owner.
+        assert!(!loopback_peer_is_owner(true));
+        assert!(loopback_peer_is_owner(false));
+    }
+
+    #[test]
+    fn a_short_or_hand_written_proof_file_never_matches() {
+        let dir = std::env::temp_dir().join(format!("kronn-proof-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Hand-written, shorter than minted: refused even when presented verbatim.
+        std::fs::write(dir.join(LOCAL_PROOF_FILE), "letmein").unwrap();
+        assert!(!local_proof_matches(&dir, Some("letmein")));
+        // `local_proof` replaces it with a minted one that does match.
+        let minted = local_proof(&dir).unwrap();
+        assert!(minted.len() >= LOCAL_PROOF_MIN_LEN);
+        assert!(local_proof_matches(&dir, Some(&minted)));
+        assert!(!local_proof_matches(&dir, Some("letmein")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

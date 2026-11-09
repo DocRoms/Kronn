@@ -3282,6 +3282,7 @@ const fr: TranslationDict = {
   'settings.recovery.staleWarning': 'Un emplacement de clé contient une autre clé que celle en cours ({0}). Définissez une phrase de récupération avant tout retour à une version antérieure : un Kronn plus ancien pourrait adopter cette clé.',
   'keyLocked.banner': 'Les secrets enregistrés sont verrouillés : aucune clé de cette machine ne les déchiffre. Rien n\'a été supprimé.',
   'authLocked.remoteHint': 'Kronn est verrouillé et ne peut être déverrouillé que sur la machine où il tourne. Ouvrez-y Kronn (http://127.0.0.1) pour restaurer la clé ou définir un nouveau jeton d\'API.',
+  'authLocked.proxyDocLink': 'Derrière un proxy TLS ? La récupération demande alors une preuve lue sur la machine (guide : auth-and-tls)',
   'authLocked.tokenHint': 'La clé de chiffrement est en place, mais le jeton d\'API enregistré a été chiffré avec une autre clé et ne peut pas être lu. Définissez un nouveau jeton d\'API ; les clients distants en auront besoin.',
   'authLocked.newToken': 'Définir un nouveau jeton d\'API',
   'authLocked.newTokenDone': 'Nouveau jeton d\'API (affiché une seule fois, copiez-le pour les clients distants) :',

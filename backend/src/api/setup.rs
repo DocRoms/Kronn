@@ -2934,11 +2934,14 @@ pub async fn import_data(
 }
 
 /// Why a reset must not run now, if it must not (see `reset`). Pure + tested.
-fn reset_refusal(proxy_declared_in_config: bool) -> Option<String> {
-    proxy_declared_in_config.then(|| {
+/// `proxy_declared` is the effective declaration: the config field or the
+/// `KRONN_TLS_TERMINATED_BY_PROXY` env flag, which a reset would not clear.
+fn reset_refusal(proxy_declared: bool) -> Option<String> {
+    proxy_declared.then(|| {
         "Reset refused: a TLS proxy is declared for this instance, and a reset would forget \
          that at the next start, letting everyone behind the proxy in as the local owner. \
-         Clear the proxy declaration in Settings › Server & network access first."
+         Clear the proxy declaration first (Settings › Server & network access, and \
+         KRONN_TLS_TERMINATED_BY_PROXY if it is set in the environment)."
             .to_string()
     })
 }
@@ -2952,7 +2955,9 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     // would regain the loopback owner trust. Clearing the declaration is a
     // deliberate act in Settings, never a side effect of a reset. Checked before
     // anything is deleted.
-    if let Some(refusal) = reset_refusal(state.config.read().await.server.tls_terminated_by_proxy) {
+    // The effective declaration counts: config or env.
+    let declared = crate::core::net_expose::proxy_declared_for(&state.config.read().await.server);
+    if let Some(refusal) = reset_refusal(declared) {
         return Json(ApiResponse::err(refusal));
     }
     // Clear the data first: a failure reports, and nothing else changes.
@@ -6172,6 +6177,17 @@ mod network_exposure_tests {
         let refusal = reset_refusal(true).expect("must refuse");
         assert!(refusal.contains("Settings"), "{refusal}");
         assert!(reset_refusal(false).is_none());
+    }
+
+    #[test]
+    fn a_reset_is_refused_when_the_proxy_is_declared_only_by_the_env() {
+        use crate::core::net_expose::proxy_declared;
+        // Config field false, env flag set: the effective declaration is true,
+        // and that is what the reset consults.
+        let declared = proxy_declared(false, Some("1"));
+        assert!(declared);
+        assert!(reset_refusal(declared).is_some());
+        assert!(reset_refusal(proxy_declared(false, None)).is_none());
     }
 
     #[test]

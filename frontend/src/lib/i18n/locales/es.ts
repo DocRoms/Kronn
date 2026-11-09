@@ -3272,6 +3272,7 @@ const es: TranslationDict = {
   'settings.recovery.staleWarning': 'Un almacén de claves contiene otra clave distinta de la que está en uso ({0}). Define una frase de recuperación antes de volver a una versión anterior: un Kronn más antiguo podría adoptar esa clave.',
   'keyLocked.banner': 'Los secretos guardados están bloqueados: ninguna clave de esta máquina los descifra. No se ha borrado nada.',
   'authLocked.remoteHint': 'Kronn está bloqueado y solo se puede desbloquear en la máquina donde se ejecuta. Abre Kronn allí (http://127.0.0.1) para restaurar la clave o definir un nuevo token de API.',
+  'authLocked.proxyDocLink': '¿Detrás de un proxy TLS? La recuperación exige entonces una prueba leída en la máquina (guía: auth-and-tls)',
   'authLocked.tokenHint': 'La clave de cifrado está en su sitio, pero el token de API guardado se cifró con otra clave y no se puede leer. Define un nuevo token de API; los clientes remotos lo necesitarán.',
   'authLocked.newToken': 'Definir un nuevo token de API',
   'authLocked.newTokenDone': 'Nuevo token de API (se muestra una vez, cópialo para los clientes remotos):',

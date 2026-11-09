@@ -84,8 +84,12 @@ Behind a declared proxy:
   rule as `server.auth_strict_localhost`) and the WebSocket "local frontend"
   shortcut is withdrawn. Declaring from Settings creates the token if needed
   and hands it to the UI in the same reply; a browser or desktop webview that
-  loses it must paste it again (Settings › Server & network access). Docker is
-  unchanged: its gateway sets `X-Real-IP`.
+  loses it must paste it again (Settings › Server & network access). **Docker is
+  no exception**: a proxy on the host reaches nginx from the bridge gateway
+  (`172.x.0.1`), which counts as local, and nginx's `X-Real-IP` then names that
+  gateway, not the remote user. With a declared proxy no peer is ever the owner
+  by address, Docker included: the token (or, for recovery, the local proof
+  below) is required.
 - The proxy must forward WebSocket upgrades (`/api/ws`) for P2P.
 - **The browser origin is allowed exactly.** CORS and the WebSocket `Origin`
   check accept the declared public origin (and only it, read from the live
@@ -96,17 +100,20 @@ Behind a declared proxy:
   `PERMISSION_POSTS`): even with auth disabled
   (`KRONN_ALLOW_INSECURE_LAN=1`) a non-loopback peer needs the token, so a LAN
   client cannot declare a proxy or change the exposure.
-- **A reset refuses while the proxy is declared in the config.** The reset
-  rewrites `config.toml` key-only, which would forget the declaration while the
-  proxy keeps forwarding from `127.0.0.1` (the loopback bypass would return).
-  Withdraw the declaration in Settings first. A declaration made by the
-  environment is not touched by a reset.
+- **A reset refuses while the proxy is declared**, in the config or by
+  `KRONN_TLS_TERMINATED_BY_PROXY`. The reset rewrites `config.toml` key-only,
+  which would forget a config declaration while the proxy keeps forwarding from
+  `127.0.0.1` (the loopback bypass would return). Withdraw the declaration in
+  Settings (and unset the variable) first.
 - **Recovery behind a proxy needs a proof read at the machine.** While auth is
   locked (the stored token cannot be decrypted), the recovery routes
   (`/api/config/recovery/*`, `auth-token/regenerate`) are normally open to a
   loopback caller. Behind a proxy every caller is loopback, so they also need the
   `X-Kronn-Local-Proof` header, set to the content of the `local-proof` file in
-  the Kronn data directory (owner-only, minted when a proxy is declared). From
+  the Kronn data directory (owner-only, minted when a proxy is declared; a
+  file shorter than 32 characters is never accepted and is re-minted). The
+  locked screen links to this page; the web UI cannot send the header, so this
+  is a `curl` recovery. From
   the machine: `curl -H "X-Kronn-Local-Proof: $(cat <data dir>/local-proof)" …`.
   The locked refusal (HTTP 423) says so.
 
