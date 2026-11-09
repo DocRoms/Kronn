@@ -48,6 +48,29 @@ them on both campaign runs and the implicit run created by a single-task
 `task_exec_launch`; a worker manifest can report observations but cannot add,
 remove or replace these gates.
 
+### Default validations: fmt + clippy + targeted lib tests
+
+In the CI gate model the PR is the gate, so the full test suite belongs to the
+PR's CI, not to a local integration validation. A full local `cargo test`
+averages about 20 minutes (5 runs, max 24.5 min, KT-1630 audit) against 3.3
+minutes for `cargo test --lib`. The validations Kronn proposes are therefore:
+
+- `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`;
+- `cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings`;
+- targeted lib tests, `cargo test --lib --manifest-path backend/Cargo.toml <filter>`.
+
+The launch dialog states this under the validations field, and the worker brief
+tells the worker the same (fmt + clippy + targeted lib tests; the full suite is
+the PR's CI's). A validation that replays the full suite — bare `cargo test`,
+`cargo nextest run` with no `--lib`/`--bin`/`--test`/`--doc` target and no name
+filter, `make test-backend` or `make test-backend-cov` — is flagged as CI-owned:
+the dialog shows a hint, and `task_exec_prepare` adds a non-blocking
+`full_suite_ci_owned` entry to `warnings`. The flag never refuses: a principal
+who keeps the gate still gets it run at integration. Both detectors are pure
+string checks over the whitespace-split command:
+`backend/src/api/orchestration.rs` (`is_full_suite_validation`) and
+`frontend/src/lib/fullSuiteValidation.ts`; keep them in step.
+
 Task orchestration is available by default in 0.11.0; there is no hidden feature
 flag. Nothing starts automatically until an operator launches a task, and
 `auto_continue` remains off unless the campaign explicitly enables it.

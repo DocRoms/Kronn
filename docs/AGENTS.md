@@ -166,7 +166,7 @@ Never load everything "just in case".
 - Include **edge cases**: empty input, large input, unicode, error paths.
 - Assertions must be **meaningful** — not just "renders without crashing".
 - Mocks must match **real API shapes** (check `types/generated.ts`).
-- Run `cargo test` (backend) and `npx vitest run` (frontend) **before declaring a task done**.
+- Run the **targeted** tests that cover your change (`cargo test --lib <filter>` for the backend, `npx vitest run <files>` for the frontend) **before declaring a task done**, plus `cargo fmt --check` and `cargo clippy`. The **full** suites (`make test-backend`, `make test-frontend`) belong to the PR's CI, not to a local or integration validation: a full local `cargo test` averages ~20 min against 3.3 min for `--lib` (KT-1630 audit). See [Delegate a planning task](guides/task-orchestration.md#default-validations-fmt--clippy--targeted-lib-tests).
 - If a test is flaky, fix the root cause — do not add retries or sleeps.
 
 ---

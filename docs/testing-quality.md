@@ -62,7 +62,11 @@ Run from the repository root unless a working directory is shown.
 | Browser E2E | `make test-e2e` | Entire Playwright suite passes against the expected backend fixture |
 
 `make test-backend-lib` runs the library unit tests only: a quick loop, not
-evidence for the gate. `export_bindings` is skipped locally (the default
+evidence for the gate. The release gate above is CI's: a local or orchestration
+integration validation is `cargo fmt --check`, `cargo clippy` and targeted lib
+tests (`cargo test --lib <filter>`, 3.3 min against ~20 min for the full local
+`cargo test`, KT-1630 audit); a full-suite validation is flagged `full_suite_ci_owned`
+(see [task orchestration](guides/task-orchestration.md#default-validations-fmt--clippy--targeted-lib-tests)). `export_bindings` is skipped locally (the default
 nextest profile filters it) so the ts-rs bindings stay untouched; CI's `ci`
 profile runs it and checks generated-type drift. `make install-dev-tools`
 installs cargo-nextest and cargo-llvm-cov; without nextest, `make test-backend`
