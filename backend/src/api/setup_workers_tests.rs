@@ -14,7 +14,7 @@ fn workers(rounds: u32, unlimited: bool) -> WorkersConfig {
     WorkersConfig {
         default_max_review_rounds: rounds,
         review_rounds_unlimited: unlimited,
-        background_priority: true,
+        ..Default::default()
     }
 }
 
@@ -147,6 +147,103 @@ fn the_review_rounds_argument_is_an_integer_or_unlimited_and_nothing_else() {
             "{bad} must be refused"
         );
     }
+}
+
+/// KT-1632 — the cap on local task workers defaults to 2, an older config
+/// loads with it, and the form can never persist a cap that would queue every
+/// worker for ever.
+#[test]
+fn the_task_worker_cap_defaults_to_two_and_refuses_zero_and_excess() {
+    assert_eq!(WorkersConfig::default().max_concurrent_task_workers, 2);
+    assert_eq!(
+        WorkersConfig::default().effective_max_concurrent_task_workers(),
+        2
+    );
+
+    let mut table = toml::Table::try_from(config::default_config()).unwrap();
+    table.remove("workers");
+    let older: AppConfig = table.try_into().unwrap();
+    assert_eq!(older.workers.max_concurrent_task_workers, 2);
+    let partial: WorkersConfig = toml::from_str("review_rounds_unlimited = true").unwrap();
+    assert_eq!(partial.max_concurrent_task_workers, 2);
+
+    for (cap, valid) in [(0, false), (1, true), (4, true), (64, true), (65, false)] {
+        let candidate = WorkersConfig {
+            max_concurrent_task_workers: cap,
+            ..Default::default()
+        };
+        assert_eq!(candidate.validate().is_ok(), valid, "cap {cap}");
+    }
+    // A hand-edited 0 still bounds, rather than parking every worker.
+    let edited = WorkersConfig {
+        max_concurrent_task_workers: 0,
+        ..Default::default()
+    };
+    assert_eq!(edited.effective_max_concurrent_task_workers(), 1);
+}
+
+async fn dispatch_limits(state: &crate::AppState) -> serde_json::Value {
+    let config = state.config.read().await;
+    serde_json::from_str(&crate::agents::runner::dispatch_concurrency_limits(&config)).unwrap()
+}
+
+/// KT-1632 — Settings > Workers reaches the claim: the dispatcher's limits
+/// carry the cap next to the per-agent ones, and a saved value changes it.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_saved_cap_is_the_one_the_dispatcher_admits_under() {
+    let _restore =
+        crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&["KRONN_DATA_DIR"]);
+    let data = tempfile::tempdir().unwrap();
+    crate::core::child_env::set_var("KRONN_DATA_DIR", data.path());
+    let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+    let config = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
+    let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+    let key = crate::db::agent_dispatch::TASK_WORKER_LIMIT_KEY;
+
+    let initial = dispatch_limits(&state).await;
+    assert_eq!(initial[key], 2);
+    // The per-agent and local-pool caps are still there.
+    assert!(initial["__local_global"].is_number());
+    assert!(initial["ClaudeCode"].is_number());
+
+    let (status, body) = workers_reply(
+        save_workers_config(
+            State(state.clone()),
+            Json(WorkersConfig {
+                max_concurrent_task_workers: 4,
+                ..Default::default()
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["max_concurrent_task_workers"], 4);
+    assert_eq!(dispatch_limits(&state).await[key], 4);
+
+    let (status, body) = workers_reply(
+        save_workers_config(
+            State(state.clone()),
+            Json(WorkersConfig {
+                max_concurrent_task_workers: 0,
+                ..Default::default()
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        state
+            .config
+            .read()
+            .await
+            .workers
+            .max_concurrent_task_workers,
+        4,
+        "a refused value leaves the saved one"
+    );
 }
 
 /// KT-1633 — Settings > Workers: the background-priority switch is on out of

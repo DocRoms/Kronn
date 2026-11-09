@@ -11513,6 +11513,7 @@ Suite de la réponse.";
                 None,
                 &[],
                 None,
+                crate::core::background_priority::Priority::Normal,
             )
         })
         .expect("the stand-in binary starts");

@@ -11,11 +11,11 @@ escalates on the `N+1`-th (`new_rounds > max_review_rounds`).
 `[src: file: backend/src/db/orchestration.rs:4464-4560#commit_review_checkpoint]`
 
 - **Integer:** 1 to 1000. `0` is refused at every boundary.
-  `[src: file: backend/src/models/setup.rs:170-191#parse_review_rounds_arg]`
+  `[src: file: backend/src/models/setup.rs:200-221#parse_review_rounds_arg]`
 - **Unlimited:** no cap. It is stored in the existing `NOT NULL INTEGER` columns as a **sentinel**,
   `UNLIMITED_REVIEW_ROUNDS = u32::MAX` (4294967295) — never `0`, so the `> max` comparison simply never
   fires and no migration is needed. APIs and the UI show it as `unlimited` / `∞`.
-  `[src: file: backend/src/models/setup.rs:168#UNLIMITED_REVIEW_ROUNDS]`
+  `[src: file: backend/src/models/setup.rs:198#UNLIMITED_REVIEW_ROUNDS]`
 
 Unlimited removes the **round** cap only. The escalations for real stalls (no delivery, watchdog,
 quota, integration failures) are unchanged. What it does not bound is a worker looping on a review that
@@ -103,7 +103,7 @@ The browser's « Extend rounds » button on the execution card calls
   `request_changes` never delivered them) are posted to its worker's room, then it takes the ordinary
   reassignment to the *same* worker, unless the campaign's token budget is spent (see above). Only the
   LATEST entry into `Escalated` counts: a watchdog or quota stall after an older budget escalation is
-  extended but not re-offered. `[src: file: backend/src/api/orchestration.rs:15871#extend_execution_review_rounds]`
+  extended but not re-offered. `[src: file: backend/src/api/orchestration.rs:15925#extend_execution_review_rounds]`
 - Refused once the execution is Done, Failed or Cancelled, when it already has no cap, and without a reason.
 
 The escalation message posted to the principal names this option.

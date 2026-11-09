@@ -15,7 +15,7 @@ Kronn-compatible documentation, with or without Kronn.
 
 One global mode, chosen in **Settings → Anti-hallucination** or with
 `anti_hallucination_mode` in `config.toml`. The default is `warn`.
-[src: file: backend/src/models/setup.rs:399#anti_hallucination_mode]
+[src: file: backend/src/models/setup.rs:429#anti_hallucination_mode]
 
 - **`off`**: no directive, no checking.
 - **`warn`** (default): each agent receives a sourcing directive ("cite a

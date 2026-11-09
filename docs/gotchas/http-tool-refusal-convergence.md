@@ -4,7 +4,7 @@ An HTTP model can ignore a withdrawn tool and keep varying its arguments, so
 exact-call repetition is not sufficient to stop a refusal loop. Kronn classifies
 only its own non-executed anti-loop outcomes as loop refusals; executor failures
 and worker-stage policy refusals keep their separate handling.
-[src: file: backend/src/agents/runner.rs:8377-8394#is_loop_refusal]
+[src: file: backend/src/agents/runner.rs:8395-8412#is_loop_refusal]
 
 The runner bounds this behavior at two levels. Within one provider response it
 answers at most eight loop refusals, then omits only later calls that would also
@@ -17,7 +17,7 @@ zero, so convergence never takes the rounds an audit needs to write. Room-visibl
 refusal traces are limited to two per logical tool and round, while aggregate
 refusal counts remain available to the ceiling report and final diagnostic.
 [src: file: backend/src/agents/runner.rs:50-55#MAX_LOOP_REFUSALS_PER_RESPONSE]
-[src: file: backend/src/agents/runner.rs:8399-8429#RefusalTraces]
+[src: file: backend/src/agents/runner.rs:8417-8447#RefusalTraces]
 [src: file: backend/src/agents/runner.rs:12052-12078]
 [src: file: backend/src/agents/runner.rs:12219-12222]
 
@@ -29,8 +29,8 @@ the batch wholesale.
 [src: file: backend/src/agents/runner.rs:10855-10909]
 [src: file: backend/src/agents/runner.rs:11567-11597]
 [src: file: backend/src/agents/runner.rs:11909-11914]
-[src: file: backend/src/agents/runner_test.rs:15221-15287#a_huge_same_response_batch_past_a_ceiling_is_bounded_and_balanced]
-[src: file: backend/src/agents/runner_test.rs:15345-15385#a_useful_tool_after_a_refused_flood_in_one_response_still_runs]
-[src: file: backend/src/agents/runner_test.rs:15389-15427#a_worker_asking_only_for_refused_tools_is_stopped_on_the_third_round]
-[src: file: backend/src/agents/runner_test.rs:15467-15492#an_audit_still_writes_its_deliverable_after_refusal_convergence]
-[src: file: backend/src/agents/runner_test.rs:15497-15519#an_audit_write_phase_of_refusals_only_is_stopped_on_its_third_round]
+[src: file: backend/src/agents/runner_test.rs:15222-15288#a_huge_same_response_batch_past_a_ceiling_is_bounded_and_balanced]
+[src: file: backend/src/agents/runner_test.rs:15346-15386#a_useful_tool_after_a_refused_flood_in_one_response_still_runs]
+[src: file: backend/src/agents/runner_test.rs:15390-15428#a_worker_asking_only_for_refused_tools_is_stopped_on_the_third_round]
+[src: file: backend/src/agents/runner_test.rs:15468-15493#an_audit_still_writes_its_deliverable_after_refusal_convergence]
+[src: file: backend/src/agents/runner_test.rs:15498-15520#an_audit_write_phase_of_refusals_only_is_stopped_on_its_third_round]
