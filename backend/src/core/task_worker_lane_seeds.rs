@@ -150,88 +150,163 @@ pub struct LaneSeedSecretFinding {
     pub files: Vec<String>,
     /// More were found than `files` lists.
     pub truncated: bool,
+    /// Some of these files are not confirmed by a human: the seed is not copied
+    /// into task worktrees until they are.
+    pub held: bool,
 }
+
+/// The secret-looking files a human has seen and accepted, by declared seed
+/// (repository-relative paths). A file that is not listed here holds its seed.
+pub type ConfirmedSecrets = BTreeMap<String, Vec<String>>;
 
 /// How many secret-looking paths one finding lists.
 const MAX_SECRET_FILES_LISTED: usize = 10;
+/// How many secret-looking files one seed may hold and still be confirmable: a
+/// human cannot review more, and the confirmation is stored.
+pub const MAX_CONFIRMABLE_SECRET_FILES: usize = 200;
 
-/// Which of `seeds` (in `repo`) look like a secret file or hold one. A seed
-/// copies files to where a worker reads them, and a gitignored `.env` or key is
-/// a gitignored path too. The seed's own path is judged by
+/// Every secret-looking file `seed` is or holds in `repo`, sorted. A seed copies
+/// files to where a worker reads them, and a gitignored `.env` or key is a
+/// gitignored path too. The seed's own path is judged by
 /// [`crate::acp::secret_files::is_secret_path`]; the tree under it is walked
 /// (bounded by [`MAX_SEED_ENTRIES`], links not followed) and each entry's name is
 /// judged, a symlink by the same path rule. Fails closed: a tree that cannot be
-/// read in full, or is too large to, is an error, never "nothing found".
+/// read in full, or is too large to, or holds more than
+/// [`MAX_CONFIRMABLE_SECRET_FILES`], is an error, never "nothing found".
+pub fn scan_secret_files(repo: &Path, seed: &str) -> Result<Vec<String>, String> {
+    use crate::acp::secret_files::{is_secret_file, is_secret_path};
+    let root = repo.join(seed);
+    if is_secret_path(&root) {
+        return Ok(vec![seed.to_string()]);
+    }
+    let meta = match std::fs::symlink_metadata(&root) {
+        Ok(meta) => meta,
+        // Nothing there to copy yet.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("cannot read `{seed}`: {error}")),
+    };
+    if !meta.is_dir() {
+        return Ok(Vec::new());
+    }
+    let (mut files, mut entries) = (Vec::new(), 0u64);
+    let mut stack = vec![(root, seed.to_string())];
+    while let Some((dir, rel)) = stack.pop() {
+        let children =
+            std::fs::read_dir(&dir).map_err(|error| format!("cannot list `{rel}`: {error}"))?;
+        for child in children {
+            let child = child.map_err(|error| format!("cannot list `{rel}`: {error}"))?;
+            entries += 1;
+            if entries > MAX_SEED_ENTRIES {
+                return Err(format!(
+                    "`{seed}` has more than {MAX_SEED_ENTRIES} entries: it cannot be checked \
+                     for secrets, and is not a generated-assets directory"
+                ));
+            }
+            let path = child.path();
+            let child_rel = format!("{rel}/{}", child.file_name().to_string_lossy());
+            let kind = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("cannot read `{child_rel}`: {error}"))?;
+            let secret = if kind.file_type().is_symlink() {
+                is_secret_path(&path)
+            } else {
+                is_secret_file(Path::new(&child_rel))
+            };
+            if secret {
+                if files.len() >= MAX_CONFIRMABLE_SECRET_FILES {
+                    return Err(format!(
+                        "`{seed}` holds more than {MAX_CONFIRMABLE_SECRET_FILES} secret-looking \
+                         files: it cannot be reviewed, and is not a generated-assets directory"
+                    ));
+                }
+                files.push(child_rel.clone());
+            }
+            if kind.is_dir() {
+                stack.push((path, child_rel));
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// The files of `found` that `confirmed` (for the same seed) does not cover.
+pub fn unconfirmed_secret_files(found: &[String], confirmed: Option<&Vec<String>>) -> Vec<String> {
+    found
+        .iter()
+        .filter(|file| !confirmed.is_some_and(|known| known.contains(file)))
+        .cloned()
+        .collect()
+}
+
+/// Which of `seeds` (in `repo`) look like a secret file or hold one, and whether
+/// each is held, i.e. has a file `confirmed` does not cover. See
+/// [`scan_secret_files`] for how it is judged and why it fails closed.
+pub fn secret_findings_against(
+    repo: &Path,
+    seeds: &[String],
+    confirmed: &ConfirmedSecrets,
+) -> Result<Vec<LaneSeedSecretFinding>, String> {
+    let mut findings = Vec::new();
+    for seed in seeds {
+        let files = scan_secret_files(repo, seed)?;
+        if files.is_empty() {
+            continue;
+        }
+        let held = !unconfirmed_secret_files(&files, confirmed.get(seed)).is_empty();
+        findings.push(LaneSeedSecretFinding::new(seed, files, held));
+    }
+    Ok(findings)
+}
+
+impl LaneSeedSecretFinding {
+    /// A finding listing the first of `files` (all of them secret-looking).
+    pub fn new(seed: &str, files: Vec<String>, held: bool) -> Self {
+        let truncated = files.len() > MAX_SECRET_FILES_LISTED;
+        Self {
+            path: seed.to_string(),
+            files: files.into_iter().take(MAX_SECRET_FILES_LISTED).collect(),
+            truncated,
+            held,
+        }
+    }
+}
+
+/// [`secret_findings_against`] with nothing confirmed.
 pub fn secret_findings(
     repo: &Path,
     seeds: &[String],
 ) -> Result<Vec<LaneSeedSecretFinding>, String> {
-    use crate::acp::secret_files::{is_secret_file, is_secret_path};
-    let mut findings = Vec::new();
-    for seed in seeds {
-        let root = repo.join(seed);
-        if is_secret_path(&root) {
-            findings.push(LaneSeedSecretFinding {
-                path: seed.clone(),
-                files: vec![seed.clone()],
-                truncated: false,
-            });
-            continue;
-        }
-        let meta = match std::fs::symlink_metadata(&root) {
-            Ok(meta) => meta,
-            // Nothing there to copy yet.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("cannot read `{seed}`: {error}")),
-        };
-        if !meta.is_dir() {
-            continue;
-        }
-        let (mut files, mut truncated, mut entries) = (Vec::new(), false, 0u64);
-        let mut stack = vec![(root, seed.clone())];
-        while let Some((dir, rel)) = stack.pop() {
-            let children =
-                std::fs::read_dir(&dir).map_err(|error| format!("cannot list `{rel}`: {error}"))?;
-            for child in children {
-                let child = child.map_err(|error| format!("cannot list `{rel}`: {error}"))?;
-                entries += 1;
-                if entries > MAX_SEED_ENTRIES {
-                    return Err(format!(
-                        "`{seed}` has more than {MAX_SEED_ENTRIES} entries: it cannot be checked \
-                         for secrets, and is not a generated-assets directory"
-                    ));
-                }
-                let path = child.path();
-                let child_rel = format!("{rel}/{}", child.file_name().to_string_lossy());
-                let kind = std::fs::symlink_metadata(&path)
-                    .map_err(|error| format!("cannot read `{child_rel}`: {error}"))?;
-                let secret = if kind.file_type().is_symlink() {
-                    is_secret_path(&path)
-                } else {
-                    is_secret_file(Path::new(&child_rel))
-                };
-                if secret {
-                    if files.len() < MAX_SECRET_FILES_LISTED {
-                        files.push(child_rel.clone());
-                    } else {
-                        truncated = true;
-                    }
-                }
-                if kind.is_dir() {
-                    stack.push((path, child_rel));
-                }
+    secret_findings_against(repo, seeds, &ConfirmedSecrets::new())
+}
+
+/// How many scans [`cached_secret_files`] keeps.
+const SCAN_CACHE_LIMIT: usize = 64;
+
+type ScanCache = std::sync::Mutex<std::collections::HashMap<PathBuf, (String, Vec<String>)>>;
+
+/// [`scan_secret_files`] of a seed whose source fingerprint is `fingerprint`,
+/// remembered by source path: every task worktree of a project is seeded from the
+/// same tree, which is only walked again once its fingerprint (entries, sizes,
+/// names, modification and change times) moved.
+fn cached_secret_files(repo: &Path, seed: &str, fingerprint: &str) -> Result<Vec<String>, String> {
+    static CACHE: std::sync::OnceLock<ScanCache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = repo.join(seed);
+    if let Ok(known) = cache.lock() {
+        if let Some((seen, files)) = known.get(&key) {
+            if seen == fingerprint {
+                return Ok(files.clone());
             }
         }
-        if !files.is_empty() {
-            files.sort();
-            findings.push(LaneSeedSecretFinding {
-                path: seed.clone(),
-                files,
-                truncated,
-            });
-        }
     }
-    Ok(findings)
+    let files = scan_secret_files(repo, seed)?;
+    if let Ok(mut known) = cache.lock() {
+        if known.len() >= SCAN_CACHE_LIMIT {
+            known.clear();
+        }
+        known.insert(key, (fingerprint.to_string(), files.clone()));
+    }
+    Ok(files)
 }
 
 // ─── Outcomes ─────────────────────────────────────────────────────────────
@@ -615,6 +690,7 @@ pub fn seed_worktree(
     main_checkout: &Path,
     worktree: &Path,
     seeds: &[String],
+    confirmed: &ConfirmedSecrets,
     clone: CloneTree<'_>,
 ) -> LaneSeedsRecord {
     if seeds.is_empty() {
@@ -653,7 +729,14 @@ pub fn seed_worktree(
     for declared in seeds {
         let outcome = match normalize_seed_path(declared) {
             Ok(rel) => {
-                let outcome = seed_one(main_checkout, worktree, &rel, &mut marker, clone);
+                let outcome = seed_one(
+                    main_checkout,
+                    worktree,
+                    &rel,
+                    confirmed.get(&rel),
+                    &mut marker,
+                    clone,
+                );
                 if let SeedStatus::Skipped { .. } = outcome.status {
                     marker.seeds.remove(&rel);
                 }
@@ -669,10 +752,29 @@ pub fn seed_worktree(
     LaneSeedsRecord { seeds: outcomes }
 }
 
+/// Why a seed holding unconfirmed secret-looking files is not copied.
+fn held_reason(unconfirmed: &[String]) -> String {
+    const NAMED: usize = 5;
+    let mut names = unconfirmed
+        .iter()
+        .take(NAMED)
+        .map(|file| format!("`{file}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if unconfirmed.len() > NAMED {
+        names.push_str(&format!(" and {} more", unconfirmed.len() - NAMED));
+    }
+    format!(
+        "held: it holds secret-looking files a human has not confirmed ({names}); confirm \
+         them in the project's lane seeds settings"
+    )
+}
+
 fn seed_one(
     main_checkout: &Path,
     worktree: &Path,
     rel: &str,
+    confirmed: Option<&Vec<String>>,
     marker: &mut SeedMarker,
     clone: CloneTree<'_>,
 ) -> LaneSeedOutcome {
@@ -713,6 +815,23 @@ fn seed_one(
         Ok(found) => found,
         Err(reason) => return skip(reason),
     };
+    // The human accepted the secret-looking files the seed held when they
+    // confirmed it: a `.env` or a key that appeared since is not covered, and the
+    // seed stays out of every worktree until they have seen it.
+    match cached_secret_files(main_checkout, rel, &current) {
+        Ok(found) => {
+            let unconfirmed = unconfirmed_secret_files(&found, confirmed);
+            if !unconfirmed.is_empty() {
+                // A copy Kronn made earlier would go stale beside the new file:
+                // take it out, so that a confirmation reseeds from scratch.
+                if marker.seeds.contains_key(rel) {
+                    let _ = discard(worktree, rel);
+                }
+                return skip(held_reason(&unconfirmed));
+            }
+        }
+        Err(reason) => return skip(format!("it cannot be checked for secrets: {reason}")),
+    }
 
     let destination = worktree.join(rel);
     let refreshing = match std::fs::symlink_metadata(&destination) {

@@ -1313,6 +1313,8 @@ const es: TranslationDict = {
   'projects.laneSeeds.secretFiles': 'Archivos con aspecto de secreto encontrados: {0}',
   'projects.laneSeeds.secretMore': 'y más',
   'projects.laneSeeds.secretDeclaredTitle': 'Rutas declaradas que contienen archivos con aspecto de secreto',
+  'projects.laneSeeds.secretHeld': 'Un archivo de aquí no está confirmado: esta ruta NO se copia a los worktrees de tareas hasta que confirmes los archivos listados.',
+  'projects.laneSeeds.secretConfirmHeld': 'Confirmar estos archivos',
   'projects.laneSeeds.secretScanError': 'No se pudieron revisar las rutas declaradas (archivos secretos): {0}',
   'projects.laneSeeds.fileWritten': 'kronn/project.toml se actualizó en el checkout del proyecto: haz commit para publicar la lista.',
   'projects.laneSeeds.fileError': 'No se pudo mantener kronn/project.toml al día: {0}',

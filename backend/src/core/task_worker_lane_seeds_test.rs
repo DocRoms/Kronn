@@ -89,6 +89,24 @@ fn no_clone(_: &Path, _: &Path) -> io::Result<()> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
+/// [`super::seed_worktree`] with no secret-looking file confirmed, the case of
+/// most tests: none of their trees holds one.
+fn seed_worktree(
+    main: &Path,
+    worktree: &Path,
+    declared: &[String],
+    clone: CloneTree<'_>,
+) -> LaneSeedsRecord {
+    super::seed_worktree(main, worktree, declared, &ConfirmedSecrets::new(), clone)
+}
+
+fn confirm(seed: &str, files: &[&str]) -> ConfirmedSecrets {
+    ConfirmedSecrets::from([(
+        seed.to_string(),
+        files.iter().map(|file| file.to_string()).collect(),
+    )])
+}
+
 #[test]
 fn a_seed_path_is_a_normalized_relative_path() {
     assert_eq!(
@@ -450,10 +468,13 @@ fn a_symlink_pointing_out_of_the_seed_is_dropped_and_named() {
         link("../icon.svg", &images.join("vector/up-one"));
         let declared = seeds(&["public/images"]);
 
+        // `deep-climb` names a `.env`: the scan flags it (it is dropped from the
+        // copy all the same), so the human has confirmed it.
+        let accepted = confirm("public/images", &["public/images/vector/deep-climb"]);
         let record = if use_clone {
-            seed_worktree(&fx.main, &fx.worktree, &declared, &clone_tree)
+            super::seed_worktree(&fx.main, &fx.worktree, &declared, &accepted, &clone_tree)
         } else {
-            seed_worktree(&fx.main, &fx.worktree, &declared, &no_clone)
+            super::seed_worktree(&fx.main, &fx.worktree, &declared, &accepted, &no_clone)
         };
 
         let dropped = match &only(&record).status {
@@ -800,12 +821,14 @@ fn a_seed_path_that_looks_secret_is_found() {
             LaneSeedSecretFinding {
                 path: ".env".into(),
                 files: vec![".env".into()],
-                truncated: false
+                truncated: false,
+                held: true
             },
             LaneSeedSecretFinding {
                 path: "config/server.key".into(),
                 files: vec!["config/server.key".into()],
-                truncated: false
+                truncated: false,
+                held: true
             },
         ],
         "a clean tree and a versioned template are no finding"
@@ -886,4 +909,157 @@ fn an_unreadable_tree_fails_the_secret_scan_closed() {
     if unreadable {
         assert!(result.is_err(), "{result:?}");
     }
+}
+
+/// A `.env` that shows up in an accepted directory after the human's review is
+/// not covered by it: the seed is not copied (and a copy Kronn made earlier is
+/// taken out) until the human confirms that file too.
+#[test]
+fn a_secret_that_appears_after_acceptance_holds_the_seed_back() {
+    let fx = fixture();
+    let declared = seeds(&["public/images"]);
+    let first = seed_worktree(&fx.main, &fx.worktree, &declared, &clone_tree);
+    assert!(
+        matches!(only(&first).status, SeedStatus::Seeded { .. }),
+        "{first:?}"
+    );
+    assert!(fx.worktree.join("public/images/icon.svg").exists());
+
+    write(&fx.main.join("public/images/.env"), "TOKEN=1");
+    let held = seed_worktree(&fx.main, &fx.worktree, &declared, &clone_tree);
+    let reason = skipped_reason(only(&held));
+    assert!(
+        reason.starts_with("held:") && reason.contains("public/images/.env"),
+        "{reason}"
+    );
+    assert!(
+        !fx.worktree.join("public/images").exists(),
+        "the stale copy is taken out, and nothing of the secret is copied"
+    );
+
+    let accepted = confirm("public/images", &["public/images/.env"]);
+    let seeded = super::seed_worktree(&fx.main, &fx.worktree, &declared, &accepted, &clone_tree);
+    assert!(
+        matches!(only(&seeded).status, SeedStatus::Seeded { .. }),
+        "{seeded:?}"
+    );
+    assert!(fx.worktree.join("public/images/.env").exists());
+    assert!(
+        run_git(&fx.worktree, &["status", "--porcelain"])
+            .trim()
+            .is_empty(),
+        "the seed stays gitignored"
+    );
+
+    write(&fx.main.join("public/images/vector/id_ed25519"), "key");
+    let again = super::seed_worktree(&fx.main, &fx.worktree, &declared, &accepted, &clone_tree);
+    let reason = skipped_reason(only(&again));
+    assert!(
+        reason.contains("public/images/vector/id_ed25519")
+            && !reason.contains("public/images/.env"),
+        "only the file nobody confirmed is named: {reason}"
+    );
+    assert!(!fx.worktree.join("public/images").exists());
+}
+
+/// The same holds for a fresh worktree, which has no copy to compare with, and
+/// for a file seed that is itself a secret.
+#[test]
+fn a_fresh_worktree_is_not_seeded_with_an_unconfirmed_secret() {
+    let fx = fixture();
+    write(&fx.main.join("public/images/deep/server.key"), "k");
+
+    let record = seed_worktree(
+        &fx.main,
+        &fx.worktree,
+        &seeds(&["public/images"]),
+        &no_clone,
+    );
+
+    assert!(
+        skipped_reason(only(&record)).starts_with("held:"),
+        "{record:?}"
+    );
+    assert!(!fx.worktree.join("public/images").exists());
+    assert!(!fx.worktree.join("public").join("images").is_dir());
+}
+
+#[test]
+fn a_confirmation_covers_only_the_files_it_lists() {
+    let found = vec!["g/.env".to_string(), "g/k.pem".to_string()];
+    assert_eq!(unconfirmed_secret_files(&found, None), found);
+    assert_eq!(
+        unconfirmed_secret_files(&found, Some(&vec!["g/.env".to_string()])),
+        vec!["g/k.pem".to_string()]
+    );
+    assert!(unconfirmed_secret_files(&found, Some(&found)).is_empty());
+}
+
+/// Held is judged on the full list: a finding that lists only its first files
+/// still knows whether a later one is unconfirmed.
+#[test]
+fn held_is_judged_on_every_secret_not_only_the_listed_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let total = MAX_SECRET_FILES_LISTED + 3;
+    let all: Vec<String> = (0..total).map(|i| format!("gen/k{i:02}.key")).collect();
+    for file in &all {
+        write(&dir.path().join(file), "k");
+    }
+    let mut covered = all.clone();
+    let last = covered.pop().unwrap();
+
+    let partial = ConfirmedSecrets::from([("gen".to_string(), covered)]);
+    let found = secret_findings_against(dir.path(), &seeds(&["gen"]), &partial).unwrap();
+    assert!(found[0].held && found[0].truncated, "{found:?}");
+
+    let complete = ConfirmedSecrets::from([(
+        "gen".to_string(),
+        [partial["gen"].clone(), vec![last]].concat(),
+    )]);
+    let found = secret_findings_against(dir.path(), &seeds(&["gen"]), &complete).unwrap();
+    assert!(!found[0].held, "{found:?}");
+}
+
+/// A seed that holds too many secret-looking files to be reviewed is refused
+/// rather than confirmed unseen.
+#[test]
+fn a_tree_with_too_many_secrets_cannot_be_confirmed() {
+    let dir = tempfile::tempdir().unwrap();
+    for index in 0..=MAX_CONFIRMABLE_SECRET_FILES {
+        write(&dir.path().join(format!("gen/k{index}.key")), "k");
+    }
+    assert!(scan_secret_files(dir.path(), "gen").is_err());
+}
+
+/// The scan of a seed is reused while its source fingerprint holds and redone
+/// when the fingerprint moves.
+#[test]
+fn the_secret_scan_is_cached_by_the_source_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    write(repo.join("gen/a.txt").as_path(), "a");
+    assert!(cached_secret_files(repo, "gen", "fp-1").unwrap().is_empty());
+
+    write(&repo.join("gen/.env"), "TOKEN=1");
+    assert!(
+        cached_secret_files(repo, "gen", "fp-1").unwrap().is_empty(),
+        "same fingerprint: the earlier answer is reused"
+    );
+    assert_eq!(
+        cached_secret_files(repo, "gen", "fp-2").unwrap(),
+        vec!["gen/.env".to_string()],
+        "a moved fingerprint walks the tree again"
+    );
+}
+
+/// What the cache relies on: adding a file moves the fingerprint of the source.
+#[test]
+fn a_new_file_in_the_source_moves_its_fingerprint() {
+    let fx = fixture();
+    let before = fingerprint(&fx.main.join("public/images")).unwrap().0;
+    write(&fx.main.join("public/images/.env"), "TOKEN=1");
+    assert_ne!(
+        before,
+        fingerprint(&fx.main.join("public/images")).unwrap().0
+    );
 }

@@ -203,9 +203,23 @@ export function ProjectLaneSeedsSetting({ projectId, t }: Props) {
           <strong><ShieldAlert size={14} aria-hidden="true" /> {t('projects.laneSeeds.secretDeclaredTitle')}</strong>
           <ul className="project-lane-seeds-list">
             {state.secret_findings.map(finding => (
-              <li key={finding.path}>
+              <li key={finding.path} data-testid={`project-lane-seeds-standing-${finding.path}`}>
                 <code>{finding.path}</code>
                 <small> {secretFiles(finding)}</small>
+                {finding.held && (
+                  <>
+                    <small data-testid={`project-lane-seeds-held-${finding.path}`}> {t('projects.laneSeeds.secretHeld')}</small>{' '}
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => void save(state.seeds, [finding.path])}
+                      disabled={saving}
+                      data-testid={`project-lane-seeds-confirm-held-${finding.path}`}
+                    >
+                      {t('projects.laneSeeds.secretConfirmHeld')}
+                    </button>
+                  </>
+                )}
               </li>
             ))}
           </ul>

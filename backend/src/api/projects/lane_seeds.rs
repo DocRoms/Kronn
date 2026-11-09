@@ -10,7 +10,10 @@
 //! them: the change is a destructive request (`is_destructive`), and no bridge
 //! token has the route. Kronn only *suggests* candidates, and a newly declared
 //! path that is, or holds, something that looks like a secret file (`.env`, a
-//! key) is refused until the human has seen the files and confirmed it.
+//! key) is refused until the human has seen the files and confirmed it. The
+//! confirmation is stored per file: a `.env` or key that shows up in an accepted
+//! directory later is not covered, and holds that seed back (`seed_worktree`)
+//! until the human confirms it too.
 //!
 //! The declaration lives in Kronn (the human's word) and is mirrored into the
 //! `[lane_seeds]` table of the main checkout's `kronn/project.toml` when the
@@ -27,7 +30,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::core::task_worker_lane_seeds::{
-    self, LaneSeedCandidate, LaneSeedSecretFinding, LaneSeedsRecord, LaneSeedsSource, SeedStatus,
+    self, ConfirmedSecrets, LaneSeedCandidate, LaneSeedSecretFinding, LaneSeedsRecord,
+    LaneSeedsSource, SeedStatus,
 };
 use crate::models::{ApiErrorCode, ApiResponse, Project};
 use crate::AppState;
@@ -73,7 +77,9 @@ pub struct ProjectLaneSeeds {
     /// saved: send their `path` back in `confirm_secret_paths` once the human
     /// has seen the files and accepted them.
     pub needs_confirmation: Vec<LaneSeedSecretFinding>,
-    /// Secret-looking files the declared seeds hold right now.
+    /// Secret-looking files the declared seeds hold right now. A finding is
+    /// `held` when some of its files are not confirmed: that seed is not copied
+    /// into task worktrees until the human confirms them.
     pub secret_findings: Vec<LaneSeedSecretFinding>,
     /// Why the declared seeds could not be checked for secrets.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,11 +147,12 @@ async fn view(
     file_write: Result<bool, String>,
 ) -> Result<ProjectLaneSeeds, String> {
     let id = project.id.clone();
-    let (declared, last_run) = state
+    let (declared, confirmed, last_run) = state
         .db
         .with_read_conn(move |conn| {
             Ok((
                 crate::db::projects::lane_seeds(conn, &id)?,
+                crate::db::projects::lane_seeds_confirmed(conn, &id)?,
                 crate::db::orchestration::latest_lane_seeds_for_project(conn, &id)?,
             ))
         })
@@ -162,7 +169,7 @@ async fn view(
     let (profile, findings) = tokio::task::spawn_blocking(move || {
         (
             crate::core::project_profile::declared_lane_seeds(&repo),
-            task_worker_lane_seeds::secret_findings(&repo, &to_scan),
+            task_worker_lane_seeds::secret_findings_against(&repo, &to_scan, &confirmed),
         )
     })
     .await
@@ -221,6 +228,53 @@ pub async fn get(
     }
 }
 
+/// What a save does with the secret-looking files its seeds hold.
+struct SecretJudgement {
+    /// Newly declared seeds holding files nobody confirmed: not saved.
+    blocked: Vec<LaneSeedSecretFinding>,
+    /// The confirmations to store with the seeds.
+    confirmed: ConfirmedSecrets,
+}
+
+/// Judge every seed of a save against what is confirmed so far. A seed the human
+/// confirms in this request has all the files it holds now confirmed. A seed that
+/// was already declared and holds a file nobody confirmed is kept, and stays
+/// held until someone confirms it; a newly declared one is blocked. Fails closed:
+/// a tree that cannot be scanned is an error.
+fn judge_secrets(
+    repo: &std::path::Path,
+    seeds: &[String],
+    previous: &[String],
+    stored: &ConfirmedSecrets,
+    confirm_now: &[String],
+) -> Result<SecretJudgement, String> {
+    let mut blocked = Vec::new();
+    let mut confirmed = ConfirmedSecrets::new();
+    for seed in seeds {
+        let found = task_worker_lane_seeds::scan_secret_files(repo, seed)?;
+        if found.is_empty() {
+            continue;
+        }
+        let unconfirmed =
+            task_worker_lane_seeds::unconfirmed_secret_files(&found, stored.get(seed));
+        if unconfirmed.is_empty() || confirm_now.contains(seed) {
+            confirmed.insert(seed.clone(), found);
+        } else if previous.contains(seed) {
+            // Held: keep what was confirmed and still exists.
+            let still: Vec<String> = found
+                .into_iter()
+                .filter(|file| !unconfirmed.contains(file))
+                .collect();
+            if !still.is_empty() {
+                confirmed.insert(seed.clone(), still);
+            }
+        } else {
+            blocked.push(LaneSeedSecretFinding::new(seed, found, true));
+        }
+    }
+    Ok(SecretJudgement { blocked, confirmed })
+}
+
 /// PUT /api/projects/{id}/lane-seeds — replaces the list; an empty one clears it.
 /// A newly declared seed that is, or holds, a secret-looking file is not saved
 /// until the request names it in `confirm_secret_paths`: the answer then lists
@@ -235,11 +289,11 @@ pub async fn set(
         Ok(seeds) => seeds,
         Err(reason) => return Json(ApiResponse::err(reason)),
     };
-    let confirmed = match task_worker_lane_seeds::normalize_seed_list(&request.confirm_secret_paths)
-    {
-        Ok(confirmed) => confirmed,
-        Err(reason) => return Json(ApiResponse::err(reason)),
-    };
+    let confirm_now =
+        match task_worker_lane_seeds::normalize_seed_list(&request.confirm_secret_paths) {
+            Ok(confirm_now) => confirm_now,
+            Err(reason) => return Json(ApiResponse::err(reason)),
+        };
     let project = match project_of(&state, id).await {
         Ok(Some(project)) => project,
         Ok(None) => return not_found(),
@@ -247,29 +301,29 @@ pub async fn set(
     };
     let repo = crate::core::scanner::resolve_host_path(&project.path);
 
-    // A seed the human already declared was accepted then: only what this
-    // request adds is judged (the others stay listed in `secret_findings`).
     let project_id = project.id.clone();
-    let previous = match state
+    let (previous, stored) = match state
         .db
-        .with_read_conn(move |conn| crate::db::projects::lane_seeds(conn, &project_id))
+        .with_read_conn(move |conn| {
+            Ok((
+                crate::db::projects::lane_seeds(conn, &project_id)?,
+                crate::db::projects::lane_seeds_confirmed(conn, &project_id)?,
+            ))
+        })
         .await
     {
-        Ok(previous) => previous.unwrap_or_default(),
+        Ok((previous, stored)) => (previous.unwrap_or_default(), stored),
         Err(error) => return Json(ApiResponse::err(error.to_string())),
     };
-    let added: Vec<String> = seeds
-        .iter()
-        .filter(|seed| !previous.contains(seed))
-        .cloned()
-        .collect();
-    let to_check = (repo.clone(), added);
-    let findings = match tokio::task::spawn_blocking(move || {
-        task_worker_lane_seeds::secret_findings(&to_check.0, &to_check.1)
-    })
-    .await
-    {
-        Ok(Ok(findings)) => findings,
+    let judged = {
+        let (repo, seeds) = (repo.clone(), seeds.clone());
+        tokio::task::spawn_blocking(move || {
+            judge_secrets(&repo, &seeds, &previous, &stored, &confirm_now)
+        })
+        .await
+    };
+    let judged = match judged {
+        Ok(Ok(judged)) => judged,
         Ok(Err(reason)) => {
             return Json(ApiResponse::err(format!(
                 "the seeds could not be checked for secrets, nothing was saved: {reason}"
@@ -281,21 +335,19 @@ pub async fn set(
             )))
         }
     };
-    let unconfirmed: Vec<LaneSeedSecretFinding> = findings
-        .into_iter()
-        .filter(|finding| !confirmed.contains(&finding.path))
-        .collect();
-    if !unconfirmed.is_empty() {
-        return match view(&state, &project, unconfirmed, Ok(false)).await {
+    if !judged.blocked.is_empty() {
+        return match view(&state, &project, judged.blocked, Ok(false)).await {
             Ok(seeds) => Json(ApiResponse::ok(seeds)),
             Err(error) => Json(ApiResponse::err(error)),
         };
     }
 
-    let (stored, project_id) = (seeds.clone(), project.id.clone());
+    let (stored, confirmed, project_id) = (seeds.clone(), judged.confirmed, project.id.clone());
     let changed = state
         .db
-        .with_conn(move |conn| crate::db::projects::set_lane_seeds(conn, &project_id, &stored))
+        .with_conn(move |conn| {
+            crate::db::projects::set_lane_seeds_confirmed(conn, &project_id, &stored, &confirmed)
+        })
         .await;
     match changed {
         Ok(true) => {}

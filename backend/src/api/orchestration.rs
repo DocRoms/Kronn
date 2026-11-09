@@ -9527,11 +9527,18 @@ async fn seed_lane_assets(
     // Only what a human declared in Kronn applies. The `[lane_seeds]` table of
     // `kronn/project.toml` reaches the repository through a pull request, not
     // through the human gate: it is proposed in the settings, never seeded here.
-    let seeds = match db
-        .with_read_conn(move |conn| crate::db::projects::lane_seeds(conn, &pid))
+    // The secret-looking files a human confirmed travel with them: a seed that
+    // gained one since is held, not copied.
+    let (seeds, confirmed) = match db
+        .with_read_conn(move |conn| {
+            Ok((
+                crate::db::projects::lane_seeds(conn, &pid)?,
+                crate::db::projects::lane_seeds_confirmed(conn, &pid)?,
+            ))
+        })
         .await
     {
-        Ok(declared) => declared.unwrap_or_default(),
+        Ok((declared, confirmed)) => (declared.unwrap_or_default(), confirmed),
         Err(error) => {
             tracing::warn!(execution_id = %exec_id, "lane seeds not read: {error}");
             return;
@@ -9546,6 +9553,7 @@ async fn seed_lane_assets(
             &repo,
             &worktree,
             &seeds,
+            &confirmed,
             &crate::core::task_worker_lane_warm::clone_tree,
         ))
     })
@@ -29462,6 +29470,73 @@ pub(crate) mod tests {
         let (exec_id, _at, record) = latest.expect("the project's settings find it");
         assert_eq!(exec_id, exec.id);
         assert_eq!(record, recorded);
+    }
+
+    /// KT-1438: a `.env` that appeared in an accepted seed after the human's
+    /// review is not copied into the launched worktree, and the journal says why.
+    #[tokio::test]
+    async fn provisioning_holds_back_a_seed_that_gained_an_unconfirmed_secret() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join(".gitignore"), "gen/\n.kronn/\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "ignore gen"]);
+        std::fs::create_dir_all(repo.path().join("gen")).unwrap();
+        std::fs::write(repo.path().join("gen/asset.txt"), "generated").unwrap();
+        std::fs::write(repo.path().join("gen/.env"), "TOKEN=1").unwrap();
+        std::fs::write(repo.path().join("gen/.env.production"), "TOKEN=2").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let pid = project_id.clone();
+        db.with_conn(move |conn| {
+            // The human reviewed `gen/.env` only.
+            crate::db::projects::set_lane_seeds_confirmed(
+                conn,
+                &pid,
+                &["gen".to_string()],
+                &crate::core::task_worker_lane_seeds::ConfirmedSecrets::from([(
+                    "gen".to_string(),
+                    vec!["gen/.env".to_string()],
+                )]),
+            )
+        })
+        .await
+        .unwrap();
+
+        let exec = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("lane-seeds-held".into()),
+            },
+        )
+        .await
+        .expect("provision");
+
+        let (worktree, _branch) =
+            worktree::task_worktree_layout(repo.path(), &task_ref, exec_short(&exec.id)).unwrap();
+        assert!(
+            !worktree.join("gen").exists(),
+            "nothing of the held seed is copied"
+        );
+        let id = exec.id.clone();
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &id))
+            .await
+            .unwrap()
+            .expect("the seeding is journalled");
+        let skipped: Vec<_> = recorded.skipped().collect();
+        assert_eq!(skipped.len(), 1, "{recorded:?}");
+        assert!(
+            skipped[0].1.starts_with("held:") && skipped[0].1.contains("gen/.env.production"),
+            "{skipped:?}"
+        );
+        assert!(
+            !skipped[0].1.contains("`gen/.env`"),
+            "the confirmed file is not named: {skipped:?}"
+        );
     }
 
     #[tokio::test]

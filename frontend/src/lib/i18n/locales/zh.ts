@@ -1307,6 +1307,8 @@ const zh: TranslationDict = {
   "projects.laneSeeds.secretFiles": "发现疑似机密文件：{0}",
   "projects.laneSeeds.secretMore": "以及更多",
   "projects.laneSeeds.secretDeclaredTitle": "已声明路径中含有疑似机密文件",
+  "projects.laneSeeds.secretHeld": "此处有未确认的文件：在你确认所列文件之前，该路径不会被复制到任务工作树。",
+  "projects.laneSeeds.secretConfirmHeld": "确认这些文件",
   "projects.laneSeeds.secretScanError": "无法检查已声明路径中的机密文件：{0}",
   "projects.laneSeeds.fileWritten": "kronn/project.toml 已在项目检出中更新：请提交以发布该列表。",
   "projects.laneSeeds.fileError": "无法让 kronn/project.toml 保持同步：{0}",

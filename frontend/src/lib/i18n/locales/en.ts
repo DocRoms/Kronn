@@ -1313,6 +1313,8 @@ const en: TranslationDict = {
   'projects.laneSeeds.secretFiles': 'Secret-looking files found: {0}',
   'projects.laneSeeds.secretMore': 'and more',
   'projects.laneSeeds.secretDeclaredTitle': 'Declared paths holding secret-looking files',
+  'projects.laneSeeds.secretHeld': 'A file here is not confirmed: this path is NOT copied into task worktrees until you confirm the files listed.',
+  'projects.laneSeeds.secretConfirmHeld': 'Confirm these files',
   'projects.laneSeeds.secretScanError': 'The declared paths could not be checked for secret files: {0}',
   'projects.laneSeeds.fileWritten': 'kronn/project.toml was updated in the project\'s checkout: commit it to publish the list.',
   'projects.laneSeeds.fileError': 'kronn/project.toml could not be kept in step: {0}',

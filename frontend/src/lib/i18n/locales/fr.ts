@@ -1313,6 +1313,8 @@ const fr: TranslationDict = {
   'projects.laneSeeds.secretFiles': 'Fichiers d\'allure secrète trouvés : {0}',
   'projects.laneSeeds.secretMore': 'et d\'autres',
   'projects.laneSeeds.secretDeclaredTitle': 'Chemins déclarés contenant des fichiers d\'allure secrète',
+  'projects.laneSeeds.secretHeld': 'Un fichier ici n\'est pas confirmé : ce chemin n\'est PAS copié dans les worktrees de tâche tant que vous n\'avez pas confirmé les fichiers listés.',
+  'projects.laneSeeds.secretConfirmHeld': 'Confirmer ces fichiers',
   'projects.laneSeeds.secretScanError': 'Les chemins déclarés n\'ont pas pu être vérifiés (fichiers secrets) : {0}',
   'projects.laneSeeds.fileWritten': 'kronn/project.toml a été mis à jour dans le checkout du projet : commitez-le pour publier la liste.',
   'projects.laneSeeds.fileError': 'kronn/project.toml n\'a pas pu être tenu à jour : {0}',

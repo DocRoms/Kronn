@@ -5159,7 +5159,12 @@ files: Array<string>,
 /**
  * More were found than `files` lists.
  */
-truncated: boolean, };
+truncated: boolean,
+/**
+ * Some of these files are not confirmed by a human: the seed is not copied
+ * into task worktrees until they are.
+ */
+held: boolean, };
 
 /**
  * The latest seeding of a task worktree of this project.
@@ -7431,7 +7436,9 @@ profile_error?: string,
  */
 needs_confirmation: Array<LaneSeedSecretFinding>,
 /**
- * Secret-looking files the declared seeds hold right now.
+ * Secret-looking files the declared seeds hold right now. A finding is
+ * `held` when some of its files are not confirmed: that seed is not copied
+ * into task worktrees until the human confirms them.
  */
 secret_findings: Array<LaneSeedSecretFinding>,
 /**

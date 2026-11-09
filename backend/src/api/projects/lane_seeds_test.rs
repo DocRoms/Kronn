@@ -416,6 +416,82 @@ async fn a_secret_inside_a_declared_directory_is_listed_and_held() {
     assert_eq!(next.seeds.len(), 3);
 }
 
+/// A `.env` that appears inside an accepted directory is not covered by the
+/// confirmation: the settings show the seed as held, saving the same list keeps
+/// it held, and confirming it releases it.
+#[tokio::test]
+async fn a_secret_added_after_acceptance_is_shown_held_until_confirmed() {
+    let state = test_state();
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::fs::create_dir_all(repo.join("generated")).unwrap();
+    std::fs::write(repo.join("generated/.env.local"), "TOKEN=1").unwrap();
+    seed_project(&state, "p1", repo).await;
+
+    let accepted = set(
+        State(state.clone()),
+        Path("p1".into()),
+        confirmed(&["generated"], &["generated"]),
+    )
+    .await
+    .0
+    .data
+    .unwrap();
+    assert_eq!(accepted.seeds, vec!["generated".to_string()]);
+    assert!(!accepted.secret_findings[0].held, "{accepted:?}");
+
+    std::fs::write(repo.join("generated/id_rsa"), "key").unwrap();
+    let seen = get(State(state.clone()), Path("p1".into()))
+        .await
+        .0
+        .data
+        .unwrap();
+    assert_eq!(seen.secret_findings.len(), 1);
+    assert!(seen.secret_findings[0].held, "{seen:?}");
+    assert_eq!(
+        seen.secret_findings[0].files,
+        vec![
+            "generated/.env.local".to_string(),
+            "generated/id_rsa".to_string()
+        ]
+    );
+
+    // Saving the list again changes nothing about what was confirmed.
+    let resaved = set(
+        State(state.clone()),
+        Path("p1".into()),
+        declared(&["generated"]),
+    )
+    .await
+    .0
+    .data
+    .unwrap();
+    assert_eq!(resaved.seeds, vec!["generated".to_string()]);
+    assert!(resaved.needs_confirmation.is_empty());
+    assert!(resaved.secret_findings[0].held, "{resaved:?}");
+    let stored = state
+        .db
+        .with_read_conn(|conn| crate::db::projects::lane_seeds_confirmed(conn, "p1"))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored["generated"],
+        vec!["generated/.env.local".to_string()],
+        "the new file is not recorded as confirmed"
+    );
+
+    let released = set(
+        State(state.clone()),
+        Path("p1".into()),
+        confirmed(&["generated"], &["generated"]),
+    )
+    .await
+    .0
+    .data
+    .unwrap();
+    assert!(!released.secret_findings[0].held, "{released:?}");
+}
+
 /// A tree that cannot be checked refuses the save instead of saving unchecked.
 #[cfg(unix)]
 #[tokio::test]

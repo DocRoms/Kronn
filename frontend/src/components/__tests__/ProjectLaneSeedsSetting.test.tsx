@@ -77,7 +77,7 @@ describe('ProjectLaneSeedsSetting (KT-1438)', () => {
   it('holds a secret-looking path until the human confirms it', async () => {
     getMock.mockResolvedValue(view({ seeds: ['a/b'], source: 'project' }));
     setMock
-      .mockResolvedValueOnce(view({ seeds: ['a/b'], source: 'project', needs_confirmation: [{ path: '.env', files: ['.env'], truncated: false }] }))
+      .mockResolvedValueOnce(view({ seeds: ['a/b'], source: 'project', needs_confirmation: [{ path: '.env', files: ['.env'], truncated: false, held: true }] }))
       .mockResolvedValueOnce(view({ seeds: ['a/b', '.env'], source: 'project' }));
     render(<ProjectLaneSeedsSetting projectId="p1" t={t} />);
     await waitFor(() => expect(screen.getByText('a/b')).toBeInTheDocument());
@@ -97,7 +97,7 @@ describe('ProjectLaneSeedsSetting (KT-1438)', () => {
 
   it('drops a held secret-looking path when the human cancels', async () => {
     getMock.mockResolvedValue(view());
-    setMock.mockResolvedValue(view({ needs_confirmation: [{ path: 'config/server.key', files: ['config/server.key'], truncated: false }] }));
+    setMock.mockResolvedValue(view({ needs_confirmation: [{ path: 'config/server.key', files: ['config/server.key'], truncated: false, held: true }] }));
     render(<ProjectLaneSeedsSetting projectId="p1" t={t} />);
     await waitFor(() => expect(screen.getByTestId('project-lane-seeds-empty')).toBeInTheDocument());
 
@@ -172,12 +172,12 @@ describe('ProjectLaneSeedsSetting (KT-1438)', () => {
     getMock.mockResolvedValue(view());
     setMock
       .mockResolvedValueOnce(view({
-        needs_confirmation: [{ path: 'generated', files: ['generated/deep/.env.local', 'generated/cert.pem'], truncated: true }],
+        needs_confirmation: [{ path: 'generated', files: ['generated/deep/.env.local', 'generated/cert.pem'], truncated: true, held: true }],
       }))
       .mockResolvedValueOnce(view({
         seeds: ['generated'],
         source: 'project',
-        secret_findings: [{ path: 'generated', files: ['generated/deep/.env.local'], truncated: false }],
+        secret_findings: [{ path: 'generated', files: ['generated/deep/.env.local'], truncated: false, held: false }],
       }));
     render(<ProjectLaneSeedsSetting projectId="p1" t={t} />);
     await waitFor(() => expect(screen.getByTestId('project-lane-seeds-empty')).toBeInTheDocument());
@@ -193,6 +193,40 @@ describe('ProjectLaneSeedsSetting (KT-1438)', () => {
     // A declared path keeps showing what secret-looking files it holds.
     const standing = await screen.findByTestId('project-lane-seeds-secret-findings');
     expect(standing).toHaveTextContent('generated/deep/.env.local');
+  });
+
+  it('shows a declared path held back by an unconfirmed file and confirms it on request', async () => {
+    const heldFinding = { path: 'generated', files: ['generated/.env.local', 'generated/id_rsa'], truncated: false, held: true };
+    getMock.mockResolvedValue(view({ seeds: ['generated'], source: 'project', secret_findings: [heldFinding] }));
+    setMock.mockResolvedValue(view({
+      seeds: ['generated'],
+      source: 'project',
+      secret_findings: [{ ...heldFinding, held: false }],
+    }));
+    render(<ProjectLaneSeedsSetting projectId="p1" t={t} />);
+
+    const standing = await screen.findByTestId('project-lane-seeds-standing-generated');
+    expect(standing).toHaveTextContent('generated/.env.local, generated/id_rsa');
+    expect(screen.getByTestId('project-lane-seeds-held-generated')).toHaveTextContent('projects.laneSeeds.secretHeld');
+
+    fireEvent.click(screen.getByTestId('project-lane-seeds-confirm-held-generated'));
+    await waitFor(() => expect(setMock).toHaveBeenLastCalledWith('p1', ['generated'], ['generated']));
+    await waitFor(() => expect(screen.queryByTestId('project-lane-seeds-held-generated')).toBeNull());
+    expect(screen.queryByTestId('project-lane-seeds-confirm-held-generated')).toBeNull();
+    // Still listed: the files are there, they are just confirmed now.
+    expect(screen.getByTestId('project-lane-seeds-standing-generated')).toBeInTheDocument();
+  });
+
+  it('does not offer to confirm a declared path whose secret-looking files are all confirmed', async () => {
+    getMock.mockResolvedValue(view({
+      seeds: ['generated'],
+      source: 'project',
+      secret_findings: [{ path: 'generated', files: ['generated/.env.local'], truncated: false, held: false }],
+    }));
+    render(<ProjectLaneSeedsSetting projectId="p1" t={t} />);
+
+    await screen.findByTestId('project-lane-seeds-standing-generated');
+    expect(screen.queryByTestId('project-lane-seeds-confirm-held-generated')).toBeNull();
   });
 
   it('says when the declared paths could not be checked for secrets', async () => {

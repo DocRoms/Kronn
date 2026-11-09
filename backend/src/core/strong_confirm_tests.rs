@@ -273,6 +273,10 @@ const OPEN_ON_PURPOSE: &[(&str, &str)] = &[
     ("POST", "/api/projects/{id}/context-audit/baseline"),
     ("POST", "/api/projects/{id}/audit-attestation"),
     ("POST", "/api/mcps/custom/{server_id}/cleanup-orphan-env"),
+    // The gitignored paths copied into a project's task worktrees (KT-1438): no
+    // bridge token has the route, and the handler holds a secret-looking file
+    // until the human confirms it, so a one-time code on top adds nothing.
+    ("PUT", "/api/projects/{id}/lane-seeds"),
     // Everyday deletions: a message, a discussion, a task, a workflow, a page, a
     // Quick Prompt / API / Exec, a skill, a profile, a directive, a contact, …
     ("DELETE", "/api/contacts/{id}"),
