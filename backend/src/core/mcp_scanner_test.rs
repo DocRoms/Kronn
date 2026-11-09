@@ -3345,7 +3345,7 @@ args = ["@example/old-mcp"]
         }
     }
 
-    #[cfg(unix)] // creates symlinks through std::os::unix; uses POSIX absolute paths
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     #[serial]
     fn docker_host_bin_uvx_survives_the_codex_plan() {

@@ -259,7 +259,7 @@ impl RoomReachPlan {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::agents::read_only_repos::{ReadOnlyRepos, ROOM_SETTINGS_MAX_BYTES};
@@ -613,6 +613,7 @@ mod tests {
         assert!(plan.prompt().contains("its credentials stay closed"));
     }
 
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_code_grant_is_never_opened_for_codex_or_a_path_that_is_not_a_checkout() {
         let temp = tempfile::tempdir().unwrap();
@@ -868,6 +869,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlinked_hooks_directory_is_closed_by_its_link_and_by_its_target() {
         let temp = tempfile::tempdir().unwrap();
@@ -893,6 +895,7 @@ mod tests {
         assert!(!deny_write.contains(&format!("{infra}/.config")));
     }
 
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_hooks_directory_behind_a_symlinked_parent_closes_the_link_too() {
         let temp = tempfile::tempdir().unwrap();
@@ -1215,6 +1218,7 @@ mod tests {
         assert!(args.iter().find(|a| a.starts_with('{')).unwrap().len() <= ROOM_SETTINGS_MAX_BYTES);
     }
 
+    #[cfg(unix)] // writes an executable hook script with chmod mode bits through std::os::unix
     #[test]
     fn a_repository_hook_does_not_run_when_kronn_checks_a_project_out() {
         use std::os::unix::fs::PermissionsExt;
@@ -1298,6 +1302,7 @@ mod tests {
 
     /// The secrets of a checkout, at the three levels, whatever their depth and
     /// whether or not they exist when the turn starts.
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn secrets_stay_closed_at_every_level_nested_and_created_after_launch() {
         let temp = tempfile::tempdir().unwrap();

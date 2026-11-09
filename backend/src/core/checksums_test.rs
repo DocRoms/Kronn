@@ -604,7 +604,7 @@ fn source_tree_fingerprint_survives_hostile_paths_and_tracks_mode() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")] // builds non-UTF-8 names from raw bytes with std::os::unix::ffi::OsStrExt
 #[test]
 fn source_tree_fingerprint_keeps_non_utf8_paths() {
     // Non-UTF-8 file names exist on Linux filesystems (APFS rejects them, so

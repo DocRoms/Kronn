@@ -452,6 +452,16 @@ fn rebuild_for_tool(mut command: std::process::Command) -> std::process::Command
 mod tests {
     use super::*;
 
+    /// A program present on every host and under no directory a test controls:
+    /// what stands for "a CLI the developer installed" (KT-1189).
+    fn machine_program() -> &'static str {
+        if cfg!(windows) {
+            r"C:\Windows\System32\cmd.exe"
+        } else {
+            "/bin/ls"
+        }
+    }
+
     #[test]
     fn async_cmd_creates_command() {
         let cmd = tool_cmd("echo");
@@ -478,14 +488,13 @@ mod tests {
     }
 
     /// KT-1189: a program resolved outside the directories a test controls is
-    /// the machine's. `/bin/ls` stands for "a CLI the developer installed":
-    /// present on every Unix host, never under the temporary directory.
-    #[cfg(unix)] // runs a POSIX shell script fixture; uses POSIX absolute paths
+    /// the machine's. `machine_program()` stands for "a CLI the developer installed":
+    /// present on every host, never under the temporary directory.
     #[test]
     fn a_machine_program_on_an_agent_route_is_a_real_agent() {
         use crate::core::child_env::AgentFamily;
         use real_agent_guard::{is_machine_agent, real_agent_binary};
-        let sh = std::ffi::OsStr::new("/bin/ls");
+        let sh = std::ffi::OsStr::new(machine_program());
         // A route that belongs to an agent makes any program an agent launch…
         assert!(real_agent_binary(sh, ChildRoute::Agent(AgentFamily::Claude), None).is_some());
         // …except a plain shell, the stand-in tests give an agent route…
@@ -497,9 +506,9 @@ mod tests {
         // …and neither does an agent route nothing is known about.
         assert!(real_agent_binary(sh, ChildRoute::Agent(AgentFamily::Other), None).is_none());
         // By name: a CLI of the machine is hidden from detection, a stub is not.
-        assert!(is_machine_agent("claude", "/bin/ls"));
-        assert!(is_machine_agent("vibe", "/bin/ls"));
-        assert!(!is_machine_agent("git", "/bin/ls"));
+        assert!(is_machine_agent("claude", machine_program()));
+        assert!(is_machine_agent("vibe", machine_program()));
+        assert!(!is_machine_agent("git", machine_program()));
         let dir = tempfile::tempdir().unwrap();
         let stub = dir.path().join("claude");
         std::fs::write(&stub, "#!/bin/sh\n").unwrap();
@@ -508,27 +517,26 @@ mod tests {
 
     /// KT-1189: the guard itself. Launching a real agent binary from a test
     /// panics with the offending path, whichever builder is used.
-    #[cfg(unix)] // uses POSIX absolute paths
     #[test]
     fn a_test_cannot_start_a_real_agent_binary() {
         use crate::core::child_env::AgentFamily;
         let before = real_agent_guard::refused().len();
         let route = ChildRoute::Agent(AgentFamily::Copilot);
         let refused_async = std::panic::catch_unwind(|| {
-            let _ = async_cmd("/bin/ls", route);
+            let _ = async_cmd(machine_program(), route);
         });
         let refused_sync = std::panic::catch_unwind(|| {
-            let _ = sync_cmd("/bin/ls", route);
+            let _ = sync_cmd(machine_program(), route);
         });
         let refused_discovery = std::panic::catch_unwind(|| {
-            let _ = discovery_cmd("/bin/ls", AgentFamily::Vibe);
+            let _ = discovery_cmd(machine_program(), AgentFamily::Vibe);
         });
         assert!(refused_async.is_err() && refused_sync.is_err() && refused_discovery.is_err());
         let refused = real_agent_guard::refused();
         assert!(refused.len() >= before + 3, "each refusal is recorded");
         assert!(refused
             .iter()
-            .any(|m| m.contains("/bin/ls") && m.contains("KT-1189")));
+            .any(|m| m.contains(machine_program()) && m.contains("KT-1189")));
     }
 
     /// KT-1495: the live vault probe opens the guard only with the gate at `1`
@@ -552,7 +560,6 @@ mod tests {
     /// KT-1495: without the gate, a thread named like a probe holds no
     /// allowance and the guard still refuses a real agent binary. Reverting the
     /// gate check in `live_probe_may_open` fails it.
-    #[cfg(unix)] // uses POSIX absolute paths
     #[test]
     fn a_probe_named_test_without_the_gate_still_cannot_start_a_real_agent() {
         use crate::core::child_env::AgentFamily;
@@ -563,7 +570,7 @@ mod tests {
             .spawn(move || {
                 let allowance = allow_live_probe_for(std::thread::current().name(), None);
                 let refused = std::panic::catch_unwind(|| {
-                    let _ = sync_cmd("/bin/ls", ChildRoute::Agent(AgentFamily::Codex));
+                    let _ = sync_cmd(machine_program(), ChildRoute::Agent(AgentFamily::Codex));
                 });
                 (allowance.is_none(), refused.is_err())
             })
@@ -578,7 +585,6 @@ mod tests {
     /// KT-1495: the allowance is held by a gated probe only, opens the guard
     /// for the real binary while held, and the guard is armed again once it
     /// drops. Runs on a thread of its own: the allowance is process-wide.
-    #[cfg(unix)] // uses POSIX absolute paths
     #[test]
     fn the_live_probe_allowance_is_scoped_to_its_holder() {
         use crate::core::child_env::AgentFamily;
@@ -590,11 +596,11 @@ mod tests {
         let held = allow_live_probe_for(Some("live_vault_probe_scoped"), Some("1"));
         assert!(held.is_some() && live_probe_open() && !real_agents_forbidden());
         // While held, the real binary starts on an agent route.
-        let _ = sync_cmd("/bin/ls", ChildRoute::Agent(AgentFamily::Codex));
+        let _ = sync_cmd(machine_program(), ChildRoute::Agent(AgentFamily::Codex));
         drop(held);
         assert!(!live_probe_open() && real_agents_forbidden());
         let refused = std::panic::catch_unwind(|| {
-            let _ = sync_cmd("/bin/ls", ChildRoute::Agent(AgentFamily::Codex));
+            let _ = sync_cmd(machine_program(), ChildRoute::Agent(AgentFamily::Codex));
         });
         assert!(refused.is_err(), "refused again after the allowance drops");
     }
@@ -667,7 +673,8 @@ mod tests {
     }
 
     /// A program Kronn runs for itself gets the base allow-list only.
-    #[cfg(unix)] // uses POSIX absolute paths
+    #[cfg(unix)]
+    // dumps the child environment with probe::env_dumping_program, a #!/bin/sh script made executable through unix mode bits
     #[tokio::test]
     async fn a_tool_command_runs_without_the_backend_environment() {
         use crate::core::child_env::probe;

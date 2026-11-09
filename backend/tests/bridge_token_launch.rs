@@ -1,7 +1,7 @@
 //! KT-1006 — a launch's bridge token through the real launch path: always
 //! minted (even for a launch that owns nothing), live exactly as long as the
 //! process handle, dead as soon as the launch is cancelled.
-#![cfg(unix)]
+#![cfg(unix)] // writes #!/bin/sh stand-in agents made executable with chmod mode bits through std::os::unix
 
 use std::{ffi::OsString, os::unix::fs::PermissionsExt, path::Path, sync::Arc, time::Duration};
 

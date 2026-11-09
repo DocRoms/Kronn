@@ -454,7 +454,7 @@ fn link(target: &str, at: &Path) {
 
 /// A symlink of the source that points out of the seed is not handed to the
 /// worker (absolute, or climbing past the seed's root); one that stays inside is.
-#[cfg(unix)] // creates symlinks through std::os::unix; uses POSIX absolute paths
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_symlink_pointing_out_of_the_seed_is_dropped_and_named() {
     for use_clone in [true, false] {
@@ -515,7 +515,7 @@ fn a_symlink_pointing_out_of_the_seed_is_dropped_and_named() {
 }
 
 /// The record names what was dropped, so the project's settings can show it.
-#[cfg(unix)] // creates symlinks through std::os::unix; uses POSIX absolute paths
+#[cfg(unix)] // creates symlinks through std::os::unix (the seed fixture's link helper)
 #[test]
 fn the_dropped_links_survive_the_journal() {
     let fx = fixture();

@@ -21,8 +21,11 @@ Release notes for 0.9.3 and earlier are available in the
   manual backup and a sealed secret back after a restart. A headless `kronn`
   serves the built UI when `KRONN_FRONTEND_DIST` names it. A nightly workflow
   runs the full backend lib suite on Windows; a test skipped there must be
-  `#[cfg(unix)]` with its reason on the gate line (`scripts/ci/lint_windows_skips.py`,
-  341 gates annotated). See `docs/operations/windows-boot-gate.md` (KT-1629).
+  `#[cfg(unix)]` with a concrete POSIX reason on the gate line, never
+  "unverified" (`scripts/ci/lint_windows_skips.py`, which also covers module and
+  whole-file gates; 343 gated tests carry a reason). Gates that only hid portable
+  tests were dropped, so the nightly decides. See
+  `docs/operations/windows-boot-gate.md` (KT-1629).
 
 - Media: an image or a video can be generated from several source images of
   the discussion, ordered and removable in the Creator. Each saved image/video

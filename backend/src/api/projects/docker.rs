@@ -1005,7 +1005,8 @@ pub async fn docker_action(
 mod tests {
     /// Compose interpolates its environment into the repository's compose
     /// file: it gets Docker's settings, never a backend secret.
-    #[cfg(unix)] // uses POSIX absolute paths
+    #[cfg(unix)]
+    // dumps the child environment with probe::env_dumping_program, a #!/bin/sh script made executable through unix mode bits
     #[tokio::test]
     async fn docker_compose_runs_without_the_backend_environment() {
         use crate::core::child_env::probe;

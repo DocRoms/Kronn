@@ -10,9 +10,9 @@ name: CI Nightly Windows
 #
 # The contract this run relies on: a test that cannot run on Windows is
 # `#[cfg(unix)]` with its reason on the gate line, never ignored or skipped at
-# run time (scripts/ci/lint_windows_skips.py, enforced by ci-test.yml). Every
-# failure of this run is therefore a Windows defect: fix it, or ticket it and
-# gate the test `#[cfg(unix)] // see KT-<n>`.
+# run time (scripts/ci/lint_windows_skips.py, enforced by the `lint-windows-skips`
+# job of ci-build.yml). Every failure of this run is therefore a Windows defect:
+# fix it, or ticket it and gate the test `#[cfg(unix)] // see KT-<n>`.
 on:
   schedule:
     # 02:17 UTC: after the day's merges, off the runner-demand peak.
@@ -87,8 +87,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: nightly-windows-junit
-          path: backend/target/nextest/ci/junit.xml
-          if-no-files-found: warn
+          # nextest writes <store>/nextest/ci/junit.xml: `backend/target` when it
+          # keeps its store next to the workspace (what a local run does), the
+          # repository `target` when it follows `.cargo/config.toml`. Either is
+          # fine; neither means the report was lost, and the step must say so.
+          path: |
+            backend/target/nextest/ci/junit.xml
+            target/nextest/ci/junit.xml
+          if-no-files-found: error
           retention-days: 14
 
       # A schedule runs on the default branch: the cache it saves serves every run after.

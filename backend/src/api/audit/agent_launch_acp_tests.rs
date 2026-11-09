@@ -713,13 +713,13 @@ async fn a_stop_that_cannot_settle_the_target_is_not_recorded_as_restored(pipeli
     );
 }
 
-#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
+#[cfg(unix)] // makes the target directory read-only with chmod 0o555; Windows has no POSIX mode bits
 #[tokio::test]
 async fn a_stop_that_cannot_settle_a_full_audit_target_is_not_recorded_as_restored() {
     a_stop_that_cannot_settle_the_target_is_not_recorded_as_restored(Pipeline::Full).await;
 }
 
-#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
+#[cfg(unix)] // makes the target directory read-only with chmod 0o555; Windows has no POSIX mode bits
 #[tokio::test]
 async fn a_stop_that_cannot_settle_a_partial_audit_target_is_not_recorded_as_restored() {
     a_stop_that_cannot_settle_the_target_is_not_recorded_as_restored(Pipeline::Partial).await;
@@ -1385,7 +1385,8 @@ impl Drop for ScriptedOpenCodeOnPath {
 /// DoD — the partial audit starts OpenCode the way the Full one does: through
 /// Kronn's own ACP spawn, so the agent gets the environment-file policy, a
 /// refused read does not end its step, and the usage its turn reports is counted.
-#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
+#[cfg(unix)]
+// puts a python3-shebang fake opencode on PATH (test_support::write_fake_opencode), which Windows cannot exec
 #[tokio::test]
 #[serial_test::serial(acp_adapter_env_toggle)]
 async fn a_partial_audit_on_opencode_gets_the_read_policy_and_survives_a_refused_read() {
@@ -1705,7 +1706,8 @@ async fn a_partial_audit_tool_chain_without_text_shows_progress_and_stops() {
 
 /// An audit is no explicit choice: OpenCode without its own full-access
 /// setting is refused before the audit starts, and OpenCode never starts.
-#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
+#[cfg(unix)]
+// puts a python3-shebang fake opencode on PATH (test_support::write_fake_opencode), which Windows cannot exec
 #[tokio::test]
 #[serial_test::serial(acp_adapter_env_toggle)]
 async fn an_audit_on_opencode_without_its_full_access_setting_is_refused_before_spawn() {
@@ -1736,7 +1738,8 @@ async fn an_audit_on_opencode_without_its_full_access_setting_is_refused_before_
 
 /// Revoking full access between two steps of a running audit refuses the next
 /// spawn: the launcher's own value, taken at the start, is not the authority.
-#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
+#[cfg(unix)]
+// puts a python3-shebang fake opencode on PATH (test_support::write_fake_opencode), which Windows cannot exec
 #[tokio::test]
 #[serial_test::serial(acp_adapter_env_toggle)]
 async fn revoking_full_access_during_an_audit_refuses_its_next_step() {

@@ -2123,7 +2123,8 @@ mod tests {
 
     /// `gh` and `glab` start git in the repository: they get the git-host
     /// environment and the project's GitHub token, never the backend's.
-    #[cfg(unix)] // uses POSIX absolute paths
+    #[cfg(unix)]
+    // dumps the child environment with probe::env_dumping_program, a #!/bin/sh script made executable through unix mode bits
     #[test]
     fn gh_and_glab_run_without_the_backend_environment() {
         use crate::core::child_env::probe;
@@ -2408,7 +2409,7 @@ mod tests {
         assert!(validate_exec_command("git log --output=x").is_err());
     }
 
-    #[cfg(unix)] // uses POSIX absolute paths
+    #[cfg(unix)] // runs `cat` and `echo` as programs and reads /etc/passwd, which Windows lacks
     #[test]
     fn exec_runs_an_in_project_read_without_a_shell_or_the_backend_env() {
         let dir = tempfile::tempdir().unwrap();

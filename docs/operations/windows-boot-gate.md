@@ -23,8 +23,9 @@ a headless `kronn` mount the built frontend next to its API, the same mount as
 the desktop's embedded server (`backend/src/main.rs`, `frontend_dist_dir`).
 Unset, nothing changes.
 
-`boot-scope` skips the job on a pull request that touches neither `backend/` nor
-`frontend/` (nor `ci-build.yml`); `ci-build-gates` accepts that skip. Like every
+`boot-scope` skips the job on a pull request that touches none of `backend/`,
+`frontend/`, `templates/`, `desktop/`, `scripts/ci/`, `.cargo/` or `ci-build.yml`;
+`ci-build-gates` accepts that skip. Like every
 build job it runs once the pull request carries the `ci-build` label.
 
 ### Run it locally
@@ -39,38 +40,90 @@ cd ../frontend && pnpm build && pnpm test:boot --empty-home
 
 ### The upgrade fixture
 
-`db-previous-release.sqlite` is a WAL-mode database at the last migration of the
-previous release (`287_quota_fallback_refusals`, 0.15.2) with one project and one
-discussion. It does not change from release to release: every new migration is
-one more pending migration. `db::upgrade_fixture_tests` keeps it honest (it must
-stay older than the code, and upgrading a copy must back it up and keep its
-data). Rebuild it only if it stops being a valid database:
-`cargo test --lib upgrade_fixture_tests::regenerate -- --ignored`.
+`backend/tests/fixtures/db-previous-release.sqlite` is a WAL-mode database at the
+last migration of the previous release (`287_quota_fallback_refusals`, 0.15.2),
+holding what a real install holds so that a data-dependent migration has rows to
+rewrite: three projects (one with linked repositories and a docs directory), four
+discussions with ten messages (one archived, one pinned, one in no project, usage
+rows on the agent replies), a workflow, two planning tasks with a definition of
+done and a linked discussion, and one `provider_key` credential sealed with a
+**test key**. Nothing in it is a secret: names and paths are invented, the
+credential is a public sentence sealed with a public key (both constants in
+`backend/src/db/upgrade_fixture_tests.rs`), and Kronn cannot open that row, which
+is also the state of a database moved to another machine: the boot must still come
+up.
+
+It does not change from release to release: every new migration is one more
+pending migration. `db::upgrade_fixture_tests` keeps it honest: it must stay older
+than the code; upgrading a copy must back it up and keep every kind of row (the
+workflow still parses with the current models, the sealed credential is byte for
+byte the same); and the committed bytes must hold no secret shape.
+
+**Regenerating it** (only to change what it holds, never for a new release):
+edit the rows in `regenerate_the_previous_release_fixture`, then
+
+```bash
+cd backend
+cargo test --lib upgrade_fixture_tests::regenerate -- --ignored
+git add tests/fixtures/db-previous-release.sqlite
+```
+
+and check `cargo test --lib upgrade_fixture_tests` and
+`cd ../frontend && pnpm test:boot --empty-home` still pass. The rows are written
+with raw SQL against the previous release's schema, because the insert helpers
+write columns a later migration adds.
+
+`KRONN_FRONTEND_DIST` pointing at a directory with no `index.html` is reported at
+startup (`kronn` logs a warning), so a typo or an unbuilt frontend shows up in the
+`kronn.log` the job attaches, not as a blank page.
 
 ### Proving the gate
 
 The gate is only worth something if it fails on the bug it exists for. Dispatch
-`CI Build` (Actions, "Run workflow") with `ref` on a commit that has
-`test-boot-windows` but not the KT-1625 fix (`fa7d7d7b8`): the upgrade case must
-go red with the os error 5 in its attached `kronn.log`. Then run it on a ref that
-has the fix: green. The first run of the pull request that added the job is that
-proof, as long as the fix has not merged yet.
+`CI Build` (Actions, "Run workflow") with `ref` on the head of the branch that
+added `test-boot-windows`: it predates the KT-1625 fix (PR #510, commit
+`fa7d7d7b8`, which is the fix, not a commit without it), so the upgrade case must
+go red with the os error 5 in its attached `kronn.log`. Then run it once #510 is
+in the branch (or on `main` after both merged): green. The first run of the pull
+request that added the job is the red half, as long as #510 has not merged. After
+it has, redo the red half on a scratch branch off the current head with
+`git revert fa7d7d7b8` applied, and dispatch on that.
 
-## 2. A test skipped on Windows is `#[cfg(unix)]` with a reason
+## 2. A test skipped on Windows is `#[cfg(unix)]` with a concrete reason
 
-`scripts/ci/lint_windows_skips.py` (job `lint-windows-skips`, unit tests in
+A skip that is not visible and justified hides real Windows bugs, so the nightly
+(section 3) must be the one to decide. `scripts/ci/lint_windows_skips.py` (job
+`lint-windows-skips`, unit tests with a fixture per form in
 `scripts/ci/test_lint_windows_skips.py`) refuses, in `backend/src` and
 `backend/tests`:
 
-- a unix-only test whose gate has no reason: write
-  `#[cfg(unix)] // what Windows lacks` (or a `//` comment on the line above; a `///`
-  doc comment is not a reason);
-- any other way to skip on Windows: `cfg(not(windows))`, `cfg_attr(windows, ignore)`,
-  or `if cfg!(windows) { return }` in the body.
+- a gate with no reason: write `#[cfg(unix)] // creates symlinks through
+  std::os::unix` on the gate line. When rustfmt moves a comment that runs past the
+  line width, the plain `//` line right below the gate is the reason; a comment
+  above it, or a `///` doc, is not. Keep the gate line within 100 columns so
+  `cargo fmt` leaves it alone;
+- a reason that names no concrete POSIX cause: symlinks, chmod mode bits, fork and
+  signals, unix sockets, FIFOs, `/proc`, a `#!/bin/sh` or python fixture, raw-byte
+  names, a program Windows lacks. "unverified on Windows", "not yet run", "flaky"
+  and the like are refused outright: **do not gate a test you have not seen fail on
+  Windows; let the nightly run it.** A gate kept for a known Windows defect says
+  `see KT-<n>` and is accepted on that ground alone;
+- any form that skips on Windows but is not `unix`: `cfg(not(windows))`,
+  `cfg(not(target_os = "windows"))`, `cfg(target_family = "unix")`,
+  `cfg_attr(windows, ignore)`, or `if cfg!(windows) { return }` in the body
+  (`all(unix, ...)` and `all(test, unix, ...)` are `unix`; `target_os = "linux"` or
+  `"macos"` is accepted for what only that OS has);
+- the same on a module that holds tests (an inline `mod tests { .. }`, a
+  `mod x;` or `#[path = ".."]` file, a whole-file `#![cfg(unix)]`). A gate on a
+  helper, a `use` or production code is not checked: a helper only gates the
+  tests that call it, and those carry a reason.
+
+A module gate hides every test in it, so prefer gating the few tests that need
+the POSIX feature over the module, and prefer a portable fixture (a tempdir path,
+`std::env::current_exe()`, `cmd.exe` for `/bin/ls`) over a gate.
 
 `python3 scripts/ci/lint_windows_skips.py --list` prints the inventory with its
-reasons. A reason that starts with "unverified on Windows" was written before the
-first nightly run: when the nightly shows the test passes there, drop the gate.
+reasons.
 
 ## 3. Nightly: the full lib suite on Windows
 

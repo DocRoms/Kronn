@@ -1471,7 +1471,8 @@ mod tests {
 
     /// A package manager runs the repository's config: it gets the
     /// dependency-check environment, never the backend's (KT-1006).
-    #[cfg(unix)] // uses POSIX absolute paths
+    #[cfg(unix)]
+    // dumps the child environment with probe::env_dumping_program, a #!/bin/sh script made executable through unix mode bits
     #[test]
     fn a_dependency_check_runs_without_the_backend_environment() {
         use crate::core::child_env::probe;

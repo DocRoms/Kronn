@@ -909,7 +909,6 @@ fn a_step_switched_off_is_not_enforcement() {
 }
 
 /// A project directory next to an `outside` one holding what must never be read.
-#[cfg(unix)]
 fn jailed_project() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let outer = tempfile::tempdir().unwrap();
     let project = outer.path().join("project");
@@ -1058,7 +1057,6 @@ fn a_makefile_commit_target_names_the_tool_and_the_line_never_the_recipe() {
     assert!(CommitFacts::detect(dir.path()).tooling.is_empty());
 }
 
-#[cfg(unix)] // runs a POSIX shell script fixture; uses POSIX absolute paths
 #[test]
 fn a_script_evidence_outside_the_project_is_never_cited() {
     let (_outer, project, outside) = jailed_project();

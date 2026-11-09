@@ -681,7 +681,6 @@ mod tests {
 
     /// Independent clones of the same remote remain distinct. Initialize real Git
     /// repositories so remote discovery exercises the intended collision.
-    #[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
     #[tokio::test]
     async fn two_clones_of_one_repository_are_two_working_copies() {
         const ORIGINE: &str = "git@example.com:acme/kronn.git";
@@ -712,13 +711,13 @@ mod tests {
     }
 
     /// `git init` sans réseau ni configuration globale héritée.
-    #[cfg(unix)]
     fn git_dans(repo: &std::path::Path, args: &[&str]) {
+        let rien = if cfg!(windows) { "NUL" } else { "/dev/null" };
         let sortie = std::process::Command::new("git")
             .args(args)
             .current_dir(repo)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", rien)
+            .env("GIT_CONFIG_SYSTEM", rien)
             .output()
             .expect("git est disponible");
         assert!(

@@ -4577,7 +4577,7 @@ mod tests {
         std::fs::remove_dir_all(&outside).ok();
     }
 
-    #[cfg(unix)] // creates symlinks through std::os::unix; uses POSIX absolute paths
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn verify_symlink_with_dotdot_target_escaping_is_outside() {
         // A relative link target that climbs out (`../..`) is refused.
@@ -4616,7 +4616,7 @@ mod tests {
     // lexical jail catches `../` traversal in `verify_relative_path_…`
     // above ; it does NOT catch a symlink whose components look innocent
     // but whose canonical resolution points outside the project.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn verify_relative_symlink_escape_is_outside_project() {
         use std::os::unix::fs::symlink;

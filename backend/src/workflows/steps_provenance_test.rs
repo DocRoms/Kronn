@@ -553,7 +553,8 @@ fn step_cache_totals_sum_reporting_attempts_and_stay_unknown_otherwise() {
 /// A reviewer runs with its own agent's access: an OpenCode reviewer whose
 /// full-access setting is off is refused, though its LiteLLM author ran with
 /// full access, and OpenCode is never started; with the setting on it runs.
-#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
+#[cfg(unix)]
+// puts a python3-shebang fake opencode on PATH (test_support::write_fake_opencode), which Windows cannot exec
 #[tokio::test]
 #[serial_test::serial(acp_adapter_env_toggle)]
 async fn a_native_reviewer_never_inherits_its_author_s_full_access() {

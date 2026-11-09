@@ -913,6 +913,9 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     if let (Some(dist), Some(service)) = (frontend_dist.as_deref(), frontend_service) {
         // Same mount as the desktop's embedded server: /api/* → API, the rest → the UI.
         tracing::info!("Serving the built UI from {}", dist.display());
+        if let Some(problem) = frontend_dist_problem(dist) {
+            tracing::warn!("{problem}");
+        }
         app = axum::Router::new().merge(app).fallback_service(service);
     }
 
@@ -987,6 +990,18 @@ fn frontend_dist_dir(value: Option<&str>) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// Why a named `KRONN_FRONTEND_DIST` would serve nothing: a typo, or a frontend
+/// that was never built, would otherwise only show as a blank page and 404s.
+fn frontend_dist_problem(dist: &std::path::Path) -> Option<String> {
+    if dist.join("index.html").is_file() {
+        return None;
+    }
+    Some(format!(
+        "KRONN_FRONTEND_DIST={} has no index.html: the UI will not load (is it the built `frontend/dist`?)",
+        dist.display()
+    ))
+}
+
 /// URL shown in the startup banner's "→" line. Returns the dev-UI override when
 /// it is set and non-empty (`kronn start-dev` exports KRONN_DEV_UI_URL — in
 /// native dev the listen port serves the API only), otherwise the backend
@@ -1056,6 +1071,20 @@ mod tests {
             frontend_dist_dir(Some(" ../frontend/dist ")),
             Some(std::path::PathBuf::from("../frontend/dist"))
         );
+    }
+
+    #[test]
+    fn a_frontend_dist_without_an_index_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let problem = frontend_dist_problem(dir.path()).expect("an empty directory serves nothing");
+        assert!(problem.contains("no index.html"), "{problem}");
+        assert!(
+            problem.contains(&dir.path().display().to_string()),
+            "{problem}"
+        );
+        assert!(frontend_dist_problem(&dir.path().join("typo")).is_some());
+        std::fs::write(dir.path().join("index.html"), "<html></html>").unwrap();
+        assert_eq!(frontend_dist_problem(dir.path()), None);
     }
 
     #[test]

@@ -245,7 +245,6 @@ fn a_planted_link_never_takes_the_copy_into_the_vault() {
 
 /// A dir a step creates between the removal of the previous copy and the new
 /// one is never adopted: removed once, refused if it comes back.
-#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[test]
 fn a_copy_dir_recreated_by_a_step_is_never_adopted() {
     let dir = repo();

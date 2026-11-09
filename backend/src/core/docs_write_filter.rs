@@ -702,7 +702,7 @@ mod tests {
     // The filesystem must accept arbitrary filename bytes. The local macOS
     // test volume rejects their creation with EILSEQ; pure conversions above
     // still run there. This fixture is qualified on Linux, not silently skipped.
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")] // builds non-UTF-8 names from raw bytes with std::os::unix::ffi::OsStrExt
     #[tokio::test]
     async fn audit_handles_non_utf8_names_without_lossy_access_or_index_changes() {
         use std::os::unix::ffi::OsStrExt;

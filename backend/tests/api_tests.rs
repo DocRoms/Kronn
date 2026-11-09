@@ -6821,7 +6821,7 @@ async fn a_trigger_step_launches_a_workflow_with_required_variables_and_links_bo
 /// KT-807: an isolated workflow with a SubWorkflow foreach accepts a
 /// concurrency above one, and two overlapping runs each work in their own
 /// worktree, their foreach still sequential and complete.
-#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
+#[cfg(unix)] // its Exec step runs `pwd` as a program, which Windows lacks
 #[tokio::test]
 async fn isolated_foreach_runs_overlap_in_their_own_worktrees() {
     let state = test_state();

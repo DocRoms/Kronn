@@ -1904,7 +1904,7 @@ mod tests {
     // because Windows CI doesn't have `echo` as a discrete binary
     // (it's a cmd.exe builtin), and the cross-platform discipline is
     // already enforced by the allowlist + cmd::async_cmd helpers.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs `echo` as a program, which Windows lacks (a cmd.exe builtin there)
     #[tokio::test]
     async fn echoes_simple_args() {
         let step = exec_step("greet", Some("echo"), vec!["hello", "world"], None);

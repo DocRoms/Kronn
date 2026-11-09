@@ -371,7 +371,7 @@ jobs:
         # A push to main only refreshes caches: its skipped checks are by design.
         # The portability job is skipped by design when the change does not
         # touch what it tests (`portability-scope`), and so is the Windows boot
-        # job when the change touches neither backend/ nor frontend/ (`boot-scope`).
+        # job when the change touches nothing Kronn is built or started from (`boot-scope`).
         run: |
           echo "Gate results: $RESULTS"
           echo "$RESULTS" | jq -e --arg event "$EVENT_NAME" '
@@ -427,8 +427,9 @@ jobs:
   #      restart.
   # The specs are frontend/e2e-boot; `pnpm test:boot` runs them locally.
   #
-  # Proving the gate: dispatch this workflow with `ref` on a commit that has
-  # this job but not the KT-1625 fix (fa7d7d7b8); the upgrade case goes red.
+  # Proving the gate: dispatch this workflow with `ref` on this branch's head: it
+  # has this job and predates the KT-1625 fix (PR #510, not merged when this was
+  # written), so the upgrade case goes red. Green: the same ref once #510 is in.
   boot-scope:
     needs: require-ci-build-label
     if: needs.require-ci-build-label.outputs.run == 'true'
@@ -454,7 +455,10 @@ jobs:
           fi
           changed=$(git diff --name-only "$BASE" "$HEAD")
           echo "$changed"
-          if echo "$changed" | grep -Eq '^(backend|frontend)/|^\.github/workflows/ci-build\.yml$'; then
+          # What Kronn is built or started from: the backend and its templates, the
+          # frontend, the desktop crate that embeds both, the cargo config, the CI
+          # scripts this job runs, and this workflow.
+          if echo "$changed" | grep -Eq '^(backend|frontend|templates|desktop|scripts/ci)/|^\.cargo/|^\.github/workflows/ci-build\.yml$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"

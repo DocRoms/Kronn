@@ -1,7 +1,7 @@
 //! KT-1038 — a file rooted_io creates follows the process umask. A binary of
 //! its own: the umask is process-wide, so no other test may run alongside.
 
-#![cfg(unix)]
+#![cfg(unix)] // asserts the POSIX umask through libc and chmod mode bits
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

@@ -522,7 +522,7 @@ fn a_probe_on_a_host_whose_launcher_is_not_installed_is_refused_and_nothing_runs
     }
 }
 
-#[cfg(unix)] // uses POSIX absolute paths
+#[cfg(unix)] // stands /usr/bin/false in for the bwrap launcher; Windows has no `false` program
 #[test]
 fn a_probe_on_a_host_whose_launcher_cannot_apply_its_sandbox_is_refused_not_failed() {
     let layout = layout();
@@ -893,7 +893,7 @@ fn an_ordinary_build_succeeds_under_the_os_sandbox() {
 
 /// A pty the test owns stands for the operator's terminal: the build script is
 /// handed its path and must neither open it for writing nor reach the master.
-#[cfg(unix)] // relies on POSIX process groups and signals; uses POSIX absolute paths
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[test]
 fn a_build_script_writing_to_a_terminal_is_denied_by_the_os() {
     let Some(mechanism) = live_mechanism() else {
@@ -945,7 +945,7 @@ fn a_build_script_writing_to_a_terminal_is_denied_by_the_os() {
 
 /// macOS only: `launchctl submit` asks launchd — over a Mach service the
 /// profile does not list — to run a job outside the sandbox.
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")] // asks macOS launchd to run a job under sandbox-exec
 #[test]
 fn a_build_script_asking_launchd_to_run_a_job_is_denied_by_the_os() {
     let Some(mechanism) = live_mechanism() else {
@@ -1100,7 +1100,7 @@ fn a_sandbox_launcher_that_is_not_installed_is_refused_with_its_name_and_nothing
     }
 }
 
-#[cfg(unix)] // uses POSIX absolute paths
+#[cfg(unix)] // stands /usr/bin/false in for the bwrap launcher; Windows has no `false` program
 #[test]
 fn a_sandbox_launcher_that_cannot_apply_its_sandbox_is_refused_with_its_exit_status() {
     let layout = layout();
@@ -1361,7 +1361,7 @@ fn a_confined_validation_that_times_out_is_reported_timed_out() {
 /// `vite.config.ts` (vitest loads it), so it runs through the sandboxed
 /// runner. Under the deny-default profile it must still be able to load that
 /// config — otherwise every lane's frontend would read as unavailable.
-#[cfg(unix)] // creates symlinks through std::os::unix; uses POSIX absolute paths
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn vitest_loads_the_worker_config_under_the_os_sandbox() {
     let Some(mechanism) = live_mechanism() else {
@@ -1524,7 +1524,7 @@ fn the_docker_socket_comes_from_docker_host_then_the_context_then_known_paths() 
 
 /// The live proof: under the real OS sandbox a Unix socket stands for Docker's.
 /// Refused without the allowance, reached with it.
-#[cfg(unix)] // uses POSIX absolute paths
+#[cfg(unix)] // binds a unix domain socket and reaches it with /usr/bin/python3 under the OS sandbox
 #[test]
 fn the_os_sandbox_reaches_the_docker_socket_only_when_the_policy_opens_it() {
     let Some(mechanism) = live_mechanism() else {

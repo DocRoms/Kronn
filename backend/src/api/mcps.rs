@@ -3374,7 +3374,8 @@ mod tests {
 
     /// A probed MCP server, possibly chosen by a repository's `.mcp.json`,
     /// sees its own configured values and no backend secret (B4-04).
-    #[cfg(unix)] // uses POSIX absolute paths
+    #[cfg(unix)]
+    // dumps the child environment with probe::env_dumping_program, a #!/bin/sh script made executable through unix mode bits
     #[test]
     fn a_probed_mcp_server_sees_no_backend_secret() {
         use crate::core::child_env::probe;

@@ -97,7 +97,7 @@ fn insert(conn: &Connection, run: &WorkflowRun) {
     crate::db::workflows::insert_run(conn, run).unwrap();
 }
 
-#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
+#[cfg(unix)] // runs `printf` as an Exec program, which Windows lacks
 #[tokio::test]
 async fn an_exec_step_declares_no_op_with_its_marker_line() {
     let declared = exec_result(&["{\"items\": []}\nKRONN_NOOP\n"]).await;

@@ -251,7 +251,7 @@ fn origin_head_names_the_default_branch_and_its_remote_ref_stands_in() {
     ));
 }
 
-#[cfg(unix)] // creates symlinks through std::os::unix; uses POSIX absolute paths
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_symlinked_profile_on_the_default_branch_is_refused() {
     let repo = repo_with_profile(None);

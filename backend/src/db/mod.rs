@@ -593,7 +593,7 @@ pub(crate) fn restrict_data_dir_to_owner(dir: &std::path::Path) {
     let _ = dir;
 }
 
-#[cfg(all(test, unix, feature = "full-tests"))]
+#[cfg(all(test, unix, feature = "full-tests"))] // asserts the data directory's chmod mode bits through std::os::unix
 mod data_dir_permission_tests {
     use std::os::unix::fs::PermissionsExt;
 

@@ -3387,7 +3387,6 @@ mod tests {
 
     /// Build a throwaway repo so the git tools are exercised for real rather than
     /// mocked: the point of these tools is that they talk to an actual repository.
-    #[cfg(unix)]
     fn tiny_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
@@ -3406,7 +3405,6 @@ mod tests {
         dir
     }
 
-    #[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
     #[test]
     fn git_status_reports_branch_and_uncommitted_work() {
         // The production gap: an agent read .git/HEAD by hand to find the branch,

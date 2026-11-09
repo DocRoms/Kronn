@@ -413,7 +413,7 @@ async fn a_level_approved_line_cannot_read_the_encryption_key_or_the_database() 
 /// Bubblewrap only: the data dir is not reachable through the host's `/proc`
 /// (`/proc/<our pid>/root/...` crosses a mount namespace for the same uid).
 /// Self-skips where bubblewrap is not usable.
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")] // walks around the tmpfs through /proc, which Windows lacks
 #[tokio::test]
 #[serial]
 async fn a_level_approved_line_cannot_walk_around_the_tmpfs_through_proc() {

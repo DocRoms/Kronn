@@ -1717,7 +1717,7 @@ mod tests {
     /// A source that sends more than the file, a `.part` longer than the
     /// file, or a range that does not continue the `.part`: nothing is
     /// spliced or kept.
-    #[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
+    #[cfg(unix)] // exercises download_file, which is unix-only production code (openat/O_NOFOLLOW model folder)
     #[tokio::test]
     async fn a_download_never_writes_past_the_file_nor_splices_a_wrong_range() {
         use wiremock::matchers::{header, method, path};

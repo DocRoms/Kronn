@@ -1139,7 +1139,7 @@ fn push_unique(roots: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
-#[cfg(all(test, unix, feature = "full-tests"))]
+#[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
 
@@ -1175,6 +1175,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn read_only_repos_rejects_missing_relative_non_git_and_overlapping_paths() {
         let (temp, work, repo) = fixture();
@@ -1207,6 +1208,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn read_only_repos_canonicalizes_aliases_and_deduplicates() {
         let (temp, work, repo) = fixture();

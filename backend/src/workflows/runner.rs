@@ -6977,7 +6977,7 @@ mod tests {
             .contains("run-holding-the-tree"));
     }
 
-    #[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
+    #[cfg(unix)] // its Exec step runs `sleep 0.4` as a program, which Windows lacks
     #[tokio::test]
     async fn a_workflow_declared_read_only_on_the_main_tree_skips_the_lock() {
         let (state, tokens, agents) = test_state_and_configs();

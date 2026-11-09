@@ -154,7 +154,7 @@ fn climb_out_and_back_to_sibling_escape_never_verifies_foreign_file() {
 // 5. Symlinked subdir pointing OUTSIDE the root. Lexically in-jail, but
 //    canonicalises out → must be OutsideProject, never Verified.
 // ──────────────────────────────────────────────────────────────────────────
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn symlinked_subdir_escaping_root_is_outside_project() {
     let root = temp_project();
@@ -191,7 +191,7 @@ fn symlinked_subdir_escaping_root_is_outside_project() {
 // ──────────────────────────────────────────────────────────────────────────
 // 6. Symlink to /etc directly — the textbook attack.
 // ──────────────────────────────────────────────────────────────────────────
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn symlink_to_etc_is_outside_project() {
     let root = temp_project();
