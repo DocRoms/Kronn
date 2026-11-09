@@ -20483,12 +20483,8 @@ pub(crate) mod tests {
         db.with_conn({
             let first_dispatch = first_dispatch.clone();
             move |conn| {
-                crate::db::agent_dispatch::claim_with_limits(
-                    conn,
-                    &first_dispatch,
-                    Some(CAP_ONE),
-                )?
-                .unwrap();
+                crate::db::agent_dispatch::claim_with_limits(conn, &first_dispatch, Some(CAP_ONE))?
+                    .unwrap();
                 crate::db::agent_dispatch::mark_agent_started(conn, &first_dispatch)?;
                 Ok(())
             }

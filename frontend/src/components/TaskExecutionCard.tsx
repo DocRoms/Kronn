@@ -152,7 +152,7 @@ export function TaskExecutionCard({
       {queue && (
         <p className="orch-exec-queued" data-testid="orch-exec-queued">
           {t('orch.exec.queued', queue.running, queue.cap)}
-          {detail.progress.queue_position !== null && (
+          {detail.progress.queue_position != null && (
             <> {t('orch.exec.queuedPosition', detail.progress.queue_position)}</>
           )}
         </p>

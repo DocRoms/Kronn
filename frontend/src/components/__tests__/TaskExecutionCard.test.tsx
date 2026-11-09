@@ -174,6 +174,21 @@ describe('TaskExecutionCard', () => {
     expect(queued.textContent).toContain('3');
   });
 
+  it('shows no position when the queue position is null or skipped from the payload', () => {
+    const skipped = progress({ phase: 'queued', reason: 'task_worker_limit:2/2' }) as unknown as Record<string, unknown>;
+    delete skipped.queue_position;
+    for (const progressValue of [
+      progress({ phase: 'queued', reason: 'task_worker_limit:2/2', queue_position: null }),
+      skipped as unknown as TaskExecutionDetail['progress'],
+    ]) {
+      const { unmount } = wrap(<TaskExecutionCard detail={detail({ progress: progressValue })} />);
+      const queued = screen.getByTestId('orch-exec-queued');
+      expect(queued.textContent).toMatch(/\b2\b.*\b2\b/);
+      expect(queued.textContent).not.toContain('undefined');
+      unmount();
+    }
+  });
+
   it('says nothing about a queue once the worker runs, or for another kind of wait', () => {
     const { unmount } = wrap(<TaskExecutionCard detail={detail({ progress: progress({ phase: 'launching' }) })} />);
     expect(screen.queryByTestId('orch-exec-queued')).toBeNull();

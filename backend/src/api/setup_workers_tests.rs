@@ -184,10 +184,7 @@ fn the_task_worker_cap_defaults_to_two_and_refuses_zero_and_excess() {
 
 async fn dispatch_limits(state: &crate::AppState) -> serde_json::Value {
     let config = state.config.read().await;
-    serde_json::from_str(&crate::agents::runner::dispatch_concurrency_limits(
-        &config,
-    ))
-    .unwrap()
+    serde_json::from_str(&crate::agents::runner::dispatch_concurrency_limits(&config)).unwrap()
 }
 
 /// KT-1632 — Settings > Workers reaches the claim: the dispatcher's limits

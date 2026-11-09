@@ -22,12 +22,21 @@ discussion turns do not go through this gate.
   path (first launch, rework re-dispatch, resume, restart recovery) obeys it.
 - The queue **is** the durable `Pending` rows: it survives a restart (the
   recovery returns `Running` rows to `Pending`) and is served in launch order
-  `(created_at, rowid)`. A claim is refused while an older eligible task worker
-  waits, so the racing dispatcher scan cannot reorder it. An older worker held
-  by its *own* per-agent cap does not hold the queue.
-- A claim refused by the cap leaves `progress_phase = 'queued'` and
+  `(created_at, rowid)`. A claim is refused while an older task worker is
+  waiting that would actually be admitted now, so the racing dispatcher scan
+  cannot reorder it. "Admitted now" is one shared SQL predicate
+  (`admissible_apart_from_task_cap`, used by the claim itself and by this
+  queue check): an older worker held back by its group limit, its agent's cap,
+  the local pool, a running or older turn in its own room, or a backoff does not
+  hold the queue, so one blocked job never starves the others.
+- A claim refused **by the cap alone** leaves `progress_phase = 'queued'` and
   `progress_detail = 'task_worker_limit:<running>/<cap>'` on the job (written
-  only when it changes).
+  only when it changes). A job something else holds back gets no such reason,
+  and loses a stale one. The queue position counts only workers actually waiting
+  (`waiting_task_worker`), not one in a backoff.
+- The local-agent lists differ on purpose and share one base (`local_cli_agents!`):
+  the `__local_global` pool is those CLIs plus Ollama; the task-worker cap is
+  those CLIs plus OpenCode and never Ollama.
 
 ## Where it shows
 
