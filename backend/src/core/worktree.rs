@@ -1563,6 +1563,100 @@ pub fn create_discussion_worktree(
     })
 }
 
+/// Workspace mode of a discussion that reviews a commit (KT-1645): it owns a
+/// detached worktree and never falls back to the project's main checkout.
+pub const REVIEW_WORKSPACE_MODE: &str = "Review";
+
+/// What [`create_review_worktree`] hands back: the checkout and the commits the
+/// review was pinned to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewWorktree {
+    pub path: String,
+    pub head_sha: String,
+    pub base_sha: Option<String>,
+}
+
+/// Create the detached worktree of a review discussion (KT-1645).
+///
+/// A reviewer's tools (and the subagents it starts) run in this checkout, so
+/// nothing they do — `git checkout --detach`, `git reset`, a stray edit — can
+/// move HEAD or touch the uncommitted files of the owner's main checkout. The
+/// checkout is pinned to the exact commit `head` resolves to, with no branch:
+/// there is nothing to switch back to and nothing to leave behind but the
+/// directory, which the discussion's deletion removes.
+///
+/// `base` is only checked to exist (a review range is `base..head`; both ends
+/// live in the repository the worktree shares). Any refusal — an unknown
+/// revision, a dirty `git worktree add` — is an `Err`: the caller must fail the
+/// creation, never run the review in the main checkout instead.
+pub fn create_review_worktree(
+    repo_path: &Path,
+    project_slug: &str,
+    discussion_id: &str,
+    head: &str,
+    base: Option<&str>,
+) -> Result<ReviewWorktree, String> {
+    let head_sha = resolve_commit(repo_path, head)?;
+    let base_sha = base
+        .map(|base| resolve_commit(repo_path, base))
+        .transpose()?;
+
+    let short_id: String = discussion_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    let dir_name = format!("{}--review-{}", slugify(project_slug), short_id);
+    let worktree_path = worktree_base_dir(repo_path).join(&dir_name);
+    if worktree_path.exists() {
+        return Err(format!(
+            "review worktree {} already exists",
+            worktree_path.display()
+        ));
+    }
+
+    std::fs::create_dir_all(worktree_base_dir(repo_path))
+        .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
+    ensure_local_git_exclude(repo_path, ".kronn/")?;
+
+    if crate::core::env::is_docker() {
+        for path in [repo_path, worktree_path.as_path()] {
+            let _ = crate::core::cmd::git_cmd()
+                .args(["config", "--global", "--add", "safe.directory"])
+                .arg(path)
+                .output();
+        }
+    }
+
+    let output = crate::core::cmd::project_git_cmd()
+        .args(["worktree", "add", "--detach"])
+        .arg(&worktree_path)
+        .arg(&head_sha)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to execute git worktree add: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    fix_worktree_paths(repo_path, &worktree_path);
+    copy_agent_configs(repo_path, &worktree_path);
+    tracing::info!(
+        "Created review worktree at {} (detached at {})",
+        worktree_path.display(),
+        head_sha
+    );
+
+    Ok(ReviewWorktree {
+        path: worktree_path.to_string_lossy().to_string(),
+        head_sha,
+        base_sha,
+    })
+}
+
 /// One `git worktree list --porcelain` entry.
 struct WorktreeEntry {
     path: PathBuf,

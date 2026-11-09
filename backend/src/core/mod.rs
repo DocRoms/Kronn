@@ -64,6 +64,7 @@ pub mod faithfulness;
 pub mod frontend_spa;
 pub mod fs_guard;
 pub mod generated_paths;
+pub mod git_guard;
 pub mod github_connection;
 pub mod host_mcp_discovery;
 pub mod inline_code;

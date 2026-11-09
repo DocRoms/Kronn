@@ -525,6 +525,8 @@ pub(crate) fn talk_discussion_request(
         directive_ids: vec![],
         workspace_mode: None,
         base_branch: None,
+        review_head: None,
+        review_base: None,
         tier: lead.tier.unwrap_or_default(),
         originating_qp_id: None,
         launch_variables: HashMap::new(),

@@ -532,6 +532,20 @@ pub async fn create(
         }
     }
 
+    // KT-1645 — a review (any discussion naming a commit) gets its own detached
+    // worktree before anything is stored; a refusal fails the creation, it never
+    // degrades to the project's main checkout.
+    let review_workspace = if req.review_head.is_some() || req.review_base.is_some() {
+        match provision_review_workspace(&state, &req, &discussion_id).await {
+            Ok(workspace) => Some(workspace),
+            Err(error) => {
+                return Json(ApiResponse::err_coded(ApiErrorCode::Validation, error));
+            }
+        }
+    } else {
+        None
+    };
+
     let language = if req.language.is_empty() {
         let config = state.config.read().await;
         config.language.clone()
@@ -580,7 +594,11 @@ pub async fn create(
         reply_to_message_id: None,
     };
 
-    let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
+    let workspace_mode = if review_workspace.is_some() {
+        crate::core::worktree::REVIEW_WORKSPACE_MODE.to_string()
+    } else {
+        req.workspace_mode.unwrap_or_else(|| "Direct".into())
+    };
     let base_branch = req.base_branch;
 
     let mut initial_participants = vec![req.agent.clone()];
@@ -626,7 +644,7 @@ pub async fn create(
         archived: false,
         pinned: false,
         workspace_mode: workspace_mode.clone(),
-        workspace_path: None,
+        workspace_path: review_workspace.as_ref().map(|w| w.path.clone()),
         worktree_branch: None,
         summary_cache: None,
         summary_up_to_msg_idx: None,
@@ -781,17 +799,74 @@ pub async fn create(
 
             Json(ApiResponse::ok(discussion))
         }
-        Err(e)
+        Err(e) => {
+            // The review's worktree has no discussion to belong to: remove it.
+            if let Some(workspace) = &review_workspace {
+                if let Err(cleanup) = crate::core::worktree::remove_discussion_worktree(
+                    std::path::Path::new(&workspace.repo_path),
+                    &workspace.path,
+                    false,
+                ) {
+                    tracing::warn!(
+                        "Failed to remove the review worktree of discussion {}: {}",
+                        discussion_id,
+                        cleanup
+                    );
+                }
+            }
             if e.is::<crate::db::discussion_effort::UnresolvedQuickPromptEffort>()
-                || e.is::<crate::db::discussion_launch_settings::InvalidLaunchSettings>() =>
-        {
-            Json(ApiResponse::err_coded(
-                ApiErrorCode::Validation,
-                e.to_string(),
-            ))
+                || e.is::<crate::db::discussion_launch_settings::InvalidLaunchSettings>()
+            {
+                Json(ApiResponse::err_coded(
+                    ApiErrorCode::Validation,
+                    e.to_string(),
+                ))
+            } else {
+                Json(ApiResponse::err(format!("DB error: {}", e)))
+            }
         }
-        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
+}
+
+/// The detached worktree a review discussion runs in, and the repository it
+/// hangs off (needed to remove it again).
+struct ReviewWorkspace {
+    path: String,
+    repo_path: String,
+}
+
+/// KT-1645 — pin a review to its commit in a worktree of its own.
+async fn provision_review_workspace(
+    state: &AppState,
+    req: &CreateDiscussionRequest,
+    discussion_id: &str,
+) -> Result<ReviewWorkspace, String> {
+    let Some(head) = req.review_head.as_deref() else {
+        return Err("review_base needs review_head".to_string());
+    };
+    let Some(project_id) = req.project_id.clone() else {
+        return Err("A review discussion needs a project: there is no repository to pin".into());
+    };
+    let project = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &project_id))
+        .await
+        .map_err(|e| format!("DB error: {e}"))?
+        .ok_or_else(|| "Project not found".to_string())?;
+    let resolved = crate::core::scanner::resolve_host_path(&project.path);
+    let repo_path = std::path::Path::new(&resolved);
+    let worktree = crate::core::worktree::create_review_worktree(
+        repo_path,
+        &project.name,
+        discussion_id,
+        head,
+        req.review_base.as_deref(),
+    )
+    .map_err(|e| format!("Cannot prepare the review worktree: {e}"))?;
+    Ok(ReviewWorkspace {
+        path: worktree.path,
+        repo_path: resolved.to_string_lossy().into_owned(),
+    })
 }
 
 /// PATCH /api/discussions/:id

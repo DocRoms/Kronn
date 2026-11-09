@@ -3246,8 +3246,22 @@ pub(super) async fn make_agent_stream_inner(
 
     // Without a project the agent used to run in the shared system temp dir,
     // where its files could not be told apart from anything else on the machine.
-    if !tool_free_judge && workspace_path.is_none() && project_path.is_empty() {
-        match runner::discussion_scratch_dir(&discussion_id) {
+    // KT-1645 — a review whose worktree pointer is gone is refused here, by the
+    // same preflight, rather than started in the project's main checkout.
+    let review_worktree_lost = !tool_free_judge
+        && workspace_path.is_none()
+        && disc.workspace_mode == crate::core::worktree::REVIEW_WORKSPACE_MODE;
+    if !tool_free_judge
+        && workspace_path.is_none()
+        && (project_path.is_empty() || review_worktree_lost)
+    {
+        let prepared = if review_worktree_lost {
+            Err("this review's worktree is gone; Kronn will not run it in the project's main checkout"
+                .to_string())
+        } else {
+            runner::discussion_scratch_dir(&discussion_id)
+        };
+        match prepared {
             Ok(dir) => workspace_path = Some(dir.to_string_lossy().into_owned()),
             Err(error) => {
                 let content = if disc.language == "fr" {
