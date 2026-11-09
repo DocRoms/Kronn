@@ -1,5 +1,5 @@
 import { useT } from '../lib/I18nContext';
-import type { TaskExecutionDetail, TaskExecutionUsage } from '../types/generated';
+import type { TaskExecutionDetail, TaskExecutionUsage, WarmingStepKind } from '../types/generated';
 import { allowedActions } from '../lib/orch-actions';
 import { isUnlimitedRounds, roundsLimitLabel } from '../lib/reviewRounds';
 
@@ -8,6 +8,26 @@ import { isUnlimitedRounds, roundsLimitLabel } from '../lib/reviewRounds';
 function cliTokens(usage: TaskExecutionUsage): { value: number | null; complete: boolean } {
   const complete = usage.cli_sessions_unmeasured === 0;
   return { value: usage.cli_billable_tokens, complete };
+}
+
+/** The i18n key naming each warming sub-step (KT-1637). */
+const WARMING_STEP_LABELS: Record<WarmingStepKind, string> = {
+  worktree_creation: 'orch.exec.warming.worktree_creation',
+  lane_seeds: 'orch.exec.warming.lane_seeds',
+  lane_provision: 'orch.exec.warming.lane_provision',
+  seed_clone: 'orch.exec.warming.seed_clone',
+  gate_wait: 'orch.exec.warming.gate_wait',
+  first_build: 'orch.exec.warming.first_build',
+  smoke_check: 'orch.exec.warming.smoke_check',
+};
+
+/** `850 ms`, `12.4 s`, `6 min 48 s`: a step is read at the scale it took. */
+export function formatStepDuration(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60_000) return `${(Math.floor(ms / 100) / 10).toFixed(1)} s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.floor((ms % 60_000) / 1000);
+  return `${minutes} min ${seconds} s`;
 }
 
 interface Props {
@@ -41,6 +61,11 @@ export function TaskExecutionCard({
   // KT-894 — the in-app total is not one unit across agents (Codex counts its
   // cache reads in it, Claude Code does not), so with a complete split the three
   // parts are shown instead; a partial split is flagged, never passed off as it.
+  // KT-1637 — where the time before the worker's dispatch went. A detail that
+  // predates the field carries none, so it is read defensively.
+  const warmingSteps = detail.progress?.warming_steps ?? [];
+  const warmingTotal = detail.progress?.warming_total_ms ?? null;
+  const warmingMeasured = warmingSteps.reduce((sum, step) => sum + step.duration_ms, 0);
   const split = usage.in_app_breakdown;
   const splitCoversAll = split !== null && split.messages >= usage.in_app_messages;
 
@@ -134,6 +159,36 @@ export function TaskExecutionCard({
           )}
         </dd>
       </dl>
+
+      {(warmingSteps.length > 0 || warmingTotal !== null) && (
+        <div className="orch-exec-warming" data-testid="orch-exec-warming">
+          <h4>{t('orch.exec.warming')}</h4>
+          <ul>
+            {warmingSteps.map(step => (
+              <li key={step.step} data-testid={`orch-exec-warming-${step.step}`}>
+                {t(WARMING_STEP_LABELS[step.step])}: {formatStepDuration(step.duration_ms)}
+              </li>
+            ))}
+          </ul>
+          {warmingTotal !== null && (
+            <p data-testid="orch-exec-warming-total">
+              {t('orch.exec.warming.total', formatStepDuration(warmingTotal))}
+              {warmingTotal > warmingMeasured && (
+                <span className="orch-exec-partial" data-testid="orch-exec-warming-unmeasured">
+                  {t('orch.exec.warming.unmeasured', formatStepDuration(warmingTotal - warmingMeasured))}
+                </span>
+              )}
+              {/* The total is wall-clock, the steps are monotonic: when they
+                  disagree, say so instead of hiding the gap. */}
+              {warmingMeasured > warmingTotal && (
+                <span className="orch-exec-partial" data-testid="orch-exec-warming-disagree">
+                  {t('orch.exec.warming.disagree', formatStepDuration(warmingMeasured))}
+                </span>
+              )}
+            </p>
+          )}
+        </div>
+      )}
 
       {failing.length > 0 && (
         <ul className="orch-exec-failing" data-testid="orch-exec-failing">

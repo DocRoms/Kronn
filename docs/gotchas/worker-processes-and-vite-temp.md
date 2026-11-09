@@ -82,5 +82,5 @@ match>`), which `--version` never did. That executes the worker-authored
 lane's first build (KT-1255): the deny-default profile, never the backend's own
 rights. If vitest cannot load its config under that profile the frontend reads
 as unavailable, with the command's output as the reason.
-[src: file: backend/src/core/task_worker_env.rs:985-1045#check_frontend]
-[src: file: backend/src/api/orchestration.rs:2466-2486#worker_probe_runner]
+[src: file: backend/src/core/task_worker_env.rs:995-1055#check_frontend]
+[src: file: backend/src/api/orchestration.rs:2491-2511#worker_probe_runner]

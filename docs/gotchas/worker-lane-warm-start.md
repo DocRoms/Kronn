@@ -111,3 +111,53 @@ The clone itself takes 14-38 s and no disk space.
 | `KRONN_WORKER_MAX_CONCURRENT_BUILDS` | 2 | first builds running at once on this backend process |
 | `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` | 1800 | bound of the first build and of its queue wait |
 | `KRONN_WORKER_PRIVATE_CARGO_HOME` | unset | `1` keeps KT-1246's lane-private `CARGO_HOME` (no seeding) |
+
+## Where the warming time goes (KT-1637)
+
+`task_exec_status` / the execution detail carry `progress.warming_steps` (the
+steps that have finished, in run order, each `{step, duration_ms}`) and
+`progress.warming_total_ms` (execution creation to the worker's dispatch, to
+now while it still provisions). The room card (`TaskExecutionCard`) renders
+them and the part of the total no step explains. They are present in every
+phase, so the breakdown outlives the warming phase.
+
+| Step | Measured around | Journalled in |
+| --- | --- | --- |
+| `worktree_creation` | `git worktree add` (only a checkout this launch really makes; adopting one on resume keeps the original timing) | `lane_warming_step` |
+| `lane_seeds` | copying the project's gitignored assets (KT-1438); absent when nothing is seeded | `lane_warming_step` |
+| `lane_provision` | `prepare_launch` (Cargo home, shared caches) | `lane_warm_start.provision_ms` |
+| `seed_clone` | seeding the lane `debug/` (`clone_ms` is the clone alone); absent when there was no warm target to clone from | `lane_warm_start.seed_ms` |
+| `gate_wait` | waiting for a first-build slot | `lane_warm_start.queued_ms` |
+| `first_build` | `cargo test --no-run`; absent when skipped or cancelled in the queue | `lane_warm_start` |
+| `smoke_check` | the toolchain smoke check that follows the build | `lane_warming_step` |
+
+A step that did not run is absent, never reported as `0`: `provision_ms` and
+`seed_ms` are optional in the row, so a lane that was not provisioned, one with
+no warm target, or a row journalled before KT-1637 leaves them out (an old
+`Cloned` row still reports its `clone_ms`). `warming_total_ms`
+minus the sum of the steps is time no step explains (the brief, the database,
+a restart between two attempts): that is the figure to chase.
+
+Limits: a step is journalled when it ends, so the step in flight is not listed
+(its elapsed time is in the total); a resumed execution shows the latest run of
+each step but a total that spans the restart.
+
+The card clamps the unexplained remainder at zero. The total is wall-clock and
+the steps are monotonic: when the steps add up to more than the total, the card
+says the clocks disagree instead of hiding the gap.
+
+### Reading an execution that predates KT-1637 (KT-1629)
+
+KT-1629 spent 45.8 min in `warming`, 6.8 min of it in the build. A row
+journalled before KT-1637 can only account for `lane_warm_start.queued_ms` (the
+gate wait), the first build's `duration_ms` and `SeedOutcome::Cloned::clone_ms`.
+It has no timing for the worktree, the lane seeds, provisioning or the smoke
+check, so whatever `45.8 min - 6.8 min - queued_ms - clone_ms` leaves is not
+explained by that row, and it is not attributable to a step: the new steps are
+what cover it from now on. Reading that row is the only way to say whether the
+39 minutes were the gate wait (`queued_ms`, bounded by
+`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, 1800 s by default) or an uninstrumented
+gap; this was not done from a sandboxed worker, which cannot read the Kronn
+database. Run the execution's `lane_warm_start` event through
+`WarmStartRecord::timed_steps` (`backend/src/core/task_worker_lane_warm.rs`) and
+subtract it from the 45.8 min.

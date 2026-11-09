@@ -10602,7 +10602,21 @@ warnings?: Array<CampaignTaskReason>, active_execution: TaskExecution | null,
  */
 default_max_review_rounds?: number | "unlimited" | undefined, };
 
-export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode, };
+export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode,
+/**
+ * KT-1637 — how long each sub-step of the warming phase took, for the steps
+ * that have finished, in the order they run. Present in every phase (the
+ * worker's own phase included), so the time spent before the dispatch stays
+ * readable once it is over.
+ */
+warming_steps: Array<TaskExecutionWarmingStep>,
+/**
+ * KT-1637 — wall time from the creation of the execution to its worker's
+ * dispatch (to now, while it is still provisioning), for a deferred warm-up.
+ * What `warming_steps` leaves unaccounted for is `warming_total_ms` minus
+ * their sum.
+ */
+warming_total_ms?: number, };
 
 export type TaskExecutionProgressPhase = "warming" | "queued" | "launching" | "upstream_wait" | "tool_activity" | "delivering" | "completed" | "failed" | "unknown";
 
@@ -10650,6 +10664,8 @@ in_app_cost_unknown_reasons: Array<string>, cli_traffic_tokens: number | null, c
  * One recorded validation run (ADR §6). `exit_code` IS the verdict.
  */
 export type TaskExecutionValidationRun = { id: string, task_execution_id: string, candidate_merge_sha: string | null, command: string, exit_code: number | null, duration_ms: number | null, output: string | null, quick_exec_id: string | null, created_at: string, };
+
+export type TaskExecutionWarmingStep = { step: WarmingStepKind, duration_ms: number, };
 
 /**
  * A durable CLI worker control offer (KT-328). Links a TaskExecution + attempt to
@@ -11942,6 +11958,11 @@ withheld_by_routing: number, };
  * surface where Kronn owns the runner.
  */
 export type WakeMode = "native_dispatch" | "external_poll";
+
+/**
+ * A sub-step of the warming phase (KT-1637), in the order they run.
+ */
+export type WarmingStepKind = "worktree_creation" | "lane_provision" | "seed_clone" | "lane_seeds" | "gate_wait" | "first_build" | "smoke_check";
 
 /**
  * How a `Watch` poll decides the source changed. Every mode sends the

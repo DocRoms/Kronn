@@ -33,6 +33,7 @@ use crate::core::background_priority::Priority;
 use crate::core::task_worker_env::{
     prepare_launch, ProbeCommand, ProbeRunner, Provisioned, WorkerLane,
 };
+use crate::models::WarmingStepKind;
 
 /// Overrides the `CARGO_BUILD_JOBS` a worker gets.
 pub const BUILD_JOBS_OVERRIDE_ENV: &str = "KRONN_WORKER_CARGO_JOBS";
@@ -337,9 +338,55 @@ pub struct WarmStartRecord {
     pub first_build: FirstBuild,
     /// How long the first build waited for a slot of the host's gate.
     pub queued_ms: u64,
+    /// KT-1637 — how long provisioning the lane took (Cargo home, caches).
+    /// `None` when the lane was not provisioned or the row predates the timing.
+    #[serde(default)]
+    pub provision_ms: Option<u64>,
+    /// KT-1637 — how long seeding the lane target took
+    /// (`SeedOutcome::Cloned::clone_ms` is the clone alone). `None` when no seed
+    /// was attempted or the row predates the timing.
+    #[serde(default)]
+    pub seed_ms: Option<u64>,
 }
 
 impl WarmStartRecord {
+    /// The warming sub-steps this record timed (KT-1637), in the order they run.
+    /// A step that did not run is absent, never reported as zero: a lane with no
+    /// first build has no gate wait, a lane the warm-up never prepared has no seed.
+    pub fn timed_steps(&self) -> Vec<(WarmingStepKind, u64)> {
+        let mut steps = Vec::new();
+        if let Some(provision_ms) = self.provision_ms {
+            steps.push((WarmingStepKind::LaneProvision, provision_ms));
+        }
+        // Only an outcome that went looking at a warm target spent seed time; a
+        // row journalled before `seed_ms` still knows its clone.
+        let seed_ms = match &self.seed {
+            SeedOutcome::Cloned { clone_ms, .. } => Some(self.seed_ms.unwrap_or(*clone_ms)),
+            SeedOutcome::AlreadyPresent | SeedOutcome::Unsupported { .. } => self.seed_ms,
+            SeedOutcome::NoSource { .. } | SeedOutcome::NotApplicable { .. } => None,
+        };
+        if let Some(seed_ms) = seed_ms {
+            steps.push((WarmingStepKind::SeedClone, seed_ms));
+        }
+        // A build cancelled in the queue never started: it has no build time.
+        let build_ms = match &self.first_build {
+            FirstBuild::Succeeded { duration_ms }
+            | FirstBuild::Failed { duration_ms, .. }
+            | FirstBuild::TimedOut { duration_ms } => Some(*duration_ms),
+            FirstBuild::Cancelled { duration_ms } => Some(*duration_ms).filter(|ms| *ms > 0),
+            FirstBuild::Skipped { .. } => None,
+        };
+        // A build that was skipped after waiting for a slot (the queue did not
+        // drain) still spent that wait.
+        if build_ms.is_some() || self.queued_ms > 0 {
+            steps.push((WarmingStepKind::GateWait, self.queued_ms));
+        }
+        if let Some(duration_ms) = build_ms {
+            steps.push((WarmingStepKind::FirstBuild, duration_ms));
+        }
+        steps
+    }
+
     fn not_applicable(reason: &str, build_jobs: u32) -> Self {
         Self {
             lock_hash: None,
@@ -351,6 +398,8 @@ impl WarmStartRecord {
                 reason: reason.into(),
             },
             queued_ms: 0,
+            provision_ms: None,
+            seed_ms: None,
         }
     }
 }
@@ -676,14 +725,18 @@ pub fn warm_lane_cancellable(
             build_jobs: jobs,
             first_build: FirstBuild::Cancelled { duration_ms: 0 },
             queued_ms: 0,
+            provision_ms: None,
+            seed_ms: None,
         };
     }
+    let seeding = Instant::now();
     let seed = match &lock_hash {
         Some(_) => seed_lane(lane, &home, clone),
         None => SeedOutcome::NoSource {
             reason: "the worktree has no Cargo.lock to match a warm target against".into(),
         },
     };
+    let seed_ms = seeding.elapsed().as_millis() as u64;
 
     // `--locked` cannot build without a lock file, and a build with no lock hash
     // could not be marked warm: nothing to run, nothing to wait for.
@@ -697,6 +750,8 @@ pub fn warm_lane_cancellable(
                     .into(),
             },
             queued_ms: 0,
+            provision_ms: None,
+            seed_ms: Some(seed_ms),
         };
     }
 
@@ -714,6 +769,8 @@ pub fn warm_lane_cancellable(
                 reason: "the lane target was already built for this Cargo.lock".into(),
             },
             queued_ms: 0,
+            provision_ms: None,
+            seed_ms: Some(seed_ms),
         };
     }
 
@@ -736,6 +793,8 @@ pub fn warm_lane_cancellable(
                 build_jobs: jobs,
                 first_build: FirstBuild::Cancelled { duration_ms: 0 },
                 queued_ms: queued.elapsed().as_millis() as u64,
+                provision_ms: None,
+                seed_ms: Some(seed_ms),
             };
         }
         // Never stall a worker behind a queue that does not drain: it starts
@@ -753,6 +812,8 @@ pub fn warm_lane_cancellable(
                     ),
                 },
                 queued_ms: queued.elapsed().as_millis() as u64,
+                provision_ms: None,
+                seed_ms: Some(seed_ms),
             };
         }
     };
@@ -809,6 +870,8 @@ pub fn warm_lane_cancellable(
         build_jobs: jobs,
         first_build,
         queued_ms,
+        provision_ms: None,
+        seed_ms: Some(seed_ms),
     }
 }
 
@@ -839,17 +902,24 @@ pub fn warm_worktree(
     on_wait: impl FnOnce(usize),
 ) -> WarmStartRecord {
     let settings = WarmStartSettings::from_host();
+    let provisioning = Instant::now();
     match prepare_launch(work_dir) {
-        Ok((lane, provisioned)) => warm_lane_cancellable(
-            &lane,
-            &provisioned,
-            &settings,
-            host_build_gate(),
-            runner,
-            &clone_tree,
-            cancel,
-            on_wait,
-        ),
+        Ok((lane, provisioned)) => {
+            let provision_ms = provisioning.elapsed().as_millis() as u64;
+            WarmStartRecord {
+                provision_ms: Some(provision_ms),
+                ..warm_lane_cancellable(
+                    &lane,
+                    &provisioned,
+                    &settings,
+                    host_build_gate(),
+                    runner,
+                    &clone_tree,
+                    cancel,
+                    on_wait,
+                )
+            }
+        }
         Err(error) => WarmStartRecord::not_applicable(
             &format!("the worker lane could not be prepared: {error}"),
             settings.build_jobs,

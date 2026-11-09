@@ -151,7 +151,7 @@ the same job.
   nor the worker permission scope. `task_worker_route_policy` decides this for
   worker preparation and for every launch route; an exact joined CLI session
   of the same agent stays eligible.
-  [src: file: backend/src/agents/runner.rs:3883-3901#task_worker_route_policy]
+  [src: file: backend/src/agents/runner.rs:3889-3907#task_worker_route_policy]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.
@@ -172,7 +172,7 @@ for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
 [src: file: backend/src/agents/runner.rs:5975-5985#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:15642-15923#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/agents/runner.rs:15679-15960#run_acp_session_streams_usage_through_agent_process]
 [src: file: backend/src/core/redact.rs:510-534#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
