@@ -437,3 +437,109 @@ async fn a_catalogue_refusal_leaves_a_dated_system_card() {
     assert!(summary.contains("constaté le 20"), "{summary}");
     assert!(room.prompts.lock().unwrap().is_empty());
 }
+
+fn model_limit() -> PromptLimit {
+    PromptLimit {
+        bytes: 3_000_000,
+        model: "gemini-4-argon".into(),
+        window_tokens: 1_000_000,
+        ceiling_bound: false,
+    }
+}
+
+#[test]
+fn a_prompt_the_provider_refused_names_its_size_the_limit_and_the_way_out() {
+    let raw = "LiteLlm error 400: Provider response: maximum context length is 131072 tokens";
+    for (language, expect) in [
+        ("en", "prompt too long"),
+        ("fr", "prompt trop long"),
+        ("es", "prompt demasiado largo"),
+        ("zh", "提示过长"),
+    ] {
+        let card = payload(&prompt_too_large_card(
+            language,
+            Some(400),
+            196_608,
+            &model_limit(),
+            raw,
+            ModelTier::Reasoning,
+            Some("job-big"),
+        ));
+        let summary = card["summary"].as_str().unwrap();
+        assert!(summary.contains(expect), "{language}: {summary}");
+        assert!(summary.contains("196608"), "{language}: {summary}");
+        assert!(summary.contains("3000000"), "{language}: {summary}");
+        assert!(summary.contains("gemini-4-argon"), "{language}: {summary}");
+        assert_eq!(card["kind"], "agent_error", "not a model verdict");
+        assert_eq!(card["status"], 400);
+        assert_eq!(card["detail"], raw);
+        assert_eq!(card["retry_dispatch_id"], "job-big");
+        assert_eq!(card["tier"], "reasoning");
+    }
+}
+
+#[test]
+fn a_run_that_ended_without_a_reply_says_so_and_stays_retryable() {
+    let card = payload(&unexplained_end_card(
+        "en",
+        "agent finished without a durable reply",
+        ModelTier::Default,
+        Some("job-silent"),
+    ));
+    assert_eq!(card["kind"], "agent_error");
+    let summary = card["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("agent finished without a durable reply"),
+        "{summary}"
+    );
+    assert_eq!(card["retry_dispatch_id"], "job-silent");
+}
+
+/// KT-1607 end to end: a LiteLLM proxy that refuses an over-large prompt with a
+/// 400 leaves a System card with the size and the limit, never the "model not
+/// found" a bare 400 used to read as.
+#[tokio::test]
+async fn a_litellm_run_refused_as_too_large_leaves_a_card_with_the_size_and_the_limit() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": {"message": "This model's maximum context length is 131072 tokens. However, your messages resulted in 150000 tokens."}
+        })))
+        .mount(&proxy)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&proxy)
+        .await;
+    let room = room().await;
+    discussion(&room.db, "d-big", "LiteLlm", "reasoning", Some("gemini-4-argon")).await;
+    room.db
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE messages SET content = ?1 WHERE discussion_id = 'd-big'",
+                [&"diff ".repeat(40_000)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let state = state_on(room.db.clone(), &proxy.uri());
+
+    let (outcome, _) = start(state, "d-big").await;
+
+    assert!(
+        matches!(outcome, AgentExecutionOutcome::PreflightFailed { .. }),
+        "{outcome:?}"
+    );
+    let cards = system_cards(&room.db, "d-big").await;
+    assert_eq!(cards.len(), 1, "{cards:?}");
+    let summary = cards[0]["summary"].as_str().unwrap();
+    assert!(summary.contains("prompt trop long"), "{summary}");
+    assert!(summary.contains("gemini-4-argon"), "{summary}");
+    assert!(summary.contains("3000000"), "the limit: {summary}");
+    assert!(!summary.contains("introuvable"), "{summary}");
+    assert_eq!(cards[0]["status"], 400);
+}

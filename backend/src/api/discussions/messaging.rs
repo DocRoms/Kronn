@@ -1183,9 +1183,58 @@ pub async fn run_agent(
         }
     };
     state.agent_dispatch_notify.notify_one();
-    super::runtime::stream_dispatch_job(state, job.id, None)
-        .await
-        .unwrap_or_else(|| sse_events(Vec::new()))
+    let job_id = job.id;
+    if let Some(stream) =
+        super::runtime::stream_dispatch_job(state.clone(), job_id.clone(), None).await
+    {
+        return stream;
+    }
+    // No stream means the job was not claimed here: the dispatcher may have taken
+    // it first, in which case the run is going and `complete` is the truth. But a
+    // job that already failed or was cancelled — a replayed idempotency key, a
+    // refused start — must not read as a finished run (KT-1607).
+    let lookup = job_id.clone();
+    let settled = state
+        .db
+        .with_read_conn(move |conn| crate::db::agent_dispatch::get(conn, &lookup))
+        .await;
+    let events = match settled {
+        Ok(Some(job)) => run_not_started_event(&job).into_iter().collect(),
+        Ok(None) => vec![Event::default().event("error").data(
+            serde_json::json!({ "error": "The agent run was not found", "dispatch_id": job_id })
+                .to_string(),
+        )],
+        Err(error) => {
+            tracing::error!("Unable to read dispatch {job_id} after an unclaimed /run: {error}");
+            Vec::new()
+        }
+    };
+    sse_events(events)
+}
+
+/// The `error` event for a dispatch `/run` could not start: why it is not
+/// running, and which dispatch it concerns. `None` while it is queued, running
+/// or done, where the absence of a stream is not a failure.
+fn run_not_started_event(job: &crate::db::agent_dispatch::AgentDispatchJob) -> Option<Event> {
+    use crate::db::agent_dispatch::DispatchStatus;
+    let last_error = job.last_error.as_deref().filter(|e| !e.trim().is_empty());
+    let reason = match (job.status, last_error) {
+        (DispatchStatus::Failed, Some(error)) => format!("The agent run failed: {error}"),
+        (DispatchStatus::Failed, None) => "The agent run failed without a recorded cause".into(),
+        (DispatchStatus::Cancelled, Some(cause)) => {
+            format!("The agent run was cancelled before it started ({cause})")
+        }
+        (DispatchStatus::Cancelled, None) => "The agent run was cancelled".into(),
+        (DispatchStatus::Pending, Some(error)) => {
+            format!("The agent run is waiting to retry after: {error}")
+        }
+        _ => return None,
+    };
+    Some(
+        Event::default().event("error").data(
+            serde_json::json!({ "error": reason, "dispatch_id": job.id }).to_string(),
+        ),
+    )
 }
 
 /// POST /api/discussions/:id/agent-dispatches/retry
@@ -3320,6 +3369,129 @@ mod tests {
             awaiting, 0,
             "failed preflight must not leave the disc marked as owed a run"
         );
+    }
+
+    /// KT-1607 — `/run` on a dispatch that already failed (here a replayed
+    /// idempotency key) used to answer a bare `complete`, which read as a run
+    /// that finished. It must say the run failed and why.
+    #[tokio::test]
+    async fn run_on_a_failed_dispatch_reports_the_failure_not_a_bare_complete() {
+        let disc = "d-run-replay";
+        let key = Uuid::new_v4().to_string();
+        let state = make_state_with_disc(disc).await;
+        let dedupe_key = format!("force:{key}:0:discussion-agent:default");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::insert_message(
+                    conn,
+                    disc,
+                    &DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
+                        session_continuity: None,
+                        kind: Default::default(),
+                        id: "user-run-replay".into(),
+                        role: MessageRole::User,
+                        channel: MessageChannel::Main,
+                        content: "review this diff".into(),
+                        timestamp: Utc::now(),
+                        model: None,
+                        lint_report: None,
+                        agent_type: None,
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id: "job-run-replay",
+                        discussion_id: disc,
+                        dedupe_key: &dedupe_key,
+                        agent_override: None,
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::mark_failed(
+                    conn,
+                    "job-run-replay",
+                    "HTTP 413 from the provider",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resp = run_agent(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Some(Json(RunAgentRequest {
+                idempotency_key: Some(key),
+            })),
+        )
+        .await;
+        let body = sse_body_to_string(resp).await;
+        assert!(body.contains("event: error"), "must report an error: {body}");
+        assert!(body.contains("HTTP 413 from the provider"), "{body}");
+        assert!(body.contains("job-run-replay"), "{body}");
+    }
+
+    /// The counterpart: a dispatch that is merely queued or running is not a
+    /// failure, so the absence of a stream there stays a plain `complete`.
+    #[test]
+    fn a_queued_or_running_dispatch_is_not_reported_as_a_failed_run() {
+        use crate::db::agent_dispatch::{AgentDispatchJob, DispatchStatus};
+        let job = |status, last_error: Option<&str>| {
+            let now = Utc::now();
+            AgentDispatchJob {
+                id: "j".into(),
+                discussion_id: "d".into(),
+                trigger_message_id: "m".into(),
+                trigger_sort_order: 1,
+                dedupe_key: "k".into(),
+                agent_override: None,
+                chain_prompt_ids: Vec::new(),
+                next_chain_index: 0,
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+                status,
+                attempts: 0,
+                turn_attempts: 0,
+                available_at: now,
+                claimed_at: None,
+                agent_started_at: None,
+                completed_at: None,
+                last_error: last_error.map(str::to_string),
+                failure_kind: None,
+                watchdog_redispatches: 0,
+                created_at: now,
+                updated_at: now,
+                progress_phase: None,
+                progress_detail: None,
+                last_progress_at: None,
+                connection_id: None,
+            }
+        };
+        assert!(run_not_started_event(&job(DispatchStatus::Running, None)).is_none());
+        assert!(run_not_started_event(&job(DispatchStatus::Pending, None)).is_none());
+        assert!(run_not_started_event(&job(DispatchStatus::Completed, None)).is_none());
+        assert!(run_not_started_event(&job(DispatchStatus::Failed, None)).is_some());
+        assert!(run_not_started_event(&job(DispatchStatus::Cancelled, None)).is_some());
+        assert!(run_not_started_event(&job(DispatchStatus::Pending, Some("boom"))).is_some());
     }
 
     /// A BATCH child is pre-marked awaiting_agent=1 at enqueue
