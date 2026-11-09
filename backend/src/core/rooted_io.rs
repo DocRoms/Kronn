@@ -191,7 +191,21 @@ mod imp {
         Ok(st)
     }
 
+    /// What names one file at one moment: device, inode, change time, size.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Identity {
+        dev: u64,
+        ino: u64,
+        ctime: i64,
+        ctime_nsec: i64,
+        len: u64,
+    }
+
     pub fn read(root: &Path, rel: &Path, max: u64) -> io::Result<Vec<u8>> {
+        read_identified(root, rel, max).map(|(bytes, _)| bytes)
+    }
+
+    pub fn read_identified(root: &Path, rel: &Path, max: u64) -> io::Result<(Vec<u8>, Identity)> {
         let (dir, name) = parent_dir(root, rel, false)?;
         // O_NONBLOCK: opening a FIFO must fail or return, never hang.
         let file = File::from(open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK)?);
@@ -224,7 +238,39 @@ mod imp {
         if bytes.len() as u64 > max {
             return Err(super::refused("the file is larger than the limit"));
         }
-        Ok(bytes)
+        // Taken from the descriptor that was read: what was read and what the
+        // name points at are the same file only while this still matches.
+        let id = Identity {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            ctime: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+            len: bytes.len() as u64,
+        };
+        Ok((bytes, id))
+    }
+
+    /// Unlinks `rel` only when the name still names the file `id` was taken
+    /// from (same device, inode, change time and size, one link).
+    pub fn remove_if_same(root: &Path, rel: &Path, id: &Identity) -> io::Result<()> {
+        let (dir, name) = parent_dir(root, rel, false)?;
+        let st = stat_at(&dir, &name)?;
+        // Casts to the libc aliases: field widths differ by platform.
+        let same = (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && st.st_nlink == 1
+            && st.st_dev as u64 == id.dev
+            && st.st_ino as u64 == id.ino
+            && st.st_ctime as i64 == id.ctime
+            && st.st_ctime_nsec as i64 == id.ctime_nsec
+            && st.st_size as u64 == id.len;
+        if !same {
+            return Err(super::refused("the file changed since it was read"));
+        }
+        // SAFETY: as in open_at.
+        if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// A fresh temporary file in `dir`, created exclusively under a random
@@ -352,7 +398,19 @@ mod imp {
         Ok(info.nNumberOfLinks)
     }
 
+    /// What names one file at one moment: size and last write time.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Identity {
+        len: u64,
+        written: u64,
+    }
+
     pub fn read(root: &Path, rel: &Path, max: u64) -> io::Result<Vec<u8>> {
+        read_identified(root, rel, max).map(|(bytes, _)| bytes)
+    }
+
+    pub fn read_identified(root: &Path, rel: &Path, max: u64) -> io::Result<(Vec<u8>, Identity)> {
+        use std::os::windows::fs::MetadataExt;
         let path = guarded(root, rel)?;
         let mut file = OpenOptions::new()
             .read(true)
@@ -373,7 +431,22 @@ mod imp {
         if bytes.len() as u64 > max {
             return Err(super::refused("the file is larger than the limit"));
         }
-        Ok(bytes)
+        let id = Identity {
+            len: bytes.len() as u64,
+            written: meta.last_write_time(),
+        };
+        Ok((bytes, id))
+    }
+
+    /// Removes `rel` only when it still has the size and write time of `id`.
+    pub fn remove_if_same(root: &Path, rel: &Path, id: &Identity) -> io::Result<()> {
+        use std::os::windows::fs::MetadataExt;
+        let path = guarded(root, rel)?;
+        let meta = std::fs::symlink_metadata(&path)?;
+        if !meta.is_file() || meta.len() != id.len || meta.last_write_time() != id.written {
+            return Err(super::refused("the file changed since it was read"));
+        }
+        std::fs::remove_file(path)
     }
 
     pub fn write(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -445,6 +518,21 @@ pub fn read(root: &Path, rel: &Path) -> io::Result<Vec<u8>> {
 /// before it is read, and a file that grows while it is read stays bounded.
 pub fn read_capped(root: &Path, rel: &Path, max: u64) -> io::Result<Vec<u8>> {
     imp::read(root, rel, max)
+}
+
+/// What names one file at one moment, to unlink it later only if it is still
+/// the one that was read.
+pub use imp::Identity;
+
+/// [`read_capped`] and the identity of the file that was read.
+pub fn read_identified(root: &Path, rel: &Path, max: u64) -> io::Result<(Vec<u8>, Identity)> {
+    imp::read_identified(root, rel, max)
+}
+
+/// Removes `rel` under `root` only if it still names the file `id` was taken
+/// from: a name swapped for another file after the read is refused.
+pub fn remove_if_same(root: &Path, rel: &Path, id: &Identity) -> io::Result<()> {
+    imp::remove_if_same(root, rel, id)
 }
 
 /// Replaces `rel` under `root` with `bytes` (fresh file renamed over it),
@@ -574,6 +662,43 @@ mod tests {
         });
         assert!(read(root.path(), Path::new("hard")).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_file_is_removed_only_if_the_name_still_names_what_was_read() {
+        let (root, _outside) = dirs();
+        let path = root.path().join("a");
+
+        // Untouched: removed.
+        std::fs::write(&path, "one").unwrap();
+        let (bytes, id) = read_identified(root.path(), Path::new("a"), 64).unwrap();
+        assert_eq!(bytes, b"one");
+        remove_if_same(root.path(), Path::new("a"), &id).unwrap();
+        assert!(!path.exists());
+
+        // Replaced by another file (new inode) after the read: kept.
+        std::fs::write(&path, "one").unwrap();
+        let (_, id) = read_identified(root.path(), Path::new("a"), 64).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "one").unwrap();
+        assert!(remove_if_same(root.path(), Path::new("a"), &id).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"one");
+
+        // Rewritten in place after the read: kept.
+        let (_, id) = read_identified(root.path(), Path::new("a"), 64).unwrap();
+        std::fs::write(&path, "one, and a secret added since").unwrap();
+        assert!(remove_if_same(root.path(), Path::new("a"), &id).is_err());
+        assert!(path.exists());
+
+        // Swapped for a link after the read: the link is not followed.
+        let (_, id) = read_identified(root.path(), Path::new("a"), 64).unwrap();
+        let elsewhere = root.path().join("b");
+        std::fs::write(&elsewhere, "keep").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink(&elsewhere, &path).unwrap();
+        assert!(remove_if_same(root.path(), Path::new("a"), &id).is_err());
+        assert!(path.symlink_metadata().is_ok());
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"keep");
     }
 
     #[test]

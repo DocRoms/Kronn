@@ -152,11 +152,21 @@ the previous file untouched.
    A set-aside `config.toml.corrupt.<ts>` is never deleted by Kronn. The owner
    deletes one in Settings → Recovery (`DELETE
    /api/config/recovery/set-aside-files/{name}`, behind the strong
-   confirmation), only once every credential in it is in `stored_credentials`
-   and decrypts with the key in use. The check is made again on the request.
-   A file is kept when it is unreadable, when the key is locked, when it holds
-   a key that still opens rows the key in use does not, or when it holds the
-   only copy of the key in use. The banner and Settings → Recovery flag
+   confirmation), only when Kronn can prove nothing in it is lost. Every
+   credential-looking value of the file (the known fields, any place the
+   config salvage treats as a credential, the webhook URL, the theme secrets)
+   must be in `stored_credentials` and decrypt with the key in use; the places
+   that store cannot hold are never verified. The check is made again on the
+   request, on the bytes read through the data directory without following a
+   link, and the file is unlinked only if its name still names that file. A
+   file is kept when it is a sealed (`.enc`) copy, unreadable (a link, a hard
+   link, not text, too big), when the key is locked, when a line of a file
+   that is not valid TOML cannot be read and holds a quote, when it holds a
+   key that still opens database rows, `locked-secrets-*.json` rows or `.enc`
+   files (the config backup, the preserved values, sealed copies) the key in
+   use does not, or when it holds the only copy of the key in use (vault
+   copies and `config.toml` are read at that moment, not taken from the boot
+   report). The banner and Settings → Recovery flag
    `config_holds_key` ("key stored beside its data") and point to a recovery
    passphrase or `KRONN_ENCRYPTION_KEK`; a locked-key banner lists the
    credentials still in clear (KT-1594).

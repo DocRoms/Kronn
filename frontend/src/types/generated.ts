@@ -9464,8 +9464,9 @@ holds_key: boolean,
  */
 deletable: boolean,
 /**
- * Why it is not deletable: `unreadable`, `key_locked`, `unverified`,
- * `key_needed` or `only_key_copy`.
+ * Why it is not deletable: `unreadable`, `sealed`, `key_locked`,
+ * `unparsed`, `unverified`, `key_needed`, `key_bound_files` or
+ * `only_key_copy`.
  */
 blocker: string | null, };
 

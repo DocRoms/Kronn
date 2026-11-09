@@ -3104,8 +3104,9 @@ pub struct SetAsideFileView {
     pub holds_key: bool,
     /// Every credential is verified and no key or row depends on the file.
     pub deletable: bool,
-    /// Why it is not deletable: `unreadable`, `key_locked`, `unverified`,
-    /// `key_needed` or `only_key_copy`.
+    /// Why it is not deletable: `unreadable`, `sealed`, `key_locked`,
+    /// `unparsed`, `unverified`, `key_needed`, `key_bound_files` or
+    /// `only_key_copy`.
     pub blocker: Option<String>,
 }
 
@@ -3163,9 +3164,11 @@ async fn fill_clear_credentials(
         let clear = set_aside::clear_credentials_in(&text);
         status.clear_credentials = credential_views(set_aside::verify(db, key, clear).await?);
     }
-    let elsewhere = status.copies > 0 || status.config_holds_key;
+    // The key copies are read now, not taken from the boot report: a rekey
+    // since the boot would make that stale.
+    let vaults = crate::core::keyvault::KeyStore::standard(dir);
     for name in set_aside::files(dir) {
-        let view = match set_aside::assess(db, dir, key, &name, elsewhere).await {
+        let view = match set_aside::assess(db, dir, key, &name, &vaults).await {
             Ok(a) => SetAsideFileView {
                 deletable: a.deletable(),
                 blocker: a.blocker.as_ref().map(|b| b.code().to_string()),
@@ -3199,13 +3202,8 @@ pub async fn delete_set_aside_file(
     // Serializes with the writers of config and the key.
     let config = state.config.write().await;
     let key = config.encryption_secret.clone();
-    let report = crate::core::keystore::boot_report(&dir);
-    let elsewhere = report.copies > 0
-        || key.as_deref().is_some_and(|k| {
-            config::retained_disk_key(&dir)
-                .is_some_and(|kept| crate::core::keyvault::same_key(&kept, k))
-        });
-    match crate::core::set_aside::delete(&state.db, &dir, key.as_deref(), &name, elsewhere).await {
+    let vaults = crate::core::keyvault::KeyStore::standard(&dir);
+    match crate::core::set_aside::delete(&state.db, &dir, key.as_deref(), &name, &vaults).await {
         Ok(()) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("{e:#}"))),
     }
