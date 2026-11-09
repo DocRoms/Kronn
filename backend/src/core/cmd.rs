@@ -101,6 +101,31 @@ pub fn real_agents_forbidden() -> bool {
     armed && !real_agent_guard::live_probe_open()
 }
 
+/// Opt-in that lets an integration test start the machine's own OS sandbox
+/// launcher (`sandbox-exec`, `bwrap`): `1`, set by the one who runs those tests
+/// on purpose (CI does). Read only where [`real_sandbox_refusal`] applies.
+pub const REAL_SANDBOX_ENV: &str = "KRONN_TEST_REAL_SANDBOX";
+
+/// Why the OS sandbox launcher of the machine must not be started, when this is
+/// an integration test binary that armed [`NO_REAL_AGENTS_ENV`] and was not
+/// opted in with [`REAL_SANDBOX_ENV`]; `None` everywhere else (production, the
+/// library's own unit tests, an opted-in run).
+///
+/// Without it, every agent launch a test makes is wrapped in the real
+/// `sandbox-exec` on an agent route: the KT-1189 guard refuses that and aborts
+/// the binary (KT-1608). A host that cannot be confined is a case Kronn
+/// already handles (the launch runs unwrapped), so refusing here is what the
+/// test sees on a machine with no sandbox.
+pub fn real_sandbox_refusal() -> Option<String> {
+    if cfg!(test) || !real_agents_forbidden() {
+        return None;
+    }
+    let opted_in = crate::core::child_env::var(REAL_SANDBOX_ENV).is_ok_and(|value| value == "1");
+    (!opted_in).then(|| {
+        format!("an integration test does not start the OS sandbox of the machine ({REAL_SANDBOX_ENV}=1 opts in)")
+    })
+}
+
 /// `true` when [`NO_REAL_AGENTS_ENV`] is set in a build that ignores it: the
 /// startup of the binary warns about it once, so a user who exported it learns
 /// it does nothing instead of wondering why.
