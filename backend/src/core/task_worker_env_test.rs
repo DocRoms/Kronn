@@ -195,7 +195,7 @@ fn a_provisioned_lane_exports_data_dir_target_offline_and_cargo_home() {
     assert!(lane.cargo_target_dir.is_dir());
 }
 
-/// KT-1634 — one budget bounds Cargo, every Rust test binary, make and vitest.
+/// KT-1634 — one budget bounds Cargo, every Rust test binary and vitest.
 #[test]
 fn the_build_budget_bounds_every_tool_from_one_job_count() {
     let env = build_budget_env(4);
@@ -207,12 +207,12 @@ fn the_build_budget_bounds_every_tool_from_one_job_count() {
     ] {
         assert_eq!(env_value(&env, name), Some(OsString::from("4")), "{name}");
     }
-    assert_eq!(env_value(&env, MAKEFLAGS_ENV), Some(OsString::from("-j4")));
-    // A budget is never zero: `-j0` and zero threads are not "unbounded" to
-    // every tool.
+    // `make -j` changes what a non-parallel-safe Makefile does: never a default.
+    assert_eq!(env_value(&env, "MAKEFLAGS"), None);
+    assert_eq!(env.len(), 4);
+    // A budget is never zero: zero threads is not "unbounded" to every tool.
     let floor = build_budget_env(0);
     assert_eq!(env_value(&floor, RUST_TEST_THREADS_ENV), Some("1".into()));
-    assert_eq!(env_value(&floor, MAKEFLAGS_ENV), Some("-j1".into()));
 }
 
 #[test]
@@ -225,29 +225,85 @@ fn the_lane_environment_carries_the_whole_budget_of_the_host() {
     for (name, expected) in build_budget_env(jobs.parse().unwrap()) {
         assert_eq!(env_value(&env, name), Some(expected), "{name}");
     }
-    assert_eq!(
-        env_value(&env, MAKEFLAGS_ENV),
-        Some(OsString::from(format!("-j{jobs}")))
-    );
+    assert_eq!(env_value(&env, "MAKEFLAGS"), None);
+}
+
+/// The environment a command carries, by name.
+fn command_env_of(command: &std::process::Command) -> std::collections::HashMap<String, OsString> {
+    command
+        .get_envs()
+        .filter_map(|(name, value)| Some((name.to_str()?.to_string(), value?.to_owned())))
+        .collect()
+}
+
+/// A worktree as Git lays it out: `.git` is a file, not a directory.
+fn linked_worktree_fixture() -> Fixture {
+    let fx = fixture();
+    std::fs::write(fx.worktree.join(".git"), "gitdir: /elsewhere\n").unwrap();
+    fx
 }
 
 #[test]
-fn apply_build_budget_sets_every_variable_on_a_command() {
+fn apply_build_budget_sets_every_variable_on_a_worktree_command() {
+    let fx = linked_worktree_fixture();
     let mut command = std::process::Command::new("true");
-    apply_build_budget(&mut command);
-    let set: std::collections::HashMap<_, _> = command
-        .get_envs()
-        .filter_map(|(name, value)| Some((name.to_str()?.to_string(), value?.to_owned())))
-        .collect();
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| None);
+    let set = command_env_of(&command);
     for name in [
         CARGO_BUILD_JOBS_ENV,
         RUST_TEST_THREADS_ENV,
         NEXTEST_TEST_THREADS_ENV,
-        MAKEFLAGS_ENV,
         VITEST_MAX_WORKERS_ENV,
     ] {
-        assert!(set.contains_key(name), "{name} missing: {set:?}");
+        assert_eq!(set.get(name), Some(&OsString::from("3")), "{name}: {set:?}");
     }
+    assert!(!set.contains_key("MAKEFLAGS"), "{set:?}");
+}
+
+/// The nothing-is-clobbered guarantee is a rule here, not an accident of what
+/// the environment allow-list happens to omit.
+#[test]
+fn an_explicit_value_wins_over_the_build_budget() {
+    let fx = linked_worktree_fixture();
+
+    // The command already carries the name: it is kept.
+    let mut command = std::process::Command::new("true");
+    command.env(RUST_TEST_THREADS_ENV, "99");
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| None);
+    let set = command_env_of(&command);
+    assert_eq!(set[RUST_TEST_THREADS_ENV], OsString::from("99"));
+    assert_eq!(set[CARGO_BUILD_JOBS_ENV], OsString::from("3"));
+
+    // The operator set the name: their value reaches the agent, the rest is budgeted.
+    let mut command = std::process::Command::new("true");
+    let operator = |name: &str| (name == VITEST_MAX_WORKERS_ENV).then(|| OsString::from("7"));
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &operator);
+    let set = command_env_of(&command);
+    assert_eq!(set[VITEST_MAX_WORKERS_ENV], OsString::from("7"));
+    assert_eq!(set[NEXTEST_TEST_THREADS_ENV], OsString::from("3"));
+
+    // An empty operator value is not a value.
+    let mut command = std::process::Command::new("true");
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| {
+        Some(OsString::new())
+    });
+    assert_eq!(command_env_of(&command)[CARGO_BUILD_JOBS_ENV], "3");
+}
+
+/// A discussion on the main checkout (`.git` is a directory) or outside any
+/// repository is not an agent on a project worktree: it keeps its environment.
+#[test]
+fn the_build_budget_is_only_for_agents_on_a_worktree() {
+    let fx = fixture();
+    let mut command = std::process::Command::new("true");
+
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| None);
+    assert!(command_env_of(&command).is_empty(), "no .git at all");
+
+    std::fs::create_dir(fx.worktree.join(".git")).unwrap();
+    apply_build_budget_with(&mut command, &fx.worktree, build_budget_env(3), &|_| None);
+    assert!(command_env_of(&command).is_empty(), "a main checkout");
+    assert!(!is_linked_worktree(&fx.worktree));
 }
 
 #[test]

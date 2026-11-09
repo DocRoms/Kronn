@@ -68,12 +68,32 @@ smoke check nor the dispatch happens.
   runs itself are bounded by the same `build_jobs` budget (KT-1634), but several
   workers compiling at once can still load the host.
 - The budget (`task_worker_env::build_budget_env`) sets `CARGO_BUILD_JOBS`,
-  `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS`, `MAKEFLAGS=-jN` and
-  `VITEST_MAX_WORKERS` from the one `build_jobs` value (jest is not used by the
-  project). It reaches every agent process Kronn starts, on all routes (direct,
-  adapted ACP, native ACP) — reviewers, fix agents and discussions as well as task
-  workers of any CLI — not only Claude task workers; the lane's private
-  locations (`CARGO_TARGET_DIR`, `CARGO_HOME`, ...) remain Claude-task-worker only.
+  `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `VITEST_MAX_WORKERS` from the
+  one `build_jobs` value (jest is not used by the project) [src: file:
+  backend/src/core/task_worker_env.rs:109]. `MAKEFLAGS=-jN` is deliberately not
+  part of it: `-j` changes what a Makefile that is not parallel-safe does, so it
+  is not a pure throttle like a thread count. Kronn neither sets nor forwards
+  `MAKEFLAGS`; a project that wants parallel `make` puts `-j` in its own
+  Makefile or scripts.
+- The budget reaches every agent process Kronn starts **on a linked Git
+  worktree** (`.git` is a file, `is_linked_worktree`), whatever its role — task
+  workers of any CLI, reviewers and fix agents — not only Claude task workers.
+  An agent on the main checkout (`.git` is a directory) gets none. It is applied
+  in `try_spawn` [src: file: backend/src/agents/runner.rs:14608] (the direct
+  route, and the adapted ACP route: `acp/claude_adapter.rs` and
+  `acp/codex_adapter.rs` call `try_spawn` with `SpawnIo::Adapter`, so the process
+  they start is the CLI itself) and in `native_command` (native ACP) [src: file:
+  backend/src/acp.rs:897]. Tests: direct, adapted and no-worktree cases in
+  `agents/runner_test.rs` (`every_agent_on_a_worktree_gets_the_build_and_test_budget`,
+  `an_adapted_acp_cli_gets_the_build_and_test_budget`,
+  `an_agent_outside_a_worktree_gets_no_build_and_test_budget`), native in
+  `acp.rs` (`a_native_launch_receives_its_key_and_contexts_through_the_builder`).
+- A budget variable the launch already carries, or the operator set in the
+  backend's own environment, is never overwritten: the operator's value is
+  forwarded (the agent's environment is an allow-list, so it would otherwise be
+  lost) [src: file: backend/src/core/task_worker_env.rs:134]. The lane's
+  private locations (`CARGO_TARGET_DIR`, `CARGO_HOME`, ...) remain
+  Claude-task-worker only.
 - A lane target is removed with its clean worktree (integration, `RemoveIfClean`
   cancellation) and swept at boot only when it carries `.kronn-lane.json`, its
   execution is finished and its worktree is gone. A lane whose worktree is kept

@@ -14602,10 +14602,10 @@ pub(crate) fn try_spawn(
             cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
         }
     }
-    // KT-1634 — every agent process, whatever its CLI and role (task worker,
-    // reviewer, fix agent, discussion on a worktree), builds and tests under the
-    // same parallelism budget; the lane below only adds its private locations.
-    crate::core::task_worker_env::apply_build_budget(cmd.as_std_mut());
+    // KT-1634 — every agent process on a project worktree, whatever its CLI and
+    // role (task worker, reviewer, fix agent), builds and tests under the same
+    // parallelism budget; the lane below only adds its private locations.
+    crate::core::task_worker_env::apply_build_budget(cmd.as_std_mut(), work_dir);
     // KT-1246 — a Claude task worker builds and tests in its own lane: private
     // Cargo target and home, offline Cargo, a scratch Kronn data dir, and the
     // main checkout's frontend dependencies linked read-only. Other runtimes
