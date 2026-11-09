@@ -27,6 +27,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -135,8 +136,123 @@ pub fn normalize_seed_list(raw: &[String]) -> Result<Vec<String>, String> {
 pub enum LaneSeedsSource {
     /// A human declared them in Kronn (they may have cleared them).
     Project,
+    /// None declared in Kronn, and Kronn's own suggestions apply because the
+    /// global "adopt suggested seeds" setting is on.
+    Adopted,
     /// None declared in Kronn.
     None,
+}
+
+// ─── The global switches ──────────────────────────────────────────────────
+
+/// `server.lane_seeds_copy_enabled`, published at boot and on every config save.
+static COPY_ENABLED: AtomicBool = AtomicBool::new(true);
+/// `server.lane_seeds_adopt_suggested`.
+static ADOPT_SUGGESTED: AtomicBool = AtomicBool::new(false);
+
+/// What the two global lane-seed switches say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeedPolicy {
+    /// Off: nothing is copied into any task worktree, whatever a project declared.
+    pub copy_enabled: bool,
+    /// On: a project that declared nothing is seeded with Kronn's suggested
+    /// candidates (a candidate holding an unconfirmed secret-looking file is held).
+    pub adopt_suggested: bool,
+}
+
+/// Publish `server.lane_seeds_copy_enabled` and `server.lane_seeds_adopt_suggested`.
+pub fn set_seed_policy(copy_enabled: bool, adopt_suggested: bool) {
+    COPY_ENABLED.store(copy_enabled, Ordering::Relaxed);
+    ADOPT_SUGGESTED.store(adopt_suggested, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The policy a test runs under: the process-wide one is shared by every
+    /// test thread (and `config::save` publishes into it), so a test reads this.
+    static TEST_SEED_POLICY: std::cell::Cell<Option<SeedPolicy>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The policy in force: the published one, or, under `cfg(test)`, the calling
+/// thread's own (the defaults unless [`TestSeedPolicy`] set one).
+pub fn seed_policy() -> SeedPolicy {
+    #[cfg(test)]
+    {
+        TEST_SEED_POLICY
+            .with(std::cell::Cell::get)
+            .unwrap_or(SeedPolicy {
+                copy_enabled: true,
+                adopt_suggested: false,
+            })
+    }
+    #[cfg(not(test))]
+    {
+        SeedPolicy {
+            copy_enabled: COPY_ENABLED.load(Ordering::Relaxed),
+            adopt_suggested: ADOPT_SUGGESTED.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Sets the calling test thread's policy, restoring the previous one on drop.
+#[cfg(test)]
+pub struct TestSeedPolicy(Option<SeedPolicy>);
+
+#[cfg(test)]
+impl TestSeedPolicy {
+    pub fn set(copy_enabled: bool, adopt_suggested: bool) -> Self {
+        let before = TEST_SEED_POLICY.with(|cell| {
+            cell.replace(Some(SeedPolicy {
+                copy_enabled,
+                adopt_suggested,
+            }))
+        });
+        Self(before)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestSeedPolicy {
+    fn drop(&mut self) {
+        TEST_SEED_POLICY.with(|cell| cell.set(self.0));
+    }
+}
+
+/// The paths a project is seeded with and where they come from: the declaration
+/// of a human when there is one (an empty one clears), else Kronn's suggestions
+/// when the owner turned adoption on, else nothing. Nothing at all when copying
+/// is off. `suggest` is only called for an adopting project with no declaration.
+/// A suggestion holding a secret-looking file is returned like any other: the
+/// seeding holds it back until a human confirms that file.
+pub fn effective_seeds(
+    policy: SeedPolicy,
+    declared: Option<Vec<String>>,
+    suggest: impl FnOnce() -> Result<Vec<LaneSeedCandidate>, String>,
+) -> Result<(Vec<String>, LaneSeedsSource), String> {
+    if !policy.copy_enabled {
+        return Ok((Vec::new(), LaneSeedsSource::None));
+    }
+    if let Some(declared) = declared {
+        return Ok((declared, LaneSeedsSource::Project));
+    }
+    if !policy.adopt_suggested {
+        return Ok((Vec::new(), LaneSeedsSource::None));
+    }
+    let mut paths: Vec<String> = suggest()?.into_iter().map(|found| found.path).collect();
+    paths.sort();
+    // A candidate nested in another one would be refused by `normalize_seed_list`.
+    let mut kept: Vec<String> = Vec::new();
+    for path in paths {
+        if !kept
+            .iter()
+            .any(|outer| path.starts_with(&format!("{outer}/")))
+        {
+            kept.push(path);
+        }
+    }
+    kept.truncate(MAX_LANE_SEEDS);
+    Ok((kept, LaneSeedsSource::Adopted))
 }
 
 /// A declared seed that is, or holds, something that looks like a secret.

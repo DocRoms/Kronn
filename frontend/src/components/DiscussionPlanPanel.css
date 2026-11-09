@@ -832,6 +832,10 @@
 .orch-exec-facts { display: grid; grid-template-columns: minmax(70px, auto) minmax(0, 1fr); gap: 4px 8px; margin: 0; font-size: var(--kr-fs-2xs); }
 .orch-exec-facts dt { color: var(--kr-text-dim); }
 .orch-exec-facts dd { overflow-wrap: anywhere; margin: 0; color: var(--kr-text-secondary); font-family: var(--kr-font-mono); }
+.orch-exec-warming { display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--kr-border-subtle); font-size: var(--kr-fs-2xs); }
+.orch-exec-warming h4 { margin: 0; color: var(--kr-text-dim); font-size: var(--kr-fs-2xs); text-transform: uppercase; }
+.orch-exec-warming ul { display: grid; gap: 2px; margin: 0; padding: 0; color: var(--kr-text-secondary); font-family: var(--kr-font-mono); list-style: none; }
+.orch-exec-warming p { margin: 0; color: var(--kr-text-primary); font-family: var(--kr-font-mono); }
 .orch-exec-partial { display: block; color: var(--kr-warning); font-family: var(--kr-font-sans); }
 .orch-exec-failing,
 .orch-exec-recovery { padding: 7px; border-left: 2px solid var(--kr-warning); background: rgba(var(--kr-warning-rgb), .07); color: var(--kr-warning); font-size: var(--kr-fs-2xs); }

@@ -80,7 +80,21 @@ const ALWAYS: &[(&str, &str)] = &[
     ("PUT", "/api/projects/{id}/validations-access"),
     ("POST", "/api/agents/uninstall"),
     ("POST", "/api/pages/import"),
+    // The gitignored paths copied into a project's task worktrees (KT-1438): a
+    // seed puts files of the main checkout where a worker reads them. The owner
+    // may waive the code for this route alone (`WAIVABLE_BY_SETTING`).
+    ("PUT", "/api/projects/{id}/lane-seeds"),
 ];
+
+/// The route the owner may release from the strong confirmation with
+/// `server.lane_seeds_strong_confirm = false` (Settings › Worktrees, default on).
+/// Changing that setting is a `POST /api/config/server`, which always asks.
+pub const LANE_SEEDS_ROUTE: (&str, &str) = ("PUT", "/api/projects/{id}/lane-seeds");
+
+/// Whether this call is the one the `lane_seeds_strong_confirm` setting governs.
+pub fn is_lane_seeds_save(method: &str, pattern: &str) -> bool {
+    method.eq_ignore_ascii_case(LANE_SEEDS_ROUTE.0) && pattern == LANE_SEEDS_ROUTE.1
+}
 
 /// The deletions that ask for the proof (owner decision, 28/10): an
 /// irreversible loss of value. A project; a plugin or a connection together with

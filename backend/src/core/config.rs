@@ -596,6 +596,10 @@ pub async fn save(config: &AppConfig) -> Result<()> {
         config.server.disk_launch_min_free_gib,
         config.server.disk_sweep_idle_hours,
     );
+    crate::core::task_worker_lane_seeds::set_seed_policy(
+        config.server.lane_seeds_copy_enabled,
+        config.server.lane_seeds_adopt_suggested,
+    );
 
     tracing::info!("Config saved to {}", path.display());
     Ok(())
@@ -883,6 +887,9 @@ pub fn default_config() -> AppConfig {
             tls_terminated_by_proxy: false,
             public_origin: None,
             protect_vault_from_agents: true,
+            lane_seeds_copy_enabled: true,
+            lane_seeds_adopt_suggested: false,
+            lane_seeds_strong_confirm: true,
             p2p_enabled: false,
             frontend_origins: vec![],
             failure_notify_url: None,

@@ -966,6 +966,9 @@ pub async fn get_server_config(
         disk_sweep_idle_hours: config.server.disk_sweep_idle_hours,
         p2p_enabled: config.server.p2p_enabled,
         frontend_origins: config.server.frontend_origins.clone(),
+        lane_seeds_copy_enabled: config.server.lane_seeds_copy_enabled,
+        lane_seeds_adopt_suggested: config.server.lane_seeds_adopt_suggested,
+        lane_seeds_strong_confirm: config.server.lane_seeds_strong_confirm,
         timezone: config.server.timezone.clone(),
         timezone_effective: crate::core::timezone::current().name().to_string(),
         timezone_detected: crate::core::timezone::detect_machine_timezone()
@@ -1019,6 +1022,15 @@ pub async fn set_server_config(
         config.server.p2p_enabled = enabled;
         // Off waits for the federation work in progress; none starts after.
         state.p2p.set(enabled);
+    }
+    if let Some(enabled) = req.lane_seeds_copy_enabled {
+        config.server.lane_seeds_copy_enabled = enabled;
+    }
+    if let Some(adopt) = req.lane_seeds_adopt_suggested {
+        config.server.lane_seeds_adopt_suggested = adopt;
+    }
+    if let Some(ask) = req.lane_seeds_strong_confirm {
+        config.server.lane_seeds_strong_confirm = ask;
     }
     if let Some(weight) = req.discussion_weight {
         config.server.discussion_weight = weight;
@@ -3030,6 +3042,11 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     cfg.server.auth_strict_localhost = previous.server.auth_strict_localhost;
     // A reset does not turn the vault protection off or back on behind the owner's back.
     cfg.server.protect_vault_from_agents = previous.server.protect_vault_from_agents;
+    // Nor the lane-seed switches (KT-1438): what is copied into a worktree, and
+    // whether changing a seed asks for the code, are the owner's standing choice.
+    cfg.server.lane_seeds_copy_enabled = previous.server.lane_seeds_copy_enabled;
+    cfg.server.lane_seeds_adopt_suggested = previous.server.lane_seeds_adopt_suggested;
+    cfg.server.lane_seeds_strong_confirm = previous.server.lane_seeds_strong_confirm;
     cfg.server.auth_locked = previous.server.auth_locked;
     cfg.server.auth_token_session_only = previous.server.auth_token_session_only;
     // Defaults turn P2P off; the gate follows.

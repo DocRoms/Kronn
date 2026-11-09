@@ -127,7 +127,7 @@ the same job.
   reads Claude, Codex and Gemini logs. Missing cost therefore remains unknown,
   never free. This is an implementation limit, not a protocol prohibition.
   [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
-  [src: file: backend/src/acp.rs:1416-1438#usage_from_prompt_result]
+  [src: file: backend/src/acp.rs:1422-1444#usage_from_prompt_result]
   [src: file: backend/src/acp/claude_adapter.rs:450-467#Cost]
 - **Statistics distinguish missing cost from a recorded zero.** Token-usage
   aggregates retain recorded amounts, fresh pricing estimates and unpriced
@@ -151,7 +151,7 @@ the same job.
   nor the worker permission scope. `task_worker_route_policy` decides this for
   worker preparation and for every launch route; an exact joined CLI session
   of the same agent stays eligible.
-  [src: file: backend/src/agents/runner.rs:3883-3901#task_worker_route_policy]
+  [src: file: backend/src/agents/runner.rs:3901-3919#task_worker_route_policy]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.
@@ -172,7 +172,7 @@ for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
 [src: file: backend/src/agents/runner.rs:5975-5985#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:15642-15923#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/agents/runner.rs:15668-15949#run_acp_session_streams_usage_through_agent_process]
 [src: file: backend/src/core/redact.rs:510-534#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)

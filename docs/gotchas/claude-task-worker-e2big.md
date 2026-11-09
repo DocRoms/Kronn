@@ -18,10 +18,10 @@ the sandbox to enumerate. Any other unreadable Git root still fails closed with
 `claude_sandbox_catalogue_unreadable`, naming the project or linked repository
 (never its path).
 [src: file: backend/src/agents/runner.rs:12979-13009#ClaudeSandboxCatalogueReceipt]
-[src: file: backend/src/agents/runner.rs:12990-13039#claude_sandbox_catalogue_receipt]
-[src: file: backend/src/agents/runner.rs:13069-13098#claude_sandbox_catalogue_roots]
-[src: file: backend/src/agents/runner.rs:13072-13079#claude_task_worker_catalogue_preflight]
-[src: file: backend/src/api/orchestration.rs:10845-10855#worker_project_refusal]
+[src: file: backend/src/agents/runner.rs:13012-13061#claude_sandbox_catalogue_receipt]
+[src: file: backend/src/agents/runner.rs:13087-13116#claude_sandbox_catalogue_roots]
+[src: file: backend/src/agents/runner.rs:13094-13101#claude_task_worker_catalogue_preflight]
+[src: file: backend/src/api/orchestration.rs:10923-10933#worker_project_refusal]
 
 The worker remains fail-closed: sandbox availability is mandatory,
 unsandboxed commands are disabled, and the explicit write roots are the
@@ -51,7 +51,7 @@ keep their own sandbox and receive no lane variables.
 | Reads | `filesystem.allowRead`: `~/.cargo/registry`, `~/.cargo/git`, existing pnpm stores, the main checkout's `frontend/node_modules`. Never a write root. |
 | Network | `network.allowLocalBinding: true` (loopback). No `allowedDomains`: no external host. |
 | Fail-closed | `enabled`, `failIfUnavailable`, `allowUnsandboxedCommands: false` unchanged; an unresolvable worktree still yields an empty write list and no network key. |
-| Environment | `KRONN_DATA_DIR=<worktree>/.kronn/data`, `CARGO_TARGET_DIR=<lane target>`, `CARGO_NET_OFFLINE=true`, `CARGO_BUILD_JOBS` (KT-1250), and `CARGO_HOME` when the registry is in place. No `VAR=x cmd` prefix is needed. |
+| Environment | `KRONN_DATA_DIR=<worktree>/.kronn/data`, `CARGO_TARGET_DIR=<lane target>`, `CARGO_NET_OFFLINE=true`, `CARGO_BUILD_JOBS` (KT-1250) with `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `VITEST_MAX_WORKERS` from the same budget (KT-1634; never `MAKEFLAGS`, see [worker-lane-warm-start.md](worker-lane-warm-start.md)), and `CARGO_HOME` when the registry is in place. No `VAR=x cmd` prefix is needed. |
 | Cargo home | the host's own `CARGO_HOME`, read-only to the sandbox (KT-1250: Cargo fingerprints a registry crate by the absolute path of its sources, so a lane under another home can never reuse a warm target — see [worker lane warm start](worker-lane-warm-start.md)). `KRONN_WORKER_PRIVATE_CARGO_HOME=1` restores the KT-1246 lane-private home (`<lane target>/.kronn-cargo-home`: `registry`, `git`, `config.toml` symlinked, credentials never linked) at the price of no seeding. |
 | Frontend | `frontend/node_modules` is a symlink to the main checkout's, created without any network install. Missing there: frontend tests are reported unavailable. |
 
