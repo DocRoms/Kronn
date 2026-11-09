@@ -919,7 +919,7 @@ fn jailed_project() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBu
     (outer, project, outside)
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
 #[test]
 fn a_makefile_that_links_out_of_the_project_puts_nothing_in_the_facts() {
     use std::os::unix::fs::symlink;
@@ -949,7 +949,7 @@ fn a_makefile_that_links_out_of_the_project_puts_nothing_in_the_facts() {
         .contains("OUTSIDE_RECIPE_REVIEW_SENTINEL"));
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
 #[test]
 fn no_file_read_by_the_facts_follows_a_link_out_of_the_project() {
     use std::os::unix::fs::symlink;
@@ -1058,7 +1058,7 @@ fn a_makefile_commit_target_names_the_tool_and_the_line_never_the_recipe() {
     assert!(CommitFacts::detect(dir.path()).tooling.is_empty());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs a POSIX shell script fixture; uses POSIX absolute paths
 #[test]
 fn a_script_evidence_outside_the_project_is_never_cited() {
     let (_outer, project, outside) = jailed_project();

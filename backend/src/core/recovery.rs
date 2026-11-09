@@ -414,7 +414,7 @@ mod tests {
         assert!(unwrap_key(&frankenstein, "pp").is_err());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn save_blob_never_follows_a_symlink_planted_at_the_temp_path() {
         use std::os::unix::fs::PermissionsExt;
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     fn saved_recovery_sidecar_is_0600_and_leaves_no_temp() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();

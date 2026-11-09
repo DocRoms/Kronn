@@ -2123,7 +2123,7 @@ mod tests {
 
     /// `gh` and `glab` start git in the repository: they get the git-host
     /// environment and the project's GitHub token, never the backend's.
-    #[cfg(unix)]
+    #[cfg(unix)] // uses POSIX absolute paths
     #[test]
     fn gh_and_glab_run_without_the_backend_environment() {
         use crate::core::child_env::probe;
@@ -2194,7 +2194,7 @@ mod tests {
 
     /// The push token reaches no repository hook: neither in an argument, nor
     /// in the environment, and the authenticated push runs no hook (B3-10).
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_push_never_shows_its_token_to_a_pre_push_hook() {
         use std::os::unix::fs::PermissionsExt;
@@ -2315,7 +2315,7 @@ mod tests {
         forget_pr_urls(dir.path());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // stands in `sleep` and `echo` for the gh CLI; Windows has neither as a program
     #[test]
     fn a_pr_lookup_that_hangs_is_given_up_instead_of_blocking_the_discussion() {
         // KT-983 — `gh pr view` runs on every git-status; a slow network must
@@ -2388,7 +2388,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn exec_refuses_a_symlink_leaving_the_project() {
         let dir = tempfile::tempdir().unwrap();
@@ -2408,7 +2408,7 @@ mod tests {
         assert!(validate_exec_command("git log --output=x").is_err());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // uses POSIX absolute paths
     #[test]
     fn exec_runs_an_in_project_read_without_a_shell_or_the_backend_env() {
         let dir = tempfile::tempdir().unwrap();

@@ -318,7 +318,7 @@ fn assert_git_shows_only_docs(root: &Path) {
     assert!(!root.join(".gitignore").exists(), "{status}");
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_step() {
     use axum::response::IntoResponse;
@@ -547,13 +547,13 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn http_start_failure_during_documentary_retry_persists_error_and_prior_usage() {
     assert_http_failure_is_persisted(false).await;
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn http_failure_after_write_persists_status_and_preserves_partial_files_without_replay() {
     assert_http_failure_is_persisted(true).await;
@@ -1298,7 +1298,7 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
     prompts
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn no_step_of_the_full_or_partial_audit_names_an_unlinked_kronn_project() {
     for pipeline in ["full", "partial"] {
@@ -1315,7 +1315,7 @@ async fn no_step_of_the_full_or_partial_audit_names_an_unlinked_kronn_project() 
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn an_explicitly_linked_repo_stays_in_every_step_prompt_and_the_others_stay_out() {
     for pipeline in ["full", "partial"] {
@@ -1336,7 +1336,7 @@ async fn an_explicitly_linked_repo_stays_in_every_step_prompt_and_the_others_sta
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn an_audit_prompt_no_longer_reads_another_repos_docs_or_lists_the_machines_projects() {
     for pipeline in ["full", "partial"] {
@@ -1358,7 +1358,7 @@ async fn an_audit_prompt_no_longer_reads_another_repos_docs_or_lists_the_machine
 /// real pipelines (retries included: the scripted agent writes nothing, so every
 /// step runs its gates' attempts): each turn ends on one step's own directive,
 /// and the step numbers it names are those of the chain.
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn every_step_prompt_the_full_and_partial_pipelines_hand_the_agent_ends_on_its_directive() {
     let docs_root = crate::core::docs_location::DocsRoot::default_root();
@@ -1462,7 +1462,7 @@ fn sse_events(body: &str, name: &str) -> Vec<Value> {
         .collect()
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_validated() {
     use axum::response::IntoResponse;
@@ -2126,7 +2126,7 @@ async fn version_source_inputs_read_the_mcp_config_the_agent_is_handed() {
 
 /// KT-1320 — the connection a resumed run had may have been deleted since: the
 /// resume runs on the agent's default connection and says so, it is not refused.
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn a_resume_whose_connection_was_deleted_falls_back_with_a_visible_note() {
     resume_after_the_run_connection_was_deleted(None).await;
@@ -2134,7 +2134,7 @@ async fn a_resume_whose_connection_was_deleted_falls_back_with_a_visible_note() 
 
 /// KT-1320 — the UI echoes the run's connection id back on a resume with an
 /// untouched picker: the server still recognises it as the run's own choice.
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn a_resume_echoing_the_deleted_connection_of_its_run_falls_back_too() {
     resume_after_the_run_connection_was_deleted(Some("deleted-conn")).await;
@@ -2142,7 +2142,7 @@ async fn a_resume_echoing_the_deleted_connection_of_its_run_falls_back_too() {
 
 /// KT-1320 — the same fallback on an HTTP provider: the retried step reaches the
 /// agent's default endpoint on the run's economy model, not the reasoning one.
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn a_resume_whose_connection_was_deleted_reaches_the_default_provider_on_the_run_tier() {
     let prose = text("The documentation is unchanged.");
@@ -2296,7 +2296,7 @@ async fn latest_run(state: &AppState) -> crate::models::AuditRun {
 /// KT-1318 — a full audit writes a lot of files and builds: below the
 /// configured free space it is refused before anything is recorded or written,
 /// with the number and the setting named.
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[tokio::test]
 async fn a_full_audit_under_disk_pressure_is_refused_before_it_creates_anything() {
     use axum::response::IntoResponse;

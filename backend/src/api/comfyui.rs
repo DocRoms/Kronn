@@ -1644,7 +1644,7 @@ mod tests {
     /// KT-1385 — a download lands as `.part`, resumes from it with a Range
     /// request, and only a file of the exact size and checksum becomes the
     /// model.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn a_download_resumes_from_its_part_and_only_a_verified_file_becomes_the_model() {
         use wiremock::matchers::{header, method, path};
@@ -1717,7 +1717,7 @@ mod tests {
     /// A source that sends more than the file, a `.part` longer than the
     /// file, or a range that does not continue the `.part`: nothing is
     /// spliced or kept.
-    #[cfg(unix)]
+    #[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
     #[tokio::test]
     async fn a_download_never_writes_past_the_file_nor_splices_a_wrong_range() {
         use wiremock::matchers::{header, method, path};
@@ -1780,7 +1780,7 @@ mod tests {
     /// Review (KT-1381 r1) — a `.part` planted as a symbolic or hard link to
     /// a file outside, or the folder swapped for a link to elsewhere: nothing
     /// outside is ever written, and the model is never a link.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[tokio::test]
     async fn links_planted_in_the_model_folder_never_lead_a_download_outside() {
         use wiremock::matchers::{method, path};

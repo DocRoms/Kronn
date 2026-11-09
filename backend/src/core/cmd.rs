@@ -480,7 +480,7 @@ mod tests {
     /// KT-1189: a program resolved outside the directories a test controls is
     /// the machine's. `/bin/ls` stands for "a CLI the developer installed":
     /// present on every Unix host, never under the temporary directory.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; uses POSIX absolute paths
     #[test]
     fn a_machine_program_on_an_agent_route_is_a_real_agent() {
         use crate::core::child_env::AgentFamily;
@@ -508,7 +508,7 @@ mod tests {
 
     /// KT-1189: the guard itself. Launching a real agent binary from a test
     /// panics with the offending path, whichever builder is used.
-    #[cfg(unix)]
+    #[cfg(unix)] // uses POSIX absolute paths
     #[test]
     fn a_test_cannot_start_a_real_agent_binary() {
         use crate::core::child_env::AgentFamily;
@@ -552,7 +552,7 @@ mod tests {
     /// KT-1495: without the gate, a thread named like a probe holds no
     /// allowance and the guard still refuses a real agent binary. Reverting the
     /// gate check in `live_probe_may_open` fails it.
-    #[cfg(unix)]
+    #[cfg(unix)] // uses POSIX absolute paths
     #[test]
     fn a_probe_named_test_without_the_gate_still_cannot_start_a_real_agent() {
         use crate::core::child_env::AgentFamily;
@@ -578,7 +578,7 @@ mod tests {
     /// KT-1495: the allowance is held by a gated probe only, opens the guard
     /// for the real binary while held, and the guard is armed again once it
     /// drops. Runs on a thread of its own: the allowance is process-wide.
-    #[cfg(unix)]
+    #[cfg(unix)] // uses POSIX absolute paths
     #[test]
     fn the_live_probe_allowance_is_scoped_to_its_holder() {
         use crate::core::child_env::AgentFamily;
@@ -601,7 +601,7 @@ mod tests {
 
     /// KT-1189: a stub the test wrote under the temporary directory is a
     /// program the test controls: it starts, on an agent route too.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn a_stub_agent_in_the_temporary_directory_starts() {
         use crate::core::child_env::AgentFamily;
@@ -620,7 +620,7 @@ mod tests {
 
     /// A repository hook runs inside git's process: it never sees a variable
     /// outside the git allow-list (synthetic sentinels, no real secret).
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_git_hook_runs_without_the_backend_environment() {
         use std::os::unix::fs::PermissionsExt;
@@ -667,7 +667,7 @@ mod tests {
     }
 
     /// A program Kronn runs for itself gets the base allow-list only.
-    #[cfg(unix)]
+    #[cfg(unix)] // uses POSIX absolute paths
     #[tokio::test]
     async fn a_tool_command_runs_without_the_backend_environment() {
         use crate::core::child_env::probe;

@@ -379,7 +379,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlink_to_a_secret_file_is_a_secret_path() {
         let tmp = tempfile::tempdir().unwrap();
@@ -401,7 +401,7 @@ mod tests {
         assert!(!is_secret_path(&root.join("missing.txt")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_secret_written_name_is_a_secret_path_whatever_it_resolves_to() {
         let tmp = tempfile::tempdir().unwrap();
@@ -418,7 +418,7 @@ mod tests {
         assert!(!is_secret_path(&root.join("settings-data")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn chain_directory_component_keeps_secret_names() {
         let tmp = tempfile::tempdir().unwrap();
@@ -469,7 +469,7 @@ mod tests {
         assert_eq!(kept, PathBuf::from("repo"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts the POSIX root `/` as the walk origin
     #[test]
     fn a_unix_absolute_path_walks_from_the_root() {
         assert_eq!(walked_root(Path::new("/repo/keys/key")), PathBuf::from("/"));

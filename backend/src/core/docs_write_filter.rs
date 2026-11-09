@@ -666,7 +666,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // builds paths from raw bytes with std::os::unix::ffi::OsStrExt
     #[test]
     fn native_document_paths_preserve_bytes_and_diagnostics_distinguish_names() {
         use std::os::unix::ffi::OsStrExt;
@@ -984,7 +984,7 @@ mod tests {
         assert!(!path.exists(), "audit never restores deleted files");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn audit_does_not_follow_document_symlinks() {
         let dir = tempfile::tempdir().unwrap();

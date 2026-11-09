@@ -1505,7 +1505,7 @@ mod tests {
         assert_eq!(key_bound_needing(dir.path(), "not a key", &other), Err(()));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     #[test]
     fn an_enc_file_without_read_permission_fails_closed() {
         use std::os::unix::fs::PermissionsExt;
@@ -1528,7 +1528,7 @@ mod tests {
         assert!(!Blocker::KeyCheckUnavailable.message().is_empty());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[tokio::test]
     async fn a_linked_name_is_never_read_or_unlinked() {
         let (dir, db, k) = verified().await;

@@ -2096,7 +2096,7 @@ mod tests {
         path
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[tokio::test]
     async fn shadowed_installs_report_a_later_copy_with_another_version() {
         let root = tempfile::tempdir().unwrap();
@@ -2132,7 +2132,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn shadowed_installs_ignore_a_copy_with_the_same_version() {
         let root = tempfile::tempdir().unwrap();
@@ -2164,7 +2164,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn binary_resolution_keeps_native_path_and_skips_only_container_host_mount() {
         let root = tempfile::tempdir().unwrap();
@@ -2234,7 +2234,7 @@ mod tests {
         .is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn binary_resolution_scans_host_dirs_when_current_directory_is_unavailable() {
         let root = tempfile::tempdir().unwrap();
@@ -2256,7 +2256,7 @@ mod tests {
         assert!(find_binary_in_paths("codex", paths, None, &[host], true, true).is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[tokio::test]
     #[serial]
     async fn detection_announces_the_measured_fallback_when_the_cli_is_missing() {
@@ -2302,7 +2302,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[tokio::test]
     #[serial]
     async fn missing_binary_fallback_keeps_command_version_and_refreshes_cache() {
@@ -2354,7 +2354,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn failed_or_empty_fallback_probe_never_reports_an_error_as_a_version() {
         use std::os::unix::fs::PermissionsExt;
@@ -2374,7 +2374,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     #[serial]
     async fn fallback_version_is_probed_and_cached_in_the_invocation_directory() {

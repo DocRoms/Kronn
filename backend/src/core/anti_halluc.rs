@@ -4550,7 +4550,7 @@ mod tests {
         assert_eq!(c.status, SourceStatus::Unchecked, "{c:?}");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn verify_symlink_escape_gives_no_existence_oracle() {
         // Both targets lie behind the same escaping link: an existing and a
@@ -4577,7 +4577,7 @@ mod tests {
         std::fs::remove_dir_all(&outside).ok();
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; uses POSIX absolute paths
     #[test]
     fn verify_symlink_with_dotdot_target_escaping_is_outside() {
         // A relative link target that climbs out (`../..`) is refused.
@@ -4589,7 +4589,7 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn verify_symlink_with_absolute_target_inside_root_is_verified() {
         use std::os::unix::fs::symlink;
@@ -4600,7 +4600,7 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn verify_symlink_loop_terminates_as_not_found() {
         use std::os::unix::fs::symlink;
@@ -4648,7 +4648,7 @@ mod tests {
         std::fs::remove_dir_all(&outside).ok();
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn verify_relative_symlink_inside_project_stays_verified() {
         // Companion to the escape test — a symlink INSIDE the project
@@ -7064,7 +7064,7 @@ mod lane_origin {
         std::fs::remove_dir_all(&checkout).ok();
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn symlinked_lane_entry_is_ignored() {
         let (checkout, _lane) = project();

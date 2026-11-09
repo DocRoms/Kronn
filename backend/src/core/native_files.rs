@@ -1170,7 +1170,7 @@ mod tests {
         assert!(parsed.get("model").is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlinked_skills_directory_is_never_written_through() {
         let repo = tmp_dir("symlinked-skills");
@@ -1194,7 +1194,7 @@ mod tests {
             .any(|rel| rel.starts_with(".claude/skills/")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlinked_kronn_dir_never_receives_the_ledger() {
         let repo = tmp_dir("symlinked-kronn");

@@ -1471,7 +1471,7 @@ mod tests {
 
     /// A package manager runs the repository's config: it gets the
     /// dependency-check environment, never the backend's (KT-1006).
-    #[cfg(unix)]
+    #[cfg(unix)] // uses POSIX absolute paths
     #[test]
     fn a_dependency_check_runs_without_the_backend_environment() {
         use crate::core::child_env::probe;
@@ -1902,7 +1902,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_workspace_with_node_modules_runs_npm_with_the_workspace_flags() {
         let project = js_project(true, true);
@@ -1918,7 +1918,7 @@ mod tests {
         assert_eq!(update.status, DependencyCheckStatus::UpToDate);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_workspace_without_node_modules_drops_the_flags_and_never_reads_up_to_date() {
         let project = js_project(true, false);
@@ -1928,7 +1928,7 @@ mod tests {
         assert!(!dependency_check_complete(&update.status));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_plain_manifest_without_node_modules_is_not_installed_not_up_to_date() {
         let project = js_project(false, false);
@@ -1943,7 +1943,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn outdated_rows_without_node_modules_still_report_updates() {
         let project = js_project(true, false);
@@ -1956,7 +1956,7 @@ mod tests {
         assert_eq!(update.major, 1);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn rows_without_an_installed_version_are_declared_only_with_no_current() {
         let project = js_project(false, false);
@@ -1974,7 +1974,7 @@ mod tests {
         assert_eq!(qs.current, "6.14.0");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_node_modules_holding_only_dot_entries_is_not_an_install() {
         let project = js_project(true, false);
@@ -1985,7 +1985,7 @@ mod tests {
         assert_eq!(update.status, DependencyCheckStatus::NotInstalled);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn an_installer_state_file_or_a_package_dir_is_an_install() {
         for entry in [".package-lock.json", ".yarn-state.yml", ".modules.yaml"] {
@@ -2049,7 +2049,7 @@ mod tests {
         assert_eq!(parsed["package.json"][0].latest, "18.0.0");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_manifest_with_nothing_to_install_is_up_to_date_without_node_modules() {
         let project = tempfile::TempDir::new().unwrap();
@@ -2120,7 +2120,7 @@ mod tests {
         temp
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn without_node_modules_the_current_version_comes_from_each_lockfile_format() {
         let lockfiles: [(&str, &str); 7] = [
@@ -2176,7 +2176,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_package_without_a_lock_entry_stays_declared_only() {
         let project = lockfile_project(
@@ -2194,7 +2194,7 @@ mod tests {
         assert_eq!(lazysizes.lockfile, None);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_lockfile_at_the_latest_version_reads_up_to_date_not_uninstalled() {
         let project = lockfile_project(
@@ -2210,7 +2210,7 @@ mod tests {
         assert_eq!(update.reason, None);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn an_installed_tree_keeps_npms_current_and_no_lockfile_source() {
         let project = lockfile_project(
@@ -2227,7 +2227,7 @@ mod tests {
         assert_eq!(update.packages[0].lockfile, None);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_not_installed_manifest_without_a_lockfile_says_why() {
         let project = js_project(false, false);
@@ -2237,7 +2237,7 @@ mod tests {
         assert!(reason.contains("no node_modules"), "{reason}");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_composer_failure_carries_the_reason_composer_printed() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -2260,7 +2260,7 @@ mod tests {
         assert!(reason.contains("No composer.lock file present"), "{reason}");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn an_unparseable_composer_answer_says_it_could_not_be_parsed() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -2281,7 +2281,7 @@ mod tests {
         assert!(reason.contains("Deprecated: PHP 8.4 notice"), "{reason}");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn composer_rows_name_composer_lock_as_their_source() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -2305,7 +2305,7 @@ mod tests {
         assert_eq!(update.reason, None);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn an_npm_error_document_surfaces_its_summary() {
         let project = js_project(false, true);
@@ -2384,7 +2384,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_failed_tools_credentials_do_not_reach_the_stored_reason() {
         let project = js_project(false, true);

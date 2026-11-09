@@ -9346,7 +9346,7 @@ for line in sys.stdin:
 
     /// A discussion whose native ACP agent never opens its session ends with a
     /// message in the user's language, settled as failed, the agent killed.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     #[serial_test::serial(acp_adapter_env_toggle)]
     async fn a_session_that_never_opens_is_settled_with_a_message_and_killed() {

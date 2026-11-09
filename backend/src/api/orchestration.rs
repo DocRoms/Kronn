@@ -21139,7 +21139,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[test]
     fn reap_child_stops_a_group_whose_leader_already_exited() {
         let dir = tempfile::tempdir().unwrap();
@@ -21151,7 +21151,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[test]
     fn reap_child_reads_early_exit_stderr_despite_a_live_descendant() {
         let dir = tempfile::tempdir().unwrap();
@@ -21171,7 +21171,7 @@ pub(crate) mod tests {
         assert_gone(descendant, "the diagnostic read must stop the group first");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn surviving_git_hook_blocks_restart_reap_until_it_exits() {
         let repo = init_repo();
@@ -22776,7 +22776,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn metadata_timeout_kills_and_reaps_the_owned_child() {
         use std::process::Stdio;
@@ -23193,7 +23193,7 @@ pub(crate) mod tests {
     /// KT-1268 review — a timed-out metadata resolution takes the whole group
     /// of the confined launch down, not only its leader: a grandchild of the
     /// worker's `rustc` wrapper must not outlive the timeout.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn metadata_timeout_kills_the_grandchildren_of_a_group_leader() {
         use std::process::Stdio;

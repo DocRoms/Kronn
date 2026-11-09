@@ -1398,7 +1398,7 @@ mod tests {
 
     /// C2-17 — the temp file is created owner-only and never follows a
     /// symlink planted at its name.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn write_config_atomic_never_follows_a_planted_temp_symlink() {
         let dir = scratch_dir("atomic-symlink");
@@ -2286,7 +2286,7 @@ image_family = "flux9_future"
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     fn write_config_atomic_sets_file_0600() {
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch_dir("atomic0600");
@@ -2705,7 +2705,7 @@ image_family = "flux9_future"
         assert!(parsed.server.auth_token.is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[tokio::test]
     #[serial]
     async fn save_chmods_dir_700_and_file_600_on_unix() {

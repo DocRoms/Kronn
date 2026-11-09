@@ -659,7 +659,7 @@ mod tests {
 
     /// KT-1585 — a step can swap `kronn-run-artifacts` or `<key>` for a link
     /// into the vault: sweep, migration, ensure and remove then touch nothing.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn a_linked_root_is_never_followed() {
         let db = db_with_runs().await;
@@ -711,7 +711,7 @@ mod tests {
 
     /// A base swapped for a link into the data dir: the root now resolves
     /// inside a protected directory and is refused at use, not only at start.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_root_that_now_resolves_into_the_vault_is_refused() {
         let data = crate::core::config::config_dir().unwrap();
@@ -730,7 +730,7 @@ mod tests {
     }
 
     /// A run directory planted as a link is refused, not adopted.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_linked_run_directory_is_refused() {
         let base = tempfile::tempdir().unwrap();

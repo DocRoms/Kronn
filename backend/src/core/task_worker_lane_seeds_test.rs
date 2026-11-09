@@ -314,7 +314,7 @@ fn a_source_the_main_checkout_lacks_is_a_skip_not_an_error() {
     assert!(skipped_reason(only(&record)).contains("main checkout does not have it"));
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_symlinked_source_or_destination_parent_is_refused() {
     let fx = fixture();
@@ -454,7 +454,7 @@ fn link(target: &str, at: &Path) {
 
 /// A symlink of the source that points out of the seed is not handed to the
 /// worker (absolute, or climbing past the seed's root); one that stays inside is.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix; uses POSIX absolute paths
 #[test]
 fn a_symlink_pointing_out_of_the_seed_is_dropped_and_named() {
     for use_clone in [true, false] {
@@ -515,7 +515,7 @@ fn a_symlink_pointing_out_of_the_seed_is_dropped_and_named() {
 }
 
 /// The record names what was dropped, so the project's settings can show it.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix; uses POSIX absolute paths
 #[test]
 fn the_dropped_links_survive_the_journal() {
     let fx = fixture();
@@ -534,7 +534,7 @@ fn the_dropped_links_survive_the_journal() {
 
 /// A rewrite that keeps the size and restores the modification time (`cp -p`,
 /// `rsync -t`) still changes the change time: the copy is refreshed.
-#[cfg(unix)]
+#[cfg(unix)] // relies on the unix change time (ctime) moving when the mtime is restored
 #[test]
 fn a_same_size_rewrite_with_a_preserved_mtime_refreshes_the_copy() {
     let fx = fixture();
@@ -728,7 +728,7 @@ fn a_single_file_seed_is_seeded() {
 
 /// A seed that is itself a link is refused (its target is not part of the copy),
 /// and `drop_escaping_links` looks at a file without listing it.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_single_link_seed_is_refused() {
     let fx = fixture();
@@ -875,7 +875,7 @@ fn the_list_of_found_secrets_is_capped_and_says_so() {
 }
 
 /// The walk never follows a link out of the seed, and a link to a secret is one.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn the_secret_scan_does_not_follow_links_and_flags_a_link_to_a_secret() {
     let dir = tempfile::tempdir().unwrap();
@@ -892,7 +892,7 @@ fn the_secret_scan_does_not_follow_links_and_flags_a_link_to_a_secret() {
 }
 
 /// A tree that cannot be read is an error, never "nothing found".
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
 #[test]
 fn an_unreadable_tree_fails_the_secret_scan_closed() {
     use std::os::unix::fs::PermissionsExt;

@@ -2366,7 +2366,7 @@ mod tests {
         assert!(applied_migrations(&conn) > 0);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlinked_database_backup_catches_a_commit_racing_the_checkpoint() {
         let dir = tempfile::tempdir().unwrap();

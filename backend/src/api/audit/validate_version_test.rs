@@ -507,7 +507,7 @@ fn an_absence_about_something_else_does_not_hide_the_deletion_of_the_cited_file(
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
 #[test]
 fn a_file_that_cannot_be_read_refuses_the_validation_before_any_write() {
     use std::os::unix::fs::PermissionsExt;

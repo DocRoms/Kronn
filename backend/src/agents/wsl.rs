@@ -699,7 +699,7 @@ mod tests {
         assert!(message.contains("Install `gemini` on Windows, or run Kronn inside WSL"));
     }
 
-    #[cfg(not(windows))]
+    #[cfg(unix)] // asserts the invocation of a non-Windows host, which never wraps through wsl.exe
     #[test]
     fn unix_hosts_never_wrap_through_wsl() {
         let (program, args, cwd) = crate::agents::runner::platform_agent_invocation(

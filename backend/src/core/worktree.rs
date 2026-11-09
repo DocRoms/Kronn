@@ -3881,7 +3881,7 @@ mod tests {
         assert_eq!(report.bytes_reclaimed, 0);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlinked_target_is_refused_instead_of_followed() {
         let repo = make_test_repo("clean-symlink");
@@ -3934,7 +3934,7 @@ mod tests {
         assert!(!target.exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn a_target_we_cannot_even_look_at_is_refused_not_reported_as_absent() {
         // "I could not look" must never be reported as "nothing to do". Absence
@@ -3963,7 +3963,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn a_deletion_that_cannot_complete_stops_on_that_target_and_says_so() {
         // DoD-7: a permission failure must produce an actionable diagnostic and
@@ -4099,7 +4099,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; reads unix inode metadata
     #[test]
     fn a_symlinked_target_is_listed_as_refused_rather_than_hidden() {
         // Following it would offer to delete storage this repository does not
@@ -5229,7 +5229,7 @@ mod tests {
         assert_eq!(git_head(&checkout).unwrap(), sha);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // a file name with a newline cannot exist on Windows
     #[test]
     fn pinned_target_checkout_preserves_newlines_and_unicode_in_paths() {
         let repo = make_test_repo("pinned-target-path");
@@ -5493,7 +5493,7 @@ mod tests {
         assert!(!branch.contains(".."));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn task_worktree_refuses_a_symlinked_managed_parent() {
         let repo = make_test_repo("task-symlink-parent");
@@ -5505,7 +5505,7 @@ mod tests {
         assert!(fs::read_dir(external.path()).unwrap().next().is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; reads unix inode metadata
     #[test]
     fn task_worktree_refuses_a_dangling_symlink_collision() {
         let repo = make_test_repo("task-dangling-link");
@@ -6733,7 +6733,7 @@ mod tests {
     /// `commit-msg` time (KT-854: the merge Kronn made for KT-840 had no
     /// `Signed-off-by`, so the release PR went red). The integration candidate must
     /// be built, signed with the identity git is configured with.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn the_integration_merge_commit_satisfies_a_dco_enforcing_repository() {
         use std::os::unix::fs::PermissionsExt;

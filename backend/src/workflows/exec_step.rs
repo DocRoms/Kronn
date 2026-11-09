@@ -1706,7 +1706,7 @@ mod tests {
 
     /// A link planted where the copy goes is replaced, never written through;
     /// a linked output directory is refused.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn the_full_copy_never_writes_through_a_planted_link() {
         let (_artifacts_base, artifacts) = run_dir();
@@ -1916,7 +1916,7 @@ mod tests {
         assert!(outcome.result.output.contains("hello world"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn arg_with_shell_metas_passed_as_literal_does_not_execute() {
         // Critical security test: an arg containing `; rm -rf /` MUST
@@ -1937,7 +1937,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn template_in_arg_renders_then_passes_literal() {
         // The {{steps.X.summary}} template is rendered FIRST, then the
@@ -1958,7 +1958,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn nonzero_exit_yields_failed_status() {
         // `false` is the canonical "exit 1" binary on Unix. Status
@@ -2049,7 +2049,7 @@ mod tests {
     // Without these, the runner saw `Failed` and short-circuited to
     // rollback — defeating the point of declaring an `on_result` rule.
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn success_appends_signal_ok_and_exit_0() {
         let step = exec_step("greet", Some("echo"), vec!["hi"], None);
@@ -2059,7 +2059,7 @@ mod tests {
         assert!(outcome.result.output.contains("[SIGNAL: exit_0]"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn nonzero_exit_appends_signal_error_and_exit_code() {
         let step = exec_step("fail", Some("false"), vec![], None);
@@ -2069,7 +2069,7 @@ mod tests {
         assert!(outcome.result.output.contains("[SIGNAL: exit_1]"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn on_result_goto_fires_when_signal_matches_on_failure() {
         // The whole point of the feature: `false` exits 1, status = Failed,
@@ -2104,7 +2104,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn on_result_no_match_leaves_condition_action_none() {
         // User declared `contains "TIMEOUT"` but exec exited 1.
@@ -2136,7 +2136,7 @@ mod tests {
     /// assert wall-clock is far below the sleep duration. If someone
     /// later removes `kill_on_drop(true)`, this test fails with a
     /// 30-second timeout instead of completing in milliseconds.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn cancel_drops_future_and_kills_long_running_child() {
         let step = exec_step("long_sleep", Some("sleep"), vec!["30"], Some(60));
@@ -2326,7 +2326,7 @@ mod tests {
 
     /// R5-04: a trusted script shape runs only a regular file, never a link
     /// to a device such as stdin.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn a_script_linked_to_a_device_is_refused_at_run_time() {
         let dir = tempfile::tempdir().unwrap();
@@ -2358,7 +2358,7 @@ mod tests {
 
     /// R6-08: an approved line whose stdin feeds a script runs only a regular
     /// file, never a link to stdin.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn an_approved_stdin_fed_script_linked_to_stdin_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -2390,7 +2390,7 @@ mod tests {
 
     /// F-03: a program file read by `awk -f` while a templated stdin feeds
     /// it must be a regular file too.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; relies on POSIX process groups and signals
     #[tokio::test]
     async fn an_awk_program_file_linked_to_stdin_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -2443,7 +2443,7 @@ mod tests {
     /// The documented recipe for a templated value next to inline code: a
     /// separate argv entry the interpreter never parses. A hostile issue
     /// title must come back verbatim and nothing in it may run.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn a_hostile_issue_title_never_executes_through_the_documented_recipes() {
         let title = "a'b\"c $(touch pwned1) ; touch pwned2 `touch pwned3` \\ é🦀";
@@ -2497,7 +2497,7 @@ mod tests {
     /// A saved step that interpolates a value into inline code fails before
     /// spawning anything, main command or setup, with the step, the
     /// placeholder and the fix in its error.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test]
     async fn a_step_interpolating_into_inline_code_is_refused_before_running() {
         let mut ctx = TemplateContext::new();
@@ -2540,7 +2540,7 @@ mod tests {
 
     /// Review findings, executed: a shell script after `-cx`, and a
     /// templated stdin given to a program that runs stdin, never run.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn a_clustered_c_script_and_a_stdin_program_are_refused_before_running() {
         let mut ctx = TemplateContext::new();
@@ -2575,7 +2575,7 @@ mod tests {
 
     /// A value reaching a program Kronn does not model is refused before it
     /// runs, unless a human approved the step.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn an_unmodelled_program_runs_only_with_a_human_approval() {
         let mut ctx = TemplateContext::new();
@@ -2611,7 +2611,7 @@ mod tests {
     }
 
     /// The envelope escapes stdout; markers must still come back as printed.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn multi_line_markers_come_back_without_literal_escapes() {
         let mut step = exec_step("sortie", Some("cat"), vec![], None);

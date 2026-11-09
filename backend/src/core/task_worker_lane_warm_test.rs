@@ -547,7 +547,7 @@ fn an_existing_debug_directory_is_never_overwritten() {
 
 /// GNU `cp --reflink=always` on a file system without reflinks (ext4) makes
 /// the directories, then fails on the first file: the clone must remove them.
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
 #[test]
 fn a_failed_cp_reflink_leaves_no_partial_tree() {
     use std::os::unix::fs::PermissionsExt;
@@ -580,7 +580,7 @@ fn a_failed_cp_reflink_leaves_no_partial_tree() {
     assert!(destination.join("keep").is_dir());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // reads unix inode metadata
 #[test]
 fn clone_tree_is_copy_on_write_not_a_shared_or_a_copied_tree() {
     use std::os::unix::fs::MetadataExt;
@@ -1135,7 +1135,7 @@ fn cancelling_a_running_first_build_stops_it_and_frees_its_slot() {
     assert!(gate.try_acquire(1).is_some());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
 #[test]
 fn the_process_runner_kills_a_cancelled_build_and_what_it_started() {
     let dir = tempfile::tempdir().unwrap();

@@ -35,7 +35,7 @@ fn the_profile_escapes_the_path() {
 /// `KRONN_DATA_DIR` through a link): `/` is bind-mounted, so a tmpfs over the
 /// alias alone leaves the real directory readable. The tmpfs goes over the
 /// resolved path, once, whichever form is given.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn bubblewrap_hides_the_resolved_data_dir_when_it_is_given_through_a_symlink() {
     let base = tempfile::tempdir().unwrap();
@@ -69,7 +69,7 @@ fn bubblewrap_hides_the_resolved_data_dir_when_it_is_given_through_a_symlink() {
 /// flags and the `--` sentinel, whether or not the network is unshared. Nothing
 /// is spliced into a finished list, so an option never splits and a path or
 /// command named like a flag cannot move the mounts.
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX paths (/work, /var/run/docker.sock)
 #[test]
 fn the_worker_sandbox_hides_the_data_dir_inside_the_options_before_the_command() {
     use crate::core::task_worker_sandbox::{
@@ -245,7 +245,7 @@ fn a_docker_volume_glued_to_a_group_of_short_flags_is_caught() {
     assert!(!hit_home("-itv~/project:/c"));
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_docker_volume_that_reaches_the_data_dir_through_a_symlink_is_caught() {
     let root = tempfile::tempdir().unwrap();
@@ -269,7 +269,7 @@ fn a_docker_volume_that_reaches_the_data_dir_through_a_symlink_is_caught() {
 
 /// The forms a shell expands before Docker sees them, and the ones Docker
 /// resolves against the working directory: `~`, `$HOME`, `${HOME}`, `./link`.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_docker_volume_written_with_a_tilde_a_variable_or_a_relative_link_is_caught() {
     let root = tempfile::tempdir().unwrap();

@@ -6870,7 +6870,7 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // uses a POSIX FIFO; relies on POSIX process groups and signals
     #[tokio::test]
     async fn two_non_isolated_runs_of_one_project_started_together_both_succeed_in_turn() {
         let (state, tokens, agents) = test_state_and_configs();
@@ -6977,7 +6977,7 @@ mod tests {
             .contains("run-holding-the-tree"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
     #[tokio::test]
     async fn a_workflow_declared_read_only_on_the_main_tree_skips_the_lock() {
         let (state, tokens, agents) = test_state_and_configs();
@@ -7984,7 +7984,7 @@ mod tests {
     /// agent, whether or not the project has a linked repo. The step is run by
     /// the real `execute_run` on a scripted `claude`, and the test reads the
     /// prompt that agent was handed on stdin.
-    #[cfg(unix)]
+    #[cfg(unix)] // uses a POSIX FIFO; relies on POSIX process groups and signals
     #[tokio::test]
     async fn an_agent_step_prompt_names_no_unlinked_kronn_project() {
         use crate::api::other_projects_fixture as fixture;
@@ -8104,7 +8104,7 @@ mod tests {
     /// activity in that room's live progress, as a step of the main path does.
     /// Run by the real `execute_run` on a scripted `claude` that makes one
     /// tool call; the test reads the frames the room's socket receives.
-    #[cfg(unix)]
+    #[cfg(unix)] // uses a POSIX FIFO; relies on POSIX process groups and signals
     #[tokio::test]
     async fn a_rollback_agent_step_feeds_its_rooms_live_progress() {
         use crate::api::other_projects_fixture as fixture;

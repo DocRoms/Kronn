@@ -121,7 +121,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     #[test]
     fn the_rewrite_keeps_the_file_permissions_and_leaves_no_temp_file() {
         use std::os::unix::fs::PermissionsExt;
@@ -144,7 +144,7 @@ mod tests {
         assert!(leftovers.is_empty(), "stray files: {leftovers:?}");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlinked_entry_file_is_not_rewritten() {
         let tmp = tempfile::tempdir().unwrap();
@@ -611,7 +611,7 @@ mod tests {
     // ─── des dépôts hors du répertoire personnel ────────────────────
 
     /// A symlinked scan root reaches repositories outside the home directory.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn a_symlinked_root_is_followed_to_the_repositories_it_points_at() {
         let real = tempfile::tempdir().unwrap();
@@ -637,7 +637,7 @@ mod tests {
     /// Suivre les liens veut dire se protéger des cycles. Un lien qui pointe sur
     /// un ancêtre ferait tourner la marche indéfiniment, ou rapporterait le même
     /// dépôt une fois par chemin qui y mène.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn a_symlink_loop_is_walked_once_and_does_not_hang() {
         let root = tempfile::tempdir().unwrap();
@@ -681,7 +681,7 @@ mod tests {
 
     /// Independent clones of the same remote remain distinct. Initialize real Git
     /// repositories so remote discovery exercises the intended collision.
-    #[cfg(unix)]
+    #[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
     #[tokio::test]
     async fn two_clones_of_one_repository_are_two_working_copies() {
         const ORIGINE: &str = "git@example.com:acme/kronn.git";
@@ -731,7 +731,7 @@ mod tests {
 
     /// A directory revisited through a shorter path may expose deeper repositories.
     /// Deduplication must not prune that traversal, regardless of filesystem order.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn a_long_route_seen_first_does_not_close_the_short_one() {
         let cible = tempfile::tempdir().unwrap();
@@ -763,7 +763,7 @@ mod tests {
 
     /// À l'inverse, deux chemins d'accès vers le MÊME dossier ne font qu'une
     /// copie de travail, quel que soit le nom du lien.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn two_names_for_one_directory_are_one_working_copy() {
         let root = tempfile::tempdir().unwrap();

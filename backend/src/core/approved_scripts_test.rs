@@ -65,7 +65,7 @@ fn declaration_refuses_duplicates_bad_hashes_and_too_many_files() {
     assert!(validate_declaration(&many).is_err());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_symlink_escaping_the_repository_is_refused_and_one_inside_is_read() {
     let outside = tempfile::tempdir().unwrap();
@@ -204,7 +204,7 @@ fn the_copy_replaces_a_previous_one_and_steps_get_distinct_directories() {
 /// KT-1585 — steps write in the run dir, so a link planted at
 /// `approved-scripts` or at the step's copy never takes Kronn's writes or
 /// deletions into a data-dir-like tree.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_planted_link_never_takes_the_copy_into_the_vault() {
     let dir = repo();
@@ -245,7 +245,7 @@ fn a_planted_link_never_takes_the_copy_into_the_vault() {
 
 /// A dir a step creates between the removal of the previous copy and the new
 /// one is never adopted: removed once, refused if it comes back.
-#[cfg(unix)]
+#[cfg(unix)] // unverified on Windows: gated before the nightly Windows run (KT-1629)
 #[test]
 fn a_copy_dir_recreated_by_a_step_is_never_adopted() {
     let dir = repo();

@@ -61,7 +61,7 @@ async fn the_detection_sweep_reports_no_agent_cli_of_the_machine() {
 /// The guard is armed here, in a build without `cfg(test)`: starting a program
 /// that is not under a test-controlled directory on an agent route panics, with
 /// every builder the launches go through.
-#[cfg(unix)]
+#[cfg(unix)] // uses POSIX absolute paths
 #[test]
 fn a_real_agent_binary_cannot_be_started_from_an_integration_test() {
     let route = ChildRoute::Agent(AgentFamily::Copilot);
@@ -81,7 +81,7 @@ fn a_real_agent_binary_cannot_be_started_from_an_integration_test() {
 
 /// A stub under the temporary directory — what a test puts on an agent route
 /// instead of the real CLI — still starts.
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
 #[tokio::test]
 async fn a_stub_agent_still_starts_from_an_integration_test() {
     use std::os::unix::fs::PermissionsExt;
@@ -104,7 +104,7 @@ async fn a_stub_agent_still_starts_from_an_integration_test() {
 /// The detached launch runs in a child process — the abort would otherwise
 /// take the whole test binary with it — and the parent asserts it died with the
 /// guard's message instead of finishing.
-#[cfg(unix)]
+#[cfg(unix)] // uses POSIX absolute paths
 #[test]
 fn a_real_agent_started_in_a_detached_task_fails_the_run() {
     const CHILD: &str = "KT1189_DETACHED_CHILD";

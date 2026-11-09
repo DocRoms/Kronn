@@ -3791,7 +3791,7 @@ mod tests {
         assert_eq!(codex_auth_path(), host.join(".codex/auth.json"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     #[test]
     fn codex_sync_failure_leaves_the_original_byte_identical() {
         use std::os::unix::fs::PermissionsExt;
@@ -3822,7 +3822,7 @@ mod tests {
     /// A mount is a top-level directory like any other. This is what makes
     /// `/workspace` reachable in a Docker install without anyone typing it,
     /// while the operating system's own directories stay out of the way.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mount points and system roots (/etc, /usr, /proc)
     #[test]
     fn a_mount_point_is_offered_and_the_system_is_not() {
         for monte in [
@@ -3853,7 +3853,7 @@ mod tests {
         }]
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn an_unreadable_directory_is_an_error_not_an_empty_listing() {
         use std::os::unix::fs::PermissionsExt;
@@ -3932,7 +3932,7 @@ mod tests {
 
     /// And a symlink is not a way around it: the check happens after
     /// canonicalization, so the link's target is what is judged.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlink_does_not_walk_out_of_a_root() {
         let dedans = tempfile::tempdir().unwrap();
@@ -3949,7 +3949,7 @@ mod tests {
     }
 
     /// `..` likewise: it resolves before the check.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_parent_reference_does_not_walk_out_of_a_root() {
         let root = tempfile::tempdir().unwrap();

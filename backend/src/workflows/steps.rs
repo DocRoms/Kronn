@@ -3665,7 +3665,7 @@ mod http_native_tool_step_tests {
         assert!(String::from_utf8_lossy(&requests[0].body).contains("\"model\":\"model-b\""));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn disappeared_model_dispatches_same_target_replacement_and_records_both_models() {
         let dir = tempfile::tempdir().unwrap();

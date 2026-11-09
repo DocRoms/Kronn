@@ -2423,7 +2423,7 @@ mod tests {
             .any(|diagnostic| diagnostic.code == "mutable_line_reference"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn report_write_refuses_an_external_symlink_target() {
         use std::os::unix::fs::symlink;
@@ -2441,7 +2441,7 @@ mod tests {
         assert_eq!(fs::read_to_string(external.path()).unwrap(), before);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn docs_traversal_does_not_follow_external_links_or_loops() {
         use std::os::unix::fs::symlink;
@@ -3133,7 +3133,7 @@ mod tests {
             .all(|marker| accepted(tmp.path(), marker)));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlink_to_a_secret_file_is_refused_like_the_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3353,7 +3353,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     fn a_hard_link_to_an_outside_makefile_never_reaches_the_diagnostics() {
         // KT-1387 — the public entry, not the reader: a hard link named like a

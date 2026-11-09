@@ -493,7 +493,7 @@ async fn a_secret_added_after_acceptance_is_shown_held_until_confirmed() {
 }
 
 /// A tree that cannot be checked refuses the save instead of saving unchecked.
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
 #[tokio::test]
 async fn a_tree_that_cannot_be_checked_refuses_the_save() {
     use std::os::unix::fs::PermissionsExt;

@@ -10,7 +10,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     #[serial]
     async fn npx_fallback_preserves_output_records_provenance_and_reuses_probe() {
@@ -10344,7 +10344,7 @@ Suite de la réponse.";
     /// A `.cargo` that is a link, or a directory above it that is, would spell as
     /// inside the worktree and write outside it (a rustc wrapper in the human's
     /// `~/.cargo/config.toml`): Edit and Write are not under the Bash sandbox.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     fn the_cargo_hook_refuses_a_path_that_goes_through_a_symlink() {
         use std::os::unix::fs::symlink;
@@ -10406,7 +10406,7 @@ Suite de la réponse.";
     /// A worktree that disappears under a running worker must not leave the hook
     /// walking up to a directory that is gone: it ends at once with no decision,
     /// so the ask stands, instead of waiting for Claude's hook timeout.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[test]
     fn the_cargo_hook_ends_without_a_decision_when_the_worktree_is_gone() {
         use std::io::Write;
@@ -10961,7 +10961,7 @@ Suite de la réponse.";
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test(start_paused = true)]
     async fn copilot_task_worker_preflight_times_out_and_terminates_the_child() {
         let mut child = tokio::process::Command::new("sh")
@@ -11000,7 +11000,7 @@ Suite de la réponse.";
 
     /// The Copilot account preflight starts the CLI only with Copilot's saved
     /// full-access setting on, read at each attempt.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test]
     async fn copilot_preflight_never_starts_the_cli_without_its_full_access_setting() {
         let dir = tempfile::tempdir().unwrap();
@@ -11046,7 +11046,7 @@ Suite de la réponse.";
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test]
     async fn copilot_preflight_capture_keeps_stdout_stderr_and_spawn_failure() {
         let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, true);
@@ -11083,7 +11083,7 @@ Suite de la réponse.";
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test(start_paused = true)]
     async fn copilot_preflight_full_spawn_path_preserves_its_four_second_deadline() {
         let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, true);
@@ -11357,7 +11357,7 @@ Suite de la réponse.";
 
     /// An unconnected project's agent gets no GitHub token, even one the
     /// backend's own environment or `gh` login holds; a connected one gets it.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn only_a_connected_project_hands_its_agent_a_github_token() {
         assert_eq!(
@@ -11421,7 +11421,7 @@ Suite de la réponse.";
 
     /// A launched Claude task worker finds its lane in its environment, so no
     /// `VAR=x cmd` prefix is ever needed to build or test (KT-1246).
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn a_claude_task_worker_launches_with_its_lane_environment() {
         let (_repo_dir, repo, worktree) = managed_task_worktree();
@@ -11450,7 +11450,7 @@ Suite de la réponse.";
 
     /// Only Claude Code's sandbox was widened: another runtime's task worker
     /// keeps the environment it had.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn another_runtimes_task_worker_gets_no_lane_environment() {
         let (_repo_dir, repo, worktree) = managed_task_worktree();
@@ -11497,7 +11497,7 @@ Suite de la réponse.";
 
     /// The opt-in must never reach a step, a principal or a worker, so these
     /// three hold whatever the operator's environment says.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     #[serial]
     async fn claude_step_principal_and_worker_launch_without_the_workstation_memory() {
@@ -11536,7 +11536,7 @@ Suite de la réponse.";
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     #[serial]
     async fn claude_native_discussion_drops_the_workstation_memory_unless_opted_in() {
@@ -11559,7 +11559,7 @@ Suite de la réponse.";
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn the_memory_switch_is_only_set_for_claude_code() {
         // Another CLI never sees it: Kronn does not set it, and the child
@@ -14168,7 +14168,7 @@ Suite de la réponse.";
         assert!(limits.get("Nvidia").is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[test]
     fn process_group_probe_never_signals_the_callers_group_or_all_processes() {
         assert!(group_has_processes(0));
@@ -14306,7 +14306,7 @@ Suite de la réponse.";
 
     /// After a normal exit, whatever the agent left in its group (a stdio MCP
     /// server, a background command) goes with the process, by drop or kill.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn agent_process_clears_its_group_after_a_normal_exit() {
         for explicit_kill in [false, true] {
@@ -14351,7 +14351,7 @@ Suite de la réponse.";
 
     /// Regression test for KT-418: the production process primitive must kill
     /// a CLI agent's whole Unix group without touching an unrelated process.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn cli_agent_cancellation_kills_process_tree() {
         struct Witness(std::process::Child);
