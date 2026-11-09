@@ -1237,3 +1237,44 @@ async fn the_card_flags_an_open_dispute_and_validation_waits_for_it() {
         .unwrap_or_default()
         .contains("cross-agent dispute"));
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_tech_debt_folder_swapped_after_the_walk_never_receives_a_sheet_or_the_index() {
+    use crate::core::fs_guard::swap_probe;
+    let dir = repo();
+    let fake = Fake::default()
+        .answer("detect", &CLAUDE, findings(&[sql()]))
+        .answer("detect", &CODEX, findings(&[sql()]))
+        .answer(
+            "check",
+            &OPENCODE,
+            verdicts(serde_json::json!([{"id": "F1", "verdict": "refute", "argument": "trust me", "proof": []}])),
+        );
+    let agents = [CLAUDE, CODEX, OPENCODE];
+    let mut report = run_cross_step(&fake, dir.path(), &agents, STEP_PROMPT)
+        .await
+        .unwrap();
+    let external = tempfile::tempdir().unwrap();
+    // The folder is swapped for a link once `write_outputs` holds it as an fd.
+    swap_probe::arm(&dir.path().join("docs/tech-debt"), external.path());
+    let _ = write_outputs(
+        dir.path(),
+        "docs/inconsistencies-security.md",
+        &agents,
+        "run-swap",
+        &mut report,
+    );
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert!(
+        std::fs::read_dir(external.path()).unwrap().next().is_none(),
+        "neither a sheet nor the index reached the outside folder"
+    );
+    let td_id = report.records[0].td_id.clone().unwrap();
+    assert!(
+        dir.path()
+            .join(format!("docs/tech-debt.moved/{td_id}.md"))
+            .is_file(),
+        "the sheet went to the folder held as an fd, inside the root"
+    );
+}

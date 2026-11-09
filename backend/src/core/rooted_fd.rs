@@ -1,18 +1,22 @@
-//! KT-1585 — the run artifacts root, held as a directory file descriptor.
+//! Directory file descriptors, the one rooted primitive (KT-1585, KT-1595).
+//!
+//! Shared by the run artifacts root (`workflows/run_artifacts`) and by
+//! `core::fs_guard`, so the two security primitives cannot drift apart.
 //!
 //! Steps write under the root while Kronn creates and deletes there, so a
 //! path checked once can be swapped for a link before it is used. Every
 //! operation here goes through a directory fd: each component is opened with
 //! `O_NOFOLLOW | O_DIRECTORY`, children are created with `mkdirat`, files
-//! with `openat(O_CREAT | O_EXCL | O_NOFOLLOW)` then `renameat`, and a
-//! deletion is a `unlinkat` walk that opens each subdirectory with
+//! with `openat(O_CREAT | O_EXCL | O_NOFOLLOW)` then `renameat` or `linkat`,
+//! and a deletion is a `unlinkat` walk that opens each subdirectory with
 //! `O_NOFOLLOW` and unlinks a link as an entry. No link is ever followed.
 //! Names are raw bytes end to end, and walks use an explicit stack capped at
 //! [`MAX_DEPTH`]: a deeper tree is refused, never followed. Such a tree is
 //! never deleted by Kronn either: the sweep warns at each start and the
 //! operator removes it by hand (docs/operations/workflow-read-only-repos.md).
 //! Off unix there is no such API: every operation is refused, so nothing is
-//! created, deleted or moved there.
+//! created, deleted or moved there (`core::fs_guard` keeps its own
+//! documented path-based behaviour on Windows).
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -23,7 +27,7 @@ use std::path::{Path, PathBuf};
 pub const MAX_DEPTH: usize = 64;
 
 #[cfg(unix)]
-pub use unix::Dir;
+pub use unix::{Dir, Identity};
 
 #[cfg(not(unix))]
 pub use fallback::Dir;
@@ -40,9 +44,50 @@ mod unix {
     use std::ffi::{CStr, CString};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::Component;
 
     const DIR_FLAGS: libc::c_int =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+
+    /// Who a regular file is: device, inode, inode change time and size. ext4
+    /// and tmpfs reuse a freed inode number at once, so device and inode alone
+    /// cannot tell a recreated file from the original; any change to the file
+    /// (content, mode, links) also changes its ctime and makes it a stranger.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Identity {
+        dev: u64,
+        ino: u64,
+        ctime: i64,
+        ctime_nsec: i64,
+        size: u64,
+    }
+
+    impl Identity {
+        /// The identity of the file behind `file`, as of now.
+        pub fn of(file: &std::fs::File) -> io::Result<Self> {
+            let meta = file.metadata()?;
+            Ok(Self {
+                dev: meta.dev(),
+                ino: meta.ino(),
+                ctime: meta.ctime(),
+                ctime_nsec: meta.ctime_nsec(),
+                size: meta.size(),
+            })
+        }
+
+        // Field widths differ between unix targets.
+        #[allow(clippy::unnecessary_cast)]
+        fn of_stat(stat: &libc::stat) -> Self {
+            Self {
+                dev: stat.st_dev as u64,
+                ino: stat.st_ino as u64,
+                ctime: stat.st_ctime as i64,
+                ctime_nsec: stat.st_ctime_nsec as i64,
+                size: stat.st_size as u64,
+            }
+        }
+    }
 
     /// An open directory; every name below it is resolved against the fd.
     pub struct Dir {
@@ -74,6 +119,36 @@ mod unix {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         }
+    }
+
+    /// A walk stopped at `part`; keeps the errno so [`Dir::is_link_refusal`]
+    /// and [`Dir::is_not_a_directory`] still classify it.
+    #[derive(Debug)]
+    struct WalkRefusal {
+        part: OsString,
+        errno: i32,
+    }
+
+    impl std::fmt::Display for WalkRefusal {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{:?} is a symlink or not a directory — refusing to write through it",
+                self.part
+            )
+        }
+    }
+
+    impl std::error::Error for WalkRefusal {}
+
+    /// The errno of `error`, also when a walk wrapped it in a [`WalkRefusal`].
+    fn errno_of(error: &io::Error) -> Option<i32> {
+        error.raw_os_error().or_else(|| {
+            error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<WalkRefusal>())
+                .map(|refusal| refusal.errno)
+        })
     }
 
     /// Whether an `openat(O_NOFOLLOW | O_DIRECTORY)` failure means "not a
@@ -120,8 +195,38 @@ mod unix {
 
         /// Opens `base` (a link there is the operator's choice), then each of
         /// `parts` below it without following a link, creating the missing
-        /// ones when `create`. `None` when a part is missing and not created.
+        /// ones (owner-only) when `create`. `None` when a part is missing and
+        /// not created.
         pub fn open_under(base: &Path, parts: &[&str], create: bool) -> io::Result<Option<Dir>> {
+            Dir::open_parts(base, parts.iter().map(OsStr::new), create, 0o700)
+        }
+
+        /// [`Dir::open_under`] for a relative path (plain names and `.`
+        /// only); the directories it creates get mode 0777 under the umask,
+        /// like `create_dir_all`.
+        pub fn open_path(base: &Path, rel: &Path, create: bool) -> io::Result<Option<Dir>> {
+            let mut parts = Vec::new();
+            for component in rel.components() {
+                match component {
+                    Component::Normal(name) => parts.push(name),
+                    Component::CurDir => {}
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("{} is not a plain relative path", rel.display()),
+                        ))
+                    }
+                }
+            }
+            Dir::open_parts(base, parts, create, 0o777)
+        }
+
+        fn open_parts<'a>(
+            base: &Path,
+            parts: impl IntoIterator<Item = &'a OsStr>,
+            create: bool,
+            mode: libc::mode_t,
+        ) -> io::Result<Option<Dir>> {
             if create {
                 std::fs::create_dir_all(base)?;
             }
@@ -137,9 +242,20 @@ mod unix {
             };
             for part in parts {
                 if create {
-                    dir.make_dir(OsStr::new(part))?;
+                    dir.make_dir(part, mode)?;
                 }
-                let child = dir.open_child(part)?;
+                let child = dir
+                    .open_child(part)
+                    .map_err(|error| match error.raw_os_error() {
+                        Some(errno) if not_a_directory(&error) => io::Error::new(
+                            error.kind(),
+                            WalkRefusal {
+                                part: part.to_os_string(),
+                                errno,
+                            },
+                        ),
+                        _ => error,
+                    })?;
                 match child {
                     Some(child) => dir = child,
                     None => return Ok(None),
@@ -186,7 +302,7 @@ mod unix {
         /// planted there is refused, never adopted.
         pub fn create_child(&self, name: impl AsRef<OsStr>) -> io::Result<Dir> {
             let name = name.as_ref();
-            self.make_dir(name)?;
+            self.make_dir(name, 0o700)?;
             let child = self
                 .open_child(name)?
                 .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
@@ -194,11 +310,11 @@ mod unix {
             Ok(child)
         }
 
-        /// `mkdirat` owner-only (umask only removes bits); an existing entry
+        /// `mkdirat` with `mode` (the umask only removes bits); an existing entry
         /// is left as it is and checked by the `O_NOFOLLOW` open that follows.
-        fn make_dir(&self, name: &OsStr) -> io::Result<()> {
+        fn make_dir(&self, name: &OsStr, mode: libc::mode_t) -> io::Result<()> {
             let c = c_name(name)?;
-            match check(unsafe { libc::mkdirat(self.fd.as_raw_fd(), c.as_ptr(), 0o700) }) {
+            match check(unsafe { libc::mkdirat(self.fd.as_raw_fd(), c.as_ptr(), mode) }) {
                 Ok(_) => Ok(()),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
                 Err(error) => Err(error),
@@ -387,10 +503,10 @@ mod unix {
         /// holding the open forever; the `fstat` that follows refuses it.
         /// `None` when there is no such entry.
         pub fn open_regular(&self, name: impl AsRef<OsStr>) -> io::Result<Option<std::fs::File>> {
-            let name = c_name(name.as_ref())?;
+            let name = name.as_ref();
+            let c = c_name(name)?;
             let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
-            let fd = match check(unsafe { libc::openat(self.fd.as_raw_fd(), name.as_ptr(), flags) })
-            {
+            let fd = match check(unsafe { libc::openat(self.fd.as_raw_fd(), c.as_ptr(), flags) }) {
                 Ok(fd) => fd,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(error),
@@ -399,7 +515,7 @@ mod unix {
             if !file.metadata()?.is_file() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "not a regular file",
+                    format!("{name:?} is not a regular file"),
                 ));
             }
             Ok(Some(file))
@@ -408,13 +524,13 @@ mod unix {
         /// Whether `error` is the refusal of a link met on a path walked with
         /// `O_NOFOLLOW` (ELOOP, or EMLINK on some systems).
         pub fn is_link_refusal(error: &io::Error) -> bool {
-            matches!(error.raw_os_error(), Some(libc::ELOOP) | Some(libc::EMLINK))
+            matches!(errno_of(error), Some(libc::ELOOP) | Some(libc::EMLINK))
         }
 
         /// Whether `error` says a part of the path is not a directory (a file
         /// in the middle of `a.png/x`), which is not a link.
         pub fn is_not_a_directory(error: &io::Error) -> bool {
-            error.raw_os_error() == Some(libc::ENOTDIR)
+            errno_of(error) == Some(libc::ENOTDIR)
         }
 
         /// `openat(O_CREAT | O_EXCL | O_NOFOLLOW)`, owner-only.
@@ -462,6 +578,144 @@ mod unix {
                 let _ = self.unlink(&temp, 0);
             }
             written
+        }
+
+        /// Whether `name` exists here; a link counts (dangling included) and is
+        /// never followed.
+        pub fn exists(&self, name: &OsStr) -> io::Result<bool> {
+            match self.stat(name) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error),
+            }
+        }
+
+        /// `fstatat(AT_SYMLINK_NOFOLLOW)` of `name`.
+        fn stat(&self, name: &OsStr) -> io::Result<libc::stat> {
+            let c = c_name(name)?;
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            check(unsafe {
+                libc::fstatat(
+                    self.fd.as_raw_fd(),
+                    c.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            })?;
+            Ok(unsafe { stat.assume_init() })
+        }
+
+        /// A fresh file `name` (`O_CREAT | O_EXCL | O_NOFOLLOW`) with `mode`
+        /// under the umask; anything already there, a link included, is
+        /// `AlreadyExists`.
+        pub fn create_excl(&self, name: &OsStr, mode: u32) -> io::Result<std::fs::File> {
+            let c = c_name(name)?;
+            let write =
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+            let fd = check(unsafe {
+                libc::openat(self.fd.as_raw_fd(), c.as_ptr(), write, mode as libc::c_uint)
+            })?;
+            Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
+        }
+
+        /// A fresh file with `mode` under a random `.kronn-tmp-*` name, short
+        /// whatever its destination (a target near NAME_MAX stays writable).
+        /// A collision picks another name and never touches the existing one.
+        pub fn create_temp(&self, mode: u32) -> io::Result<(std::fs::File, OsString)> {
+            for _ in 0..8 {
+                let name = OsString::from(format!(".kronn-tmp-{}", uuid::Uuid::new_v4()));
+                match self.create_excl(&name, mode) {
+                    Ok(file) => return Ok((file, name)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "no free temporary name",
+            ))
+        }
+
+        /// Whether the entry `name` is, right now, the regular file behind
+        /// `file` (same device and inode): a name swapped for a link or for
+        /// another file since `file` was opened is `false`. The open handle
+        /// keeps its inode allocated, so no other file can reuse the number.
+        pub fn names_file(&self, name: &OsStr, file: &std::fs::File) -> io::Result<bool> {
+            let meta = file.metadata()?;
+            let stat = self.stat(name)?;
+            #[allow(clippy::unnecessary_cast)]
+            Ok(stat.st_mode & libc::S_IFMT == libc::S_IFREG
+                && stat.st_dev as u64 == meta.dev()
+                && stat.st_ino as u64 == meta.ino())
+        }
+
+        /// Whether the entry `name` is, right now, a regular file with exactly
+        /// this identity (a link or another file is `false`; a missing name is
+        /// a `NotFound` error).
+        pub fn names_identity(&self, name: &OsStr, id: &Identity) -> io::Result<bool> {
+            let stat = self.stat(name)?;
+            Ok(stat.st_mode & libc::S_IFMT == libc::S_IFREG && Identity::of_stat(&stat) == *id)
+        }
+
+        /// The permission bits (`0o777` only: setuid, setgid and sticky never
+        /// travel to new content) of `name` when it is a regular file here;
+        /// `None` for a missing name, a link or anything else (a link is never
+        /// followed, so its target's mode is never read).
+        // st_mode is u16 on macOS and u32 on Linux: the conversion is needed on one.
+        #[allow(clippy::useless_conversion)]
+        pub fn regular_mode(&self, name: &OsStr) -> io::Result<Option<u32>> {
+            match self.stat(name) {
+                Ok(stat) if stat.st_mode & libc::S_IFMT == libc::S_IFREG => {
+                    Ok(Some(u32::from(stat.st_mode & 0o777)))
+                }
+                Ok(_) => Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
+
+        /// `chmod` of the regular file `name`, through its handle: a link is
+        /// refused, never followed.
+        pub fn set_mode(&self, name: &OsStr, mode: u32) -> io::Result<()> {
+            let file = self
+                .open_regular(name)?
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))
+        }
+
+        /// Hard-links `from` to `to` in this directory: `AlreadyExists` when
+        /// `to` is anything, a link included, and it is never followed.
+        pub fn link_new(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+            self.link_from(self, from, to)
+        }
+
+        /// Hard-links `from_dir/from` to `self/to`, no-clobber like
+        /// [`Dir::link_new`]; neither name is re-resolved from a path.
+        pub fn link_from(&self, from_dir: &Dir, from: &OsStr, to: &OsStr) -> io::Result<()> {
+            let (from, to) = (c_name(from)?, c_name(to)?);
+            check(unsafe {
+                libc::linkat(
+                    from_dir.fd.as_raw_fd(),
+                    from.as_ptr(),
+                    self.fd.as_raw_fd(),
+                    to.as_ptr(),
+                    0,
+                )
+            })
+            .map(|_| ())
+        }
+
+        /// `unlinkat` of the file or link `name`; missing is `NotFound`.
+        pub fn unlink_file(&self, name: &OsStr) -> io::Result<()> {
+            let c = c_name(name)?;
+            check(unsafe { libc::unlinkat(self.fd.as_raw_fd(), c.as_ptr(), 0) }).map(|_| ())
+        }
+
+        /// `unlinkat(AT_REMOVEDIR)` of the empty directory `name`.
+        pub fn remove_empty_dir(&self, name: &OsStr) -> io::Result<()> {
+            let c = c_name(name)?;
+            check(unsafe { libc::unlinkat(self.fd.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) })
+                .map(|_| ())
         }
 
         /// The path the kernel holds for this directory.

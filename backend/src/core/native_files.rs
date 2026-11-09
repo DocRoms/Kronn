@@ -43,17 +43,7 @@ fn save_ledger(root: &Path, ledger: &Ledger) {
     let Ok(content) = serde_json::to_string_pretty(ledger) else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        if let Err(e) = crate::core::fs_guard::guarded_create_dir_all(root, parent) {
-            tracing::warn!("Cannot write {}: {}", path.display(), e);
-            return;
-        }
-    }
-    if let Err(e) = crate::core::fs_guard::assert_contained_no_symlink(root, &path) {
-        tracing::warn!("Cannot write {}: {}", path.display(), e);
-        return;
-    }
-    if let Err(e) = crate::core::mcp_scanner::atomic_write(&path, &content) {
+    if let Err(e) = crate::core::fs_guard::guarded_replace(root, &path, content.as_bytes()) {
         tracing::warn!("Cannot write {}: {}", path.display(), e);
     }
 }
@@ -120,13 +110,7 @@ fn write_owned(root: &Path, rel: &str, content: &str, ledger: &mut Ledger) -> bo
         return false;
     }
     let path = root.join(rel);
-    if let Some(parent) = path.parent() {
-        if let Err(e) = crate::core::fs_guard::guarded_create_dir_all(root, parent) {
-            tracing::warn!("Cannot create {}: {}", parent.display(), e);
-            return false;
-        }
-    }
-    if let Err(e) = crate::core::mcp_scanner::atomic_write(&path, content) {
+    if let Err(e) = crate::core::fs_guard::guarded_replace(root, &path, content.as_bytes()) {
         tracing::warn!("Cannot write {}: {}", path.display(), e);
         return false;
     }
@@ -153,7 +137,7 @@ fn remove_owned(root: &Path, rel: &str, ledger: &mut Ledger) {
     let unchanged =
         meta.is_file() && std::fs::read(&path).is_ok_and(|bytes| digest(&bytes) == written);
     if unchanged && !is_tracked(root, rel) {
-        let _ = std::fs::remove_file(&path);
+        let _ = crate::core::fs_guard::guarded_remove_file(root, &path);
         tracing::info!("Removed stale native file: {}", path.display());
     } else {
         tracing::info!("Kept {}: edited, linked or tracked", path.display());
@@ -589,11 +573,8 @@ fn cleanup_stale_dirs(root: &Path, dir: &str, active_slugs: &[String], ledger: &
         }
     }
     for folder in folders {
-        let path = root.join(folder);
-        if crate::core::fs_guard::assert_contained_no_symlink(root, &path).is_ok() {
-            // Only succeeds once the folder is empty.
-            let _ = std::fs::remove_dir(path);
-        }
+        // Only succeeds once the folder is empty; a link is never followed.
+        let _ = crate::core::fs_guard::guarded_remove_dir(root, &root.join(folder));
     }
 }
 
@@ -678,7 +659,9 @@ fn repair_folder_ignores(root: &Path) {
         .collect();
     let mut content = kept.join("\n");
     content.push('\n');
-    if let Err(e) = crate::core::mcp_scanner::atomic_write(&root.join(".gitignore"), &content) {
+    if let Err(e) =
+        crate::core::fs_guard::guarded_replace(root, &root.join(".gitignore"), content.as_bytes())
+    {
         tracing::warn!("Cannot repair {}/.gitignore: {}", root.display(), e);
     } else {
         tracing::info!(
@@ -1252,5 +1235,78 @@ mod tests {
     fn has_skill_md_files_false_when_empty() {
         let tmp = tmp_dir("no-skill");
         assert!(!has_skill_md_files(&tmp));
+    }
+}
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    fn repo() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".claude/skills")).unwrap();
+        std::fs::create_dir_all(root.join(".kronn")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        (tmp, root, external)
+    }
+
+    #[test]
+    fn a_parent_swapped_after_the_walk_never_receives_a_native_file() {
+        let (_tmp, root, external) = repo();
+        swap_probe::arm(&root.join(".claude/skills"), &external);
+        let mut ledger = Ledger::default();
+        write_owned(&root, ".claude/skills/x.md", "content", &mut ledger);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_ledger_folder_swapped_after_the_walk_never_receives_the_ledger() {
+        let (_tmp, root, external) = repo();
+        swap_probe::arm(&root.join(".kronn"), &external);
+        save_ledger(&root, &Ledger::default());
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_parent_swapped_after_the_walk_never_removes_an_outside_empty_folder() {
+        let (_tmp, root, external) = repo();
+        std::fs::create_dir_all(root.join(".claude/skills/old")).unwrap();
+        std::fs::write(root.join(".claude/skills/old/SKILL.md"), "content").unwrap();
+        std::fs::create_dir_all(external.join("old")).unwrap();
+        let mut ledger = Ledger::default();
+        ledger
+            .files
+            .insert(".claude/skills/old/SKILL.md".into(), digest(b"content"));
+        swap_probe::arm(&root.join(".claude/skills"), &external);
+        cleanup_stale_dirs(&root, ".claude/skills", &[], &mut ledger);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(
+            external.join("old").is_dir(),
+            "the outside folder with the same name is still there"
+        );
+    }
+
+    #[test]
+    fn a_parent_swapped_after_the_walk_never_loses_an_outside_file_on_removal() {
+        let (_tmp, root, external) = repo();
+        std::fs::write(root.join(".claude/skills/x.md"), "content").unwrap();
+        std::fs::write(external.join("x.md"), "content").unwrap();
+        let mut ledger = Ledger::default();
+        ledger
+            .files
+            .insert(".claude/skills/x.md".into(), digest(b"content"));
+        swap_probe::arm(&root.join(".claude/skills"), &external);
+        remove_owned(&root, ".claude/skills/x.md", &mut ledger);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join("x.md")).unwrap(),
+            "content",
+            "the outside file with the same name is still there"
+        );
     }
 }

@@ -84,3 +84,17 @@ it beyond `localhost`:
 
 These are not vulnerabilities in Kronn itself, but they're the most
 common ways a Kronn deployment ends up exposed.
+
+## Known residual risks
+
+- **Windows desktop build — project writes are check-then-write.** On
+  macOS and Linux every write Kronn makes inside a project (docs, native
+  agent files, templates, seeds) goes through directory file descriptors
+  opened with `O_NOFOLLOW`, so a folder swapped for a symlink while Kronn
+  works is never written through. Windows has no such primitive in use:
+  Kronn checks the path for links, then writes it. A folder swapped for a
+  link in that window is not excluded. Creating a symlink on Windows needs
+  elevated rights or developer mode, so Kronn accepts this rather than
+  refusing to write there. A rooted primitive for Windows is tracked as
+  KT-1609. Any other platform that is neither unix nor Windows refuses these
+  writes. Details: `docs/operations/fs-guard-rooted-writes.md`.

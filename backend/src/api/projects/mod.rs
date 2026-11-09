@@ -130,8 +130,10 @@ pub(crate) fn format_linked_repos_for_docs_with(
 /// Two variants:
 ///   - `sync_linked_repos_doc(project_path)` — auto-detects `docs/`
 ///     via `detect_docs_dir`; no-op if not bootstrapped yet.
-///   - `sync_linked_repos_doc_in(docs_dir)` — called by the audit
-///     Phase 1 which already knows the exact docs path.
+///   - `sync_linked_repos_doc_in(root, docs_dir)` — called by the audit
+///     Phase 1 which already knows the exact docs path. `root` is the
+///     project: the write and the removal run through the rooted primitives
+///     of `fs_guard`, never through a link below it.
 pub(crate) fn sync_linked_repos_doc(
     project_path: &std::path::Path,
     repos: &[LinkedRepo],
@@ -140,10 +142,11 @@ pub(crate) fn sync_linked_repos_doc(
     if !docs_dir.is_dir() {
         return Ok(());
     }
-    sync_linked_repos_doc_in(&docs_dir, repos)
+    sync_linked_repos_doc_in(project_path, &docs_dir, repos)
 }
 
 pub(crate) fn sync_linked_repos_doc_in(
+    root: &std::path::Path,
     docs_dir: &std::path::Path,
     repos: &[LinkedRepo],
 ) -> std::io::Result<()> {
@@ -152,8 +155,9 @@ pub(crate) fn sync_linked_repos_doc_in(
     }
     let target = docs_dir.join("linked-repos.md");
     match format_linked_repos_for_docs(repos) {
-        Some(body) => std::fs::write(&target, body),
-        None => match std::fs::remove_file(&target) {
+        Some(body) => crate::core::fs_guard::guarded_replace(root, &target, body.as_bytes())
+            .map_err(std::io::Error::other),
+        None => match crate::core::fs_guard::guarded_remove_file(root, &target) {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
@@ -630,7 +634,7 @@ mod tests {
             lr("front", "frontend", "/r/front", "React app"),
             lr("api", "api", "/r/api", "GraphQL"),
         ];
-        sync_linked_repos_doc_in(&docs, &repos).unwrap();
+        sync_linked_repos_doc_in(tmp.path(), &docs, &repos).unwrap();
         let target = docs.join("linked-repos.md");
         assert!(target.exists(), "non-empty list must write the file");
         let body = std::fs::read_to_string(&target).unwrap();
@@ -639,7 +643,7 @@ mod tests {
             "both entries must be in the file"
         );
         // Now sync with []: file must vanish.
-        sync_linked_repos_doc_in(&docs, &[]).unwrap();
+        sync_linked_repos_doc_in(tmp.path(), &docs, &[]).unwrap();
         assert!(
             !target.exists(),
             "empty list must remove the stale file (no contradictory state on disk)"
@@ -652,9 +656,37 @@ mod tests {
         // not crash; the audit Phase 1 will recall the helper later.
         let tmp = tempfile::TempDir::new().unwrap();
         let not_a_dir = tmp.path().join("missing-docs");
-        sync_linked_repos_doc_in(&not_a_dir, &[lr("x", "api", "/r/x", "")]).unwrap();
+        sync_linked_repos_doc_in(tmp.path(), &not_a_dir, &[lr("x", "api", "/r/x", "")]).unwrap();
         // No file created (target dir doesn't exist).
         assert!(!not_a_dir.join("linked-repos.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_linked_repos_doc_in_never_writes_through_a_swapped_docs_folder() {
+        use crate::core::fs_guard::swap_probe;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        let docs = root.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("linked-repos.md"), "stale").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("linked-repos.md"), "KEEP").unwrap();
+        // Written, then removed, each time with the folder swapped under it.
+        swap_probe::arm(&docs, &external);
+        let _ = sync_linked_repos_doc_in(&root, &docs, &[lr("x", "api", "/r/x", "")]);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join("linked-repos.md")).unwrap(),
+            "KEEP"
+        );
+        let _ = sync_linked_repos_doc_in(&root, &docs, &[]);
+        assert_eq!(
+            std::fs::read_to_string(external.join("linked-repos.md")).unwrap(),
+            "KEEP",
+            "the removal never reached the outside file"
+        );
     }
 
     // Note: what an agent prompt says about OTHER repos (KT-926) is pinned

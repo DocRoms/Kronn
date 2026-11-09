@@ -353,15 +353,15 @@ pub(crate) fn heading_for(
 }
 
 /// Writes `content` unless the file already holds it; true when it wrote.
-fn write_if_changed(path: &Path, content: &str) -> Result<bool, String> {
+fn write_if_changed(root: &Path, path: &Path, content: &str) -> Result<bool, String> {
     match std::fs::read_to_string(path) {
         Ok(existing) if existing == content => Ok(false),
-        Ok(_) => std::fs::write(path, content)
-            .map(|()| true)
-            .map_err(|e| format!("write {}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::write(path, content)
-            .map(|()| true)
-            .map_err(|e| format!("write {}: {e}", path.display())),
+        Ok(_) => {
+            crate::core::fs_guard::guarded_replace(root, path, content.as_bytes()).map(|()| true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            crate::core::fs_guard::guarded_replace(root, path, content.as_bytes()).map(|()| true)
+        }
         Err(e) => Err(format!("read {}: {e}", path.display())),
     }
 }
@@ -440,7 +440,7 @@ pub(crate) fn write_outputs(
 ) -> Result<bool, String> {
     let docs_root = crate::core::docs_location::DocsRoot::of(root);
     let td_dir = docs_root.file(root, "tech-debt");
-    std::fs::create_dir_all(&td_dir).map_err(|e| format!("create {}: {e}", td_dir.display()))?;
+    crate::core::fs_guard::guarded_create_dir_all(root, &td_dir)?;
     let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
     engine::assign_td_ids(&mut report.records, &td_dir, &yyyymmdd);
     for record in report.records.iter_mut().filter(|r| r.awaits_human()) {
@@ -466,7 +466,7 @@ pub(crate) fn write_outputs(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => engine::render_td_sheet(record),
             Err(e) => return Err(format!("read {}: {e}", path.display())),
         };
-        changed |= write_if_changed(&path, &content)?;
+        changed |= write_if_changed(root, &path, &content)?;
     }
     let index = engine::render_index(&IndexInput {
         heading: heading_for(target_file, &docs_root),
@@ -480,7 +480,7 @@ pub(crate) fn write_outputs(
     });
     let index = super::anti_hallu_enforce::enforce_human_owned_sections(&previous, &index)
         .map_or(index, |(restored, _)| restored);
-    changed |= write_if_changed(&target, &index)?;
+    changed |= write_if_changed(root, &target, &index)?;
     Ok(changed)
 }
 

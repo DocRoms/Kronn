@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::validation::{target_snapshot, TargetSnapshot};
-use crate::core::fs_guard::{assert_contained_no_symlink, guarded_create_dir_all};
+use crate::core::fs_guard::assert_contained_no_symlink;
 
 pub(crate) const PARTIAL_OPEN: &str = "<!-- kronn:partial-step -->";
 pub(crate) const PARTIAL_CLOSE: &str = "<!-- kronn:partial-step:end -->";
@@ -84,47 +84,11 @@ pub(crate) fn read_target(project_path: &Path, target: &str) -> Result<Option<St
     }
 }
 
-/// A sibling of `path` that only this call can have created: never a name an
-/// agent could have planted.
-fn sibling(path: &Path, tag: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    path.with_file_name(format!(
-        ".{name}.{tag}-{}-{}-{}",
-        std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-        SEQ.fetch_add(1, Ordering::Relaxed),
-    ))
-}
-
-/// Create `path` with `content`, failing when anything is already there and
-/// never following a symlink at the final component.
-fn create_new_file(path: &Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(content.as_bytes())?;
-    file.sync_all()
-}
-
-/// Replace `path` (already checked by [`contained_path`]) with `content`
-/// atomically, through a fresh exclusive temp sibling.
-fn write_atomically(path: &Path, content: &str) -> std::io::Result<()> {
-    let tmp = sibling(path, "kronn-restore");
-    create_new_file(&tmp, content)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
+/// Replace `path` (checked by [`contained_path`]) with `content` atomically,
+/// through a fresh exclusive temp sibling reached by the project's directory
+/// fds: a parent swapped for a link meanwhile is never written through.
+fn write_atomically(project_path: &Path, path: &Path, content: &str) -> Result<(), String> {
+    crate::core::fs_guard::guarded_replace(project_path, path, content.as_bytes())
 }
 
 /// Put `target` back as it was before the step: `pre` is its content then,
@@ -141,14 +105,10 @@ pub(crate) fn restore_target(
     }
     match pre {
         Some(content) => {
-            if let Some(parent) = path.parent() {
-                guarded_create_dir_all(project_path, parent)
-                    .map_err(|e| format!("could not restore `{target}`: {e}"))?;
-            }
-            write_atomically(&path, content)
+            write_atomically(project_path, &path, content)
                 .map_err(|e| format!("could not restore `{target}`: {e}"))?;
         }
-        None => std::fs::remove_file(&path)
+        None => crate::core::fs_guard::guarded_remove_file(project_path, &path)
             .map_err(|e| format!("could not remove the half-written `{target}`: {e}"))?,
     }
     Ok(true)
@@ -171,12 +131,12 @@ fn save_aside(project_path: &Path, target: &str, content: &str) -> Result<String
             format!("-{attempt}")
         };
         let aside = path.with_file_name(format!("{name}.kronn-displaced-{stamp}{suffix}"));
-        match create_new_file(&aside, content) {
-            Ok(()) => {
+        match crate::core::fs_guard::guarded_write_new(project_path, &aside, content.as_bytes()) {
+            Ok(true) => {
                 let shown = aside.strip_prefix(project_path).unwrap_or(&aside);
                 return Ok(shown.to_string_lossy().into_owned());
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Ok(false) => continue,
             Err(e) => {
                 return Err(format!(
                     "could not keep the content of `{target}` aside: {e}"
@@ -205,8 +165,12 @@ pub(crate) fn mark_partial(
         return Ok(false);
     }
     let marked = format!("{}{}", partial_banner(step, reason), body);
-    write_atomically(&contained_path(project_path, target)?, &marked)
-        .map_err(|e| format!("could not mark `{target}` as partial: {e}"))?;
+    write_atomically(
+        project_path,
+        &contained_path(project_path, target)?,
+        &marked,
+    )
+    .map_err(|e| format!("could not mark `{target}` as partial: {e}"))?;
     Ok(true)
 }
 
@@ -218,7 +182,7 @@ pub(crate) fn clear_partial_marker(project_path: &Path, target: &str) -> Result<
     let Some(clean) = strip_partial_marker(&content) else {
         return Ok(false);
     };
-    write_atomically(&contained_path(project_path, target)?, &clean)
+    write_atomically(project_path, &contained_path(project_path, target)?, &clean)
         .map_err(|e| format!("could not clear the partial marker of `{target}`: {e}"))?;
     Ok(true)
 }
@@ -1518,15 +1482,6 @@ mod tests {
     }
 
     #[test]
-    fn the_exclusive_create_never_replaces_what_is_already_there() {
-        let root = project();
-        let file = root.path().join("docs/taken.md");
-        std::fs::write(&file, "mine").unwrap();
-        assert!(create_new_file(&file, "theirs").is_err());
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine");
-    }
-
-    #[test]
     fn a_missing_project_root_is_not_recreated_and_leaves_the_step_open() {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("mounted-volume").join("repo");
@@ -2349,5 +2304,43 @@ mod tests {
         .unwrap();
         let steps = crate::db::audit_runs::list_audit_steps(&conn, "r1").unwrap();
         assert_eq!(super::super::accept::accept_blocker_of(&steps[0]), None);
+    }
+}
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    #[test]
+    fn a_parent_swapped_after_the_walk_never_receives_a_restored_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/stack.md"), "half").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let _ = restore_target(&root, "docs/stack.md", Some("whole"));
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_parent_swapped_after_the_walk_never_loses_an_outside_target_on_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/stack.md"), "half").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("stack.md"), "KEEP").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let _ = restore_target(&root, "docs/stack.md", None);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join("stack.md")).unwrap(),
+            "KEEP"
+        );
     }
 }

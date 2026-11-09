@@ -38,7 +38,7 @@ to a managed workspace (see *Lane attribution* below). Everything else — an un
 row names, the interactive `target/debug`, any directory Kronn did not create — is **reported as `foreign`
 and never touched**.
 [src: file: backend/src/core/worktree.rs:523-570#mark_lane_target]
-[src: file: backend/src/core/worktree.rs:580-598#mark_lane_target_for_worktree]
+[src: file: backend/src/core/worktree.rs:575-593#mark_lane_target_for_worktree]
 
 ## When something is removed
 

@@ -55,6 +55,10 @@ Release notes for 0.9.3 and earlier are available in the
   unreadable config, a retired key) is encrypted with the instance key, clear
   copies left by earlier versions are encrypted at the next start, and the
   set-aside never follows a link or replaces an existing file (KT-1528).
+- Writes guarded by `fs_guard` (docs migration, templates, audits, skills,
+  worktrees) resolve through directory file descriptors with `O_NOFOLLOW`, so a
+  parent folder swapped for a link after the check never lets a write leave
+  the project; Windows keeps the check-then-write by path (KT-1595).
 
 ### Fixed
 

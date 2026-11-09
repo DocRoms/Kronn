@@ -396,17 +396,9 @@ pub fn plan(root: &Path) -> SkillMigrationPlan {
 fn write_tree(root: &Path, dir: &str, files: &BTreeMap<String, FileData>) -> Result<(), String> {
     for (relative, file) in files {
         let path = root.join(dir).join(relative);
-        crate::core::fs_guard::assert_contained_no_symlink(root, &path)?;
-        if let Some(parent) = path.parent() {
-            crate::core::fs_guard::guarded_create_dir_all(root, parent)?;
-        }
-        crate::core::mcp_scanner::atomic_write_bytes(&path, &file.bytes)
-            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        crate::core::fs_guard::guarded_replace(root, &path, &file.bytes)?;
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(file.mode));
-        }
+        let _ = crate::core::fs_guard::guarded_set_mode(root, &path, file.mode);
     }
     Ok(())
 }
@@ -419,20 +411,20 @@ fn replace_tree(root: &Path, dir: &str, files: &BTreeMap<String, FileData>) -> R
     let backup = format!("{dir}.kronn-old-{}", uuid::Uuid::new_v4());
     let had_previous = std::fs::symlink_metadata(&path).is_ok();
     if had_previous {
-        std::fs::rename(&path, root.join(&backup))
+        crate::core::fs_guard::guarded_rename(root, &path, &root.join(&backup))
             .map_err(|error| format!("cannot replace {}: {error}", path.display()))?;
     }
     match write_tree(root, dir, files) {
         Ok(()) => {
             if had_previous {
-                let _ = std::fs::remove_dir_all(root.join(&backup));
+                let _ = crate::core::fs_guard::guarded_remove_tree(root, &root.join(&backup));
             }
             Ok(())
         }
         Err(error) => {
-            let _ = std::fs::remove_dir_all(&path);
+            let _ = crate::core::fs_guard::guarded_remove_tree(root, &path);
             if had_previous {
-                let _ = std::fs::rename(root.join(&backup), &path);
+                let _ = crate::core::fs_guard::guarded_rename(root, &root.join(&backup), &path);
             }
             Err(error)
         }
@@ -449,7 +441,7 @@ fn remove_tree(root: &Path, source: &Candidate) {
         let unchanged = std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file())
             && std::fs::read(&path).is_ok_and(|bytes| bytes == file.original);
         if unchanged {
-            let _ = std::fs::remove_file(&path);
+            let _ = crate::core::fs_guard::guarded_remove_file(root, &path);
         }
         let mut parent = path.parent();
         while let Some(directory) = parent.filter(|directory| *directory != base) {
@@ -461,9 +453,9 @@ fn remove_tree(root: &Path, source: &Candidate) {
     }
     directories.sort_by_key(|directory| std::cmp::Reverse(directory.components().count()));
     for directory in directories {
-        let _ = std::fs::remove_dir(directory);
+        let _ = crate::core::fs_guard::guarded_remove_dir(root, &directory);
     }
-    if std::fs::remove_dir(&base).is_ok() {
+    if crate::core::fs_guard::guarded_remove_dir(root, &base).is_ok() {
         resources::remove_empty_parents(root, &base);
     }
 }
@@ -923,5 +915,57 @@ mod tests {
         remove_tree(root.path(), source);
         assert!(root.path().join(".claude/skills/review/late.txt").is_file());
         assert!(root.path().join(".claude/skills/review/SKILL.md").is_file());
+    }
+}
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    fn files() -> BTreeMap<String, FileData> {
+        let mut files = BTreeMap::new();
+        files.insert(
+            "SKILL.md".to_string(),
+            FileData {
+                bytes: b"---\nname: s\n---\n".to_vec(),
+                original: Vec::new(),
+                mode: 0o644,
+            },
+        );
+        files
+    }
+
+    #[test]
+    fn a_skill_folder_swapped_after_the_walk_never_receives_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".claude/skills/s")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        swap_probe::arm(&root.join(".claude/skills/s"), &external);
+        let _ = write_tree(&root, ".claude/skills/s", &files());
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_replaced_skill_folder_never_moves_or_removes_anything_outside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".claude/skills/s")).unwrap();
+        std::fs::write(root.join(".claude/skills/s/old.md"), "old").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(external.join("s")).unwrap();
+        std::fs::write(external.join("s/keep.md"), "KEEP").unwrap();
+        swap_probe::arm(&root.join(".claude/skills"), &external);
+        let _ = replace_tree(&root, ".claude/skills/s", &files());
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join("s/keep.md")).unwrap(),
+            "KEEP"
+        );
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(external.join("s")).unwrap().count(), 1);
     }
 }
