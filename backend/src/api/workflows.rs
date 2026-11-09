@@ -3322,6 +3322,10 @@ pub async fn update_step(
 #[path = "workflow_step_patch_tests.rs"]
 mod step_patch_tests;
 
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "workflow_examples_tests.rs"]
+mod examples_tests;
+
 async fn update_written(
     state: AppState,
     id: String,

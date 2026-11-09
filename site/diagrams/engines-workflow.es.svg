@@ -1,0 +1,180 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640"
+     role="img" aria-labelledby="eng-title eng-desc"
+     font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <!-- Un workflow en tres carriles de motores. Fondo oscuro propio, legible
+       igual con un tema claro u oscuro. -->
+  <title id="eng-title">Un workflow, cualquier motor en cada paso: las mismas cuatro etapas en un carril cloud, un carril 100 % local y un carril híbrido</title>
+  <desc id="eng-desc">
+    Ejemplo: crear el primer visual del proyecto a partir de su design system. El workflow lee los design tokens del proyecto, su guía de marca, su logo y una muestra de paleta. Cuatro etapas de izquierda a derecha: uno, escribir el prompt; dos, revisarlo; tres, generar la imagen a partir del prompt y de imágenes de referencia; cuatro, convertir la imagen en vídeo. Carril cloud, de pago: Claude Code escribe, Codex revisa, LiteLLM u OpenRouter genera la imagen, OpenRouter hace el vídeo. Carril 100 % local: Ollama con Qwen escribe, un segundo modelo de Ollama revisa, ComfyUI genera la imagen y, en una máquina muy potente, el vídeo. Carril híbrido: Claude Code escribe donde el razonamiento importa, Ollama revisa gratis y en privado, ComfyUI genera la imagen para que los archivos de marca (logo, paleta) nunca salgan de la máquina, OpenRouter hace el vídeo donde falta el hardware local. Los colores indican el tipo de motor.
+  </desc>
+
+  <rect x="0" y="0" width="1200" height="640" fill="#0d1117"/>
+
+  <style>
+    .title  { font-size: 22px; font-weight: 700; fill: #f9fafb; }
+    .label  { font-size: 15px; font-weight: 700; fill: #f9fafb; }
+    .small  { font-size: 12px; fill: #d1d5db; }
+    .tiny   { font-size: 11px; fill: #9ca3af; font-style: italic; }
+    .num    { font-size: 13px; font-weight: 800; fill: #0d1117; }
+    .stage  { font-size: 14px; font-weight: 700; fill: #f9fafb; }
+    .row-h  { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; fill: #f9fafb; }
+    .kind   { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+    .cli    { fill: #fbbf24; }
+    .http   { fill: #a78bfa; }
+    .local  { fill: #34d399; }
+  </style>
+
+  <text x="600" y="34" text-anchor="middle" class="title">Un workflow, cualquier motor en cada paso</text>
+
+  <g role="group" aria-label="Contexto del proyecto que lee el workflow">
+    <rect x="210" y="52" width="960" height="34" rx="8" fill="#38bdf8" fill-opacity="0.10" stroke="#38bdf8" stroke-opacity="0.7" stroke-dasharray="5 3"/>
+    <text x="690" y="74" text-anchor="middle" class="small">Contexto del proyecto: design tokens · guía de marca · logo · muestra de paleta</text>
+  </g>
+
+  <g role="group" aria-label="Las cuatro etapas">
+    <circle cx="232" cy="112" r="12" fill="#f9fafb"/><text x="232" y="117" text-anchor="middle" class="num">1</text>
+    <text x="252" y="117" class="stage">Prompt</text>
+    <circle cx="479" cy="112" r="12" fill="#f9fafb"/><text x="479" y="117" text-anchor="middle" class="num">2</text>
+    <text x="499" y="117" class="stage">Revisión</text>
+    <circle cx="726" cy="112" r="12" fill="#f9fafb"/><text x="726" y="117" text-anchor="middle" class="num">3</text>
+    <text x="746" y="117" class="stage">Imagen</text>
+    <circle cx="973" cy="112" r="12" fill="#f9fafb"/><text x="973" y="117" text-anchor="middle" class="num">4</text>
+    <text x="993" y="117" class="stage">Vídeo</text>
+  </g>
+
+  <text x="30" y="172" class="row-h">Cloud</text>
+  <text x="30" y="190" class="small">de pago, nada</text>
+  <text x="30" y="206" class="small">que instalar</text>
+
+  <g role="group" aria-label="Carril cloud, etapa 1: Claude Code">
+    <rect x="210" y="136" width="219" height="96" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="226" y="157" class="kind cli">Agente CLI</text>
+    <text x="226" y="180" class="label">Claude Code</text>
+    <text x="226" y="201" class="small">escribe el prompt</text>
+    <text x="226" y="218" class="small">desde los tokens</text>
+  </g>
+  <g role="group" aria-label="Carril cloud, etapa 2: Codex">
+    <rect x="457" y="136" width="219" height="96" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="473" y="157" class="kind cli">Agente CLI</text>
+    <text x="473" y="180" class="label">Codex</text>
+    <text x="473" y="201" class="small">comprueba que respeta</text>
+    <text x="473" y="218" class="small">la marca</text>
+  </g>
+  <g role="group" aria-label="Carril cloud, etapa 3: LiteLLM / OpenRouter">
+    <rect x="704" y="136" width="219" height="96" rx="10" fill="#a78bfa" fill-opacity="0.14" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="720" y="157" class="kind http">Proveedor HTTP</text>
+    <text x="720" y="180" class="label">LiteLLM / OpenRouter</text>
+    <text x="720" y="201" class="small">prompt + imágenes</text>
+    <text x="720" y="218" class="small">de referencia</text>
+  </g>
+  <g role="group" aria-label="Carril cloud, etapa 4: OpenRouter">
+    <rect x="951" y="136" width="219" height="96" rx="10" fill="#a78bfa" fill-opacity="0.14" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="967" y="157" class="kind http">Proveedor HTTP</text>
+    <text x="967" y="180" class="label">OpenRouter</text>
+    <text x="967" y="201" class="small">la imagen como</text>
+    <text x="967" y="218" class="small">primer fotograma</text>
+  </g>
+
+  <text x="30" y="298" class="row-h">100 % local</text>
+  <text x="30" y="316" class="small">cada modelo en</text>
+  <text x="30" y="332" class="small">tu máquina</text>
+
+  <g role="group" aria-label="Carril 100 % local, etapa 1: Ollama · Qwen">
+    <rect x="210" y="262" width="219" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="226" y="283" class="kind local">Local</text>
+    <text x="226" y="306" class="label">Ollama · Qwen</text>
+    <text x="226" y="327" class="small">escribe el prompt</text>
+    <text x="226" y="344" class="small">desde los tokens</text>
+  </g>
+  <g role="group" aria-label="Carril 100 % local, etapa 2: Ollama">
+    <rect x="457" y="262" width="219" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="473" y="283" class="kind local">Local</text>
+    <text x="473" y="306" class="label">Ollama</text>
+    <text x="473" y="327" class="small">un segundo modelo</text>
+    <text x="473" y="344" class="small">comprueba la marca</text>
+  </g>
+  <g role="group" aria-label="Carril 100 % local, etapa 3: ComfyUI">
+    <rect x="704" y="262" width="219" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="720" y="283" class="kind local">Local</text>
+    <text x="720" y="306" class="label">ComfyUI</text>
+    <text x="720" y="327" class="small">prompt + imágenes</text>
+    <text x="720" y="344" class="small">de referencia</text>
+  </g>
+  <g role="group" aria-label="Carril 100 % local, etapa 4: ComfyUI">
+    <rect x="951" y="262" width="219" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <text x="967" y="283" class="kind local">Local</text>
+    <text x="967" y="306" class="label">ComfyUI *</text>
+    <text x="967" y="327" class="small">la imagen como</text>
+    <text x="967" y="344" class="small">primer fotograma</text>
+  </g>
+
+  <text x="30" y="424" class="row-h">Híbrido</text>
+  <text x="30" y="442" class="small">cada paso en</text>
+  <text x="30" y="458" class="small">su mejor motor</text>
+
+  <g role="group" aria-label="Carril híbrido, etapa 1: Claude Code">
+    <rect x="210" y="388" width="219" height="96" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="226" y="409" class="kind cli">Agente CLI</text>
+    <text x="226" y="432" class="label">Claude Code</text>
+    <text x="226" y="453" class="small">el razonamiento importa:</text>
+    <text x="226" y="470" class="small">un agente sólido</text>
+  </g>
+  <g role="group" aria-label="Carril híbrido, etapa 2: Ollama">
+    <rect x="457" y="388" width="219" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="473" y="409" class="kind local">Local</text>
+    <text x="473" y="432" class="label">Ollama</text>
+    <text x="473" y="453" class="small">revisión gratuita</text>
+    <text x="473" y="470" class="small">y privada</text>
+  </g>
+  <g role="group" aria-label="Carril híbrido, etapa 3: ComfyUI">
+    <rect x="704" y="388" width="219" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="720" y="409" class="kind local">Local</text>
+    <text x="720" y="432" class="label">ComfyUI</text>
+    <text x="720" y="453" class="small">logo y paleta no</text>
+    <text x="720" y="470" class="small">salen de la máquina</text>
+  </g>
+  <g role="group" aria-label="Carril híbrido, etapa 4: OpenRouter">
+    <rect x="951" y="388" width="219" height="96" rx="10" fill="#a78bfa" fill-opacity="0.14" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="967" y="409" class="kind http">Proveedor HTTP</text>
+    <text x="967" y="432" class="label">OpenRouter</text>
+    <text x="967" y="453" class="small">el vídeo, donde falta</text>
+    <text x="967" y="470" class="small">el hardware local</text>
+  </g>
+
+  <g aria-hidden="true">
+    <path d="M 429 184 L 451 184" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="457,184 448,180 448,188" fill="#d1d5db"/>
+    <path d="M 676 184 L 698 184" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="704,184 695,180 695,188" fill="#d1d5db"/>
+    <path d="M 923 184 L 945 184" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="951,184 942,180 942,188" fill="#d1d5db"/>
+    <path d="M 429 310 L 451 310" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="457,310 448,306 448,314" fill="#d1d5db"/>
+    <path d="M 676 310 L 698 310" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="704,310 695,306 695,314" fill="#d1d5db"/>
+    <path d="M 923 310 L 945 310" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="951,310 942,306 942,314" fill="#d1d5db"/>
+    <path d="M 429 436 L 451 436" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="457,436 448,432 448,440" fill="#d1d5db"/>
+    <path d="M 676 436 L 698 436" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="704,436 695,432 695,440" fill="#d1d5db"/>
+    <path d="M 923 436 L 945 436" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="951,436 942,432 942,440" fill="#d1d5db"/>
+  </g>
+
+  <g role="group" aria-label="Leyenda: tipos de motor">
+    <rect x="210" y="532" width="14" height="14" rx="3" fill="#fbbf24"/>
+    <text x="232" y="544" class="small">Agente CLI (modelo cloud)</text>
+    <rect x="470" y="532" width="14" height="14" rx="3" fill="#a78bfa"/>
+    <text x="492" y="544" class="small">Proveedor HTTP (cloud)</text>
+    <rect x="730" y="532" width="14" height="14" rx="3" fill="#34d399"/>
+    <text x="752" y="544" class="small">Modelo o medio local</text>
+  </g>
+
+  <text x="600" y="586" text-anchor="middle" class="small">
+    Ejemplo: el primer visual del proyecto a partir de su design system. Mismas cuatro etapas: solo cambia el motor de cada paso.
+  </text>
+  <text x="600" y="616" text-anchor="middle" class="tiny">
+    * El vídeo local necesita una máquina muy potente; es casi imposible incluso en un buen Mac.
+  </text>
+</svg>

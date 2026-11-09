@@ -18,6 +18,37 @@ what's happening under the hood.
 
 ---
 
+## Start from a validated audit
+
+The audit is not a document that sits in a folder: Kronn wires it into action.
+When the agent confirms `KRONN:VALIDATION_COMPLETE` in the audit's validation
+discussion, the page offers two actions:
+
+1. **Mark audit as validated**: flips the project's status and freezes the
+   tech-debt baseline.
+2. **Setup AutoPilot**: opens the workflow wizard with the `ticket-to-pr` preset
+   already applied and configured for the project:
+   - the tracker is detected from the project's `repo_url` (github.com → the
+     GitHub plugin, gitlab.com → the GitLab plugin, …);
+   - the `{owner}/{repo}` path parameters are filled in from the parsed remote;
+   - the first step (`fetch_issue`) switches from the JSON fixture to a real
+     `ApiCall` against your tracker;
+   - the wizard lands on the **Steps page in Advanced mode**, so you see the
+     whole 9-step pipeline described below.
+
+The preset follows Kronn's de-agentification discipline: only `analyze`,
+`implement` and `review` (plus the `create_pr` helper) spend agent tokens; the
+rest is mechanical (`ApiCall`, `Exec`, `Gate`, `Notify`).
+
+**The pattern this unlocks:** create a GitHub issue from your phone; the
+AutoPilot's Tracker trigger picks it up and drafts the change while you are away
+from the keyboard, pausing at `plan_gate` for your approval and at `ready_gate`
+before anything is pushed. Real autonomy, with two human checkpoints.
+
+The audit itself is described in the [audit guide](guides/ai-audit.md).
+
+---
+
 ## Pipeline at a glance
 
 ```

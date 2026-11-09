@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380"
+     role="img" aria-labelledby="shadow-title shadow-desc"
+     font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <!-- Un run normal y su run shadow. Fondo oscuro propio, legible igual
+       con un tema claro u oscuro. -->
+  <title id="shadow-title">Runs shadow: probar una nueva versión con entradas reales sin efectos secundarios</title>
+  <desc id="shadow-desc">
+    Las mismas entradas reales lanzan dos runs. El run normal se publica y carga Prompt v2 y Skill v1. El run shadow carga Prompt v2 y Skill v2, la versión en prueba, y se salta cada paso que actúa fuera de Kronn. Los dos runs alimentan una comparación lado a lado, paso a paso. Si la versión del shadow es mejor, un clic la promueve a los runs normales.
+  </desc>
+
+  <rect x="0" y="0" width="1200" height="380" fill="#0d1117"/>
+
+  <style>
+    .title  { font-size: 22px; font-weight: 700; fill: #f9fafb; }
+    .label  { font-size: 15px; font-weight: 700; fill: #f9fafb; }
+    .small  { font-size: 12px; fill: #d1d5db; }
+    .tiny   { font-size: 11px; fill: #9ca3af; font-style: italic; }
+    .kind   { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+    .loop   { font-size: 11px; font-weight: 600; fill: #f87171; }
+    .chip   { font-size: 12px; font-weight: 600; fill: #f9fafb; }
+  </style>
+
+  <text x="600" y="36" text-anchor="middle" class="title">Probar una nueva versión sin riesgo</text>
+
+  <g role="group" aria-label="Mismas entradas reales">
+    <rect x="30" y="128" width="212" height="96" rx="10" fill="#38bdf8" fill-opacity="0.10" stroke="#38bdf8" stroke-width="1.5"/>
+    <text x="46" y="153" class="label">Mismas entradas reales</text>
+    <text x="46" y="174" class="small">disparador, variables,</text>
+    <text x="46" y="191" class="small">mismo ticket o PR</text>
+  </g>
+  <g role="group" aria-label="Run normal, publicado: Prompt v2 y Skill v1">
+    <rect x="290" y="70" width="280" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="306" y="91" class="kind" fill="#34d399">Publicado</text>
+    <text x="306" y="114" class="label">Run normal</text>
+    <text x="306" y="135" class="small">Prompt v2 · Skill v1</text>
+  </g>
+  <g role="group" aria-label="Run shadow, sin efectos secundarios: Prompt v2 y Skill v2">
+    <rect x="290" y="190" width="280" height="96" rx="10" fill="#a78bfa" fill-opacity="0.14" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <text x="306" y="211" class="kind" fill="#a78bfa">Sin efectos secundarios</text>
+    <text x="306" y="234" class="label">Run shadow</text>
+    <text x="306" y="255" class="small">Prompt v2 · Skill v2</text>
+  </g>
+  <text x="306" y="306" class="tiny">✕ los pasos que actúan fuera de Kronn se saltan</text>
+  <g role="group" aria-label="Comparación lado a lado">
+    <rect x="640" y="128" width="240" height="96" rx="10" fill="#f9fafb" fill-opacity="0.06" stroke="#f9fafb" stroke-width="1.5"/>
+    <text x="656" y="153" class="label">Comparación</text>
+    <text x="656" y="174" class="small">paso a paso: idéntico,</text>
+    <text x="656" y="191" class="small">distinto o saltado</text>
+  </g>
+  <g role="group" aria-label="Promover la mejor versión en un clic">
+    <rect x="940" y="128" width="230" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="956" y="153" class="label">Promover</text>
+    <text x="956" y="174" class="small">la mejor versión,</text>
+    <text x="956" y="191" class="small">en un clic</text>
+  </g>
+  <g aria-hidden="true">
+    <path d="M 242 176 C 266 176 266 118 284 118" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="290,118 281,114 281,122" fill="#d1d5db"/>
+    <path d="M 242 176 C 266 176 266 238 284 238" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="290,238 281,234 281,242" fill="#d1d5db"/>
+    <path d="M 570 118 C 605 118 605 176 634 176" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="640,176 631,172 631,180" fill="#d1d5db"/>
+    <path d="M 570 238 C 605 238 605 176 634 176" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="640,176 631,172 631,180" fill="#d1d5db"/>
+    <path d="M 880 176 L 934 176" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="940,176 931,172 931,180" fill="#d1d5db"/>
+  </g>
+
+  <text x="600" y="352" text-anchor="middle" class="small">
+    Medir si una nueva versión de un skill o de un prompt es realmente mejor, con datos reales, sin publicar ni romper nada.
+  </text>
+</svg>
