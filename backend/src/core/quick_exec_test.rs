@@ -860,11 +860,26 @@ fn a_quick_exec_child_carries_a_built_environment() {
 /// KT-1633: a validation starts behind the host's priority launcher and keeps
 /// its own argv after the program; a collector keeps the backend's priority.
 #[test]
+#[serial_test::serial(background_launcher)]
 fn a_background_validation_runs_behind_the_priority_launcher() {
+    use crate::core::background_priority::{self, HostOs, LauncherCheck, LauncherGuard};
+    // The launcher state is process-wide: pin it, so the plan below is the one
+    // the spawn uses whatever the host (un)checked.
+    background_priority::set_enabled(true);
+    let _launcher = LauncherGuard::set(LauncherCheck::Works);
     let root = tempfile::tempdir().unwrap();
     let roots = vec![root.path().to_path_buf()];
     let validated = validate(&spec("git", &["status"], root.path()), &roots).unwrap();
-    let plan = crate::core::background_priority::plan_here(Priority::Background);
+    let plan = background_priority::plan_here(Priority::Background);
+    if crate::core::background_priority::enabled()
+        && background_priority::launcher_for(HostOs::CURRENT, |path| Path::new(path).is_file())
+            .is_some()
+    {
+        assert!(
+            plan.launcher.is_some(),
+            "an installed launcher is used: {plan:?}"
+        );
+    }
 
     let background = build_command(&validated, None, Priority::Background);
     let normal = build_command(&validated, None, Priority::Normal);

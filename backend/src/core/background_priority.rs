@@ -250,6 +250,16 @@ impl LauncherState {
         }
     }
 
+    #[cfg(test)]
+    fn force(&self, check: LauncherCheck) {
+        let stored = match check {
+            LauncherCheck::Unchecked => Self::UNCHECKED,
+            LauncherCheck::Works => Self::WORKS,
+            LauncherCheck::Refused => Self::REFUSED,
+        };
+        self.0.store(stored, Ordering::Relaxed);
+    }
+
     /// Keep a definitive answer; leave an inconclusive one unrecorded so the
     /// next attempt is made.
     pub fn record(&self, verdict: Verdict) {
@@ -340,16 +350,53 @@ fn probe_launcher(launcher: Launcher) -> Verdict {
 
 /// Re-check on a thread of its own, at most every [`RECHECK_EVERY`].
 fn recheck_later() {
+    claim_recheck(&LAST_RECHECK, Instant::now(), RECHECK_EVERY, || {
+        std::thread::spawn(check_launcher_blocking);
+    });
+}
+
+/// Run `start` when no re-check began within `every` before `now`, and record
+/// `now` as the latest one. Returns whether it ran: the throttle, apart from
+/// the thread it starts.
+fn claim_recheck(
+    last: &Mutex<Option<Instant>>,
+    now: Instant,
+    every: Duration,
+    start: impl FnOnce(),
+) -> bool {
     let due = {
-        let mut last = LAST_RECHECK.lock().unwrap_or_else(|p| p.into_inner());
-        let due = last.is_none_or(|at| at.elapsed() >= RECHECK_EVERY);
+        let mut last = last.lock().unwrap_or_else(|p| p.into_inner());
+        let due = last.is_none_or(|at| now.saturating_duration_since(at) >= every);
         if due {
-            *last = Some(Instant::now());
+            *last = Some(now);
         }
         due
     };
     if due {
-        std::thread::spawn(check_launcher_blocking);
+        start();
+    }
+    due
+}
+
+/// Test seam: the stored answer of the launcher check, restored on drop. A test
+/// holding it must be `#[serial_test::serial(background_launcher)]`: the state
+/// is process-wide.
+#[cfg(test)]
+pub struct LauncherGuard(LauncherCheck);
+
+#[cfg(test)]
+impl LauncherGuard {
+    pub fn set(check: LauncherCheck) -> Self {
+        let previous = LAUNCHER.get();
+        LAUNCHER.force(check);
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for LauncherGuard {
+    fn drop(&mut self) {
+        LAUNCHER.force(self.0);
     }
 }
 
@@ -509,7 +556,7 @@ mod tests {
 
     /// The Settings value reaches `enabled()` and, through it, the plan.
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(background_launcher)]
     fn publishing_the_setting_turns_a_background_spawn_back_to_normal() {
         set_enabled(false);
         assert!(!enabled());
@@ -585,5 +632,61 @@ mod tests {
         );
         state.record(Verdict::Refused);
         assert_eq!(state.get(), LauncherCheck::Refused);
+    }
+
+    /// The re-check of an unchecked launcher starts one thread per window, and
+    /// none once the answer is known.
+    #[test]
+    fn an_unchecked_launcher_is_rechecked_once_per_window() {
+        let last = Mutex::new(None);
+        let started = std::cell::Cell::new(0);
+        let start = || started.set(started.get() + 1);
+        let t0 = Instant::now();
+        let window = RECHECK_EVERY;
+
+        assert!(claim_recheck(&last, t0, window, start), "first ask starts");
+        for offset in [
+            Duration::ZERO,
+            Duration::from_secs(1),
+            window - Duration::from_millis(1),
+        ] {
+            assert!(
+                !claim_recheck(&last, t0 + offset, window, start),
+                "inside the window: {offset:?}"
+            );
+        }
+        assert_eq!(started.get(), 1);
+        assert!(
+            claim_recheck(&last, t0 + window, window, start),
+            "next window"
+        );
+        assert!(!claim_recheck(
+            &last,
+            t0 + window + Duration::from_secs(5),
+            window,
+            start
+        ));
+        assert_eq!(started.get(), 2);
+    }
+
+    /// `plan_here` never asks again once the host's answer is known. (The
+    /// unknown case starts a real probe thread that would write the global
+    /// state mid-suite; the throttle above covers it.)
+    #[test]
+    #[serial_test::serial(background_launcher)]
+    fn a_known_launcher_is_never_rechecked() {
+        if launcher_for(HostOs::CURRENT, |path| Path::new(path).is_file()).is_none() {
+            return; // Windows, or a host without the launcher: nothing to check.
+        }
+        set_enabled(true);
+        for known in [LauncherCheck::Works, LauncherCheck::Refused] {
+            let _guard = LauncherGuard::set(known);
+            *LAST_RECHECK.lock().unwrap() = None;
+            let _ = plan_here(Priority::Background);
+            assert!(
+                LAST_RECHECK.lock().unwrap().is_none(),
+                "{known:?}: no re-check was claimed"
+            );
+        }
     }
 }

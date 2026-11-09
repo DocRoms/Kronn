@@ -518,6 +518,7 @@ mod tests {
     /// holds (the one it kills, with its process group) IS the program.
     #[cfg(unix)]
     #[tokio::test]
+    #[serial_test::serial(background_launcher)]
     async fn a_background_spawn_runs_the_program_in_the_launchers_own_process() {
         // Ask the host first, as boot does: a sandbox that refuses the launcher
         // leaves the program unwrapped, and there is nothing to exec.
