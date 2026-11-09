@@ -48,6 +48,7 @@ and never touched**.
 | Execution **Cancelled**, `RemoveIfClean`, clean checkout | the lane build dir, with the worktree | `settle_cancelled_workspace` |
 | Execution **Cancelled**, checkout **dirty** or policy `Preserve` | nothing at cancel time: the worker may still be writing | released later by the terminal-checkout release |
 | Boot and **every 30 min**: a **Done, Failed or Cancelled** execution whose managed checkout is still on disk | the checkout (branch kept) and its lane build dir | the terminal-checkout release below |
+| Boot and **every 30 min**, and **before a Claude launch is refused for the worktree cap**: a finished execution whose checkout is **clean** | the checkout (branch kept) and its lane build dir, with no idle window | `reclaim_clean_finished_checkout` (KT-1646) |
 | Boot: an orphaned managed checkout removed | its lane build dir, with it | `reconcile_at_boot` |
 | Worktree **kept** (diverged, over the evidence cap, written recently) | nothing: the lane is kept with it | same policy as the worktree |
 | Boot, **every 30 min**, and under pressure | **orphan** lane build dirs | the sweeper rules below |
@@ -74,6 +75,17 @@ and the working tree exactly; staged-only content (index differs from the files)
 worktree's index is only copied, never written. If a patch cannot be written, exceeds the cap, or the index
 holds unmerged paths, nothing is removed. Each distinct *kept* reason is recorded once as a
 `worktree_release_kept` event, a release as `worktree_released`. Evidence patches are not cleaned up by Kronn.
+
+### Worktree cap at launch (KT-1646)
+
+A Claude task worker is refused (`claude_sandbox_catalogue_unsafe`) once the repository lists more than 64 Git
+worktrees: the sandbox policy enumerates them. The cap is not raised. When a launch (or `task_exec_prepare`) is
+over it, Kronn first removes the **clean** checkouts of finished (Done, Failed, Cancelled) executions of that
+project, branch kept, measures again, and refuses only if it is still over. The refusal then names, by directory
+name only, the finished executions' worktrees it had to keep (dirty, written to, or on another branch) so a human
+can review them and run `git worktree remove`. Worktrees that belong to no finished execution (older lanes,
+discussion worktrees) are never touched. The catalogue listing (`task_worker_catalogue`) is advisory and does not
+reclaim.
 
 [src: file: backend/src/api/orchestration.rs:4409-4421#cleanup_integrated_execution]
 [src: file: backend/src/api/orchestration.rs:12829-12840#settle_cancelled_workspace]
