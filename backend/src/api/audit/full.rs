@@ -937,7 +937,7 @@ pub async fn full_audit(
                 let docs_template = template_dir.join("docs");
                 crate::core::template_manifest::apply_renames(&project_path, &docs_template)?;
                 if docs_template.is_dir() {
-                    crate::api::projects::copy_dir_nondestructive_in(&docs_template, &docs_target, &install_root)?;
+                    crate::api::projects::copy_dir_nondestructive_in(&project_path, &docs_template, &docs_target, &install_root)?;
                 }
                 super::briefing::sync_briefing_file(&project_path, install_briefing.as_deref())?;
                 // Ownership first: a run stopped before its end leaves a folder
@@ -952,7 +952,7 @@ pub async fn full_audit(
                 // prompts no longer inject the block inline, so the
                 // file on disk IS the source of truth. Idempotent +
                 // no-op on empty list (file is removed if present).
-                if let Err(e) = crate::api::projects::sync_linked_repos_doc_in(&docs_target, &project.linked_repos) {
+                if let Err(e) = crate::api::projects::sync_linked_repos_doc_in(&project_path, &docs_target, &project.linked_repos) {
                     tracing::warn!(
                         "Failed to seed {} during audit Phase 1 (project {}): {}",
                         install_root.path("linked-repos.md"), project.name, e
@@ -1167,7 +1167,7 @@ pub async fn full_audit(
         // Remove bootstrap prompt
         let index_file = docs_root.file(&project_path, "AGENTS.md");
         if index_file.exists() {
-            remove_bootstrap_block(&index_file);
+            remove_bootstrap_block(&project_path, &index_file);
         }
 
         // 0.9.0 security blocker — PRE-AGENT redaction boundary. The audit

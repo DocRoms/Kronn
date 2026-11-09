@@ -131,15 +131,12 @@ fn first_content_line(content: &str) -> &str {
 /// Caller must run this BEFORE the template install — running AFTER
 /// would move the freshly-installed Kronn templates into legacy/ on
 /// every audit.
-pub fn migrate_user_docs_to_legacy(docs_dir: &Path) -> std::io::Result<LegacyMigrationReport> {
-    migrate_user_docs_to_legacy_in(
-        docs_dir,
-        &crate::core::docs_location::DocsRoot::default_root(),
-    )
-}
-
-/// `migrate_user_docs_to_legacy` whose README names `docs_root` (KT-1192).
+///
+/// Every write is rooted at `root`, the project folder, never at `docs_dir`: a
+/// docs folder swapped for a link between two calls must not carry `legacy/`,
+/// the moves or the README out of the project.
 pub fn migrate_user_docs_to_legacy_in(
+    root: &Path,
     docs_dir: &Path,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> std::io::Result<LegacyMigrationReport> {
@@ -152,7 +149,7 @@ pub fn migrate_user_docs_to_legacy_in(
     if is_kronn_managed_docs(docs_dir) {
         return Ok(LegacyMigrationReport::skipped("already-kronn-managed"));
     }
-    move_user_docs_to_legacy_in(docs_dir, docs_root)
+    move_user_docs_to_legacy_in(root, docs_dir, docs_root)
 }
 
 /// Move everything but Kronn's own files into `legacy/`, without asking whether
@@ -160,6 +157,7 @@ pub fn migrate_user_docs_to_legacy_in(
 /// choice on a folder `docs_folder` reads as a human's, even when its entry
 /// file carries Kronn's signature, KT-1299).
 pub fn move_user_docs_to_legacy_in(
+    root: &Path,
     docs_dir: &Path,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> std::io::Result<LegacyMigrationReport> {
@@ -178,19 +176,24 @@ pub fn move_user_docs_to_legacy_in(
     }
 
     let legacy_dir = docs_dir.join("legacy");
-    fs::create_dir_all(&legacy_dir)?;
+    // Rooted at the project, not at `docs_dir`: the components between the two
+    // are walked without following a link as well.
+    crate::core::fs_guard::guarded_create_dir_all(root, &legacy_dir)
+        .map_err(std::io::Error::other)?;
 
     let mut moved_entries: Vec<String> = Vec::new();
     for (src, rel) in &to_move {
         let dst = legacy_dir.join(rel);
         if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
+            crate::core::fs_guard::guarded_create_dir_all(root, parent)
+                .map_err(std::io::Error::other)?;
         }
         // If a destination already exists from a partial prior run,
         // append a numeric suffix so we don't clobber. Cheap, rare
         // case (truly partial migration after a crash).
         let dst_final = unique_destination(&dst);
-        fs::rename(src, &dst_final)?;
+        crate::core::fs_guard::guarded_rename(root, src, &dst_final)
+            .map_err(std::io::Error::other)?;
         moved_entries.push(rel.clone());
     }
 
@@ -199,7 +202,7 @@ pub fn move_user_docs_to_legacy_in(
     // an explanation of why this folder exists and what to do with
     // it. Token cost = 0 (deterministic write). Idempotent : if the
     // user has hand-edited the file post-audit, we don't clobber.
-    write_legacy_readme_if_absent(&legacy_dir, docs_root)?;
+    write_legacy_readme_if_absent(root, &legacy_dir, docs_root)?;
 
     let moved_count = moved_entries.len();
     // Cap the surfaced list to keep SSE payloads small on legacy
@@ -258,14 +261,18 @@ where your changes will survive Kronn updates.\n\
 /// their own notes) is never clobbered. The file name `README.md`
 /// matches Git/GitHub convention so it surfaces in folder views.
 fn write_legacy_readme_if_absent(
+    root: &Path,
     legacy_dir: &Path,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> std::io::Result<()> {
     let readme = legacy_dir.join("README.md");
-    if readme.exists() {
-        return Ok(());
-    }
-    fs::write(&readme, docs_root.relocate(LEGACY_README_BODY).as_bytes())
+    crate::core::fs_guard::guarded_write_new(
+        root,
+        &readme,
+        docs_root.relocate(LEGACY_README_BODY).as_bytes(),
+    )
+    .map(|_| ())
+    .map_err(std::io::Error::other)
 }
 
 /// If `dst` exists, return `dst-1`, `dst-2`, … so a re-run after a
@@ -333,6 +340,15 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(p, content).unwrap();
+    }
+
+    /// The tests keep `docs` directly under the project folder.
+    fn migrate_user_docs_to_legacy(docs: &Path) -> std::io::Result<LegacyMigrationReport> {
+        migrate_user_docs_to_legacy_in(
+            docs.parent().unwrap(),
+            docs,
+            &crate::core::docs_location::DocsRoot::default_root(),
+        )
     }
 
     #[test]
@@ -859,6 +875,61 @@ mod tests {
         assert!(
             meta.file_type().is_symlink(),
             "the moved entry must remain a symlink (never deref'd)"
+        );
+    }
+}
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    fn run(root: &Path, docs: &Path) -> std::io::Result<LegacyMigrationReport> {
+        migrate_user_docs_to_legacy_in(
+            root,
+            docs,
+            &crate::core::docs_location::DocsRoot::default_root(),
+        )
+    }
+
+    #[test]
+    fn a_legacy_folder_swapped_after_the_walk_never_receives_the_moved_docs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let docs = root.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("guide.md"), "# Human guide\n").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        swap_probe::arm(&docs.join("legacy"), &external);
+        let _ = run(&root, &docs);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_docs_folder_swapped_after_the_walk_never_carries_legacy_out_of_the_project() {
+        // The docs folder itself is the swapped one: rooted at the project, the
+        // write refuses the link; rooted at `docs` it would have followed it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let docs = root.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("guide.md"), "# Human guide\n").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        swap_probe::arm(&docs, &external);
+        let result = run(&root, &docs);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(result.is_err(), "the swapped folder is refused: {result:?}");
+        assert!(
+            std::fs::read_dir(&external).unwrap().next().is_none(),
+            "nothing was created outside the project"
+        );
+        assert_eq!(
+            std::fs::read_to_string(docs.with_file_name("docs.moved").join("guide.md")).unwrap(),
+            "# Human guide\n",
+            "the human doc stays where it was"
         );
     }
 }

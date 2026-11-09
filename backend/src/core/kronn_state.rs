@@ -176,15 +176,13 @@ pub(crate) fn load_for_mutation(project_path: &Path) -> Result<KronnState, Strin
 pub fn write(project_path: &Path, state: &mut KronnState) -> Result<(), String> {
     // A configured folder that fails containment refuses the write (KT-263).
     let docs_dir = crate::core::docs_location::guard_write(project_path)?;
-    std::fs::create_dir_all(&docs_dir)
-        .map_err(|e| format!("Failed to create {} dir: {e}", docs_dir.display()))?;
 
     state.touch_readme();
     let json =
         serde_json::to_string_pretty(state).map_err(|e| format!("JSON serialize error: {e}"))?;
 
     let path = docs_dir.join(KRONN_STATE_FILENAME);
-    crate::core::mcp_scanner::atomic_write(&path, &json)
+    crate::core::fs_guard::guarded_replace(project_path, &path, json.as_bytes())
 }
 
 fn today_iso() -> String {
@@ -287,13 +285,20 @@ fn insert_written<'a>(
     Ok(())
 }
 
-/// A template merge wrote `rel_paths` (relative to `docs_dir`, the merge
-/// worktree's folder): the folder becomes Kronn's (a template install) and the
+/// A template merge wrote `rel_paths` (relative to the folder `docs_rel` of the
+/// merge worktree `root`, the trusted root the write is anchored at, so every
+/// component between the worktree and the folder is walked without following
+/// a link): the folder becomes Kronn's (a template install) and the
 /// files are recorded as Kronn's, the human sources beside them staying the
 /// human's. It works on the folder itself, so the state file that travels with
 /// the accepted commit is the merge worktree's. An unreadable or corrupt state
 /// file refuses, as every other mutation does.
-pub fn record_template_merge(docs_dir: &Path, rel_paths: &[String]) -> Result<(), String> {
+pub fn record_template_merge(
+    root: &Path,
+    docs_rel: &str,
+    rel_paths: &[String],
+) -> Result<(), String> {
+    let docs_dir = root.join(docs_rel);
     let path = docs_dir.join(KRONN_STATE_FILENAME);
     let mut state: KronnState = match std::fs::read_to_string(&path) {
         Ok(data) => serde_json::from_str(&data)
@@ -304,11 +309,11 @@ pub fn record_template_merge(docs_dir: &Path, rel_paths: &[String]) -> Result<()
     if state.template_installed_at.is_none() {
         state.template_installed_at = Some(today_iso());
     }
-    insert_written(&mut state, docs_dir, rel_paths)?;
+    insert_written(&mut state, &docs_dir, rel_paths)?;
     state.touch_readme();
     let json =
         serde_json::to_string_pretty(&state).map_err(|e| format!("JSON serialize error: {e}"))?;
-    crate::core::mcp_scanner::atomic_write(&path, &json)
+    crate::core::fs_guard::guarded_replace(root, &path, json.as_bytes())
 }
 
 /// Record an explicit human attestation without pretending Kronn ran an audit.
@@ -603,13 +608,44 @@ pub fn restore_from_git_history(project_path: &Path, commit: &str) -> Result<(),
         .ok_or_else(|| format!("{rel} not found in commit {commit}"))?;
     serde_json::from_slice::<KronnState>(&content)
         .map_err(|e| format!("{rel} in commit {commit} is not a valid state file: {e}"))?;
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
-    }
-    crate::core::mcp_scanner::atomic_write_bytes(&target, &content)
+    crate::core::fs_guard::guarded_replace(project_path, &target, &content)
 }
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "kronn_state_test.rs"]
 mod tests;
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    fn project() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        (tmp, root, external)
+    }
+
+    #[test]
+    fn a_docs_folder_swapped_after_the_walk_never_receives_the_state_file() {
+        let (_tmp, root, external) = project();
+        swap_probe::arm(&root.join("docs"), &external);
+        let _ = write(&root, &mut KronnState::default());
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+        assert!(root.join("docs.moved").join(KRONN_STATE_FILENAME).is_file());
+    }
+
+    #[test]
+    fn a_merge_folder_swapped_after_the_walk_never_receives_the_state_file() {
+        let (_tmp, root, external) = project();
+        let docs = root.join("docs");
+        swap_probe::arm(&docs, &external);
+        let _ = record_template_merge(&root, "docs", &[]);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+}

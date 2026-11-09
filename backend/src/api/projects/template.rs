@@ -126,6 +126,7 @@ pub async fn install_template(
             let mut created_files = Vec::new();
             if docs_template.is_dir() {
                 created_files.extend(copy_dir_nondestructive_in(
+                    &project_path,
                     &docs_template,
                     &docs_target,
                     &docs_root,
@@ -344,6 +345,7 @@ pub(crate) fn copy_dir_nondestructive(
     dst: &std::path::Path,
 ) -> Result<Vec<std::path::PathBuf>, String> {
     copy_dir_nondestructive_in(
+        dst.parent().unwrap_or(dst),
         src,
         dst,
         &crate::core::docs_location::DocsRoot::default_root(),
@@ -352,23 +354,23 @@ pub(crate) fn copy_dir_nondestructive(
 
 /// `copy_dir_nondestructive` with the markdown templates' `docs/` references
 /// rewritten to `docs_root` (KT-1192); byte copies under the default root.
+///
+/// `root` is the trusted root the install is anchored at (the project): every
+/// folder is created, and every file published create-only, through the
+/// rooted primitives of `fs_guard` — a folder swapped for a link mid-install
+/// is refused, never followed, and a file that appeared is never overwritten.
 pub(crate) fn copy_dir_nondestructive_in(
+    root: &std::path::Path,
     src: &std::path::Path,
     dst: &std::path::Path,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> Result<Vec<std::path::PathBuf>, String> {
-    // The destination root itself must not be a symlink: `exists()` and
-    // `create_dir_all` follow links, so a symlinked docs/ would route the
-    // whole install into a directory outside the ownership boundary.
-    if let Ok(meta) = std::fs::symlink_metadata(dst) {
-        if meta.file_type().is_symlink() {
-            return Err(format!(
-                "{} is a symlink — refusing to install templates through it",
-                dst.display()
-            ));
-        }
-    }
-    std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {}", dst.display(), e))?;
+    // A symlinked destination (the docs folder itself included) is refused
+    // here, readably: `exists()` and `create_dir_all` follow links, so it
+    // would route the whole install outside the ownership boundary.
+    crate::core::fs_guard::assert_contained_no_symlink(root, dst)
+        .map_err(|e| format!("refusing to install templates: {e}"))?;
+    crate::core::fs_guard::guarded_create_dir_all(root, dst)?;
 
     let entries =
         std::fs::read_dir(src).map_err(|e| format!("read_dir {}: {}", src.display(), e))?;
@@ -393,29 +395,40 @@ pub(crate) fn copy_dir_nondestructive_in(
         }
 
         if src_path.is_dir() {
-            created.extend(copy_dir_nondestructive_in(&src_path, &dst_path, docs_root)?);
+            created.extend(copy_dir_nondestructive_in(
+                root, &src_path, &dst_path, docs_root,
+            )?);
         } else if dst_lstat.is_err() {
             // An existing destination is NEVER touched (Codex A2) — not
             // even 0 B or placeholder-bearing: neither proves Kronn owns
             // the current content, and recovery of a corrupt skeleton is
-            // an explicit operation, not an implicit side effect.
+            // an explicit operation, not an implicit side effect. The
+            // publication is no-clobber, so one that appears after the
+            // lstat above is left alone too.
             let markdown = src_path.extension().is_some_and(|ext| ext == "md");
-            let copied = if docs_root.is_default() || !markdown {
-                std::fs::copy(&src_path, &dst_path).map(|_| ())
+            let published = if docs_root.is_default() || !markdown {
+                crate::core::fs_guard::guarded_copy_new(root, &src_path, &dst_path)
             } else {
-                std::fs::read_to_string(&src_path).and_then(|text| {
-                    std::fs::write(&dst_path, docs_root.relocate(&text).as_bytes())
-                })
-            };
-            copied.map_err(|e| {
-                format!(
-                    "copy {} -> {}: {}",
-                    src_path.display(),
-                    dst_path.display(),
-                    e
-                )
-            })?;
-            created.push(dst_path);
+                std::fs::read_to_string(&src_path)
+                    .map_err(|e| {
+                        format!(
+                            "copy {} -> {}: {}",
+                            src_path.display(),
+                            dst_path.display(),
+                            e
+                        )
+                    })
+                    .and_then(|text| {
+                        crate::core::fs_guard::guarded_write_new(
+                            root,
+                            &dst_path,
+                            docs_root.relocate(&text).as_bytes(),
+                        )
+                    })
+            }?;
+            if published {
+                created.push(dst_path);
+            }
         }
     }
     Ok(created)
@@ -905,6 +918,98 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dst.join("tech-debt/README.md")).unwrap(),
             ""
+        );
+    }
+}
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    fn write(path: &std::path::Path, content: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn a_template_subfolder_swapped_after_the_walk_never_receives_a_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("repo");
+        let docs = project.join("docs");
+        let src = tmp.path().join("src");
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        write(&src.join("architecture/overview.md"), &"o".repeat(300));
+        write(&src.join("AGENTS.md"), &"a".repeat(300));
+        std::fs::create_dir_all(&docs).unwrap();
+        swap_probe::arm(&docs.join("architecture"), &external);
+        let root = crate::core::docs_location::DocsRoot::default_root();
+        let _ = copy_dir_nondestructive_in(&project, &src, &docs, &root);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(
+            std::fs::read_dir(&external).unwrap().next().is_none(),
+            "nothing reached the folder the subfolder was swapped for"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(kronn_templates_env)]
+    async fn install_template_with_a_folder_swapped_after_the_walk_writes_nothing_outside() {
+        struct RestoreTemplatesEnv(Option<std::ffi::OsString>);
+        impl Drop for RestoreTemplatesEnv {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => crate::core::child_env::remove_var("KRONN_TEMPLATES_DIR"),
+                }
+            }
+        }
+        let _restore = RestoreTemplatesEnv(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
+        let tmp = tempfile::TempDir::new().unwrap();
+        let templates = tmp.path().join("templates");
+        write(&templates.join("docs/AGENTS.md"), &"template ".repeat(50));
+        write(
+            &templates.join("docs/architecture/overview.md"),
+            &"o".repeat(300),
+        );
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", &templates);
+        let project = tmp.path().join("repo");
+        std::fs::create_dir_all(project.join("docs")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let path = project.to_string_lossy().to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('p1', 'Swap', ?1, datetime('now'), datetime('now'))",
+                    [path],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // The install walks `docs/architecture` for the template copy: it is
+        // swapped for a link the moment a write holds it as an fd.
+        swap_probe::arm(&project.join("docs/architecture"), &external);
+        let _ = install_template(
+            axum::extract::State(state),
+            axum::extract::Path("p1".to_string()),
+        )
+        .await;
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(
+            std::fs::read_dir(&external).unwrap().next().is_none(),
+            "the install wrote nothing through the swapped folder"
         );
     }
 }

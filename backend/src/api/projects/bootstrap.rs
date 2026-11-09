@@ -182,6 +182,7 @@ async fn bootstrap_in(
                     let docs_target = docs_root.dir(&project_path);
                     if docs_template.is_dir() {
                         super::template::copy_dir_nondestructive_in(
+                            &project_path,
                             &docs_template,
                             &docs_target,
                             &docs_root,
@@ -194,13 +195,14 @@ async fn bootstrap_in(
                     // already present (re-bootstrap doesn't clobber user
                     // edits ; PR3 endpoint `/anti-hallu/inject` is the
                     // explicit re-sync path).
-                    let conventions_dir = docs_target.join("conventions");
-                    let _ = std::fs::create_dir_all(&conventions_dir);
-                    let spec_path = conventions_dir.join("agents-md-format-v1.md");
-                    if !spec_path.exists() {
-                        let _ =
-                            std::fs::write(&spec_path, crate::core::anti_halluc::SPEC_AGENTS_MD_V1);
-                    }
+                    let spec_path = docs_target
+                        .join("conventions")
+                        .join("agents-md-format-v1.md");
+                    let _ = crate::core::fs_guard::guarded_write_new(
+                        &project_path,
+                        &spec_path,
+                        crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
+                    );
                     // 0.7.1 — agent-writable subfolders. Bootstrapped only
                     // when missing (idempotent), with a short README so a
                     // human poking around immediately understands what each

@@ -87,13 +87,17 @@ pub fn apply(
         .map(|text| (apply_human_decision_to_index(&text, &td_id, decision), text));
 
     crate::db::audit_cross::update_record(conn, target).map_err(|e| e.to_string())?;
-    crate::core::mcp_scanner::atomic_write(&sheet_path, &sheet)?;
+    crate::core::fs_guard::guarded_replace(&root, &sheet_path, sheet.as_bytes())?;
     if let Some((patched, original)) = &index {
         if patched != original {
-            if let Err(e) = crate::core::mcp_scanner::atomic_write(&index_path, patched) {
-                if let Err(restore) =
-                    crate::core::mcp_scanner::atomic_write(&sheet_path, &original_sheet)
-                {
+            if let Err(e) =
+                crate::core::fs_guard::guarded_replace(&root, &index_path, patched.as_bytes())
+            {
+                if let Err(restore) = crate::core::fs_guard::guarded_replace(
+                    &root,
+                    &sheet_path,
+                    original_sheet.as_bytes(),
+                ) {
                     tracing::error!("Could not restore {}: {restore}", sheet_path.display());
                 }
                 return Err(e);

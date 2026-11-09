@@ -50,3 +50,34 @@ fn a_refusal_only_refreshes_the_verdict() {
     assert!(!out.contains("audit_history"));
     assert!(out.contains("- **Verdict**: disputed — left undecided by a human"));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_tech_debt_folder_swapped_after_the_walk_never_receives_the_decided_sheet() {
+    use crate::core::fs_guard::swap_probe;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let folder = root.join("docs/tech-debt");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("TD-20261011-sql.md"), SHEET).unwrap();
+    std::fs::write(root.join("docs/inconsistencies-security.md"), "# Index\n").unwrap();
+    let external = tmp.path().join("external");
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(external.join("TD-20261011-sql.md"), SHEET).unwrap();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE audit_cross_findings (audit_run_id TEXT, step_index INTEGER, \
+         group_id TEXT, record_json TEXT);",
+    )
+    .unwrap();
+    let mut disputed = target(None);
+    disputed.project_path = root.to_string_lossy().into_owned();
+    swap_probe::arm(&folder, &external);
+    let _ = apply(&conn, &mut disputed, HumanDecision::Dismiss);
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert_eq!(
+        std::fs::read_to_string(external.join("TD-20261011-sql.md")).unwrap(),
+        SHEET,
+        "the outside sheet is untouched"
+    );
+}

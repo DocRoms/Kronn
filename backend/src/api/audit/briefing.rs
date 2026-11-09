@@ -94,11 +94,11 @@ pub(crate) fn sync_briefing_file(
         return Ok(());
     }
     let target = docs_dir.join("briefing.md");
-    crate::core::fs_guard::assert_contained_no_symlink(project_path, &target)?;
     match notes {
-        Some(body) => std::fs::write(&target, body)
-            .map_err(|e| format!("Failed to write {}: {}", target.display(), e)),
-        None => match std::fs::remove_file(&target) {
+        Some(body) => {
+            crate::core::fs_guard::guarded_replace(project_path, &target, body.as_bytes())
+        }
+        None => match crate::core::fs_guard::guarded_remove_file(project_path, &target) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("Failed to remove {}: {}", target.display(), e)),
@@ -624,9 +624,8 @@ impl BriefingAfterCommit {
             let target = docs_dir.join("briefing.md");
             crate::core::fs_guard::assert_contained_no_symlink(&self.root, &target)
                 .map_err(BriefingSaveError::DocsDir)?;
-            std::fs::write(&target, &self.body).map_err(|e| {
-                BriefingSaveError::Internal(format!("Failed to write {}: {}", target.display(), e))
-            })?;
+            crate::core::fs_guard::guarded_replace(&self.root, &target, self.body.as_bytes())
+                .map_err(BriefingSaveError::Internal)?;
             // KT-1193 — every agent of the project reads the coding-rules doc.
             if let Err(e) = super::briefing_rules::sync_coding_rules_doc(
                 &self.root,
@@ -936,5 +935,65 @@ mod tests {
             defaults(tmp.path(), None, Some("../escape")),
             ("docs".into(), BriefingDocsDirSource::Default)
         );
+    }
+}
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    fn project() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        (tmp, root, external)
+    }
+
+    #[test]
+    fn a_docs_folder_swapped_after_the_walk_never_receives_the_briefing_mirror() {
+        let (_tmp, root, external) = project();
+        swap_probe::arm(&root.join("docs"), &external);
+        let _ = sync_briefing_file(&root, Some("notes"));
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs.moved/briefing.md")).unwrap(),
+            "notes"
+        );
+    }
+
+    #[test]
+    fn clearing_the_briefing_never_removes_an_outside_file() {
+        let (_tmp, root, external) = project();
+        std::fs::write(root.join("docs/briefing.md"), "notes").unwrap();
+        std::fs::write(external.join("briefing.md"), "KEEP").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let _ = sync_briefing_file(&root, None);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join("briefing.md")).unwrap(),
+            "KEEP"
+        );
+        assert!(!root.join("docs.moved/briefing.md").exists());
+    }
+
+    #[test]
+    fn saving_the_briefing_after_the_commit_never_writes_through_a_swapped_folder() {
+        let (_tmp, root, external) = project();
+        let after = BriefingAfterCommit {
+            project_path: root.to_string_lossy().into_owned(),
+            root: root.clone(),
+            docs_override: None,
+            legacy_move: None,
+            body: "notes".into(),
+            project_rules: None,
+        };
+        swap_probe::arm(&root.join("docs"), &external);
+        let _ = after.apply();
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
     }
 }

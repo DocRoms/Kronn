@@ -1207,7 +1207,7 @@ fn remove_owned_file(root: &Path, relative: &str, previous: &RepositoryLock) -> 
         return Ok(());
     }
     let path = root.join(relative);
-    match std::fs::remove_file(&path) {
+    match crate::core::fs_guard::guarded_remove_file(root, &path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("cannot remove {}: {error}", path.display())),
@@ -1225,7 +1225,7 @@ pub(crate) fn remove_empty_parents(root: &Path, path: &Path) {
             .strip_prefix(root)
             .map(|relative| relative.components().count())
             .unwrap_or(0);
-        if depth < 2 || std::fs::remove_dir(directory).is_err() {
+        if depth < 2 || crate::core::fs_guard::guarded_remove_dir(root, directory).is_err() {
             return;
         }
         current = directory.parent();
@@ -1234,12 +1234,7 @@ pub(crate) fn remove_empty_parents(root: &Path, path: &Path) {
 
 fn write_atomic(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
     let path = root.join(relative);
-    crate::core::fs_guard::assert_contained_no_symlink(root, &path)?;
-    if let Some(parent) = path.parent() {
-        crate::core::fs_guard::guarded_create_dir_all(root, parent)?;
-    }
-    crate::core::mcp_scanner::atomic_write_bytes(&path, bytes)
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))
+    crate::core::fs_guard::guarded_replace(root, &path, bytes)
 }
 
 fn index_markdown(lock: &RepositoryLock) -> Vec<u8> {
@@ -3304,5 +3299,25 @@ mod tests {
             approval_hash(&rendered.document),
             approval_hash(&other.document)
         );
+    }
+}
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    #[test]
+    fn a_parent_swapped_after_the_walk_never_receives_a_repository_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("kronn")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        swap_probe::arm(&root.join("kronn"), &external);
+        write_atomic(&root, "kronn/lock.json", b"{}").unwrap();
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+        assert!(root.join("kronn.moved/lock.json").is_file());
     }
 }

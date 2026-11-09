@@ -20,8 +20,7 @@ use std::path::{Path, PathBuf};
 use crate::core::task_worker_sandbox::real_path;
 use crate::models::RunStatus;
 
-#[path = "run_artifacts_fd.rs"]
-pub(crate) mod fd;
+pub(crate) use crate::core::rooted_fd as fd;
 
 /// Where versions before KT-1585 kept the run directories, in the data dir.
 const LEGACY_DIR_NAME: &str = "run-artifacts";
@@ -158,7 +157,7 @@ pub fn dir_for(run_id: &str) -> Option<PathBuf> {
     safe_run_id(run_id).then(|| root().map(|root| root.join(run_id)))?
 }
 
-/// The root as a directory fd (`run_artifacts_fd`): no part is a link and it
+/// The root as a directory fd (`core::rooted_fd`): no part is a link and it
 /// is outside every protected directory, else refused and logged, so nothing
 /// is read, created or removed. `Ok(None)`: not created yet.
 fn open_root(root: &Path, create: bool) -> std::io::Result<Option<fd::Dir>> {

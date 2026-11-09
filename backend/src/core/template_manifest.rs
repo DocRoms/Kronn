@@ -200,12 +200,8 @@ pub fn apply_renames_in(
     {
         let from = project.join(&rename.from);
         let to = project.join(&rename.to);
-        fs_guard::assert_contained_no_symlink(project, &from)?;
-        fs_guard::guarded_create_dir_all(project, to.parent().ok_or("missing rename parent")?)?;
-        fs_guard::assert_contained_no_symlink(project, &to)?;
-        std::fs::hard_link(&from, &to)
+        fs_guard::guarded_move_new(project, &from, &to)
             .map_err(|e| format!("rename {} to {}: {e}", rename.from, rename.to))?;
-        std::fs::remove_file(&from).map_err(|e| format!("remove renamed {}: {e}", rename.from))?;
         applied.push(rename);
     }
     Ok(applied)
@@ -223,12 +219,12 @@ pub fn record_install(project: &Path, template_docs: &Path) -> Result<(), String
         .and_then(|p| p.installed_spec_sha256.as_ref());
     let bytes = crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes();
     let hash = crate::core::docs_merge::sha256_hex(bytes);
-    let mtime = crate::core::mcp_scanner::read_target_mtime(&spec);
-    let actual = match std::fs::read(&spec) {
-        Ok(bytes) => Some(crate::core::docs_merge::sha256_hex(&bytes)),
+    let observed = match std::fs::read(&spec) {
+        Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("read {}: {e}", spec.display())),
     };
+    let actual = observed.as_deref().map(crate::core::docs_merge::sha256_hex);
     if actual.is_none() {
         if fs_guard::guarded_write_new(project, &spec, bytes)? {
             manifest.installed_spec_sha256 = Some(hash);
@@ -240,12 +236,15 @@ pub fn record_install(project: &Path, template_docs: &Path) -> Result<(), String
             .as_ref()
             .is_some_and(|h| LEGACY_SPEC_SHA256.contains(&h.as_str()))
     {
-        crate::core::mcp_scanner::atomic_write_checked(
+        // The bytes just read are the ones replaced: a spec edited since is
+        // refused, and the swap goes through the project's directory fds.
+        fs_guard::guarded_replace_if_unchanged_keeping_mode(
+            project,
             &spec,
             crate::core::anti_halluc::SPEC_AGENTS_MD_V1,
-            mtime,
+            observed.as_deref().unwrap_or_default(),
         )
-        .map_err(|e| format!("spec update refused: {e:?}"))?;
+        .map_err(|e| format!("spec update refused: {e}"))?;
         manifest.installed_spec_sha256 = Some(hash);
     } else {
         manifest.installed_spec_sha256 = expected.cloned();

@@ -184,7 +184,7 @@ delivery manifest and diff, then choose one of:
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
   [src: file: backend/src/core/worktree.rs:2088-2116#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:2351-2371#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:2352-2372#fast_forward_target_to]
   [src: file: backend/src/core/worktree.rs:2296-2348#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
@@ -199,7 +199,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:2268-2275#integration_target]
+[src: file: backend/src/core/worktree.rs:2269-2276#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This

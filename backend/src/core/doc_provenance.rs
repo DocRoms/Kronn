@@ -210,8 +210,7 @@ fn write(project: &Path, file: &mut ProvenanceFile) -> Result<(), String> {
     }
     file.readme = README.to_string();
     let json = serde_json::to_string_pretty(file).map_err(|e| format!("JSON error: {e}"))?;
-    crate::core::fs_guard::assert_contained_no_symlink(project, &path)?;
-    crate::core::mcp_scanner::atomic_write(&path, &format!("{json}\n"))?;
+    crate::core::fs_guard::guarded_replace(project, &path, format!("{json}\n").as_bytes())?;
     let keep: BTreeSet<String> = file
         .docs
         .values()
@@ -889,3 +888,23 @@ pub(crate) fn source_provenance_with_citations(
 #[cfg(test)]
 #[path = "doc_provenance_test.rs"]
 mod tests;
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    #[test]
+    fn a_docs_folder_swapped_after_the_walk_never_receives_the_provenance_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(provenance_path(&root), "{}").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let _ = write(&root, &mut ProvenanceFile::default());
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+}

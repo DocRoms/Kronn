@@ -234,12 +234,8 @@ pub fn state_path(project: &Path) -> std::path::PathBuf {
 /// refuses the write (KT-263).
 pub fn write(project: &Path, state: &RunState) -> Result<(), String> {
     let dir = crate::core::docs_location::guard_write(project)?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join(RUN_STATE_FILENAME);
-    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(format!("{} is a symbolic link", path.display()));
-    }
-    crate::core::mcp_scanner::atomic_write(&path, &state.render()?)
+    crate::core::fs_guard::guarded_replace(project, &path, state.render()?.as_bytes())
 }
 
 /// What the repository says about the run.

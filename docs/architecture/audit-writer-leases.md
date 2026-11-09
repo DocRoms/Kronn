@@ -11,7 +11,7 @@ The guarded entry points include template install and reinstall, anti-hallucinat
 injection and redirector sync, documentation migration, and audit-state
 attestation and restoration.
 [src: file: backend/src/api/projects/template.rs:19-45#install_template]
-[src: file: backend/src/api/projects/template_reinstall.rs:583-611#reinstall_for]
+[src: file: backend/src/api/projects/template_reinstall.rs:606-634#reinstall_for]
 [src: file: backend/src/api/projects/anti_hallu_inject.rs:120-207#inject]
 [src: file: backend/src/api/projects/migrate.rs:66-110#migrate_docs]
 [src: file: backend/src/api/context_audit.rs:218-289#attest_project_documentation]
