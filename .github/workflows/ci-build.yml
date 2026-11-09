@@ -25,6 +25,11 @@ env:
   # onnxruntime-node's postinstall downloads CUDA binaries CI never uses, from
   # a host that times out on GitHub runners (see ci-test.yml).
   ONNXRUNTIME_NODE_INSTALL: skip
+  # Test builds without debug info and without incremental state: the kronn
+  # test binary is huge, and its debug info swaps the 7 GB macOS runner (~94 min).
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   # Labels are read live: a re-run replays the original event payload.
