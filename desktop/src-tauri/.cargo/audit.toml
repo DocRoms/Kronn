@@ -6,18 +6,31 @@
 # config in `backend/.cargo/audit.toml`; the desktop crate depends on the
 # backend crate, so both lock files share most of the same transitive paths.
 [advisories]
-# 2026-11-10 — RUSTSEC-2026-0367/0368/0369/0429 (zip < 9: SUID/SGID bits kept,
-# symlinks and permissions escaping the destination, abort on a symlink entry with
-# a large declared size, all on `ZipArchive::extract` to disk). The only zip < 9 in
-# this lock file is zip 3.0.0, a build dependency of utoipa-swagger-ui 9.0.2 (via
-# the backend crate): it unpacks its own bundled Swagger UI archive at build time,
-# never user input (`cargo tree -i zip@3.0.0`). Same path and same blocker as the
-# backend ignore: utoipa-swagger-ui 10 needs utoipa 6 (major bump, tracked
-# separately). Review by 2026-11-16, or as soon as utoipa-swagger-ui is upgraded.
-# 2026-11-10 — RUSTSEC-2026-0459 (libsqlite3-sys < 0.39 bundles a vulnerable C
-# SQLite, CVE-2026-119375). libsqlite3-sys 0.37.0 comes from rusqlite 0.39.0, a
-# direct dependency of the backend crate that the desktop app embeds; the fix needs
-# the rusqlite bump (libsqlite3-sys >= 0.39.0), which changes the backend lock file
-# and is out of scope for this desktop audit task. The backend lock file reports
-# the same advisory. Review by 2026-11-16, or as soon as rusqlite is upgraded.
-ignore = ["RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369", "RUSTSEC-2026-0429", "RUSTSEC-2026-0459"]
+# 2026-11-10 — RUSTSEC-2026-0367/0368/0369/0429 (all patched in zip >= 9.0.0:
+# SUID/SGID bits kept, symlinks and permissions escaping the destination, abort on
+# a symlink entry with a large declared size; 0368/0369/0429 are on
+# `ZipArchive::extract`). The only zip < 9 in this lock file is zip 3.0.0, a
+# build-dependency of utoipa-swagger-ui 9.0.2 (`cargo tree -i zip@3.0.0`:
+# zip 3.0.0 <- utoipa-swagger-ui 9.0.2 <- kronn (backend) <- kronn-desktop).
+# Why no upgrade: utoipa-swagger-ui 9.0.2 requires `zip = "^3.0"`, so
+# `cargo update -p zip` cannot leave 3.x. The release lines that move off it need a
+# major bump of the backend's `utoipa` 5 -> 6: utoipa-swagger-ui 10.0.0/10.0.1
+# require utoipa ^6 and zip ^8.6 (still vulnerable), only 10.0.2 requires zip ^9.0
+# (crates.io index). That change belongs to the backend crate (backend/Cargo.toml,
+# backend/src/lib.rs, backend/src/api/openapi.rs, backend/src/api/version.rs) and
+# is out of scope for this desktop audit task.
+# Exploitability: none reachable at runtime. The code is in the build script of
+# utoipa-swagger-ui, not in the shipped binary. With the `vendored` feature it opens
+# the Swagger UI archive embedded in the utoipa-swagger-ui-vendored crate (a
+# checksum-pinned crates.io dependency), never a user-supplied or downloaded archive.
+# It does not call `ZipArchive::extract` (0368/0369/0429); it walks `by_index` and
+# writes the `dist/` entries itself, and applies each entry's unix mode (the
+# 0367 class) to files under its own build output directory.
+# Follow-up: upgrade utoipa to 6 and utoipa-swagger-ui to >= 10.0.2 in the backend
+# (ticket to be created by the principal; reference it here once it exists).
+# Review by 2026-11-16, or as soon as utoipa-swagger-ui is upgraded.
+#
+# RUSTSEC-2026-0459 (libsqlite3-sys) is deliberately NOT ignored: the rusqlite bump
+# to 0.41.1 / libsqlite3-sys 0.39.1 lands with KT-1620 (PR #507), which also updates
+# this lock file.
+ignore = ["RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369", "RUSTSEC-2026-0429"]
