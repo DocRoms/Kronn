@@ -2199,17 +2199,24 @@ async fn provision_task_execution_inner(
         // (D2) Physical checkout from the EXACT pinned SHA. A prior attempt may
         // already have created it (resume): adopt it only after proving HEAD==base,
         // else create it fresh (fail-closed on any foreign/stale collision).
+        // KT-1637 — only a checkout this launch really makes is timed: adopting
+        // the one a prior attempt made would overwrite its duration with the
+        // few milliseconds of a HEAD check.
+        let mut worktree_created_ms: Option<u64> = None;
         let create_result = if worktree_path.exists() {
             worktree::verify_worktree_head(&worktree_path, &base_sha)
                 .and_then(|_| worktree::materialize_task_submodules(&repo_path, &worktree_path))
         } else {
-            worktree::create_task_worktree(
+            let creating = std::time::Instant::now();
+            let created = worktree::create_task_worktree(
                 &repo_path,
                 &prepared.task_reference,
                 exec_short(&prepared.execution.id),
                 &base_sha,
             )
-            .map(|_| ())
+            .map(|_| ());
+            worktree_created_ms = Some(creating.elapsed().as_millis() as u64);
+            created
         };
 
         if let Err(e) = create_result {
@@ -2254,18 +2261,36 @@ async fn provision_task_execution_inner(
         })
         .await
         .map_err(|e| ProvisionError::Internal(e.to_string()))?;
+        if let Some(duration_ms) = worktree_created_ms {
+            record_warming_step(
+                db,
+                &prepared.execution.id,
+                crate::models::WarmingStepKind::WorktreeCreation,
+                duration_ms,
+            )
+            .await;
+        }
     }
 
     // The project's generated, gitignored assets (KT-1438), whatever the worker
     // kind: a fresh worktree has the tracked tree only. A resume refreshes them.
-    seed_lane_assets(
+    if let Some(duration_ms) = seed_lane_assets(
         db,
         &prepared.execution.id,
         &prepared.project_id,
         &repo_path,
         &worktree_path,
     )
-    .await;
+    .await
+    {
+        record_warming_step(
+            db,
+            &prepared.execution.id,
+            crate::models::WarmingStepKind::LaneSeeds,
+            duration_ms,
+        )
+        .await;
+    }
 
     // A prelocalized scope is a mechanical promise, not prose. Validate it
     // against the exact SHA-pinned worktree before any worker dispatch exists.
@@ -2667,15 +2692,22 @@ async fn finish_native_provisioning(
                 "cancelled while the lane warmed".into(),
             ));
         }
-        Some(
-            record_toolchain_smoke_check(
-                db,
-                &prepared.execution.id,
-                &worktree_path,
-                worker_probe_runner(&prepared.repo_path, &worktree_path),
-            )
-            .await,
+        let smoke_check = std::time::Instant::now();
+        let capabilities = record_toolchain_smoke_check(
+            db,
+            &prepared.execution.id,
+            &worktree_path,
+            worker_probe_runner(&prepared.repo_path, &worktree_path),
         )
+        .await;
+        record_warming_step(
+            db,
+            &prepared.execution.id,
+            crate::models::WarmingStepKind::SmokeCheck,
+            smoke_check.elapsed().as_millis() as u64,
+        )
+        .await;
+        Some(capabilities)
     } else {
         None
     };
@@ -9516,18 +9548,20 @@ async fn mark_lane_target_for_worker(exec_id: &str, worktree: &std::path::Path) 
 /// validations, so a source that changed meanwhile is refreshed. Best-effort:
 /// a path that cannot be seeded is recorded with its reason and the worktree
 /// goes on without it; it never fails a launch or an integration.
+///
+/// Returns how long the copy took (KT-1637), `None` when nothing was seeded.
 async fn seed_lane_assets(
     db: &Database,
     exec_id: &str,
     project_id: &str,
     repo: &std::path::Path,
     worktree: &std::path::Path,
-) {
+) -> Option<u64> {
     let pid = project_id.to_string();
     let policy = crate::core::task_worker_lane_seeds::seed_policy();
     if !policy.copy_enabled {
         // The owner turned copying off (Settings > Worktrees): nothing is seeded.
-        return;
+        return None;
     }
     // Only what a human declared in Kronn applies, or, when the owner turned
     // adoption on, Kronn's suggestions for a project that declared nothing. The
@@ -9547,11 +9581,11 @@ async fn seed_lane_assets(
         Ok(read) => read,
         Err(error) => {
             tracing::warn!(execution_id = %exec_id, "lane seeds not read: {error}");
-            return;
+            return None;
         }
     };
     let (repo, worktree) = (repo.to_path_buf(), worktree.to_path_buf());
-    let record = match tokio::task::spawn_blocking(move || {
+    let (record, duration_ms) = match tokio::task::spawn_blocking(move || {
         let (seeds, _) =
             match crate::core::task_worker_lane_seeds::effective_seeds(policy, declared, || {
                 crate::core::task_worker_lane_seeds::suggest_seeds(&repo)
@@ -9565,21 +9599,23 @@ async fn seed_lane_assets(
         if seeds.is_empty() {
             return None;
         }
-        Some(crate::core::task_worker_lane_seeds::seed_worktree(
+        let copying = std::time::Instant::now();
+        let record = crate::core::task_worker_lane_seeds::seed_worktree(
             &repo,
             &worktree,
             &seeds,
             &confirmed,
             &crate::core::task_worker_lane_warm::clone_tree,
-        ))
+        );
+        Some((record, copying.elapsed().as_millis() as u64))
     })
     .await
     {
-        Ok(Some(record)) => record,
-        Ok(None) => return,
+        Ok(Some(seeded)) => seeded,
+        Ok(None) => return None,
         Err(error) => {
             tracing::warn!(execution_id = %exec_id, "lane seeding did not complete: {error}");
-            return;
+            return None;
         }
     };
     for (path, reason) in record.skipped() {
@@ -9593,6 +9629,32 @@ async fn seed_lane_assets(
         .await
     {
         tracing::warn!(execution_id = %exec_id, "lane seeds record not persisted: {error}");
+    }
+    Some(duration_ms)
+}
+
+/// Journal how long a sub-step of the warming phase took (KT-1637). Never
+/// raised: a timing that is not recorded only leaves a hole in the breakdown.
+async fn record_warming_step(
+    db: &Database,
+    exec_id: &str,
+    step: crate::models::WarmingStepKind,
+    duration_ms: u64,
+) {
+    let id = exec_id.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_warming_step(
+                conn,
+                &id,
+                step,
+                duration_ms,
+                &backend_actor(),
+            )
+        })
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, "warming step {step:?} not recorded: {error}");
     }
 }
 
@@ -11607,7 +11669,66 @@ pub(crate) fn execution_detail(
     })
 }
 
+/// The execution's progress, with the timing of its warming sub-steps (KT-1637)
+/// on top of the phase it is in.
 fn execution_progress(
+    conn: &rusqlite::Connection,
+    execution: &crate::models::TaskExecution,
+) -> Result<crate::models::TaskExecutionProgress> {
+    let mut progress = execution_phase_progress(conn, execution)?;
+    let (steps, total_ms) = warming_timings(conn, execution)?;
+    progress.warming_steps = steps;
+    progress.warming_total_ms = total_ms;
+    Ok(progress)
+}
+
+/// How long each warming sub-step took, in the order they run, and the wall time
+/// from the execution's creation to the worker's dispatch (to now while it is
+/// still provisioning). What the steps do not add up to is time nobody measured.
+fn warming_timings(
+    conn: &rusqlite::Connection,
+    execution: &crate::models::TaskExecution,
+) -> Result<(Vec<crate::models::TaskExecutionWarmingStep>, Option<u64>)> {
+    use crate::models::{TaskExecutionWarmingStep, WarmingStepKind};
+    let mut timed = crate::db::orchestration::latest_warming_steps(conn, &execution.id)?;
+    if let Some(record) = crate::db::orchestration::latest_lane_warm_start(conn, &execution.id)? {
+        for (step, duration_ms) in record.timed_steps() {
+            timed.retain(|known| known.step != step);
+            timed.push(TaskExecutionWarmingStep { step, duration_ms });
+        }
+    }
+    const ORDER: [WarmingStepKind; 7] = [
+        WarmingStepKind::WorktreeCreation,
+        WarmingStepKind::LaneSeeds,
+        WarmingStepKind::LaneProvision,
+        WarmingStepKind::SeedClone,
+        WarmingStepKind::GateWait,
+        WarmingStepKind::FirstBuild,
+        WarmingStepKind::SmokeCheck,
+    ];
+    timed.sort_by_key(|known| ORDER.iter().position(|step| *step == known.step));
+
+    // The clock starts with the execution, not with the `lane_warming` event: the
+    // worktree and the lane seeds are timed before that event is written. Only a
+    // deferred warm-up has a total (the others dispatch at once).
+    let deferred =
+        crate::db::orchestration::lane_warming_started_at(conn, &execution.id)?.is_some();
+    let end = match execution.dispatch_job_id.as_deref() {
+        Some(dispatch_id) => {
+            crate::db::agent_dispatch::get(conn, dispatch_id)?.map(|job| job.created_at)
+        }
+        None if execution.status == crate::models::TaskExecutionStatus::Provisioning => {
+            Some(chrono::Utc::now())
+        }
+        None => None,
+    };
+    let total_ms = end
+        .filter(|_| deferred)
+        .map(|end| (end - execution.created_at).num_milliseconds().max(0) as u64);
+    Ok((timed, total_ms))
+}
+
+fn execution_phase_progress(
     conn: &rusqlite::Connection,
     execution: &crate::models::TaskExecution,
 ) -> Result<crate::models::TaskExecutionProgress> {
@@ -11631,6 +11752,8 @@ fn execution_progress(
                 process_alive: None,
                 last_reliable_signal_at: Some(since),
                 telemetry_mode: TaskExecutionTelemetryMode::Unavailable,
+                warming_steps: Vec::new(),
+                warming_total_ms: None,
             });
         }
     }
@@ -11643,6 +11766,8 @@ fn execution_progress(
             process_alive: None,
             last_reliable_signal_at: None,
             telemetry_mode: TaskExecutionTelemetryMode::Unavailable,
+            warming_steps: Vec::new(),
+            warming_total_ms: None,
         });
     };
     let Some(job) = crate::db::agent_dispatch::get(conn, dispatch_id)? else {
@@ -11654,6 +11779,8 @@ fn execution_progress(
             process_alive: None,
             last_reliable_signal_at: None,
             telemetry_mode: TaskExecutionTelemetryMode::Unavailable,
+            warming_steps: Vec::new(),
+            warming_total_ms: None,
         });
     };
     let (phase, reason, queue_position) = match job.status {
@@ -11706,6 +11833,8 @@ fn execution_progress(
         } else {
             TaskExecutionTelemetryMode::Unavailable
         },
+        warming_steps: Vec::new(),
+        warming_total_ms: None,
     })
 }
 
@@ -30057,6 +30186,20 @@ pub(crate) mod tests {
             "a stuck warm-up is visible to the principal"
         );
         assert!(detail.progress.queued_since.is_some());
+        // KT-1637 — while the build runs, the steps already behind it are timed
+        // and the warm-up's wall clock is running.
+        let steps: Vec<_> = detail
+            .progress
+            .warming_steps
+            .iter()
+            .map(|step| step.step)
+            .collect();
+        assert_eq!(
+            steps,
+            vec![crate::models::WarmingStepKind::WorktreeCreation],
+            "only the finished steps are reported"
+        );
+        assert!(detail.progress.warming_total_ms.is_some());
 
         runner.release();
         wait_for_status(&db, &launched.id, TaskExecutionStatus::Working).await;
@@ -30089,6 +30232,39 @@ pub(crate) mod tests {
             detail.progress.phase,
             crate::models::TaskExecutionProgressPhase::Warming,
             "the warming phase ends with the warm-up"
+        );
+        // KT-1637 — and the breakdown outlives it, in run order, with the wall
+        // time of the whole warm-up so what is unmeasured can be read off.
+        use crate::models::WarmingStepKind as Step;
+        let steps: Vec<_> = detail
+            .progress
+            .warming_steps
+            .iter()
+            .map(|step| step.step)
+            .collect();
+        assert_eq!(
+            steps,
+            vec![
+                Step::WorktreeCreation,
+                Step::LaneProvision,
+                Step::SeedClone,
+                Step::GateWait,
+                Step::FirstBuild,
+                Step::SmokeCheck,
+            ],
+            "{:?}",
+            detail.progress.warming_steps
+        );
+        let measured: u64 = detail
+            .progress
+            .warming_steps
+            .iter()
+            .map(|step| step.duration_ms)
+            .sum();
+        let total = detail.progress.warming_total_ms.expect("warm-up wall time");
+        assert!(
+            total >= measured,
+            "the wall time ({total} ms) covers the measured steps ({measured} ms)"
         );
     }
 

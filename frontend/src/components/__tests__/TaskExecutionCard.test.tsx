@@ -272,6 +272,37 @@ describe('TaskExecutionCard', () => {
     expect(text).not.toContain('cargo test');
   });
 
+  it('breaks the warm-up down by step and says how much of it nobody measured (KT-1637)', () => {
+    wrap(
+      <TaskExecutionCard
+        detail={detail({
+          progress: {
+            phase: 'tool_activity',
+            warming_steps: [
+              { step: 'worktree_creation', duration_ms: 850 },
+              { step: 'seed_clone', duration_ms: 12_400 },
+              { step: 'gate_wait', duration_ms: 1_500_000 },
+              { step: 'first_build', duration_ms: 408_000 },
+            ],
+            warming_total_ms: 2_700_000,
+          } as unknown as TaskExecutionDetail['progress'],
+        })}
+      />
+    );
+    expect(screen.getByTestId('orch-exec-warming-worktree_creation').textContent).toContain('850 ms');
+    expect(screen.getByTestId('orch-exec-warming-seed_clone').textContent).toContain('12.4 s');
+    expect(screen.getByTestId('orch-exec-warming-gate_wait').textContent).toContain('25 min 0 s');
+    expect(screen.getByTestId('orch-exec-warming-first_build').textContent).toContain('6 min 48 s');
+    expect(screen.getByTestId('orch-exec-warming-total').textContent).toContain('45 min 0 s');
+    // 2 700 000 - (850 + 12 400 + 1 500 000 + 408 000) ms is left unexplained.
+    expect(screen.getByTestId('orch-exec-warming-unmeasured').textContent).toContain('12 min 59 s');
+  });
+
+  it('shows no warm-up block for an execution that never warmed', () => {
+    wrap(<TaskExecutionCard detail={detail()} />);
+    expect(screen.queryByTestId('orch-exec-warming')).toBeNull();
+  });
+
   it('renders nothing before the detail is loaded', () => {
     wrap(<TaskExecutionCard detail={null} />);
     expect(screen.queryByTestId('orch-exec-card')).toBeNull();

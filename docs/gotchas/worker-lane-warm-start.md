@@ -111,3 +111,30 @@ The clone itself takes 14-38 s and no disk space.
 | `KRONN_WORKER_MAX_CONCURRENT_BUILDS` | 2 | first builds running at once on this backend process |
 | `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` | 1800 | bound of the first build and of its queue wait |
 | `KRONN_WORKER_PRIVATE_CARGO_HOME` | unset | `1` keeps KT-1246's lane-private `CARGO_HOME` (no seeding) |
+
+## Where the warming time goes (KT-1637)
+
+`task_exec_status` / the execution detail carry `progress.warming_steps` (the
+steps that have finished, in run order, each `{step, duration_ms}`) and
+`progress.warming_total_ms` (execution creation to the worker's dispatch, to
+now while it still provisions). The room card (`TaskExecutionCard`) renders
+them and the part of the total no step explains. They are present in every
+phase, so the breakdown outlives the warming phase.
+
+| Step | Measured around | Journalled in |
+| --- | --- | --- |
+| `worktree_creation` | `git worktree add` (only a checkout this launch really makes; adopting one on resume keeps the original timing) | `lane_warming_step` |
+| `lane_seeds` | copying the project's gitignored assets (KT-1438); absent when nothing is seeded | `lane_warming_step` |
+| `lane_provision` | `prepare_launch` (Cargo home, shared caches) | `lane_warm_start.provision_ms` |
+| `seed_clone` | seeding the lane `debug/`, whatever its outcome (`clone_ms` is the clone alone) | `lane_warm_start.seed_ms` |
+| `gate_wait` | waiting for a first-build slot | `lane_warm_start.queued_ms` |
+| `first_build` | `cargo test --no-run`; absent when skipped or cancelled in the queue | `lane_warm_start` |
+| `smoke_check` | the toolchain smoke check that follows the build | `lane_warming_step` |
+
+A step that did not run is absent, never reported as `0`. `warming_total_ms`
+minus the sum of the steps is time no step explains (the brief, the database,
+a restart between two attempts): that is the figure to chase.
+
+Limits: a step is journalled when it ends, so the step in flight is not listed
+(its elapsed time is in the total); a resumed execution shows the latest run of
+each step but a total that spans the restart.
