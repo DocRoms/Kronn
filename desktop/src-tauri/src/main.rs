@@ -666,6 +666,20 @@ async fn start_backend(
         tracing::error!("{msg}");
         return Err(anyhow::anyhow!(msg));
     }
+    // KT-1596 — and never over plain HTTP unless a proxy/Tailscale carries TLS.
+    let tls_terminated = kronn::core::net_expose::flag_enabled(
+        kronn::core::child_env::var(kronn::core::net_expose::TLS_TERMINATED_ENV)
+            .ok()
+            .as_deref(),
+    );
+    if let Some(msg) = kronn::core::net_expose::plain_http_lan_boot_error(
+        kronn::core::net_expose::is_exposed_host(&bind_host),
+        false,
+        tls_terminated,
+    ) {
+        tracing::error!("{msg}");
+        return Err(anyhow::anyhow!(msg));
+    }
 
     // Before any launch: which projects hand their agents a GitHub token (D2).
     match kronn::core::github_connection::load_grants(

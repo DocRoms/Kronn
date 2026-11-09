@@ -33,7 +33,6 @@ has a detail file, every detail file has a row, and neither says it is closed.
 
 | ID | Problem | Area | Severity |
 |----|---------|------|----------|
-| TD-20260314-no-tls | No TLS/HTTPS — nginx TLS setup pending. Tailscale encrypts P2P traffic as interim. Code-side opt-out shipped: `server.auth_strict_localhost = true` requires Bearer token even on loopback. Migration plan in `docs/operations/auth-and-tls.md`. Not blocking for local/VPN use. | Infra | Medium |
 | TD-20260314-openapi-coverage | OpenAPI scaffold shipped (utoipa + Swagger UI at `/api/docs`); 1 of ~170 routes annotated. Residual = incremental enrichment by feature owner — every PR that touches an endpoint adds a `#[utoipa::path]` macro. | Docs | Low |
 | TD-20260318-token-tracking-incomplete | Token usage returns 0 for Gemini CLI and Vibe — SDK doesn't expose token counts. Blocked by upstream. | Backend | Medium |
 | TD-20260509-react19-effect-rules | Current ESLint baseline is 72 warnings / 0 errors (2026-08-11): 43 `set-state-in-effect`, 19 `immutability`, 4 `purity`, 3 project-specific restrictions, 2 manual-memoization and 1 `refs`. `exhaustive-deps` and Oxlint are now clean; keep contextual directory-sized passes and do not hide the residual inventory. | Frontend | Medium |

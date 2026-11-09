@@ -220,7 +220,7 @@ pub struct ServerConfig {
     /// pragmatic self-hosted behaviour). Flipping to `true` is the
     /// hardening path for users who run multiple processes on the
     /// same host (one of which they don't trust) — e.g. shared dev
-    /// VMs. Once TLS lands (TD-20260314-no-tls) we'll deprecate the
+    /// VMs. Once peers reach Kronn over TLS by default we'll deprecate the
     /// bypass entirely; this flag is the early-opt-out for users who
     /// can't wait.
     #[serde(default)]

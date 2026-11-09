@@ -221,6 +221,19 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         tracing::error!("{msg}");
         return Err(anyhow::anyhow!(msg));
     }
+    // KT-1596 — the same exposure must not carry the token over plain HTTP.
+    // There is no in-process TLS yet, hence `tls_enabled = false`.
+    let tls_terminated = kronn::core::net_expose::flag_enabled(
+        kronn::core::child_env::var(kronn::core::net_expose::TLS_TERMINATED_ENV)
+            .ok()
+            .as_deref(),
+    );
+    if let Some(msg) =
+        kronn::core::net_expose::plain_http_lan_boot_error(exposed, false, tls_terminated)
+    {
+        tracing::error!("{msg}");
+        return Err(anyhow::anyhow!(msg));
+    }
 
     // KT-619 — an operator who lost the admin secret asks for a new one by
     // creating `recover-admin-secret` in the private directory; this honours it

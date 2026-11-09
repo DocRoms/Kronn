@@ -7,9 +7,11 @@ auto-bypass enabled by default for self-hosted comfort. This page
 covers:
 
 1. How auth is gated today
-2. The early-opt-out for users who can't wait for TLS
+2. The transport guard: a LAN-exposed instance refuses plain HTTP
+   (KT-1596)
+3. The early-opt-out for users who want a token even on loopback
    (`server.auth_strict_localhost`)
-3. The migration path when TLS lands (TD-20260314-no-tls)
+4. The migration path when in-process TLS lands
 
 ## Today's defaults
 
@@ -42,6 +44,36 @@ endpoint is `POST /api/config/auth-token/regenerate` — localhost
 access only, so a leaked token holder can't rotate it without first
 landing on the box.
 
+## Plain HTTP on the LAN: refused unless TLS is carried elsewhere
+
+Kronn itself (the backend, and the nginx gateway on `:80`) speaks plain
+HTTP. When the instance is exposed beyond loopback (native bind host
+`0.0.0.0` / a LAN IP, or Docker with `KRONN_BIND` not loopback), the Bearer
+token and P2P invite codes would cross the network in clear. The backend
+therefore **refuses to start** in that situation, in addition to the
+unauthenticated-API guard (`insecure_lan_boot_error`), unless one of the two
+paths below applies. Loopback-only use is never refused.
+
+| Path | Status | How |
+|------|--------|-----|
+| **TLS terminated by a proxy, or Tailscale only** | Shipped | Set `KRONN_TLS_TERMINATED_BY_PROXY=1` (`true`/`yes` also accepted). It is a declaration by the operator: a TLS-terminating reverse proxy sits in front of Kronn, or peers only reach it over Tailscale (WireGuard-encrypted). Kronn cannot verify it. In Docker the variable is passed through by `docker-compose.yml`. |
+| **In-process TLS** (rustls, generated certificate, fingerprint carried in the P2P invite) | Not shipped | The guard already takes a `tls_enabled` input (`plain_http_lan_boot_error`), currently always `false`. The certificate generation and serving need dependencies that are not in the workspace yet. |
+
+`KRONN_ALLOW_INSECURE_LAN=1` (an *unauthenticated* API on a trusted LAN) does
+**not** waive this guard: authentication and transport are checked separately,
+and an exposed instance needs an answer to both.
+
+The refusal message names the variable to set. The check lives in
+`backend/src/core/net_expose.rs::plain_http_lan_boot_error` and is called by
+the standalone backend (`backend/src/main.rs`) and the embedded desktop server
+(`desktop/src-tauri/src/main.rs`). Tests: `core::net_expose::tests`
+(`plain_http_guard_refuses_an_exposed_instance_without_tls_or_the_proxy_flag`).
+
+**Upgrading:** an install that already publishes on the LAN (`KRONN_BIND=0.0.0.0`,
+or the Settings "Allow connections from other devices" toggle) fails its next
+boot with the message above until it sets the variable (or goes back to
+loopback).
+
 ## Strict-localhost opt-in
 
 Set the flag in `config.toml`:
@@ -67,9 +99,11 @@ the token in their requests. The setup wizard already provisions one
 on first boot, and the Tauri build reads it from the same
 `config.toml` — so most users won't notice a difference.
 
-## What changes when TLS ships
+## What changes when in-process TLS ships
 
-`TD-20260314-no-tls` tracks the move to nginx-fronted TLS. Once
+The transport guard above closed the old `TD-20260314-no-tls` debt entry:
+an exposed instance can no longer run in clear by accident. In-process TLS
+itself (the second path in the table) is the remaining step. Once
 that's in place, the localhost auto-bypass becomes redundant — the
 threat model it mitigated (HTTP-on-loopback) goes away. The plan:
 
@@ -147,4 +181,4 @@ the predicate behaviour is unchanged.
 - `frontend/src/pages/SettingsPage.tsx:1240-1275` — Settings UI
 - `.docker/nginx.conf` — CSP + security headers (gateway, Docker mode)
 - `desktop/src-tauri/src/main.rs:desktop_app` — desktop router (no COOP/COEP)
-- `docs/tech-debt/TD-20260314-no-tls.md` (when filed) — TLS plan
+- `backend/src/core/net_expose.rs:plain_http_lan_boot_error` — transport guard (KT-1596)

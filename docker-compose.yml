@@ -178,6 +178,9 @@ services:
       # KRONN_ALLOW_INSECURE_LAN=1 to keep it open on a trusted home network.
       - KRONN_BIND=${KRONN_BIND:-127.0.0.1}
       - KRONN_ALLOW_INSECURE_LAN=${KRONN_ALLOW_INSECURE_LAN:-}
+      # KT-1596 — the gateway speaks plain HTTP, so a LAN publish ALSO needs
+      # KRONN_TLS_TERMINATED_BY_PROXY=1 (a TLS proxy in front, or Tailscale only).
+      - KRONN_TLS_TERMINATED_BY_PROXY=${KRONN_TLS_TERMINATED_BY_PROXY:-}
       - KRONN_AUTH_TOKEN=${KRONN_AUTH_TOKEN:-}
       # 0.8.11 (B6) — failure webhook (Slack/Teams/generic) + scheduled backups.
       # A backup dir OUTSIDE the data volume needs a host bind-mount (see the

@@ -104,9 +104,65 @@ pub fn insecure_lan_boot_error(
     )
 }
 
+/// Env var an operator sets to declare that the plain-HTTP listener is NOT the
+/// transport peers see: a reverse proxy terminates TLS in front of it, or the
+/// instance is only reachable over Tailscale (WireGuard-encrypted).
+pub const TLS_TERMINATED_ENV: &str = "KRONN_TLS_TERMINATED_BY_PROXY";
+
+/// Parse the boolean spelling shared by the exposure env flags.
+pub fn flag_enabled(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1" | "true" | "yes"))
+}
+
+/// Boot transport guard (KT-1596): `Some(message)` when the instance is
+/// LAN-exposed and would serve the Bearer token and P2P invite codes over plain
+/// HTTP, with neither in-process TLS nor the explicit "TLS terminated by proxy /
+/// Tailscale only" declaration. Independent of the auth guard above: a token
+/// protects nothing if it crosses the LAN in clear, and
+/// `KRONN_ALLOW_INSECURE_LAN` (an unauthenticated API) does not waive it.
+/// Loopback-only use is never refused. Pure + tested.
+pub fn plain_http_lan_boot_error(
+    lan_exposed: bool,
+    tls_enabled: bool,
+    tls_terminated_by_proxy: bool,
+) -> Option<String> {
+    if !lan_exposed || tls_enabled || tls_terminated_by_proxy {
+        return None;
+    }
+    Some(format!(
+        "REFUSING TO START: Kronn is exposed to the network (LAN/Tailscale) over plain \
+         HTTP — the Bearer token and P2P invite codes would travel in clear.\n  Fix one of:\n    \
+         • put a TLS-terminating reverse proxy in front and set {TLS_TERMINATED_ENV}=1, or\n    \
+         • reach the instance only over Tailscale (encrypted) and set {TLS_TERMINATED_ENV}=1, \
+         or\n    • bind loopback only (KRONN_BIND=127.0.0.1 / host=127.0.0.1)."
+    ))
+}
+
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_http_guard_refuses_an_exposed_instance_without_tls_or_the_proxy_flag() {
+        // Exposed, no TLS, no declaration → refuse, naming the flag to set.
+        let msg = plain_http_lan_boot_error(true, false, false).expect("must refuse");
+        assert!(msg.contains(TLS_TERMINATED_ENV));
+        // Loopback-only use is accepted.
+        assert!(plain_http_lan_boot_error(false, false, false).is_none());
+        // Either way out lifts the refusal.
+        assert!(plain_http_lan_boot_error(true, true, false).is_none());
+        assert!(plain_http_lan_boot_error(true, false, true).is_none());
+    }
+
+    #[test]
+    fn tls_flag_spelling_matches_the_other_exposure_flags() {
+        assert!(flag_enabled(Some("1")));
+        assert!(flag_enabled(Some(" true ")));
+        assert!(flag_enabled(Some("yes")));
+        assert!(!flag_enabled(Some("0")));
+        assert!(!flag_enabled(Some("")));
+        assert!(!flag_enabled(None));
+    }
 
     #[test]
     fn a_native_backend_keeps_its_configured_host_whatever_its_data_dir() {

@@ -43,6 +43,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Security
 
+- A LAN-exposed instance (bind-all host, or Docker with a non-loopback
+  `KRONN_BIND`) now refuses to start over plain HTTP, since the Bearer token and
+  P2P invite codes would cross the network in clear. Set
+  `KRONN_TLS_TERMINATED_BY_PROXY=1` to declare that a TLS proxy fronts Kronn or
+  that peers only reach it over Tailscale. `KRONN_ALLOW_INSECURE_LAN` does not
+  waive it, and loopback-only use is unchanged. An install that already
+  publishes on the LAN must set the variable on its next boot. In-process TLS
+  is not shipped yet (KT-1596).
 - The copy of a generated asset into a run's artifacts directory is written
   through the directory's file descriptor, so a link an Exec step planted at
   the asset's name is replaced, never written through. A press of a step's
