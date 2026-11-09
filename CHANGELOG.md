@@ -64,6 +64,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Windows: Kronn could not start after an upgrade with a pending migration ("Access denied (os error 5)"), and scheduled backups failed. The backup copy was flushed through a read-only handle, which Windows refuses; it is now opened for writing first, and the Windows CI job runs the test (KT-1625, #509).
+
 - An interrupted task execution no longer stays stuck on "recovery decision
   already consumed": it can always resume or deliver, and a resume never
   consumes the decision of a newer interruption (KT-1537, #492).
