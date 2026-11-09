@@ -103,7 +103,7 @@ going, the comparison says it is partial.
 A Page shows, in its **Quick Prompts and skills** panel, every Quick Prompt and
 skill used by the workflows behind it, with the version each lane loads: the
 normal run's and the one the shadow tests.
-[src: file: backend/src/db/live_pages.rs:2051-2197#list_live_page_resources]
+[src: file: backend/src/db/live_pages.rs:2077-2223#list_live_page_resources]
 **Promote** hands the tested version to the normal runs in one click:
 
 - a skill: every step of that workflow that loads it now loads the tested
