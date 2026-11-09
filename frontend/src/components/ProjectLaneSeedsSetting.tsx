@@ -4,7 +4,7 @@ import { FolderInput, Loader2, ShieldAlert, Sparkles, Trash2 } from 'lucide-reac
 import { projects as projectsApi } from '../lib/api';
 import { userError } from '../lib/userError';
 import { formatBytes } from '../lib/live-page-weight';
-import type { LaneSeedCandidate, ProjectLaneSeeds } from '../types/generated';
+import type { LaneSeedCandidate, LaneSeedSecretFinding, ProjectLaneSeeds } from '../types/generated';
 
 interface Props {
   projectId: string;
@@ -14,7 +14,7 @@ interface Props {
 /** What waits for the human to accept secret-looking paths. */
 interface Held {
   seeds: string[];
-  paths: string[];
+  findings: LaneSeedSecretFinding[];
 }
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((path, i) => path === b[i]);
@@ -45,7 +45,7 @@ export function ProjectLaneSeedsSetting({ projectId, t }: Props) {
     try {
       const next = await projectsApi.setLaneSeeds(projectId, seeds, confirm);
       if (next.needs_confirmation.length > 0) {
-        setHeld({ seeds, paths: next.needs_confirmation });
+        setHeld({ seeds, findings: next.needs_confirmation });
         setState(next);
       } else {
         setHeld(null);
@@ -82,7 +82,15 @@ export function ProjectLaneSeedsSetting({ projectId, t }: Props) {
     }
   };
 
-  const profileDiffers = !!state?.profile_seeds && !sameList(state.profile_seeds, state.seeds);
+  // The file's list is a proposal: it is only seeded once adopted here.
+  const profileProposal = !!state?.profile_seeds && !sameList(state.profile_seeds, state.seeds);
+
+  const secretFiles = (finding: LaneSeedSecretFinding) => (
+    <>
+      {t('projects.laneSeeds.secretFiles', finding.files.join(', '))}
+      {finding.truncated ? ` ${t('projects.laneSeeds.secretMore')}` : ''}
+    </>
+  );
 
   return (
     <section className="project-agent-files" data-testid="project-lane-seeds">
@@ -91,12 +99,6 @@ export function ProjectLaneSeedsSetting({ projectId, t }: Props) {
         {(saving || looking) && <Loader2 size={12} className="spin" aria-hidden="true" />}
       </h4>
       <p className="project-agent-files-help">{t('projects.laneSeeds.help')}</p>
-
-      {state?.source === 'profile' && (
-        <p className="project-agent-files-where" data-testid="project-lane-seeds-from-profile">
-          {t('projects.laneSeeds.fromProfile')}
-        </p>
-      )}
 
       {state && state.seeds.length === 0 && (
         <p className="project-agent-files-where" data-testid="project-lane-seeds-empty">{t('projects.laneSeeds.empty')}</p>
@@ -178,22 +180,46 @@ export function ProjectLaneSeedsSetting({ projectId, t }: Props) {
           </strong>
           <p>{t('projects.laneSeeds.secretWarning')}</p>
           <ul className="project-lane-seeds-list">
-            {held.paths.map(path => <li key={path}><code>{path}</code></li>)}
+            {held.findings.map(finding => (
+              <li key={finding.path} data-testid={`project-lane-seeds-secret-${finding.path}`}>
+                <code>{finding.path}</code>
+                <small> {secretFiles(finding)}</small>
+              </li>
+            ))}
           </ul>
           <div className="project-validations-access-warning-actions">
             <button type="button" className="btn btn-secondary" onClick={() => setHeld(null)} disabled={saving}>
               {t('projects.laneSeeds.cancel')}
             </button>
-            <button type="button" className="btn btn-danger" onClick={() => void save(held.seeds, held.paths)} disabled={saving} data-testid="project-lane-seeds-secret-confirm">
+            <button type="button" className="btn btn-danger" onClick={() => void save(held.seeds, held.findings.map(finding => finding.path))} disabled={saving} data-testid="project-lane-seeds-secret-confirm">
               {t('projects.laneSeeds.secretConfirm')}
             </button>
           </div>
         </div>
       )}
 
-      {profileDiffers && state?.profile_seeds && (
-        <p className="project-agent-files-where" data-testid="project-lane-seeds-profile-differs">
-          {t('projects.laneSeeds.profileDiffers', state.profile_seeds.join(', ') || '—')}{' '}
+      {state && state.secret_findings.length > 0 && !held && (
+        <div className="project-agent-files-error" role="alert" data-testid="project-lane-seeds-secret-findings">
+          <strong><ShieldAlert size={14} aria-hidden="true" /> {t('projects.laneSeeds.secretDeclaredTitle')}</strong>
+          <ul className="project-lane-seeds-list">
+            {state.secret_findings.map(finding => (
+              <li key={finding.path}>
+                <code>{finding.path}</code>
+                <small> {secretFiles(finding)}</small>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {state?.secret_scan_error && (
+        <p role="alert" className="project-agent-files-error" data-testid="project-lane-seeds-scan-error">
+          {t('projects.laneSeeds.secretScanError', state.secret_scan_error)}
+        </p>
+      )}
+
+      {profileProposal && state?.profile_seeds && (
+        <p className="project-agent-files-where" data-testid="project-lane-seeds-profile-proposal">
+          {t('projects.laneSeeds.profileProposal', state.profile_seeds.join(', ') || '—')}{' '}
           <button
             type="button"
             className="btn btn-secondary"

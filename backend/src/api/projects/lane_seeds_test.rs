@@ -173,8 +173,11 @@ async fn a_secret_looking_path_is_saved_only_once_confirmed() {
     assert!(held.0.success, "{:?}", held.0.error);
     let held = held.0.data.unwrap();
     assert_eq!(
-        held.needs_confirmation,
-        vec![".env".to_string(), "config/server.key".to_string()]
+        held.needs_confirmation
+            .iter()
+            .map(|finding| finding.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![".env", "config/server.key"]
     );
     assert_eq!(held.seeds, vec!["a/b".to_string()], "nothing was saved");
     assert_eq!(current(&state, "p1").await, vec!["a/b".to_string()]);
@@ -190,8 +193,12 @@ async fn a_secret_looking_path_is_saved_only_once_confirmed() {
     .data
     .unwrap();
     assert_eq!(
-        partly.needs_confirmation,
-        vec!["config/server.key".to_string()]
+        partly
+            .needs_confirmation
+            .iter()
+            .map(|finding| finding.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["config/server.key"]
     );
     assert_eq!(current(&state, "p1").await, vec!["a/b".to_string()]);
 
@@ -231,9 +238,9 @@ fn committed_repo_with_profile(profile: &str) -> (tempfile::TempDir, std::path::
     (dir, repo)
 }
 
-/// A project nobody declared seeds for in Kronn falls back to the table its
-/// default branch carries; a human's declaration (even an empty one) wins, and a
-/// save keeps the working copy of the file in step with it.
+/// The table the default branch carries is only proposed: nothing is seeded from
+/// it until a human adopts it. A human's declaration (even an empty one) is what
+/// applies, and a save keeps the working copy of the file in step with it.
 #[tokio::test]
 async fn the_declaration_and_the_projects_profile_stay_consistent() {
     let state = test_state();
@@ -247,11 +254,11 @@ async fn the_declaration_and_the_projects_profile_stay_consistent() {
         .0
         .data
         .unwrap();
-    assert_eq!(read.source, LaneSeedsSource::Profile);
-    assert_eq!(
-        read.seeds,
-        vec!["public/images".to_string()],
-        "a secret-looking path out of the file is never applied unconfirmed"
+    assert_eq!(read.source, LaneSeedsSource::None);
+    assert!(
+        read.seeds.is_empty(),
+        "a repo-controlled table seeds nothing by itself: {:?}",
+        read.seeds
     );
     assert_eq!(
         read.profile_seeds,
@@ -290,6 +297,168 @@ async fn the_declaration_and_the_projects_profile_stay_consistent() {
     assert!(!std::fs::read_to_string(repo.join("kronn/project.toml"))
         .unwrap()
         .contains("lane_seeds"));
+}
+
+/// Adopting the proposal is a declaration like any other: a secret-looking path
+/// in it is held, listed, until the human confirms it.
+#[tokio::test]
+async fn adopting_the_profile_proposal_holds_a_secret_until_confirmed() {
+    let state = test_state();
+    let (_dir, repo) = committed_repo_with_profile(
+        "schema_version = 1\n\n[lane_seeds]\npaths = [\"public/images\", \".env\"]\n",
+    );
+    seed_project(&state, "p1", &repo).await;
+    let proposal = get(State(state.clone()), Path("p1".into()))
+        .await
+        .0
+        .data
+        .unwrap()
+        .profile_seeds
+        .unwrap();
+
+    let held = set(
+        State(state.clone()),
+        Path("p1".into()),
+        Json(SetProjectLaneSeeds {
+            seeds: proposal.clone(),
+            confirm_secret_paths: vec![],
+        }),
+    )
+    .await
+    .0
+    .data
+    .unwrap();
+    assert_eq!(held.needs_confirmation.len(), 1);
+    assert_eq!(held.needs_confirmation[0].path, ".env");
+    assert!(current(&state, "p1").await.is_empty(), "nothing is saved");
+
+    let adopted = set(
+        State(state.clone()),
+        Path("p1".into()),
+        Json(SetProjectLaneSeeds {
+            seeds: proposal.clone(),
+            confirm_secret_paths: vec![".env".into()],
+        }),
+    )
+    .await
+    .0
+    .data
+    .unwrap();
+    assert!(adopted.needs_confirmation.is_empty());
+    assert_eq!(adopted.seeds, proposal);
+}
+
+/// A declared directory that holds a `.env` or a key is held with the files
+/// listed, although its own path is harmless; a seed already accepted is not
+/// asked about again when another one is added.
+#[tokio::test]
+async fn a_secret_inside_a_declared_directory_is_listed_and_held() {
+    let state = test_state();
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::fs::create_dir_all(repo.join("generated/deep")).unwrap();
+    std::fs::write(repo.join("generated/ok.txt"), "fine").unwrap();
+    std::fs::write(repo.join("generated/deep/.env.local"), "TOKEN=1").unwrap();
+    std::fs::create_dir_all(repo.join("clean")).unwrap();
+    std::fs::write(repo.join("clean/a.txt"), "a").unwrap();
+    seed_project(&state, "p1", repo).await;
+
+    let held = set(
+        State(state.clone()),
+        Path("p1".into()),
+        declared(&["clean", "generated"]),
+    )
+    .await
+    .0
+    .data
+    .unwrap();
+    assert_eq!(
+        held.needs_confirmation.len(),
+        1,
+        "{:?}",
+        held.needs_confirmation
+    );
+    assert_eq!(held.needs_confirmation[0].path, "generated");
+    assert_eq!(
+        held.needs_confirmation[0].files,
+        vec!["generated/deep/.env.local".to_string()]
+    );
+    assert!(current(&state, "p1").await.is_empty());
+
+    let saved = set(
+        State(state.clone()),
+        Path("p1".into()),
+        confirmed(&["clean", "generated"], &["generated"]),
+    )
+    .await
+    .0
+    .data
+    .unwrap();
+    assert!(saved.needs_confirmation.is_empty());
+    assert_eq!(saved.secret_findings.len(), 1, "still shown once saved");
+    assert_eq!(saved.secret_findings[0].path, "generated");
+
+    std::fs::create_dir_all(repo.join("more")).unwrap();
+    let next = set(
+        State(state.clone()),
+        Path("p1".into()),
+        declared(&["clean", "generated", "more"]),
+    )
+    .await
+    .0
+    .data
+    .unwrap();
+    assert!(
+        next.needs_confirmation.is_empty(),
+        "{:?}",
+        next.needs_confirmation
+    );
+    assert_eq!(next.seeds.len(), 3);
+}
+
+/// A tree that cannot be checked refuses the save instead of saving unchecked.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tree_that_cannot_be_checked_refuses_the_save() {
+    use std::os::unix::fs::PermissionsExt;
+    let state = test_state();
+    let dir = tempfile::tempdir().unwrap();
+    let inner = dir.path().join("gen/inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::write(inner.join("a.txt"), "a").unwrap();
+    std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // A superuser reads it anyway: then there is nothing to fail on.
+    let unreadable = std::fs::read_dir(&inner).is_err();
+    seed_project(&state, "p1", dir.path()).await;
+
+    let refused = set(State(state.clone()), Path("p1".into()), declared(&["gen"])).await;
+
+    std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if unreadable {
+        assert!(!refused.0.success, "an unchecked tree must not be saved");
+        assert!(current(&state, "p1").await.is_empty());
+    }
+}
+
+/// A table with a path that is no valid seed is an error of the proposal, never
+/// handed back raw.
+#[tokio::test]
+async fn a_malformed_profile_table_is_an_error_not_raw_paths() {
+    let state = test_state();
+    let (_dir, repo) = committed_repo_with_profile(
+        "schema_version = 1\n\n[lane_seeds]\npaths = [\"../escape\"]\n",
+    );
+    seed_project(&state, "p1", &repo).await;
+
+    let read = get(State(state.clone()), Path("p1".into()))
+        .await
+        .0
+        .data
+        .unwrap();
+
+    assert!(read.profile_seeds.is_none(), "{:?}", read.profile_seeds);
+    assert!(read.profile_error.is_some());
+    assert!(read.seeds.is_empty());
 }
 
 /// A project without a `kronn/project.toml` is not given one by a save.

@@ -644,3 +644,246 @@ fn a_seed_never_enters_a_worker_commit() {
     }
     assert!(fx.worktree.join("public/images/icon.svg").is_file());
 }
+
+/// Make a path gitignored in the main checkout and in every worktree: the main
+/// checkout's `info/exclude` is shared.
+fn ignore_everywhere(fx: &Fixture, line: &str) {
+    let exclude = fx.main.join(".git/info/exclude");
+    let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    text.push_str(line);
+    text.push('\n');
+    std::fs::write(exclude, text).unwrap();
+}
+
+/// A seed may be one generated file (a config, a key the project needs): it is
+/// seeded, not skipped, by a clone and by a plain copy.
+#[test]
+fn a_single_file_seed_is_seeded() {
+    for use_clone in [true, false] {
+        let fx = fixture();
+        ignore_everywhere(&fx, "config/generated.json");
+        write(&fx.main.join("config/generated.json"), "version one");
+        let declared = seeds(&["config/generated.json"]);
+
+        let record = if use_clone {
+            seed_worktree(&fx.main, &fx.worktree, &declared, &clone_tree)
+        } else {
+            seed_worktree(&fx.main, &fx.worktree, &declared, &no_clone)
+        };
+
+        match &only(&record).status {
+            SeedStatus::Seeded { dropped_links, .. } => assert!(dropped_links.is_empty()),
+            other => panic!("a file seed must be seeded (clone={use_clone}): {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(fx.worktree.join("config/generated.json")).unwrap(),
+            "version one"
+        );
+        assert_eq!(
+            run_git(
+                &fx.worktree,
+                &["status", "--porcelain", "--untracked-files=all"]
+            )
+            .trim(),
+            "",
+            "the seeded file stays out of git status"
+        );
+
+        let again = seed_worktree(&fx.main, &fx.worktree, &declared, &clone_tree);
+        assert_eq!(only(&again).status, SeedStatus::UpToDate, "{again:?}");
+
+        write(&fx.main.join("config/generated.json"), "version two!");
+        let refreshed = seed_worktree(&fx.main, &fx.worktree, &declared, &clone_tree);
+        match &only(&refreshed).status {
+            SeedStatus::Seeded { refreshed, .. } => assert!(refreshed),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(fx.worktree.join("config/generated.json")).unwrap(),
+            "version two!"
+        );
+    }
+}
+
+/// A seed that is itself a link is refused (its target is not part of the copy),
+/// and `drop_escaping_links` looks at a file without listing it.
+#[cfg(unix)]
+#[test]
+fn a_single_link_seed_is_refused() {
+    let fx = fixture();
+    ignore_everywhere(&fx, "config/link.json");
+    write(&fx.main.join("config/real.json"), "real");
+    link("real.json", &fx.main.join("config/link.json"));
+
+    let record = seed_worktree(
+        &fx.main,
+        &fx.worktree,
+        &seeds(&["config/link.json"]),
+        &clone_tree,
+    );
+
+    let reason = skipped_reason(only(&record));
+    assert!(reason.contains("symlink"), "{reason}");
+    assert!(std::fs::symlink_metadata(fx.worktree.join("config/link.json")).is_err());
+
+    // The helper on its own: a file is kept, a link as the root is an error.
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("file"), "x");
+    assert!(drop_escaping_links(&dir.path().join("file"))
+        .unwrap()
+        .is_empty());
+    link("file", &dir.path().join("root-link"));
+    assert!(drop_escaping_links(&dir.path().join("root-link")).is_err());
+}
+
+/// The copy under construction (or one a crash left) is ignored by git before it
+/// exists, so a worker's `git add -A` cannot commit it.
+#[test]
+fn a_leftover_transient_copy_is_ignored_by_git() {
+    let fx = fixture();
+    seed_worktree(
+        &fx.main,
+        &fx.worktree,
+        &seeds(&["public/images"]),
+        &clone_tree,
+    );
+    for kind in [STAGING_KIND, TRASH_KIND] {
+        let name = format!(".kronn-{kind}-0123456789abcdef");
+        write(&fx.worktree.join(&name).join("left.txt"), "left by a crash");
+        let status = run_git(
+            &fx.worktree,
+            &["status", "--porcelain", "--untracked-files=all"],
+        );
+        assert_eq!(status.trim(), "", "{name} shows in git status: {status}");
+        run_git(&fx.worktree, &["add", "-A"]);
+        assert_eq!(
+            run_git(&fx.worktree, &["ls-files", "--", &name]),
+            "",
+            "{name} was staged"
+        );
+    }
+
+    // The next seeding sweeps them.
+    seed_worktree(
+        &fx.main,
+        &fx.worktree,
+        &seeds(&["public/images"]),
+        &clone_tree,
+    );
+    let left: Vec<String> = std::fs::read_dir(&fx.worktree)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".kronn-seed"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_seed_path_that_looks_secret_is_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    write(&repo.join(".env"), "TOKEN=1");
+    write(&repo.join("config/server.key"), "k");
+    write(&repo.join("assets/logo.svg"), "<svg/>");
+    write(&repo.join("assets/.env.example"), "TOKEN=");
+
+    let found = secret_findings(
+        repo,
+        &seeds(&[".env", "config/server.key", "assets", "missing"]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        found,
+        vec![
+            LaneSeedSecretFinding {
+                path: ".env".into(),
+                files: vec![".env".into()],
+                truncated: false
+            },
+            LaneSeedSecretFinding {
+                path: "config/server.key".into(),
+                files: vec!["config/server.key".into()],
+                truncated: false
+            },
+        ],
+        "a clean tree and a versioned template are no finding"
+    );
+}
+
+/// A seeded directory holding a `.env` or a key gets a warning naming the files,
+/// although its own path is harmless.
+#[test]
+fn a_secret_inside_a_seeded_directory_is_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    write(&repo.join("generated/ok.txt"), "fine");
+    write(&repo.join("generated/deep/.env.production"), "TOKEN=1");
+    write(&repo.join("generated/deep/er/id_ed25519"), "key");
+    write(&repo.join("generated/cert.pem"), "pem");
+
+    let found = secret_findings(repo, &seeds(&["generated"])).unwrap();
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].path, "generated");
+    assert_eq!(
+        found[0].files,
+        vec![
+            "generated/cert.pem".to_string(),
+            "generated/deep/.env.production".to_string(),
+            "generated/deep/er/id_ed25519".to_string(),
+        ]
+    );
+    assert!(!found[0].truncated);
+}
+
+#[test]
+fn the_list_of_found_secrets_is_capped_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    for index in 0..(MAX_SECRET_FILES_LISTED + 5) {
+        write(&dir.path().join(format!("gen/k{index}.key")), "k");
+    }
+
+    let found = secret_findings(dir.path(), &seeds(&["gen"])).unwrap();
+
+    assert_eq!(found[0].files.len(), MAX_SECRET_FILES_LISTED);
+    assert!(found[0].truncated);
+}
+
+/// The walk never follows a link out of the seed, and a link to a secret is one.
+#[cfg(unix)]
+#[test]
+fn the_secret_scan_does_not_follow_links_and_flags_a_link_to_a_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    write(&repo.join("outside/.env"), "TOKEN=1");
+    write(&repo.join("gen/a.txt"), "a");
+    link("../outside", &repo.join("gen/to-dir"));
+    link("../outside/.env", &repo.join("gen/to-env"));
+
+    let found = secret_findings(repo, &seeds(&["gen"])).unwrap();
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].files, vec!["gen/to-env".to_string()]);
+}
+
+/// A tree that cannot be read is an error, never "nothing found".
+#[cfg(unix)]
+#[test]
+fn an_unreadable_tree_fails_the_secret_scan_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("gen/inner/a.txt"), "a");
+    let inner = dir.path().join("gen/inner");
+    std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // A superuser reads it anyway: then there is nothing to fail on.
+    let unreadable = std::fs::read_dir(&inner).is_err();
+
+    let result = secret_findings(dir.path(), &seeds(&["gen"]));
+
+    std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if unreadable {
+        assert!(result.is_err(), "{result:?}");
+    }
+}

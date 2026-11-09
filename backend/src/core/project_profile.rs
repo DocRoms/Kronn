@@ -754,13 +754,16 @@ pub fn run_template_values(
 
 /// The lane seeds the default branch's profile declares (KT-1438): `None` when
 /// there is no profile or it has no `[lane_seeds]` table, an error when the
-/// profile is malformed.
+/// profile is malformed or a path of the table is not a valid seed (the raw
+/// paths are never handed back unchecked).
 pub fn declared_lane_seeds(repo: &Path) -> Result<Option<Vec<String>>, String> {
     match load_from_default_branch(repo)? {
-        ProfileSource::Loaded { profile, .. } => Ok(profile.lane_seeds.map(|seeds| {
-            crate::core::task_worker_lane_seeds::normalize_seed_list(&seeds.paths)
-                .unwrap_or(seeds.paths)
-        })),
+        ProfileSource::Loaded { profile, .. } => match profile.lane_seeds {
+            Some(seeds) => crate::core::task_worker_lane_seeds::normalize_seed_list(&seeds.paths)
+                .map(Some)
+                .map_err(|reason| format!("{PROFILE_PATH}: [lane_seeds] {reason}")),
+            None => Ok(None),
+        },
         ProfileSource::Absent { .. } => Ok(None),
     }
 }

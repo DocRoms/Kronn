@@ -9524,11 +9524,14 @@ async fn seed_lane_assets(
     worktree: &std::path::Path,
 ) {
     let pid = project_id.to_string();
-    let declared = match db
+    // Only what a human declared in Kronn applies. The `[lane_seeds]` table of
+    // `kronn/project.toml` reaches the repository through a pull request, not
+    // through the human gate: it is proposed in the settings, never seeded here.
+    let seeds = match db
         .with_read_conn(move |conn| crate::db::projects::lane_seeds(conn, &pid))
         .await
     {
-        Ok(declared) => declared,
+        Ok(declared) => declared.unwrap_or_default(),
         Err(error) => {
             tracing::warn!(execution_id = %exec_id, "lane seeds not read: {error}");
             return;
@@ -9536,20 +9539,6 @@ async fn seed_lane_assets(
     };
     let (repo, worktree) = (repo.to_path_buf(), worktree.to_path_buf());
     let record = match tokio::task::spawn_blocking(move || {
-        // What a human declared in Kronn wins; a project they never declared
-        // any for falls back to the `[lane_seeds]` of its default branch.
-        let profile = if declared.is_none() {
-            crate::core::project_profile::declared_lane_seeds(&repo)
-                .map_err(|error| {
-                    tracing::warn!("lane seeds of kronn/project.toml not read: {error}")
-                })
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
-        let (seeds, _) =
-            crate::core::task_worker_lane_seeds::effective_lane_seeds(declared, profile, &repo);
         if seeds.is_empty() {
             return None;
         }

@@ -8,13 +8,16 @@
 //! A seed copies files from the main checkout to where a worker can read them
 //! (a gitignored `.env` is a gitignored path too), so only a human declares
 //! them: the change is a destructive request (`is_destructive`), and no bridge
-//! token has the route. Kronn only *suggests* candidates, and a declared path
-//! that looks like a secret file is refused until the human confirms it.
+//! token has the route. Kronn only *suggests* candidates, and a newly declared
+//! path that is, or holds, something that looks like a secret file (`.env`, a
+//! key) is refused until the human has seen the files and confirmed it.
 //!
 //! The declaration lives in Kronn (the human's word) and is mirrored into the
 //! `[lane_seeds]` table of the main checkout's `kronn/project.toml` when the
-//! project has one; a project nobody declared seeds for in Kronn falls back to
-//! the table its default branch carries.
+//! project has one. That table never applies by itself: it reaches the
+//! repository through a pull request, not through the human gate, so it is only
+//! *proposed* here (`profile_seeds`), and adopting it is a declaration like any
+//! other, secret check and confirmation included.
 
 use axum::{
     extract::{Path, State},
@@ -24,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::core::task_worker_lane_seeds::{
-    self, LaneSeedCandidate, LaneSeedsRecord, LaneSeedsSource, SeedStatus,
+    self, LaneSeedCandidate, LaneSeedSecretFinding, LaneSeedsRecord, LaneSeedsSource, SeedStatus,
 };
 use crate::models::{ApiErrorCode, ApiResponse, Project};
 use crate::AppState;
@@ -54,10 +57,11 @@ pub struct LaneSeedsLastRun {
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct ProjectLaneSeeds {
-    /// The paths seeded into each task worktree, whichever way they are declared.
+    /// The paths seeded into each task worktree: what a human declared here.
     pub seeds: Vec<String>,
     pub source: LaneSeedsSource,
-    /// What `kronn/project.toml` on the default branch declares, when it does.
+    /// What `kronn/project.toml` on the default branch proposes, when it does.
+    /// Nothing is seeded from it until a human adopts it.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub profile_seeds: Option<Vec<String>>,
@@ -65,9 +69,16 @@ pub struct ProjectLaneSeeds {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub profile_error: Option<String>,
-    /// Declared paths that look like a secret file and were NOT saved: send them
-    /// back in `confirm_secret_paths` once the human accepted them.
-    pub needs_confirmation: Vec<String>,
+    /// Newly declared paths that are, or hold, a secret-looking file and were NOT
+    /// saved: send their `path` back in `confirm_secret_paths` once the human
+    /// has seen the files and accepted them.
+    pub needs_confirmation: Vec<LaneSeedSecretFinding>,
+    /// Secret-looking files the declared seeds hold right now.
+    pub secret_findings: Vec<LaneSeedSecretFinding>,
+    /// Why the declared seeds could not be checked for secrets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub secret_scan_error: Option<String>,
     /// A save rewrote the working copy of `kronn/project.toml` (uncommitted).
     pub profile_file_written: bool,
     /// Why the working copy of `kronn/project.toml` could not be kept in step.
@@ -83,7 +94,7 @@ pub struct ProjectLaneSeeds {
 #[ts(export)]
 pub struct SetProjectLaneSeeds {
     pub seeds: Vec<String>,
-    /// Secret-looking paths of `seeds` the human confirmed.
+    /// Newly declared seeds holding secret-looking files that the human confirmed.
     #[serde(default)]
     pub confirm_secret_paths: Vec<String>,
 }
@@ -126,7 +137,7 @@ fn reports(record: &LaneSeedsRecord) -> Vec<LaneSeedReport> {
 async fn view(
     state: &AppState,
     project: &Project,
-    needs_confirmation: Vec<String>,
+    needs_confirmation: Vec<LaneSeedSecretFinding>,
     file_write: Result<bool, String>,
 ) -> Result<ProjectLaneSeeds, String> {
     let id = project.id.clone();
@@ -140,23 +151,29 @@ async fn view(
         })
         .await
         .map_err(|error| error.to_string())?;
+    let source = if declared.is_some() {
+        LaneSeedsSource::Project
+    } else {
+        LaneSeedsSource::None
+    };
+    let seeds = declared.unwrap_or_default();
     let repo = crate::core::scanner::resolve_host_path(&project.path);
-    let profile = tokio::task::spawn_blocking(move || {
-        let profile = crate::core::project_profile::declared_lane_seeds(&repo);
-        let (seeds, source) = match &profile {
-            Ok(found) => {
-                task_worker_lane_seeds::effective_lane_seeds(declared, found.clone(), &repo)
-            }
-            Err(_) => task_worker_lane_seeds::effective_lane_seeds(declared, None, &repo),
-        };
-        (profile, seeds, source)
+    let to_scan = seeds.clone();
+    let (profile, findings) = tokio::task::spawn_blocking(move || {
+        (
+            crate::core::project_profile::declared_lane_seeds(&repo),
+            task_worker_lane_seeds::secret_findings(&repo, &to_scan),
+        )
     })
     .await
     .map_err(|error| format!("the declaration could not be read: {error}"))?;
-    let (profile, seeds, source) = profile;
     let (profile_seeds, profile_error) = match profile {
         Ok(found) => (found, None),
         Err(error) => (None, Some(error)),
+    };
+    let (secret_findings, secret_scan_error) = match findings {
+        Ok(found) => (found, None),
+        Err(error) => (Vec::new(), Some(error)),
     };
     let (profile_file_written, profile_file_error) = match file_write {
         Ok(written) => (written, None),
@@ -168,6 +185,8 @@ async fn view(
         profile_seeds,
         profile_error,
         needs_confirmation,
+        secret_findings,
+        secret_scan_error,
         profile_file_written,
         profile_file_error,
         last_run: last_run.map(|(execution_id, at, record)| LaneSeedsLastRun {
@@ -203,8 +222,10 @@ pub async fn get(
 }
 
 /// PUT /api/projects/{id}/lane-seeds — replaces the list; an empty one clears it.
-/// A path that looks like a secret file is not saved until the request names it
-/// in `confirm_secret_paths`: the answer then lists it in `needs_confirmation`.
+/// A newly declared seed that is, or holds, a secret-looking file is not saved
+/// until the request names it in `confirm_secret_paths`: the answer then lists
+/// it, with the files found, in `needs_confirmation`. A tree that cannot be
+/// checked refuses the save (fail closed).
 pub async fn set(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -226,15 +247,43 @@ pub async fn set(
     };
     let repo = crate::core::scanner::resolve_host_path(&project.path);
 
-    let to_check = (repo.clone(), seeds.clone());
-    let secret = tokio::task::spawn_blocking(move || {
-        task_worker_lane_seeds::secret_looking(&to_check.0, &to_check.1)
+    // A seed the human already declared was accepted then: only what this
+    // request adds is judged (the others stay listed in `secret_findings`).
+    let project_id = project.id.clone();
+    let previous = match state
+        .db
+        .with_read_conn(move |conn| crate::db::projects::lane_seeds(conn, &project_id))
+        .await
+    {
+        Ok(previous) => previous.unwrap_or_default(),
+        Err(error) => return Json(ApiResponse::err(error.to_string())),
+    };
+    let added: Vec<String> = seeds
+        .iter()
+        .filter(|seed| !previous.contains(seed))
+        .cloned()
+        .collect();
+    let to_check = (repo.clone(), added);
+    let findings = match tokio::task::spawn_blocking(move || {
+        task_worker_lane_seeds::secret_findings(&to_check.0, &to_check.1)
     })
     .await
-    .unwrap_or_default();
-    let unconfirmed: Vec<String> = secret
+    {
+        Ok(Ok(findings)) => findings,
+        Ok(Err(reason)) => {
+            return Json(ApiResponse::err(format!(
+                "the seeds could not be checked for secrets, nothing was saved: {reason}"
+            )))
+        }
+        Err(error) => {
+            return Json(ApiResponse::err(format!(
+                "the secret check did not complete, nothing was saved: {error}"
+            )))
+        }
+    };
+    let unconfirmed: Vec<LaneSeedSecretFinding> = findings
         .into_iter()
-        .filter(|path| !confirmed.contains(path))
+        .filter(|finding| !confirmed.contains(&finding.path))
         .collect();
     if !unconfirmed.is_empty() {
         return match view(&state, &project, unconfirmed, Ok(false)).await {

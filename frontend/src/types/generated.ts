@@ -5144,14 +5144,36 @@ outcome: string,
 detail?: string, };
 
 /**
+ * A declared seed that is, or holds, something that looks like a secret.
+ */
+export type LaneSeedSecretFinding = {
+/**
+ * The declared seed.
+ */
+path: string,
+/**
+ * What looks secret, relative to the repository: the seed itself when its
+ * own path does, else the files and directories found under it.
+ */
+files: Array<string>,
+/**
+ * More were found than `files` lists.
+ */
+truncated: boolean, };
+
+/**
  * The latest seeding of a task worktree of this project.
  */
 export type LaneSeedsLastRun = { execution_id: string, at: string, seeds: Array<LaneSeedReport>, };
 
 /**
- * Where the seeds a project is seeded with come from.
+ * Where the seeds a project is seeded with come from. The `[lane_seeds]` table
+ * of `kronn/project.toml` is not a source: it reaches the repository through a
+ * pull request, not through the human gate, so it is only *proposed* in the
+ * settings and takes effect once a human adopts it there (which declares it in
+ * Kronn).
  */
-export type LaneSeedsSource = "project" | "profile" | "none";
+export type LaneSeedsSource = "project" | "none";
 
 export type LaunchAuditRequest = { agent: AgentType,
 /**
@@ -7390,11 +7412,12 @@ connected_on_upgrade: boolean, updated_at: string | null, };
 
 export type ProjectLaneSeeds = {
 /**
- * The paths seeded into each task worktree, whichever way they are declared.
+ * The paths seeded into each task worktree: what a human declared here.
  */
 seeds: Array<string>, source: LaneSeedsSource,
 /**
- * What `kronn/project.toml` on the default branch declares, when it does.
+ * What `kronn/project.toml` on the default branch proposes, when it does.
+ * Nothing is seeded from it until a human adopts it.
  */
 profile_seeds?: Array<string>,
 /**
@@ -7402,10 +7425,19 @@ profile_seeds?: Array<string>,
  */
 profile_error?: string,
 /**
- * Declared paths that look like a secret file and were NOT saved: send them
- * back in `confirm_secret_paths` once the human accepted them.
+ * Newly declared paths that are, or hold, a secret-looking file and were NOT
+ * saved: send their `path` back in `confirm_secret_paths` once the human
+ * has seen the files and accepted them.
  */
-needs_confirmation: Array<string>,
+needs_confirmation: Array<LaneSeedSecretFinding>,
+/**
+ * Secret-looking files the declared seeds hold right now.
+ */
+secret_findings: Array<LaneSeedSecretFinding>,
+/**
+ * Why the declared seeds could not be checked for secrets.
+ */
+secret_scan_error?: string,
 /**
  * A save rewrote the working copy of `kronn/project.toml` (uncommitted).
  */
@@ -9556,7 +9588,7 @@ export type SetProjectGithubConnectionRequest = { mode: GithubConnectionMode, to
 
 export type SetProjectLaneSeeds = { seeds: Array<string>,
 /**
- * Secret-looking paths of `seeds` the human confirmed.
+ * Newly declared seeds holding secret-looking files that the human confirmed.
  */
 confirm_secret_paths?: Array<string>, };
 

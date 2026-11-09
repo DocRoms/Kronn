@@ -124,58 +124,114 @@ pub fn normalize_seed_list(raw: &[String]) -> Result<Vec<String>, String> {
 
 // ─── Which seeds apply ────────────────────────────────────────────────────
 
-/// Where the seeds a project is seeded with come from.
+/// Where the seeds a project is seeded with come from. The `[lane_seeds]` table
+/// of `kronn/project.toml` is not a source: it reaches the repository through a
+/// pull request, not through the human gate, so it is only *proposed* in the
+/// settings and takes effect once a human adopts it there (which declares it in
+/// Kronn).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum LaneSeedsSource {
     /// A human declared them in Kronn (they may have cleared them).
     Project,
-    /// Nobody declared any in Kronn: the `[lane_seeds]` table of the default
-    /// branch's `kronn/project.toml` applies.
-    Profile,
-    /// None declared anywhere.
+    /// None declared in Kronn.
     None,
 }
 
-/// The declared paths of `seeds` that look like a secret file (`.env`, a key, a
-/// credentials directory), by [`crate::acp::secret_files::is_secret_path`] on the
-/// path as it sits in `repo`. A seed copies files to where a worker reads them.
-pub fn secret_looking(repo: &Path, seeds: &[String]) -> Vec<String> {
-    seeds
-        .iter()
-        .filter(|seed| crate::acp::secret_files::is_secret_path(&repo.join(seed.as_str())))
-        .cloned()
-        .collect()
+/// A declared seed that is, or holds, something that looks like a secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct LaneSeedSecretFinding {
+    /// The declared seed.
+    pub path: String,
+    /// What looks secret, relative to the repository: the seed itself when its
+    /// own path does, else the files and directories found under it.
+    pub files: Vec<String>,
+    /// More were found than `files` lists.
+    pub truncated: bool,
 }
 
-/// The seeds to apply to a project's worktrees: what a human declared in Kronn
-/// when they did, else what the default branch's `kronn/project.toml` declares.
-/// A path out of the file is never trusted to name a secret: a profile reaches
-/// the repository through a pull request, not through the human gate, so a
-/// secret-looking one is left out (a human may still declare it in Kronn).
-pub fn effective_lane_seeds(
-    declared: Option<Vec<String>>,
-    profile: Option<Vec<String>>,
+/// How many secret-looking paths one finding lists.
+const MAX_SECRET_FILES_LISTED: usize = 10;
+
+/// Which of `seeds` (in `repo`) look like a secret file or hold one. A seed
+/// copies files to where a worker reads them, and a gitignored `.env` or key is
+/// a gitignored path too. The seed's own path is judged by
+/// [`crate::acp::secret_files::is_secret_path`]; the tree under it is walked
+/// (bounded by [`MAX_SEED_ENTRIES`], links not followed) and each entry's name is
+/// judged, a symlink by the same path rule. Fails closed: a tree that cannot be
+/// read in full, or is too large to, is an error, never "nothing found".
+pub fn secret_findings(
     repo: &Path,
-) -> (Vec<String>, LaneSeedsSource) {
-    if let Some(declared) = declared {
-        return (declared, LaneSeedsSource::Project);
-    }
-    match profile {
-        Some(paths) if !paths.is_empty() => {
-            let secret = secret_looking(repo, &paths);
-            let kept: Vec<String> = paths
-                .into_iter()
-                .filter(|path| !secret.contains(path))
-                .collect();
-            for path in &secret {
-                tracing::warn!("lane seed `{path}` of kronn/project.toml left out: it looks like a secret file");
-            }
-            (kept, LaneSeedsSource::Profile)
+    seeds: &[String],
+) -> Result<Vec<LaneSeedSecretFinding>, String> {
+    use crate::acp::secret_files::{is_secret_file, is_secret_path};
+    let mut findings = Vec::new();
+    for seed in seeds {
+        let root = repo.join(seed);
+        if is_secret_path(&root) {
+            findings.push(LaneSeedSecretFinding {
+                path: seed.clone(),
+                files: vec![seed.clone()],
+                truncated: false,
+            });
+            continue;
         }
-        _ => (Vec::new(), LaneSeedsSource::None),
+        let meta = match std::fs::symlink_metadata(&root) {
+            Ok(meta) => meta,
+            // Nothing there to copy yet.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("cannot read `{seed}`: {error}")),
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let (mut files, mut truncated, mut entries) = (Vec::new(), false, 0u64);
+        let mut stack = vec![(root, seed.clone())];
+        while let Some((dir, rel)) = stack.pop() {
+            let children =
+                std::fs::read_dir(&dir).map_err(|error| format!("cannot list `{rel}`: {error}"))?;
+            for child in children {
+                let child = child.map_err(|error| format!("cannot list `{rel}`: {error}"))?;
+                entries += 1;
+                if entries > MAX_SEED_ENTRIES {
+                    return Err(format!(
+                        "`{seed}` has more than {MAX_SEED_ENTRIES} entries: it cannot be checked \
+                         for secrets, and is not a generated-assets directory"
+                    ));
+                }
+                let path = child.path();
+                let child_rel = format!("{rel}/{}", child.file_name().to_string_lossy());
+                let kind = std::fs::symlink_metadata(&path)
+                    .map_err(|error| format!("cannot read `{child_rel}`: {error}"))?;
+                let secret = if kind.file_type().is_symlink() {
+                    is_secret_path(&path)
+                } else {
+                    is_secret_file(Path::new(&child_rel))
+                };
+                if secret {
+                    if files.len() < MAX_SECRET_FILES_LISTED {
+                        files.push(child_rel.clone());
+                    } else {
+                        truncated = true;
+                    }
+                }
+                if kind.is_dir() {
+                    stack.push((path, child_rel));
+                }
+            }
+        }
+        if !files.is_empty() {
+            files.sort();
+            findings.push(LaneSeedSecretFinding {
+                path: seed.clone(),
+                files,
+                truncated,
+            });
+        }
     }
+    Ok(findings)
 }
 
 // ─── Outcomes ─────────────────────────────────────────────────────────────
@@ -454,7 +510,16 @@ fn link_stays_inside(target: &Path, depth: usize) -> bool {
 /// Remove, from the fresh copy at `staging`, every symlink that points out of
 /// the seed (absolute, or climbing past its root): copied as-is, it would hand
 /// the worker a window onto the host. Returns their names relative to the seed.
+/// A seed may be a single file: it is looked at (never listed) and kept. A seed
+/// that is itself a link is an error: its target is not part of the copy.
 fn drop_escaping_links(staging: &Path) -> io::Result<Vec<String>> {
+    let root = std::fs::symlink_metadata(staging)?;
+    if root.file_type().is_symlink() {
+        return Err(io::Error::other("the seed itself is a symlink"));
+    }
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
     let mut dropped = Vec::new();
     let mut stack = vec![(staging.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
@@ -566,6 +631,22 @@ pub fn seed_worktree(
             }
         }
     };
+    // A copy under construction (or one left by a crash) sits at the worktree
+    // root under a transient name: have git ignore that name before anything is
+    // created there, so a worker's `git add -A` can never pick it up.
+    for kind in [STAGING_KIND, TRASH_KIND] {
+        if let Err(reason) =
+            crate::core::worktree::ensure_local_git_exclude(worktree, &format!("/.kronn-{kind}-*"))
+        {
+            let reason = format!("its temporary copy cannot be kept out of git: {reason}");
+            return LaneSeedsRecord {
+                seeds: seeds
+                    .iter()
+                    .map(|path| LaneSeedOutcome::skipped(path, reason.clone()))
+                    .collect(),
+            };
+        }
+    }
     sweep_transients(worktree);
     let mut marker = read_marker(&git_dir);
     let mut outcomes = Vec::with_capacity(seeds.len());
