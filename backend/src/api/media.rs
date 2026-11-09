@@ -30,7 +30,7 @@ const ALLOWED_RESOLUTIONS: [&str; 3] = ["480p", "720p", "1080p"];
 /// Ceiling for a source image. Providers reject oversized inputs anyway; being
 /// refused here costs nothing, being refused there costs a round trip and,
 /// depending on the provider, a submission.
-const MAX_REFERENCE_BYTES: u64 = 12 * 1024 * 1024;
+pub(crate) const MAX_REFERENCE_BYTES: u64 = 12 * 1024 * 1024;
 /// Ceiling for all the source images of one request together.
 const MAX_REFERENCE_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -694,8 +694,6 @@ fn insert_media_discussion(
     media_job_id: &str,
     project_id: Option<String>,
 ) -> anyhow::Result<(String, String)> {
-    use crate::models::{Discussion, SummaryStrategy};
-
     let id = uuid::Uuid::new_v4().to_string();
     // Titles are read in a sidebar: a full prompt would be unusable there.
     let title: String = {
@@ -707,19 +705,45 @@ fn insert_media_discussion(
         short
     };
     let (message_id, message) = build_prompt_message(prompt, now, None, media_job_id);
-    let discussion = Discussion {
+    let discussion = media_discussion(
+        id.clone(),
+        title,
+        project_id,
+        now,
+        vec![message.clone()],
+        None,
+    );
+
+    crate::db::discussions::insert_discussion(conn, &discussion)?;
+    crate::db::discussions::insert_message(conn, &discussion.id, &message)?;
+    // The prompt message is the anchor the finished asset attaches to.
+    Ok((id, message_id))
+}
+
+/// A discussion that only holds generated media, with the given transcript.
+fn media_discussion(
+    id: String,
+    title: String,
+    project_id: Option<String>,
+    now: chrono::DateTime<Utc>,
+    messages: Vec<crate::models::DiscussionMessage>,
+    workflow_run_id: Option<String>,
+) -> crate::models::Discussion {
+    use crate::models::{Discussion, SummaryStrategy};
+    let count = messages.len() as u32;
+    Discussion {
         connection_id: None,
         awaiting_agent: false,
         agent_running: false,
-        id: id.clone(),
+        id,
         project_id,
         title,
         agent: crate::models::AgentType::ClaudeCode,
         language: "fr".into(),
         participants: vec![],
-        messages: vec![message.clone()],
-        message_count: 1,
-        non_system_message_count: 1,
+        messages,
+        message_count: count,
+        non_system_message_count: count,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
@@ -737,17 +761,34 @@ fn insert_media_discussion(
         introspection_call_count: 0,
         shared_id: None,
         shared_with: vec![],
-        workflow_run_id: None,
+        workflow_run_id,
         test_mode_restore_branch: None,
         test_mode_stash_ref: None,
         created_at: now,
         updated_at: now,
-    };
+    }
+}
 
+/// The room a workflow Agent step's generations land in (KT-1605), opened
+/// before the first one so the references it imports and its jobs share it:
+/// empty, in the workflow's project, listed with the run when there is one.
+pub(crate) fn insert_step_media_room(
+    conn: &rusqlite::Connection,
+    title: &str,
+    project_id: Option<String>,
+    workflow_run_id: Option<&str>,
+) -> anyhow::Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let discussion = media_discussion(
+        id.clone(),
+        title.to_string(),
+        project_id,
+        Utc::now(),
+        Vec::new(),
+        workflow_run_id.map(str::to_string),
+    );
     crate::db::discussions::insert_discussion(conn, &discussion)?;
-    crate::db::discussions::insert_message(conn, &discussion.id, &message)?;
-    // The prompt message is the anchor the finished asset attaches to.
-    Ok((id, message_id))
+    Ok(id)
 }
 
 pub async fn get_job(

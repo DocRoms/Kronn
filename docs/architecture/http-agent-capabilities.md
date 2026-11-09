@@ -76,14 +76,72 @@ The workspace catalogue, thirteen tools [src: file: backend/src/api/agent_worksp
 | `git_commit` | Commit named files, only for the active native worker in its task worktree |
 
 Plus Kronn's internal catalogue — plan and task tools, `qa_list`/`qa_run`, and `api_call`
-against configured REST plugins [src: file: backend/src/api/agent_tools.rs:535-1056#build_tool_catalogue].
+against configured REST plugins [src: file: backend/src/api/agent_tools.rs:585-1106#build_tool_catalogue].
 
 And, since 0.13.0, media generation: `media_generate` and `media_job_status`
-[src: file: backend/src/api/agent_tools.rs:1197-1292#orchestration_tool_catalogue]. These sit in the orchestration
+[src: file: backend/src/api/agent_tools.rs:1247-1342#orchestration_tool_catalogue]. These sit in the orchestration
 catalogue, so an HTTP agent replying in a discussion has them, and a bounded worker keeps
 them — they are deliberately absent from the principal-only list a worker room strips
-[src: file: backend/src/api/agent_tools.rs:1543-1596#NOT_FOR_A_WORKER]. A Workflow Agent step does not: only a
-discussion run adds the orchestration tools [src: file: backend/src/api/agent_tools.rs:1675-1709#orchestration_tool_catalogue].
+[src: file: backend/src/api/agent_tools.rs:1597-1650#NOT_FOR_A_WORKER].
+
+Since 0.15.3 a Workflow Agent step on an HTTP or local agent (Ollama, LiteLLM, OpenRouter…)
+has these two tools as well, and **only** these two: every other orchestration tool
+(`agent_list`, `task_exec_*`, `agent_job_start`, `agent_schedule_wake`…) stays out of its
+catalogue and is refused when named
+[src: file: backend/src/api/agent_tools.rs:1569-1596#workflow_tool_catalogue]. The step runs the
+very same handler as a discussion — one body, so the validation, the request guard, the
+connection resolution and the idempotency key cannot drift
+[src: file: backend/src/api/agent_media_tools.rs:58-72#generate_media] — and differs only in where
+the asset goes:
+
+- **A room of the run.** A step has no discussion, so before its first generation Kronn opens
+  one in the workflow's project and links it to the run (`discussions.workflow_run_id`: the run's
+  discussions list it, deleting the run deletes it). The step's next generation reuses it, which
+  is what lets a picture feed a clip within one step; a refusal that leaves it empty takes it
+  back. Concurrent first calls of a run are serialised, so there is exactly one room and the
+  caps below cannot be passed by calls launched together. The bridge gate adopts that room, so
+  the step can read its own job and no other.
+- **The run artifacts.** Once the job is `completed`, `media_job_status` copies the asset to
+  `<run artifacts dir>/<job id>.<ext>` and returns `asset.artifact_path` beside the context file
+  id. The directory is the one `{{run.artifacts_dir}}` names, so a later Exec step or an Agent step
+  reading it read-only can use the file; it lives as long as the run
+  [src: file: backend/src/workflows/run_artifacts.rs:250-262#keeps_directory]. The copy is written through
+  the run directory's file descriptor (KT-1585), because an Exec step can write there: a link
+  planted at `<job id>.<ext>` is replaced, never written through
+  [src: file: backend/src/api/agent_media_tools.rs:1051-1081#copy_into_run].
+- **Waiting.** A step has no room to wake, so `wake_when_ready` is neither declared nor accepted
+  (it is refused before anything is billed). `media_job_status` takes `wait_secs` (capped at 300)
+  and blocks until the job settles; an unsettled answer says `settled: false` and not to generate
+  again. A video that outlasts the cap is not lost: the worker keeps going, the step calls again.
+- **The billing guard.** The request the guard counts is the run and the step
+  (`workflow-step:<run> · <step>`): at most six generations per step, no retry once one failed, no
+  switch of connection or loss of references. A step that runs more than once in a run (a retry,
+  a loop) shares that budget on purpose. On top of it a run may start at most 12 generations in
+  all (`KRONN_WORKFLOW_MEDIA_JOBS_PER_RUN` changes it; a value above 100 is lowered to 100 and an
+  unparsable or zero one falls back to 12), so a cron workflow is bounded per run.
+  The Test button is its own request on every press, keyed on its project and a fresh id: two
+  presses, two workflows or two projects never share a cap or a room. A **dry run** Test refuses
+  `media_generate` before anything is queued, because a dry run only adds a preamble to the
+  prompt and would otherwise bill.
+- **References.** `reference_asset_ids` works in a step with `reference_mode`, resolved inside
+  the run's own scope and brought into the step's room as a context file (once per source), where
+  the discussion's own checks then apply. The accepted sources are, in this order: an image
+  already in the step's room (id or filename); the context file id of a picture in a room of
+  **this run** or in a discussion of **this project** (a brand image whose id a launch variable
+  carries); the `job_id` of a completed generation of **this run** (an earlier step's image), or
+  the `artifact_path` `media_job_status` returned for it; a png, jpg, webp or gif file **inside
+  the project**, named relative to its root. That file is read through directory fds, never
+  through a link: no `..`, no absolute path, a link anywhere on the path (directory or file) is
+  refused, a path through a file (`a.png/x`) is refused as "not a directory", a FIFO or device
+  is refused without blocking, a file over 12 MiB is refused even if it grew while being read,
+  and it is a picture by its first bytes (PNG, JPEG, WebP, GIF), not by its name. A name that matches nothing gets the same single
+  refusal as an id of another scope.
+  Any discussion of the same project counts as a source, rooms shared with peers included: fine
+  for one account, to be revisited with KT-1235 (multi-account).
+  A job of another run, a human's own generation, another project's file and a path in another
+  run's artifacts directory all get one refusal that does not say whether the id exists. An
+  arbitrary file of the artifacts directory is not a source: an Exec step writes there, and
+  only the copies Kronn made of generated assets are resolved, through their job.
 
 Until then only CLI agents could generate an image or a video, because the tools were
 declared in the MCP bridge and an HTTP agent structurally cannot reach it. The capability
@@ -123,7 +181,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3531-3598#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3370-3437#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -169,7 +227,7 @@ So the boundary today is **not** "HTTP agents cannot write". It is:
 One trap in that sentence, worth naming because the catalogue says otherwise: `git_commit`
 IS declared to a discussion agent, and its handler refuses every caller that is not the
 active native worker in its managed task worktree
-`[src: file: backend/src/api/agent_tools.rs:3856-3904#git_commit]`. So an ordinary `@ollama` in a room
+`[src: file: backend/src/api/agent_tools.rs:3695-3743#git_commit]`. So an ordinary `@ollama` in a room
 sees the tool and is turned away by it. The refusal is correct; the declaration is the part
 that misleads, and it is kept declared only because a worker room is built by narrowing the
 same catalogue.
@@ -273,8 +331,8 @@ HTTP discussion agents receive the full native catalogue by default. Explicitly
 setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
-[src: file: backend/src/api/agent_tools.rs:357-437#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2601-2609#tools_load]
+[src: file: backend/src/api/agent_tools.rs:407-487#TOOL_FAMILIES]
+[src: file: backend/src/api/agent_tools.rs:2661-2669#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -319,7 +377,7 @@ agent is spawned exactly as before. An HTTP agent gets a
 `KronnToolExecutor::audit_arc_for_step`, scoped to the project directory the pipeline
 already resolved (`resolve_host_path`, so it is right inside a container) rather
 than a workspace row or a project looked up by id
-[src: file: backend/src/api/agent_tools.rs:269-292#audit_arc_for_step]. The bounds are KT-338's, unchanged:
+[src: file: backend/src/api/agent_tools.rs:318-341#audit_arc_for_step]. The bounds are KT-338's, unchanged:
 every path is canonicalised against that root and refused when it leaves it, by
 `..`, by an absolute path or by a symlink; there is no shell; a truncated read
 says so.
@@ -327,13 +385,13 @@ says so.
 **What the audit's tools are.** Narrower than a workflow Agent step's:
 `read_file`, `list_files`, `find_files`, `search_text`, `git_status`, `git_diff`,
 `git_log` to read, and `write_file`, `edit_file`, `edit_lines`,
-`insert_after_line` to write [src: file: backend/src/api/agent_tools.rs:308-325#AUDIT_TOOLS].
+`insert_after_line` to write [src: file: backend/src/api/agent_tools.rs:358-375#AUDIT_TOOLS].
 No `web_fetch` (it would send the model off the project), no `git_commit` (the
 audit never commits), no plan, REST-plugin or discussion tools. A call to any
 other name is refused before a handler sees it, and so is a write to the
 target document of another step of the chain (the consolidation step excepted)
-[src: file: backend/src/api/agent_tools.rs:1792-1806#AUDIT_TOOLS]
-[src: file: backend/src/api/agent_tools.rs:211-242#foreign_step_target_refusal].
+[src: file: backend/src/api/agent_tools.rs:1846-1860#AUDIT_TOOLS]
+[src: file: backend/src/api/agent_tools.rs:260-291#foreign_step_target_refusal].
 
 **What the audit prompt says about other repos (KT-926).** An audit's file tools
 cannot leave the project, and the prompt goes to the model provider. It used to
@@ -402,8 +460,8 @@ shipping it. Three things changed:
   is accepted as its `path`. An empty or malformed value is refused with a working
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
-  [src: file: backend/src/api/agent_tools.rs:884-912#extract]
-  [src: file: backend/src/api/agent_tools.rs:4970-4994#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:934-962#extract]
+  [src: file: backend/src/api/agent_tools.rs:4837-4861#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down

@@ -154,8 +154,32 @@ mod unix {
             match check(unsafe { libc::openat(self.fd.as_raw_fd(), name.as_ptr(), DIR_FLAGS) }) {
                 Ok(fd) => Ok(Some(Dir::wrap(fd))),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                // `O_NOFOLLOW | O_DIRECTORY` on a link says ENOTDIR on some
+                // systems and ELOOP on others: look at the entry itself, so a
+                // link is always ELOOP and ENOTDIR only means a file.
+                Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => {
+                    Err(if self.is_symlink(&name) {
+                        io::Error::from_raw_os_error(libc::ELOOP)
+                    } else {
+                        error
+                    })
+                }
                 Err(error) => Err(error),
             }
+        }
+
+        /// Whether the entry `name` is itself a link (`fstatat`, not followed).
+        fn is_symlink(&self, name: &CStr) -> bool {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            let seen = unsafe {
+                libc::fstatat(
+                    self.fd.as_raw_fd(),
+                    name.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            seen == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK
         }
 
         /// Creates (or opens) the owner-only child directory `name`; a link
@@ -358,6 +382,41 @@ mod unix {
             io::copy(&mut source, &mut target).map(|_| ())
         }
 
+        /// The regular file `name` of this directory, opened for reading and
+        /// never through a link. `O_NONBLOCK` keeps a FIFO (or a device) from
+        /// holding the open forever; the `fstat` that follows refuses it.
+        /// `None` when there is no such entry.
+        pub fn open_regular(&self, name: impl AsRef<OsStr>) -> io::Result<Option<std::fs::File>> {
+            let name = c_name(name.as_ref())?;
+            let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+            let fd = match check(unsafe { libc::openat(self.fd.as_raw_fd(), name.as_ptr(), flags) })
+            {
+                Ok(fd) => fd,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+            if !file.metadata()?.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "not a regular file",
+                ));
+            }
+            Ok(Some(file))
+        }
+
+        /// Whether `error` is the refusal of a link met on a path walked with
+        /// `O_NOFOLLOW` (ELOOP, or EMLINK on some systems).
+        pub fn is_link_refusal(error: &io::Error) -> bool {
+            matches!(error.raw_os_error(), Some(libc::ELOOP) | Some(libc::EMLINK))
+        }
+
+        /// Whether `error` says a part of the path is not a directory (a file
+        /// in the middle of `a.png/x`), which is not a link.
+        pub fn is_not_a_directory(error: &io::Error) -> bool {
+            error.raw_os_error() == Some(libc::ENOTDIR)
+        }
+
         /// `openat(O_CREAT | O_EXCL | O_NOFOLLOW)`, owner-only.
         fn create_file(&self, name: &CStr) -> io::Result<std::fs::File> {
             let write =
@@ -376,7 +435,16 @@ mod unix {
         /// Writes `name` whole: a new temporary file renamed over it, so a
         /// link planted at `name` is replaced, never written through.
         pub fn write_file(&self, name: impl AsRef<OsStr>, bytes: &[u8]) -> io::Result<()> {
-            use std::io::Write;
+            self.write_from(name, &mut &*bytes)
+        }
+
+        /// [`Self::write_file`] for a stream, so a large file is never held
+        /// whole in memory: the same new temporary file renamed over `name`.
+        pub fn write_from(
+            &self,
+            name: impl AsRef<OsStr>,
+            source: &mut dyn io::Read,
+        ) -> io::Result<()> {
             use std::sync::atomic::{AtomicU64, Ordering};
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let name = name.as_ref();
@@ -388,7 +456,7 @@ mod unix {
             ));
             let written = self
                 .create_file(&c_name(&temp)?)
-                .and_then(|mut file| file.write_all(bytes))
+                .and_then(|mut file| io::copy(source, &mut file).map(|_| ()))
                 .and_then(|()| self.rename_from(self, &temp, name));
             if written.is_err() {
                 let _ = self.unlink(&temp, 0);
@@ -529,7 +597,19 @@ mod fallback {
         ) -> io::Result<()> {
             Err(refused())
         }
+        pub fn open_regular(&self, _: impl AsRef<OsStr>) -> io::Result<Option<std::fs::File>> {
+            Err(refused())
+        }
+        pub fn is_link_refusal(_: &io::Error) -> bool {
+            false
+        }
+        pub fn is_not_a_directory(_: &io::Error) -> bool {
+            false
+        }
         pub fn write_file(&self, _: impl AsRef<OsStr>, _: &[u8]) -> io::Result<()> {
+            Err(refused())
+        }
+        pub fn write_from(&self, _: impl AsRef<OsStr>, _: &mut dyn io::Read) -> io::Result<()> {
             Err(refused())
         }
         pub fn path(&self) -> io::Result<PathBuf> {

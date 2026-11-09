@@ -59,6 +59,9 @@ mod workflow_tools;
 #[path = "agent_page_tools.rs"]
 mod page_tools;
 
+#[path = "agent_media_tools.rs"]
+mod media_tools;
+
 #[path = "agent_version_tools.rs"]
 mod version_tools;
 
@@ -106,6 +109,8 @@ pub struct KronnToolExecutor {
     /// This run's bridge token (KT-1346): minted on first use, held as long
     /// as the executor, so its tools cross the same gate as a CLI agent's.
     bridge_token: std::sync::Mutex<Option<crate::core::bridge_token::BridgeTokenGuard>>,
+    /// What a workflow step's media generations are keyed on (KT-1605).
+    step_media: media_tools::StepMedia,
 }
 
 impl KronnToolExecutor {
@@ -125,6 +130,7 @@ impl KronnToolExecutor {
             audit_step_target: None,
             launch_identity: Default::default(),
             bridge_token: Default::default(),
+            step_media: Default::default(),
         }
     }
 
@@ -152,6 +158,7 @@ impl KronnToolExecutor {
             audit_step_target: None,
             launch_identity: Default::default(),
             bridge_token: Default::default(),
+            step_media: Default::default(),
         })
     }
 
@@ -182,6 +189,7 @@ impl KronnToolExecutor {
             audit_step_target: None,
             launch_identity: Default::default(),
             bridge_token: Default::default(),
+            step_media: Default::default(),
         })
     }
 
@@ -194,7 +202,43 @@ impl KronnToolExecutor {
         workflow_run_id: String,
         step_name: String,
     ) -> std::sync::Arc<dyn ToolExecutor> {
-        std::sync::Arc::new(Self {
+        std::sync::Arc::new(Self::workflow_executor(
+            state,
+            project_id,
+            workflow_run_id,
+            step_name,
+            false,
+        ))
+    }
+
+    /// The same catalogue for the Test button of one step. It has no run, so a
+    /// press is its own scope for the media guard, never shared with another
+    /// press, workflow or project; a dry run bills nothing.
+    pub fn workflow_test_arc(
+        state: AppState,
+        project_id: Option<String>,
+        step_name: String,
+        dry_run: bool,
+    ) -> std::sync::Arc<dyn ToolExecutor> {
+        std::sync::Arc::new(Self::workflow_executor(
+            state,
+            project_id,
+            TEST_STEP_RUN_ID.to_string(),
+            step_name,
+            dry_run,
+        ))
+    }
+
+    fn workflow_executor(
+        state: AppState,
+        project_id: Option<String>,
+        workflow_run_id: String,
+        step_name: String,
+        dry_run: bool,
+    ) -> Self {
+        let test_invocation =
+            (workflow_run_id == TEST_STEP_RUN_ID).then(|| uuid::Uuid::new_v4().to_string());
+        Self {
             state,
             disc_id: None,
             project_id,
@@ -209,7 +253,12 @@ impl KronnToolExecutor {
             audit_step_target: None,
             launch_identity: Default::default(),
             bridge_token: Default::default(),
-        })
+            step_media: media_tools::StepMedia {
+                step_name,
+                test_invocation,
+                dry_run,
+            },
+        }
     }
 
     /// Native file tools for an HTTP agent running an audit step (KT-924).
@@ -288,6 +337,7 @@ impl KronnToolExecutor {
             audit_step_target: step_target.map(str::to_string),
             launch_identity: Default::default(),
             bridge_token: Default::default(),
+            step_media: Default::default(),
         })
     }
 }
@@ -1531,7 +1581,7 @@ fn workflow_tool_catalogue(has_project: bool) -> Vec<Value> {
         "page_update_html",
         "page_add_dataset",
     ];
-    tool_catalogue()
+    let mut catalogue: Vec<Value> = tool_catalogue()
         .into_iter()
         .filter(|tool| {
             tool["function"]["name"].as_str().is_some_and(|name| {
@@ -1539,7 +1589,11 @@ fn workflow_tool_catalogue(has_project: bool) -> Vec<Value> {
                     || (has_project && matches!(name, "task_list" | "task_get"))
             })
         })
-        .collect()
+        .collect();
+    // The two media tools, and no other orchestration tool: the rest launch or
+    // steer task executions, which a step cannot be the principal of.
+    catalogue.extend(media_tools::workflow_declarations());
+    catalogue
 }
 
 /// Tools a worker is never offered, and never runs even when it names one.
@@ -1840,6 +1894,12 @@ impl ToolExecutor for KronnToolExecutor {
             ToolDispatch::DiscussionRead => return self.read_other_discussion(call).await,
             ToolDispatch::DiscussionList => return self.list_project_discussions(call).await,
             ToolDispatch::Workspace => return self.execute_workspace_tool(call).await,
+            ToolDispatch::Orchestration
+                if self.workflow_run_id.is_some()
+                    && matches!(call.name.as_str(), "media_generate" | "media_job_status") =>
+            {
+                return self.workflow_media_tool(call).await
+            }
             ToolDispatch::Orchestration => return self.execute_orchestration_tool(call).await,
             ToolDispatch::Resume => return self.execute_agent_resume_tool(call).await,
             ToolDispatch::Core => {}
@@ -2642,242 +2702,20 @@ impl KronnToolExecutor {
                 )
             }
             "media_generate" => {
-                // Let the media handler resolve an absent connection or report ambiguous providers.
-                let connection_id = required_string(call, "connection_id");
-                let Some(prompt) = required_string(call, "prompt") else {
-                    return fail(call, "missing required field `prompt`");
-                };
-                let modality = match call
-                    .arguments
-                    .get("modality")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    Some("image") => crate::models::MediaModality::Image,
-                    Some("video") => crate::models::MediaModality::Video,
-                    // Named rather than defaulted: generating the wrong modality
-                    // is a billed mistake the operator did not ask for.
-                    other => {
-                        return fail(
-                            call,
-                            format!(
-                                "`modality` must be \"image\" or \"video\", got {}",
-                                other.unwrap_or("nothing")
-                            ),
-                        )
-                    }
-                };
-                let references: Vec<String> = call
-                    .arguments
-                    .get("reference_asset_ids")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|ids| {
-                        ids.iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .map(str::to_string)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                // KT-1481 — bounded per human request: no cascade after a
-                // notification, no retry of a refusal, no silent provider
-                // switch or loss of references (KT-1420), nothing after Stop.
-                let named_connection = match connection_id.as_deref() {
-                    Some(named) => {
-                        crate::api::media_request_guard::resolve_connection_id(&self.state, named)
-                            .await
-                    }
-                    None => None,
-                };
-                let verdict = {
-                    let dispatch_id = self.source_dispatch_job_id.clone();
-                    let message_id = self.source_message_id.clone();
-                    let references = references.clone();
-                    self.state
-                        .db
-                        .with_read_conn(move |conn| {
-                            crate::api::media_request_guard::authorize(
-                                conn,
-                                &crate::api::media_request_guard::Caller {
-                                    dispatch_id: dispatch_id.as_deref(),
-                                    message_id: message_id.as_deref(),
-                                },
-                                &crate::api::media_request_guard::Ask {
-                                    modality,
-                                    references: &references,
-                                    connection_id: named_connection.as_deref(),
-                                },
-                            )
-                        })
-                        .await
-                };
-                let (request_root, connection_id) = match verdict {
-                    Ok(crate::api::media_request_guard::Verdict::Allow {
-                        root,
-                        pinned_connection,
-                    }) => (root, pinned_connection.or(connection_id)),
-                    Ok(crate::api::media_request_guard::Verdict::Refuse(reason)) => {
-                        return fail(call, reason)
-                    }
-                    Err(error) => {
-                        return fail(call, format!("could not check this generation: {error}"))
-                    }
-                };
-                let request = crate::api::media::GenerateMediaRequest {
-                    // Derived from the request when the agent gives none.
-                    // Without this the server falls back to a random id, so two
-                    // identical asks are two jobs and two charges — which is
-                    // what a wake-and-retry loop produced: the same picture
-                    // generated twice, six minutes apart, billed twice.
-                    //
-                    // An agent that wants a genuinely different take says so by
-                    // passing its own key, or by changing the prompt.
-                    idempotency_key: Some(
-                        call.arguments
-                            .get("idempotency_key")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| {
-                                derived_media_idempotency_key(&discussion_id, &call.arguments)
-                            }),
-                    ),
-                    connection_id,
-                    expected_model: required_string(call, "expected_model"),
-                    modality,
-                    prompt,
-                    // The asset belongs to the room the agent is answering in.
-                    discussion_id: Some(discussion_id.clone()),
-                    message_id: None,
-                    duration_secs: call
-                        .arguments
-                        .get("duration_secs")
-                        .and_then(serde_json::Value::as_u64)
-                        .map(|value| value as u32),
-                    resolution: call
-                        .arguments
-                        .get("resolution")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string),
-                    aspect_ratio: call
-                        .arguments
-                        .get("aspect_ratio")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string),
-                    generate_audio: call
-                        .arguments
-                        .get("generate_audio")
-                        .and_then(serde_json::Value::as_bool),
-                    // Hardcoded to None until 0.13.0, which is why an agent
-                    // could generate an image and a video but never join them.
-                    reference_asset_ids: call
-                        .arguments
-                        .get("reference_asset_ids")
-                        .and_then(serde_json::Value::as_array)
-                        .map(|_| references.clone()),
-                    reference_asset_id: None,
-                    reference_mode: match call
-                        .arguments
-                        .get("reference_mode")
-                        .and_then(serde_json::Value::as_str)
-                    {
-                        Some("first_frame") => Some(crate::models::MediaReferenceMode::FirstFrame),
-                        Some("last_frame") => Some(crate::models::MediaReferenceMode::LastFrame),
-                        Some("reference") => Some(crate::models::MediaReferenceMode::Reference),
-                        // Left to the server's own default rather than guessed
-                        // here, so the agent path and the UI agree.
-                        _ => None,
+                self.generate_media(
+                    call,
+                    media_tools::MediaOrigin {
+                        discussion_id: Some(discussion_id.clone()),
+                        key_scope: discussion_id.clone(),
+                        message_id: self.source_message_id.clone(),
+                        dispatch_id: self.source_dispatch_job_id.clone(),
+                        wake_agent: Some(actor_type),
+                        references: None,
                     },
-                };
-                let response = crate::api::media::generate(
-                    axum::extract::State(self.state.clone()),
-                    None,
-                    axum::Json(request),
                 )
-                .await;
-
-                // The job now belongs to the human request that asked for it, so
-                // the next notification of this chain counts against the same one.
-                if let (Some(root), Some(queued)) = (request_root, response.0.data.as_ref()) {
-                    let job = queued.job_id.clone();
-                    if let Err(error) = self
-                        .state
-                        .db
-                        .with_conn(move |conn| {
-                            crate::db::media_jobs::set_request_root(conn, &job, &root)
-                        })
-                        .await
-                    {
-                        tracing::warn!("media job could not be tied to its request: {error}");
-                    }
-                }
-
-                // Recorded AFTER the job exists, and only when asked. Writing it
-                // into the generation request would carry caller identity into
-                // the body sent to the provider.
-                if call
-                    .arguments
-                    .get("wake_when_ready")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    if let Some(job_id) =
-                        response.0.data.as_ref().map(|queued| queued.job_id.clone())
-                    {
-                        let payload = serde_json::json!({
-                            "agent_type": actor_type,
-                            "source_dispatch_job_id": self.source_dispatch_job_id,
-                        })
-                        .to_string();
-                        let job = job_id.clone();
-                        if let Err(error) = self
-                            .state
-                            .db
-                            .with_conn(move |conn| {
-                                crate::db::media_jobs::set_wake_request(conn, &job, &payload)
-                            })
-                            .await
-                        {
-                            // The generation is already queued and billed. Say
-                            // the wake was not armed rather than let the agent
-                            // wait for a call that will never come.
-                            return fail(
-                                call,
-                                format!(
-                                    "the generation started ({job_id}) but the wake could not be \
-                                     armed: {error}. Poll media_job_status instead."
-                                ),
-                            );
-                        }
-                    }
-                }
-
-                // KT-1418 — a refused generation is a failed call. Reported as
-                // `ok`, it never fed the runner's error circuit: an agent that
-                // kept passing an unusable reference called this 13 times,
-                // each time getting the same refusal as if it had succeeded.
-                let succeeded = response.0.success;
-                match serde_json::to_value(response.0) {
-                    Ok(value) if succeeded => ok(call, value),
-                    Ok(value) => ToolOutcome {
-                        call: call.clone(),
-                        content: value,
-                        ok: false,
-                    },
-                    Err(error) => fail(call, error.to_string()),
-                }
+                .await
             }
-            "media_job_status" => {
-                let Some(job_id) = required_string(call, "job_id") else {
-                    return fail(call, "missing required field `job_id`");
-                };
-                let response = crate::api::media::get_job(
-                    axum::extract::State(self.state.clone()),
-                    axum::extract::Path(job_id),
-                )
-                .await;
-                match serde_json::to_value(response.0) {
-                    Ok(value) => ok(call, value),
-                    Err(error) => fail(call, error.to_string()),
-                }
-            }
+            "media_job_status" => self.read_media_job(call).await,
             "task_exec_prepare" => {
                 if let Some(refusal) = unknown_argument_refusal(call) {
                     return fail(call, refusal);
@@ -5948,6 +5786,8 @@ mod tests {
                 "page_create",
                 "page_update_html",
                 "page_add_dataset",
+                "media_generate",
+                "media_job_status",
             ]
         );
         let projectless_names: Vec<String> = workflow_tool_catalogue(false)
@@ -5968,6 +5808,8 @@ mod tests {
                 "page_create",
                 "page_update_html",
                 "page_add_dataset",
+                "media_generate",
+                "media_job_status",
             ]
         );
         for name in names

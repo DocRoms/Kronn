@@ -5786,12 +5786,16 @@ pub async fn test_step(
     // tiers exactly like a real run (run-9 finding: overrides were dropped).
     let model_tiers = agents.model_tiers.clone();
     let http_endpoints = crate::models::setup::HttpEndpoints::from_agents(&agents);
-    let native_tools = Some(crate::api::agent_tools::KronnToolExecutor::workflow_arc(
-        state.clone(),
-        req.project_id.clone(),
-        crate::api::agent_tools::TEST_STEP_RUN_ID.to_string(),
-        req.step.name.clone(),
-    ));
+    // A press of Test is its own scope for the media guard, and a dry run
+    // starts no generation: it would bill, and a preamble does not stop that.
+    let native_tools = Some(
+        crate::api::agent_tools::KronnToolExecutor::workflow_test_arc(
+            state.clone(),
+            req.project_id.clone(),
+            req.step.name.clone(),
+            req.dry_run,
+        ),
+    );
 
     // In dry_run mode, prepend a simulation preamble. The preamble is
     // adaptive so it does not fight the output contract downstream steps rely on:

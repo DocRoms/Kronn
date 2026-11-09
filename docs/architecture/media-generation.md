@@ -166,8 +166,20 @@ without a reload.
 * Agents: `media_generate` and `media_job_status`, by two independent routes —
   CLI agents through the `kronn-internal` MCP bridge, HTTP agents through the
   native orchestration catalogue
-  [src: file: backend/src/api/agent_tools.rs:1252-1285#media_generate]. The bridge route came
+  [src: file: backend/src/api/agent_tools.rs:1264-1304#media_generate]. The bridge route came
   first; the native one closed the half of the fleet that could not reach it.
+* A workflow Agent step on an HTTP or local agent has the same two tools since 0.15.3, through
+  the same handler. Its asset lands in a room opened for the run (linked to it) and, when the
+  job completes, as a file in the run artifacts directory; the step waits with
+  `media_job_status` and `wait_secs`. Its references come from the run's scope only: an image of
+  the step's room, a picture of the run's rooms or the project's discussions (a brand image a
+  launch variable names), an earlier step's generation by job id or `artifact_path`, or a
+  picture file inside the project (read through directory fds, never through a link, and judged
+  a picture by its first bytes). Any discussion of the same project is a source, shared rooms
+  included — to be revisited with KT-1235 (multi-account). Beside the six generations of the
+  request guard, a run is capped at 12 (`KRONN_WORKFLOW_MEDIA_JOBS_PER_RUN`, at most 100), and a
+  dry-run Test generates nothing. See
+  [HTTP agent capabilities](http-agent-capabilities.md).
 * **The connection is optional (KT-686).** A generation names one, or names
   none and Kronn uses the only connection configured for that modality. When
   several can serve it, the request is refused with their names: choosing
