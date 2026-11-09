@@ -87,6 +87,9 @@ mod release_gate_tests;
 #[cfg(all(test, feature = "full-tests"))]
 mod large_db_measure;
 
+#[cfg(all(test, feature = "full-tests"))]
+mod upgrade_fixture_tests;
+
 /// `EXPLAIN QUERY PLAN` details of `sql`, one line per plan node.
 #[cfg(test)]
 pub(crate) fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {

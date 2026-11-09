@@ -13,6 +13,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- CI: Kronn is started on Windows on every backend or frontend change. The
+  `test-boot-windows` job builds `kronn.exe` and boots it on a fresh data
+  directory and on the previous release's database (migrations pending, backup
+  taken first), then drives the UI it serves with no agent configured
+  (onboarding, Settings, Projects, Discussions, no 5xx), and reads a project, a
+  manual backup and a sealed secret back after a restart. A headless `kronn`
+  serves the built UI when `KRONN_FRONTEND_DIST` names it. A nightly workflow
+  runs the full backend lib suite on Windows; a test skipped there must be
+  `#[cfg(unix)]` with its reason on the gate line (`scripts/ci/lint_windows_skips.py`,
+  341 gates annotated). See `docs/operations/windows-boot-gate.md` (KT-1629).
+
 - Media: an image or a video can be generated from several source images of
   the discussion, ordered and removable in the Creator. Each saved image/video
   model (ComfyUI included) has a reference limit in Config: empty uses what

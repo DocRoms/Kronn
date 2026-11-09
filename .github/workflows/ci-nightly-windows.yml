@@ -1,0 +1,103 @@
+name: CI Nightly Windows
+
+# KT-1629 — the whole backend lib suite on Windows, once a night.
+#
+# `ci-build.yml` runs a handful of lib modules there on the pull requests that
+# touch them (test-backend-portability) and boots the real binary on every
+# backend/frontend change (test-boot-windows). Neither runs the other ~12 000
+# unit tests, and compiling them takes far longer than a pull request should
+# wait, so they run here.
+#
+# The contract this run relies on: a test that cannot run on Windows is
+# `#[cfg(unix)]` with its reason on the gate line, never ignored or skipped at
+# run time (scripts/ci/lint_windows_skips.py, enforced by ci-test.yml). Every
+# failure of this run is therefore a Windows defect: fix it, or ticket it and
+# gate the test `#[cfg(unix)] // see KT-<n>`.
+on:
+  schedule:
+    # 02:17 UTC: after the day's merges, off the runner-demand peak.
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit, tag or branch to test (empty: the selected ref)"
+        required: false
+        default: ""
+        type: string
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-nightly-windows
+  cancel-in-progress: false
+
+jobs:
+  test-backend-lib-windows:
+    runs-on: windows-latest
+    # The full lib-test binary needs 13 GB in rustc (docs/gotchas/
+    # ci-macos-portability-memory.md): two build jobs keep it inside the 16 GB
+    # of the Windows runner. The first run is cold; later ones restore the cache.
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Restore cargo registry and build
+        id: cache-nightly
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: nightly-windows-lib-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: nightly-windows-lib-
+
+      - name: Toolchain and machine
+        shell: bash
+        run: |
+          rustc -vV
+          cargo -V
+          systeminfo | grep -E "Total Physical Memory|Available Physical Memory" || true
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # Every test in its own process, as in ci-test.yml: the same isolation, so a
+      # Windows failure is a Windows difference, not a shared-state one. The `ci`
+      # profile (backend/.config/nextest.toml) reports every failure at the end.
+      - name: Full backend lib suite
+        env:
+          NEXTEST_PROFILE: ci
+          KRONN_TEMPLATES_DIR: ${{ github.workspace }}\templates
+        run: cargo nextest run --lib --locked --build-jobs 2
+
+      - name: Upload the nextest JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-windows-junit
+          path: backend/target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+      # A schedule runs on the default branch: the cache it saves serves every run after.
+      - name: Save cargo registry and build
+        if: always() && steps.cache-nightly.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache-nightly.outputs.cache-primary-key }}
