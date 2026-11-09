@@ -248,7 +248,7 @@ async executor.
 [src: file: backend/src/workflows/run_artifacts.rs:124-140#refusal]
 [src: file: backend/src/workflows/run_artifacts.rs:161-190#open_root]
 [src: file: backend/src/workflows/run_artifacts.rs:238-248#open_run_dir]
-[src: file: backend/src/core/rooted_fd.rs:269-307#remove_child]
+[src: file: backend/src/core/rooted_fd.rs:362-400#remove_child]
 [src: file: backend/src/workflows/run_artifacts.rs:341-382#migrate_from]
 [src: file: backend/src/workflows/run_artifacts.rs:407-425#move_into]
 [src: file: backend/src/workflows/run_artifacts.rs:432-464#sweep_root]
