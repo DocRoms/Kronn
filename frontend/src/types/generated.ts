@@ -6310,8 +6310,9 @@ tls_declared_by_env: boolean,
  */
 public_origin: string | null,
 /**
- * The configuration asks for exposure that nothing encrypts. The backend
- * started (or will start) on loopback instead; Settings says why.
+ * The configuration, or `KRONN_HOST`, asks for exposure that nothing
+ * encrypts. The backend started (or will start) on loopback instead, and
+ * hands out no invite code; Settings says why.
  */
 plain_http_blocked: boolean,
 /**

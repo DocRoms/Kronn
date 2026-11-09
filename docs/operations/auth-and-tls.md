@@ -69,7 +69,7 @@ answering.
 |-----------|------------------|--------|
 | Loopback only | Binds as asked. | `KRONN_BIND` loopback: starts. |
 | Exposure asked, **no** TLS and **no** declared proxy | The Settings toggle **refuses** (HTTP 409, with what is needed; nothing is written). A config that already asks for it (written by an older Kronn, by hand, or `KRONN_HOST`) **starts on `127.0.0.1`** and Settings shows a banner saying why: the owner is never locked out of the UI that can fix it. | The publish is outside the process: refuses to start, naming `KRONN_TLS_TERMINATED_BY_PROXY` and `KRONN_PUBLIC_ORIGIN`. |
-| Exposure asked + **declared proxy** | Binds `127.0.0.1` (the proxy on this machine is the only way in, the P2P socket included). | Starts. Keep `KRONN_BIND=127.0.0.1` for a proxy on the Docker host, `0.0.0.0` for a proxy on another machine. |
+| Exposure asked + **declared proxy** | Binds `127.0.0.1` (the proxy on this machine is the only way in, the P2P socket included). | Starts **only with `KRONN_BIND=127.0.0.1`**: the proxy on the Docker host reaches Kronn through loopback. A declared proxy with the plain port still published beyond loopback refuses to start (the port would keep serving the token in clear): a proxy on another machine, which needs that publish, is not supported until in-process TLS ships. |
 
 Behind a declared proxy:
 
@@ -87,6 +87,33 @@ Behind a declared proxy:
   loses it must paste it again (Settings › Server & network access). Docker is
   unchanged: its gateway sets `X-Real-IP`.
 - The proxy must forward WebSocket upgrades (`/api/ws`) for P2P.
+- **The browser origin is allowed exactly.** CORS and the WebSocket `Origin`
+  check accept the declared public origin (and only it, read from the live
+  config), so a remote user loading the UI through the proxy is not refused as
+  a foreign page.
+- **The declaration is owner-only.** `POST /api/config/network-exposure` is
+  gated like the other config changes that widen access (it is in
+  `PERMISSION_POSTS`): even with auth disabled
+  (`KRONN_ALLOW_INSECURE_LAN=1`) a non-loopback peer needs the token, so a LAN
+  client cannot declare a proxy or change the exposure.
+- **A reset refuses while the proxy is declared in the config.** The reset
+  rewrites `config.toml` key-only, which would forget the declaration while the
+  proxy keeps forwarding from `127.0.0.1` (the loopback bypass would return).
+  Withdraw the declaration in Settings first. A declaration made by the
+  environment is not touched by a reset.
+- **Recovery behind a proxy needs a proof read at the machine.** While auth is
+  locked (the stored token cannot be decrypted), the recovery routes
+  (`/api/config/recovery/*`, `auth-token/regenerate`) are normally open to a
+  loopback caller. Behind a proxy every caller is loopback, so they also need the
+  `X-Kronn-Local-Proof` header, set to the content of the `local-proof` file in
+  the Kronn data directory (owner-only, minted when a proxy is declared). From
+  the machine: `curl -H "X-Kronn-Local-Proof: $(cat <data dir>/local-proof)" …`.
+  The locked refusal (HTTP 423) says so.
+
+While exposure is *blocked* (asked for, nothing carries TLS: a stale config or
+`KRONN_HOST`), the boot is on loopback, **no invite code is handed out** (the
+endpoint answers an error and peer broadcasts carry an empty code) and Settings
+shows one notice, read from the effective bind (`KRONN_HOST` included).
 
 `KRONN_ALLOW_INSECURE_LAN=1` (an *unauthenticated* API on a trusted LAN) does
 **not** waive any of this: authentication and transport are checked separately.
@@ -96,15 +123,18 @@ The logic lives in `backend/src/core/net_expose.rs` (`boot_bind`,
 backend (`backend/src/main.rs`), the embedded desktop server
 (`desktop/src-tauri/src/main.rs`) and the toggle
 (`backend/src/api/setup.rs::set_network_exposure`). Tests:
-`core::net_expose::tests`, `api_tests::network_exposure_*`,
-`api::contacts::tests` (proxy invites), the desktop `embedded_*` tests and
-`IdentitySection.test.tsx`.
+`core::net_expose::tests`, `api_tests::network_exposure_*`, `api_tests::recovery_behind_a_declared_proxy_*`,
+`api_tests::a_reset_is_refused_*`, `lib.rs::auth_tests` (owner-only gate),
+`cors_policy` and `api::ws` origin tests (declared origin),
+`api::contacts::tests` (proxy invites, none while blocked), the desktop
+`embedded_*` tests and `IdentitySection.test.tsx`.
 
 **Upgrading:** an install whose `config.toml` already says `host = "0.0.0.0"`
 (the old toggle) now boots on loopback with a banner until a proxy is
 declared; a Docker install published on the network (`KRONN_BIND` not
-loopback) fails its next boot until it sets the two variables (or goes back to
-loopback). Existing `kronn:` contacts keep working.
+loopback) fails its next boot until it goes back to loopback
+(`KRONN_BIND=127.0.0.1`) behind a proxy on the host that is declared with the two
+variables. Existing `kronn:` contacts keep working.
 
 ## Strict-localhost opt-in
 

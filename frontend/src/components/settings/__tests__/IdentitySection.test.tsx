@@ -266,6 +266,39 @@ describe('IdentitySection — plain-HTTP exposure (KT-1596)', () => {
     expect(screen.getByTestId('expose-plain-http-blocked')).toHaveTextContent('settings.exposePlainBlocked');
   });
 
+  it('offers no plain invite and one consistent notice while exposure is blocked', async () => {
+    config.getServerConfig.mockResolvedValue({
+      domain: null, port: 3140, max_concurrent_agents: 5, auth_enabled: true,
+      pseudo: 'me', avatar_email: '', bio: '',
+    });
+    config.getNetworkExposure.mockResolvedValue({ ...declared, exposed: true, plain_http_blocked: true });
+    await mountIdentity();
+
+    // One notice about the block: no "reachable from your network" note beside it,
+    // and the state badge agrees (this boot serves nobody).
+    expect(screen.getByTestId('expose-plain-http-blocked')).toBeInTheDocument();
+    expect(screen.queryByText('settings.exposeSecurityNote')).not.toBeInTheDocument();
+    expect(screen.getByText('settings.networkLocalOnly')).toBeInTheDocument();
+    expect(screen.queryByText('settings.networkReachable')).not.toBeInTheDocument();
+    // No plain kronn: invite is advertised, and no copy button for one.
+    expect(screen.getByTestId('invite-blocked')).toHaveTextContent('settings.identityInviteBlocked');
+    expect(screen.queryByText(/^kronn:me@/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the invite and the exposure note when nothing is blocked', async () => {
+    config.getServerConfig.mockResolvedValue({
+      domain: null, port: 3140, max_concurrent_agents: 5, auth_enabled: true,
+      pseudo: 'me', avatar_email: '', bio: '',
+    });
+    config.getNetworkExposure.mockResolvedValue({ ...declared, exposed: true, tls_terminated_by_proxy: true, public_origin: 'https://kronn.example.com' });
+    contacts.inviteCode.mockResolvedValue('kronns:me@kronn.example.com:443');
+    await mountIdentity();
+    expect(screen.queryByTestId('invite-blocked')).not.toBeInTheDocument();
+    expect(await screen.findByText('kronns:me@kronn.example.com:443')).toBeInTheDocument();
+    expect(screen.getByText('settings.exposeSecurityNote')).toBeInTheDocument();
+    expect(screen.getByText('settings.networkReachable')).toBeInTheDocument();
+  });
+
   it('says nothing about plain HTTP once a proxy is declared', async () => {
     config.getNetworkExposure.mockResolvedValue({ ...declared, exposed: true, tls_terminated_by_proxy: true, public_origin: 'https://kronn.example.com' });
     contacts.inviteCode.mockResolvedValue('kronns:me@kronn.example.com:443');

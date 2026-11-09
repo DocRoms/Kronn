@@ -19962,6 +19962,170 @@ async fn a_stale_exposed_config_reports_the_plain_http_banner() {
     assert!(boot.fatal.is_none());
 }
 
+/// One request through the router, as seen from `peer` (the socket address the
+/// auth middleware reads), with extra headers; the body is parsed when JSON.
+async fn send_from(
+    app: Router,
+    method: &str,
+    uri: &str,
+    peer: [u8; 4],
+    headers: &[(&str, &str)],
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let mut req = builder
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            peer, 45678,
+        ))));
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn network_exposure_post_is_refused_from_the_network_even_with_auth_off() {
+    // KT-1596 review: with auth disabled (KRONN_ALLOW_INSECURE_LAN) any LAN
+    // client could declare a proxy or change the exposure. The REAL auth layer
+    // is on here; auth_enabled stays false.
+    let state = test_state();
+    assert!(!state.config.read().await.server.auth_enabled);
+    let before = state.config.read().await.server.clone();
+    let declare = serde_json::json!({
+        "exposed": true,
+        "tls_terminated_by_proxy": true,
+        "public_origin": "https://kronn.example.com",
+    });
+    let app = kronn::build_router_with_auth(state.clone(), true);
+    let (status, _) = send_from(
+        app,
+        "POST",
+        "/api/config/network-exposure",
+        [192, 168, 1, 50],
+        &[],
+        declare.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    {
+        let cfg = state.config.read().await;
+        assert!(!cfg.server.tls_terminated_by_proxy, "nothing was declared");
+        assert_eq!(cfg.server.host, before.host);
+    }
+    // The owner at this machine still reaches it (and gets the handler's answer).
+    let app = kronn::build_router_with_auth(state.clone(), true);
+    let (status, _) = send_from(
+        app,
+        "POST",
+        "/api/config/network-exposure",
+        [127, 0, 0, 1],
+        &[],
+        declare,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(state.config.read().await.server.tls_terminated_by_proxy);
+    // Reading the state (auth off) stays open to the network: the page polls it.
+    let app = kronn::build_router_with_auth(test_state(), true);
+    let (status, _) = send_from(
+        app,
+        "GET",
+        "/api/config/network-exposure",
+        [192, 168, 1, 50],
+        &[],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn recovery_behind_a_declared_proxy_needs_the_proof_read_at_the_machine() {
+    // KT-1596 review: with auth locked (token undecryptable) and a proxy
+    // declared, every request is a loopback request, so the peer address cannot
+    // tell the owner from the network. The proof file in the data dir can.
+    const STATUS: &str = "/api/config/recovery/status";
+    let state = test_state();
+    {
+        let mut cfg = state.config.write().await;
+        cfg.server.auth_enabled = true;
+        cfg.server.auth_token = None;
+        cfg.server.auth_locked = true;
+        cfg.server.tls_terminated_by_proxy = true;
+        cfg.server.public_origin = Some("https://kronn.example.com".into());
+    }
+    let dir = kronn::core::config::config_dir().unwrap();
+    let proof = kronn::core::net_expose::local_proof(&dir).unwrap();
+    let header = kronn::core::net_expose::LOCAL_PROOF_HEADER;
+    let call = |peer: [u8; 4], headers: Vec<(&'static str, String)>| {
+        let state = state.clone();
+        async move {
+            let app = kronn::build_router_with_auth(state, true);
+            let headers: Vec<(&str, &str)> =
+                headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            send_from(app, "GET", STATUS, peer, &headers, Value::Null).await
+        }
+    };
+
+    // The proxy's loopback peer alone is not the owner, and the refusal says
+    // how recovery works behind a proxy.
+    let (status, body) = call([127, 0, 0, 1], vec![]).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(message.contains(header), "{message}");
+    assert!(message.contains(kronn::core::net_expose::LOCAL_PROOF_FILE));
+    // A guessed proof, or a right one from the network, is refused too.
+    let (status, _) = call([127, 0, 0, 1], vec![(header, "guess".into())]).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    let (status, _) = call([192, 168, 1, 50], vec![(header, proof.clone())]).await;
+    assert_eq!(status, StatusCode::LOCKED);
+    // The owner at the machine carries the proof and reaches the route.
+    let (status, _) = call([127, 0, 0, 1], vec![(header, proof)]).await;
+    assert_ne!(status, StatusCode::LOCKED);
+
+    // Without a proxy the loopback peer is the owner, as before (no proof).
+    state.config.write().await.server.tls_terminated_by_proxy = false;
+    let (status, _) = call([127, 0, 0, 1], vec![]).await;
+    assert_ne!(status, StatusCode::LOCKED);
+}
+
+#[tokio::test]
+async fn a_reset_is_refused_while_a_proxy_is_declared_and_changes_nothing() {
+    // KT-1596 review: the reset must not forget a live proxy declaration (the
+    // proxy keeps forwarding the network from 127.0.0.1).
+    let state = test_state();
+    {
+        let mut cfg = state.config.write().await;
+        cfg.server.tls_terminated_by_proxy = true;
+        cfg.server.public_origin = Some("https://kronn.example.com".into());
+        cfg.server.auth_enabled = true;
+        cfg.server.auth_token = Some("tok".into());
+    }
+    let axum::Json(reply) = kronn::api::setup::reset(axum::extract::State(state.clone())).await;
+    assert!(!reply.success, "reset must be refused");
+    let message = reply.error.unwrap_or_default();
+    assert!(message.contains("proxy"), "{message}");
+    let cfg = state.config.read().await;
+    assert!(cfg.server.tls_terminated_by_proxy);
+    assert_eq!(
+        cfg.server.public_origin.as_deref(),
+        Some("https://kronn.example.com")
+    );
+    assert_eq!(cfg.server.auth_token.as_deref(), Some("tok"));
+}
+
 #[tokio::test]
 async fn import_legacy_json_via_multipart() {
     let state = test_state();

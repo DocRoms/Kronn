@@ -382,6 +382,8 @@ pub(crate) fn allowed_ws_origins(
         origins.push(dev);
     }
     origins.extend(server.frontend_origins.iter().cloned());
+    // KT-1596 — the UI a declared TLS proxy serves: exactly its public origin.
+    origins.extend(crate::core::net_expose::declared_origin(server));
     origins.iter().filter_map(|o| normalize_origin(o)).collect()
 }
 
@@ -1987,6 +1989,27 @@ mod origin_and_admission_tests {
 
     fn classify(origin: &str, server: &crate::models::ServerConfig) -> WsOrigin {
         classify_ws_origin(Some(origin), &allowed_ws_origins(server, None, false))
+    }
+
+    #[test]
+    fn the_declared_proxy_origin_is_allowed_exactly_and_foreign_pages_still_are_not() {
+        // KT-1596 review: a remote user behind the proxy loads the UI from the
+        // proxy's public origin; without it every /api/ws upgrade was a 403.
+        let mut server = server();
+        let proxy = "https://kronn.example.com";
+        assert_eq!(classify(proxy, &server), WsOrigin::Foreign, "undeclared");
+        server.tls_terminated_by_proxy = true;
+        server.public_origin = Some("https://Kronn.Example.com:443/".into());
+        assert_eq!(classify(proxy, &server), WsOrigin::Allowed);
+        for foreign in [
+            "http://kronn.example.com",
+            "https://kronn.example.com:8443",
+            "https://evil.example.com",
+            "https://kronn.example.com.evil.example",
+            "null",
+        ] {
+            assert_eq!(classify(foreign, &server), WsOrigin::Foreign, "{foreign}");
+        }
     }
 
     #[test]

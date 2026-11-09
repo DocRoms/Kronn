@@ -129,6 +129,9 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
   };
   const inviteHost = networkInfo?.advertised_host ?? window.location.hostname;
   const invitePort = networkInfo?.port ?? (window.location.port || '3140');
+  // Exposure asked for with nothing carrying TLS: this boot serves nobody, and a
+  // plain LAN invite would name a port that is closed or in clear (KT-1596).
+  const plainBlocked = !!exposure?.plain_http_blocked && !exposure.in_docker;
   const inviteCode = proxyDeclared
     ? (proxyInviteCode ?? '')
     : `kronn:${pseudo}@${inviteHost}:${invitePort}`;
@@ -300,7 +303,7 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
                 <p>{t('settings.identityNetworkHint')}</p>
               </div>
               <span className="set-identity-network-state" data-exposed={!!exposure?.exposed}>
-                {exposure?.exposed ? t('settings.networkReachable') : t('settings.networkLocalOnly')}
+                {exposure?.exposed && !plainBlocked ? t('settings.networkReachable') : t('settings.networkLocalOnly')}
               </span>
             </div>
 
@@ -341,12 +344,11 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
             {exposeRefusal && (
               <div className="set-expose-warn" role="alert" data-testid="expose-refusal">{exposeRefusal}</div>
             )}
-            {exposure?.plain_http_blocked && !exposure.in_docker && (
+            {plainBlocked ? (
               <div className="set-expose-warn" role="alert" data-testid="expose-plain-http-blocked">
                 {t('settings.exposePlainBlocked')}
               </div>
-            )}
-            {exposure?.exposed && (
+            ) : exposure?.exposed && (
               <div className="set-expose-warn" role="note">{t('settings.exposeSecurityNote')}</div>
             )}
             {exposure && !exposure.in_docker && (
@@ -458,7 +460,9 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
               <div className="set-hint-xs">{t('settings.frontendOriginsHint')}</div>
             </div>
 
-            {pseudo ? (
+            {pseudo && plainBlocked ? (
+              <div className="set-identity-invite-empty" data-testid="invite-blocked">{t('settings.identityInviteBlocked')}</div>
+            ) : pseudo ? (
               <div className="set-invite-box">
                 <div className="set-invite-head">
                   <div>

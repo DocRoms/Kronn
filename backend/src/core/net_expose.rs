@@ -179,12 +179,117 @@ pub fn public_origin_for(server: &crate::models::ServerConfig) -> Option<String>
     )
 }
 
+/// The one browser origin a declared proxy serves Kronn's UI from, canonical
+/// (`https://host[:port]`), or None without a declaration or an origin. CORS and
+/// the WebSocket Origin check allow exactly this one, so a remote user behind
+/// the proxy is not refused as a foreign page while any other site still is.
+pub fn declared_origin(server: &crate::models::ServerConfig) -> Option<String> {
+    if !proxy_declared_for(server) {
+        return None;
+    }
+    crate::db::contacts::normalize_public_origin(&public_origin_for(server)?)
+}
+
 /// Whether a request that arrives from a loopback peer may be trusted as the
 /// owner: never when a proxy on this machine forwards the network's traffic
 /// (every proxied request then comes from 127.0.0.1). Docker is exempt: its
 /// gateway sets `X-Real-IP`, which the auth middleware already reads.
 pub fn loopback_peer_is_owner(proxy_declared: bool, is_docker: bool) -> bool {
     is_docker || !proxy_declared
+}
+
+/// Header carrying the on-machine proof (see [`local_proof`]).
+pub const LOCAL_PROOF_HEADER: &str = "x-kronn-local-proof";
+
+/// File, in the data directory, holding the on-machine proof.
+pub const LOCAL_PROOF_FILE: &str = "local-proof";
+
+/// The secret that tells the owner at this machine from a stranger coming
+/// through a declared proxy (KT-1596). Behind a proxy every request arrives from
+/// loopback, so the peer address proves nothing; this file can only be read by
+/// whoever can read the data directory (owner-only, like the keys beside it).
+/// It is what lets the recovery routes work while the token cannot be decrypted
+/// and no token can authenticate anyone. Minted on first use.
+pub fn local_proof(dir: &std::path::Path) -> std::io::Result<String> {
+    let path = dir.join(LOCAL_PROOF_FILE);
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let existing = existing.trim();
+        if existing.len() >= 32 {
+            return Ok(existing.to_string());
+        }
+    }
+    let proof = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let tmp = dir.join(format!(".{LOCAL_PROOF_FILE}.tmp"));
+    crate::core::keyvault::write_private_atomic(&tmp, &path, proof.as_bytes())?;
+    Ok(proof)
+}
+
+/// Put the on-machine proof in the data directory when a proxy is declared, so
+/// the owner can read it before a recovery needs it. Best-effort: a failure is
+/// logged, never fatal to the boot.
+pub fn arm_local_proof(server: &crate::models::ServerConfig) {
+    if !proxy_declared_for(server) {
+        return;
+    }
+    let armed = crate::core::config::config_dir()
+        .map_err(|e| e.to_string())
+        .and_then(|dir| local_proof(&dir).map_err(|e| e.to_string()));
+    if let Err(e) = armed {
+        tracing::warn!("Could not prepare the on-machine recovery proof: {e}");
+    }
+}
+
+/// Whether `presented` is the on-machine proof of `dir`. A missing or empty
+/// proof never matches, and the comparison does not stop at the first
+/// differing byte. The file is only created by [`local_proof`], never here, so
+/// a request cannot make it appear.
+pub fn local_proof_matches(dir: &std::path::Path, presented: Option<&str>) -> bool {
+    let Some(presented) = presented.map(str::trim).filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    let Ok(expected) = std::fs::read_to_string(dir.join(LOCAL_PROOF_FILE)) else {
+        return false;
+    };
+    let expected = expected.trim();
+    !expected.is_empty()
+        && crate::core::bridge_token::operator_token_matches(Some(expected), presented)
+}
+
+/// Who the recovery routes treat as the local owner while auth is locked.
+/// Without a proxy: a loopback peer. Behind a declared proxy the peer address
+/// is the proxy, so only a loopback peer that also presents the on-machine
+/// proof counts. Pure + tested.
+pub fn recovery_caller_is_local(
+    proxy_fronted: bool,
+    peer_is_local: bool,
+    proof_matches: bool,
+) -> bool {
+    peer_is_local && (!proxy_fronted || proof_matches)
+}
+
+/// Whether plain HTTP is what a network peer would get: exposure is requested
+/// (the bind the next boot is asked for is not loopback, `KRONN_HOST` included)
+/// and nothing declares TLS in front. Natively that boot falls back to loopback
+/// and nobody is served, but the owner must be told, and no invite may
+/// advertise an address that would carry the token in clear. Docker refuses to
+/// start instead. Pure + tested.
+pub fn plain_http_blocked(is_docker: bool, requested_host: &str, proxy_declared: bool) -> bool {
+    !is_docker && !proxy_declared && !is_loopback_host(requested_host)
+}
+
+/// [`plain_http_blocked`] for a live config and the process environment.
+pub fn plain_http_blocked_for(server: &crate::models::ServerConfig) -> bool {
+    let is_docker = crate::core::env::is_docker();
+    let requested = resolve_bind_host(
+        crate::core::child_env::var("KRONN_HOST").ok().as_deref(),
+        is_docker,
+        &server.host,
+    );
+    plain_http_blocked(is_docker, &requested, proxy_declared_for(server))
 }
 
 /// What the Settings toggle must say when asked to expose Kronn (KT-1596):
@@ -226,6 +331,23 @@ pub fn plain_http_lan_boot_error(
          • put a TLS-terminating reverse proxy in front, set {TLS_TERMINATED_ENV}=1 and \
          {PUBLIC_ORIGIN_ENV}=https://<its address>, or\n    • publish on loopback only \
          (KRONN_BIND=127.0.0.1)."
+    ))
+}
+
+/// Docker with a declared proxy AND the plain port published beyond loopback:
+/// the proxy is declared as the only way in, yet the backend's own port still
+/// answers in clear on the network, token and P2P invites included. The declared
+/// proxy lives on this host and reaches Kronn through loopback, so there is no
+/// reason to publish wider. `Some(message)` to refuse to start. Pure + tested.
+pub fn proxy_with_plain_publish_error(lan_exposed: bool, proxy_declared: bool) -> Option<String> {
+    if !(lan_exposed && proxy_declared) {
+        return None;
+    }
+    Some(format!(
+        "REFUSING TO START: {TLS_TERMINATED_ENV} declares a TLS proxy as the way in, but \
+         Kronn's own port is published beyond loopback, so the token and P2P invite codes \
+         are still served in clear on the network.\n  Publish on loopback only \
+         (KRONN_BIND=127.0.0.1) and let the proxy on this host reach it there."
     ))
 }
 
@@ -276,7 +398,8 @@ pub fn boot_bind(
             bind_host: requested_host.to_string(),
             reason: BindReason::AsRequested,
             reachable_from_network: requested_exposed || proxy_declared,
-            fatal: plain_http_lan_boot_error(requested_exposed, tls_enabled, proxy_declared),
+            fatal: plain_http_lan_boot_error(requested_exposed, tls_enabled, proxy_declared)
+                .or_else(|| proxy_with_plain_publish_error(requested_exposed, proxy_declared)),
         };
     }
     let (bind_host, reason) = if !requested_exposed || tls_enabled {
@@ -541,9 +664,116 @@ mod tests {
         assert!(boot_bind("0.0.0.0", true, None, false, false)
             .fatal
             .is_none());
-        assert!(boot_bind("0.0.0.0", true, Some("0.0.0.0"), false, true)
+        // A declared proxy with a loopback publish boots: the proxy is the way in.
+        assert!(boot_bind("0.0.0.0", true, Some("127.0.0.1"), false, true)
             .fatal
             .is_none());
+    }
+
+    #[test]
+    fn docker_with_a_declared_proxy_refuses_a_plain_port_published_on_the_network() {
+        // KT-1596 review: the declaration says the proxy is the only way in, yet
+        // KRONN_BIND=0.0.0.0 leaves Kronn's own plain port open on the LAN.
+        let bind = boot_bind("0.0.0.0", true, Some("0.0.0.0"), false, true);
+        let fatal = bind.fatal.expect("must refuse");
+        assert!(fatal.contains("KRONN_BIND=127.0.0.1"), "{fatal}");
+        assert!(proxy_with_plain_publish_error(true, true).is_some());
+        assert!(proxy_with_plain_publish_error(false, true).is_none());
+        assert!(proxy_with_plain_publish_error(true, false).is_none());
+        // Native never reaches it: the declared proxy binds loopback there.
+        assert!(boot_bind("0.0.0.0", false, None, false, true)
+            .fatal
+            .is_none());
+    }
+
+    #[test]
+    fn plain_http_is_blocked_on_the_effective_bind_request() {
+        // The requested bind, KRONN_HOST included, decides: not only the config.
+        let from_env = resolve_bind_host(Some("0.0.0.0"), false, "127.0.0.1");
+        assert!(plain_http_blocked(false, &from_env, false));
+        assert!(plain_http_blocked(false, "192.168.1.10", false));
+        assert!(
+            !plain_http_blocked(false, &from_env, true),
+            "declared proxy"
+        );
+        assert!(!plain_http_blocked(false, "127.0.0.1", false), "loopback");
+        assert!(!plain_http_blocked(false, "[::1]", false));
+        assert!(
+            !plain_http_blocked(true, "0.0.0.0", false),
+            "Docker refuses to start instead"
+        );
+    }
+
+    #[test]
+    fn only_the_declared_public_origin_is_a_proxy_origin() {
+        let mut server = crate::core::config::default_config().server;
+        server.public_origin = Some("https://Kronn.Example.com:443/".into());
+        // An origin without the declaration allows nothing.
+        assert_eq!(declared_origin(&server), None);
+        server.tls_terminated_by_proxy = true;
+        assert_eq!(
+            declared_origin(&server).as_deref(),
+            Some("https://kronn.example.com")
+        );
+        server.public_origin = Some("https://kronn.example.com:8443".into());
+        assert_eq!(
+            declared_origin(&server).as_deref(),
+            Some("https://kronn.example.com:8443")
+        );
+        // Declared, but no usable origin: nothing to allow.
+        server.public_origin = Some("http://kronn.example.com".into());
+        assert_eq!(declared_origin(&server), None);
+        server.public_origin = None;
+        assert_eq!(declared_origin(&server), None);
+    }
+
+    #[test]
+    fn recovery_behind_a_proxy_needs_the_machine_proof_not_just_a_loopback_peer() {
+        // No proxy: a loopback peer is the owner, as before.
+        assert!(recovery_caller_is_local(false, true, false));
+        assert!(!recovery_caller_is_local(false, false, false));
+        // Behind a proxy: the proxy is the loopback peer, so the proof decides.
+        assert!(!recovery_caller_is_local(true, true, false));
+        assert!(recovery_caller_is_local(true, true, true));
+        // A proof from a non-loopback peer is still refused.
+        assert!(!recovery_caller_is_local(true, false, true));
+    }
+
+    #[test]
+    fn the_local_proof_is_minted_once_kept_private_and_compared_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        // Nothing to match before it exists, and matching never creates it.
+        assert!(!local_proof_matches(dir.path(), Some("anything")));
+        assert!(!dir.path().join(LOCAL_PROOF_FILE).exists());
+        let proof = local_proof(dir.path()).unwrap();
+        assert!(proof.len() >= 32);
+        assert_eq!(
+            local_proof(dir.path()).unwrap(),
+            proof,
+            "stable once minted"
+        );
+        assert!(local_proof_matches(dir.path(), Some(&proof)));
+        assert!(local_proof_matches(
+            dir.path(),
+            Some(&format!(" {proof}\n"))
+        ));
+        assert!(!local_proof_matches(dir.path(), Some("wrong")));
+        assert!(!local_proof_matches(dir.path(), Some("")));
+        assert!(!local_proof_matches(dir.path(), None));
+        // An empty file is not a proof that an empty header could match.
+        std::fs::write(dir.path().join(LOCAL_PROOF_FILE), "").unwrap();
+        assert!(!local_proof_matches(dir.path(), Some("")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let fresh = tempfile::tempdir().unwrap();
+            local_proof(fresh.path()).unwrap();
+            let mode = std::fs::metadata(fresh.path().join(LOCAL_PROOF_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "owner-only, got {mode:o}");
+        }
     }
 
     #[test]

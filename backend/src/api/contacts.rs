@@ -215,6 +215,17 @@ pub async fn try_build_invite_code(server: &crate::models::ServerConfig) -> Resu
             crate::core::net_expose::public_origin_for(server).as_deref(),
         );
     }
+    // Exposure was asked for and nothing carries TLS: this boot serves nobody on
+    // the network, and a plain LAN / Tailscale address in an invite would send the
+    // peer (and its P2P traffic) to a port that is either closed or in clear.
+    if crate::core::net_expose::plain_http_blocked_for(server) {
+        return Err(
+            "No invite code while network exposure is blocked: nothing carries TLS. Declare \
+             a TLS proxy and its public https:// address in Settings, or turn the exposure \
+             off."
+                .to_string(),
+        );
+    }
     let host = advertised_host_async(server).await;
     Ok(format!(
         "kronn:{}@{}:{}",
@@ -465,9 +476,10 @@ mod tests {
     #[tokio::test]
     async fn build_invite_code_is_always_parseable() {
         use crate::db::contacts::parse_invite_code;
-        // Even with no pseudo + bind-all host, the emitted code must round-trip
-        // through the peer's parser (non-empty pseudo, reachable host).
-        for h in ["0.0.0.0", "::", "127.0.0.1", "192.168.1.5"] {
+        // Even with no pseudo, the emitted code must round-trip through the
+        // peer's parser (non-empty pseudo, reachable host). An exposed host only
+        // gets a code once a proxy carries TLS (next test).
+        for h in ["127.0.0.1", "localhost", "[::1]"] {
             let code = try_build_invite_code(&cfg(h, None)).await.unwrap();
             assert!(code.starts_with("kronn:"), "host={h} code={code}");
             assert!(!code.starts_with("kronn:@"), "empty pseudo leaked: {code}");
@@ -475,6 +487,28 @@ mod tests {
             assert!(
                 parsed.is_some(),
                 "peer must accept our code (host={h}): {code}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn no_plain_invite_while_exposure_is_blocked() {
+        // KT-1596: exposure requested, nothing carries TLS → this boot serves
+        // nobody and the invite would name a port that is closed or in clear.
+        for h in ["0.0.0.0", "::", "192.168.1.5"] {
+            let mut server = cfg(h, Some("kronn.example"));
+            let reason = try_build_invite_code(&server)
+                .await
+                .expect_err("a plain LAN invite must not be handed out");
+            assert!(reason.contains("TLS"), "{reason}");
+            // The infallible variant (every broadcast) is EMPTY, never plain.
+            assert_eq!(build_invite_code(&server).await, "");
+            // A declared proxy lifts the block: the https/wss form is advertised.
+            server.tls_terminated_by_proxy = true;
+            server.public_origin = Some("https://kronn.example.com".into());
+            assert_eq!(
+                try_build_invite_code(&server).await.unwrap(),
+                "kronns:anonymous@kronn.example.com:443"
             );
         }
     }

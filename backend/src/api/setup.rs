@@ -1168,8 +1168,9 @@ pub struct NetworkExposure {
     pub tls_declared_by_env: bool,
     /// The proxy's public `https://` origin, the address invites advertise.
     pub public_origin: Option<String>,
-    /// The configuration asks for exposure that nothing encrypts. The backend
-    /// started (or will start) on loopback instead; Settings says why.
+    /// The configuration, or `KRONN_HOST`, asks for exposure that nothing
+    /// encrypts. The backend started (or will start) on loopback instead, and
+    /// hands out no invite code; Settings says why.
     pub plain_http_blocked: bool,
     /// Only in the reply to a declaration: the network access token, handed over
     /// once because the loopback bypass is withdrawn from now on and the local
@@ -1200,6 +1201,7 @@ fn exposure_state(
     is_docker: bool,
     kronn_bind: Option<&str>,
     config_host: &str,
+    requested_host: &str,
     proxy_declared: bool,
 ) -> (bool, bool) {
     if is_docker {
@@ -1208,8 +1210,9 @@ fn exposure_state(
             false,
         )
     } else {
+        // The next boot binds what `KRONN_HOST` (when set) or the config asks.
         let planned =
-            crate::core::net_expose::boot_bind(config_host, false, None, false, proxy_declared);
+            crate::core::net_expose::boot_bind(requested_host, false, None, false, proxy_declared);
         (
             crate::core::net_expose::is_exposed_host(config_host),
             crate::core::net_expose::restart_required(&planned.bind_host),
@@ -1238,8 +1241,20 @@ async fn network_exposure_snapshot(state: &AppState) -> NetworkExposure {
         .flatten()
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty());
-    let (exposed, restart_required) =
-        exposure_state(in_docker, kronn_bind.as_deref(), &host, proxy_declared);
+    // What this boot is asked to bind, `KRONN_HOST` included: a loopback fallback
+    // caused by the environment is as real as one caused by the config.
+    let requested_host = crate::core::net_expose::resolve_bind_host(
+        crate::core::child_env::var("KRONN_HOST").ok().as_deref(),
+        in_docker,
+        &host,
+    );
+    let (exposed, restart_required) = exposure_state(
+        in_docker,
+        kronn_bind.as_deref(),
+        &host,
+        &requested_host,
+        proxy_declared,
+    );
     NetworkExposure {
         exposed,
         restart_required,
@@ -1251,7 +1266,11 @@ async fn network_exposure_snapshot(state: &AppState) -> NetworkExposure {
         tls_terminated_by_proxy: proxy_declared,
         tls_declared_by_env: declared_by_env,
         public_origin,
-        plain_http_blocked: !in_docker && exposed && !proxy_declared,
+        plain_http_blocked: crate::core::net_expose::plain_http_blocked(
+            in_docker,
+            &requested_host,
+            proxy_declared,
+        ),
         issued_auth_token: None,
     }
 }
@@ -1366,6 +1385,8 @@ pub async fn set_network_exposure(
                 format!("Failed to save: {}", e),
             );
         }
+        // The recovery proof the owner will need behind this proxy, ready now.
+        crate::core::net_expose::arm_local_proof(&next.server);
         let issued = (req.tls_terminated_by_proxy == Some(true))
             .then(|| next.server.auth_token.clone())
             .flatten();
@@ -2912,9 +2933,28 @@ pub async fn import_data(
     }
 }
 
+/// Why a reset must not run now, if it must not (see `reset`). Pure + tested.
+fn reset_refusal(proxy_declared_in_config: bool) -> Option<String> {
+    proxy_declared_in_config.then(|| {
+        "Reset refused: a TLS proxy is declared for this instance, and a reset would forget \
+         that at the next start, letting everyone behind the proxy in as the local owner. \
+         Clear the proxy declaration in Settings › Server & network access first."
+            .to_string()
+    })
+}
+
 /// POST /api/setup/reset
 /// Delete config file to trigger first-run wizard again
 pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
+    // KT-1596 — a reset leaves a key-only config.toml, so a TLS proxy declared in
+    // the config would be forgotten at the next start while the proxy keeps
+    // forwarding the whole network from 127.0.0.1, and every proxied request
+    // would regain the loopback owner trust. Clearing the declaration is a
+    // deliberate act in Settings, never a side effect of a reset. Checked before
+    // anything is deleted.
+    if let Some(refusal) = reset_refusal(state.config.read().await.server.tls_terminated_by_proxy) {
+        return Json(ApiResponse::err(refusal));
+    }
     // Clear the data first: a failure reports, and nothing else changes.
     if let Err(e) = state
         .db
@@ -6087,7 +6127,7 @@ mod frontend_origin_tests {
 
 #[cfg(test)]
 mod network_exposure_tests {
-    use super::{auth_token_set, exposure_state};
+    use super::{auth_token_set, exposure_state, reset_refusal};
 
     #[test]
     fn docker_exposure_follows_kronn_bind_and_never_needs_a_restart() {
@@ -6095,16 +6135,19 @@ mod network_exposure_tests {
         // 0.0.0.0): only the host port publish counts.
         for host in ["127.0.0.1", "0.0.0.0"] {
             assert_eq!(
-                exposure_state(true, Some("127.0.0.1"), host, false),
+                exposure_state(true, Some("127.0.0.1"), host, host, false),
                 (false, false)
             );
-            assert_eq!(exposure_state(true, None, host, false), (false, false));
             assert_eq!(
-                exposure_state(true, Some("0.0.0.0"), host, false),
+                exposure_state(true, None, host, host, false),
+                (false, false)
+            );
+            assert_eq!(
+                exposure_state(true, Some("0.0.0.0"), host, host, false),
                 (true, false)
             );
             assert_eq!(
-                exposure_state(true, Some("192.168.1.10"), host, false),
+                exposure_state(true, Some("192.168.1.10"), host, host, false),
                 (true, false)
             );
         }
@@ -6114,11 +6157,37 @@ mod network_exposure_tests {
     fn native_exposure_still_follows_the_configured_host() {
         // KRONN_BIND is ignored natively; with no boot host recorded there is
         // never a restart to ask for.
-        assert!(!exposure_state(false, Some("0.0.0.0"), "127.0.0.1", false).0);
-        assert!(exposure_state(false, None, "0.0.0.0", false).0);
-        assert!(exposure_state(false, None, "::", false).0);
-        assert!(!exposure_state(false, None, "127.0.0.1", false).0);
-        assert!(!exposure_state(false, None, "192.168.1.10", false).0);
+        let state = |host: &str| exposure_state(false, None, host, host, false);
+        assert!(!exposure_state(false, Some("0.0.0.0"), "127.0.0.1", "127.0.0.1", false).0);
+        assert!(state("0.0.0.0").0);
+        assert!(state("::").0);
+        assert!(!state("127.0.0.1").0);
+        assert!(!state("192.168.1.10").0);
+    }
+
+    #[test]
+    fn a_reset_is_refused_while_a_proxy_is_declared_in_the_config() {
+        // KT-1596: the reset rewrites config.toml key-only; the declaration would
+        // be forgotten while the proxy keeps forwarding from loopback.
+        let refusal = reset_refusal(true).expect("must refuse");
+        assert!(refusal.contains("Settings"), "{refusal}");
+        assert!(reset_refusal(false).is_none());
+    }
+
+    #[test]
+    fn the_plain_http_banner_reads_the_effective_bind_not_only_the_config_host() {
+        use crate::core::net_expose::plain_http_blocked;
+        // KRONN_HOST=0.0.0.0 over a loopback config: the boot falls back, the
+        // owner must be told (the host passed is the resolved bind request).
+        let requested =
+            crate::core::net_expose::resolve_bind_host(Some("0.0.0.0"), false, "127.0.0.1");
+        assert!(plain_http_blocked(false, &requested, false));
+        // A declared proxy, loopback use and Docker (refuses to start) are not.
+        assert!(!plain_http_blocked(false, &requested, true));
+        assert!(!plain_http_blocked(false, "127.0.0.1", false));
+        assert!(!plain_http_blocked(true, "0.0.0.0", false));
+        // A specific LAN address is exposure too, not only the bind-all forms.
+        assert!(plain_http_blocked(false, "192.168.1.10", false));
     }
 
     #[test]
