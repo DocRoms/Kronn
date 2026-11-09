@@ -272,6 +272,24 @@ fn the_first_build_runs_with_the_jobs_cap_and_the_lane_target() {
     );
 }
 
+/// KT-1633: the lane's first build (a `cargo test --no-run` of the whole
+/// graph) reaches the probe runner as a background command, so the runner —
+/// the sandboxed one included — starts it behind the priority launcher.
+#[test]
+fn the_first_build_asks_the_runner_for_background_priority() {
+    let fx = fixture();
+    let lane = fx.lane("kt-1633-priority", LOCK_A);
+    let runner = ScriptedBuild::ok();
+    warm(&lane, &runner, &RecordingClone::new(), &BuildGate::new());
+
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].priority,
+        crate::core::background_priority::Priority::Background
+    );
+}
+
 // ── Seeding ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -1148,6 +1166,7 @@ fn the_process_runner_kills_a_cancelled_build_and_what_it_started() {
         cwd: dir.path().to_path_buf(),
         env: Vec::new(),
         timeout: Duration::from_secs(120),
+        priority: crate::core::background_priority::Priority::Normal,
     };
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();

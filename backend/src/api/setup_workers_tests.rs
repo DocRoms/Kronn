@@ -14,6 +14,7 @@ fn workers(rounds: u32, unlimited: bool) -> WorkersConfig {
     WorkersConfig {
         default_max_review_rounds: rounds,
         review_rounds_unlimited: unlimited,
+        background_priority: true,
     }
 }
 
@@ -146,4 +147,53 @@ fn the_review_rounds_argument_is_an_integer_or_unlimited_and_nothing_else() {
             "{bad} must be refused"
         );
     }
+}
+
+/// KT-1633 — Settings > Workers: the background-priority switch is on out of
+/// the box, an older `[workers]` table without it loads as on, it round-trips
+/// through `config.toml`, and saving it reaches the process (`config::save`
+/// publishes it) so the next spawn reads it.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_background_priority_switch_defaults_on_round_trips_and_reaches_the_process() {
+    use crate::core::background_priority;
+    let _restore =
+        crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&["KRONN_DATA_DIR"]);
+    let data = tempfile::tempdir().unwrap();
+    crate::core::child_env::set_var("KRONN_DATA_DIR", data.path());
+    let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+    let config = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
+    let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+
+    let Json(initial) = get_workers_config(State(state.clone())).await;
+    assert!(initial.data.unwrap().background_priority);
+    let partial: WorkersConfig = toml::from_str("review_rounds_unlimited = true").unwrap();
+    assert!(partial.background_priority, "an older table keeps it on");
+
+    let off = WorkersConfig {
+        background_priority: false,
+        ..workers(5, false)
+    };
+    let (status, body) =
+        workers_reply(save_workers_config(State(state.clone()), Json(off)).await).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["background_priority"], false);
+    assert!(
+        !background_priority::enabled(),
+        "the save reached the process"
+    );
+    assert_eq!(
+        background_priority::plan_here(background_priority::Priority::Background),
+        background_priority::Plan::default()
+    );
+    let reloaded = config::load().await.unwrap().expect("a saved config");
+    assert!(!reloaded.workers.background_priority);
+
+    let (status, _) =
+        workers_reply(save_workers_config(State(state.clone()), Json(workers(5, false))).await)
+            .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(state.config.read().await.workers.background_priority);
+    // Restored for the tests that follow: the setting is process-wide.
+    background_priority::set_enabled(true);
 }

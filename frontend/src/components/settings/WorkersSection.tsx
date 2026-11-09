@@ -7,6 +7,10 @@
 // carry its own. « Unlimited » lifts the cap — stalls (no delivery, watchdog) still
 // escalate and a campaign's token budget still stops it, but a worker looping on a
 // review that never converges burns tokens, which the warning says.
+//
+// KT-1633 — the same card holds the « background priority » switch: workers, their
+// validations and workflow Agent / Exec steps run at a lower CPU priority so the
+// owner's applications stay responsive. On by default; saved with the same button.
 import { useEffect, useState } from 'react';
 import { AlertTriangle, Bot } from 'lucide-react';
 import { config as configApi } from '../../lib/api';
@@ -24,6 +28,7 @@ export function WorkersSection({ t }: Props) {
   const [saved, setSaved] = useState<WorkersConfig | null>(null);
   const [rounds, setRounds] = useState('5');
   const [unlimited, setUnlimited] = useState(false);
+  const [background, setBackground] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -35,6 +40,8 @@ export function WorkersSection({ t }: Props) {
         setSaved(value);
         setRounds(String(value.default_max_review_rounds));
         setUnlimited(value.review_rounds_unlimited);
+        // A server that predates the switch leaves it on, as the server's own default does.
+        setBackground(value.background_priority !== false);
       })
       .catch(cause => { if (live) setError(userError(cause)); });
     return () => { live = false; };
@@ -47,6 +54,7 @@ export function WorkersSection({ t }: Props) {
   const valid = unlimited || validCount;
   const unchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
+    && background === (saved.background_priority !== false)
     && (unlimited || count === saved.default_max_review_rounds);
 
   const save = useAsyncGuard(async () => {
@@ -56,10 +64,12 @@ export function WorkersSection({ t }: Props) {
       const next = await configApi.saveWorkers({
         default_max_review_rounds: validCount ? count : saved.default_max_review_rounds,
         review_rounds_unlimited: unlimited,
+        background_priority: background,
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));
       setUnlimited(next.review_rounds_unlimited);
+      setBackground(next.background_priority !== false);
     } catch (cause) {
       setError(userError(cause));
     }
@@ -132,6 +142,21 @@ export function WorkersSection({ t }: Props) {
             <span>{t('config.workers.unlimitedWarning')}</span>
           </div>
         )}
+        <div className="flex-row gap-4 mt-4">
+          <label className="flex-row gap-3">
+            <input
+              type="checkbox"
+              checked={background}
+              disabled={saved === null}
+              onChange={event => setBackground(event.target.checked)}
+              data-testid="workers-background-priority"
+            />
+            <span className="text-sm">{t('config.workers.backgroundPriority')}</span>
+          </label>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-background-hint">
+          {t('config.workers.backgroundPriorityHint')}
+        </p>
         {error && <p role="alert" className="default-docs-dir-error" data-testid="workers-error">{error}</p>}
       </div>
     </div>

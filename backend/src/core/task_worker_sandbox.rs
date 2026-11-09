@@ -32,7 +32,6 @@ use std::sync::{Arc, OnceLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::child_env::ChildRoute;
-use crate::core::cmd::Priority;
 use crate::core::task_worker_env::{
     prepare_launch, ProbeCommand, ProbeOutcome, ProbeRunner, ProcessProbeRunner, WorkerLane,
 };
@@ -184,30 +183,15 @@ impl Mechanism {
 /// ([`Confinement`]) or the profile of what a trust level grants
 /// ([`crate::core::trust_sandbox::LevelConfinement`]).
 pub trait CommandConfinement: Send + Sync {
-    /// The process `probe` becomes under this confinement, not yet started,
-    /// at `priority` (KT-1633): the priority launcher goes in front of the
+    /// The process `probe` becomes under this confinement, not yet started, at
+    /// `probe.priority` (KT-1633): the priority launcher goes in front of the
     /// sandbox's own.
-    fn command_with(
-        &self,
-        probe: &ProbeCommand,
-        route: ChildRoute,
-        priority: Priority,
-    ) -> tokio::process::Command;
-
-    /// [`CommandConfinement::command_with`] at the backend's own priority.
-    fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command {
-        self.command_with(probe, route, Priority::Normal)
-    }
+    fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command;
 }
 
 impl CommandConfinement for Confinement {
-    fn command_with(
-        &self,
-        probe: &ProbeCommand,
-        route: ChildRoute,
-        priority: Priority,
-    ) -> tokio::process::Command {
-        Confinement::command_with(self, probe, route, priority)
+    fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command {
+        Confinement::command(self, probe, route)
     }
 }
 
@@ -481,6 +465,7 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
         cwd: probe.cwd.clone(),
         env,
         timeout: probe.timeout,
+        priority: probe.priority,
     }
 }
 
@@ -685,20 +670,11 @@ impl Confinement {
     /// The process that runs `probe` confined: the sealed environment of
     /// `route`, in a session of its own with no controlling terminal
     /// ([`crate::core::task_worker_env::detach_from_terminal`], the launcher of
-    /// the lane's first build). Not started.
+    /// the lane's first build), at `probe.priority` (KT-1633). Not started.
     pub fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command {
-        self.command_with(probe, route, Priority::Normal)
-    }
-
-    /// [`Confinement::command`] at `priority` (KT-1633).
-    pub fn command_with(
-        &self,
-        probe: &ProbeCommand,
-        route: ChildRoute,
-        priority: Priority,
-    ) -> tokio::process::Command {
         let wrapped = self.wrap(probe);
-        let mut command = crate::core::cmd::async_cmd_with(&wrapped.program, route, priority);
+        let mut command =
+            crate::core::cmd::async_cmd_with(&wrapped.program, route, wrapped.priority);
         command.args(&wrapped.args).current_dir(&wrapped.cwd);
         for (name, value) in &wrapped.env {
             command.env(name, value);

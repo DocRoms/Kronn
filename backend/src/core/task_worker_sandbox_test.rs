@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::background_priority::Priority;
 use crate::core::task_worker_env::Provisioned;
 use crate::core::task_worker_lane_warm::{warm_lane, BuildGate, FirstBuild, WarmStartSettings};
 use std::sync::Mutex;
@@ -61,6 +62,7 @@ fn probe(program: &str, args: &[&str], cwd: &Path) -> ProbeCommand {
         cwd: cwd.to_path_buf(),
         env: Vec::new(),
         timeout: Duration::from_secs(120),
+        priority: crate::core::background_priority::Priority::Normal,
     }
 }
 
@@ -698,7 +700,56 @@ fn a_relaunch_after_the_worker_changed_its_build_never_reaches_a_process_unconfi
         assert!(call.args[1].contains("(deny default)"), "{call:?}");
         assert!(!call.args[1].contains("(allow default)"), "{call:?}");
         assert!(!call.args[1].contains("network-outbound"), "{call:?}");
+        // KT-1633: the first build is heavy; the priority crosses the sandbox
+        // wrapping to the process runner, which starts it behind the launcher.
+        assert_eq!(call.priority, Priority::Background, "{call:?}");
     }
+}
+
+/// KT-1633: the sandboxed runner hands the process level the priority the
+/// probe asked for — a background build stays background, a smoke check stays
+/// at the backend's priority — so no command reaching the lane through it can
+/// silently lose it.
+#[test]
+fn the_sandboxed_runner_carries_the_priority_of_a_probe_to_the_process_level() {
+    let layout = layout();
+    let inner = Recorder::new();
+    let runner = SandboxedProbeRunner::new(
+        Ok(policy_of(&layout)),
+        Some(Mechanism::Seatbelt),
+        inner.clone(),
+    );
+    for priority in [Priority::Background, Priority::Normal] {
+        let asked = ProbeCommand {
+            priority,
+            ..probe("cargo", &["build"], &layout.worktree)
+        };
+        assert!(runner.run(&asked).success);
+        let cancel = CancellationToken::new();
+        assert!(runner.run_cancellable(&asked, &cancel).success);
+    }
+    let seen: Vec<Priority> = inner.calls().iter().map(|call| call.priority).collect();
+    assert_eq!(
+        seen,
+        [
+            Priority::Background,
+            Priority::Background,
+            Priority::Normal,
+            Priority::Normal
+        ]
+    );
+    assert_eq!(
+        confine(
+            Mechanism::Bubblewrap,
+            &policy_of(&layout),
+            &ProbeCommand {
+                priority: Priority::Background,
+                ..probe("cargo", &["build"], &layout.worktree)
+            }
+        )
+        .priority,
+        Priority::Background
+    );
 }
 
 // ── The OS enforces it (hosts where the sandbox can be applied) ──────────
@@ -1225,6 +1276,7 @@ fn run_confined_blocking(
             None,
             &CancellationToken::new(),
             confinement,
+            crate::core::background_priority::Priority::Normal,
         ))
         .unwrap()
 }

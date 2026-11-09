@@ -1348,6 +1348,8 @@ const fr: TranslationDict = {
   'config.workers.unlimited': 'Illimité',
   'config.workers.unlimitedWarning': 'Des tours de revue illimités peuvent consommer beaucoup de tokens : un worker peut boucler sur une revue qui ne converge jamais. Les blocages (pas de livraison, watchdog) escaladent toujours et le budget de tokens d\'une campagne, s\'il est défini, arrête toujours toute nouvelle correction.',
   'config.workers.invalid': 'Saisissez un entier de {0} à {1}, ou cochez Illimité.',
+  'config.workers.backgroundPriority': 'Lancer les workers en priorité d\'arrière-plan',
+  'config.workers.backgroundPriorityHint': 'Les workers de tâche, leurs validations et les étapes Agent / Exec des workflows tournent avec une priorité CPU réduite (macOS : taskpolicy -b, Linux : nice -n 10, Windows : inférieure à la normale), pour que vos autres applications et l\'interface de Kronn restent réactives pendant les compilations. Kronn lui-même et son interface gardent la priorité normale ; les discussions ne sont jamais concernées. Décochez pour leur donner la même priorité que le reste ; KRONN_BACKGROUND_PRIORITY=0 la désactive aussi.',
   'projects.deleteConfirm': 'Supprimer ce projet de Kronn ?',
   'projects.deleteHard': 'Supprimer définitivement',
   'projects.deleteHardWarn': 'Cette action est irréversible. Le dossier du projet sera supprimé du disque.',

@@ -1348,6 +1348,8 @@ const en: TranslationDict = {
   'config.workers.unlimited': 'Unlimited',
   'config.workers.unlimitedWarning': 'Unlimited review rounds can burn tokens: a worker may loop on a review that never converges. Stalls (no delivery, watchdog) still escalate and a campaign\'s token budget, when set, still stops any further correction.',
   'config.workers.invalid': 'Enter a whole number from {0} to {1}, or tick Unlimited.',
+  'config.workers.backgroundPriority': 'Run workers at background priority',
+  'config.workers.backgroundPriorityHint': 'Task workers, their validations and workflow Agent / Exec steps run at a lower CPU priority (macOS: taskpolicy -b, Linux: nice -n 10, Windows: below normal), so your other applications and Kronn\'s own interface stay responsive while they build. Kronn itself and its interface keep normal priority; discussions are never affected. Untick to give them the same priority as everything else; KRONN_BACKGROUND_PRIORITY=0 turns it off too.',
   'projects.deleteConfirm': 'Remove this project from Kronn?',
   'projects.deleteHard': 'Delete permanently',
   'projects.deleteHardWarn': 'This action is irreversible. The project folder will be deleted from disk.',

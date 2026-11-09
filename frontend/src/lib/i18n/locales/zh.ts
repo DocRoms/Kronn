@@ -1342,6 +1342,8 @@ const zh: TranslationDict = {
   "config.workers.unlimited": "不限",
   "config.workers.unlimitedWarning": "不限评审轮数可能烧掉大量 token：worker 可能在永远无法收敛的评审中循环。停滞（无交付、看门狗）仍会升级，战役若设置了 token 预算，仍会据此停止任何后续修正。",
   "config.workers.invalid": "请输入 {0} 到 {1} 之间的整数，或勾选“不限”。",
+  "config.workers.backgroundPriority": "以后台优先级运行 worker",
+  "config.workers.backgroundPriorityHint": "任务 worker、它们的验证命令以及工作流的 Agent / Exec 步骤以较低的 CPU 优先级运行（macOS：taskpolicy -b，Linux：nice -n 10，Windows：低于正常），这样编译期间您的其他应用和 Kronn 界面仍保持流畅。Kronn 本身及其界面保持正常优先级；讨论不受影响。取消勾选则与其他进程使用相同优先级；设置 KRONN_BACKGROUND_PRIORITY=0 同样可关闭。",
   "projects.deleteConfirm": "从 Kronn 中移除此项目？",
   "projects.deleteHard": "永久删除",
   "projects.deleteHardWarn": "此操作不可逆。项目文件夹将从磁盘中删除。",

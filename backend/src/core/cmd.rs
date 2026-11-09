@@ -329,7 +329,7 @@ pub fn async_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> tokio::proce
 /// [`async_cmd`] at `priority` (KT-1633). A background spawn runs behind the
 /// host's priority launcher (`taskpolicy -b`, `nice -n 10`) or, on Windows,
 /// with the below-normal priority class, unless the owner switched that off
-/// ([`background_priority::BACKGROUND_PRIORITY_ENV`]). Arguments the caller
+/// (Settings > Workers, or [`background_priority::BACKGROUND_PRIORITY_ENV`]). Arguments the caller
 /// adds afterwards follow `program`, behind the launcher.
 pub fn async_cmd_with<S: AsRef<OsStr>>(
     program: S,
@@ -351,13 +351,8 @@ pub(crate) fn async_cmd_planned(
 ) -> tokio::process::Command {
     real_agent_guard::refuse_real_agent(program, route);
     let (launched, prefix_args) = plan.argv(program);
-    let mut cmd = if plan.launcher.is_some() {
-        let mut cmd = raw_async(&launched);
-        cmd.args(&prefix_args);
-        cmd
-    } else {
-        raw_async(program)
-    };
+    let mut cmd = raw_async(&launched);
+    cmd.args(&prefix_args);
     #[cfg(target_os = "windows")]
     if plan.below_normal_class {
         cmd.creation_flags(CREATE_NO_WINDOW | background_priority::BELOW_NORMAL_PRIORITY_CLASS);
@@ -368,8 +363,37 @@ pub(crate) fn async_cmd_planned(
 
 /// [`async_cmd`] for a `std::process::Command`.
 pub fn sync_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> std::process::Command {
-    real_agent_guard::refuse_real_agent(program.as_ref(), route);
-    let mut cmd = raw_sync(program.as_ref());
+    sync_cmd_with(program, route, Priority::Normal)
+}
+
+/// [`sync_cmd`] at `priority` (KT-1633), as [`async_cmd_with`] does for tokio.
+pub fn sync_cmd_with<S: AsRef<OsStr>>(
+    program: S,
+    route: ChildRoute,
+    priority: Priority,
+) -> std::process::Command {
+    sync_cmd_planned(
+        program.as_ref(),
+        route,
+        background_priority::plan_here(priority),
+    )
+}
+
+/// [`sync_cmd_with`] for an already decided [`background_priority::Plan`].
+pub(crate) fn sync_cmd_planned(
+    program: &OsStr,
+    route: ChildRoute,
+    plan: background_priority::Plan,
+) -> std::process::Command {
+    real_agent_guard::refuse_real_agent(program, route);
+    let (launched, prefix_args) = plan.argv(program);
+    let mut cmd = raw_sync(&launched);
+    cmd.args(&prefix_args);
+    #[cfg(target_os = "windows")]
+    if plan.below_normal_class {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW | background_priority::BELOW_NORMAL_PRIORITY_CLASS);
+    }
     crate::core::child_env::isolate(&mut cmd, route);
     cmd
 }
@@ -490,47 +514,35 @@ fn rebuild_for_tool(mut command: std::process::Command) -> std::process::Command
 mod tests {
     use super::*;
 
-    /// KT-1633: a background spawn starts the host's priority launcher with the
-    /// program as its argument; a normal one starts the program itself.
-    #[cfg(unix)]
-    #[test]
-    fn a_background_spawn_runs_the_program_behind_the_priority_launcher() {
-        use background_priority::{plan, HostOs, Priority};
-        for (os, launcher, flags) in [
-            (HostOs::MacOs, "/usr/sbin/taskpolicy", vec!["-b"]),
-            (HostOs::Linux, "/usr/bin/nice", vec!["-n", "10"]),
-        ] {
-            let background = plan(Priority::Background, true, os, |_| true);
-            let cmd = async_cmd_planned(OsStr::new("echo"), ChildRoute::Tool, background);
-            let std_cmd = cmd.as_std();
-            assert_eq!(std_cmd.get_program(), launcher);
-            let args: Vec<_> = std_cmd.get_args().collect();
-            let mut expected: Vec<&str> = flags;
-            expected.push("echo");
-            assert_eq!(args, expected, "{os:?}");
-
-            let normal = plan(Priority::Normal, true, os, |_| true);
-            let cmd = async_cmd_planned(OsStr::new("echo"), ChildRoute::Tool, normal);
-            assert_eq!(cmd.as_std().get_program(), "echo");
-            assert_eq!(cmd.as_std().get_args().count(), 0);
-
-            let switched_off = plan(Priority::Background, false, os, |_| true);
-            let cmd = async_cmd_planned(OsStr::new("echo"), ChildRoute::Tool, switched_off);
-            assert_eq!(cmd.as_std().get_program(), "echo");
-        }
-    }
-
-    /// KT-1633: the priority launcher execs the program, so a worker's output,
-    /// exit status and arguments reach the caller unchanged on this host.
+    /// KT-1633: the priority launcher execs the program, so the child Kronn
+    /// holds (the one it kills, with its process group) IS the program.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_background_spawn_still_runs_the_program_on_this_host() {
+    async fn a_background_spawn_runs_the_program_in_the_launchers_own_process() {
+        // Ask the host first, as boot does: a sandbox that refuses the launcher
+        // leaves the program unwrapped, and there is nothing to exec.
+        background_priority::check_launcher_blocking();
         let plan = background_priority::plan_here(Priority::Background);
-        let mut cmd = async_cmd_planned(OsStr::new("/bin/echo"), ChildRoute::Tool, plan);
-        cmd.arg("kt-1633");
-        let output = cmd.output().await.expect("spawn");
+        if plan.launcher.is_none() {
+            eprintln!("skipped: this host does not let a process lower its own priority");
+            return;
+        }
+        let shell = which::which("sh").expect("a POSIX shell on PATH");
+        let mut cmd = async_cmd_planned(shell.as_os_str(), ChildRoute::Tool, plan);
+        cmd.args(["-c", "echo $$"]);
+        cmd.stdout(std::process::Stdio::piped());
+        let child = cmd.spawn().expect("spawn");
+        let spawned = child.id().expect("a running child has an id");
+        let output = child.wait_with_output().await.expect("wait");
         assert!(output.status.success(), "{output:?}");
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "kt-1633");
+        let reported: u32 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("the shell prints its pid");
+        assert_eq!(
+            reported, spawned,
+            "the launcher must exec the program, not fork it: a kill of the child's group would miss it"
+        );
     }
 
     #[test]
@@ -1398,5 +1410,45 @@ mod tests {
             resolve_windows_program(&with_ext).is_none(),
             "name with extension must skip resolution"
         );
+    }
+}
+
+/// KT-1633. Not behind `full-tests`: the macOS portability leg builds without
+/// it and must still prove the argv of a background spawn.
+#[cfg(all(test, unix))]
+mod background_argv_tests {
+    use super::*;
+    use background_priority::{plan, HostOs};
+
+    /// A background spawn starts the host's priority launcher with the program
+    /// as its argument; a normal one, or one the owner switched off, starts the
+    /// program itself. Async and sync spawns agree.
+    #[test]
+    fn a_background_spawn_runs_the_program_behind_the_priority_launcher() {
+        for (os, launcher, flags) in [
+            (HostOs::MacOs, "/usr/sbin/taskpolicy", vec!["-b"]),
+            (HostOs::Linux, "/usr/bin/nice", vec!["-n", "10"]),
+        ] {
+            let background = plan(Priority::Background, true, os, |_| true);
+            let asynchronous = async_cmd_planned(OsStr::new("cargo"), ChildRoute::Tool, background);
+            let synchronous = sync_cmd_planned(OsStr::new("cargo"), ChildRoute::Tool, background);
+            let mut expected: Vec<&str> = flags;
+            expected.push("cargo");
+            for std_cmd in [asynchronous.as_std(), &synchronous] {
+                assert_eq!(std_cmd.get_program(), launcher, "{os:?}");
+                let args: Vec<_> = std_cmd.get_args().collect();
+                assert_eq!(args, expected, "{os:?}");
+            }
+
+            let normal = plan(Priority::Normal, true, os, |_| true);
+            let cmd = sync_cmd_planned(OsStr::new("cargo"), ChildRoute::Tool, normal);
+            assert_eq!(cmd.get_program(), "cargo");
+            assert_eq!(cmd.get_args().count(), 0);
+
+            let switched_off = plan(Priority::Background, false, os, |_| true);
+            let cmd = async_cmd_planned(OsStr::new("cargo"), ChildRoute::Tool, switched_off);
+            assert_eq!(cmd.as_std().get_program(), "cargo");
+            assert_eq!(cmd.as_std().get_args().count(), 0);
+        }
     }
 }

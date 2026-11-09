@@ -112,6 +112,14 @@ pub struct WorkersConfig {
     /// cost is tokens spent on a review that may never converge.
     #[serde(default)]
     pub review_rounds_unlimited: bool,
+    /// KT-1633 — run task workers (first dispatch and re-dispatch), their
+    /// validations and workflow Agent / Exec steps at background priority
+    /// (`taskpolicy -b`, `nice -n 10`, below-normal on Windows), so the owner's
+    /// applications and Kronn's own UI stay responsive. On by default; off keeps
+    /// every spawn at the backend's priority. `KRONN_BACKGROUND_PRIORITY=0` turns
+    /// it off too, whatever this says.
+    #[serde(default = "default_true")]
+    pub background_priority: bool,
 }
 
 impl Default for WorkersConfig {
@@ -119,6 +127,7 @@ impl Default for WorkersConfig {
         Self {
             default_max_review_rounds: DEFAULT_MAX_REVIEW_ROUNDS,
             review_rounds_unlimited: false,
+            background_priority: true,
         }
     }
 }

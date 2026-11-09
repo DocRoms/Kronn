@@ -37,7 +37,8 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
-use crate::core::cmd::async_cmd;
+use crate::core::background_priority::{self, Priority};
+use crate::core::cmd::async_cmd_planned;
 use crate::models::*;
 
 use super::steps::StepOutcome;
@@ -68,6 +69,24 @@ pub const LEGACY_TRUNCATION_MARKER_PREFIX: &str = "[... output tronqué — limi
 /// Added to a failed `gh` step whose project gave it no GitHub token.
 pub const GH_NOT_CONNECTED_HINT: &str = " — this project is not connected to GitHub in Kronn, so the step received no GitHub token (Projects → Overview → GitHub)";
 
+/// KT-1633 — an Exec step (an autoCode build, `cargo test`, `npm install`) runs
+/// in the background: it yields to the owner's interactive applications.
+const EXEC_STEP_PRIORITY: Priority = Priority::Background;
+
+/// The command of an Exec step child at [`EXEC_STEP_PRIORITY`], behind the
+/// host's priority launcher unless the owner turned that off.
+fn step_command(program: &str) -> tokio::process::Command {
+    step_command_planned(program, background_priority::plan_here(EXEC_STEP_PRIORITY))
+}
+
+fn step_command_planned(program: &str, plan: background_priority::Plan) -> tokio::process::Command {
+    async_cmd_planned(
+        program.as_ref(),
+        crate::core::child_env::ChildRoute::WorkflowExec,
+        plan,
+    )
+}
+
 /// An Exec step child (setup or main command): the program with its built
 /// environment (KT-1006) and the project's GitHub variables only when the
 /// project is connected (D2); callers only add argv, cwd and stdio.
@@ -77,7 +96,14 @@ fn exec_child(
     github_env: &[(String, String)],
     refs: &[(String, String)],
 ) -> tokio::process::Command {
-    let mut command = async_cmd(program, crate::core::child_env::ChildRoute::WorkflowExec);
+    isolated_exec_child(step_command(program), github_env, refs)
+}
+
+fn isolated_exec_child(
+    mut command: tokio::process::Command,
+    github_env: &[(String, String)],
+    refs: &[(String, String)],
+) -> tokio::process::Command {
     crate::core::child_env::isolate_with_github_values_and_refs(
         command.as_std_mut(),
         crate::core::child_env::ChildRoute::WorkflowExec,
@@ -117,7 +143,7 @@ fn approved_script_child(
     copy_dir: &Path,
 ) -> tokio::process::Command {
     use crate::core::approved_scripts::{SCRIPTS_DIR_ENV, WORKTREE_ENV};
-    let mut command = async_cmd(program, crate::core::child_env::ChildRoute::WorkflowExec);
+    let mut command = step_command(program);
     crate::core::child_env::isolate_with_github_values_and_refs(
         command.as_std_mut(),
         crate::core::child_env::ChildRoute::WorkflowExec,
@@ -1328,6 +1354,39 @@ mod tests {
                 !env.iter().any(|name| name == gone),
                 "{gone} reached the step"
             );
+        }
+    }
+
+    /// KT-1633: an Exec step starts at background priority — behind the host's
+    /// launcher, whichever of the main command and the approved-script command
+    /// it is — and keeps its built environment. The owner's switch and a host
+    /// without the launcher both leave the program itself.
+    #[cfg(unix)]
+    #[test]
+    fn an_exec_step_child_runs_behind_the_priority_launcher() {
+        use background_priority::{plan, HostOs};
+        assert_eq!(EXEC_STEP_PRIORITY, Priority::Background);
+        for (os, launcher, flags) in [
+            (HostOs::MacOs, "/usr/sbin/taskpolicy", vec!["-b"]),
+            (HostOs::Linux, "/usr/bin/nice", vec!["-n", "10"]),
+        ] {
+            let background = plan(EXEC_STEP_PRIORITY, true, os, |_| true);
+            let command = isolated_exec_child(step_command_planned("cargo", background), &[], &[]);
+            let command = command.as_std();
+            assert_eq!(command.get_program(), launcher, "{os:?}");
+            let args: Vec<_> = command.get_args().collect();
+            let mut expected = flags;
+            expected.push("cargo");
+            assert_eq!(args, expected, "{os:?}");
+            assert!(
+                command.get_envs().any(|(name, _)| name == "PATH"),
+                "the launcher must not cost the step its built environment"
+            );
+
+            let off = plan(EXEC_STEP_PRIORITY, false, os, |_| true);
+            let command = step_command_planned("cargo", off);
+            assert_eq!(command.as_std().get_program(), "cargo");
+            assert_eq!(command.as_std().get_args().count(), 0);
         }
     }
 

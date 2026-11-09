@@ -12027,7 +12027,16 @@ default_max_review_rounds: number,
  * `token_budget`, when set, still stops every further correction attempt; the
  * cost is tokens spent on a review that may never converge.
  */
-review_rounds_unlimited: boolean, };
+review_rounds_unlimited: boolean,
+/**
+ * KT-1633 — run task workers (first dispatch and re-dispatch), their
+ * validations and workflow Agent / Exec steps at background priority
+ * (`taskpolicy -b`, `nice -n 10`, below-normal on Windows), so the owner's
+ * applications and Kronn's own UI stay responsive. On by default; off keeps
+ * every spawn at the backend's priority. `KRONN_BACKGROUND_PRIORITY=0` turns
+ * it off too, whatever this says.
+ */
+background_priority: boolean, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

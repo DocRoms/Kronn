@@ -3193,6 +3193,11 @@ pub struct AgentStartConfig<'a> {
     pub room_agent_context: Option<&'a RoomAgentBridgeContext>,
     /// A workflow step's room capability. Ignored when a worker context is present.
     pub workflow_step_context: Option<&'a WorkflowStepBridgeContext>,
+    /// KT-1633 — how urgently the agent's CLI process wants the CPU. A workflow
+    /// Agent step asks for [`Priority::Background`]; a task worker runs there
+    /// whatever this says; every other launch keeps the default (the backend's
+    /// own priority).
+    pub priority: Priority,
     /// The audit run this agent works for (KT-1324): its processes carry the
     /// run's tag so boot can stop them after a backend stop.
     pub audit_run_id: Option<&'a str>,
@@ -3317,6 +3322,7 @@ impl<'a> AgentStartConfig<'a> {
             task_worker_context: None,
             room_agent_context: None,
             workflow_step_context: None,
+            priority: Priority::Normal,
             audit_run_id: None,
             ollama_format: None,
             model_override: None,
@@ -4597,6 +4603,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 step_tools: config.step_tools.cloned(),
                 github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
                 bridge_token: bridge_value.clone(),
+                priority: config.priority,
             };
             // Read-only repositories need the adapter's restricted policy.
             return start_adapted_acp(
@@ -4740,6 +4747,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.audit_run_id,
         &github_env,
         bridge_value.as_deref(),
+        config.priority,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -4773,6 +4781,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     config.audit_run_id,
                     &github_env,
                     bridge_value.as_deref(),
+                    config.priority,
                 )
                 .map_err(|error| {
                     format!("Direct CLI launch failed: {e}; npx fallback failed: {error}")
@@ -5002,6 +5011,8 @@ pub(crate) struct AdapterLaunchOptions {
     pub(crate) github_env: Vec<(String, String)>,
     /// The launch's scoped bridge token (layer B); revoked with the launch.
     pub(crate) bridge_token: Option<String>,
+    /// KT-1633 — see [`AgentStartConfig::priority`].
+    pub(crate) priority: Priority,
 }
 
 /// Reuse the authoritative direct worker policy, including its isolated MCP
@@ -14277,13 +14288,17 @@ pub(crate) fn claude_auto_memory_opted_in() -> bool {
         == Ok("1")
 }
 
-/// The priority of one agent launch: a task worker runs in the background, any
-/// other launch keeps the backend's own priority.
-fn agent_launch_priority(task_worker_context: Option<&TaskWorkerBridgeContext>) -> Priority {
+/// The priority of one agent launch: a task worker runs in the background
+/// whatever the caller asked, any other launch at the priority its caller asked
+/// for (a workflow Agent step: background; a discussion turn: the backend's own).
+fn agent_launch_priority(
+    task_worker_context: Option<&TaskWorkerBridgeContext>,
+    requested: Priority,
+) -> Priority {
     if task_worker_context.is_some() {
         Priority::Background
     } else {
-        Priority::Normal
+        requested
     }
 }
 
@@ -14362,6 +14377,7 @@ pub(crate) fn try_spawn(
     audit_run_id: Option<&str>,
     github_env: &[(String, String)],
     bridge_token: Option<&str>,
+    priority: Priority,
 ) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
@@ -14455,13 +14471,13 @@ pub(crate) fn try_spawn(
     let route = crate::core::child_env::ChildRoute::Agent(
         crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key),
     );
-    // KT-1633 — a task worker (and the reviewer's re-dispatch of it, a fix)
-    // builds for minutes: it yields to the owner's interactive applications.
-    // A room principal or a plain discussion turn is the owner's own work.
+    // KT-1633 — a task worker (and its re-dispatch after a review) and a workflow
+    // Agent step build for minutes: they yield to the owner's interactive
+    // applications. A room principal or a plain discussion turn is the owner's own work.
     let mut cmd = async_cmd_with(
         &final_cmd,
         route,
-        agent_launch_priority(task_worker_context),
+        agent_launch_priority(task_worker_context, priority),
     );
     // Built, never inherited: the backend's own environment holds secrets.
     crate::core::child_env::reset(cmd.as_std_mut(), route);

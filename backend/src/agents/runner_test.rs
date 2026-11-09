@@ -11307,6 +11307,7 @@ Suite de la réponse.";
             None,
             &[],
             None,
+            crate::core::background_priority::Priority::Normal,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11349,6 +11350,7 @@ Suite de la réponse.";
             None,
             github_env,
             None,
+            crate::core::background_priority::Priority::Normal,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11413,6 +11415,7 @@ Suite de la réponse.";
             None,
             &[],
             None,
+            crate::core::background_priority::Priority::Normal,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11486,16 +11489,43 @@ Suite de la réponse.";
         }
     }
 
-    /// KT-1633: only a task worker's launch runs in the background; the room
-    /// principal's and a plain turn's agent is the owner's own work.
+    /// KT-1633: a task worker's launch always runs in the background, a launch
+    /// that asked for it (a workflow Agent step) does too, and the room
+    /// principal's or a plain turn's agent is the owner's own work.
     #[test]
-    fn only_a_task_worker_launch_runs_at_background_priority() {
+    fn a_launch_runs_at_background_priority_only_for_a_worker_or_when_asked() {
         use crate::core::cmd::Priority;
+        for requested in [Priority::Normal, Priority::Background] {
+            assert_eq!(
+                agent_launch_priority(Some(&worker_context()), requested),
+                Priority::Background
+            );
+        }
         assert_eq!(
-            agent_launch_priority(Some(&worker_context())),
+            agent_launch_priority(None, Priority::Background),
             Priority::Background
         );
-        assert_eq!(agent_launch_priority(None), Priority::Normal);
+        assert_eq!(
+            agent_launch_priority(None, Priority::Normal),
+            Priority::Normal
+        );
+    }
+
+    /// KT-1633: the default config does not ask for the background, so a
+    /// discussion turn keeps the backend's priority; only a workflow Agent step
+    /// (`workflows::steps`) sets it.
+    #[test]
+    fn an_agent_start_config_defaults_to_the_backends_own_priority() {
+        use crate::core::cmd::Priority;
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let config = AgentStartConfig::new(&AgentType::ClaudeCode, "/tmp", "p", &tokens);
+        assert_eq!(config.priority, Priority::Normal);
     }
 
     fn workflow_step_context() -> WorkflowStepBridgeContext {

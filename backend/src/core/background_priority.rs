@@ -15,10 +15,17 @@
 //! | Windows | `BELOW_NORMAL_PRIORITY_CLASS` creation flag         |
 //!
 //! The backend itself and the UI never go through here: only the call sites
-//! that ask for [`Priority::Background`] do. [`BACKGROUND_PRIORITY_ENV`] set to
-//! `0` / `false` / `off` / `no` turns the whole mechanism off.
+//! that ask for [`Priority::Background`] do. The owner turns the whole mechanism
+//! off in Settings > Workers ([`set_enabled`]) or with
+//! [`BACKGROUND_PRIORITY_ENV`] set to `0` / `false` / `off` / `no`.
+//!
+//! Whether the host lets the launcher run is asked once, at boot, off the async
+//! path ([`check_launcher_at_boot`]); a spawn only reads the stored answer.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Environment switch of the mechanism. Unset, empty or any other value keeps
 /// it on; `0`, `false`, `off` or `no` (any case) turns it off.
@@ -38,8 +45,9 @@ pub enum Priority {
     /// The process inherits the backend's own priority.
     #[default]
     Normal,
-    /// A worker, a reviewer's re-dispatch or a validation: it yields to the
-    /// owner's interactive applications, unless the owner turned that off.
+    /// A task worker (first dispatch and re-dispatch after a review), a
+    /// validation or a workflow Agent / Exec step: it yields to the owner's
+    /// interactive applications, unless the owner turned that off.
     Background,
 }
 
@@ -93,9 +101,27 @@ pub fn disabled_by(value: Option<&std::ffi::OsStr>) -> bool {
     })
 }
 
-/// Whether the owner left the mechanism on.
+/// The Settings > Workers switch (`workers.background_priority`), published by
+/// `config::save` and at boot. On until the config says otherwise.
+static SETTING_ON: AtomicBool = AtomicBool::new(true);
+
+/// Publish the owner's Settings > Workers choice to this process.
+pub fn set_enabled(on: bool) {
+    SETTING_ON.store(on, Ordering::Relaxed);
+}
+
+/// Whether the owner left the mechanism on: the Settings switch and the
+/// environment variable must both allow it.
 pub fn enabled() -> bool {
-    !disabled_by(crate::core::child_env::var_os(BACKGROUND_PRIORITY_ENV).as_deref())
+    enabled_with(
+        SETTING_ON.load(Ordering::Relaxed),
+        crate::core::child_env::var_os(BACKGROUND_PRIORITY_ENV).as_deref(),
+    )
+}
+
+/// [`enabled`] for a given Settings value and environment value.
+pub fn enabled_with(setting: bool, env: Option<&std::ffi::OsStr>) -> bool {
+    setting && !disabled_by(env)
 }
 
 /// The launcher `os` puts in front of a background program, given which
@@ -136,51 +162,202 @@ pub fn plan(
 
 /// [`plan`] for this host and this process's setting. A launcher the host
 /// refuses to run (a sandboxed backend may not lower a priority) is dropped:
-/// a worker at normal priority beats a worker that never starts.
+/// a worker at normal priority beats a worker that never starts. Reads the
+/// stored answer of [`check_launcher_at_boot`]; never starts a process on the
+/// caller's thread.
 pub fn plan_here(priority: Priority) -> Plan {
     if priority != Priority::Background {
         return Plan::default();
     }
-    let mut chosen = plan(priority, enabled(), HostOs::CURRENT, |path| {
+    let chosen = plan(priority, enabled(), HostOs::CURRENT, |path| {
         Path::new(path).is_file()
     });
-    if let Some(launcher) = chosen.launcher {
-        if !launcher_works(launcher) {
-            chosen.launcher = None;
-        }
+    if chosen.launcher.is_some() && LAUNCHER.get() == LauncherCheck::Unchecked {
+        // Boot could not tell (or has not run): ask again, off this thread.
+        recheck_later();
     }
-    chosen
+    apply_check(chosen, LAUNCHER.get())
 }
 
-/// Whether `launcher` can start a program on this host. Asked once per
-/// process: the answer is a property of the host's policy, not of a spawn.
-fn launcher_works(launcher: Launcher) -> bool {
-    static WORKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *WORKS.get_or_init(|| {
-        let works = crate::core::cmd::sync_tool_cmd(launcher.program)
-            .args(launcher.args)
-            .arg(probe_program())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        if !works {
-            tracing::warn!(
-                "{} cannot lower a priority here: workers and validations keep the backend's priority ({BACKGROUND_PRIORITY_ENV}=0 silences this)",
-                launcher.program
-            );
+/// What the host's launcher is known to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherCheck {
+    /// Not asked yet, or the last attempt was inconclusive.
+    Unchecked,
+    Works,
+    /// The host definitively refuses to run it.
+    Refused,
+}
+
+/// `plan`, with its launcher kept only when the host is known to run it. An
+/// unchecked launcher is not used: a worker must never fail to start for it.
+pub fn apply_check(mut plan: Plan, check: LauncherCheck) -> Plan {
+    if check != LauncherCheck::Works {
+        plan.launcher = None;
+    }
+    plan
+}
+
+/// How one probe of the launcher ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeEnd {
+    Exited {
+        success: bool,
+    },
+    /// Ended by a signal.
+    Killed,
+    SpawnFailed(std::io::ErrorKind),
+}
+
+/// What a probe settles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Works,
+    /// The launcher is missing or ran and refused: stable, worth caching.
+    Refused,
+    /// A passing failure (no process slot, interrupted, killed): ask again.
+    Inconclusive,
+}
+
+pub fn verdict(end: ProbeEnd) -> Verdict {
+    use std::io::ErrorKind::{NotFound, PermissionDenied};
+    match end {
+        ProbeEnd::Exited { success: true } => Verdict::Works,
+        ProbeEnd::Exited { success: false } => Verdict::Refused,
+        ProbeEnd::Killed => Verdict::Inconclusive,
+        ProbeEnd::SpawnFailed(NotFound | PermissionDenied) => Verdict::Refused,
+        ProbeEnd::SpawnFailed(_) => Verdict::Inconclusive,
+    }
+}
+
+/// The stored [`LauncherCheck`]: only a definitive verdict changes it.
+pub struct LauncherState(AtomicU8);
+
+impl LauncherState {
+    const UNCHECKED: u8 = 0;
+    const WORKS: u8 = 1;
+    const REFUSED: u8 = 2;
+
+    pub const fn new() -> Self {
+        Self(AtomicU8::new(Self::UNCHECKED))
+    }
+
+    pub fn get(&self) -> LauncherCheck {
+        match self.0.load(Ordering::Relaxed) {
+            Self::WORKS => LauncherCheck::Works,
+            Self::REFUSED => LauncherCheck::Refused,
+            _ => LauncherCheck::Unchecked,
         }
-        works
-    })
+    }
+
+    /// Keep a definitive answer; leave an inconclusive one unrecorded so the
+    /// next attempt is made.
+    pub fn record(&self, verdict: Verdict) {
+        let stored = match verdict {
+            Verdict::Works => Self::WORKS,
+            Verdict::Refused => Self::REFUSED,
+            Verdict::Inconclusive => return,
+        };
+        self.0.store(stored, Ordering::Relaxed);
+    }
+}
+
+impl Default for LauncherState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static LAUNCHER: LauncherState = LauncherState::new();
+
+/// Attempts of one boot probe, and the wait between two.
+const PROBE_ATTEMPTS: usize = 3;
+const PROBE_BACKOFF: Duration = Duration::from_millis(150);
+/// Minimum time between two background re-checks of an unchecked launcher.
+const RECHECK_EVERY: Duration = Duration::from_secs(30);
+
+static LAST_RECHECK: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Ask the host once, on a blocking thread: the launcher runs `true`. Called
+/// at boot, before any worker can be dispatched.
+pub async fn check_launcher_at_boot() {
+    let _ = tokio::task::spawn_blocking(check_launcher_blocking).await;
+}
+
+/// [`check_launcher_at_boot`]'s body: blocks on a child process, so it never
+/// runs on an async worker thread.
+pub fn check_launcher_blocking() {
+    let Some(launcher) = launcher_for(HostOs::CURRENT, |path| Path::new(path).is_file()) else {
+        return;
+    };
+    for attempt in 0..PROBE_ATTEMPTS {
+        match probe_launcher(launcher) {
+            Verdict::Works => {
+                LAUNCHER.record(Verdict::Works);
+                return;
+            }
+            Verdict::Refused => {
+                LAUNCHER.record(Verdict::Refused);
+                tracing::warn!(
+                    "{} cannot lower a priority here: workers and validations keep the backend's priority ({BACKGROUND_PRIORITY_ENV}=0 silences this)",
+                    launcher.program
+                );
+                return;
+            }
+            Verdict::Inconclusive if attempt + 1 < PROBE_ATTEMPTS => {
+                std::thread::sleep(PROBE_BACKOFF);
+            }
+            Verdict::Inconclusive => {}
+        }
+    }
+    tracing::warn!(
+        "could not tell whether {} can lower a priority; workers keep the backend's priority until a later check succeeds",
+        launcher.program
+    );
+}
+
+/// Run the launcher once on a program that exits 0.
+fn probe_launcher(launcher: Launcher) -> Verdict {
+    let Some(program) = probe_program() else {
+        return Verdict::Inconclusive;
+    };
+    let end = match crate::core::cmd::sync_tool_cmd(launcher.program)
+        .args(launcher.args)
+        .arg(program)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) if status.code().is_some() => ProbeEnd::Exited {
+            success: status.success(),
+        },
+        Ok(_) => ProbeEnd::Killed,
+        Err(error) => ProbeEnd::SpawnFailed(error.kind()),
+    };
+    verdict(end)
+}
+
+/// Re-check on a thread of its own, at most every [`RECHECK_EVERY`].
+fn recheck_later() {
+    let due = {
+        let mut last = LAST_RECHECK.lock().unwrap_or_else(|p| p.into_inner());
+        let due = last.is_none_or(|at| at.elapsed() >= RECHECK_EVERY);
+        if due {
+            *last = Some(Instant::now());
+        }
+        due
+    };
+    if due {
+        std::thread::spawn(check_launcher_blocking);
+    }
 }
 
 /// A program every host with a launcher has, which exits 0.
-fn probe_program() -> &'static str {
+fn probe_program() -> Option<&'static str> {
     ["/usr/bin/true", "/bin/true"]
         .into_iter()
         .find(|path| Path::new(path).is_file())
-        .unwrap_or("/usr/bin/true")
 }
 
 /// How one spawn is made background.
@@ -208,7 +385,9 @@ impl Plan {
     }
 }
 
-#[cfg(all(test, feature = "full-tests"))]
+// Not behind `full-tests`: the macOS portability leg builds without it and must
+// still prove the `taskpolicy -b` argv.
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsStr;
@@ -317,5 +496,94 @@ mod tests {
     #[test]
     fn the_priority_of_a_spawn_defaults_to_normal() {
         assert_eq!(Priority::default(), Priority::Normal);
+    }
+
+    #[test]
+    fn the_settings_switch_and_the_environment_must_both_allow_it() {
+        assert!(enabled_with(true, None));
+        assert!(enabled_with(true, Some(OsStr::new("1"))));
+        assert!(!enabled_with(false, None));
+        assert!(!enabled_with(true, Some(OsStr::new("0"))));
+        assert!(!enabled_with(false, Some(OsStr::new("off"))));
+    }
+
+    /// The Settings value reaches `enabled()` and, through it, the plan.
+    #[test]
+    #[serial_test::serial]
+    fn publishing_the_setting_turns_a_background_spawn_back_to_normal() {
+        set_enabled(false);
+        assert!(!enabled());
+        assert_eq!(plan_here(Priority::Background), Plan::default());
+        set_enabled(true);
+        assert_eq!(
+            enabled(),
+            !disabled_by(crate::core::child_env::var_os(BACKGROUND_PRIORITY_ENV).as_deref())
+        );
+    }
+
+    #[test]
+    fn a_launcher_is_used_only_once_the_host_is_known_to_run_it() {
+        let wanted = plan(
+            Priority::Background,
+            true,
+            HostOs::MacOs,
+            everything_installed,
+        );
+        assert!(wanted.launcher.is_some());
+        assert_eq!(apply_check(wanted, LauncherCheck::Works), wanted);
+        assert_eq!(apply_check(wanted, LauncherCheck::Refused).launcher, None);
+        assert_eq!(apply_check(wanted, LauncherCheck::Unchecked).launcher, None);
+        let windows = plan(
+            Priority::Background,
+            true,
+            HostOs::Windows,
+            everything_installed,
+        );
+        assert!(apply_check(windows, LauncherCheck::Refused).below_normal_class);
+    }
+
+    #[test]
+    fn only_a_definitive_probe_result_is_stored() {
+        use std::io::ErrorKind;
+        assert_eq!(verdict(ProbeEnd::Exited { success: true }), Verdict::Works);
+        assert_eq!(
+            verdict(ProbeEnd::Exited { success: false }),
+            Verdict::Refused
+        );
+        assert_eq!(
+            verdict(ProbeEnd::SpawnFailed(ErrorKind::NotFound)),
+            Verdict::Refused
+        );
+        assert_eq!(
+            verdict(ProbeEnd::SpawnFailed(ErrorKind::PermissionDenied)),
+            Verdict::Refused
+        );
+        for transient in [
+            ProbeEnd::Killed,
+            ProbeEnd::SpawnFailed(ErrorKind::WouldBlock),
+            ProbeEnd::SpawnFailed(ErrorKind::Interrupted),
+            ProbeEnd::SpawnFailed(ErrorKind::OutOfMemory),
+        ] {
+            assert_eq!(verdict(transient), Verdict::Inconclusive, "{transient:?}");
+        }
+
+        let state = LauncherState::new();
+        assert_eq!(state.get(), LauncherCheck::Unchecked);
+        state.record(Verdict::Inconclusive);
+        assert_eq!(
+            state.get(),
+            LauncherCheck::Unchecked,
+            "a transient failure is retried"
+        );
+        state.record(Verdict::Works);
+        assert_eq!(state.get(), LauncherCheck::Works);
+        state.record(Verdict::Inconclusive);
+        assert_eq!(
+            state.get(),
+            LauncherCheck::Works,
+            "a transient failure keeps a known answer"
+        );
+        state.record(Verdict::Refused);
+        assert_eq!(state.get(), LauncherCheck::Refused);
     }
 }

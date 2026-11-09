@@ -5973,6 +5973,8 @@ fn validation_metadata_command(
         cwd: cwd.to_path_buf(),
         env: Vec::new(),
         timeout: std::time::Duration::from_secs(15),
+        // A bounded target-dir lookup that gates a validation's refusal.
+        priority: crate::core::background_priority::Priority::Normal,
     };
     // Preserve the validation's manifest and configuration options. Validations
     // are normally launched from the repository root, including commands such
@@ -6147,8 +6149,14 @@ async fn run_one_validation_checked(
             let cancel = tokio_util::sync::CancellationToken::new();
             match launch.confinement() {
                 Some(confinement) => {
-                    crate::core::quick_exec::run_confined(&validated, None, &cancel, confinement)
-                        .await
+                    crate::core::quick_exec::run_confined(
+                        &validated,
+                        None,
+                        &cancel,
+                        confinement,
+                        crate::core::background_priority::Priority::Background,
+                    )
+                    .await
                 }
                 None => crate::core::quick_exec::run_background(&validated, None, &cancel).await,
             }
@@ -45097,6 +45105,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: false,
+                    ..Default::default()
                 }),
                 None,
                 9,
@@ -45105,6 +45114,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: true,
+                    ..Default::default()
                 }),
                 None,
                 crate::models::UNLIMITED_REVIEW_ROUNDS,
@@ -45113,6 +45123,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: true,
+                    ..Default::default()
                 }),
                 Some(2),
                 2,

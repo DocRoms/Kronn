@@ -266,28 +266,60 @@ kills on a timeout or a cancel, and the program's children (which inherit the
 policy) are the same as without it. It sits in front of the OS sandbox, never
 behind it.
 
-What runs in the background: the CLI agent of a **task worker** launch (a
-reviewer's `request_changes` re-dispatches the same worker, so a fix runs there
-too) and every **validation** command of a task, confined or not. What does
-not: the backend, the UI, the room principal's and any plain discussion turn's
-agent (the owner's own work), Quick Exec collectors the owner starts, and the
-short `cargo metadata` target probe.
+**What runs in the background**
 
-**Turning it off.** Start the backend with `KRONN_BACKGROUND_PRIORITY=0` (`false`,
-`off` and `no` work too, any case); unset or any other value keeps it on. It is
-read at each spawn, so restarting the backend is the only step.
+- A **task worker**'s CLI agent, on its first dispatch and on every re-dispatch
+  after a reviewer's `request_changes` (a fix is the same worker again).
+- The lane's **first build** (`cargo test --no-run`, the warm-up), including
+  under the OS sandbox: the priority travels on the probe command and the
+  process runner applies it beneath the sandbox's own launcher.
+- Every **validation** command of a task, confined or not.
+- A workflow **Agent** step's CLI agent and a workflow **Exec** step's command
+  (a heavy autoCode build runs there).
 
-**A host that refuses the launcher.** The first background spawn runs the
-launcher once on `true`. If that fails (a backend running inside an OS sandbox
-that forbids lowering a priority gets `taskpolicy: setpriority(): Operation not
-permitted`), a warning is logged once and workers and validations keep the
-backend's priority: a worker at normal priority beats one that never starts. A
-host without the launcher binary is treated the same way.
+**What does not**
+
+- The backend and the UI.
+- Interactive discussions: the room principal's agent and any plain discussion
+  turn. Reviews now run as read-only discussions that never build, so there is
+  no separate review launch to lower.
+- Quick Exec collectors the owner starts.
+- The short bounded probes: `cargo metadata` (the validation target lookup),
+  `cargo nextest --version` / `cargo fetch --offline` and the `vitest` smoke
+  checks.
+- Native ACP launches that carry no workflow-step or worker context.
+
+**Turning it off.** Settings > Workers > « Run workers at background priority »
+(`workers.background_priority` in `config.toml`, on by default). Saving it takes
+effect at the next spawn, with no restart. `KRONN_BACKGROUND_PRIORITY=0`
+(`false`, `off` and `no` work too, any case) in the backend's environment turns
+it off as well: the mechanism runs only when both the setting and the
+environment allow it.
+
+**A host that refuses the launcher.** At boot, before any worker can be
+dispatched, the backend runs the launcher once on `true`, on a blocking thread
+(`check_launcher_at_boot`); a spawn only reads the stored answer and never waits
+on a process. Only a definitive answer is kept. If the launcher is missing or
+exits non-zero (a backend running inside an OS sandbox that forbids lowering a
+priority gets `taskpolicy: setpriority(): Operation not permitted`), a warning
+is logged once and workers and validations keep the backend's priority: a worker
+at normal priority beats one that never starts. A transient failure (no process
+slot, an interrupted call) is not stored: the boot probe retries, and until an
+answer is known a spawn runs at normal priority while a re-check, at most every
+30 seconds, runs on a thread of its own.
 
 [src: file: backend/src/core/background_priority.rs:1-30#background_priority]
-[src: file: backend/src/core/cmd.rs:324-366#async_cmd_with]
-[src: file: backend/src/agents/runner.rs:14282-14290#agent_launch_priority]
-[src: file: backend/src/core/quick_exec.rs:506-535#build_command]
+[src: file: backend/src/core/background_priority.rs:168-182#plan_here]
+[src: file: backend/src/core/background_priority.rs:283-286#check_launcher_at_boot]
+[src: file: backend/src/core/cmd.rs:334-345#async_cmd_with]
+[src: file: backend/src/core/cmd.rs:370-379#sync_cmd_with]
+[src: file: backend/src/core/task_worker_env.rs:719-719#ProbeCommand.priority]
+[src: file: backend/src/core/task_worker_lane_warm.rs:782-782#first-build-priority]
+[src: file: backend/src/agents/runner.rs:14294-14303#agent_launch_priority]
+[src: file: backend/src/core/quick_exec.rs:516-540#build_command]
+[src: file: backend/src/workflows/steps.rs:1393-1393#agent-step-priority]
+[src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
+[src: file: backend/src/core/config.rs:604-604#publish-setting]
 
 ## Maintenance command
 

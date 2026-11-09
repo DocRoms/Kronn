@@ -278,6 +278,7 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
         ["embed_allowed_origins", "[]"] => Url,
         ["workers", "default_max_review_rounds"] => Number,
         ["workers", "review_rounds_unlimited"] => Flag,
+        ["workers", "background_priority"] => Flag,
         ["tokens", "disabled_overrides", "[]"] => Text,
         ["tokens", "keys", "[]", "id" | "name" | "provider"] => Text,
         ["tokens", "keys", "[]", "active"] => Flag,

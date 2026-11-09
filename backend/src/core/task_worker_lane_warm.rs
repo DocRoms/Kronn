@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
+use crate::core::background_priority::Priority;
 use crate::core::task_worker_env::{
     prepare_launch, ProbeCommand, ProbeRunner, Provisioned, WorkerLane,
 };
@@ -777,6 +778,8 @@ pub fn warm_lane_cancellable(
             cwd: manifest_dir,
             env,
             timeout: settings.first_build_timeout,
+            // The lane's first build compiles the whole dependency graph.
+            priority: Priority::Background,
         },
         cancel,
     );

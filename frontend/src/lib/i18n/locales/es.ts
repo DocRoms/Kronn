@@ -1348,6 +1348,8 @@ const es: TranslationDict = {
   'config.workers.unlimited': 'Ilimitado',
   'config.workers.unlimitedWarning': 'Las rondas de revisión ilimitadas pueden quemar tokens: un worker puede entrar en bucle en una revisión que nunca converge. Los bloqueos (sin entrega, watchdog) siguen escalando y el presupuesto de tokens de una campaña, si existe, sigue deteniendo cualquier nueva corrección.',
   'config.workers.invalid': 'Introduzca un entero de {0} a {1}, o marque Ilimitado.',
+  'config.workers.backgroundPriority': 'Ejecutar los workers con prioridad en segundo plano',
+  'config.workers.backgroundPriorityHint': 'Los workers de tareas, sus validaciones y los pasos Agent / Exec de los workflows se ejecutan con una prioridad de CPU reducida (macOS: taskpolicy -b, Linux: nice -n 10, Windows: inferior a la normal), para que sus otras aplicaciones y la interfaz de Kronn sigan respondiendo mientras compilan. Kronn y su interfaz mantienen la prioridad normal; las conversaciones nunca se ven afectadas. Desmarque para darles la misma prioridad que al resto; KRONN_BACKGROUND_PRIORITY=0 también lo desactiva.',
   'projects.deleteConfirm': 'Eliminar este proyecto de Kronn?',
   'projects.deleteHard': 'Eliminar permanentemente',
   'projects.deleteHardWarn': 'Esta acción es irreversible. La carpeta del proyecto será eliminada del disco.',

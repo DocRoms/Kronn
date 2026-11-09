@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::core::background_priority::Priority;
+
 /// Where the worker's tests keep their Kronn state, so they never touch the
 /// operator's real data directory.
 pub const KRONN_DATA_DIR_ENV: &str = "KRONN_DATA_DIR";
@@ -711,6 +713,10 @@ pub struct ProbeCommand {
     pub cwd: PathBuf,
     pub env: Vec<(String, OsString)>,
     pub timeout: Duration,
+    /// KT-1633: how urgently the command wants the CPU. Every runner applies it
+    /// (the plain one and, beneath the OS sandbox, the confined one), so a
+    /// worker's build yields to the owner's applications whichever way it runs.
+    pub priority: Priority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -754,8 +760,11 @@ impl ProbeRunner for ProcessProbeRunner {
             success: false,
             detail,
         };
-        let mut command =
-            crate::core::cmd::sync_cmd(&probe.program, crate::core::child_env::ChildRoute::Tool);
+        let mut command = crate::core::cmd::sync_cmd_with(
+            &probe.program,
+            crate::core::child_env::ChildRoute::Tool,
+            probe.priority,
+        );
         command.args(&probe.args).current_dir(&probe.cwd);
         for (name, value) in &probe.env {
             command.env(name, value);
@@ -956,6 +965,7 @@ fn check_rust(
         cwd: manifest_dir.clone(),
         env: env.to_vec(),
         timeout,
+        priority: Priority::Normal,
     };
     let nextest = runner.run(&probe(&["nextest", "--version"], NEXTEST_TIMEOUT));
     if !nextest.success {
@@ -1011,6 +1021,7 @@ pub(crate) fn check_frontend(
                 cwd: frontend,
                 env: env.to_vec(),
                 timeout: VITEST_TIMEOUT,
+                priority: Priority::Normal,
             });
             if !outcome.success {
                 return Capability::no(format!("`vitest --version` failed: {}", outcome.detail));
@@ -1029,6 +1040,7 @@ pub(crate) fn check_frontend(
                 cwd: lane.frontend_dir(),
                 env: env.to_vec(),
                 timeout: VITEST_CONFIG_TIMEOUT,
+                priority: Priority::Normal,
             });
             if config.success {
                 Capability::yes(format!(

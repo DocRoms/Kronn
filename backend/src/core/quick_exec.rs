@@ -525,16 +525,16 @@ fn build_command(
             command.args(&spec.argv).current_dir(&spec.cwd);
             command
         }
-        Some(confinement) => confinement.command_with(
+        Some(confinement) => confinement.command(
             &ProbeCommand {
                 program: resolve_binary(spec).to_string_lossy().into_owned(),
                 args: spec.argv.clone(),
                 cwd: spec.cwd.clone(),
                 env: Vec::new(),
                 timeout: std::time::Duration::from_secs(spec.timeout_secs),
+                priority,
             },
             route,
-            priority,
         ),
     }
 }
@@ -568,22 +568,16 @@ pub async fn run_background(
 /// [`run`] under the worker's sandbox (KT-1268): what the command may write is
 /// the lane's roots and its temp dir, it reaches no network (loopback included)
 /// and has no terminal. A timeout or a cancel takes the command's whole process
-/// group down, not only its leader. It validates a worker's tree, so it runs in
-/// the background (KT-1633).
+/// group down, not only its leader. `priority` (KT-1633): a validation of a
+/// worker's tree passes [`Priority::Background`].
 pub async fn run_confined(
     spec: &ValidatedSpec,
     artifact_dir: Option<&Path>,
     cancel: &CancellationToken,
     confinement: &dyn CommandConfinement,
+    priority: Priority,
 ) -> Result<QuickExecResult> {
-    run_with(
-        spec,
-        artifact_dir,
-        cancel,
-        Some(confinement),
-        Priority::Background,
-    )
-    .await
+    run_with(spec, artifact_dir, cancel, Some(confinement), priority).await
 }
 
 /// SIGKILL to the whole process group `leader` leads. Only for a child that
