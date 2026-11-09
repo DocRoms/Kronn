@@ -1,0 +1,30 @@
+{
+  "note": "KT-1636 — the one table of the full-suite validation rule. Read by the backend (`is_full_suite_validation`) and by the frontend (`isFullSuiteValidation`): a case added here is enforced on both sides, so the two detectors cannot drift.",
+  "cases": [
+    { "command": "cargo test", "full_suite": true },
+    { "command": "cargo test --no-fail-fast", "full_suite": true },
+    { "command": "cargo test --manifest-path backend/Cargo.toml --target-dir /tmp/t", "full_suite": true },
+    { "command": "cargo test --workspace -- --nocapture", "full_suite": true },
+    { "command": "rtk cargo test", "full_suite": true },
+    { "command": "cargo nextest run --workspace", "full_suite": true },
+    { "command": "cargo --offline test", "full_suite": true },
+    { "command": "make test-backend", "full_suite": true },
+    { "command": "make test-backend-cov", "full_suite": true },
+    { "command": "cargo fmt --check", "full_suite": false },
+    { "command": "cargo clippy --all-targets -- -D warnings", "full_suite": false },
+    { "command": "cargo test --lib", "full_suite": false },
+    { "command": "cargo test --lib --manifest-path backend/Cargo.toml orchestration::", "full_suite": false },
+    { "command": "cargo test leading_thinking_filter", "full_suite": false },
+    { "command": "cargo test --manifest-path backend/Cargo.toml discussion", "full_suite": false },
+    { "command": "cargo test --test api_integration", "full_suite": false },
+    { "command": "cargo test --doc", "full_suite": false },
+    { "command": "cargo test --no-run", "full_suite": false },
+    { "command": "cargo test -- reaper", "full_suite": false },
+    { "command": "cargo nextest run --lib", "full_suite": false },
+    { "command": "cargo nextest list", "full_suite": false },
+    { "command": "make test-backend-lib", "full_suite": false },
+    { "command": "pnpm --dir frontend exec tsc -b", "full_suite": false },
+    { "command": "true", "full_suite": false },
+    { "command": "", "full_suite": false }
+  ]
+}

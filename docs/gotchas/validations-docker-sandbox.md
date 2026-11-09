@@ -28,7 +28,7 @@ itself is stopped.
 - The socket comes from `DOCKER_HOST` (Unix only), then `docker context
   inspect`, then the known OrbStack, Docker Desktop, Colima and `/var/run`
   paths. A TCP endpoint is refused.
-  [src: file: backend/src/core/task_worker_sandbox.rs:481-497#host_docker_socket]
+  [src: file: backend/src/core/task_worker_sandbox.rs:487-503#host_docker_socket]
 
 The Docker socket carries the host's rights: allow it only for a project whose
 validations you trust.

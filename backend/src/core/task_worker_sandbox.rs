@@ -93,6 +93,9 @@ impl Mechanism {
     /// a launcher that is missing or cannot apply its sandbox. Only a success
     /// is remembered: a host that gains `bwrap` is picked up without a restart.
     pub fn usable_on_host() -> Result<Self, String> {
+        if let Some(refusal) = crate::core::cmd::real_sandbox_refusal() {
+            return Err(refusal);
+        }
         Self::usable_from(Self::of_host(), Self::check_usable_remembered)
     }
 
