@@ -16,6 +16,7 @@ import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/re
 const { config } = vi.hoisted(() => ({
   config: {
     getRecoveryStatus: vi.fn(),
+    deleteSetAsideFile: vi.fn(),
     setRecovery: vi.fn(),
     restoreRecovery: vi.fn(),
   },
@@ -249,5 +250,76 @@ describe('RecoverySection', () => {
     await waitFor(() => expect(screen.getByTestId('recovery-invalid').textContent).toContain('sidecar'));
     expect(screen.getByTestId('recovery-single-copy')).toBeTruthy();
     expect(screen.getByTestId('recovery-locked-credentials').textContent).toContain('2');
+  });
+  // KT-1594
+  it('flags a key stored beside its data', async () => {
+    config.getRecoveryStatus.mockResolvedValue({ configured: false, key_locked: false, config_holds_key: true });
+    render(<RecoverySection toast={toast} t={t} />);
+    expect(await screen.findByTestId('recovery-key-beside-data')).toBeTruthy();
+  });
+
+  it('lists the credentials still in clear, by name', async () => {
+    config.getRecoveryStatus.mockResolvedValue({
+      configured: false,
+      clear_credentials: [
+        { kind: 'provider_key', name: 'Anthropic', provider: 'anthropic', verified: false },
+        { kind: 'auth_token', name: '', provider: '', verified: true },
+      ],
+    });
+    render(<RecoverySection toast={toast} t={t} />);
+    const list = await screen.findByTestId('recovery-clear-credentials');
+    expect(list.textContent).toContain('Anthropic');
+    expect(list.textContent).toContain('settings.recovery.authToken');
+    expect(list.textContent).toContain('settings.recovery.clearUnverified');
+  });
+
+  const setAside = (deletable: boolean, blocker: string | null) => ({
+    configured: false,
+    set_aside_files: [{
+      name: 'config.toml.corrupt.1',
+      credentials: [{ kind: 'auth_token', name: '', provider: '', verified: deletable }],
+      holds_key: false,
+      deletable,
+      blocker,
+    }],
+  });
+
+  it('keeps the delete button disabled until every credential is verified', async () => {
+    config.getRecoveryStatus.mockResolvedValue(setAside(false, 'unverified'));
+    render(<RecoverySection toast={toast} t={t} />);
+    const button = await screen.findByTestId('recovery-set-aside-delete-config.toml.corrupt.1') as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(screen.getByTestId('recovery-set-aside-blocker-config.toml.corrupt.1').textContent)
+      .toBe('settings.recovery.blocker.unverified');
+    fireEvent.click(button);
+    expect(config.deleteSetAsideFile).not.toHaveBeenCalled();
+  });
+
+  it('deletes a verified set-aside file after a confirmation, then refreshes', async () => {
+    config.getRecoveryStatus.mockResolvedValueOnce(setAside(true, null)).mockResolvedValue({ configured: false, set_aside_files: [] });
+    config.deleteSetAsideFile.mockResolvedValue(undefined);
+    const confirmSpy = vi.fn().mockReturnValue(true);
+    window.confirm = confirmSpy as never;
+    render(<RecoverySection toast={toast} t={t} />);
+    const button = await screen.findByTestId('recovery-set-aside-delete-config.toml.corrupt.1') as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    await waitFor(() => expect(config.deleteSetAsideFile).toHaveBeenCalledWith('config.toml.corrupt.1'));
+    await waitFor(() => expect(screen.queryByTestId('recovery-set-aside-files')).toBeNull());
+  });
+
+  it('does nothing when the confirmation is declined, and shows a refusal from the backend', async () => {
+    config.getRecoveryStatus.mockResolvedValue(setAside(true, null));
+    const confirmSpy = vi.fn().mockReturnValue(false);
+    window.confirm = confirmSpy as never;
+    render(<RecoverySection toast={toast} t={t} />);
+    const button = await screen.findByTestId('recovery-set-aside-delete-config.toml.corrupt.1');
+    fireEvent.click(button);
+    expect(config.deleteSetAsideFile).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    config.deleteSetAsideFile.mockRejectedValue(new Error('1 credential(s) in the file are not in the encrypted store'));
+    fireEvent.click(button);
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('not in the encrypted store'), 'error'));
   });
 });

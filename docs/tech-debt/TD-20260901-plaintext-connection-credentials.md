@@ -28,7 +28,7 @@
      credentials in clear. Its credentials join the boot, and the notice tells
      the operator to delete the file once checked; Kronn does not delete it.
      [src: file: backend/src/core/config.rs:410-465#set_aside_unreadable_config]
-     [src: file: backend/src/core/config.rs:1083-1095#set_aside_unreadable_config]
+     [src: file: backend/src/core/config.rs:1091-1103#set_aside_unreadable_config]
 - **Why we can't fix now (constraint)**: All three are deliberate KT-1007
   trade-offs against losing the key or a credential: dropping the file copy
   of the key without two durable copies, rewriting `config.toml` under a
@@ -41,9 +41,20 @@
 - **Where (pointers)**: `backend/src/core/keystore.rs` (copy retention),
   `backend/src/core/config.rs` (`disk_toml`, `load` set-aside),
   `backend/src/core/credential_store.rs` (`boot`, `sync_for_save`).
-- **Suggested direction (non-binding)**: make the keychain-less case visible
-  and actionable (Settings → Recovery already reports `config_holds_key`;
-  push the operator to set a recovery passphrase or `KRONN_ENCRYPTION_KEK`
-  from a secret manager), and offer to delete a set-aside file once its
-  credentials are stored.
-- **Next step**: create ticket
+- **Suggested direction (non-binding)**: done by KT-1594 for the visibility
+  and the set-aside file (see Next step). What remains is the design choice of
+  keeping the key in `config.toml` on a keychain-less host without a verified
+  recovery passphrase.
+- **Status**: partly closed by KT-1594. Case 1 is flagged (banner and Settings →
+  Recovery, `config_holds_key`) and leads to a recovery passphrase or
+  `KRONN_ENCRYPTION_KEK`; case 2 lists the credentials still in clear while the
+  key is locked; case 3 is deletable by the owner only when nothing in the
+  file can be lost (every leaf value is a credential verified in
+  `stored_credentials` or sits at a place of a closed list of non-secret
+  settings; an unknown field, a webhook URL, a line that does not parse, a
+  sealed copy, or a key some file still needs blocks it), behind the strong
+  confirmation (KT-1496). [src: file: backend/src/core/set_aside.rs:1-25]
+  The key itself is still kept in `config.toml` in case 1 until two durable
+  copies exist.
+- **Next step**: close when case 1 no longer needs the file copy (a keychain
+  or `KRONN_ENCRYPTION_KEK` is the norm), or accept the residual risk.

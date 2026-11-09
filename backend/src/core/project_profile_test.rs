@@ -548,3 +548,98 @@ fn a_refused_dynamic_key_is_never_printed() {
         assert!(!failure.contains(TOKEN), "{failure}");
     }
 }
+
+// ── KT-1438: lane seeds ─────────────────────────────────────────────────
+
+fn lane_paths(paths: &[&str]) -> Vec<String> {
+    paths.iter().map(|path| path.to_string()).collect()
+}
+
+#[test]
+fn a_profile_may_declare_lane_seeds() {
+    let profile = parse_profile(
+        "schema_version = 1\n[lane_seeds]\npaths = [\"application/public/images\", \"./public/build\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        profile.lane_seeds.unwrap().paths,
+        lane_paths(&["application/public/images", "./public/build"])
+    );
+    // Readable as a template path too.
+    let profile = parse_profile("schema_version = 1\n[lane_seeds]\npaths = [\"a/b\"]\n").unwrap();
+    assert_eq!(
+        template_values(&profile).get("project.lane_seeds.paths.0"),
+        Some(&"a/b".to_string())
+    );
+}
+
+#[test]
+fn a_profile_refuses_a_lane_seed_that_leaves_the_repository() {
+    for bad in ["../outside", "/etc", ".git/hooks", "a/../../b", ""] {
+        let text = format!("schema_version = 1\n[lane_seeds]\npaths = [{bad:?}]\n");
+        assert!(parse_profile(&text).is_err(), "{bad:?} must be refused");
+    }
+}
+
+fn repo_with_toml(text: &str) -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(repo.path().join("kronn")).unwrap();
+    std::fs::write(repo.path().join(PROFILE_PATH), text).unwrap();
+    repo
+}
+
+#[test]
+fn writing_lane_seeds_changes_only_their_table() {
+    let original = "# profile\nschema_version = 1\n\n[validation.targets.test]\ncommand = \"make test\"\n\n[forge]\nbase_branch = \"main\"\n";
+    let repo = repo_with_toml(original);
+    assert!(
+        write_lane_seeds(repo.path(), &lane_paths(&["public/images", "public/build"])).unwrap()
+    );
+    let written = std::fs::read_to_string(repo.path().join(PROFILE_PATH)).unwrap();
+    assert!(
+        written.starts_with("# profile\nschema_version = 1\n"),
+        "{written}"
+    );
+    assert!(written.contains("command = \"make test\""));
+    assert!(written.contains("base_branch = \"main\""));
+    let profile = parse_profile(&written).unwrap();
+    assert_eq!(
+        profile.lane_seeds.unwrap().paths,
+        lane_paths(&["public/images", "public/build"])
+    );
+
+    // Replacing the table in the middle of the file keeps what follows it.
+    let in_the_middle = written.replace("[forge]", "[forge]\n# kept");
+    std::fs::write(repo.path().join(PROFILE_PATH), &in_the_middle).unwrap();
+    assert!(write_lane_seeds(repo.path(), &lane_paths(&["public/images"])).unwrap());
+    let written = std::fs::read_to_string(repo.path().join(PROFILE_PATH)).unwrap();
+    assert!(written.contains("base_branch = \"main\""), "{written}");
+    assert!(written.contains("# kept"), "{written}");
+    assert_eq!(
+        parse_profile(&written).unwrap().lane_seeds.unwrap().paths,
+        lane_paths(&["public/images"])
+    );
+    // Same list: nothing to write.
+    assert!(!write_lane_seeds(repo.path(), &lane_paths(&["public/images"])).unwrap());
+
+    // An empty list removes the table and nothing else.
+    assert!(write_lane_seeds(repo.path(), &[]).unwrap());
+    let written = std::fs::read_to_string(repo.path().join(PROFILE_PATH)).unwrap();
+    assert!(!written.contains("lane_seeds"), "{written}");
+    assert!(written.contains("base_branch = \"main\""));
+    assert!(parse_profile(&written).unwrap().lane_seeds.is_none());
+}
+
+#[test]
+fn writing_lane_seeds_needs_an_existing_valid_profile() {
+    let none = tempfile::tempdir().unwrap();
+    assert!(!write_lane_seeds(none.path(), &lane_paths(&["public/images"])).unwrap());
+    assert!(!none.path().join(PROFILE_PATH).exists());
+
+    let broken = repo_with_toml("schema_version = 1\n[nope]\n");
+    assert!(write_lane_seeds(broken.path(), &lane_paths(&["public/images"])).is_err());
+    assert_eq!(
+        std::fs::read_to_string(broken.path().join(PROFILE_PATH)).unwrap(),
+        "schema_version = 1\n[nope]\n"
+    );
+}

@@ -139,6 +139,74 @@ pub fn set_validations_access(
     Ok(changed > 0)
 }
 
+/// The gitignored paths this project declares as lane seeds (KT-1438): `None`
+/// when a human never declared any (the project's `kronn/project.toml` may),
+/// `Some(empty)` when they were cleared. An unknown project or an unreadable
+/// value reads as never declared.
+pub fn lane_seeds(conn: &Connection, project_id: &str) -> Result<Option<Vec<String>>> {
+    let value: Option<Option<String>> = conn
+        .query_row(
+            "SELECT lane_seeds_json FROM projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok()))
+}
+
+/// Replace the project's lane seeds; an empty list is stored as such, so that
+/// clearing them is not mistaken for never having declared any. Returns false
+/// when the project does not exist.
+pub fn set_lane_seeds(conn: &Connection, project_id: &str, seeds: &[String]) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE projects SET lane_seeds_json = ?2 WHERE id = ?1",
+        params![project_id, serde_json::to_string(seeds)?],
+    )?;
+    Ok(changed > 0)
+}
+
+/// The secret-looking files a human confirmed inside each declared lane seed
+/// (KT-1438). An unknown project or an unreadable value reads as nothing
+/// confirmed, which holds every seed that has such a file.
+pub fn lane_seeds_confirmed(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<crate::core::task_worker_lane_seeds::ConfirmedSecrets> {
+    let value: Option<Option<String>> = conn
+        .query_row(
+            "SELECT lane_seeds_confirmed_json FROM projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default())
+}
+
+/// Replace the project's lane seeds together with the secret-looking files a
+/// human confirmed inside them, in one write. Returns false when the project
+/// does not exist.
+pub fn set_lane_seeds_confirmed(
+    conn: &Connection,
+    project_id: &str,
+    seeds: &[String],
+    confirmed: &crate::core::task_worker_lane_seeds::ConfirmedSecrets,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE projects SET lane_seeds_json = ?2, lane_seeds_confirmed_json = ?3 WHERE id = ?1",
+        params![
+            project_id,
+            serde_json::to_string(seeds)?,
+            serde_json::to_string(confirmed)?
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Whether a human granted `capability` to this discussion's runs (KT-1433).
 pub fn discussion_capability_granted(
     conn: &Connection,

@@ -1082,6 +1082,14 @@ pub fn set_aside_notice(dir: &std::path::Path) -> Option<String> {
         .cloned()
 }
 
+/// Forget the notice about a set-aside file the owner deleted (KT-1594).
+pub fn forget_set_aside(dir: &std::path::Path, name: &str) {
+    let mut notices = SET_ASIDE.lock().unwrap_or_else(|p| p.into_inner());
+    if notices.get(dir).is_some_and(|n| n.contains(name)) {
+        notices.remove(dir);
+    }
+}
+
 /// Move an unreadable config.toml to `config.toml.corrupt.<ts>` (owner-only).
 fn set_aside_unreadable_config(dir: &std::path::Path, path: &std::path::Path) -> Result<String> {
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");

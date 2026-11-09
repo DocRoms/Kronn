@@ -124,7 +124,7 @@ this degrades and continues.
   refuses any bridge caller. It is refused when the target is missing, empty
   or still holds template placeholders. It is also refused when the run is not
   the latest `Interrupted` run, or while the audit lease is held.
-  [src: file: backend/src/lib.rs:2106-2111#accept_audit_step] [src: file: backend/src/api/audit/accept.rs:137-145#BridgeCaller] [src: file: backend/src/api/audit/accept.rs:59-81#check_target] [src: file: backend/src/api/audit/accept.rs:174-184#latest] [src: file: backend/src/api/audit/accept.rs:280-282#DocsWriteLease]
+  [src: file: backend/src/lib.rs:2120-2125#accept_audit_step] [src: file: backend/src/api/audit/accept.rs:137-145#BridgeCaller] [src: file: backend/src/api/audit/accept.rs:59-81#check_target] [src: file: backend/src/api/audit/accept.rs:174-184#latest] [src: file: backend/src/api/audit/accept.rs:280-282#DocsWriteLease]
 - Once no failed step is left, the resume runs no agent step and only
   finalizes the run. It goes to `Completed`, writes its validation discussion,
   which lists the accepted steps apart, and makes the project validatable.
@@ -238,7 +238,7 @@ this degrades and continues.
   run is resumable, it says so and offers "Retry". Every launch button stays
   disabled until it knows. A step retried alone never falls back to a whole
   audit when its run is no longer resumable.
-  [src: file: frontend/src/components/ProjectCard.tsx:529-538#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:889-895#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:557-559#launchBlocked]
+  [src: file: frontend/src/components/ProjectCard.tsx:529-538#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:890-896#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:557-559#launchBlocked]
 
 ## Every error carries its action (KT-1169)
 
@@ -256,7 +256,7 @@ this degrades and continues.
 | Verify-docs dialog | A stale-sections refresh failed. | The stale section stays in the single doc-state block. “Update affected steps” retries the partial run; “Verified, unchanged” settles it without an agent. Both remain unavailable while a resumable run takes priority. |
 | Toasts during a run | A step failed or warned. | Informational: the run ends with that step's "Retry this step" and "Accept as it stands". |
 
-- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:858-876#launchError] [src: file: frontend/src/components/ProjectCard.tsx:1074-1097#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:456#auditLaunchError]
+- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:858-876#launchError] [src: file: frontend/src/components/ProjectCard.tsx:1074-1097#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:457#auditLaunchError]
 - Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:891-903#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:904-914#loadFailed]
 - Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:554-576#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:1007-1010#acceptError]
 - Validation prerequisites and linked actions. [src: file: frontend/src/components/AuditTimeline.tsx:1107-1169#completedLocalRun]
@@ -365,7 +365,7 @@ sections.
   no agent and writes no doc. It is a human action only: the route is not on
   the bridge list, and the handler refuses any bridge caller. It takes the
   audit lease.
-  [src: file: backend/src/lib.rs:2008-2011#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:812-843#acknowledge_sections]
+  [src: file: backend/src/lib.rs:2022-2025#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:812-843#acknowledge_sections]
 
 ## The action offered in each state
 
@@ -401,7 +401,7 @@ The validation phase never reads "running" while an audit runs. It derives its
 action from the latest local run of any kind and that run's `latest_validation`;
 an older completed Full or Partial run cannot authorize Validate after a newer
 specialized run. Discussion-title guesses never authorize Validate.
-[src: file: frontend/src/components/ProjectCard.tsx:583-589#latest]
+[src: file: frontend/src/components/ProjectCard.tsx:584-590#latest]
 [src: file: frontend/src/components/AuditTimeline.tsx:346-356#latestRun]
 [src: file: frontend/src/components/AuditTimeline.tsx:1160-1222#linkedValidation]
 
@@ -412,7 +412,7 @@ specialized run. Discussion-title guesses never authorize Validate.
 - Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:1136-1149#runPending]
 - Confirmation before a fresh full audit. [src: file: frontend/src/components/AuditTimeline.tsx:1448-1489#confirmRelaunch]
 - Orphaned lease banner. [src: file: frontend/src/components/AuditTimeline.tsx:780-857#leaseOrphaned]
-- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:743-744#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:454#cancelPending]
+- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:743-744#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:455#cancelPending]
 
 ## Validation and document trust (KT-1206)
 

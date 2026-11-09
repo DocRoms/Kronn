@@ -3230,6 +3230,54 @@ pub struct RecoveryStatus {
     /// recovery.key parses but its payload is damaged: replaced without a
     /// passphrase (kept aside).
     pub recovery_damaged: bool,
+    /// Credentials config.toml still carries in clear (names only, never
+    /// values): a locked or missing key at boot leaves them there (KT-1594).
+    pub clear_credentials: Vec<ClearCredentialView>,
+    /// The `config.toml.corrupt.*` files kept aside, each with the credentials
+    /// it holds and whether the owner may delete it now (KT-1594).
+    pub set_aside_files: Vec<SetAsideFileView>,
+}
+
+/// A credential found in clear in a file, without its value.
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ClearCredentialView {
+    /// `provider_key` or `auth_token`.
+    pub kind: String,
+    pub name: String,
+    pub provider: String,
+    /// The same value is in `stored_credentials` and the key in use decrypts it.
+    pub verified: bool,
+}
+
+/// A set-aside `config.toml.corrupt.<ts>` and what deleting it would lose.
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct SetAsideFileView {
+    pub name: String,
+    pub credentials: Vec<ClearCredentialView>,
+    /// The file carries an encryption key.
+    pub holds_key: bool,
+    /// Every credential is verified and no key or row depends on the file.
+    pub deletable: bool,
+    /// Why it is not deletable: `unreadable`, `sealed`, `key_locked`,
+    /// `unparsed`, `unknown_value`, `unverified`, `key_needed`, `key_bound_files`,
+    /// `key_check_unavailable` or `only_key_copy`.
+    pub blocker: Option<String>,
+}
+
+fn credential_views(
+    verdicts: Vec<(crate::core::set_aside::ClearCredential, bool)>,
+) -> Vec<ClearCredentialView> {
+    verdicts
+        .into_iter()
+        .map(|(c, verified)| ClearCredentialView {
+            kind: c.kind.to_string(),
+            name: c.name,
+            provider: c.provider,
+            verified,
+        })
+        .collect()
 }
 
 #[derive(serde::Deserialize)]
@@ -3251,7 +3299,70 @@ pub async fn recovery_status(State(state): State<AppState>) -> Json<ApiResponse<
             .await
             .unwrap_or(0) as u32;
     }
+    if let Some(dir) = dir.as_deref() {
+        if let Err(e) = fill_clear_credentials(&state.db, dir, key.as_deref(), &mut status).await {
+            tracing::warn!("recovery status: clear credentials could not be checked: {e:#}");
+        }
+    }
     Json(ApiResponse::ok(status))
+}
+
+/// Credentials still in clear in config.toml, and the set-aside files with
+/// the verdict on each (KT-1594).
+async fn fill_clear_credentials(
+    db: &crate::db::Database,
+    dir: &std::path::Path,
+    key: Option<&str>,
+    status: &mut RecoveryStatus,
+) -> anyhow::Result<()> {
+    use crate::core::set_aside;
+    if let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) {
+        let clear = set_aside::clear_credentials_in(&text);
+        status.clear_credentials = credential_views(set_aside::verify(db, key, clear).await?);
+    }
+    // The key copies are read now, not taken from the boot report: a rekey
+    // since the boot would make that stale.
+    let vaults = crate::core::keyvault::KeyStore::standard(dir);
+    for name in set_aside::files(dir) {
+        let view = match set_aside::assess(db, dir, key, &name, &vaults).await {
+            Ok(a) => SetAsideFileView {
+                deletable: a.deletable(),
+                blocker: a.blocker.as_ref().map(|b| b.code().to_string()),
+                holds_key: a.holds_key,
+                credentials: credential_views(a.credentials),
+                name,
+            },
+            Err(e) => {
+                tracing::warn!("set-aside file {name}: {e:#}");
+                continue;
+            }
+        };
+        status.set_aside_files.push(view);
+    }
+    Ok(())
+}
+
+/// DELETE /api/config/recovery/set-aside-files/{name} — delete a kept
+/// `config.toml.corrupt.<ts>` once every credential in it is verified in the
+/// encrypted store (KT-1594). Asks for the strong confirmation
+/// (`SENSITIVE_DELETES`); the check is made again here, whatever the screen
+/// showed.
+pub async fn delete_set_aside_file(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Json<ApiResponse<()>> {
+    let dir = match config::config_dir() {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::err(e.to_string())),
+    };
+    // Serializes with the writers of config and the key.
+    let config = state.config.write().await;
+    let key = config.encryption_secret.clone();
+    let vaults = crate::core::keyvault::KeyStore::standard(&dir);
+    match crate::core::set_aside::delete(&state.db, &dir, key.as_deref(), &name, &vaults).await {
+        Ok(()) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("{e:#}"))),
+    }
 }
 
 fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> RecoveryStatus {
@@ -3304,6 +3415,8 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
             == Some(crate::core::recovery::RecoveryMatch::Unverified),
         recovery_damaged: recovery_state == Some(crate::core::recovery::RecoveryMatch::Unreadable)
             && dir.and_then(crate::core::recovery::load_blob).is_some(),
+        clear_credentials: Vec::new(),
+        set_aside_files: Vec::new(),
         copies: report.copies as u32,
         stale_sources: names(&report.stale_sources),
         invalid_sources: names(&report.invalid_sources),
@@ -4875,6 +4988,67 @@ mod tests {
         // longer keeps a dead run alive.
         assert_eq!(crate::models::clamp_agent_global_timeout_min(240), 240);
         assert_eq!(crate::models::clamp_agent_global_timeout_min(241), 240);
+    }
+
+    /// KT-1594: the status lists, by name only, what is still in clear and
+    /// what a set-aside file would lose.
+    #[tokio::test]
+    async fn the_status_lists_clear_credentials_and_the_set_aside_verdicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::core::crypto::generate_secret();
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let clear = "[server]\nauth_token = \"clear-token-fixture-1\"\n";
+        std::fs::write(dir.path().join("config.toml"), clear).unwrap();
+        std::fs::write(dir.path().join("config.toml.corrupt.1"), clear).unwrap();
+
+        // Key locked: everything is listed, nothing is verified or deletable.
+        let mut status = recovery_status_in(Some(dir.path()), None);
+        fill_clear_credentials(&db, dir.path(), None, &mut status)
+            .await
+            .unwrap();
+        assert_eq!(status.clear_credentials.len(), 1);
+        assert!(!status.clear_credentials[0].verified);
+        assert_eq!(status.set_aside_files.len(), 1);
+        assert!(!status.set_aside_files[0].deletable);
+        assert_eq!(
+            status.set_aside_files[0].blocker.as_deref(),
+            Some("key_locked")
+        );
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(
+            !json.contains("clear-token-fixture-1"),
+            "a value leaked: {json}"
+        );
+
+        // The same value stored under the key in use: verified, deletable.
+        let enc = crate::core::crypto::encrypt(
+            "clear-token-fixture-1",
+            &crate::core::crypto::parse_secret(&key).unwrap(),
+        )
+        .unwrap();
+        db.with_conn(move |c| {
+            crate::db::stored_credentials::upsert_all(
+                c,
+                &[crate::db::stored_credentials::StoredCredential {
+                    kind: "auth_token".into(),
+                    id: "server".into(),
+                    name: String::new(),
+                    provider: String::new(),
+                    active: true,
+                    position: 0,
+                    value_encrypted: enc,
+                }],
+            )
+        })
+        .await
+        .unwrap();
+        let mut status = recovery_status_in(Some(dir.path()), Some(&key));
+        fill_clear_credentials(&db, dir.path(), Some(&key), &mut status)
+            .await
+            .unwrap();
+        assert!(status.clear_credentials[0].verified);
+        assert!(status.set_aside_files[0].deletable);
+        assert_eq!(status.set_aside_files[0].blocker, None);
     }
 
     #[test]

@@ -310,7 +310,7 @@ import { registerGrantMinter, strongFetch, withStrongConfirm } from './strongCon
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
 import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
-import type { AgentFilesPolicy, ProjectValidationsAccess, ValidationsAccess, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
+import type { AgentFilesPolicy, LaneSeedCandidate, ProjectLaneSeeds, ProjectValidationsAccess, ValidationsAccess, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -1013,6 +1013,10 @@ export const config = {
   /** P2 recovery passphrase — the encryption key wrapped under an Argon2id
    *  passphrase, so MCP secrets survive total machine/keychain loss. */
   getRecoveryStatus: () => api<RecoveryStatus>('GET', '/config/recovery/status'),
+  /** Deletes a kept `config.toml.corrupt.<ts>`; the backend checks again that
+   *  every credential in it is verified, and the strong confirmation applies (KT-1594). */
+  deleteSetAsideFile: (name: string) =>
+    api<void>('DELETE', `/config/recovery/set-aside-files/${encodeURIComponent(name)}`),
   /** Returns the recovery code the user MUST save off-machine. */
   // Replacing an existing passphrase requires the current one (KT-1007).
   setRecovery: (passphrase: string, currentPassphrase?: string, replaceUnverified?: boolean) => api<{ recovery_code: string }>('POST', '/config/recovery/set', {
@@ -1071,6 +1075,15 @@ export const projects = {
     api<ProjectValidationsAccess>('GET', `/projects/${encodeURIComponent(id)}/validations-access`),
   setValidationsAccess: (id: string, access: ValidationsAccess) =>
     api<ProjectValidationsAccess>('PUT', `/projects/${encodeURIComponent(id)}/validations-access`, { access }),
+  /** Gitignored paths copied into each task worktree, with the last seeding (KT-1438). */
+  laneSeeds: (id: string) =>
+    api<ProjectLaneSeeds>('GET', `/projects/${encodeURIComponent(id)}/lane-seeds`),
+  /** Replaces the list; a secret-looking path comes back in `needs_confirmation` until confirmed. */
+  setLaneSeeds: (id: string, seeds: string[], confirmSecretPaths: string[] = []) =>
+    api<ProjectLaneSeeds>('PUT', `/projects/${encodeURIComponent(id)}/lane-seeds`, { seeds, confirm_secret_paths: confirmSecretPaths }),
+  /** Gitignored directories the project's tracked code references. */
+  laneSeedCandidates: (id: string) =>
+    api<LaneSeedCandidate[]>('GET', `/projects/${encodeURIComponent(id)}/lane-seeds/candidates`),
   setAgentFiles: (id: string, policy: AgentFilesPolicy) =>
     api<ProjectAgentFiles>('PUT', `/projects/${encodeURIComponent(id)}/agent-files`, { policy }),
   /** Where the project keeps its AI doc, and its own override (KT-263). */
