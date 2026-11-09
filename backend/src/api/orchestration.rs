@@ -11641,6 +11641,21 @@ fn execution_progress(
         });
     };
     let (phase, reason, queue_position) = match job.status {
+        // KT-1632 — the task-worker cap holds this launch: the claim left the
+        // reason on the job (`task_worker_limit:<running>/<cap>`), so it is
+        // still told after a restart.
+        DispatchStatus::Pending
+            if job.progress_phase.as_deref() == Some("queued")
+                && job.progress_detail.as_deref().is_some_and(|detail| {
+                    detail.starts_with(crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX)
+                }) =>
+        {
+            (
+                TaskExecutionProgressPhase::Queued,
+                job.progress_detail.clone(),
+                crate::db::agent_dispatch::task_worker_queue_position(conn, &job.id)?,
+            )
+        }
         DispatchStatus::Pending => (
             TaskExecutionProgressPhase::Queued,
             Some("concurrency_limit_or_scheduler".into()),
@@ -15150,6 +15165,10 @@ pub struct TaskExecutionCompactStatus {
     /// transcripts (KT-911). `view: full` lists them all, attempts included.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub worker_sessions: Vec<String>,
+    /// KT-1632 — why a launch waits for its worker to start: the task-worker
+    /// cap is full. Absent once the worker runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued: Option<String>,
     pub next_action: Option<CompactNextAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait: Option<ExecutionWaitOutcome>,
@@ -15231,6 +15250,26 @@ fn compact_next_action(detail: &crate::models::TaskExecutionDetail) -> Option<Co
         ),
     };
     Some(CompactNextAction { tool, reason })
+}
+
+/// The sentence a queued launch reports in place of a silent `Working`: the
+/// cap that holds it, how full it is and its place in the queue.
+fn task_worker_queue_reason(progress: &crate::models::TaskExecutionProgress) -> Option<String> {
+    if progress.phase != crate::models::TaskExecutionProgressPhase::Queued {
+        return None;
+    }
+    let counts = progress
+        .reason
+        .as_deref()?
+        .strip_prefix(crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX)?;
+    let (running, cap) = counts.split_once('/')?;
+    let place = progress
+        .queue_position
+        .map(|position| format!(", position {position}"))
+        .unwrap_or_default();
+    Some(format!(
+        "queued: {running} of {cap} local task workers running (max_concurrent_task_workers){place}; starts when a slot frees"
+    ))
 }
 
 fn compact_last_error(detail: &crate::models::TaskExecutionDetail) -> Option<String> {
@@ -15333,6 +15372,7 @@ pub(crate) fn compact_execution_status(
             .iter()
             .map(|session| session.session_id.clone())
             .collect(),
+        queued: task_worker_queue_reason(&detail.progress),
         next_action: compact_next_action(detail),
         wait,
     };
@@ -20401,6 +20441,131 @@ pub(crate) mod tests {
             running.progress.phase,
             crate::models::TaskExecutionProgressPhase::Launching
         );
+    }
+
+    /// KT-1632 — a launch held back by the task-worker cap is `Queued` with its
+    /// reason, place and the cap on the execution detail and in the compact
+    /// status a polling principal reads; it reports `Launching` once a slot
+    /// frees, and the reason is gone.
+    #[tokio::test]
+    async fn a_launch_held_by_the_task_worker_cap_reports_why_and_where() {
+        const CAP_ONE: &str = r#"{"__task_workers":1}"#;
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (first_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let second_ref = db
+            .with_conn(move |conn| {
+                Ok(create_todo_task(conn, &project_id, "Second task")
+                    .summary
+                    .reference)
+            })
+            .await
+            .unwrap();
+        let mut launched = Vec::new();
+        for (task_reference, key) in [(first_ref, "cap-first"), (second_ref, "cap-second")] {
+            launched.push(
+                provision_single_task_execution(
+                    &db,
+                    ProvisionInput {
+                        task_reference,
+                        parent_discussion_id: parent_id.clone(),
+                        worker: native_worker(),
+                        base_rev: Some("main".into()),
+                        idempotency_key: Some(key.into()),
+                    },
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let first_dispatch = launched[0].dispatch_job_id.clone().unwrap();
+        let second_dispatch = launched[1].dispatch_job_id.clone().unwrap();
+        db.with_conn({
+            let first_dispatch = first_dispatch.clone();
+            move |conn| {
+                crate::db::agent_dispatch::claim_with_limits(
+                    conn,
+                    &first_dispatch,
+                    Some(CAP_ONE),
+                )?
+                .unwrap();
+                crate::db::agent_dispatch::mark_agent_started(conn, &first_dispatch)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        let held = db
+            .with_conn({
+                let second_dispatch = second_dispatch.clone();
+                move |conn| {
+                    crate::db::agent_dispatch::claim_with_limits(
+                        conn,
+                        &second_dispatch,
+                        Some(CAP_ONE),
+                    )
+                }
+            })
+            .await
+            .unwrap();
+        assert!(held.is_none(), "the one slot is taken");
+
+        let second_id = launched[1].id.clone();
+        let queued = db
+            .with_conn({
+                let id = second_id.clone();
+                move |conn| execution_detail(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            queued.progress.phase,
+            crate::models::TaskExecutionProgressPhase::Queued
+        );
+        assert_eq!(
+            queued.progress.reason.as_deref(),
+            Some("task_worker_limit:1/1")
+        );
+        assert_eq!(queued.progress.queue_position, Some(1));
+        let compact = compact_execution_status(&queued, None);
+        let sentence = compact.queued.clone().expect("a queued launch says why");
+        assert!(sentence.contains("1 of 1 local task workers"), "{sentence}");
+        assert!(sentence.contains("position 1"), "{sentence}");
+        assert!(
+            compact_status_chars(&compact) <= COMPACT_STATUS_MAX_CHARS,
+            "the reason stays inside the compact budget"
+        );
+
+        // The running worker reports no queue reason.
+        let running = db
+            .with_conn({
+                let id = launched[0].id.clone();
+                move |conn| execution_detail(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(running.progress.queue_position, None);
+        assert!(compact_execution_status(&running, None).queued.is_none());
+
+        // A freed slot starts it; nothing is left of the reason.
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::mark_completed(conn, &first_dispatch)?;
+            crate::db::agent_dispatch::claim_with_limits(conn, &second_dispatch, Some(CAP_ONE))?
+                .unwrap();
+            crate::db::agent_dispatch::mark_agent_started(conn, &second_dispatch)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let started = db
+            .with_conn(move |conn| execution_detail(conn, &second_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            started.progress.phase,
+            crate::models::TaskExecutionProgressPhase::Launching
+        );
+        assert!(compact_execution_status(&started, None).queued.is_none());
     }
 
     async fn count(db: &Database, sql: &'static str) -> i64 {
@@ -44939,6 +45104,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: false,
+                    ..Default::default()
                 }),
                 None,
                 9,
@@ -44947,6 +45113,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: true,
+                    ..Default::default()
                 }),
                 None,
                 crate::models::UNLIMITED_REVIEW_ROUNDS,
@@ -44955,6 +45122,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: true,
+                    ..Default::default()
                 }),
                 Some(2),
                 2,

@@ -495,10 +495,7 @@ pub(crate) async fn stream_dispatch_job(
     // dispatch scans cannot both believe the slot is free.
     let limits = {
         let config = state.config.read().await;
-        crate::agents::runner::agent_concurrency_limits(
-            &config.agents,
-            config.server.max_concurrent_agents,
-        )
+        crate::agents::runner::dispatch_concurrency_limits(&config)
     };
     let job = match state
         .db

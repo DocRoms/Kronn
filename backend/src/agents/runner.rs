@@ -3488,6 +3488,24 @@ pub(crate) fn agent_concurrency_limits(
     serde_json::Value::Object(map).to_string()
 }
 
+/// The limits the dispatcher admits a job under: the per-agent and local-pool
+/// caps of [`agent_concurrency_limits`], plus KT-1632's cap on local task
+/// workers (Settings > Workers), which no per-agent cap can express.
+pub(crate) fn dispatch_concurrency_limits(config: &crate::models::AppConfig) -> String {
+    let mut limits: serde_json::Value = serde_json::from_str(&agent_concurrency_limits(
+        &config.agents,
+        config.server.max_concurrent_agents,
+    ))
+    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(map) = limits.as_object_mut() {
+        map.insert(
+            crate::db::agent_dispatch::TASK_WORKER_LIMIT_KEY.into(),
+            serde_json::json!(config.workers.effective_max_concurrent_task_workers()),
+        );
+    }
+    limits.to_string()
+}
+
 pub(crate) fn is_http_chat_agent(agent_type: &AgentType) -> bool {
     matches!(
         agent_type,

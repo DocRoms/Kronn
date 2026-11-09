@@ -11996,7 +11996,15 @@ default_max_review_rounds: number,
  * `token_budget`, when set, still stops every further correction attempt; the
  * cost is tokens spent on a review that may never converge.
  */
-review_rounds_unlimited: boolean, };
+review_rounds_unlimited: boolean,
+/**
+ * KT-1632 — local task workers (a CLI agent in its own worktree) running at
+ * once. A launch or re-dispatch beyond it waits `Queued`, in launch order,
+ * and starts when a slot frees. Remote (HTTP) and Ollama workers do not
+ * count. `max_concurrent_agents` counts agent processes, not the builds
+ * behind them, so it cannot bound the machine load on its own.
+ */
+max_concurrent_task_workers: number, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

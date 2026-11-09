@@ -149,6 +149,43 @@ describe('TaskExecutionCard', () => {
     expect(screen.queryByTestId('orch-exec-tokens-partial')).toBeNull();
   });
 
+  // ── KT-1632 — a launch held by the cap on local task workers says why ──────
+
+  const progress = (over: Record<string, unknown>) => ({
+    phase: 'launching',
+    reason: null,
+    queue_position: null,
+    queued_since: null,
+    process_alive: null,
+    last_reliable_signal_at: null,
+    telemetry_mode: 'unavailable',
+    ...over,
+  }) as unknown as TaskExecutionDetail['progress'];
+
+  it('shows why and where a launch waits when the task-worker cap is full', () => {
+    wrap(
+      <TaskExecutionCard
+        detail={detail({ progress: progress({ phase: 'queued', reason: 'task_worker_limit:2/2', queue_position: 3 }) })}
+      />
+    );
+    const queued = screen.getByTestId('orch-exec-queued');
+    // The test locale is not English: assert the numbers the sentence carries.
+    expect(queued.textContent).toMatch(/\b2\b.*\b2\b/);
+    expect(queued.textContent).toContain('3');
+  });
+
+  it('says nothing about a queue once the worker runs, or for another kind of wait', () => {
+    const { unmount } = wrap(<TaskExecutionCard detail={detail({ progress: progress({ phase: 'launching' }) })} />);
+    expect(screen.queryByTestId('orch-exec-queued')).toBeNull();
+    unmount();
+    wrap(
+      <TaskExecutionCard
+        detail={detail({ progress: progress({ phase: 'queued', reason: 'concurrency_limit_or_scheduler' }) })}
+      />
+    );
+    expect(screen.queryByTestId('orch-exec-queued')).toBeNull();
+  });
+
   it('keeps the selected model and candidate SHA inspectable', () => {
     wrap(<TaskExecutionCard detail={detail()} />);
     expect(screen.getByTestId('orch-exec-model')).toHaveTextContent('qwen3-coder:30b');
