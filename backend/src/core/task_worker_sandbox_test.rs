@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::background_priority::Priority;
 use crate::core::task_worker_env::Provisioned;
 use crate::core::task_worker_lane_warm::{warm_lane, BuildGate, FirstBuild, WarmStartSettings};
 use std::sync::Mutex;
@@ -61,6 +62,7 @@ fn probe(program: &str, args: &[&str], cwd: &Path) -> ProbeCommand {
         cwd: cwd.to_path_buf(),
         env: Vec::new(),
         timeout: Duration::from_secs(120),
+        priority: crate::core::background_priority::Priority::Normal,
     }
 }
 
@@ -698,7 +700,152 @@ fn a_relaunch_after_the_worker_changed_its_build_never_reaches_a_process_unconfi
         assert!(call.args[1].contains("(deny default)"), "{call:?}");
         assert!(!call.args[1].contains("(allow default)"), "{call:?}");
         assert!(!call.args[1].contains("network-outbound"), "{call:?}");
+        // KT-1633: the first build is heavy; the priority crosses the sandbox
+        // wrapping to the process runner, which starts it behind the launcher.
+        assert_eq!(call.priority, Priority::Background, "{call:?}");
     }
+}
+
+/// KT-1633: the sandboxed runner hands the process level the priority the
+/// probe asked for — a background build stays background, a smoke check stays
+/// at the backend's priority — so no command reaching the lane through it can
+/// silently lose it.
+#[test]
+fn the_sandboxed_runner_carries_the_priority_of_a_probe_to_the_process_level() {
+    let layout = layout();
+    let inner = Recorder::new();
+    let runner = SandboxedProbeRunner::new(
+        Ok(policy_of(&layout)),
+        Some(Mechanism::Seatbelt),
+        inner.clone(),
+    );
+    for priority in [Priority::Background, Priority::Normal] {
+        let asked = ProbeCommand {
+            priority,
+            ..probe("cargo", &["build"], &layout.worktree)
+        };
+        assert!(runner.run(&asked).success);
+        let cancel = CancellationToken::new();
+        assert!(runner.run_cancellable(&asked, &cancel).success);
+    }
+    let seen: Vec<Priority> = inner.calls().iter().map(|call| call.priority).collect();
+    assert_eq!(
+        seen,
+        [
+            Priority::Background,
+            Priority::Background,
+            Priority::Normal,
+            Priority::Normal
+        ]
+    );
+    assert_eq!(
+        confine(
+            Mechanism::Bubblewrap,
+            &policy_of(&layout),
+            &ProbeCommand {
+                priority: Priority::Background,
+                ..probe("cargo", &["build"], &layout.worktree)
+            }
+        )
+        .priority,
+        Priority::Background
+    );
+}
+
+/// KT-1633: the priority launcher goes in front of the OS sandbox, so the
+/// whole sandboxed build is throttled, and the sandbox's own argv is intact
+/// after it: `taskpolicy -b sandbox-exec ...` / `nice -n 10 bwrap ...`.
+#[test]
+fn the_priority_launcher_wraps_the_os_sandbox_launcher() {
+    use crate::core::background_priority::{plan, HostOs};
+    let layout = layout();
+    let asked = ProbeCommand {
+        priority: Priority::Background,
+        ..probe("cargo", &["test", "--no-run"], &layout.worktree)
+    };
+    let everything = |_: &str| true;
+    for (os, mechanism, launcher, launcher_args, sandbox) in [
+        (
+            HostOs::MacOs,
+            Mechanism::Seatbelt,
+            "/usr/sbin/taskpolicy",
+            vec!["-b"],
+            SANDBOX_EXEC,
+        ),
+        (
+            HostOs::Linux,
+            Mechanism::Bubblewrap,
+            "/usr/bin/nice",
+            vec!["-n", "10"],
+            BWRAP,
+        ),
+    ] {
+        let confined = confine(mechanism, &policy_of(&layout), &asked);
+        assert_eq!(confined.program, sandbox);
+        let (program, args) = plan(Priority::Background, true, os, everything)
+            .argv(std::ffi::OsStr::new(&confined.program));
+        assert_eq!(program, launcher);
+        // `taskpolicy -b sandbox-exec` / `nice -n 10 bwrap`, then the sandbox's
+        // own argv untouched.
+        let mut expected: Vec<OsString> = launcher_args.iter().map(OsString::from).collect();
+        expected.push(OsString::from(sandbox));
+        assert_eq!(args, expected, "{os:?}");
+        assert!(!confined.args.is_empty(), "{os:?}");
+    }
+}
+
+/// The same through the real spawn path of this host: `Confinement::command`
+/// puts the launcher in front of the sandbox program when the host runs one.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+#[serial_test::serial(background_launcher)]
+fn a_confined_background_command_starts_behind_the_launcher_then_the_sandbox() {
+    use crate::core::background_priority::{self, HostOs, LauncherCheck, LauncherGuard};
+    background_priority::set_enabled(true);
+    let _launcher = LauncherGuard::set(LauncherCheck::Works);
+    let layout = layout();
+    let mechanism = Mechanism::of_host().expect("macOS and Linux have one");
+    let confinement = Confinement::with_mechanism(&layout.worktree, Some(mechanism)).unwrap();
+    let asked = |priority| ProbeCommand {
+        priority,
+        ..probe("cargo", &["test", "--no-run"], &layout.worktree)
+    };
+    let sandbox_program = confinement.wrap(&asked(Priority::Normal)).program;
+
+    let normal = confinement.command(&asked(Priority::Normal), ChildRoute::QuickExec);
+    assert_eq!(normal.as_std().get_program(), sandbox_program.as_str());
+
+    let background = confinement.command(&asked(Priority::Background), ChildRoute::QuickExec);
+    let plan = background_priority::plan_here(Priority::Background);
+    if !background_priority::enabled()
+        || background_priority::launcher_for(HostOs::CURRENT, |path| Path::new(path).is_file())
+            .is_none()
+    {
+        return; // The owner's env switch is off, or the host has no launcher.
+    }
+    let launcher = plan.launcher.expect("a known-good launcher is used");
+    assert_eq!(background.as_std().get_program(), launcher.program);
+    let args: Vec<OsString> = background
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_os_string())
+        .collect();
+    assert_eq!(args[..launcher.args.len()], launcher.args[..]);
+    assert_eq!(
+        args[launcher.args.len()],
+        OsString::from(&sandbox_program),
+        "the sandbox program follows the launcher"
+    );
+    let normal_args: Vec<OsString> = normal
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_os_string())
+        .collect();
+    assert_eq!(
+        args[launcher.args.len() + 1..],
+        normal_args[..],
+        "the sandbox's own argv is unchanged"
+    );
 }
 
 // ── The OS enforces it (hosts where the sandbox can be applied) ──────────
@@ -1225,6 +1372,7 @@ fn run_confined_blocking(
             None,
             &CancellationToken::new(),
             confinement,
+            crate::core::background_priority::Priority::Normal,
         ))
         .unwrap()
 }

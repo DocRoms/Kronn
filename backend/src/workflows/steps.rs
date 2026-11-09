@@ -1388,6 +1388,9 @@ async fn run_agent_with_timeout(
             // The bridge's discussion is the room the capability names.
             discussion_id: room.map(|room| room.discussion_id.as_str()),
             workflow_step_context: room,
+            // KT-1633 — an Agent step (autoCode implement, review, fix) can build
+            // for minutes: it yields to the owner's interactive applications.
+            priority: crate::core::background_priority::Priority::Background,
             project_id,
             ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
         })
