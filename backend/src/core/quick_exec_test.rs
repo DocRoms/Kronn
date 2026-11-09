@@ -524,6 +524,94 @@ fn the_generic_summariser_prefers_stderr_but_falls_back_to_stdout() {
     assert!(without.summary.contains("only stdout"));
 }
 
+/// KT-1438: a wrapper (`make`) prints the real failure on stdout and only its
+/// own verdict on stderr; the tail alone sent a worker back with `Error 1`.
+fn wrapped_phpunit_run() -> (String, String) {
+    let mut stdout = String::from("PHPUnit 10.5\n");
+    stdout.push_str("Twig\\Error\\LoaderError: Unable to find template \"@web/images/vector/menu-icons/icon-hr-language.svg\" (looked into: /app/public)\n");
+    for index in 0..200 {
+        stdout.push_str(&format!(
+            "#{index} /app/vendor/twig/twig/src/Environment.php({index})\n"
+        ));
+    }
+    stdout.push_str("Tests: 11, Assertions: 4, Errors: 7.\n");
+    let stderr = "WARNING: The requested image's platform (linux/amd64) does not match\n\
+                  make: *** [iso-test-class] Error 1\n"
+        .to_string();
+    (stdout, stderr)
+}
+
+#[test]
+fn a_red_generic_run_keeps_its_first_error_lines_not_only_its_tail() {
+    let (stdout, stderr) = wrapped_phpunit_run();
+    let extracted = summarise(
+        Summariser::Generic,
+        &stdout,
+        &stderr,
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(
+        extracted.summary.contains("Unable to find template"),
+        "the first error must survive: {}",
+        extracted.summary
+    );
+    assert!(extracted.summary.contains("icon-hr-language.svg"));
+    assert!(
+        extracted.summary.contains("Error 1"),
+        "the tail is kept too: {}",
+        extracted.summary
+    );
+    assert!(extracted.summary.len() <= SUMMARY_MAX_BYTES);
+}
+
+#[test]
+fn a_passing_generic_run_has_no_first_errors_section() {
+    let extracted = summarise(
+        Summariser::Generic,
+        "0 errors, 0 failed\nall good\n",
+        "",
+        QuickExecStatus::Passed,
+        true,
+    );
+    assert!(!extracted.summary.contains("first errors"));
+    assert!(extracted.summary.contains("all good"));
+}
+
+#[test]
+fn a_count_of_zero_errors_is_not_a_first_error() {
+    let extracted = summarise(
+        Summariser::Generic,
+        "build: 0 errors\n",
+        "boom\n",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(!extracted.summary.contains("first errors"));
+    assert!(extracted.summary.contains("boom"));
+}
+
+#[test]
+fn the_first_error_section_cannot_push_the_tail_out_of_the_summary() {
+    let stdout: String = (0..400)
+        .map(|index| format!("error: noisy failure number {index} {}\n", "x".repeat(200)))
+        .collect();
+    let extracted = summarise(
+        Summariser::Generic,
+        &stdout,
+        "the last line says make: Error 1\n",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(extracted.summary.contains("first errors"));
+    assert!(extracted.summary.contains("noisy failure number 0 "));
+    assert!(
+        extracted.summary.contains("make: Error 1"),
+        "tail lost: {}",
+        extracted.summary
+    );
+}
+
 // ── idempotency key ─────────────────────────────────────────────────
 
 #[test]

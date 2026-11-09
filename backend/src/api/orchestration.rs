@@ -2256,6 +2256,17 @@ async fn provision_task_execution_inner(
         .map_err(|e| ProvisionError::Internal(e.to_string()))?;
     }
 
+    // The project's generated, gitignored assets (KT-1438), whatever the worker
+    // kind: a fresh worktree has the tracked tree only. A resume refreshes them.
+    seed_lane_assets(
+        db,
+        &prepared.execution.id,
+        &prepared.project_id,
+        &repo_path,
+        &worktree_path,
+    )
+    .await;
+
     // A prelocalized scope is a mechanical promise, not prose. Validate it
     // against the exact SHA-pinned worktree before any worker dispatch exists.
     // The runner will still perform its own fresh read to obtain the edit CAS.
@@ -3425,6 +3436,10 @@ async fn validate_and_apply(
         .ok_or_else(|| ProvisionError::Internal("run has no pinned target branch".into()))?;
     let generic = BlockedReasonCode::IntegrationRefused;
     let reach = ValidationReach::of_run(db, run.project_id.as_deref(), &run.discussion_id).await;
+    // The source may have been regenerated since the worker started (KT-1438).
+    if let Some(project_id) = run.project_id.as_deref() {
+        seed_lane_assets(db, exec_id, project_id, repo, child).await;
+    }
     let mut rebuilds = 0;
     loop {
         if let Some(failure) = run_pending_validations(
@@ -5014,18 +5029,24 @@ impl ReworkReport {
 }
 
 /// How much of a failing validation's output travels in a message. The end is
-/// kept: a compiler or a test runner prints its verdict last.
+/// kept, because a compiler or a test runner prints its verdict last, and so is
+/// the start (KT-1438): the first error (a Twig exception, the first failing
+/// test) is what a worker needs, and a wrapper's last lines are only its own
+/// `make: Error 1`.
 const REWORK_OUTPUT_LIMIT: usize = 4_000;
+const REWORK_OUTPUT_HEAD: usize = 1_500;
 
 /// A fenced block that the text itself cannot close early.
 fn fenced_output(output: &str, lang: RoomLang) -> String {
     let total = output.chars().count();
     let shown: String = if total > REWORK_OUTPUT_LIMIT {
-        let tail: String = output.chars().skip(total - REWORK_OUTPUT_LIMIT).collect();
+        let tail_len = REWORK_OUTPUT_LIMIT - REWORK_OUTPUT_HEAD;
+        let head: String = output.chars().take(REWORK_OUTPUT_HEAD).collect();
+        let tail: String = output.chars().skip(total - tail_len).collect();
         let omitted = total - REWORK_OUTPUT_LIMIT;
         match lang {
-            RoomLang::Fr => format!("[… {omitted} caractères omis]\n{tail}"),
-            RoomLang::En => format!("[… {omitted} characters omitted]\n{tail}"),
+            RoomLang::Fr => format!("{head}\n[… {omitted} caractères omis]\n{tail}"),
+            RoomLang::En => format!("{head}\n[… {omitted} characters omitted]\n{tail}"),
         }
     } else {
         output.to_string()
@@ -9483,6 +9504,63 @@ async fn mark_lane_target_for_worker(exec_id: &str, worktree: &std::path::Path) 
         Err(error) => {
             tracing::warn!(execution_id = %exec_id, "lane target marking did not complete: {error}");
         }
+    }
+}
+
+/// Seed a task worktree with the project's gitignored assets (KT-1438) and
+/// journal what happened. Run at provisioning and again before the integration
+/// validations, so a source that changed meanwhile is refreshed. Best-effort:
+/// a path that cannot be seeded is recorded with its reason and the worktree
+/// goes on without it; it never fails a launch or an integration.
+async fn seed_lane_assets(
+    db: &Database,
+    exec_id: &str,
+    project_id: &str,
+    repo: &std::path::Path,
+    worktree: &std::path::Path,
+) {
+    let pid = project_id.to_string();
+    let declared = match db
+        .with_read_conn(move |conn| crate::db::projects::lane_seeds(conn, &pid))
+        .await
+    {
+        Ok(seeds) => seeds,
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "lane seeds not read: {error}");
+            return;
+        }
+    };
+    if declared.is_empty() {
+        return;
+    }
+    let (repo, worktree) = (repo.to_path_buf(), worktree.to_path_buf());
+    let record = match tokio::task::spawn_blocking(move || {
+        crate::core::task_worker_lane_seeds::seed_worktree(
+            &repo,
+            &worktree,
+            &declared,
+            &crate::core::task_worker_lane_warm::clone_tree,
+        )
+    })
+    .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "lane seeding did not complete: {error}");
+            return;
+        }
+    };
+    for (path, reason) in record.skipped() {
+        tracing::warn!(execution_id = %exec_id, "lane seed `{path}` skipped: {reason}");
+    }
+    let id = exec_id.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_lane_seeds(conn, &id, &record, &backend_actor())
+        })
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, "lane seeds record not persisted: {error}");
     }
 }
 
@@ -22797,6 +22875,40 @@ pub(crate) mod tests {
             exit_code,
             output: output.into(),
         }
+    }
+
+    /// KT-1438: a long failing output reaches the room and the worker with its
+    /// start (the first error) and its end (the verdict), not only the tail.
+    #[test]
+    fn a_long_failure_output_keeps_its_head_and_its_tail() {
+        let mut output = String::from("Twig\\Error\\LoaderError: Unable to find template\n");
+        output.push_str(&"#1 /app/vendor/twig/Environment.php\n".repeat(400));
+        output.push_str("make: *** [iso-test-class] Error 1\n");
+        for lang in [RoomLang::Fr, RoomLang::En] {
+            let shown = fenced_output(&output, lang);
+            assert!(
+                shown.contains("LoaderError: Unable to find template"),
+                "{shown}"
+            );
+            assert!(
+                shown.contains("make: *** [iso-test-class] Error 1"),
+                "{shown}"
+            );
+            assert!(shown.contains("omi"), "the cut is announced: {shown}");
+            assert!(
+                shown.chars().count() < REWORK_OUTPUT_LIMIT + 200,
+                "bounded: {}",
+                shown.chars().count()
+            );
+        }
+    }
+
+    /// An output within the limit is shown whole.
+    #[test]
+    fn a_short_failure_output_is_shown_whole() {
+        let shown = fenced_output("one\ntwo\n", RoomLang::En);
+        assert!(shown.contains("one\ntwo"));
+        assert!(!shown.contains("omitted"));
     }
 
     /// KT-1433: a discussion grant widens a sandboxed project to Docker and

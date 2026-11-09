@@ -6606,6 +6606,48 @@ pub fn record_lane_warm_start(
     )
 }
 
+/// Journal what seeding a task worktree with the project's gitignored assets
+/// did (KT-1438): which paths were cloned, refreshed, left alone or refused,
+/// and why.
+pub fn record_lane_seeds(
+    conn: &Connection,
+    exec_id: &str,
+    record: &crate::core::task_worker_lane_seeds::LaneSeedsRecord,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        crate::core::task_worker_lane_seeds::LANE_SEEDS_EVENT_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::to_value(record)?,
+    )
+}
+
+/// The most recent lane-seeds record of an execution, if any.
+pub fn latest_lane_seeds(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::core::task_worker_lane_seeds::LaneSeedsRecord>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                crate::core::task_worker_lane_seeds::LANE_SEEDS_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
 /// The most recent warm-start record of an execution, if any.
 pub fn latest_lane_warm_start(
     conn: &Connection,

@@ -139,6 +139,35 @@ pub fn set_validations_access(
     Ok(changed > 0)
 }
 
+/// The gitignored paths this project declares as lane seeds (KT-1438). An
+/// unknown project, an empty column or an unreadable value reads as none.
+pub fn lane_seeds(conn: &Connection, project_id: &str) -> Result<Vec<String>> {
+    let value: Option<Option<String>> = conn
+        .query_row(
+            "SELECT lane_seeds_json FROM projects WHERE id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default())
+}
+
+/// Replace the project's lane seeds; an empty list clears them. Returns false
+/// when the project does not exist.
+pub fn set_lane_seeds(conn: &Connection, project_id: &str, seeds: &[String]) -> Result<bool> {
+    let json = (!seeds.is_empty())
+        .then(|| serde_json::to_string(seeds))
+        .transpose()?;
+    let changed = conn.execute(
+        "UPDATE projects SET lane_seeds_json = ?2 WHERE id = ?1",
+        params![project_id, json],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Whether a human granted `capability` to this discussion's runs (KT-1433).
 pub fn discussion_capability_granted(
     conn: &Connection,

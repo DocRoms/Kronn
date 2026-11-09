@@ -847,15 +847,34 @@ fn summarise(
             } else {
                 stderr
             };
-            for line in source
+            let mut tail: Vec<String> = source
                 .lines()
                 .rev()
                 .filter(|l| !l.trim().is_empty())
                 .take(20)
-            {
-                lines.push(line.trim().to_string());
+                .map(|line| line.trim().to_string())
+                .collect();
+            tail.reverse();
+            // KT-1438: a wrapper (`make`, `docker compose`) prints its own
+            // verdict on stderr and the real failure (a phpunit diff, a Twig
+            // exception) on stdout, far above the tail: the tail alone sent a
+            // worker back with "Error 1" and a platform warning. A red run
+            // also keeps the first error lines of BOTH streams.
+            let first_errors = if status == QuickExecStatus::Passed {
+                Vec::new()
+            } else {
+                first_error_lines(stdout, stderr, &tail)
+            };
+            if !first_errors.is_empty() {
+                lines.push(cap_bytes_keeping_start(
+                    &format!("first errors:\n{}", first_errors.join("\n")),
+                    FIRST_ERRORS_MAX_BYTES,
+                ));
+                lines.push("… (the rest is in the artifact)".to_string());
             }
-            lines.reverse();
+            if !tail.is_empty() {
+                lines.push(cap_bytes_keeping_end(&tail.join("\n"), TAIL_MAX_BYTES));
+            }
         }
     }
 
@@ -892,6 +911,77 @@ fn summarise(
         failed_tests,
         diagnostics,
     }
+}
+
+/// What the generic summary keeps of a red run's first error lines, and of its
+/// last lines, so that neither can push the other out of [`SUMMARY_MAX_BYTES`].
+const FIRST_ERRORS_MAX_BYTES: usize = 1_800;
+const TAIL_MAX_BYTES: usize = 2_000;
+const FIRST_ERROR_LINES: usize = 12;
+const ERROR_LINE_MAX_CHARS: usize = 300;
+
+/// The first lines of the output that name a failure (an error, an exception,
+/// a failed assertion, a panic), stdout then stderr, minus those the tail
+/// already shows. A line that merely says a count of `0 errors` is not one.
+fn first_error_lines(stdout: &str, stderr: &str, tail: &[String]) -> Vec<String> {
+    const MARKERS: &[&str] = &[
+        "error",
+        "exception",
+        "fatal",
+        "panic",
+        "traceback",
+        "failed",
+        "failure",
+        "assert",
+    ];
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            MARKERS.iter().any(|marker| lower.contains(marker))
+                && !["0 error", "no error", "0 failed", "0 failure"]
+                    .iter()
+                    .any(|benign| lower.contains(benign))
+        })
+        .filter(|line| !tail.iter().any(|shown| shown == line))
+        .take(FIRST_ERROR_LINES)
+        .map(|line| {
+            if line.chars().count() > ERROR_LINE_MAX_CHARS {
+                let cut: String = line.chars().take(ERROR_LINE_MAX_CHARS).collect();
+                format!("{cut}…")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect()
+}
+
+/// At most `max` bytes of the start of `text`, on a character boundary.
+fn cap_bytes_keeping_start(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut cut = max;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n… truncated", &text[..cut])
+}
+
+/// At most `max` bytes of the end of `text`, on a character boundary: a test
+/// runner or a compiler prints its verdict last.
+fn cap_bytes_keeping_end(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut cut = text.len() - max;
+    while cut < text.len() && !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    format!("… truncated\n{}", &text[cut..])
 }
 
 fn push_capped<T>(target: &mut Vec<T>, value: T, cap: usize) {
