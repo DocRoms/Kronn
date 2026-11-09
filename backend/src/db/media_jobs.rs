@@ -224,6 +224,18 @@ pub fn list_for_request_root(conn: &Connection, root: &str) -> Result<Vec<MediaJ
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// How many jobs were launched under any request root that starts with
+/// `prefix`: every step of one workflow run, for the run's total.
+pub fn count_for_request_root_prefix(conn: &Connection, prefix: &str) -> Result<usize> {
+    // The highest code point sorts after anything a root can continue with.
+    let upper = format!("{prefix}{}", char::MAX);
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM media_jobs WHERE request_root_id >= ?1 AND request_root_id < ?2",
+        params![prefix, upper],
+        |row| row.get::<_, i64>(0),
+    )? as usize)
+}
+
 pub fn get(conn: &Connection, id: &str) -> Result<Option<MediaJob>> {
     let sql = format!("SELECT {COLUMNS} FROM media_jobs WHERE id = ?1");
     Ok(conn.query_row(&sql, params![id], row_to_job).optional()?)

@@ -24,6 +24,33 @@ Release notes for 0.9.3 and earlier are available in the
   each workflow needs before queueing. A source image must start like a PNG,
   JPEG, WebP or GIF, and one request's sources stay under 64 MB together
   (KT-1403, #265).
+- A workflow Agent step on an HTTP or local agent (Ollama, LiteLLM,
+  OpenRouter…) can now generate an image or a video with `media_generate`
+  and follow the job with `media_job_status`, as in a discussion: same
+  validation, same per-request billing guard, same connection resolution.
+  The asset lands in a room opened for the run (listed with it) and, once
+  the job completes, as a file in the run's artifacts directory
+  (`asset.artifact_path`) that a later step can read. The step waits with
+  `wait_secs` instead of being woken. Every other task or orchestration tool
+  stays refused in a workflow step (KT-1605, #502).
+- Reference images work in a workflow step: a picture of the run's rooms or the
+  project's discussions (a brand image a launch variable names), an earlier
+  step's generation by job id or artifact path, or a picture file inside the
+  project. Nothing of another run or project is reachable. A run is also capped
+  at 12 generations (`KRONN_WORKFLOW_MEDIA_JOBS_PER_RUN`, at most 100), on top of
+  six per step, and a dry-run Test no longer bills. A reference that matches
+  nothing gets the one scope refusal (KT-1605, #502).
+
+### Security
+
+- The copy of a generated asset into a run's artifacts directory is written
+  through the directory's file descriptor, so a link an Exec step planted at
+  the asset's name is replaced, never written through. A press of a step's
+  Test button is its own scope for the media guard, never shared across
+  workflows or projects (KT-1605, #502).
+- A project file used as a reference is read through directory fds: a link on its
+  path is refused, a FIFO cannot block the open, and it must be a picture by its
+  first bytes, not by its extension (KT-1605, #502).
 
 ### Fixed
 
