@@ -27,7 +27,7 @@ Every encrypted column is listed in one registry, `keystore::ENCRYPTED_COLUMNS`;
 a test compares it with the schema, so a new `*_encrypted` / cipher column
 cannot be added without the reconciler seeing it.
 [src: file: backend/src/core/keystore.rs:41-61#ENCRYPTED_COLUMNS]
-[src: file: backend/src/core/keystore.rs:4459-4496#encrypted_column_registry_matches_the_schema]
+[src: file: backend/src/core/keystore.rs:4473-4510#encrypted_column_registry_matches_the_schema]
 
 The running process still reads `config.tokens.keys` and
 `config.server.auth_token`: the boot fills them from the table, and every
@@ -111,7 +111,7 @@ the previous file untouched.
      and no key in memory (fail closed: nothing new is encrypted under a key
      no vault holds). Kronn keeps running so the key can be restored from
      Settings → Recovery.
-   [src: file: backend/src/core/keystore.rs:435-682#reconcile_with]
+   [src: file: backend/src/core/keystore.rs:450-697#reconcile_with]
 3. The resolved key is mirrored into the **empty** writable vaults; a vault
    holding another key, or whose read failed, is never written. `config.toml`
    drops its copy only when the key decrypts at least one row of every
@@ -142,13 +142,16 @@ the previous file untouched.
    key, never overwritten; also refreshed after a restore),
    `invalid_sources`, `locked_credentials`, `kept_recovery_blobs`,
    `credentials_unavailable`, `recovery_other_key`, `recovery_unverified`,
-   `recovery_damaged`, `config_set_aside`, `rows_moved_from_files`,
+   `recovery_damaged`, `clear_credentials` (names of the credentials
+   `config.toml` still carries in clear, never values), `set_aside_files` (each
+   `config.toml.corrupt.<ts>` with its credentials, whether the owner may delete
+   it, and why not), `config_set_aside`, `rows_moved_from_files`,
    `file_key_moves_pending`, `file_key_rows_pending`, `undecryptable_rows`
    and `locked_file_rows`; pending file-key moves are shown as "nothing to
    do"; Settings → Recovery shows the warnings, and the
    app-wide banner shows a locked key, `credentials_unavailable` and
    `config_set_aside`.
-   [src: file: backend/src/core/keystore.rs:278-332#settle_disk_copy] [src: file: backend/src/core/keystore.rs:404-410#enough_copies] [src: file: backend/src/core/keystore.rs:234-239#decrypts_every_column] [src: file: backend/src/core/keystore.rs:415-433#persist] [src: file: backend/src/core/keyvault.rs:455-474#mirror] [src: file: backend/src/core/keystore.rs:372-402#ensure_durable_copy]
+   [src: file: backend/src/core/keystore.rs:293-347#settle_disk_copy] [src: file: backend/src/core/keystore.rs:419-425#enough_copies] [src: file: backend/src/core/keystore.rs:249-254#decrypts_every_column] [src: file: backend/src/core/keystore.rs:430-448#persist] [src: file: backend/src/core/keyvault.rs:455-474#mirror] [src: file: backend/src/core/keystore.rs:387-417#ensure_durable_copy]
 4. `credential_store::boot` loads the stored credentials, moves any still in
    `config.toml` into the table, and generates an auth token only when none
    exists anywhere. Locked key: the store stays off and `config.toml` is left
@@ -156,6 +159,35 @@ the previous file untouched.
    stored, auth is locked (below), never open. The stored token row also
    records whether auth is enabled, so a lost `config.toml` does not turn
    auth off. [src: file: backend/src/core/credential_store.rs:465-612#boot] [src: file: backend/src/lib.rs:130-150#stored_auth_token_exists]
+
+   A set-aside `config.toml.corrupt.<ts>` is never deleted by Kronn. The owner
+   deletes one in Settings → Recovery (`DELETE
+   /api/config/recovery/set-aside-files/{name}`, behind the strong
+   confirmation), only when Kronn can prove nothing in it is lost. The rule
+   is closed: every leaf value of the file is either a credential verified in
+   `stored_credentials` (it decrypts with the key in use and equals the value
+   of the file), or sits at a place a closed list from the config model knows
+   to hold no secret (ports, flags, names, language; an address with no user
+   info, query or fragment), with the type that place has. Nothing is judged by
+   what a field is called: an unknown field, a non-text value at a credential
+   place, the webhook URL, a theme secret or an `encryption_secret` that is not
+   a valid key is never verified and blocks. A file that is not valid TOML is
+   read line by line under the section it sat in; any line that does not parse
+   (a header, a value with no quote, a cut string) blocks. The check is made
+   again on the request, on the bytes read through the data directory without
+   following a link, and the file is unlinked only if its name still names
+   that file (on Windows that identity is only the size and the write time,
+   see `core/rooted_io.rs`). A
+   file is kept when it is a sealed (`.enc`) copy, unreadable (a link, a hard
+   link, not text, too big), when the key is locked, when it holds a
+   key that still opens database rows, `locked-secrets-*.json` rows or `.enc`
+   files (the config backup, the preserved values, sealed copies) the key in
+   use does not, or when it holds the only copy of the key in use (vault
+   copies and `config.toml` are read at that moment, not taken from the boot
+   report). The banner and Settings → Recovery flag
+   `config_holds_key` ("key stored beside its data") and point to a recovery
+   passphrase or `KRONN_ENCRYPTION_KEK`; a locked-key banner lists the
+   credentials still in clear (KT-1594).
 
 An operator-set `KRONN_AUTH_TOKEN` is read and removed from the process
 environment before the database opens (`config::take_env_auth_token`). Step 4
@@ -308,7 +340,7 @@ all back, so local MCP secrets are never lost to a half import. GitHub
 connections are not exported; those of projects that come back by id are
 kept (the `projects` cascade no longer drops their tokens), and the report
 counts the ones whose project is gone.
-[src: file: backend/src/api/setup.rs:2341-2489#import_clear_statements]
+[src: file: backend/src/api/setup.rs:2549-2597#import_clear_statements]
 [src: file: backend/src/db/github_connections.rs:84-107#restore_rows]
 
 ## Reset

@@ -13,6 +13,7 @@ import type { ToastFn } from '../../hooks/useToast';
 import { KeyRound, Copy, Download, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { RecoveryRestorePanel } from '../RecoveryRestorePanel';
 import type { RecoveryStatus } from '../../types/generated';
+import { clearCredentialLabel } from '../../lib/clearCredentials';
 import '../../pages/SettingsPage.css';
 
 interface RecoverySectionProps {
@@ -78,6 +79,23 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
       toast(e instanceof Error ? e.message : String(e), 'error');
     } finally {
       setSaving(false);
+    }
+  };
+
+  // KT-1594: delete a kept config.toml. The backend checks again that every
+  // credential in it is verified, and the strong confirmation applies.
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const deleteSetAside = async (name: string) => {
+    if (!window.confirm(t('settings.recovery.deleteSetAsideConfirm', name))) return;
+    setDeleting(name);
+    try {
+      await configApi.deleteSetAsideFile(name);
+      toast(t('settings.recovery.setAsideDeleted', name), 'success');
+      setStatus(await configApi.getRecoveryStatus());
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setDeleting(null);
     }
   };
 
@@ -158,6 +176,63 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
           <div className="set-expose-warn" data-testid="recovery-config-set-aside">
             <AlertTriangle size={13} />
             <span>{status.config_set_aside}</span>
+          </div>
+        )}
+        {status && !status.key_locked && status.config_holds_key && (
+          <div className="set-expose-warn" data-testid="recovery-key-beside-data">
+            <AlertTriangle size={13} />
+            <span>{t('keyLocked.keyBesideData')}</span>
+          </div>
+        )}
+        {status && (status.clear_credentials ?? []).length > 0 && (
+          <div className="set-expose-warn" data-testid="recovery-clear-credentials">
+            <AlertTriangle size={13} />
+            <div>
+              <span>{t('settings.recovery.clearTitle')}</span>
+              <ul>
+                {(status.clear_credentials ?? []).map((c, i) => (
+                  <li key={`${c.kind}-${c.name}-${c.provider}-${i}`}>
+                    {clearCredentialLabel(c, t)}{' — '}
+                    {t(c.verified ? 'settings.recovery.clearVerified' : 'settings.recovery.clearUnverified')}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
+        {status && (status.set_aside_files ?? []).length > 0 && (
+          <div data-testid="recovery-set-aside-files">
+            <span className="font-semibold">{t('settings.recovery.setAsideTitle')}</span>
+            <p className="set-hint-xs">{t('settings.recovery.setAsideHint')}</p>
+            {(status.set_aside_files ?? []).map(file => (
+              <div key={file.name} className="flex-col gap-2 mt-4" data-testid={`recovery-set-aside-${file.name}`}>
+                <code>{file.name}</code>
+                {file.holds_key && <span className="set-hint-xs">{t('settings.recovery.holdsKey')}</span>}
+                <ul>
+                  {file.credentials.map((c, i) => (
+                    <li key={`${c.kind}-${c.name}-${c.provider}-${i}`}>
+                      {clearCredentialLabel(c, t)}{' — '}
+                      {t(c.verified ? 'settings.recovery.clearVerified' : 'settings.recovery.clearUnverified')}
+                    </li>
+                  ))}
+                </ul>
+                {file.blocker && (
+                  <span className="set-hint-xs" data-testid={`recovery-set-aside-blocker-${file.name}`}>
+                    {t(`settings.recovery.blocker.${file.blocker}`)}
+                  </span>
+                )}
+                <div className="flex-row gap-4">
+                  <button
+                    className="set-action-btn"
+                    disabled={!file.deletable || deleting !== null}
+                    onClick={() => deleteSetAside(file.name)}
+                    data-testid={`recovery-set-aside-delete-${file.name}`}
+                  >
+                    {t('settings.recovery.deleteSetAside')}
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         )}
         {status && (status.rows_moved_from_files ?? []).length > 0 && (

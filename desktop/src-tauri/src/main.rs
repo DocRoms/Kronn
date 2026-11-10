@@ -587,16 +587,30 @@ fn configure_embedded_server(server: &mut kronn::models::ServerConfig, port: u16
     server.runtime_port = Some(port);
 }
 
-/// The LAN guard on the host the embedded server binds: the same predicate
-/// as the bind itself, so `::` is as exposed as `0.0.0.0`.
+/// What the embedded server binds (KT-1596): the shared boot plan for a native
+/// runtime, fed by the configured host and the proxy declaration. Never Docker:
+/// the desktop app owns its listening interface.
+fn embedded_boot_bind(server: &kronn::models::ServerConfig) -> kronn::core::net_expose::BootBind {
+    kronn::core::net_expose::boot_bind(
+        &server.host,
+        false,
+        None,
+        false,
+        kronn::core::net_expose::proxy_declared_for(server),
+    )
+}
+
+/// The LAN guard on what the embedded server can be reached through: the same
+/// predicate as the bind itself, so `::` is as exposed as `0.0.0.0`, and a
+/// declared proxy counts even though the server then binds loopback.
 fn embedded_lan_guard(
-    bind_host: &str,
+    boot_bind: &kronn::core::net_expose::BootBind,
     auth_enabled: bool,
     token_configured: bool,
     ack_insecure: bool,
 ) -> Option<String> {
     kronn::core::net_expose::insecure_lan_boot_error(
-        kronn::core::net_expose::is_exposed_host(bind_host),
+        boot_bind.reachable_from_network,
         auth_enabled,
         token_configured,
         ack_insecure,
@@ -631,7 +645,12 @@ async fn start_backend(
     // 0.0.0.0 includes), so the local UI is unaffected either way. We never bind
     // an arbitrary configured host in embedded mode — only loopback or bind-all.
     configure_embedded_server(&mut app_config.server, port);
-    let bind_host = app_config.server.host.clone();
+    // KT-1596 — a requested exposure that nothing encrypts never serves the token
+    // in clear: the embedded server falls back to loopback (the webview talks to
+    // 127.0.0.1 anyway) and Settings says why, instead of a startup-error screen
+    // with no UI to switch the toggle back.
+    let boot_bind = embedded_boot_bind(&app_config.server);
+    let bind_host = boot_bind.bind_host.clone();
 
     let max_agents = if app_config.server.max_concurrent_agents > 0 {
         app_config.server.max_concurrent_agents
@@ -658,13 +677,16 @@ async fn start_backend(
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
         .unwrap_or(false);
     if let Some(msg) = embedded_lan_guard(
-        &bind_host,
+        &boot_bind,
         app_config.server.auth_enabled,
         app_config.server.auth_token_or_lock(),
         ack_insecure,
     ) {
         tracing::error!("{msg}");
         return Err(anyhow::anyhow!(msg));
+    }
+    if let Some(notice) = boot_bind.notice() {
+        tracing::warn!("{notice}");
     }
 
     // Before any launch: which projects hand their agents a GitHub token (D2).
@@ -1276,20 +1298,76 @@ mod enrich_path_tests {
     use super::*;
     use std::fs;
 
+    fn bind_for(host: &str, proxy_declared: bool) -> kronn::core::net_expose::BootBind {
+        kronn::core::net_expose::boot_bind(host, false, None, false, proxy_declared)
+    }
+
     #[test]
     fn the_lan_guard_treats_every_bind_all_host_alike() {
+        // A declared proxy is the only way a bind-all host stays reachable (KT-1596):
+        // the unauthenticated API behind it is refused for `::` as for `0.0.0.0`.
         for host in ["0.0.0.0", "::"] {
-            assert!(embedded_lan_guard(host, false, false, false).is_some(), "{host}");
-            assert!(embedded_lan_guard(host, true, false, false).is_some(), "{host}");
-            assert!(embedded_lan_guard(host, true, true, false).is_none(), "{host}");
-            assert!(embedded_lan_guard(host, false, false, true).is_none(), "{host}");
+            let bind = bind_for(host, true);
+            assert!(
+                embedded_lan_guard(&bind, false, false, false).is_some(),
+                "{host}"
+            );
+            assert!(
+                embedded_lan_guard(&bind, true, false, false).is_some(),
+                "{host}"
+            );
+            assert!(
+                embedded_lan_guard(&bind, true, true, false).is_none(),
+                "{host}"
+            );
+            assert!(
+                embedded_lan_guard(&bind, false, false, true).is_none(),
+                "{host}"
+            );
         }
-        assert!(embedded_lan_guard("127.0.0.1", false, false, false).is_none());
-        // `::` survives configure_embedded_server, so the guard must see it.
+        assert!(embedded_lan_guard(&bind_for("127.0.0.1", false), false, false, false).is_none());
+        // `::` survives configure_embedded_server, so the plan must see it.
         let mut config = config::default_config();
         config.server.host = "::".into();
         configure_embedded_server(&mut config.server, 53591);
         assert_eq!(config.server.host, "::");
+    }
+
+    #[test]
+    fn a_stale_exposed_config_starts_the_embedded_server_on_loopback() {
+        // KT-1596: the config asks for LAN exposure, nothing carries TLS. The app
+        // must come up on 127.0.0.1 (the webview's address) instead of the
+        // startup-error screen, and the unauthenticated-LAN guard has nothing left
+        // to refuse since nobody can reach it.
+        for host in ["0.0.0.0", "::"] {
+            let mut config = config::default_config();
+            config.server.host = host.into();
+            configure_embedded_server(&mut config.server, 53591);
+            let bind = embedded_boot_bind(&config.server);
+            assert_eq!(bind.bind_host, "127.0.0.1", "{host}");
+            assert_eq!(
+                bind.reason,
+                kronn::core::net_expose::BindReason::PlainHttpFellBackToLoopback
+            );
+            assert!(bind.fatal.is_none());
+            assert!(bind.notice().is_some());
+            assert!(embedded_lan_guard(&bind, false, false, false).is_none());
+        }
+    }
+
+    #[test]
+    fn a_declared_proxy_keeps_the_embedded_server_on_loopback() {
+        let mut config = config::default_config();
+        config.server.host = "0.0.0.0".into();
+        config.server.tls_terminated_by_proxy = true;
+        configure_embedded_server(&mut config.server, 53591);
+        let bind = embedded_boot_bind(&config.server);
+        assert_eq!(bind.bind_host, "127.0.0.1");
+        assert_eq!(
+            bind.reason,
+            kronn::core::net_expose::BindReason::ProxyOnLoopback
+        );
+        assert!(bind.reachable_from_network);
     }
 
     #[test]
