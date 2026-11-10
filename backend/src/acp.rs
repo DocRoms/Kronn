@@ -821,6 +821,38 @@ pub struct NativeLaunchEnv {
     pub bridge_token: Option<String>,
     /// `core::github_connection::env_for_launch` for the agent's project (D2).
     pub github_env: Vec<(String, String)>,
+    /// Whether the owner opened this launch in full access (KT-1656): the
+    /// launch then keeps the shared credential stores of the home readable
+    /// (`~/.ssh`, `~/.aws`, …). `false` by default, so a launch that does not
+    /// say loses them. [`AcpJsonRpcTransport::spawn_native`] sets it from the
+    /// `full_access` it verified.
+    pub full_access: bool,
+    /// The launch carries read-only grants (a read policy): it is a restricted
+    /// launch, so it loses the shared stores whatever `full_access` says.
+    pub read_only_grants: bool,
+}
+
+/// Whether a native launch keeps the shared credential stores readable: the
+/// `full_access` it verified, unless it carries read-only grants.
+fn native_reach_is_full(full_access: bool, launch: &NativeLaunchEnv) -> bool {
+    crate::agents::runner::reach_is_full_access(full_access, launch.read_only_grants)
+}
+
+/// The launch with its reach settled: what the command, the home masks and the
+/// session's broker are all built from, so none of them reads the raw flag.
+fn native_launch_with_reach(full_access: bool, launch: NativeLaunchEnv) -> NativeLaunchEnv {
+    NativeLaunchEnv {
+        full_access: native_reach_is_full(full_access, &launch),
+        ..launch
+    }
+}
+
+/// The broker of a native launch, from its settled reach.
+fn native_session_broker(
+    launch: &NativeLaunchEnv,
+    scope: Option<AcpSessionScope>,
+) -> AcpPermissionBroker {
+    session_broker(launch.full_access, scope)
 }
 
 fn native_family(agent: AcpAgent) -> crate::core::child_env::AgentFamily {
@@ -839,12 +871,26 @@ fn native_family(agent: AcpAgent) -> crate::core::child_env::AgentFamily {
 /// `program args` behind the vault sandbox, or unchanged when the owner turned
 /// the protection off or the host has none (never an error: nothing that works
 /// today is refused).
-fn vault_confined(program: &str, args: &[&str]) -> (String, Vec<String>) {
+///
+/// KT-1656 — it also hides the credential files of the home that `family` does
+/// not own (a Gemini runtime cannot read `~/.codex`).
+fn vault_confined(
+    family: crate::core::child_env::AgentFamily,
+    full_access: bool,
+    program: &str,
+    args: &[&str],
+) -> (String, Vec<String>) {
     let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
     let (program, args, _) = crate::core::vault_guard::wrap_launch(
-        crate::core::vault_guard::launch_confinement().as_ref(),
+        crate::core::vault_guard::launch_confinement_for(
+            family,
+            crate::core::vault_guard::LaunchSandbox::None,
+            full_access,
+        )
+        .as_ref(),
         crate::core::vault_guard::LaunchSandbox::None,
-        &crate::core::vault_guard::LaunchRoots::default(),
+        // KT-1587 — an ACP runtime is granted no run directory.
+        &crate::core::vault_guard::LaunchRoots::default().with_run_artifacts(&[]),
         program.to_owned(),
         args,
     );
@@ -867,7 +913,7 @@ fn native_command(
     // to the OS sandbox, like every other agent launch (`runner::try_spawn`).
     // The arguments appended later (the bridge declaration) land after the
     // program's own, behind the launcher.
-    let (program, args) = vault_confined(program, args);
+    let (program, args) = vault_confined(family, launch.full_access, program, args);
     let mut command = crate::core::cmd::async_cmd(&program, route);
     command.args(&args).current_dir(cwd);
     child_env::reset(command.as_std_mut(), route);
@@ -893,6 +939,11 @@ fn native_command(
         &values,
         backend_url,
     )?;
+    // KT-1634 — the same build and test parallelism budget as every other route.
+    crate::core::task_worker_env::apply_build_budget(
+        command.as_std_mut(),
+        std::path::Path::new(cwd),
+    );
     // Only a project connected to GitHub hands its agent a token (D2).
     crate::core::github_connection::apply_launch_env(command.as_std_mut(), &launch.github_env);
     let mut granted = values.granted();
@@ -952,13 +1003,16 @@ impl AcpJsonRpcTransport {
         if let Some(refusal) = native_acp_wsl_only_refusal(program) {
             return Err(AcpError::Transport(refusal));
         }
+        let launch = native_launch_with_reach(full_access, launch);
         let mut command =
             native_command(agent, program, &args, cwd, &launch).map_err(AcpError::Transport)?;
         let bridge_env =
             bridge_env::for_launch(agent, command.as_std()).map_err(AcpError::Transport)?;
         // The servers are authorized once, by the session's own broker: the
         // launch arguments never name a server `session/new` does not declare.
-        let broker = session_broker(full_access, Some(scope));
+        // The broker follows the reach-adjusted flag, not the raw one: a launch
+        // with read-only grants is restricted for its permissions too.
+        let broker = native_session_broker(&launch, Some(scope));
         // Vibe's permission request carries only the call id; the tool it
         // resolved is in the update announcing that call.
         if agent == AcpAgent::Vibe {
@@ -2180,6 +2234,8 @@ mod tests {
             api_key: Some("kronn-stored-gemini-key".into()),
             bridge_token: Some("kbt_native".into()),
             github_env: Vec::new(),
+            full_access: true,
+            read_only_grants: false,
         };
         let command = crate::core::child_env::with_parent_env(
             &[
@@ -2241,6 +2297,53 @@ mod tests {
         .unwrap();
         assert!(command_env(&command)["KRONN_WORKFLOW_STEP_CONTEXT"].contains("run-1"));
 
+        // KT-1634 — the build and test parallelism budget rides every route,
+        // for an agent on a worktree (`.git` is a file there) and no other.
+        let jobs = crate::core::task_worker_lane_warm::worker_build_jobs().to_string();
+        let on_worktree = tempfile::tempdir().unwrap();
+        std::fs::write(
+            on_worktree.path().join(".git"),
+            "gitdir: /repo/.git/worktrees/task\n",
+        )
+        .unwrap();
+        let budgeted = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
+            native_command(
+                AcpAgent::Kiro,
+                &kiro_cli_stub,
+                &[],
+                &on_worktree.path().to_string_lossy(),
+                &NativeLaunchEnv::default(),
+            )
+            .unwrap()
+        });
+        let env = command_env(&budgeted);
+        for name in [
+            "CARGO_BUILD_JOBS",
+            "RUST_TEST_THREADS",
+            "NEXTEST_TEST_THREADS",
+            "VITEST_MAX_WORKERS",
+        ] {
+            assert_eq!(env[name], jobs, "{name} on the native launch");
+        }
+        assert!(
+            !env.contains_key("MAKEFLAGS"),
+            "make's -j is never a default"
+        );
+        let off_worktree = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
+            native_command(
+                AcpAgent::Kiro,
+                &kiro_cli_stub,
+                &[],
+                &project.path().to_string_lossy(),
+                &NativeLaunchEnv::default(),
+            )
+            .unwrap()
+        });
+        assert!(
+            !command_env(&off_worktree).contains_key("RUST_TEST_THREADS"),
+            "no worktree, no budget"
+        );
+
         // A connected project's GitHub variables reach the native agent.
         let connected = NativeLaunchEnv {
             github_env: vec![
@@ -2286,11 +2389,21 @@ mod tests {
         assert_eq!(command.as_std().get_program(), stub.as_str());
 
         assert_eq!(
-            vault_confined(&stub, &["--acp"]),
+            vault_confined(
+                crate::core::child_env::AgentFamily::Other,
+                true,
+                &stub,
+                &["--acp"]
+            ),
             (stub.clone(), vec!["--acp".to_string()])
         );
         crate::core::vault_guard::set_test_wrap(true);
-        let wrapped = vault_confined(&stub, &["--acp"]);
+        let wrapped = vault_confined(
+            crate::core::child_env::AgentFamily::Other,
+            true,
+            &stub,
+            &["--acp"],
+        );
         crate::core::vault_guard::set_test_wrap(false);
         match crate::core::trust_sandbox::confinement() {
             Some(confinement) => {
@@ -2471,6 +2584,66 @@ mod tests {
         assert!(session_bridge(&resembling, &bridge_id).is_none());
         assert!(is_bridge_like("KRONN-internal-2"));
         assert!(!is_bridge_like("github"));
+    }
+
+    /// KT-1656 — a native launch that carries read-only grants is a restricted
+    /// launch: it loses the shared credential stores, as the direct and adapter
+    /// routes (`launch_full_access` and no read-only grants) do.
+    #[test]
+    fn a_native_launch_with_read_only_grants_is_not_full_access_reach() {
+        let plain = NativeLaunchEnv::default();
+        let granted = NativeLaunchEnv {
+            read_only_grants: true,
+            ..Default::default()
+        };
+        assert!(native_reach_is_full(true, &plain));
+        assert!(!native_reach_is_full(true, &granted));
+        assert!(!native_reach_is_full(false, &plain));
+        assert!(!native_reach_is_full(false, &granted));
+        // The broker of the session is built from the settled reach, not the raw
+        // flag: read-only grants make its permissions restricted too.
+        let broker_full = |full_access: bool, launch: NativeLaunchEnv| {
+            let settled = native_launch_with_reach(full_access, launch);
+            native_session_broker(&settled, None).full_access()
+        };
+        assert!(broker_full(true, NativeLaunchEnv::default()));
+        assert!(!broker_full(
+            true,
+            NativeLaunchEnv {
+                read_only_grants: true,
+                ..Default::default()
+            }
+        ));
+        assert!(!broker_full(false, NativeLaunchEnv::default()));
+        // The runner's rule, shared by every route.
+        assert!(crate::agents::runner::reach_is_full_access(true, false));
+        assert!(!crate::agents::runner::reach_is_full_access(true, true));
+        assert!(!crate::agents::runner::reach_is_full_access(false, false));
+        // Today no native agent can hold read grants at all (only Claude Code
+        // and Codex do), so the rule above is defense in depth, not the only guard.
+        let work = std::env::temp_dir();
+        for agent in [
+            crate::models::AgentType::GeminiCli,
+            crate::models::AgentType::Kiro,
+            crate::models::AgentType::OpenCode,
+            crate::models::AgentType::Vibe,
+            crate::models::AgentType::CopilotCli,
+        ] {
+            assert!(
+                crate::agents::runner::requires_explicit_full_access(&agent),
+                "{agent:?} is a native ACP agent"
+            );
+            assert!(
+                crate::agents::read_only_repos::ReadOnlyRepos::resolve_with_dirs(
+                    &agent,
+                    &work,
+                    &[work.display().to_string()],
+                    &[],
+                )
+                .is_err(),
+                "{agent:?} cannot hold read-only grants"
+            );
+        }
     }
 
     /// The spawn seam holds on its own: a native runtime never starts restricted.
@@ -3626,7 +3799,7 @@ mod tests {
     /// what OpenCode's `read` permission request carries), is refused, goes on
     /// with its turn and ends it reporting what it consumed. Before, the refusal
     /// ended the turn and the step with it, and the usage was never read.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     #[serial_test::serial(acp_adapter_env_toggle)]
     async fn a_refused_read_does_not_end_the_turn_and_the_turn_reports_its_usage() {
@@ -3715,7 +3888,7 @@ mod tests {
 
     /// A non-UTF-8 byte on the agent's stdout costs one discarded frame, not
     /// the session: the dispatcher keeps reading and answers the next request.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn a_non_utf8_stdout_line_does_not_end_the_session() {
         let peer = r#"
@@ -3742,7 +3915,7 @@ for line in sys.stdin:
 
     /// KT-927 — stopping the agent stops what it started. Killing the ACP child
     /// alone left its shell commands running.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn shutdown_stops_the_processes_the_agent_started_too() {
         let dir = tempfile::tempdir().unwrap();
@@ -3924,7 +4097,7 @@ for line in sys.stdin:
 
     /// KT-1158 — the live dispatcher reads Vibe's tool-call update before the
     /// permission request naming only its call id, and answers it from it.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn dispatcher_identifies_a_vibe_bridge_call_from_the_update_that_announced_it() {
         const VIBE_FIXTURE: &str = r#"
@@ -4364,7 +4537,7 @@ while True:
     /// DoD — abandonment: a transport dropped after a REJECTED negotiation must
     /// not leave its process behind. The fixture ignores stdin EOF, so only
     /// real process ownership can end it.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn a_rejected_negotiation_dropped_terminates_the_owned_fixture() {
         let link = FixtureLink::new();
@@ -4396,7 +4569,7 @@ while True:
     }
 
     /// DoD — idempotent reap: two shutdowns succeed, and the process is gone.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn shutdown_is_idempotent_and_reaps_the_owned_fixture() {
         let link = FixtureLink::new();

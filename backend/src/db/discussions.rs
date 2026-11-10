@@ -19,6 +19,15 @@ pub fn count_discussions(conn: &Connection) -> Result<u32> {
     Ok(count)
 }
 
+/// KT-1656 — the text of a turn still streaming is agent output too: it is kept in
+/// `discussions.partial_response` until the turn completes or boot recovery turns
+/// it into a message, so it is masked like a stored message
+/// ([`mask_agent_output`]), not only when it becomes one.
+fn mask_partial_response(conn: &Connection, disc_id: &str, text: &str) -> Result<String> {
+    let masked = crate::db::assistant_conversations::mask_for_discussion(conn, disc_id, text)?;
+    Ok(crate::core::redact::redact_agent_output(&masked))
+}
+
 /// Checkpoint the in-flight agent response. Called periodically from
 /// `make_agent_stream` (every ~30s or ~100 chunks) so a backend restart
 /// preserves what the agent has produced so far.
@@ -42,8 +51,7 @@ pub fn set_partial_response(
 ) -> Result<()> {
     match partial {
         Some(text) => {
-            let masked =
-                crate::db::assistant_conversations::mask_for_discussion(conn, disc_id, text)?;
+            let masked = mask_partial_response(conn, disc_id, text)?;
             let text = masked.as_str();
             let agent_type = provenance.map(|(agent, _)| format_agent_type(agent));
             let model = provenance.and_then(|(_, model)| model);
@@ -104,7 +112,7 @@ pub fn set_partial_response_for_dispatch(
     trigger_message_id: &str,
     connection_id: Option<&str>,
 ) -> Result<bool> {
-    let masked = crate::db::assistant_conversations::mask_for_discussion(conn, disc_id, partial)?;
+    let masked = mask_partial_response(conn, disc_id, partial)?;
     let partial = masked.as_str();
     let agent_type = format_agent_type(provenance.0);
     let changed = conn.execute(
@@ -2352,6 +2360,23 @@ pub fn clear_discussion_workspace(conn: &Connection, id: &str) -> Result<bool> {
     Ok(affected > 0)
 }
 
+/// Ids of the archived review discussions (KT-1645) that still point at a
+/// worktree: the ones whose checkout is due for release.
+pub fn archived_review_ids_with_workspace(conn: &Connection) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM discussions
+          WHERE archived = 1 AND workspace_mode = ?1 AND workspace_path IS NOT NULL
+          ORDER BY updated_at",
+    )?;
+    let ids = statement
+        .query_map(
+            params![crate::core::worktree::REVIEW_WORKSPACE_MODE],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
 /// Set or clear the two test-mode tracking fields together.
 ///
 /// `restore_branch = Some(...)` + `stash_ref = Option<...>`: user just entered
@@ -2867,6 +2892,22 @@ pub fn insert_message(
     insert_message_inner(conn, discussion_id, msg)
 }
 
+/// KT-1656 — what an agent wrote is stored masked: a worker that prints a
+/// credential file (`cat ~/.gemini/settings.json`) and quotes it in its reply
+/// must not leave the token in the transcript, which is kept and is sent back to
+/// the model provider on every later turn. Vendor token shapes, and secret-named
+/// assignments and JSON keys whose value is a credential, not code or a
+/// placeholder (`redact::redact_agent_output`: its false-positive rate was
+/// measured, `db::insert_redaction_measure`). Only the agent's own role: what a
+/// human typed is theirs.
+pub(crate) fn mask_agent_output(role: &crate::models::MessageRole, content: String) -> String {
+    if matches!(role, crate::models::MessageRole::Agent) {
+        crate::core::redact::redact_agent_output(&content)
+    } else {
+        content
+    }
+}
+
 fn insert_message_inner(
     conn: &Connection,
     discussion_id: &str,
@@ -2886,8 +2927,11 @@ fn insert_message_inner(
         .as_ref()
         .and_then(|r| serde_json::to_string(r).ok());
     // KT-1111 — every message of an assistant conversation, any author.
+    // KT-1656 — masked once, here: the row, the proposals, the actions, the
+    // questions and the audit hook below read this text, never `msg.content`.
     let content =
         crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, &msg.content)?;
+    let content = mask_agent_output(&msg.role, content);
 
     conn.execute(
         "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id, session_continuity, kind)
@@ -2942,19 +2986,14 @@ fn insert_message_inner(
             conn,
             discussion_id,
             &msg.id,
-            &msg.content,
+            &content,
         )?;
-        super::discussion_actions::ingest_message_actions(
-            conn,
-            discussion_id,
-            &msg.id,
-            &msg.content,
-        )?;
+        super::discussion_actions::ingest_message_actions(conn, discussion_id, &msg.id, &content)?;
         let invalid_cards = super::discussion_questions::ingest_message_questions(
             conn,
             discussion_id,
             &msg.id,
-            &msg.content,
+            &content,
         )?;
         super::discussion_questions::report_invalid_cards(
             conn,
@@ -2966,7 +3005,7 @@ fn insert_message_inner(
             conn,
             discussion_id,
             &msg.id,
-            &msg.content,
+            &content,
             &msg.timestamp.to_rfc3339(),
         )?;
     }
@@ -3242,33 +3281,6 @@ pub fn update_discussion_sharing(
     Ok(affected > 0)
 }
 
-pub fn delete_last_agent_messages(conn: &Connection, discussion_id: &str) -> Result<u64> {
-    // Delete trailing non-User messages (Agent + System) from the end
-    let affected = conn.execute(
-        "DELETE FROM messages WHERE discussion_id = ?1
-         AND EXISTS (
-            SELECT 1 FROM messages
-            WHERE discussion_id = ?1 AND role = 'User'
-         )
-         AND sort_order > (
-            SELECT COALESCE(MAX(sort_order), -1) FROM messages
-            WHERE discussion_id = ?1 AND role = 'User'
-        )",
-        params![discussion_id],
-    )?;
-
-    // Recount to keep message_count accurate after bulk delete
-    conn.execute(
-        "UPDATE discussions SET message_count = (
-            SELECT COUNT(*) FROM messages WHERE discussion_id = ?1
-         ) WHERE id = ?1",
-        params![discussion_id],
-    )?;
-
-    update_discussion_timestamp(conn, discussion_id)?;
-    Ok(affected as u64)
-}
-
 #[derive(Debug)]
 pub enum TombstoneMessageError {
     NotFound,
@@ -3405,27 +3417,6 @@ pub fn delete_dispatch_reply_messages(
 
     update_discussion_timestamp(conn, discussion_id)?;
     Ok(affected as u64)
-}
-
-pub fn edit_last_user_message(
-    conn: &Connection,
-    discussion_id: &str,
-    content: &str,
-) -> Result<bool> {
-    let masked =
-        crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, content)?;
-    let content = masked.as_str();
-    let affected = conn.execute(
-        "UPDATE messages SET content = ?1, timestamp = ?2
-         WHERE discussion_id = ?3 AND role = 'User'
-         AND sort_order = (SELECT MAX(sort_order) FROM messages WHERE discussion_id = ?3 AND role = 'User')",
-        params![content, Utc::now().to_rfc3339(), discussion_id],
-    )?;
-
-    update_discussion_timestamp(conn, discussion_id)?;
-    // Invalidate cached summary since conversation content changed
-    let _ = invalidate_summary_cache(conn, discussion_id);
-    Ok(affected > 0)
 }
 
 #[derive(Debug)]
@@ -3585,6 +3576,7 @@ pub fn revise_message_with_dispatch(
             sort_order: existing.sort_order,
             duplicate: true,
             dispatch_job_id: existing.dispatch_job_id.clone(),
+            dropped_targets: 0,
         };
         transaction.commit()?;
         return Ok(ReviseMessageOutcome {
@@ -3802,6 +3794,7 @@ pub fn revise_message_with_dispatch(
             sort_order: event_sort_order,
             duplicate: false,
             dispatch_job_id,
+            dropped_targets: 0,
         },
         event,
         claimed_dispatch,
@@ -4267,6 +4260,81 @@ pub fn insert_context_file(
         "INSERT INTO context_files (id, discussion_id, filename, mime_type, original_size, extracted_text, extracted_size, disk_path)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![id, discussion_id, filename, mime_type, original_size as i64, extracted_text, extracted_text.len() as i64, disk_path],
+    )?;
+    Ok(())
+}
+
+/// Every context file row, for the whole-DB export (KT-1602). `disk_path` is
+/// read so the exporter can find the bytes; it never reaches the archive.
+pub fn list_context_file_records(
+    conn: &Connection,
+) -> Result<Vec<crate::models::db::ContextFileRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_text,
+                extracted_size, message_id, extracted_from_asset_id, created_at, disk_path
+         FROM context_files
+         ORDER BY created_at, rowid",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(crate::models::db::ContextFileRecord {
+            id: row.get(0)?,
+            discussion_id: row.get(1)?,
+            filename: row.get(2)?,
+            mime_type: row.get(3)?,
+            original_size: row.get::<_, i64>(4)?.max(0) as u64,
+            extracted_text: row.get(5)?,
+            extracted_size: row.get::<_, i64>(6)?.max(0) as u64,
+            message_id: row.get(7)?,
+            extracted_from_asset_id: row.get(8)?,
+            created_at: row.get(9)?,
+            has_blob: false,
+            disk_path: row.get(10)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Restore a context file row verbatim (KT-1602). `disk_path` is where the
+/// imported bytes were written here, not the exporter's. The asset a frame was
+/// taken from is linked afterwards (`link_context_file_source`): it may come
+/// later in the archive.
+pub fn insert_context_file_record(
+    conn: &Connection,
+    record: &crate::models::db::ContextFileRecord,
+    disk_path: Option<&str>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO context_files
+         (id, discussion_id, filename, mime_type, original_size, extracted_text,
+          extracted_size, disk_path, message_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            record.id,
+            record.discussion_id,
+            record.filename,
+            record.mime_type,
+            record.original_size as i64,
+            record.extracted_text,
+            record.extracted_size as i64,
+            disk_path,
+            record.message_id,
+            record.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Point a restored picture at the clip it was taken from, when that clip was
+/// restored too (otherwise the link stays empty rather than dangling).
+pub fn link_context_file_source(
+    conn: &Connection,
+    file_id: &str,
+    source_asset_id: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE context_files SET extracted_from_asset_id = ?2
+         WHERE id = ?1 AND EXISTS (SELECT 1 FROM context_files WHERE id = ?2)",
+        rusqlite::params![file_id, source_asset_id],
     )?;
     Ok(())
 }

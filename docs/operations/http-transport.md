@@ -31,23 +31,23 @@ for repetition only; exhausted call budgets and open error circuits still
 apply, and effectful calls remain cached. Workers retain their separate bounded
 finalization policy. This prevents a post-edit verification from receiving the
 pre-edit file or a repetition refusal (KT-948).
-[src: file: backend/src/agents/runner.rs:11819-11862#observation_readers_to_restore]
+[src: file: backend/src/agents/runner.rs:12073-12116#observation_readers_to_restore]
 
 The HTTP runner also publishes structured input/output and reported cache-token
 counters through `AgentProcess`, which Full and partial audits consume. Each
 provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
-[src: file: backend/src/agents/runner.rs:8897-8908#cached_prompt_tokens]
-[src: file: backend/src/agents/runner.rs:2119-2126#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10234-10264#task_usage]
+[src: file: backend/src/agents/runner.rs:9180-9191#cached_prompt_tokens]
+[src: file: backend/src/agents/runner.rs:2178-2185#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10499-10529#task_usage]
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
 per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 `None` means unknown, never zero (KT-997). If any response of the run reported
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
-[src: file: backend/src/agents/runner.rs:8190-8196#request_provider_cost]
-[src: file: backend/src/agents/runner.rs:2112-2117#cost_incomplete]
+[src: file: backend/src/agents/runner.rs:8480-8486#request_provider_cost]
+[src: file: backend/src/agents/runner.rs:2171-2176#cost_incomplete]
 [src: file: backend/src/api/audit/full.rs:2239#reported_cost_usd_micros]
 [src: file: backend/src/api/audit/drift.rs:1295#reported_cost_usd_micros]
 
@@ -71,9 +71,9 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:8204-8206#HOSTED_STEP_CTX_BUDGET]
-[src: file: backend/src/agents/runner.rs:8208-8210#HOSTED_AUDIT_STEP_INPUT_BUDGET]
-[src: file: backend/src/agents/runner.rs:12512-12527#audit_budget_spent]
+[src: file: backend/src/agents/runner.rs:8494-8496#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:8498-8500#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:12766-12781#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
 each step. Comma-bundled file references (including a repeated `file:` prefix)
@@ -114,7 +114,7 @@ Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
 [src: file: backend/src/api/audit/validation.rs:183-223#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:8939-8943#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/runner.rs:9229-9233#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the
@@ -181,6 +181,34 @@ under an unrelated agent.
   `AgentType`, so two different named connections can both appear in one
   debate without colliding on `AgentType::Custom`.
 
+## Workflow Agent steps with a `room_id` (KT-1244)
+
+An HTTP Agent step (`Ollama`, `LiteLlm`, `Nvidia`, `Custom` — any provider on
+this transport, OpenRouter included) accepts `room_id`, at save and at launch,
+like a Claude Code or Codex step: the provider stays a free choice. It has no
+bridge process, so there is no `KRONN_WORKFLOW_STEP_CONTEXT` exchange; the
+orchestrator, which already runs this agent's tools in-process, makes the step a
+member of the room itself when it activates it. The membership is the KT-793
+one: the same `workflow_step_room_sessions` row, ended with the step and
+revoked at backend boot, and the room shows the step working (KT-883).
+`[src: file: backend/src/workflows/step_room.rs:574-607#join_http_step]`
+`[src: file: backend/src/api/workflows.rs:773-780]`
+
+Only then does the step's native catalogue carry three room tools, bound to that
+room: `disc_read`, `disc_append` (main channel; this is also how a
+`kronn-question` card is published) and `disc_question_list` (the same contract
+as the bridge's: pending questions or the answer of an exact `key`; absence is
+not consent). The schemas are closed: a `discussion_id` naming any other
+discussion, or any undeclared field, is refused, and the bridge-token gate
+decides the two writing/asking tools on the room the step owns. What the
+step posts is authored by the step's provider, not by the room's agent. A step
+without a `room_id` is offered exactly the workflow catalogue it had before,
+because every tool declaration costs a small model context. The model-facing
+behaviour is the same as for a joined CLI; see
+[kronn-internal.md](mcp-servers/kronn-internal.md) for the full contract.
+`[src: file: backend/src/api/agent_tools.rs:1803-1805#catalogue]`
+`[src: file: backend/src/api/agent_room_tools.rs:19-65#declarations]`
+
 ## Known limitations
 
 - **Preflight remains caller-owned.** Each launch surface must pass the actual
@@ -191,13 +219,13 @@ under an unrelated agent.
   immediately before each launch. A future
   centralized guard can make this invariant structural once the agent runner
   is available for that refactor.
-  [src: file: backend/src/core/model_catalog/mod.rs:1320-1327#preflight_resolve]
+  [src: file: backend/src/core/model_catalog/mod.rs:1380-1387#preflight_resolve]
   [src: file: backend/src/api/discussions/orchestration.rs:66-132#checked_launch_connection]
   [src: file: backend/src/api/discussions/orchestration.rs:814-822#checked_launch_connection]
   [src: file: backend/src/api/discussions/orchestration.rs:710-718#checked_launch_connection]
   [src: file: backend/src/api/discussions/orchestration.rs:1049-1057#checked_launch_connection]
-  [src: file: backend/src/workflows/steps.rs:1153-1193#resolve_step_connection]
-  [src: file: backend/src/workflows/steps.rs:1195-1248#preflight_workflow_launch]
+  [src: file: backend/src/workflows/steps.rs:1171-1211#resolve_step_connection]
+  [src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
 - **Mid-thread `@mention` autocomplete doesn't suggest connection aliases.**
   The composer's autocomplete only lists built-in agents; typing a
   connection's exact alias (e.g. `@groq`) still dispatches correctly — the
@@ -234,13 +262,13 @@ under an unrelated agent.
   invocation. It stops the test immediately: later model errors cannot hide
   the billing failure. The form and saved connection card show a translated
   message; provider response bodies and credentials remain private.
-  [src: file: backend/src/api/external_api_connections.rs:1291-1297#PAYMENT_REQUIRED]
-  [src: file: backend/src/api/external_api_connections.rs:558-564#PAYMENT_REQUIRED]
-  [src: file: backend/src/api/external_api_connections.rs:671-673#ChatProbe]
-  [src: file: backend/src/api/external_api_connections.rs:702-722#failure_response]
-  [src: file: backend/src/api/external_api_connections.rs:816-827#assemble_tier_report]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:372-373#billing_error]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1062#billing_error]
+  [src: file: backend/src/api/external_api_connections.rs:1297-1303#PAYMENT_REQUIRED]
+  [src: file: backend/src/api/external_api_connections.rs:564-570#PAYMENT_REQUIRED]
+  [src: file: backend/src/api/external_api_connections.rs:677-679#ChatProbe]
+  [src: file: backend/src/api/external_api_connections.rs:708-728#failure_response]
+  [src: file: backend/src/api/external_api_connections.rs:822-833#assemble_tier_report]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:387-388#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1086#billing_error]
   Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks
   credit, even when the key can load `/v1/models`. Previously the generic
   fallback could hide this behind a later HTTP 400 from a TTS model.
@@ -259,7 +287,7 @@ Ollama `/api/show` and LiteLLM `/model/info` may confirm vision for the exact
 model. A missing declaration never causes an image to be sent speculatively.
 [src: file: backend/src/agents/vision.rs:520-551#attach_to_chat_body]
 [src: file: backend/src/agents/vision.rs:145-169#ollama_show_vision]
-[src: file: backend/src/api/discussions/streaming.rs:2739-2780#http_context_images]
+[src: file: backend/src/api/discussions/streaming.rs:2772-2813#http_context_images]
 
 Every withheld image is named in the model's context with an explicit instruction
 not to describe its contents, and a way for the user to supply the information.
@@ -285,7 +313,7 @@ without a project. This exception grants no directory listing or writing rights;
 `.kronn/context-files` remains read-only inside a project too. Symlink
 attachments are refused. Unrelated files outside the workspace keep the existing
 refusal. Images are never returned as lossy text by `read_file`.
-[src: file: backend/src/api/agent_tools.rs:3570-3602#read_attached_file]
+[src: file: backend/src/api/agent_tools.rs:3605-3637#read_attached_file]
 [src: file: backend/src/api/agent_workspace_tools.rs:1297-1341#read_attachment_payload]
 
 CLI agents retain the existing attachment prompt: an image's path and an
