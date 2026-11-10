@@ -12754,6 +12754,55 @@ pub fn discussion_scratch_dir(discussion_id: &str) -> Result<PathBuf, String> {
     discussion_scratch_dir_under(home.home_dir(), discussion_id)
 }
 
+/// Test guard: the home a discussion folder is created under must be a scratch
+/// directory strictly inside `temp`. Both sides are canonicalised so macOS's
+/// `/var` -> `/private/var` link cannot make a scratch home look foreign.
+#[cfg(test)]
+fn scratch_home_guard(home: &Path, temp: &Path) -> Result<(), String> {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let (home_real, temp_real) = (canonical(home), canonical(temp));
+    if home_real != temp_real && home_real.starts_with(&temp_real) {
+        return Ok(());
+    }
+    Err(format!(
+        "test attempted to create a discussion working directory under the real home {} — \
+         enter a `ScratchHome` (HOME pointed at a tempdir, test marked #[serial]) first",
+        home.display()
+    ))
+}
+
+/// Points `HOME` at a fresh tempdir for one test and puts it back on drop, even
+/// on a panic. `HOME` is process-wide: callers must be `#[serial]`.
+#[cfg(test)]
+pub(crate) struct ScratchHome {
+    dir: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl ScratchHome {
+    pub(crate) fn enter() -> Self {
+        let dir = tempfile::tempdir().expect("scratch home");
+        let previous = crate::core::child_env::var_os("HOME");
+        crate::core::child_env::set_var("HOME", dir.path());
+        Self { dir, previous }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScratchHome {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::core::child_env::set_var("HOME", value),
+            None => crate::core::child_env::remove_var("HOME"),
+        }
+    }
+}
+
 fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<PathBuf, String> {
     // The id becomes a path segment: anything but a plain id could escape it.
     if discussion_id.is_empty()
@@ -12762,6 +12811,12 @@ fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<Path
             .all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
         return Err("Invalid discussion id for its working directory".into());
+    }
+    // A test creating this under the developer's real home would litter (or, in
+    // a worker sandbox, fail to create) `~/.kronn/discussions`: fail loudly.
+    #[cfg(test)]
+    if let Err(error) = scratch_home_guard(home, &std::env::temp_dir()) {
+        panic!("{error}");
     }
     let dir = home.join(".kronn").join("discussions").join(discussion_id);
     std::fs::create_dir_all(&dir)
