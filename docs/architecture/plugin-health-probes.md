@@ -57,6 +57,32 @@ list shows health without re-probing on load.
 config with a bounded concurrency (`TEST_ALL_CONCURRENCY`, a `Semaphore`,
 same idiom as `workflows::batch_apicall_step`), persisting the same way.
 
+## Refused tokens (KT-1524)
+
+A probe is not the only thing that learns a token is dead: every real call
+does. `workflows::api_auth_failure::track_outcome` runs after each ApiCall
+(workflow step, batch item, collector source, Quick API, agent broker call,
+wizard test) and after each readiness probe:
+
+- success → deletes the connection's row in `mcp_auth_failures` (migration
+  `backend/src/db/sql/290_mcp_auth_failures.sql`);
+- HTTP 401, a 403 whose body blames the credential (a bare 403 or a rate limit
+  is *not* an auth failure), or a rejected OAuth2 / token-exchange mint → upserts
+  the row (`kind`, `http_status`, scrubbed provider message, `failed_at`);
+- any other failure (5xx, network, timeout) leaves the row as it was.
+
+The row surfaces as `McpConfigDisplay.auth_failure`: the card shows the
+`TokenRefusedNotice` with an update action, the list row a badge, the API
+access health reads `token_refused`, and `AuthFailureBanner` (dashboard layout)
+lists every refused connection. A failed ApiCall output starts with one plain
+sentence (`Connection "<label>" (<plugin>) refused the token (HTTP 401): … —
+update the token in Settings → APIs.`) and ends with `[SIGNAL: auth_refused]`;
+a `CollectApiData` step repeats it with the `N of M sources` count. The run page
+(`RunDetail`) keys its run-level notice on that signal.
+
+Not covered: a token's *known expiry date* — connections store none, so an
+expiring token is only caught by the call (or probe) that gets refused.
+
 ## Rescan report
 
 `POST /mcps/refresh` (`backend/src/api/mcps.rs:1474`) now returns

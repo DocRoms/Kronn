@@ -43,6 +43,37 @@ describe('plugin health projection', () => {
     expect(latestPluginTest(target)).toBe('2026-09-28T09:00:00Z');
   });
 
+  // KT-1524
+  it('flags the API access of a connection whose token the provider refuses, over an older good probe', () => {
+    const target = config({
+      last_probes: [
+        { access: 'api', ok: true, code: 'ok', summary: 'ready', tested_at: '2026-11-01T08:00:00Z' },
+        { access: 'mcp', ok: true, code: 'ok', summary: 'ready', tested_at: '2026-11-01T08:00:00Z' },
+      ],
+      auth_failure: { kind: 'refused', http_status: 401, message: 'Bad credentials', failed_at: '2026-11-10T08:00:00Z' },
+    });
+
+    expect(accessHealth(target, 'api')).toEqual({
+      access: 'api', state: 'error', code: 'token_refused', testedAt: '2026-11-10T08:00:00Z',
+    });
+    // The MCP access does not use the refused API token.
+    expect(accessHealth(target, 'mcp')).toMatchObject({ state: 'ok', code: 'ok' });
+    expect(configHealth(target)).toBe('error');
+  });
+
+  it('lets a passing live probe win over the recorded refusal', () => {
+    const target = config({
+      auth_failure: { kind: 'refused', http_status: 401, message: 'Bad credentials', failed_at: '2026-11-10T08:00:00Z' },
+    });
+    const liveProbe = {
+      server_id: 'plugin-1',
+      ready: true,
+      checks: [{ id: 'api', label: 'API', ok: true, required: true, detail: 'ok', code: 'ok' as const }],
+    };
+    expect(accessHealth(target, 'api', { liveProbe, liveTestedAt: '2026-11-10T09:00:00Z' }))
+      .toMatchObject({ state: 'ok', code: 'ok' });
+  });
+
   it('marks untested access for verification and broken secrets as errors', () => {
     expect(accessHealth(config(), 'mcp')).toMatchObject({ state: 'warning', code: 'never_tested' });
     expect(configHealth(config({ secrets_broken: true }))).toBe('error');
