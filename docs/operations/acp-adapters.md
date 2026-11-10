@@ -50,7 +50,7 @@ the permissive container marker from workers.
 [src: file: backend/src/agents/runner.rs:5114-5142#adapter_task_worker_args]
 [src: file: backend/src/agents/runner.rs:3974-3992#task_worker_route_policy]
 [src: file: backend/src/agents/runner.rs:4573#acp_resume_id]
-[src: file: backend/src/agents/runner.rs:14907-14917#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:14910-14920#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/tests/adapter_worker_policy.rs:335-446#worker]
 
 Each adapter permits one active prompt at a time; sequential turns still resume
@@ -90,7 +90,7 @@ with a specific diagnostic; this does not disable ordinary Claude discussions
 or relax worker isolation. Workers run through WSL instead; the boundary
 (`WSLENV`, translated paths, backend URL in NAT mode, native ACP refusal) is in
 [`windows-wsl-agents.md`](windows-wsl-agents.md).
-[src: file: backend/src/agents/runner.rs:13367-13375#claude_task_worker_platform_check]
+[src: file: backend/src/agents/runner.rs:13370-13378#claude_task_worker_platform_check]
 [Claude sandbox platform support](https://code.claude.com/docs/en/sandboxing)
 
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
@@ -114,7 +114,7 @@ to the displayed reply. Thought, tool-content and unknown labelled updates do
 not become answer text; tool and usage events still follow their own paths.
 Older runtimes with unlabelled content retain their compatibility path.
 An echo without an agent message therefore supplies no answer text.
-[src: file: backend/src/acp.rs:1510-1517#is_answer]
+[src: file: backend/src/acp.rs:1526-1533#is_answer]
 [ACP session updates](https://agentclientprotocol.com/protocol/v1/prompt-turn#session-updates)
 
 Native tool banners retain the reported tool name, a bounded redacted input
@@ -189,7 +189,7 @@ re-seeds the adapter and resumes the same CLI conversation, but a different
 project path never reuses that identifier.
 [src: file: backend/src/db/acp_runtime_sessions.rs:7-13#SessionKey]
 [src: file: backend/src/agents/runner.rs:2932-2948#session_key]
-[src: file: backend/src/agents/runner.rs:5750-5759#persist]
+[src: file: backend/src/agents/runner.rs:5753-5762#persist]
 [src: file: backend/src/acp/codex_adapter.rs:566-570#NativeSessionId]
 
 ## Security model

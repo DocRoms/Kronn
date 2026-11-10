@@ -49,7 +49,7 @@ old progress before spawning, even if the next init event never arrives; a
 database failure there prevents the spawn rather than leaving a stale frontier.
 [src: file: backend/src/agents/runner.rs:2939-2944#CLI_PRINT_RUNTIME]
 [src: file: backend/src/agents/runner.rs:3071-3126#prepare_cli_print_turn]
-[src: file: backend/src/agents/runner.rs:4814-4823#prepare_cli_print_turn]
+[src: file: backend/src/agents/runner.rs:4817-4826#prepare_cli_print_turn]
 [src: file: backend/src/api/discussions/streaming.rs:2657-2669#acp_delta]
 
 ## Negotiated resumption
@@ -81,7 +81,7 @@ guessed from a 404 or free text.
 [Pinned OpenCode error contract](https://github.com/anomalyco/opencode/blob/v1.18.27/packages/opencode/src/acp/error.ts)
 [src: file: backend/src/acp.rs:156-161#PendingRequest]
 [src: file: backend/src/acp.rs:1215-1223#missing_session_id]
-[src: file: backend/src/acp.rs:1250-1254#JSON_RPC_INVALID_PARAMS]
+[src: file: backend/src/acp.rs:1266-1270#JSON_RPC_INVALID_PARAMS]
 [src: file: backend/src/acp.rs:1270-1306#classify_response_error]
 
 Each agent reply records which path its turn took in
@@ -91,7 +91,7 @@ discussion layer decides `new` and its reason; the runner reports a refused
 resume once the runtime answered it. Runtimes that never resume record nothing.
 [src: file: backend/src/api/discussions/streaming.rs:2626-2758#resume_with_delta_if_possible]
 [src: file: backend/src/api/discussions/streaming.rs:2759-2769#settle_turn_continuity]
-[src: file: backend/src/agents/runner.rs:6105-6120#resume_refused]
+[src: file: backend/src/agents/runner.rs:6108-6123#resume_refused]
 
 ## Deterministic qualification boundaries
 

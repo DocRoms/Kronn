@@ -257,9 +257,9 @@ is still cut, by its own (wider) bound, with a reason naming the tool instead
 of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs:45-58#TOOL_TIMEOUT_MULTIPLIER] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
 [src: file: backend/src/agents/idle_watchdog.rs:282-295#tool_stall_reason]
-[src: file: backend/src/agents/runner.rs:5840-5848#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5946-5961#begin_tool]
+[src: file: backend/src/agents/runner.rs:5843-5851#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5946-5961#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
-[src: file: backend/src/acp.rs:1537-1551#ToolCallEnded] [src: file: backend/src/acp.rs:522-527#Activity]
+[src: file: backend/src/acp.rs:1553-1567#ToolCallEnded] [src: file: backend/src/acp.rs:522-527#Activity]
 
 **Input validation**: title ≤ 500 chars, content ≤ 100KB, workflow ≤ 20 steps, workflow name ≤ 200 chars.
 

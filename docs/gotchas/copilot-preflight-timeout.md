@@ -24,7 +24,7 @@ and spawn errors are covered separately. The timer budget still includes
 spawning; this does not alter account classification, authentication or worker
 reassignment policy.
 [src: file: backend/src/agents/runner.rs:13580-13629#wait_copilot_preflight_child_with_timeout]
-[src: file: backend/src/agents/runner.rs:13509-13540#run_copilot_task_worker_preflight_with_timeout]
+[src: file: backend/src/agents/runner.rs:13512-13543#run_copilot_task_worker_preflight_with_timeout]
 [src: file: backend/src/agents/runner_test.rs:11312-11348#copilot_preflight_capture_keeps_stdout_stderr_and_spawn_failure]
 [Tokio Child lifecycle](https://docs.rs/tokio/latest/tokio/process/struct.Child.html#method.kill)
 

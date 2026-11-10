@@ -46,7 +46,7 @@ per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 `None` means unknown, never zero (KT-997). If any response of the run reported
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
-[src: file: backend/src/agents/runner.rs:8382-8388#request_provider_cost]
+[src: file: backend/src/agents/runner.rs:8385-8391#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:2171-2176#cost_incomplete]
 [src: file: backend/src/api/audit/full.rs:2239#reported_cost_usd_micros]
 [src: file: backend/src/api/audit/drift.rs:1295#reported_cost_usd_micros]
@@ -71,8 +71,8 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:8396-8398#HOSTED_STEP_CTX_BUDGET]
-[src: file: backend/src/agents/runner.rs:8400-8402#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:8399-8401#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:8403-8405#HOSTED_AUDIT_STEP_INPUT_BUDGET]
 [src: file: backend/src/agents/runner.rs:12671-12686#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
@@ -114,7 +114,7 @@ Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
 [src: file: backend/src/api/audit/validation.rs:183-223#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:9131-9135#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/runner.rs:9134-9138#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the

@@ -45,7 +45,7 @@ that remain are anti-hang bounds, never waits — every one of them resolves on 
 socket event.
 [src: file: backend/src/acp.rs:4542-4559#FixtureLink]
 [src: file: backend/src/acp.rs:4471-4506#command]
-[src: file: backend/src/acp.rs:4424-4427#FIXTURE_GUARD]
+[src: file: backend/src/acp.rs:4455-4458#FIXTURE_GUARD]
 
 The in-process tests pin the ownership rules without a subprocess and without
 timing, including that a PANICKING drain is reported as an error rather than
@@ -65,7 +65,7 @@ session-creation failures, and no longer discards its own cleanup error. A
 scripted transport counts its shutdowns, so "did this path clean up?" is
 asserted on all three outcomes rather than read off the source — and a failing
 cleanup never replaces the failure that caused it.
-[src: file: backend/src/agents/runner.rs:6144-6153#acp_start_failure]
+[src: file: backend/src/agents/runner.rs:6147-6156#acp_start_failure]
 [src: file: backend/src/agents/runner.rs:5640-5651#acp_start_failure]
 [src: file: backend/src/agents/runner.rs:5650-5658#acp_start_failure]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:80-120#discover_with_transport]

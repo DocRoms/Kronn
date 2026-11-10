@@ -519,7 +519,7 @@ response>, "excerpt": "<start of the original>", "note": "…"}`, with the large
 excerpt that keeps the envelope inside the budget once embedded in `messages`. An
 envelope shortened again keeps the original size it reports. Content that is not
 JSON keeps the plain cut and its note
-[src: file: backend/src/agents/runner.rs:7921#truncated_json_envelope]
+[src: file: backend/src/agents/runner.rs:7924#truncated_json_envelope]
 [src: file: backend/src/agents/runner_test.rs:3327#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
 
 What this does not show: how often a model writes the extract it is shown, or
