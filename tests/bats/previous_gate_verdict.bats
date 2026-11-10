@@ -54,10 +54,6 @@ finishes() {
     on_sleep "cp \"$FIXTURES/done_jobs.json\" \"$FIXTURES/actions_runs_$1_jobs.json\""
 }
 
-# Nothing was asked of GitHub but reads.
-no_post() {
-    ! grep -q '^POST' "$FIXTURES/calls.log"
-}
 
 verdict() {
     run "${PROJECT_ROOT}/scripts/ci/previous_gate_verdict.sh" ci-build.yml ci-build-gates ci-build
@@ -182,7 +178,7 @@ verdict() {
     refute_output --partial "passed"
     assert_output --partial "moved past head h7"
     # Not even the upstream run was read.
-    ! grep -q 'actions/runs/1001' "$FIXTURES/calls.log"
+    no_call "actions/runs/1001"
 }
 
 @test "verdict: an obsolete head cancels its own run and stops holding a runner" {

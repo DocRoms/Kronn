@@ -7,7 +7,10 @@ name: CI Verdict
 # re-run once (it reads labels live) and its verdict is repeated.
 #
 # No job here may carry an `if`: a skipped required check counts as passing.
-# The superseding step is the only conditional step besides the label guard.
+# The superseding step is the only conditional step. The label guard runs every
+# time and reads the pull request's labels live (scripts/ci/require_label.sh):
+# a re-run replays the payload of the original event, whose labels may be stale,
+# and a guard that read it turned a labelled pull request red (KT-1523, #507).
 on:
   pull_request:
     types: [labeled, unlabeled, edited]
@@ -40,14 +43,17 @@ jobs:
       # Marks this gate's earlier check runs on the same head as superseded.
       checks: write
       contents: read
+      # Reads the pull request's labels live.
+      pull-requests: read
     steps:
       # First: the superseding step below needs the scripts even when the guard fails.
       - uses: actions/checkout@v4
       - name: Require the ci-test label
-        if: "!contains(github.event.pull_request.labels.*.name, 'ci-test')"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "::error::Add the ci-test label: it runs the suite this check requires."
-          exit 1
+          scripts/ci/require_label.sh ci-test "Add the ci-test label: it runs the suite this check requires."
       - name: Repeat the CI Tests verdict for this pull request
         env:
           GH_TOKEN: ${{ github.token }}
@@ -72,14 +78,17 @@ jobs:
       # Marks this gate's earlier check runs on the same head as superseded.
       checks: write
       contents: read
+      # Reads the pull request's labels live.
+      pull-requests: read
     steps:
       # First: the superseding step below needs the scripts even when the guard fails.
       - uses: actions/checkout@v4
       - name: Require the ci-build label
-        if: "!contains(github.event.pull_request.labels.*.name, 'ci-build')"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "::error::Add the ci-build label before merging: it runs the app builds this check requires."
-          exit 1
+          scripts/ci/require_label.sh ci-build "Add the ci-build label before merging: it runs the app builds this check requires."
       - name: Repeat the CI Build verdict for this pull request
         env:
           GH_TOKEN: ${{ github.token }}

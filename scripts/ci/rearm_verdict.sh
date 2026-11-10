@@ -13,15 +13,16 @@
 #     step), or
 #   - it failed: a verdict that ran on the label event before the upstream run
 #     existed, or against an earlier attempt of it, is red for a result that has
-#     since changed (KT-1523). A job that repeated the right failure just
-#     repeats it again: the re-run is cheap and idempotent.
-# A job that passed already told the truth and is left alone, and so is a gate
-# that failed on its own label guard ("Require the <label> label": the label is
-# absent, a newer label event starts a newer verdict run, a re-run changes
-# nothing). A failed gate is re-armed at most REARM_MAX_ATTEMPTS attempts, so a
-# verdict that keeps re-running its upstream run cannot loop. The re-run job
-# reads the upstream result itself: this script never decides a verdict, so an
-# unknown result can never turn green here.
+#     since changed (KT-1523). So is one whose label guard failed on a label
+#     list that has since changed: the guard reads the labels live
+#     (require_label.sh), so the re-run judges the pull request as it is now
+#     (the #507 reopen case). A job that repeated the right failure just repeats
+#     it again: the re-run is cheap and idempotent.
+# A job that passed already told the truth and is left alone. A failed gate is
+# re-armed at most REARM_MAX_ATTEMPTS attempts, so a verdict that keeps
+# re-running its upstream run, or a label that really is absent, cannot loop.
+# The re-run job reads the upstream result itself: this script never decides a
+# verdict, so an unknown result can never turn green here.
 #
 # The run must be completed before one of its jobs can be re-run, and its
 # sibling gate may still be polling: the script waits for that (REARM_WAIT_SECONDS).
@@ -80,9 +81,8 @@ while :; do
         | if . == null then \"\"
           else (.status == \"completed\") as \$done
             | ([.steps[]? | select(.conclusion == \"cancelled\")] | length > 0) as \$cut
-            | ([.steps[]? | select((.name | test(\"^Require the .+ label\$\")) and .conclusion == \"failure\")] | length > 0) as \$unlabelled
             | (\$done and (.conclusion == \"cancelled\" or .conclusion == \"timed_out\" or (.conclusion == \"failure\" and \$cut))
-                or (\$done and .conclusion == \"failure\" and (\$unlabelled | not) and (.run_attempt // 1) < $max_attempts)) as \$rearm
+                or (\$done and .conclusion == \"failure\" and (.run_attempt // 1) < $max_attempts)) as \$rearm
             | \"\(.id) \(\$rearm)\"
           end" 2>/dev/null)" || job=""
     if [ "${job##* }" != "true" ]; then

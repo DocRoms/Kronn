@@ -60,7 +60,7 @@ rearm() {
     rearm
     assert_success
     posted "repos/o/r/actions/jobs/22/rerun"
-    ! posted "repos/o/r/actions/jobs/11/rerun"
+    not_posted "repos/o/r/actions/jobs/11/rerun"
 }
 
 @test "rearm: a job cut off but reported failed (cancelled step) is re-run" {
@@ -93,13 +93,27 @@ rearm() {
     assert_output --partial "Re-ran ci-build-gates of CI Verdict run 500"
 }
 
-@test "rearm: a gate that failed on its label guard is left alone" {
+@test "rearm: a gate that failed on its label guard is re-run, the guard reads labels live (#507)" {
+    # The guard judged a stale label list (reopen, or a replayed payload). The
+    # re-run reads the labels as they are now, so it is not worth leaving red.
     verdict_runs 500
     verdict_run 500 completed
     cat > "$FIXTURES/actions_runs_500_jobs.json" <<'JSON'
 {"jobs":[{"id":555,"name":"ci-build-gates","status":"completed","conclusion":"failure","run_attempt":1,
   "steps":[{"name":"Require the ci-build label","conclusion":"failure"},
            {"name":"Repeat the CI Build verdict for this pull request","conclusion":"skipped"}]}]}
+JSON
+    rearm
+    assert_success
+    posted "repos/o/r/actions/jobs/555/rerun"
+}
+
+@test "rearm: a label that is really absent is re-run at most REARM_MAX_ATTEMPTS times" {
+    verdict_runs 500
+    verdict_run 500 completed
+    cat > "$FIXTURES/actions_runs_500_jobs.json" <<'JSON'
+{"jobs":[{"id":555,"name":"ci-build-gates","status":"completed","conclusion":"failure","run_attempt":3,
+  "steps":[{"name":"Require the ci-build label","conclusion":"failure"}]}]}
 JSON
     rearm
     assert_success
@@ -130,7 +144,7 @@ JSON
     rearm
     assert_success
     posted "repos/o/r/actions/jobs/555/rerun"
-    ! grep -q 'actions/runs/400' "$FIXTURES/calls.log"
+    no_call "actions/runs/400"
 }
 
 @test "rearm: a verdict run still going is awaited, then its cut-off job is re-run" {
@@ -230,8 +244,4 @@ JSON
     # And the single script it runs is ours, with no inline expression.
     [ "$(grep -c '^ *run:' "$WORKFLOW")" -eq 1 ]
     grep -qx '        run: scripts/ci/rearm_verdict.sh' "$WORKFLOW"
-}
-
-no_post() {
-    ! grep -q '^POST' "$FIXTURES/calls.log" 2>/dev/null
 }
