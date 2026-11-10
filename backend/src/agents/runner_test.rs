@@ -10029,52 +10029,63 @@ Suite de la réponse.";
         assert_eq!(tokens, None);
     }
 
-    const GEMINI_ENVELOPE: &str = r#"{
-  "session_id": "s-1",
-  "response": "Bonjour\nle monde",
-  "stats": {
-    "models": {
-      "gemini-2.5-pro": {
-        "api": {"totalRequests": 2},
-        "tokens": {"input": 80, "prompt": 100, "candidates": 20, "total": 130, "cached": 20, "thoughts": 10, "tool": 0}
-      },
-      "gemini-2.5-flash": {
-        "tokens": {"input": 5, "prompt": 5, "candidates": 2, "total": 7, "cached": 0, "thoughts": 0, "tool": 0}
-      }
-    }
-  }
-}"#;
+    // Event shapes as emitted by Gemini CLI 0.66.0 `--output-format stream-json`
+    // (`StreamJsonFormatter`, `convertToStreamStats` in its bundle).
+    const GEMINI_INIT: &str =
+        r#"{"type":"init","timestamp":"t","session_id":"s-1","model":"gemini-2.5-pro"}"#;
+    const GEMINI_PROMPT_ECHO: &str =
+        r#"{"type":"message","timestamp":"t","role":"user","content":"the prompt"}"#;
+    const GEMINI_RESULT: &str = r#"{"type":"result","timestamp":"t","status":"success","stats":{"total_tokens":137,"input_tokens":105,"output_tokens":22,"cached":20,"input":85,"duration_ms":900,"tool_calls":0,"models":{}}}"#;
 
-    #[test]
-    fn gemini_json_envelope_yields_the_reply_and_the_summed_total() {
-        let (cleaned, tokens) = parse_token_usage(&AgentType::GeminiCli, GEMINI_ENVELOPE, &[]);
-        assert_eq!(cleaned, "Bonjour\nle monde");
-        assert_eq!(tokens, Some(137));
+    fn gemini_delta(content: &str) -> String {
+        serde_json::json!({
+            "type": "message", "timestamp": "t", "role": "assistant",
+            "content": content, "delta": true,
+        })
+        .to_string()
     }
 
     #[test]
-    fn gemini_json_envelope_without_usage_is_unmeasured() {
-        for raw in [
-            r#"{"response": "ok"}"#,
-            r#"{"response": "ok", "stats": {"models": {}}}"#,
-            r#"{"response": "ok", "stats": {"models": {"m": {"tokens": {"prompt": 0, "candidates": 0, "total": 0}}}}}"#,
-        ] {
-            let (cleaned, tokens) = parse_token_usage(&AgentType::GeminiCli, raw, &[]);
-            assert_eq!(cleaned, "ok");
-            assert_eq!(tokens, None, "{raw}");
-        }
+    fn gemini_args_ask_for_streaming_json_not_the_single_envelope() {
+        let (_, _, args, _, _, output_mode) =
+            super::super::agent_command(&AgentType::GeminiCli, "hi", false, "", None);
+        let flag = args.iter().position(|a| a == "--output-format").unwrap();
+        assert_eq!(
+            args[flag + 1],
+            "stream-json",
+            "one block at the end is not streaming"
+        );
+        // The adapter hands consumers plain reply lines, so the mode stays Text.
+        assert!(matches!(output_mode, OutputMode::Text));
     }
 
     #[test]
-    fn gemini_assembler_unwraps_the_envelope_and_records_usage() {
+    fn gemini_adapter_emits_each_reply_line_before_the_result_event() {
         let usage = Mutex::new(AgentUsage::default());
-        let mut assembler = GeminiJsonAssembler::default();
-        let mut emitted = Vec::new();
-        for line in GEMINI_ENVELOPE.lines() {
-            emitted.extend(assembler.push(line.to_string(), &usage));
-        }
-        assert_eq!(emitted, vec!["Bonjour\nle monde".to_string()]);
-        assert!(assembler.flush().is_none());
+        let stderr = Mutex::new(Vec::new());
+        let mut adapter = GeminiStreamAdapter::default();
+        let mut push = |line: &str| adapter.push(line.to_string(), &usage, &stderr);
+
+        assert!(push(GEMINI_INIT).is_empty());
+        assert!(
+            push(GEMINI_PROMPT_ECHO).is_empty(),
+            "the prompt is not the reply"
+        );
+        // A delta that does not end a line is held until the line is complete…
+        assert!(push(&gemini_delta("Bonjour ")).is_empty());
+        // …and the line goes out as soon as its newline arrives.
+        assert_eq!(
+            push(&gemini_delta("le monde\nDeux")),
+            vec!["Bonjour le monde"]
+        );
+        assert_eq!(
+            push(&gemini_delta("ième\n\nTrois\n")),
+            vec!["Deuxième", "", "Trois"]
+        );
+        // Nothing is measured until the final event reports it.
+        assert_eq!(*usage.lock().unwrap(), AgentUsage::default());
+
+        assert!(push(GEMINI_RESULT).is_empty());
         let usage = usage.lock().unwrap().clone();
         assert_eq!(usage.input_tokens, 105);
         assert_eq!(usage.output_tokens, 32, "total 137 - prompt 105");
@@ -10082,23 +10093,130 @@ Suite de la réponse.";
     }
 
     #[test]
-    fn gemini_assembler_passes_plain_text_through_and_flushes_a_cut_envelope() {
+    fn gemini_adapter_flushes_a_last_line_without_newline_on_result_and_on_eof() {
         let usage = Mutex::new(AgentUsage::default());
-        let mut assembler = GeminiJsonAssembler::default();
+        let stderr = Mutex::new(Vec::new());
+        let mut adapter = GeminiStreamAdapter::default();
+        assert!(adapter
+            .push(gemini_delta("tail"), &usage, &stderr)
+            .is_empty());
         assert_eq!(
-            assembler.push("just text".to_string(), &usage),
-            Some("just text".to_string())
+            adapter.push(GEMINI_RESULT.to_string(), &usage, &stderr),
+            vec!["tail"]
         );
-        assert_eq!(assembler.push("{".to_string(), &usage), None);
+        assert!(adapter.flush().is_none());
+
+        assert!(adapter
+            .push(gemini_delta("cut"), &usage, &stderr)
+            .is_empty());
+        assert_eq!(adapter.flush(), Some("cut".to_string()));
+        assert!(adapter.flush().is_none());
+    }
+
+    #[test]
+    fn gemini_adapter_without_a_token_count_is_unmeasured() {
+        for result in [
+            r#"{"type":"result","status":"success"}"#,
+            r#"{"type":"result","status":"success","stats":{"total_tokens":0,"input_tokens":0}}"#,
+            r#"{"type":"result","status":"success","stats":{"models":{}}}"#,
+        ] {
+            let usage = Mutex::new(AgentUsage::default());
+            let stderr = Mutex::new(Vec::new());
+            let mut adapter = GeminiStreamAdapter::default();
+            adapter.push(result.to_string(), &usage, &stderr);
+            assert_eq!(*usage.lock().unwrap(), AgentUsage::default(), "{result}");
+        }
+    }
+
+    #[test]
+    fn gemini_adapter_routes_errors_to_stderr_and_passes_plain_text_through() {
+        let usage = Mutex::new(AgentUsage::default());
+        let stderr = Mutex::new(Vec::new());
+        let mut adapter = GeminiStreamAdapter::default();
+        assert!(adapter
+            .push(
+                r#"{"type":"error","severity":"warning","message":"slow"}"#.to_string(),
+                &usage,
+                &stderr
+            )
+            .is_empty());
+        assert!(adapter
+            .push(
+                r#"{"type":"result","status":"error","error":{"type":"X","message":"boom"}}"#
+                    .to_string(),
+                &usage,
+                &stderr
+            )
+            .is_empty());
+        assert_eq!(*stderr.lock().unwrap(), ["[WARNING] slow", "[ERROR] boom"]);
+
+        // Not an event (older CLI, warning): untouched, after any held text.
+        assert!(adapter
+            .push(gemini_delta("held"), &usage, &stderr)
+            .is_empty());
         assert_eq!(
-            assembler.push("  \"response\": \"cut".to_string(), &usage),
-            None
+            adapter.push("plain {text}".to_string(), &usage, &stderr),
+            vec!["held", "plain {text}"]
         );
         assert_eq!(
-            assembler.flush(),
-            Some("{\n  \"response\": \"cut".to_string())
+            adapter.push(r#"{"not":"an event"}"#.to_string(), &usage, &stderr),
+            vec![r#"{"not":"an event"}"#]
         );
-        assert_eq!(*usage.lock().unwrap(), AgentUsage::default());
+    }
+
+    /// The reply reaches the consumer WHILE the run is still going: several
+    /// chunks arrive before the `result` event is even written, let alone
+    /// before stdout closes, and only then does the usage show up.
+    #[tokio::test]
+    async fn gemini_reply_chunks_reach_the_consumer_before_the_run_ends() {
+        use tokio::io::AsyncWriteExt;
+        let (mut agent, stdout) = tokio::io::duplex(4096);
+        let (tx, mut rx) = mpsc::channel::<String>(16);
+        let usage = Arc::new(Mutex::new(AgentUsage::default()));
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let pump = tokio::spawn(pump_stdout(
+            stdout,
+            tx,
+            None,
+            Some(GeminiStreamAdapter::default()),
+            usage.clone(),
+            stderr,
+        ));
+        async fn recv(rx: &mut mpsc::Receiver<String>) -> Option<String> {
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("the chunk must arrive while the agent is still running")
+        }
+
+        agent
+            .write_all(format!("{GEMINI_INIT}\n{GEMINI_PROMPT_ECHO}\n").as_bytes())
+            .await
+            .unwrap();
+        for chunk in ["Premier\n", "Deuxième\n", "Troisième\n"] {
+            agent
+                .write_all(format!("{}\n", gemini_delta(chunk)).as_bytes())
+                .await
+                .unwrap();
+            // The agent has NOT finished — no result event, stdout still open.
+            assert_eq!(recv(&mut rx).await.as_deref(), Some(chunk.trim_end()));
+            assert!(
+                usage.lock().unwrap().input_tokens == 0,
+                "usage is only known from the final event"
+            );
+        }
+
+        agent
+            .write_all(format!("{GEMINI_RESULT}\n").as_bytes())
+            .await
+            .unwrap();
+        drop(agent);
+        pump.await.unwrap();
+        assert_eq!(
+            rx.recv().await,
+            None,
+            "only the three reply lines were sent"
+        );
+        assert_eq!(usage.lock().unwrap().input_tokens, 105);
     }
 
     // ─── fix_file_ownership ──────────────────────────────────────────────────

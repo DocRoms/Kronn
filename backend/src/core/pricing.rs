@@ -87,6 +87,8 @@ impl TokenCounters {
                 cache_read_tokens,
                 cache_write_tokens,
             ),
+            // GeminiCli reports usage summed over every model the run used, and a
+            // cost needs the counters of one served model: it stays unpriced.
             _ => None,
         }
     }
