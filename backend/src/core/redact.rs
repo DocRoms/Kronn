@@ -487,7 +487,8 @@ const ASSIGNMENT_NAMES: &str = r"secret|apikey|api[_-]?key|passwd|password|pwd|p
 const NAME_QUALIFIERS: &[&str] = &["key", "value", "string", "str"];
 
 /// `name` (lowercase bytes) without a trailing qualifier of [`NAME_QUALIFIERS`]
-/// and the `_` / `-` before it; `None` when it has none, or nothing else.
+/// and the whole run of `_` / `-` before it (`SECRET__KEY`, `secret--value`);
+/// `None` when it has none, or nothing else.
 fn without_qualifier(name: &[u8]) -> Option<&[u8]> {
     NAME_QUALIFIERS.iter().find_map(|qualifier| {
         let qualifier = qualifier.as_bytes();
@@ -496,9 +497,9 @@ fn without_qualifier(name: &[u8]) -> Option<&[u8]> {
             return None;
         }
         let stem = name[..split]
-            .strip_suffix(b"_")
-            .or_else(|| name[..split].strip_suffix(b"-"));
-        let stem = stem.unwrap_or(&name[..split]);
+            .iter()
+            .rposition(|byte| *byte != b'_' && *byte != b'-')
+            .map_or(&name[..0], |last| &name[..=last]);
         (!stem.is_empty()).then_some(stem)
     })
 }
@@ -516,7 +517,7 @@ fn ends_with_secret_word(name: &[u8], tails: &[Vec<u8>]) -> bool {
 
 static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let name = format!(
-        "[a-z0-9_.-]*(?:{ASSIGNMENT_NAMES})(?:[_-]?(?:{NAME_QUALIFIERS}))?",
+        "[a-z0-9_.-]*(?:{ASSIGNMENT_NAMES})(?:[_-]*(?:{NAME_QUALIFIERS}))?",
         NAME_QUALIFIERS = NAME_QUALIFIERS.join("|"),
     );
     let quoted_dq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)\"((?:\\\\.|[^\"\\\\])+)\"");
@@ -815,6 +816,78 @@ fn is_placeholder(value: &str) -> bool {
         || value.chars().all(|c| Some(c) == first)
         || PLACEHOLDERS.iter().any(|needle| lowered.contains(needle))
         || WORDS.contains(&lowered.as_str())
+        || is_invite_token(value)
+}
+
+/// A room invitation (`kr-join-<32 hex>`, `db::discussion_sessions::create_invite_token`):
+/// an agent posts it on purpose so that a peer can `disc_join` with it, and it
+/// lives `INVITE_TTL_SECS` (10 minutes) and is stored only as a hash. Masking it
+/// at insert would break the invitation it carries, so the stored-agent-output
+/// guards leave it as written. The audit pass ([`redact_for_audit_artifact`],
+/// [`redact_stored_text`]) is not guarded and still masks it: it runs on history
+/// long after the expiry, where a leaked `kr-join-` token is better gone.
+fn is_invite_token(value: &str) -> bool {
+    const PREFIX: &str = "kr-join-";
+    value.find(PREFIX).is_some_and(|at| {
+        value[at + PREFIX.len()..]
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .count()
+            >= 16
+    })
+}
+
+/// A value that is a plain camelCase or PascalCase word (`initGeneration`,
+/// `TooLarge`): letters only, each word of two letters or more, cut at the
+/// capitals. Random mixed-case text never splits that cleanly.
+fn is_camel_identifier(value: &str) -> bool {
+    if !value.chars().all(|c| c.is_ascii_alphabetic())
+        || !value.chars().any(|c| c.is_ascii_lowercase())
+        || !value.chars().any(|c| c.is_ascii_uppercase())
+    {
+        return false;
+    }
+    let mut words = Vec::new();
+    let mut start = 0;
+    for (at, c) in value.char_indices() {
+        if c.is_ascii_uppercase() && at > start {
+            words.push(&value[start..at]);
+            start = at;
+        }
+    }
+    words.push(&value[start..]);
+    words.len() >= 2
+        && words
+            .iter()
+            .all(|word| word.len() >= 2 && word[1..].chars().all(|c| c.is_ascii_lowercase()))
+}
+
+/// A value that is a lowercase path or route (`session/cancel`, `docs/a-b.md`):
+/// segments of lowercase letters, digits, `_`, `.` and `-`. A base64 secret with
+/// a `/` in it carries capitals.
+fn is_path_like(value: &str) -> bool {
+    let segments: Vec<&str> = value.split('/').collect();
+    segments.len() >= 2
+        && value.starts_with(|c: char| c.is_ascii_lowercase())
+        && segments.iter().all(|segment| {
+            !segment.is_empty()
+                && segment.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-')
+                })
+        })
+}
+
+/// A value that only repeats the name it is given to (`CHANNEL_TOKEN =
+/// 'channeltoken'`), separators and case aside.
+fn repeats_its_name(name: &str, value: &str) -> bool {
+    let squash = |text: &str| {
+        text.chars()
+            .filter(|c| !matches!(c, '_' | '-' | '.'))
+            .map(|c| c.to_ascii_lowercase())
+            .collect::<String>()
+    };
+    let value = squash(value);
+    !value.is_empty() && value == squash(name)
 }
 
 /// Whether the value of a secret-named assignment (`password: …`,
@@ -833,12 +906,22 @@ fn is_placeholder(value: &str) -> bool {
 /// URL, a file path, an operator).
 fn value_is_credential(name: &str, value: &str, quoted: bool) -> bool {
     let value = value.trim();
-    let name = name.to_ascii_lowercase();
+    let full_name = name.to_ascii_lowercase();
     // `SECRET_KEY` is a secret, `PIN_VALUE` a pin: the qualifier is not the word.
-    let name = without_qualifier(name.as_bytes())
+    let name = without_qualifier(full_name.as_bytes())
         .and_then(|stem| std::str::from_utf8(stem).ok())
-        .map_or(name.clone(), str::to_owned);
+        .map_or(full_name.clone(), str::to_owned);
     if is_placeholder(value) || value.chars().any(char::is_whitespace) {
+        return false;
+    }
+    // A code identifier, a route, the name repeated, a short number: what a
+    // reply says about a secret, not the secret (KT-1656, real-message review).
+    if is_camel_identifier(value)
+        || is_path_like(value)
+        || repeats_its_name(&full_name, value)
+        || repeats_its_name(&name, value)
+        || (value.len() < 8 && value.chars().all(|c| c.is_ascii_digit()))
+    {
         return false;
     }
     let dotted_identifier = value.contains('.')
@@ -911,6 +994,17 @@ fn assignment_is_credential(captures: &regex_lite::Captures<'_>, text: &str) -> 
     let name = captures
         .get(1)
         .map_or("", |prefix| name_before_value(prefix.as_str()));
+    // A word in backticks right after `token:` / `secret:` is prose naming a
+    // thing (``cancel token: `session/cancel` ``, ``un secret : `TooLarge` ``).
+    let backticked = text[..value.start()].ends_with('`');
+    let lowered = name.to_ascii_lowercase();
+    let stem = without_qualifier(lowered.as_bytes()).unwrap_or(lowered.as_bytes());
+    if backticked
+        && (stem.ends_with(b"token") || stem.ends_with(b"secret"))
+        && value.as_str().chars().all(|c| c.is_alphabetic())
+    {
+        return false;
+    }
     value_is_credential(name, value.as_str(), quoted)
 }
 
@@ -2052,6 +2146,113 @@ mod tests {
         ] {
             assert_eq!(redact_agent_output(text), text, "{text}");
         }
+    }
+
+    #[test]
+    fn a_run_of_separators_before_the_qualifier_still_names_a_secret() {
+        for text in [
+            "SECRET__KEY=django-insecure-8f3a9c2e7d41b6",
+            "secret--value: 's3cr3tValue-0042'",
+            "export TOKEN___VALUE=8f3a9c2e7d41b6a0",
+            "api_key__string = \"plainKeyString-7\"",
+        ] {
+            let out = redact_agent_output(text);
+            assert!(out.contains("***REDACTED***"), "{text} -> {out}");
+            assert!(
+                redact_for_audit_artifact(text).0.contains("***REDACTED***"),
+                "{text}"
+            );
+        }
+        let env_block = r#"{"env": {"SECRET__KEY": "plainSecretKey-42", "TOKEN--VALUE": "plainTokenValue1", "LOG_LEVEL": "debug"}}"#;
+        let out = redact_agent_output(env_block);
+        assert!(!out.contains("plainSecretKey-42"), "{out}");
+        assert!(!out.contains("plainTokenValue1"), "{out}");
+        assert!(out.contains("\"LOG_LEVEL\": \"debug\""), "{out}");
+        serde_json::from_str::<serde_json::Value>(&out).expect("still JSON");
+        // The gate of the patterns reads the same names.
+        assert!(is_credential_key("SECRET__KEY"));
+        assert!(is_credential_key("secret--value"));
+        assert!(!is_credential_key("__key"));
+        assert_eq!(without_qualifier(b"secret__key"), Some(&b"secret"[..]));
+        assert_eq!(without_qualifier(b"__value"), None);
+    }
+
+    /// KT-1656 — a room invitation is posted on purpose, so a peer can join: it is
+    /// stored as written. A credential next to it is still masked.
+    #[test]
+    fn a_room_invitation_is_stored_as_written_and_a_credential_beside_it_is_not() {
+        let invite = "kr-join-0123456789abcdef0123456789abcdef";
+        for text in [
+            format!("disc_join({{token: \"{invite}\"}})"),
+            format!("disc_join({{\"token\": \"{invite}\"}})"),
+            format!("{{\"token\":\"{invite}\"}}"),
+            format!("token={invite}"),
+            format!("Token {invite} is valid for ten minutes"),
+        ] {
+            assert_eq!(redact_agent_output(&text), text, "{text}");
+        }
+        let both = format!(
+            "disc_join({{token: \"{invite}\"}}) and GEMINI_API_KEY=t0kenNotShapedLikeAVendor01"
+        );
+        let out = redact_agent_output(&both);
+        assert!(out.contains(invite), "{out}");
+        assert!(!out.contains("t0kenNotShapedLikeAVendor01"), "{out}");
+        // A shorter `kr-join-` is not an invitation.
+        assert!(redact_agent_output("token: \"kr-join-9f8e7d6c5b4a\"").contains("REDACTED"));
+        // The audit pass is not guarded: history is scrubbed of it.
+        assert!(redact_for_audit_artifact(&format!("token: \"{invite}\""))
+            .0
+            .contains("REDACTED"));
+    }
+
+    /// KT-1656 — the false positives of the real-message measurement: the value
+    /// is a name or a number, not a credential.
+    #[test]
+    fn an_identifier_a_route_the_name_repeated_or_a_short_number_is_not_a_secret() {
+        for text in [
+            r#"{"token":"initGeneration"}"#,
+            r#""token": "TooLarge""#,
+            "cancel token: `session/cancel`",
+            "token: 'session/cancel'",
+            "ce n'est **pas** un secret : `TooLarge`",
+            "le secret : `initGeneration`",
+            "CHANNEL_TOKEN = 'channeltoken'",
+            "const CHANNEL_TOKEN = \"channel-token\";",
+            "api_key = 'apikey'",
+            "PIN=1234",
+            "pin: 123456",
+            "\"pin\": \"0042\"",
+            "password: 1234567",
+        ] {
+            assert_eq!(redact_agent_output(text), text, "{text}");
+        }
+        // What is not a plain identifier is still a credential.
+        for (text, secret) in [
+            ("token: \"aB3dE5fG7hJ9kL1m\"", "aB3dE5fG7hJ9kL1m"),
+            ("token: \"xKjQpLmZrTbVnWcY\"", "xKjQpLmZrTbVnWcY"),
+            (
+                "secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYsD9fT3kQ'",
+                "wJalrXUtnFEMI",
+            ),
+            ("PIN=12345678", "12345678"),
+            ("password: \"correcthorsebattery\"", "correcthorsebattery"),
+            ("token: `correcthorse8battery`", "correcthorse8battery"),
+            ("api_key = 'channeltoken-7f3a'", "channeltoken-7f3a"),
+        ] {
+            let out = redact_agent_output(text);
+            assert!(!out.contains(secret), "{text} -> {out}");
+        }
+        assert!(is_camel_identifier("initGeneration"));
+        assert!(is_camel_identifier("TooLarge"));
+        assert!(!is_camel_identifier("xKjQpLmZrTbV"));
+        assert!(!is_camel_identifier("lowercase"));
+        assert!(!is_camel_identifier("ABCDEF"));
+        assert!(is_path_like("session/cancel"));
+        assert!(!is_path_like("Session/Cancel"));
+        assert!(!is_path_like("/etc/passwd"));
+        assert!(!is_path_like("wJalrXUtnFEMI/K7MDENG"));
+        assert!(repeats_its_name("CHANNEL_TOKEN", "channeltoken"));
+        assert!(!repeats_its_name("CHANNEL_TOKEN", "channeltoken1"));
     }
 
     #[test]

@@ -150,7 +150,11 @@ exist on the host, as given and with their links resolved, in two tiers:
   adapter's broker; the one `spawn_native` verified). Every other launch,
   including a restricted Gemini, Kiro, Copilot or Vibe CLI launch and a
   restricted ACP adapter, is `Reach::Sandboxed`. A native ACP runtime starts only
-  with its full-access setting on, so it is always a full-access launch.
+  with its full-access setting on, so it is always a full-access launch, unless it
+  carries read-only grants (`NativeLaunchEnv::read_only_grants`): every route asks
+  `runner::reach_is_full_access(launch_full_access, has_read_only_grants)`. No
+  native agent can hold such grants today (`read_only_repos` is refused for any
+  agent but Claude Code and Codex), so on that route it is defense in depth.
   [src: file: backend/src/core/vault_guard.rs:548-554#launch_reach]
 - Owner decision (2026-11-10): the owner's rule above holds for an agent in full
   access: `~/.ssh`, `~/.aws`, `gh` stay reachable, as in the owner's terminal.
@@ -203,17 +207,30 @@ exist on the host, as given and with their links resolved, in two tiers:
   placeholder (`$TOKEN`, `<your-token>`, `your-api-key`, `changeme`, `xxxx`,
   `kr-join-...`, `…`), the name of an environment variable (`VOTRE_API_KEY`),
   prose (whitespace, or a script with no spaces), a dotted or snake_case
-  identifier, a CSS variable, a reference (`secret://NAME`), or, for a bare value,
+  identifier, a camelCase / PascalCase word (`initGeneration`, `TooLarge`), a
+  lowercase route or path (`session/cancel`), the name it is given to repeated
+  (`CHANNEL_TOKEN = 'channeltoken'`), a number of fewer than 8 digits (`PIN=1234`),
+  a word in backticks right after `token:` / `secret:` in prose, a CSS variable, a
+  reference (`secret://NAME`), or, for a bare value,
   shorter than 12 characters or without letters and digits or shaped like code (a
   call, a path, a URL). A quoted value counts from 8 characters, 6 under a
-  `password`-like name; a `pin` name needs 4 to 12 digits. The price is the
+  `password`-like name; a `pin` name needs 8 to 12 digits. The price is the
   inverse risk: a short bare secret under a harmless name is stored as written.
-  A secret word followed by a qualifier (`key`, `value`, `string`, `str`) still
+  A secret word followed by a qualifier (`key`, `value`, `string`, `str`), after
+  any run of `_` / `-` (`SECRET__KEY`, `secret--value`), still
   names a secret (`SECRET_KEY`, `TOKEN_VALUE`, `passwordString`): the value is then
-  judged by the same rules as under the bare word. The login files of the other
-  agents are masked by shape too: Google OAuth access (`ya29.…`) and refresh
-  (`1//0…`) tokens (`~/.gemini/oauth_creds.json`), GitHub fine-grained
-  `github_pat_…` and AWS STS `ASIA…` keys.
+  judged by the same rules as under the bare word.
+- **A room invitation is stored as written.** An agent posts
+  `disc_join({token: "kr-join-<32 hex>"})` on purpose, so that a peer can join
+  within the invitation's ten minutes (`INVITE_TTL_SECS`; the database keeps only
+  its hash). Masking it at insert would break the invite, so the insert path
+  (`is_invite_token`: `kr-join-` and 16 characters or more) leaves it. The audit
+  passes (`redact_for_audit_artifact`, `redact_stored_text`, so the owner-run
+  `redact-discussion`) still mask it: they run on history, long after the expiry,
+  and a `kr-join-` token found in a public place means a compromised room.
+- The login files of the other agents are masked by shape too: Google OAuth
+  access (`ya29.…`) and refresh (`1//0…`) tokens (`~/.gemini/oauth_creds.json`),
+  GitHub fine-grained `github_pat_…` and AWS STS `ASIA…` keys.
 - **Masked once, then fed everywhere.** `insert_message_inner` masks the content
   one time and hands that text to the row, `ingest_message_proposals`,
   `ingest_message_actions`, `ingest_message_questions` and
@@ -222,7 +239,13 @@ exist on the host, as given and with their links resolved, in two tiers:
   streaming checkpoints (`set_partial_response`,
   `set_partial_response_for_dispatch`) mask their text the same way, so
   `discussions.partial_response` and the message a boot recovery makes of it hold
-  no clear secret.
+  no clear secret. **A peer receives the stored text too**: `federate_message`
+  sends an Agent message as its stored (masked) row, or masks the in-memory text
+  when no row is found, never what the agent wrote; every caller of
+  `federate_message` goes through it (the runner's reply, a source append, a
+  refused start). The `validation_documents` of a validation reply are not reply
+  text: they are the fingerprints of the documents on disk, captured after the
+  validation child stopped.
   The regression samples are `AS_WRITTEN` in `db::insert_redaction_measure`.
   [src: file: backend/src/core/redact.rs:702-707#redact_agent_output]
 - **Measured on a corpus, not yet on a database.** `db::insert_redaction_measure`
@@ -242,6 +265,14 @@ exist on the host, as given and with their links resolved, in two tiers:
   `*_token` key, the word "pin", a CSS variable, `user:pass@host`) were fixed and
   are regression samples. The run over a copy of a real database is the owner's:
   `docs/operations/db-backup.md#redaction-of-stored-credentials-kt-1656`.
+  The principal ran it on the 16,004 Agent messages of the owner's database
+  (read-only extract): 42 would be masked (0.26%), each reviewed. True positives:
+  a real `KRONN_AUTH_TOKEN` and credential-shaped URL examples. False positives,
+  fixed and now samples: 12 room invitations (`kr-join-`) and 5 identifiers or
+  prose (`"token":"initGeneration"`, `` cancel token: `session/cancel` ``,
+  `` un secret : `TooLarge` ``, `CHANNEL_TOKEN = 'channeltoken'`, `PIN=1234`). After
+  those fixes the repository corpus run (20,421 chunks) changes 209, the three
+  more than before being fake credentials in the new tests.
 
 #### What is scrubbed after the fact, and where
 

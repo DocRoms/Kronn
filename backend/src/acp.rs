@@ -827,6 +827,15 @@ pub struct NativeLaunchEnv {
     /// say loses them. [`AcpJsonRpcTransport::spawn_native`] sets it from the
     /// `full_access` it verified.
     pub full_access: bool,
+    /// The launch carries read-only grants (a read policy): it is a restricted
+    /// launch, so it loses the shared stores whatever `full_access` says.
+    pub read_only_grants: bool,
+}
+
+/// Whether a native launch keeps the shared credential stores readable: the
+/// `full_access` it verified, unless it carries read-only grants.
+fn native_reach_is_full(full_access: bool, launch: &NativeLaunchEnv) -> bool {
+    crate::agents::runner::reach_is_full_access(full_access, launch.read_only_grants)
 }
 
 fn native_family(agent: AcpAgent) -> crate::core::child_env::AgentFamily {
@@ -977,7 +986,7 @@ impl AcpJsonRpcTransport {
             return Err(AcpError::Transport(refusal));
         }
         let launch = NativeLaunchEnv {
-            full_access,
+            full_access: native_reach_is_full(full_access, &launch),
             ..launch
         };
         let mut command =
@@ -2209,6 +2218,7 @@ mod tests {
             bridge_token: Some("kbt_native".into()),
             github_env: Vec::new(),
             full_access: true,
+            read_only_grants: false,
         };
         let command = crate::core::child_env::with_parent_env(
             &[
@@ -2557,6 +2567,51 @@ mod tests {
         assert!(session_bridge(&resembling, &bridge_id).is_none());
         assert!(is_bridge_like("KRONN-internal-2"));
         assert!(!is_bridge_like("github"));
+    }
+
+    /// KT-1656 — a native launch that carries read-only grants is a restricted
+    /// launch: it loses the shared credential stores, as the direct and adapter
+    /// routes (`launch_full_access` and no read-only grants) do.
+    #[test]
+    fn a_native_launch_with_read_only_grants_is_not_full_access_reach() {
+        let plain = NativeLaunchEnv::default();
+        let granted = NativeLaunchEnv {
+            read_only_grants: true,
+            ..Default::default()
+        };
+        assert!(native_reach_is_full(true, &plain));
+        assert!(!native_reach_is_full(true, &granted));
+        assert!(!native_reach_is_full(false, &plain));
+        assert!(!native_reach_is_full(false, &granted));
+        // The runner's rule, shared by every route.
+        assert!(crate::agents::runner::reach_is_full_access(true, false));
+        assert!(!crate::agents::runner::reach_is_full_access(true, true));
+        assert!(!crate::agents::runner::reach_is_full_access(false, false));
+        // Today no native agent can hold read grants at all (only Claude Code
+        // and Codex do), so the rule above is defense in depth, not the only guard.
+        let work = std::env::temp_dir();
+        for agent in [
+            crate::models::AgentType::GeminiCli,
+            crate::models::AgentType::Kiro,
+            crate::models::AgentType::OpenCode,
+            crate::models::AgentType::Vibe,
+            crate::models::AgentType::CopilotCli,
+        ] {
+            assert!(
+                crate::agents::runner::requires_explicit_full_access(&agent),
+                "{agent:?} is a native ACP agent"
+            );
+            assert!(
+                crate::agents::read_only_repos::ReadOnlyRepos::resolve_with_dirs(
+                    &agent,
+                    &work,
+                    &[work.display().to_string()],
+                    &[],
+                )
+                .is_err(),
+                "{agent:?} cannot hold read-only grants"
+            );
+        }
     }
 
     /// The spawn seam holds on its own: a native runtime never starts restricted.

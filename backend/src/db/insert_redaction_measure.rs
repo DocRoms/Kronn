@@ -256,6 +256,15 @@ const AS_WRITTEN: &[&str] = &[
     r#"format!("Authorization: Bearer \"{TOKEN}\"")"#,
     "The SAFETY-CRITICAL pin: `test_does_not_auto_fill_source_session_id` guards the fix",
     "the secret: `refresh_token_ttl_seconds` is read once",
+    // Found by the measurement over the 16,004 Agent messages of a real database
+    // (KT-1656): a room invitation posted on purpose, and the names of things.
+    "disc_join({token: \"kr-join-0123456789abcdef0123456789abcdef\"}) to enter the room",
+    "Run `disc_join({token: 'kr-join-fedcba9876543210fedcba9876543210'})` within 10 minutes",
+    "{\"token\":\"initGeneration\",\"sessionId\":\"s-1\"}",
+    "the cancel token: `session/cancel`",
+    "ce n'est **pas** un secret : `TooLarge`",
+    "const CHANNEL_TOKEN = 'channeltoken';",
+    "Example: PIN=1234",
     // Prose.
     "The token budget is 5000 and the password policy asks for 12 characters.",
     "password: required, 12 characters minimum",
