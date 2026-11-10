@@ -59,8 +59,9 @@ fn mirrored_child_key(step_name: &str) -> String {
     format!("__kronn.quota_mirrored_child.{step_name}")
 }
 
-/// Records which child, and which of its waits, a foreach step mirrored, so
-/// its resume tells that wait apart from a child some other pass left waiting.
+/// Records which child, and which of its waits, a sub-workflow step mirrored,
+/// again each time the child parks. A foreach resume only trusts the wait it
+/// mirrored; a single step follows the child run whichever wait it is on.
 pub fn remember_mirrored_child(
     run_state: &mut std::collections::HashMap<String, String>,
     step_name: &str,

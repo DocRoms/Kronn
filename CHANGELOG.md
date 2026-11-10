@@ -361,8 +361,9 @@ Release notes for 0.9.3 and earlier are available in the
   are replayed. A foreach under a single sub-workflow waits through the whole
   chain. A batch step whose children were all refused for quota waits too and
   re-runs at the reset; a batch with at least one success keeps its partial
-  verdict. Cancellation never wakes the chain, and a wait only claims the child
-  it mirrored.
+  verdict. Cancellation never wakes the chain, a child cancelled on its own ends
+  the parent's wait with a clear failure, and the parent follows its child
+  across repeated refusals instead of starting another.
 - A quota pause no longer spends a run's Timeout guard, which now measures
   active runner time (persisted, so a restart keeps it). A reset announced past
   the old deadline schedules a wake like any other instead of leaving the run

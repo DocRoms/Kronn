@@ -526,8 +526,13 @@ pass (a frequent schedule adds no fire during the repeated hour).
   any depth: the parent's step mirrors the child's wait and records the child
   and wait it mirrored; the resume reclaims that child at its refused step
   (compare-and-set on the wait id, the parent's own deadline) and does not
-  replay the parent's or the child's earlier steps. A record naming another
-  child or wait reclaims nothing, and the step starts a fresh child. A foreach
+  replay the parent's or the child's earlier steps. The parent follows its child
+  by identity: a child woken and refused again parks under a new wait, which the
+  parent re-mirrors, and the claim compares-and-sets on the wait it reads. A
+  child cancelled while its parent waited ends the step as a clear failure, with
+  no fresh child; a record naming no child of this parent starts a fresh one.
+  The resumed child keeps its trigger context and pinned variable snapshot, and
+  its own Timeout counts its own active time. A foreach
   under a single sub-workflow waits through the whole chain. A `BatchQuickPrompt`
   whose children were ALL refused for quota (dispatch `failure_kind =
   quota_exhausted` or a quota refusal in `last_error`) makes its step wait; the

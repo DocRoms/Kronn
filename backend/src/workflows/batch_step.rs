@@ -851,6 +851,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
         }
     };
 
+    let settled_at = chrono::Utc::now();
     let tokens_used = (collected.tokens_status != "unavailable_children_not_measured")
         .then_some(collected.measured_tokens);
     let output = build_structured_output(BatchStructuredOutput {
@@ -880,7 +881,9 @@ async fn execute_batch_quick_prompt_step_with_budget(
     // 2026-06-10 audit P1 — honour declared `on_result` rules (the runner
     // only acts on `outcome.condition_action`; None = rules silently dead).
     let quota_wait = if step_status == RunStatus::Failed {
-        quota_wait_of_batch(&collected.results, chrono::Utc::now())
+        // Read when the batch settled, not when it started: a relative reset
+        // ("in 5 hours") counts from the refusal, which came after the start.
+        quota_wait_of_batch(&collected.results, settled_at)
     } else {
         None
     };
@@ -2411,19 +2414,16 @@ mod tests {
         assert!(quota_wait_of_batch(&[], now).is_none());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_batch_whose_children_were_all_refused_for_quota_reports_a_quota_wait() {
-        let state = e2e_state();
-        let qp = seed_qp(&state).await;
-        let parent_run_id = seed_parent_run(&state).await;
-        let step = batch_step(&qp.id, /* wait */ true);
-        let ctx = TemplateContext::new();
-
-        // Stands in for the dispatcher: every child's job ends refused for
-        // quota, then the batch settles 0 ok / 3 failed.
+    /// Stands in for the dispatcher: every child's job ends refused for quota
+    /// (`one_other_failure`: all but one), then the batch settles 0 ok / 3 failed.
+    fn refusing_dispatcher(
+        state: &AppState,
+        parent_run_id: &str,
+        one_other_failure: bool,
+    ) -> tokio::task::JoinHandle<()> {
         let watch_state = state.clone();
-        let watch_parent_id = parent_run_id.clone();
-        let watchdog = tokio::spawn(async move {
+        let watch_parent_id = parent_run_id.to_string();
+        tokio::spawn(async move {
             for _ in 0..40 {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let parent = watch_parent_id.clone();
@@ -2453,6 +2453,17 @@ mod tests {
                                    (SELECT id FROM discussions WHERE workflow_run_id = ?1)",
                             rusqlite::params![batch, SESSION_LIMIT],
                         )?;
+                        if one_other_failure {
+                            conn.execute(
+                                "UPDATE agent_dispatch_jobs
+                                 SET last_error = 'Agent exited with code 1: panic', failure_kind = NULL
+                                 WHERE id = (SELECT id FROM agent_dispatch_jobs
+                                             WHERE discussion_id IN
+                                                   (SELECT id FROM discussions WHERE workflow_run_id = ?1)
+                                             ORDER BY id LIMIT 1)",
+                                rusqlite::params![batch],
+                            )?;
+                        }
                         Ok(())
                     })
                     .await
@@ -2469,8 +2480,18 @@ mod tests {
                 return;
             }
             panic!("Watchdog never saw a child batch run materialise within 2s");
-        });
+        })
+    }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_batch_whose_children_were_all_refused_for_quota_reports_a_quota_wait() {
+        let state = e2e_state();
+        let qp = seed_qp(&state).await;
+        let parent_run_id = seed_parent_run(&state).await;
+        let step = batch_step(&qp.id, /* wait */ true);
+        let ctx = TemplateContext::new();
+
+        let watchdog = refusing_dispatcher(&state, &parent_run_id, false);
         let outcome =
             execute_batch_quick_prompt_step(&step, &parent_run_id, state.clone(), &ctx).await;
         watchdog.await.expect("watchdog finished cleanly");
@@ -2479,5 +2500,30 @@ mod tests {
         let wait = outcome.result.quota_wait.expect("the step reads as quota");
         assert!(wait.reset_at.is_some());
         assert!(outcome.condition_action.is_none());
+    }
+
+    /// Two children refused for quota, one failed for another reason: the batch
+    /// keeps its failed verdict and nothing waits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_batch_with_one_failure_that_is_not_quota_does_not_wait() {
+        let state = e2e_state();
+        let qp = seed_qp(&state).await;
+        let parent_run_id = seed_parent_run(&state).await;
+        let step = batch_step(&qp.id, /* wait */ true);
+        let ctx = TemplateContext::new();
+
+        let watchdog = refusing_dispatcher(&state, &parent_run_id, true);
+        let outcome =
+            execute_batch_quick_prompt_step(&step, &parent_run_id, state.clone(), &ctx).await;
+        watchdog.await.expect("watchdog finished cleanly");
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            outcome.result.quota_wait.is_none(),
+            "one failure is not quota"
+        );
+        let envelope = parse_envelope_for_test(&outcome.result.output);
+        assert_eq!(envelope["data"]["failed"], 3);
+        assert_eq!(envelope["data"]["ok"], 0);
     }
 }
