@@ -63,12 +63,15 @@ async function expectHealthy(kronn: KronnInstance): Promise<void> {
 
 /** No agent CLI is configured: always the case in a fresh install and in CI. */
 async function expectNoAgentConfigured(kronn: KronnInstance): Promise<void> {
-  const status = await call<{ agents_detected: { name: string; installed: boolean }[] }>(
+  const status = await call<{ agents_detected: { name: string; installed: boolean; path: string | null }[] }>(
     kronn,
     'GET',
     '/api/setup/status',
   );
-  const installed = status.agents_detected.filter((agent) => agent.installed).map((agent) => agent.name);
+  // A remote provider (NVIDIA) is always `installed` with no binary; a CLI found on this machine has a path.
+  const installed = status.agents_detected
+    .filter((agent) => agent.installed && agent.path !== null)
+    .map((agent) => agent.name);
   if (process.env.KRONN_E2E_EXPECT_NO_AGENT === '1') {
     expect(installed, 'an agent CLI is installed on this machine').toEqual([]);
   }
