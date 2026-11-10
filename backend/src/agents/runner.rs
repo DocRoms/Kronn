@@ -14626,9 +14626,13 @@ pub(crate) fn try_spawn(
             Path::new(&effective_work_dir),
             npx_package.is_some() && cmd_name != binary,
         );
+        // KT-1656 — and the credential files of the home that this agent does
+        // not own (`~/.gemini` for a Claude, `~/.codex` for a Gemini, …).
+        let sandbox = crate::core::vault_guard::launch_sandbox(binary, npx_package, args);
+        let family = crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key);
         let (program, wrapped_args, outcome) = crate::core::vault_guard::wrap_launch(
-            crate::core::vault_guard::launch_confinement().as_ref(),
-            crate::core::vault_guard::launch_sandbox(binary, npx_package, args),
+            crate::core::vault_guard::launch_confinement_for(family, sandbox).as_ref(),
+            sandbox,
             &roots,
             final_cmd,
             final_args,

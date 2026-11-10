@@ -839,10 +839,21 @@ fn native_family(agent: AcpAgent) -> crate::core::child_env::AgentFamily {
 /// `program args` behind the vault sandbox, or unchanged when the owner turned
 /// the protection off or the host has none (never an error: nothing that works
 /// today is refused).
-fn vault_confined(program: &str, args: &[&str]) -> (String, Vec<String>) {
+///
+/// KT-1656 — it also hides the credential files of the home that `family` does
+/// not own (a Gemini runtime cannot read `~/.codex`).
+fn vault_confined(
+    family: crate::core::child_env::AgentFamily,
+    program: &str,
+    args: &[&str],
+) -> (String, Vec<String>) {
     let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
     let (program, args, _) = crate::core::vault_guard::wrap_launch(
-        crate::core::vault_guard::launch_confinement().as_ref(),
+        crate::core::vault_guard::launch_confinement_for(
+            family,
+            crate::core::vault_guard::LaunchSandbox::None,
+        )
+        .as_ref(),
         crate::core::vault_guard::LaunchSandbox::None,
         &crate::core::vault_guard::LaunchRoots::default(),
         program.to_owned(),
@@ -867,7 +878,7 @@ fn native_command(
     // to the OS sandbox, like every other agent launch (`runner::try_spawn`).
     // The arguments appended later (the bridge declaration) land after the
     // program's own, behind the launcher.
-    let (program, args) = vault_confined(program, args);
+    let (program, args) = vault_confined(family, program, args);
     let mut command = crate::core::cmd::async_cmd(&program, route);
     command.args(&args).current_dir(cwd);
     child_env::reset(command.as_std_mut(), route);
@@ -2338,11 +2349,19 @@ mod tests {
         assert_eq!(command.as_std().get_program(), stub.as_str());
 
         assert_eq!(
-            vault_confined(&stub, &["--acp"]),
+            vault_confined(
+                crate::core::child_env::AgentFamily::Other,
+                &stub,
+                &["--acp"]
+            ),
             (stub.clone(), vec!["--acp".to_string()])
         );
         crate::core::vault_guard::set_test_wrap(true);
-        let wrapped = vault_confined(&stub, &["--acp"]);
+        let wrapped = vault_confined(
+            crate::core::child_env::AgentFamily::Other,
+            &stub,
+            &["--acp"],
+        );
         crate::core::vault_guard::set_test_wrap(false);
         match crate::core::trust_sandbox::confinement() {
             Some(confinement) => {

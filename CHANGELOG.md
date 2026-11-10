@@ -95,6 +95,19 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Security
 
+- An agent can no longer read another agent's login from the owner's home
+  (KT-1656). A task worker that probed Gemini CLI printed `~/.gemini/settings.json`
+  with its tokens into its transcript, which is stored and sent to the model
+  provider. Every confined launch now denies the credential stores of the other
+  agents (`~/.gemini`, `~/.codex`, `~/.claude.json`, `~/.copilot`, `~/.vibe`, …)
+  and a sandboxed one (task worker, read-only review, Codex `read-only` /
+  `workspace-write`) also `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.npmrc`,
+  `~/.cargo/credentials*` and the other tools' files; the agent's own store stays
+  open, and an agent in full access keeps the tools of the owner's terminal.
+  What an agent writes is stored masked (a settings file printed whole, an `env`
+  block keyed by `*_TOKEN` / `*_API_KEY`), and the upgrade masks what the exposed
+  transcript and any agent message with a vendor-shaped token already hold.
+  **Rotate the Gemini tokens that were in that file.**
 - Kronn is no longer exposed over plain HTTP. The Settings « Allow connections
   from other devices » toggle now refuses (409, with what is needed) unless a
   TLS-terminating proxy on the machine (nginx, Caddy, `tailscale serve`) is

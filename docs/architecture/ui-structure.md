@@ -321,7 +321,7 @@ human user bubbles. Their card spans the full message column like a discussion
 note. The first meaningful line stays visible as a compact summary while the
 full operational payload is collapsed behind “Show details” by default; that
 toggle lives in the fixed card header so expanding it never moves the pointer
-target. `[src: file: backend/src/db/discussions.rs:3298-3374#tombstone_message]`
+target. `[src: file: backend/src/db/discussions.rs:3313-3389#tombstone_message]`
 `[src: file: frontend/src/components/MessageBubble.tsx:481-493#orchestratorPreview]`
 `[src: file: frontend/src/components/MessageBubble.tsx:973-985#disc-msg-orchestrator-toggle]`
 

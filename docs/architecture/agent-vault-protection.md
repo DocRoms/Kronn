@@ -18,6 +18,10 @@ own vault** and nothing else:
   elsewhere) is denied, read and write. Project databases, other repositories,
   the credentials of other tools (`~/.aws`, `gh`), Docker and the network stay as
   they were.
+- **Exception (KT-1656): the credential files of the home.** The login of one
+  agent CLI is not another's to read, so every confined launch also loses the
+  stores of the *other* agents, and a *sandboxed* launch the shared ones. See
+  [Credential files of the home](#credential-files-of-the-home-kt-1656).
 - **The Kronn API port stays open.** The agents' MCP bridge and the owner's Quick
   Exec scripts go through it. It is not denied by the sandbox.
 - **`auth_strict_localhost` is unchanged** (off by default): it would break every
@@ -65,7 +69,7 @@ replaced; everything else is wrapped as it is.
 - Claude's rules name the directory as `Read(//abs/path/**)` (two slashes: a path
   from the filesystem root), for `Read`, `Edit` and `Write`. A deny rule is checked
   before the permission mode, so the bypass flag does not lift it.
-  [src: file: backend/src/core/vault_guard.rs:416-426#claude_permission_deny]
+  [src: file: backend/src/core/vault_guard.rs:416-426#claude_vault_permission_deny]
   `sandbox.filesystem.denyRead` is a documented field of Claude Code's sandbox
   settings ("paths to deny reading within the sandbox, merged with paths from
   `Read(...)` deny permission rules", read from the installed 2.1.285 binary's
@@ -117,6 +121,48 @@ exactly as before.
   another directory) is not covered; neither is a secret in the agent's own
   environment (the child environment is built, not inherited: `core::child_env`).
 
+### Credential files of the home (KT-1656)
+
+A task worker that probed Gemini CLI printed `~/.gemini/settings.json`, tokens
+included, into its transcript (stored, and sent to the provider on every later
+turn). `core::home_credentials` lists the credential stores of the home that
+exist on the host, as given and with their links resolved, in two tiers:
+
+| Tier | Stores | Hidden from |
+|---|---|---|
+| Other agents' | `~/.gemini`, `~/.codex`, `~/.claude.json`, `~/.claude/.credentials.json`, `~/.copilot`, `~/.config/github-copilot`, `~/.kiro`, `~/.local/share/kiro-cli`, `~/.vibe`, `~/.local/share/opencode`, `~/.config/opencode` | every confined launch, except the store of the agent that is running |
+| Shared | `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, `~/.config/glab-cli`, `~/.config/hub`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc`, `~/.yarnrc.yml`, `~/.pypirc`, `~/.cargo/credentials*`, `~/.docker/config.json`, `~/.kube/config`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.vault-token`, … | a **sandboxed** launch only |
+
+[src: file: backend/src/core/home_credentials.rs:93-121#hidden_in]
+
+| Launch | Tiers hidden | Mechanism |
+|---|---|---|
+| Claude task worker, read-only review (its own sandbox) | both, **including Claude's own** (the CLI reads its login from outside the sandbox it gives its shell) | `sandbox.filesystem.denyRead` and a `Read(…)` rule per store; independent of the vault setting |
+| Codex `read-only` / `workspace-write` (replaced sandbox) | both, but Codex's own `~/.codex` | the Kronn profile / `bwrap` mounts |
+| Any agent in full access (CLI, ACP runtime) | other agents' | the Kronn profile / `bwrap` mounts |
+| The validations Kronn runs in a worker's tree | other agents' | the lane's sandbox |
+
+- The owner's rule above holds for an agent in full access: `~/.ssh`, `~/.aws`,
+  `gh` stay reachable, as in the owner's terminal. Only the sandboxed launches,
+  which never had them by design, lose them. The validations keep the shared
+  files readable: a package manager or the Docker CLI fails on a file it is
+  refused.
+- A path that does not exist is not listed (bubblewrap cannot mount over it);
+  a store created after the launch is not covered until the next one.
+  `XDG_CONFIG_HOME` and a `HOME` other than the user's are not followed.
+- Linux masks a directory with an empty tmpfs and a file with `/dev/null`
+  bound over it.
+- On a host with no sandbox, or with "Protect the Kronn vault from agents" off,
+  the wrapped launches (full access, Codex) are not confined, so these stores are
+  open to them; a Claude worker's settings carry the denial either way.
+- **Stored output is masked.** An Agent message is run through the audit
+  redaction when it is inserted (`db::discussions::insert_message`): vendor token
+  shapes, secret-named assignments and secret-named JSON keys, including the
+  `env` block of a CLI's `settings.json` (`"GITHUB_PERSONAL_ACCESS_TOKEN": "…"`).
+  The upgrade (migration 292) masks the transcript of the exposed sub-discussion
+  and any agent message with a vendor-shaped token. Anything the heuristics do not
+  recognise (a bare value under a harmless name) is still stored as written.
+
 ### Run artifacts sit outside the vault (KT-1585)
 
 A workflow run's artifacts directory (`{{run.artifacts_dir}}`) used to live in
@@ -165,6 +211,7 @@ every channel, loopback included (see `strong-confirmation-routes.md`):
 | Where | What |
 |---|---|
 | `core/vault_guard.rs` | which launches are wrapped, the Claude rules |
+| `core/home_credentials.rs` | the credential stores of the home an agent must not read (KT-1656) |
 | `agents/runner.rs` `try_spawn` | the one spawn point of every native agent |
 | `agents/runner.rs` `claude_task_worker_settings` | `denyRead` and `permissions.deny` of the worker |
 | `api/strong_confirm.rs` `strong_gate` | the code of the vault routes, on every channel |

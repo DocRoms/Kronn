@@ -1063,6 +1063,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "291_workflow_runs_heaviest_output",
         include_str!("sql/291_workflow_runs_heaviest_output.sql"),
     ),
+    (
+        "292_kt1656_scrub_exposed_credentials",
+        include_str!("sql/292_kt1656_scrub_exposed_credentials.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole
@@ -1141,7 +1145,65 @@ fn apply_migration(tx: &rusqlite::Transaction<'_>, name: &str, sql: &str) -> Res
         // Reads each repository's remote, which SQL cannot do.
         crate::db::github_connections::seed_on_upgrade(tx)?;
     }
+    if name == "292_kt1656_scrub_exposed_credentials" {
+        scrub_exposed_credentials(tx)?;
+    }
     Ok(())
+}
+
+/// The sub-discussion in which a worker printed `~/.gemini/settings.json`
+/// (KT-1599's worker, KT-1656): matched by the prefix its id is quoted by.
+const EXPOSED_DISCUSSION_PREFIX: &str = "dcabb259";
+
+/// KT-1656 — mask the credentials a transcript already holds.
+///
+/// - every message of the exposed sub-discussion goes through the audit
+///   redaction (vendor token shapes, secret-named assignments and JSON keys),
+///   whatever its role;
+/// - anywhere else, an agent message that holds a token of a **known shape**
+///   (`ghp_…`, `AIza…`, `sk-…`, a JWT, a `Bearer` value, a `"token": "…"` field)
+///   is masked too: a message that quoted the same file, with the precision of
+///   those shapes alone so the rest of the history is left as written.
+///
+/// Both are idempotent. Returns the number of messages rewritten.
+fn scrub_exposed_credentials(conn: &Connection) -> Result<usize> {
+    let mut rewrites: Vec<(String, String)> = Vec::new();
+    {
+        let mut statement = conn.prepare(
+            "SELECT id, role, discussion_id, content FROM messages
+              WHERE role = 'Agent' OR discussion_id LIKE ?1 || '%'",
+        )?;
+        let mut rows = statement.query([EXPOSED_DISCUSSION_PREFIX])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let role: String = row.get(1)?;
+            let discussion_id: String = row.get(2)?;
+            let content: String = row.get(3)?;
+            let masked = if discussion_id.starts_with(EXPOSED_DISCUSSION_PREFIX) {
+                crate::core::redact::redact_for_audit_artifact(&content).0
+            } else if role == "Agent" && crate::core::redact::looks_like_secret(&content) {
+                crate::core::redact::redact_secrets(&content)
+            } else {
+                continue;
+            };
+            if masked != content {
+                rewrites.push((id, masked));
+            }
+        }
+    }
+    for (id, content) in &rewrites {
+        conn.execute(
+            "UPDATE messages SET content = ?1 WHERE id = ?2",
+            rusqlite::params![content, id],
+        )?;
+    }
+    if !rewrites.is_empty() {
+        tracing::warn!(
+            "KT-1656: masked credentials in {} stored message(s)",
+            rewrites.len()
+        );
+    }
+    Ok(rewrites.len())
 }
 
 fn ensure_openrouter_preset(tx: &rusqlite::Transaction<'_>) -> Result<()> {
@@ -3224,6 +3286,68 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reply_to.as_deref(), Some("u-1"));
+    }
+
+    /// KT-1656 — the transcript of the exposed sub-discussion is masked on
+    /// upgrade, a vendor-shaped token quoted by an agent elsewhere too, and
+    /// every other message stays as written.
+    #[test]
+    fn exposed_credentials_are_masked_on_upgrade() {
+        const SETTINGS: &str = r#"```json
+{"mcpServers": {"github": {"env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "t0kenNotShapedLikeAVendor01", "LOG_LEVEL": "debug"}}}}
+```"#;
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "291_workflow_runs_heaviest_output").unwrap();
+        conn.execute_batch(
+            "INSERT INTO discussions (id, title, created_at, updated_at) VALUES
+                 ('dcabb259-0000-4000-8000-000000000000', 'Exposed', '2026-11-10T00:00:00Z', '2026-11-10T00:00:00Z'),
+                 ('other-room', 'Other', '2026-11-10T00:00:00Z', '2026-11-10T00:00:00Z');",
+        )
+        .unwrap();
+        let next_order = std::cell::Cell::new(0);
+        let insert = |id: &str, discussion: &str, role: &str, content: &str| {
+            next_order.set(next_order.get() + 1);
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order)
+                 VALUES (?1, ?2, ?3, ?4, '2026-11-10T00:00:00Z', ?5)",
+                rusqlite::params![id, discussion, role, content, next_order.get()],
+            )
+            .unwrap();
+        };
+        let exposed = "dcabb259-0000-4000-8000-000000000000";
+        insert("m-agent", exposed, "Agent", SETTINGS);
+        insert("m-system", exposed, "System", SETTINGS);
+        insert("m-user", exposed, "User", "plain question");
+        let quoted = "key AIzaSy0123456789012345678901234567 end";
+        insert("o-vendor", "other-room", "Agent", quoted);
+        insert(
+            "o-plain",
+            "other-room",
+            "Agent",
+            "TOKEN_BUDGET: 5000 is fine",
+        );
+        insert("o-user", "other-room", "User", quoted);
+
+        run(&conn).unwrap();
+
+        let content = |id: &str| -> String {
+            conn.query_row("SELECT content FROM messages WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        for id in ["m-agent", "m-system"] {
+            assert!(!content(id).contains("t0kenNotShapedLikeAVendor01"), "{id}");
+            assert!(content(id).contains("\"LOG_LEVEL\": \"debug\""), "{id}");
+        }
+        assert_eq!(content("m-user"), "plain question");
+        assert!(!content("o-vendor").contains("0123456789012345678901234567"));
+        assert_eq!(content("o-plain"), "TOKEN_BUDGET: 5000 is fine");
+        assert_eq!(content("o-user"), quoted, "a human's message is theirs");
+
+        // Idempotent: a second pass rewrites nothing.
+        let tx = conn.unchecked_transaction().unwrap();
+        assert_eq!(scrub_exposed_credentials(&tx).unwrap(), 0);
     }
 
     #[test]

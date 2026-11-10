@@ -39,7 +39,7 @@ alone does not establish a user-visible duration.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:997-998#reconcileLoadedDiscussion]
 5. The detail response also queries all message targets belonging to the
    discussion and groups them in a map.
-   [src: file: backend/src/db/discussions.rs:3083-3127#list_discussion_message_targets]
+   [src: file: backend/src/db/discussions.rs:3098-3142#list_discussion_message_targets]
    This means the refresh payload and
    server-side deserialization can grow with both messages and addressed
    targets, independently of visible transcript rows.

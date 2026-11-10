@@ -10219,6 +10219,16 @@ Suite de la réponse.";
             .unwrap()
             .iter()
             .any(|r| r == &rule));
+        // KT-1656 — the credential stores of the home (`~/.gemini`, `~/.ssh`, …)
+        // are denied to the worker's shell and to its Read tool as well.
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["denyRead"],
+            serde_json::json!(crate::core::vault_guard::claude_sandbox_deny_read())
+        );
+        assert_eq!(
+            settings["permissions"]["deny"],
+            serde_json::json!(crate::core::vault_guard::claude_permission_deny())
+        );
         assert_eq!(
             crate::core::vault_guard::launch_sandbox("claude", None, &args),
             crate::core::vault_guard::LaunchSandbox::Own,
@@ -10819,7 +10829,17 @@ Suite de la réponse.";
         assert_eq!(receipt.mcp_config_bytes, mcp_config.len());
         assert_eq!(receipt.system_prompt_bytes, "worker context".len());
         assert_eq!(receipt.stdin_bytes, "test prompt".len());
-        assert!(receipt.settings_bytes < 4096);
+        // KT-1656 — the credential stores of this host's home are named twice
+        // (`denyRead`, the Read tool's rule): a few dozen bytes per store that
+        // exists, whatever the catalogue holds.
+        let stores: usize = crate::core::home_credentials::hidden(
+            None,
+            crate::core::home_credentials::Reach::Sandboxed,
+        )
+        .iter()
+        .map(|path| 2 * (path.as_os_str().len() + 24))
+        .sum();
+        assert!(receipt.settings_bytes < 4096 + stores);
         assert!(receipt.max_argument_bytes < MAX_SINGLE_ARG_BYTES);
         assert_eq!(receipt.validate_single_argument_limit(), Ok(()));
         assert!(

@@ -2884,6 +2884,20 @@ pub fn insert_message(
     insert_message_inner(conn, discussion_id, msg)
 }
 
+/// KT-1656 — what an agent wrote is stored masked: a worker that prints a
+/// credential file (`cat ~/.gemini/settings.json`) and quotes it in its reply
+/// must not leave the token in the transcript, which is kept and is sent back to
+/// the model provider on every later turn. The same heuristics as every other
+/// stored excerpt (vendor token shapes, secret-named assignments, secret-named
+/// JSON keys). Only the agent's own role: what a human typed is theirs.
+pub(crate) fn mask_agent_output(role: &crate::models::MessageRole, content: String) -> String {
+    if matches!(role, crate::models::MessageRole::Agent) {
+        crate::core::redact::redact_for_audit_artifact(&content).0
+    } else {
+        content
+    }
+}
+
 fn insert_message_inner(
     conn: &Connection,
     discussion_id: &str,
@@ -2905,6 +2919,7 @@ fn insert_message_inner(
     // KT-1111 — every message of an assistant conversation, any author.
     let content =
         crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, &msg.content)?;
+    let content = mask_agent_output(&msg.role, content);
 
     conn.execute(
         "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id, session_continuity, kind)

@@ -23,7 +23,7 @@ Both checks are needed. [src: file: backend/src/agents/runner.rs:14257-14266#NUL
 
 A test pins that library behaviour, so a future Rust release that stops
 substituting the placeholder fails there instead of quietly blinding the
-detection. [src: file: backend/src/agents/runner_test.rs:11413-11447#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
+detection. [src: file: backend/src/agents/runner_test.rs:11433-11467#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
 
 ## Report the carrier, never the value
 
@@ -31,7 +31,7 @@ These fields hold API keys and tokens. The refusal names the environment
 variable by key, or the argument by the flag it follows — positions shift
 between agents — and never the content, matching the invocation receipt's own
 rule that no argument content is logged.
-[src: file: backend/src/agents/runner_test.rs:11345-11411#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
+[src: file: backend/src/agents/runner_test.rs:11365-11431#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
 
 ## It is settled before anything runs
 

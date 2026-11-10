@@ -52,7 +52,7 @@ container sandbox-bypass marker when a mandatory sandbox policy is present.
 [src: file: backend/src/agents/runner.rs:4660-4662#read_only_repos]
 [src: file: backend/src/agents/read_only_repos.rs:972-979#apply]
 [src: file: backend/src/agents/runner.rs:14564-14569#sandbox_required]
-[src: file: backend/src/agents/runner.rs:14788-14798#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:14792-14802#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -346,7 +346,7 @@ including ordinary non-strict and direct launches. Unit coverage checks host
 aliases, duplicate aliases and path escaping.
 [src: file: backend/tests/adapter_worker_policy.rs:193-223#trust_overrides]
 [src: file: backend/tests/adapter_worker_policy.rs:226-316#config_keys]
-[src: file: backend/src/agents/runner_test.rs:12019-12080#codex_project_trust_override_preserves_paths_and_host_alias]
+[src: file: backend/src/agents/runner_test.rs:12039-12100#codex_project_trust_override_preserves_paths_and_host_alias]
 [src: file: backend/src/acp/codex_adapter.rs:479-490#codex_project_mcp_override]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations

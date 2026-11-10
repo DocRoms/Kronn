@@ -80,9 +80,9 @@ fallback. Unstructured upstream failures remain ambiguous rather than being
 guessed from a 404 or free text.
 [Pinned OpenCode error contract](https://github.com/anomalyco/opencode/blob/v1.18.27/packages/opencode/src/acp/error.ts)
 [src: file: backend/src/acp.rs:156-161#PendingRequest]
-[src: file: backend/src/acp.rs:1131-1139#missing_session_id]
-[src: file: backend/src/acp.rs:1216-1220#JSON_RPC_INVALID_PARAMS]
-[src: file: backend/src/acp.rs:1222-1258#classify_response_error]
+[src: file: backend/src/acp.rs:1142-1150#missing_session_id]
+[src: file: backend/src/acp.rs:1227-1231#JSON_RPC_INVALID_PARAMS]
+[src: file: backend/src/acp.rs:1233-1269#classify_response_error]
 
 Each agent reply records which path its turn took in
 `messages.session_continuity`: `resumed`, `new` or `fallback_full_history`

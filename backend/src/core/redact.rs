@@ -47,6 +47,10 @@ enum Gate {
     /// quoted-value pattern also needs its quote right after the `:`/`=`, past
     /// optional whitespace; `None` for the one that takes a bare value.
     Assignment(Option<u8>),
+    /// As [`Gate::Assignment`], for a quoted object key (`"NAME": "value"`): the
+    /// name is followed by its closing quote (escaped or not) before the `:`.
+    /// Carries the quote the value opens with (`"` or the `\` of `\"`).
+    JsonKey(u8),
 }
 
 impl Gate {
@@ -57,7 +61,8 @@ impl Gate {
                 let lowered = text.to_ascii_lowercase();
                 needles.iter().any(|needle| lowered.contains(needle))
             }
-            Gate::Assignment(quote) => assignment_gate(text, quote),
+            Gate::Assignment(quote) => assignment_gate(text, quote, false),
+            Gate::JsonKey(quote) => assignment_gate(text, Some(quote), true),
         }
     }
 }
@@ -441,20 +446,27 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let quoted_bt = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)`((?:\\\\.|[^`\\\\])+)`");
     let quoted_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
     let unquoted = format!(r#"(?i)(\b{name}\b\s*[:=]\s*(?:\\")?)((?:[^\s\\"'`,;]|\\[^\s"'`])+)"#);
+    // KT-1656 — a credential file printed whole (`~/.gemini/settings.json`,
+    // `.npmrc`-like JSON): the secret-ish name is a quoted object key, closed
+    // by its quote before the `:`, which the shapes above never read.
+    let json_key_dq = format!(r#"(?i)("{name}"\s*:\s*)"((?:\\.|[^"\\])+)""#);
+    let json_key_escaped = format!(r#"(?i)(\\"{name}\\"\s*:\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
     [
-        (quoted_dq, "$1\"***REDACTED***\"", Some(b'"')),
-        (quoted_sq, "$1'***REDACTED***'", Some(b'\'')),
-        (quoted_bt, "$1`***REDACTED***`", Some(b'`')),
-        (quoted_escaped, "$1***REDACTED***$3", Some(b'\\')),
-        (unquoted, "$1***REDACTED***", None),
+        (quoted_dq, "$1\"***REDACTED***\"", Gate::Assignment(Some(b'"'))),
+        (quoted_sq, "$1'***REDACTED***'", Gate::Assignment(Some(b'\''))),
+        (quoted_bt, "$1`***REDACTED***`", Gate::Assignment(Some(b'`'))),
+        (quoted_escaped, "$1***REDACTED***$3", Gate::Assignment(Some(b'\\'))),
+        (unquoted, "$1***REDACTED***", Gate::Assignment(None)),
+        (json_key_dq, "$1\"***REDACTED***\"", Gate::JsonKey(b'"')),
+        (json_key_escaped, "$1***REDACTED***$3", Gate::JsonKey(b'\\')),
     ]
     .into_iter()
-    .filter_map(|(src, repl, quote)| {
+    .filter_map(|(src, repl, gate)| {
         Regex::new(&src)
             .map(|re| Pattern {
                 re,
                 replacement: repl,
-                gate: Gate::Assignment(quote),
+                gate,
             })
             .map_err(|e| {
                 tracing::warn!(pattern = %src, error = %e, "core::redact: invalid assignment pattern skipped");
@@ -501,7 +513,7 @@ static ASSIGNMENT_TAILS: LazyLock<Option<Vec<Vec<u8>>>> = LazyLock::new(|| {
 ///
 /// A quoted-value pattern reads its opening `quote` right after `[:=]\s*`, so
 /// the first byte past the `:`/`=` that is not up to a space must be that quote.
-fn assignment_gate(text: &str, quote: Option<u8>) -> bool {
+fn assignment_gate(text: &str, quote: Option<u8>, quoted_key: bool) -> bool {
     let Some(tails) = ASSIGNMENT_TAILS.as_ref() else {
         return true;
     };
@@ -521,7 +533,14 @@ fn assignment_gate(text: &str, quote: Option<u8>) -> bool {
             .iter()
             .rposition(|byte| *byte > b' ')
             .map_or(0, |last| last + 1);
-        let before = &before[..end];
+        let mut before = &before[..end];
+        if quoted_key {
+            // `NAME"` or `NAME\"`: the key's closing quote, escaped or not.
+            let Some(unquoted) = before.strip_suffix(b"\"") else {
+                return false;
+            };
+            before = unquoted.strip_suffix(b"\\").unwrap_or(unquoted);
+        }
         tails.iter().any(|tail| {
             before.len() >= tail.len()
                 && before[before.len() - tail.len()..].eq_ignore_ascii_case(tail)
@@ -609,6 +628,22 @@ const JSON_CREDENTIAL_KEYS: &[&str] = &[
     "private_key",
 ];
 
+/// Whether the value of this object key is a credential: one of
+/// [`JSON_CREDENTIAL_KEYS`], or a name that ends in a secret-ish word of
+/// [`ASSIGNMENT_NAMES`] (`GEMINI_API_KEY`, `GITHUB_PERSONAL_ACCESS_TOKEN`: the
+/// env block of a CLI's `settings.json`, KT-1656), as the text patterns read it.
+fn is_credential_key(key: &str) -> bool {
+    if JSON_CREDENTIAL_KEYS.contains(&key) {
+        return true;
+    }
+    let key = key.as_bytes();
+    ASSIGNMENT_TAILS.as_ref().is_some_and(|tails| {
+        tails.iter().any(|tail| {
+            key.len() >= tail.len() && key[key.len() - tail.len()..].eq_ignore_ascii_case(tail)
+        })
+    })
+}
+
 /// Runs `redact` on `input`, one JSON string at a time when `input` is a JSON
 /// document (an object or an array), on the whole text otherwise.
 ///
@@ -660,9 +695,7 @@ fn redact_json_aware(input: &str, redact: impl Fn(&str) -> (String, usize)) -> (
                     let redacted = redact(&decoded);
                     key = Some(decoded);
                     redacted
-                } else if key
-                    .take()
-                    .is_some_and(|key| JSON_CREDENTIAL_KEYS.contains(&key.as_str()))
+                } else if key.take().is_some_and(|key| is_credential_key(&key))
                     && !decoded.is_empty()
                 {
                     let masked = "***REDACTED***";
@@ -1500,6 +1533,75 @@ mod tests {
         assert!(!out.contains("0123456789012345678901234567"));
     }
 
+    // ── KT-1656: a printed credential file is masked ───────────────────
+
+    /// What `cat ~/.gemini/settings.json` prints: an env block of MCP servers
+    /// keyed by the variable name, no vendor prefix on the values.
+    const GEMINI_SETTINGS: &str = r#"{
+  "security": { "auth": { "selectedType": "oauth-personal" } },
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "t0kenValueNotShapedLikeAVendor1",
+        "GEMINI_API_KEY": "plainKeyValue-8f3a9c2e7d41",
+        "LOG_LEVEL": "debug"
+      },
+      "headers": { "X-Api-Key": "headerKeyValue-77aa11bb22cc" }
+    }
+  }
+}"#;
+
+    const GEMINI_SECRETS: [&str; 3] = [
+        "t0kenValueNotShapedLikeAVendor1",
+        "plainKeyValue-8f3a9c2e7d41",
+        "headerKeyValue-77aa11bb22cc",
+    ];
+
+    fn assert_masked(out: &str) {
+        for secret in GEMINI_SECRETS {
+            assert!(!out.contains(secret), "{secret} survived: {out}");
+        }
+        assert!(out.contains("\"LOG_LEVEL\": \"debug\""), "{out}");
+    }
+
+    #[test]
+    fn a_settings_json_printed_as_a_document_is_masked() {
+        let (out, count) = redact_for_audit_artifact(GEMINI_SETTINGS);
+        assert_masked(&out);
+        assert!(count > 0);
+        serde_json::from_str::<serde_json::Value>(&out).expect("still JSON");
+        assert_eq!(redact_for_audit_artifact(&out).1, 0, "idempotent");
+        assert_masked(&redact_stored_text(GEMINI_SETTINGS));
+    }
+
+    #[test]
+    fn a_settings_json_quoted_in_a_message_is_masked() {
+        let message = format!("Here is the file:\n```json\n{GEMINI_SETTINGS}\n```\nDone.");
+        assert_masked(&redact_for_audit_artifact(&message).0);
+        assert_masked(&redact_stored_text(&message));
+    }
+
+    #[test]
+    fn a_settings_json_nested_in_a_json_string_is_masked() {
+        // A tool result carried as an escaped string inside a JSON envelope.
+        let envelope =
+            serde_json::to_string(&serde_json::json!({ "output": GEMINI_SETTINGS })).unwrap();
+        let (out, _) = redact_for_audit_artifact(&envelope);
+        serde_json::from_str::<serde_json::Value>(&out).expect("still JSON");
+        for secret in GEMINI_SECRETS {
+            assert!(!out.contains(secret), "{secret} survived: {out}");
+        }
+        // The same text cut mid-document, which the JSON parser rejects.
+        let cut = &envelope[..envelope.len() - 2];
+        for secret in GEMINI_SECRETS {
+            assert!(
+                !redact_for_audit_artifact(cut).0.contains(secret),
+                "{secret}"
+            );
+        }
+    }
+
     #[test]
     fn redact_is_idempotent() {
         let s = "Authorization: Bearer abc123def456ghi789jklmn AIzaSy0123456789012345678901234567";
@@ -1589,7 +1691,7 @@ mod tests {
             RAW_PATTERNS.len(),
             "a pattern failed to compile"
         );
-        assert_eq!(ASSIGNMENT.len(), 5);
+        assert_eq!(ASSIGNMENT.len(), 7);
         assert!(
             matches!(&*VENDOR_PREFILTER, Prefilter::Triples(_)),
             "a gate literal shorter than three bytes turns the vendor prefilter off"
@@ -1809,7 +1911,8 @@ mod tests {
 
     #[test]
     fn quoted_assignment_patterns_wait_for_their_own_quote() {
-        // ASSIGNMENT is ordered: double quote, single quote, backtick, bare.
+        // ASSIGNMENT is ordered: double quote, single quote, backtick, escaped, bare, then the two
+        // quoted-key shapes (KT-1656).
         let admitted = |text: &str| -> Vec<bool> {
             ASSIGNMENT.iter().map(|pat| pat.gate.admits(text)).collect()
         };
@@ -1817,26 +1920,26 @@ mod tests {
         // value pattern has anything to do.
         assert_eq!(
             admitted("curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com"),
-            [false, false, false, false, true]
+            [false, false, false, false, true, false, false]
         );
         assert_eq!(
             admitted("password: \"hunter2\""),
-            [true, false, false, false, true]
+            [true, false, false, false, true, false, false]
         );
         assert_eq!(
             admitted("token =\n  'hunter2'"),
-            [false, true, false, false, true]
+            [false, true, false, false, true, false, false]
         );
         assert_eq!(
             admitted("secret=`hunter2`"),
-            [false, false, true, false, true]
+            [false, false, true, false, true, false, false]
         );
         assert_eq!(
             admitted(r#"token: \"hunter2\""#),
-            [false, false, false, true, true]
+            [false, false, false, true, true, false, false]
         );
         // No assignment at all: nothing runs, whatever quotes the text holds.
-        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 5]);
+        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 7]);
         // Each pattern that is turned away really has no match to make.
         for text in [
             "curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com",
