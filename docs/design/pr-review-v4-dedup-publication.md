@@ -139,4 +139,4 @@ The planner **writes nothing until resolved**, but **the alert survives** (opera
 
 ---
 
-*Open items out of scope: where to persist the ledger (dedicated table — the foreach done-set is unsuitable: attached to a `workflow_run`, appendable only while `Running`) — to be settled at implementation; relation to TD-20260722 (project-scoped skills/automation) and TD-20260630 (Link-header pagination, already mitigated by `per_page=100`).*
+*Open items out of scope: where to persist the ledger (dedicated table — the foreach done-set is unsuitable: attached to a `workflow_run`, appendable only while `Running`) — to be settled at implementation; relation to `docs/design/project-scoped-automation-fs.md` (project-scoped skills/automation) and TD-20260630 (Link-header pagination, already mitigated by `per_page=100`).*

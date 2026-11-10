@@ -18,20 +18,24 @@ Ad-hoc TS-strict warnings ride alongside:
 - `@typescript-eslint/no-non-null-assertion`
 - `@typescript-eslint/no-explicit-any`
 
-## Current count (2026-08-11 — fourth contextual pass)
+## Current count (2026-11-10)
 
-The first maintenance pass remeasured **164 warnings, 0 errors**. After four
-contextual batches, `pnpm exec eslint src/ -f json` reports **72 warnings,
-0 errors**:
+CI pins the ESLint warning budget at **63** (`pnpm lint --max-warnings 63`,
+`.github/workflows/ci-test.yml:698`); it was 72 at the fourth contextual pass
+and can only go down. A local `eslint src/ -f json` run on 2026-11-10 counted
+**55 warnings, 0 errors**, so the ratchet still has 8 warnings of slack to
+tighten:
 
 | Rule | Count | Category |
 |---|---|---|
-| `react-hooks/set-state-in-effect` | 43 | Heavy refactor each (often state derived from props) |
-| `react-hooks/immutability` | 19 | Mutation in render / effect |
-| `react-hooks/purity` | 4 | Pure-render rule violations |
+| `react-hooks/set-state-in-effect` | 36 | Heavy refactor each (often state derived from props) |
+| `react-hooks/immutability` | 9 | Mutation in render / effect |
+| `react-hooks/purity` | 3 | Pure-render rule violations |
 | `no-restricted-syntax` | 3 | Project-specific restricted patterns |
-| `react-hooks/preserve-manual-memoization` | 2 | Memo broken by inner ref change |
+| `react-hooks/preserve-manual-memoization` | 1 | Memo broken by inner ref change |
 | `react-hooks/refs` | 1 | Ref observed during render |
+| `react-refresh/only-export-components` | 1 | Fast Refresh boundary |
+| (no rule id) | 1 | Report not tied to a rule |
 
 The first batch brought ten targeted component files to zero warnings without
 disabling a rule: `SourceCodeViewer`, `AiDocViewer`, `AgentQuestionForm`,
@@ -61,8 +65,8 @@ dependencies, the WebSocket callback now depends on stable callbacks declared
 before it, empty-list fallbacks are referentially stable, and latest-handler
 refs update in the layout phase. It also removes obsolete render-time ref
 access from the mention picker and API-call filters. Oxlint is consequently a
-zero-warning gate; ESLint's 72-warning residual is pinned in CI as the new
-ratchet.
+zero-warning gate; ESLint's residual is pinned in CI as the ratchet (72 then,
+63 now).
 
 ## Patterns applied for the cleared cases
 
@@ -107,7 +111,7 @@ No automated fix for these — `eslint --fix` doesn't help.
 
 Each warning needs contextual analysis:
 
-- **`set-state-in-effect`** (43 hits) — usually means "reset state on
+- **`set-state-in-effect`** (36 hits) — usually means "reset state on
   prop change" or "derive state from props with a side-effect".
   Three legitimate fixes per case:
   - Replace with `useMemo` (when no real side effect)
@@ -120,7 +124,7 @@ Each warning needs contextual analysis:
   safe to migrate to `useState` + `useEffect` pair, sometimes not
   (the ref's stability is load-bearing for race guards — see
   `feedback_race_guards.md`).
-- **`immutability`** (19 hits) — mutation in render. Almost always
+- **`immutability`** (9 hits) — mutation in render. Almost always
   fixable by hoisting the value into a `useMemo`.
 
 Recompute per-file hotspots from the JSON lint output before each pass; the

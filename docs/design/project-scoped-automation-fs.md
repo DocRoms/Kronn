@@ -1,6 +1,7 @@
-# TD-20260722-project-scoped-automation-fs
+# Project-scoped automation as a filesystem
 
-- **ID**: TD-20260722-project-scoped-automation-fs
+- **Kind**: feature (Planning), not tech debt. Moved out of the tech-debt
+  registry by KT-1603; it was `TD-20260722-project-scoped-automation-fs`.
 - **Area**: Backend / Skills / Workflows / MCP
 - **Problem (fact)**:
   - Skills, profiles and directives remain DB-only. Their MCP list tools are
@@ -28,5 +29,5 @@
     - `/automation/prompts/` — Quick Prompts.
     - `/automation/api/` — Quick API declarations (reference configs by id, never secrets).
     - Cross-references resolvable **by slug across folders**: a workflow YAML/JSON can name a skill, a QP step, and an API step and Kronn wires them. → automation versioned with the code, diffable in PRs, portable, self-documenting. "That would simplify everything."
-  - Likely a two-way sync (DB ⇆ files) with the file as source of truth when present, mirroring the `docs/`-dir convention work (`TD-20260627-configurable-docs-dir`).
-- **Next step**: create ticket — design ADR (file-vs-DB source of truth, sync direction, secret handling, cross-slug resolver) before any filesystem-backed implementation.
+  - Likely a two-way sync (DB ⇆ files) with the file as source of truth when present, mirroring the `docs/`-dir convention work (`core::docs_location`).
+- **Next step**: Planning task — design ADR (file-vs-DB source of truth, sync direction, secret handling, cross-slug resolver) before any filesystem-backed implementation.

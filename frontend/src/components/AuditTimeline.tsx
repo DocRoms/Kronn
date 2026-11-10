@@ -315,11 +315,11 @@ export function AuditTimeline(props: AuditTimelineProps) {
 
   useEffect(() => {
     let alive = true;
-    projectsApi.auditSteps()
+    projectsApi.auditSteps(projectId)
       .then(list => { if (alive) setPlan(new Map((list ?? []).map(s => [s.index, s.target_file]))); })
       .catch(() => { /* the timeline still shows recorded steps */ });
     return () => { alive = false; };
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     let alive = true;
