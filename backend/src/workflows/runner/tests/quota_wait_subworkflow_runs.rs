@@ -467,6 +467,49 @@ fn a_stale_wait_in_the_record_still_reclaims_the_same_child() {
     });
 }
 
+/// A backend that died while the parent resumed its child leaves that child
+/// `Interrupted`: the recorded child is resumed, not replaced by a fresh one.
+#[test]
+fn an_interrupted_recorded_child_is_resumed_not_replaced() {
+    on_big_stack(async {
+        let tree = tree("single-quota-interrupted-child", SESSION_LIMIT, 1, 1).await;
+        let root = stored(&tree.state, &tree.root_id).await;
+        let waiting = tree.leaf().await;
+        let child_id = waiting.id.clone();
+        tree.state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE workflow_runs SET status = 'Interrupted' WHERE id = ?1",
+                    rusqlite::params![child_id],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let state = restarted(&tree.state);
+        assert_eq!(
+            crate::workflows::quota_wait::wake_due_runs(&state, wake_of(&root)).await,
+            vec![tree.root_id.clone()]
+        );
+        let done = wait_until_settled(&state, &tree.root_id).await;
+        assert_eq!(done.status, RunStatus::Success, "{:?}", done.step_results);
+        let children = tree.descendants().await;
+        assert_eq!(children.len(), 1, "no second child");
+        assert_eq!(children[0].id, waiting.id);
+        assert_eq!(children[0].status, RunStatus::Success);
+        assert_eq!(
+            tree.prompts()
+                .iter()
+                .filter(|p| p.as_str() == "PREP-T2")
+                .count(),
+            1,
+            "the child's earlier step is not replayed"
+        );
+    });
+}
+
 /// A record whose child is not one of this parent's starts a fresh child.
 #[test]
 fn a_record_naming_no_child_of_this_parent_starts_a_fresh_one() {
