@@ -14,6 +14,7 @@ import { projects as projectsApi, externalApi } from '../../lib/api';
 import { AuditTimeline, type AuditTimelineProps } from '../AuditTimeline';
 import type { AgentDetection } from '../../types/generated';
 import fr from '../../lib/i18n/locales/fr';
+import { formatStepList } from '../../lib/audit-resume';
 
 const wrap = (ui: ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);
 
@@ -218,5 +219,36 @@ describe('AuditTimeline — every run state offers an action', () => {
     expect(screen.getByTestId('audit-timeline-step-1')).toHaveClass('is-done');
     expect(container.querySelector('[role="progressbar"]')).toHaveAttribute('aria-valuenow', '3');
     expect(screen.queryByTestId('audit-timeline-step-actions-3')).toBeNull();
+  });
+
+  // KT-1133 scenario 5 — Kronn restarted in the middle of a run: the boot settled
+  // it `Interrupted`, step 4 had started and never ended, the rest never ran.
+  it('a restart in the middle of a run shows the exact state and offers to resume it', async () => {
+    const left = Array.from({ length: 13 }, (_, i) => i + 4);
+    mockTimeline('Interrupted', [step(1), step(2), step(3), step(4, { ended_at: null, duration_ms: null, cli_success: false })]);
+    const onLaunch = vi.fn();
+    const { container } = wrap(<AuditTimeline {...props({
+      resumable: { id: 'run-1', steps_to_redo: left, last_completed_step: 3 }, onLaunch,
+    })} />);
+    await openGroups(container);
+
+    // Exact: three steps done, the in-flight one interrupted, the others to run.
+    // Nothing reads « En cours » and no cancel is offered for a run that is gone.
+    expect(await screen.findByTestId('audit-timeline-step-3')).toHaveClass('is-done');
+    const killed = screen.getByTestId('audit-timeline-step-4');
+    expect(killed).toHaveClass('is-failed');
+    expect(killed).toHaveTextContent(fr['auditTimeline.reason.interrupted']);
+    expect(screen.getByTestId('audit-timeline-step-5')).not.toHaveClass('is-running');
+    expect(container.querySelector('[role="progressbar"]')).toHaveAttribute('aria-valuenow', '3');
+    expect(screen.queryByTestId('audit-timeline-cancel')).toBeNull();
+    expect(within(container).queryByText(fr['auditTimeline.status.running'])).toBeNull();
+
+    // The action: resume, naming the steps that are left; each step also retries alone.
+    const launch = screen.getByTestId('audit-timeline-launch');
+    expect(launch).toHaveTextContent(fr['audit.resumeRedoSteps'].replace('{0}', formatStepList(left)));
+    expect(launch).toBeEnabled();
+    expect(screen.getByTestId('audit-timeline-step-retry-4')).toBeEnabled();
+    fireEvent.click(launch);
+    expect(onLaunch).toHaveBeenCalledTimes(1);
   });
 });
