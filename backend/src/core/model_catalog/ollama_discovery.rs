@@ -158,6 +158,12 @@ pub fn catalog_capabilities(ollama: &[String]) -> Vec<String> {
             }
         }
     }
+    // `tools` qualifies a chat model rather than replacing its kind, so it
+    // rides along whichever way the kind was decided (KT-1600): the runner
+    // attaches its tool executor only to a model that lists it.
+    if ollama.iter().any(|word| word == "tools") && !capabilities.iter().any(|c| c == "tools") {
+        capabilities.push("tools".to_string());
+    }
     capabilities
 }
 
@@ -204,7 +210,7 @@ mod tests {
         );
         assert_eq!(
             catalog_capabilities(&words(&["completion", "vision", "tools", "thinking"])),
-            words(&["chat", "vision"])
+            words(&["chat", "vision", "tools"])
         );
         assert_eq!(
             catalog_capabilities(&words(&["embedding"])),

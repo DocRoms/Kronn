@@ -13862,6 +13862,7 @@ async fn external_api_test_state(endpoint: String) -> AppState {
         image_model: None,
         video_model: None,
         decision_model: None,
+        tools_enabled: None,
         media_endpoint: None,
     };
     let insert = connection.clone();
@@ -13921,6 +13922,7 @@ async fn external_api_nvidia_update_refreshes_the_models_used_by_global_selector
         image_model: None,
         video_model: None,
         decision_model: None,
+        tools_enabled: None,
         media_endpoint: None,
     };
     state
@@ -14955,6 +14957,7 @@ async fn litellm_saved_connection_state(endpoint: String) -> AppState {
         image_model: None,
         video_model: None,
         decision_model: None,
+        tools_enabled: None,
         media_endpoint: None,
     };
     let insert = connection.clone();

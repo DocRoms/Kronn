@@ -3877,6 +3877,7 @@ mod tests {
                 image_model: None,
                 video_model: None,
                 decision_model: None,
+                tools_enabled: None,
                 media_endpoint: None,
             },
         )

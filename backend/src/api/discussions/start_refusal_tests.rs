@@ -118,6 +118,7 @@ fn the_vpn_card_is_typed_and_never_carries_the_address() {
 #[test]
 fn the_probed_address_is_the_one_the_runner_calls() {
     let endpoints = HttpEndpoints {
+        tools: Default::default(),
         lite_llm: Some("http://litellm.internal".into()),
         nvidia: None,
     };

@@ -53,6 +53,37 @@ type ReasoningModesByModel = HashMap<(String, String), Vec<String>>;
 static RESOLVED_REASONING_MODES: LazyLock<std::sync::RwLock<ReasoningModesByModel>> =
     LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
 
+/// Models the catalogue lists with the `tools` capability, projected like the
+/// tier map so the runner can gate its tool executor synchronously (KT-1600).
+type ToolModels = std::collections::HashSet<(String, String)>;
+static RESOLVED_TOOL_MODELS: LazyLock<std::sync::RwLock<ToolModels>> =
+    LazyLock::new(|| std::sync::RwLock::new(ToolModels::new()));
+
+/// Capability word marking a model that accepts tool declarations.
+pub const CAPABILITY_TOOLS: &str = "tools";
+
+/// Whether the live catalogue lists `tools` for this exact model. Absence is
+/// "no": a model the catalogue has not seen is not given a tool schema.
+pub fn model_accepts_tools(agent_type: &AgentType, model_id: &str) -> bool {
+    let target = db::agent_runtime_target_id(agent_type);
+    RESOLVED_TOOL_MODELS
+        .read()
+        .map(|models| models.contains(&(target, model_id.to_owned())))
+        .unwrap_or(false)
+}
+
+/// Test seam: replace the projected tool-capable models.
+#[cfg(all(test, feature = "full-tests"))]
+pub(crate) fn set_tool_models_for_test(models: &[(AgentType, &str)]) {
+    let projected = models
+        .iter()
+        .map(|(agent, model)| (db::agent_runtime_target_id(agent), (*model).to_owned()))
+        .collect();
+    if let Ok(mut catalog) = RESOLVED_TOOL_MODELS.write() {
+        *catalog = projected;
+    }
+}
+
 fn tier_key(tier: ModelTier) -> u8 {
     match tier {
         ModelTier::Economy => 0,
@@ -113,8 +144,12 @@ pub async fn refresh_runtime_cache(database: &Database) -> anyhow::Result<()> {
     let entries = database.with_read_conn(db::list_all).await?;
     let mut resolved = HashMap::new();
     let mut reasoning_modes = HashMap::new();
+    let mut tool_models = ToolModels::new();
     for entry in entries {
         if entry.availability == ModelAvailability::Available {
+            if entry.capabilities.iter().any(|c| c == CAPABILITY_TOOLS) {
+                tool_models.insert((entry.runtime_target_id.clone(), entry.model_id.clone()));
+            }
             reasoning_modes.insert(
                 (entry.runtime_target_id.clone(), entry.model_id.clone()),
                 entry.reasoning_modes.clone(),
@@ -133,6 +168,9 @@ pub async fn refresh_runtime_cache(database: &Database) -> anyhow::Result<()> {
     }
     if let Ok(mut catalog) = RESOLVED_REASONING_MODES.write() {
         *catalog = reasoning_modes;
+    }
+    if let Ok(mut catalog) = RESOLVED_TOOL_MODELS.write() {
+        *catalog = tool_models;
     }
     Ok(())
 }
@@ -1995,7 +2033,7 @@ mod tests {
             capabilities_of(&view, "clef-flash:9b"),
             vec!["decision", "vision"]
         );
-        assert_eq!(capabilities_of(&view, "qwen3:8b"), vec!["chat"]);
+        assert_eq!(capabilities_of(&view, "qwen3:8b"), vec!["chat", "tools"]);
         assert_eq!(capabilities_of(&view, "x/flux2-klein:4b"), vec!["image"]);
         assert!(preflight_check(
             &db,
@@ -2040,7 +2078,7 @@ mod tests {
             capabilities_of(&view, "clef-flash:9b"),
             vec!["decision", "vision"]
         );
-        assert_eq!(capabilities_of(&view, "qwen3:8b"), vec!["chat"]);
+        assert_eq!(capabilities_of(&view, "qwen3:8b"), vec!["chat", "tools"]);
     }
 
     #[tokio::test]

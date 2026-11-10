@@ -1067,6 +1067,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "292_campaign_reviewer",
         include_str!("sql/292_campaign_reviewer.sql"),
     ),
+    (
+        "293_external_api_tools_enabled",
+        include_str!("sql/293_external_api_tools_enabled.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole

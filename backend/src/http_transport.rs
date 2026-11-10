@@ -50,6 +50,51 @@ pub(crate) fn entry_supports_capability(entry: &CatalogModelEntry, capability: &
     entry.capabilities.is_empty() || entry.capabilities.iter().any(|c| c.as_str() == capability)
 }
 
+/// Why the Kronn tool executor is, or is not, attached to an HTTP run
+/// (KT-1600).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HttpToolsVerdict {
+    Attach,
+    /// The operator switched tools off for this agent or connection.
+    OperatorOff,
+    /// The catalogue does not list `tools` for this model (Ollama).
+    ModelLacksTools,
+    /// A provider that cannot report capabilities (LiteLLM, NVIDIA, a custom
+    /// gateway) whose operator never declared that its models take tools.
+    NotDeclared,
+}
+
+/// Decide whether an HTTP run gets the tool executor.
+///
+/// `setting` is the operator's explicit choice for the agent, or for its named
+/// connection when it runs on one. `model_has_tools` is the catalogue's answer
+/// for the exact model. Ollama reports capabilities, so its catalogue decides
+/// and `Some(true)` cannot force a model without `tools`. The OpenAI-wire
+/// providers report nothing a gate could read: they attach only on an explicit
+/// `Some(true)`, because a tool schema sent to a model that lacks the
+/// capability is rejected or answered in prose. `Some(false)` always wins.
+pub(crate) fn http_tools_verdict(
+    agent_type: &AgentType,
+    setting: Option<bool>,
+    model_has_tools: bool,
+) -> HttpToolsVerdict {
+    if setting == Some(false) {
+        return HttpToolsVerdict::OperatorOff;
+    }
+    if crate::agents::runner::is_openai_wire_agent(agent_type) {
+        return if setting == Some(true) {
+            HttpToolsVerdict::Attach
+        } else {
+            HttpToolsVerdict::NotDeclared
+        };
+    }
+    if model_has_tools {
+        HttpToolsVerdict::Attach
+    } else {
+        HttpToolsVerdict::ModelLacksTools
+    }
+}
+
 /// Resolve a named connection's model for one tier — the single rule shared
 /// by discussion dispatch, Quick Prompt launches, Compare judge/improve and
 /// workflow/batch-compare retries, so a connection's tier resolves
@@ -85,6 +130,7 @@ pub(crate) fn external_http_runtime(
         display_name: connection.display_name.clone(),
         mention_alias: connection.mention_alias.clone(),
         endpoint: endpoint.clone(),
+        tools_enabled: connection.tools_enabled,
         api_key: tokens
             .active_key_for(&connection.credential_slug)
             .filter(|key| !key.trim().is_empty())
@@ -186,6 +232,7 @@ mod tests {
             image_model: None,
             video_model: None,
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         }
     }

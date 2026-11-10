@@ -445,6 +445,7 @@ async fn bench_native_pr_review_chain() {
     assert!(trials > 0, "KRONN_BENCH_TRIALS must be at least 1");
     let external = var("KRONN_BENCH_HTTP_ENDPOINT").ok().map(|endpoint| {
         crate::agents::runner::ExternalHttpRuntime {
+            tools_enabled: Some(true),
             display_name: "Bench".into(),
             mention_alias: "bench".into(),
             endpoint,
@@ -510,6 +511,7 @@ async fn the_trial_reaches_an_openai_compatible_endpoint_with_its_key() {
         .mount(&server)
         .await;
     let runtime = crate::agents::runner::ExternalHttpRuntime {
+        tools_enabled: Some(true),
         display_name: "Bench".into(),
         mention_alias: "bench".into(),
         endpoint: server.uri(),

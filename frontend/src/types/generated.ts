@@ -374,7 +374,15 @@ mention_color?: string | null,
  * under the `litellm` provider, never here — this struct is serialised
  * to the frontend.
  */
-base_url?: string | null, };
+base_url?: string | null,
+/**
+ * Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
+ * `Some(false)` withholds the tools from every model of this agent;
+ * `Some(true)` declares that its models take them, which is the only way
+ * to enable them on a proxy that cannot report capabilities (LiteLLM).
+ * `None` leaves the decision to the model catalogue. Ignored by CLI agents.
+ */
+tools_enabled?: boolean | null, };
 
 /**
  * One agent's effective context.
@@ -4622,7 +4630,13 @@ media_endpoint?: string | null,
  * The model Decision steps call on this connection (KT-1366). A
  * capability like the media slots, not a quality tier.
  */
-decision_model?: string | null, };
+decision_model?: string | null,
+/**
+ * Whether the Kronn tool executor is attached to runs on this connection
+ * (KT-1600). `None` = not declared: a proxy that cannot report model
+ * capabilities gets no tools until an operator says its models take them.
+ */
+tools_enabled?: boolean | null, };
 
 export type ExternalApiConnectionPreset = "lite_llm" | "nvidia" | "open_router" | "other";
 
@@ -9873,6 +9887,12 @@ export type SetAgentMentionColorRequest = { agent: AgentType,
  * `None` or an empty string restores the built-in color.
  */
 color?: string | null, };
+
+export type SetAgentToolsRequest = { agent: AgentType,
+/**
+ * `None` clears the operator setting; see `AgentConfig::tools_enabled`.
+ */
+enabled?: boolean | null, };
 
 /**
  * `PUT /api/mcps/servers/{id}/access-policy`; `policy: null` removes it.

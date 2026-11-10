@@ -779,6 +779,18 @@ pub struct AgentsConfig {
 pub struct HttpEndpoints {
     pub lite_llm: Option<String>,
     pub nvidia: Option<String>,
+    /// The operator's explicit tool-executor setting per HTTP agent (KT-1600),
+    /// carried with the endpoints because every call site already hands them
+    /// to the runner. `None` = not declared. A named `Custom` connection has
+    /// its own on `ExternalHttpRuntime::tools_enabled`.
+    pub tools: HttpToolSettings,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct HttpToolSettings {
+    pub ollama: Option<bool>,
+    pub lite_llm: Option<bool>,
+    pub nvidia: Option<bool>,
 }
 
 impl HttpEndpoints {
@@ -786,6 +798,22 @@ impl HttpEndpoints {
         Self {
             lite_llm: agents.lite_llm.base_url.clone(),
             nvidia: agents.nvidia.base_url.clone(),
+            tools: HttpToolSettings {
+                ollama: agents.ollama.tools_enabled,
+                lite_llm: agents.lite_llm.tools_enabled,
+                nvidia: agents.nvidia.tools_enabled,
+            },
+        }
+    }
+
+    /// The explicit tool setting for this agent, `None` when none is declared
+    /// or the agent has no slot (a CLI agent, or `Custom`).
+    pub fn tools_setting_for(&self, agent_type: &AgentType) -> Option<bool> {
+        match agent_type {
+            AgentType::Ollama => self.tools.ollama,
+            AgentType::LiteLlm => self.tools.lite_llm,
+            AgentType::Nvidia => self.tools.nvidia,
+            _ => None,
         }
     }
 
@@ -920,6 +948,13 @@ pub struct AgentConfig {
     /// to the frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
+    /// `Some(false)` withholds the tools from every model of this agent;
+    /// `Some(true)` declares that its models take them, which is the only way
+    /// to enable them on a proxy that cannot report capabilities (LiteLLM).
+    /// `None` leaves the decision to the model catalogue. Ignored by CLI agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_enabled: Option<bool>,
 }
 
 // ─── Model tiers ──────────────────────────────────────────────────────────
@@ -1306,6 +1341,14 @@ pub struct SetAgentConcurrencyRequest {
     /// `None` restores the family default: unlimited for a remote provider,
     /// 1 for Ollama, 5 for a CLI.
     pub concurrency: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct SetAgentToolsRequest {
+    pub agent: AgentType,
+    /// `None` clears the operator setting; see `AgentConfig::tools_enabled`.
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, TS)]

@@ -6004,6 +6004,7 @@ fi
         let mut tiers = crate::models::ModelTiersConfig::default();
         tiers.lite_llm.default = Some("corp-default".into());
         let endpoints = crate::models::setup::HttpEndpoints {
+            tools: Default::default(),
             lite_llm: Some(server.uri()),
             nvidia: None,
         };
@@ -6283,6 +6284,7 @@ fi
         tiers.nvidia.default = Some("meta/llama-3.3-70b-instruct".into());
         tiers.lite_llm.default = Some("corp-default".into());
         let endpoints = crate::models::setup::HttpEndpoints {
+            tools: Default::default(),
             lite_llm: Some(proxy.uri()),
             nvidia: Some(nvidia.uri()),
         };
@@ -6344,6 +6346,7 @@ fi
             disabled_overrides: Vec::new(),
         };
         let runtime = ExternalHttpRuntime {
+            tools_enabled: None,
             display_name: "OpenRouter".into(),
             mention_alias: "openrouter".into(),
             endpoint: server.uri(),
@@ -6408,10 +6411,15 @@ fi
             disabled_overrides: Vec::new(),
         };
         let runtime = ExternalHttpRuntime {
+            tools_enabled: None,
             display_name: "Router".into(),
             mention_alias: "router".into(),
             endpoint: server.uri(),
             api_key: None,
+        };
+        let runtime = ExternalHttpRuntime {
+            tools_enabled: Some(true),
+            ..runtime
         };
         let recorder = Arc::new(Recorder(Mutex::new(None)));
         // The provider fails; what matters is what the tools were told first.
@@ -6432,6 +6440,85 @@ fi
                 model: Some("model-b".into()),
             })
         );
+    }
+
+    fn gated(
+        agent: &AgentType,
+        model: &'static str,
+        setting: Option<bool>,
+    ) -> Option<Arc<dyn crate::agents::tools::ToolExecutor>> {
+        let tokens = crate::models::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        // A named connection carries its own setting; the others read theirs
+        // from the agent's slot in the settings.
+        let runtime = ExternalHttpRuntime {
+            tools_enabled: setting,
+            display_name: "Gateway".into(),
+            mention_alias: "gateway".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            api_key: None,
+        };
+        let mut endpoints = crate::models::setup::HttpEndpoints::default();
+        endpoints.tools.ollama = setting;
+        endpoints.tools.lite_llm = setting;
+        endpoints.tools.nvidia = setting;
+        let config = AgentStartConfig {
+            model_override: Some(model),
+            tools: Some(Arc::new(FakeTools { seen })),
+            http_endpoints: Some(&endpoints),
+            external_http: (*agent == AgentType::Custom).then_some(&runtime),
+            ..AgentStartConfig::new(agent, "", "hello", &tokens)
+        };
+        gate_http_tools(&config)
+    }
+
+    /// KT-1600 — Ollama reports capabilities, so the executor reaches only a
+    /// model the catalogue lists with `tools`; an unknown model gets none, and
+    /// the operator switch turns even a capable one off.
+    #[test]
+    #[serial]
+    fn the_executor_attaches_to_an_ollama_model_only_when_the_catalogue_lists_tools() {
+        crate::core::model_catalog::set_tool_models_for_test(&[(
+            AgentType::Ollama,
+            "tool-capable:8b",
+        )]);
+        assert!(gated(&AgentType::Ollama, "tool-capable:8b", None).is_some());
+        assert!(gated(&AgentType::Ollama, "tool-capable:8b", Some(true)).is_some());
+        assert!(
+            gated(&AgentType::Ollama, "plain-chat:1b", None).is_none(),
+            "a model the catalogue does not list with tools gets no executor"
+        );
+        assert!(
+            gated(&AgentType::Ollama, "plain-chat:1b", Some(true)).is_none(),
+            "the switch cannot force tools onto a model that lacks them"
+        );
+        assert!(
+            gated(&AgentType::Ollama, "tool-capable:8b", Some(false)).is_none(),
+            "the operator switch withholds tools from a capable model"
+        );
+    }
+
+    /// KT-1600 — LiteLLM, NVIDIA and a custom gateway report no capabilities:
+    /// the connection must say so explicitly, and a catalogued `tools` entry
+    /// alone is not enough.
+    #[test]
+    #[serial]
+    fn an_openai_wire_provider_gets_the_executor_only_on_an_explicit_setting() {
+        crate::core::model_catalog::set_tool_models_for_test(&[
+            (AgentType::LiteLlm, "gw-model"),
+            (AgentType::Nvidia, "gw-model"),
+        ]);
+        for agent in [AgentType::LiteLlm, AgentType::Nvidia, AgentType::Custom] {
+            assert!(gated(&agent, "gw-model", None).is_none(), "{agent:?}: undeclared");
+            assert!(gated(&agent, "gw-model", Some(false)).is_none(), "{agent:?}: off");
+            assert!(gated(&agent, "gw-model", Some(true)).is_some(), "{agent:?}: declared");
+        }
     }
 
     /// The whole point of the feature: a model that asks for a tool gets the
@@ -16462,6 +16549,7 @@ sleep 3600
         let external = crate::core::child_env::var("KRONN_BENCH_HTTP_ENDPOINT")
             .ok()
             .map(|endpoint| ExternalHttpRuntime {
+                tools_enabled: None,
                 display_name: "Bench".into(),
                 mention_alias: "bench".into(),
                 endpoint,
@@ -16977,6 +17065,7 @@ sleep 3600
             let external = crate::core::child_env::var("KRONN_BENCH_HTTP_ENDPOINT")
                 .ok()
                 .map(|endpoint| ExternalHttpRuntime {
+                    tools_enabled: None,
                     display_name: "Bench".into(),
                     mention_alias: "bench".into(),
                     endpoint,

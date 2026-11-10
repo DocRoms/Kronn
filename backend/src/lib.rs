@@ -1756,6 +1756,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_agent_access_effective),
         )
         .route(
+            "/api/config/agent-tools",
+            post(api::setup::set_agent_tools),
+        )
+        .route(
             "/api/config/agent-mention-color",
             post(api::setup::set_agent_mention_color),
         )

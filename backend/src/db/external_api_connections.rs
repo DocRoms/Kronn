@@ -13,7 +13,7 @@ use crate::models::{
 // meaning; a mid-list insertion would silently shift created_at/updated_at.
 const COLUMNS: &str = "id, display_name, mention_alias, endpoint, credential_slug, origin_preset, \
     economy_model, default_model, reasoning_model, created_at, updated_at, \
-    image_model, video_model, media_endpoint, decision_model";
+    image_model, video_model, media_endpoint, decision_model, tools_enabled";
 
 const LEGACY_LITELLM_ID: &str = "external-api-litellm";
 const LEGACY_NVIDIA_ID: &str = "external-api-nvidia";
@@ -112,6 +112,7 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExternalApiCon
         video_model: row.get(12)?,
         media_endpoint: row.get(13)?,
         decision_model: row.get(14)?,
+        tools_enabled: row.get(15)?,
     })
 }
 
@@ -280,8 +281,8 @@ pub fn insert(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
         "INSERT INTO external_api_connections (
              id, display_name, mention_alias, endpoint, credential_slug, origin_preset,
              economy_model, default_model, reasoning_model, created_at, updated_at,
-             image_model, video_model, media_endpoint, decision_model
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             image_model, video_model, media_endpoint, decision_model, tools_enabled
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             connection.id,
             connection.display_name,
@@ -298,6 +299,7 @@ pub fn insert(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
             connection.video_model,
             connection.media_endpoint,
             connection.decision_model,
+            connection.tools_enabled,
         ],
     )?;
     Ok(())
@@ -310,7 +312,8 @@ pub fn update(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
              display_name = ?2, mention_alias = ?3, endpoint = ?4, credential_slug = ?5,
              origin_preset = ?6, economy_model = ?7, default_model = ?8,
              reasoning_model = ?9, updated_at = ?10, image_model = ?11,
-             video_model = ?12, media_endpoint = ?13, decision_model = ?14
+             video_model = ?12, media_endpoint = ?13, decision_model = ?14,
+             tools_enabled = ?15
          WHERE id = ?1",
         params![
             connection.id,
@@ -327,6 +330,7 @@ pub fn update(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
             connection.video_model,
             connection.media_endpoint,
             connection.decision_model,
+            connection.tools_enabled,
         ],
     )?;
     Ok(())
@@ -426,6 +430,7 @@ mod tests {
             image_model: None,
             video_model: None,
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         }
     }
@@ -905,6 +910,7 @@ mod tests {
                     image_model: None,
                     video_model: None,
                     decision_model: None,
+                    tools_enabled: None,
                     media_endpoint: None,
                 },
             )

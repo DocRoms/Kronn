@@ -884,6 +884,37 @@ fn normalize_mention_color(color: Option<&str>) -> Result<Option<String>, &'stat
     Ok(Some(color.to_ascii_lowercase()))
 }
 
+/// POST /api/config/agent-tools
+/// Set (or clear) the operator switch for the Kronn tool executor on one HTTP
+/// agent (KT-1600). CLI agents bring their own tools and have no such switch;
+/// a named `Custom` connection carries its own setting on the connection.
+pub async fn set_agent_tools(
+    State(state): State<AppState>,
+    Json(req): Json<SetAgentToolsRequest>,
+) -> Json<ApiResponse<()>> {
+    let mut config = state.config.write().await;
+    let agent = match req.agent {
+        AgentType::Ollama => &mut config.agents.ollama,
+        AgentType::LiteLlm => &mut config.agents.lite_llm,
+        AgentType::Nvidia => &mut config.agents.nvidia,
+        AgentType::Custom => {
+            return Json(ApiResponse::err(
+                "Set the tools option on the external API connection itself",
+            ))
+        }
+        _ => {
+            return Json(ApiResponse::err(
+                "Only HTTP agents have a tool executor switch",
+            ))
+        }
+    };
+    agent.tools_enabled = req.enabled;
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(error) => Json(ApiResponse::err(format!("Failed to save: {error}"))),
+    }
+}
+
 /// POST /api/config/agent-mention-color
 /// Set (or reset) the color used by the UI for a canonical agent mention.
 pub async fn set_agent_mention_color(

@@ -78,6 +78,8 @@ async fn provider(first: String, then: String) -> (MockServer, Arc<Mutex<Vec<Val
 async fn litellm_state(endpoint: &str) -> AppState {
     let mut config = crate::core::config::default_config();
     config.agents.lite_llm.base_url = Some(endpoint.to_string());
+    // KT-1600 — LiteLLM reports no capabilities: its tools are declared.
+    config.agents.lite_llm.tools_enabled = Some(true);
     config.agents.model_tiers.lite_llm.reasoning = Some("audit-model".into());
     config.agents.model_tiers.lite_llm.economy = Some("economy-model".into());
     AppState::new_defaults(
@@ -1153,6 +1155,7 @@ async fn a_named_connection_audit_calls_that_connection_with_its_tier_model() {
         image_model: None,
         video_model: None,
         decision_model: None,
+        tools_enabled: None,
         media_endpoint: None,
     };
     state
