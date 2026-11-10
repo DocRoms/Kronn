@@ -22,7 +22,8 @@ const PROVIDER_MESSAGE_CHARS: usize = 240;
 pub struct AuthRefusal {
     pub kind: McpAuthFailureKind,
     pub http_status: Option<u16>,
-    /// The provider's answer, one line, scrubbed by the executor already.
+    /// The provider's answer on one line. [`classify`] extracts it raw: only
+    /// [`sanitize`] makes it fit to store and show.
     pub provider_message: String,
 }
 
@@ -103,7 +104,9 @@ fn blames_credential(body: &str) -> bool {
 }
 
 /// The provider's answer on one line: a JSON error body keeps its `message`
-/// when it has one, whitespace collapses, the length is bounded.
+/// when it has one, whitespace collapses. Not bounded here: the length is
+/// capped by [`sanitize`], after the redaction, so a cut can never leave a
+/// fragment of a credential the masks no longer recognise.
 fn one_line(raw: &str) -> String {
     let raw = raw.trim();
     let message = serde_json::from_str::<serde_json::Value>(raw)
@@ -114,13 +117,27 @@ fn one_line(raw: &str) -> String {
                 .find_map(|key| value.get(key)?.as_str().map(str::to_string))
         })
         .unwrap_or_else(|| raw.to_string());
-    let collapsed = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() > PROVIDER_MESSAGE_CHARS {
+    message.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The refusal as it may be stored and shown: some providers echo the
+/// presented credential (or a piece of it) in the 401 body, so the message
+/// loses the connection's own secret values (`secrets`, every wire form), then
+/// goes through the same heuristic redaction as stored run output, and only
+/// then is bounded.
+pub(crate) fn sanitize(
+    mut refusal: AuthRefusal,
+    secrets: &crate::core::secret_scrub::SecretSet,
+) -> AuthRefusal {
+    let masked = crate::core::redact::redact_stored_text(&secrets.scrub(&refusal.provider_message));
+    let collapsed = masked.split_whitespace().collect::<Vec<_>>().join(" ");
+    refusal.provider_message = if collapsed.chars().count() > PROVIDER_MESSAGE_CHARS {
         let head: String = collapsed.chars().take(PROVIDER_MESSAGE_CHARS - 1).collect();
         format!("{head}…")
     } else {
         collapsed
-    }
+    };
+    refusal
 }
 
 /// The sentence a failed step starts with. English like every backend message;
@@ -170,6 +187,7 @@ pub async fn track_outcome(
     plugin: &McpServer,
     config_id: &str,
     outcome: &mut StepOutcome,
+    secrets: &crate::core::secret_scrub::SecretSet,
     annotate_step: bool,
 ) {
     if config_id.is_empty() {
@@ -189,7 +207,8 @@ pub async fn track_outcome(
     if outcome.result.status != RunStatus::Failed {
         return;
     }
-    let Some(refusal) = classify(&outcome.result.output) else {
+    let Some(refusal) = classify(&outcome.result.output).map(|found| sanitize(found, secrets))
+    else {
         return;
     };
 
@@ -318,8 +337,66 @@ mod tests {
     #[test]
     fn a_long_provider_message_is_bounded_to_one_line() {
         let refusal = classify(&http(401, &format!("a\n{}", "b ".repeat(400)))).unwrap();
-        assert!(!refusal.provider_message.contains('\n'));
-        assert!(refusal.provider_message.chars().count() <= PROVIDER_MESSAGE_CHARS);
+        let stored = sanitize(refusal, &crate::core::secret_scrub::SecretSet::new());
+        assert!(!stored.provider_message.contains('\n'));
+        assert_eq!(
+            stored.provider_message.chars().count(),
+            PROVIDER_MESSAGE_CHARS
+        );
+        assert!(stored.provider_message.ends_with('…'));
+    }
+
+    #[test]
+    fn a_body_echoing_the_connection_secret_stores_only_the_mask() {
+        let mut secrets = crate::core::secret_scrub::SecretSet::new();
+        secrets.add(TOKEN);
+        let body = serde_json::json!({
+            "message": format!("invalid token {TOKEN} (sent as Bearer {TOKEN})")
+        })
+        .to_string();
+        let stored = sanitize(classify(&http(401, &body)).unwrap(), &secrets);
+        assert!(
+            !stored.provider_message.contains(TOKEN),
+            "{}",
+            stored.provider_message
+        );
+        assert!(stored.provider_message.contains("***"));
+        let sentence = plain_words("GitHub Euronews", "GitHub", &stored);
+        assert!(sentence.contains("***") && !sentence.contains(TOKEN));
+    }
+
+    #[test]
+    fn a_body_echoing_a_credential_shaped_value_is_redacted_without_the_secret_set() {
+        // A token the connection does not hold (a rotated one, a sibling's):
+        // only the heuristic redaction of stored output can catch it.
+        let echoed = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+        let body = serde_json::json!({
+            "message": format!("invalid token {echoed}; password=hunter2hunter2")
+        })
+        .to_string();
+        let stored = sanitize(
+            classify(&http(401, &body)).unwrap(),
+            &crate::core::secret_scrub::SecretSet::new(),
+        );
+        assert!(
+            !stored.provider_message.contains(&echoed),
+            "{}",
+            stored.provider_message
+        );
+        assert!(!stored.provider_message.contains("hunter2hunter2"));
+    }
+
+    #[test]
+    fn the_cap_cannot_leave_a_fragment_of_a_secret() {
+        // The secret straddles the cap: it is masked before the cut.
+        let mut secrets = crate::core::secret_scrub::SecretSet::new();
+        secrets.add(TOKEN);
+        let padding = "x".repeat(PROVIDER_MESSAGE_CHARS - 10);
+        let body = format!("{padding} {TOKEN} tail");
+        let stored = sanitize(classify(&http(401, &body)).unwrap(), &secrets);
+        assert!(stored.provider_message.chars().count() <= PROVIDER_MESSAGE_CHARS);
+        assert!(!stored.provider_message.contains("ghp_"));
+        assert!(!stored.provider_message.contains("kt1524"));
     }
 
     // ─── Through the executor, against a mock provider ───────────────────
@@ -421,7 +498,7 @@ mod tests {
     async fn failure(state: &crate::AppState) -> Option<crate::models::McpAuthFailure> {
         state
             .db
-            .with_conn(|conn| crate::db::mcps::list_auth_failures(conn))
+            .with_conn(crate::db::mcps::list_auth_failures)
             .await
             .unwrap()
             .remove("cfg-gh")
@@ -465,6 +542,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed[0].auth_failure.as_ref(), Some(&recorded));
+    }
+
+    #[tokio::test]
+    async fn a_401_echoing_the_token_stores_and_shows_only_the_mask() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_json(
+                    serde_json::json!({"message": format!("invalid token {TOKEN}")}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        let state = state_with_connection(&server.uri()).await;
+
+        let result = call(&state).await;
+
+        assert!(!result.output.contains(TOKEN), "{}", result.output);
+        let recorded = failure(&state).await.expect("the refusal is recorded");
+        assert!(!recorded.message.contains(TOKEN), "{}", recorded.message);
+        assert!(recorded.message.contains("***"), "{}", recorded.message);
     }
 
     #[tokio::test]

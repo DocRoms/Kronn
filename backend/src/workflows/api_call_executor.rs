@@ -836,7 +836,9 @@ pub async fn execute_api_call_probe(
     .await;
     // The probe parses its raw failure text: it records the connection's
     // auth state (a "Test" that gets a 401 flags it) without annotating.
-    super::api_auth_failure::track_outcome(state, plugin, config_id, &mut outcome, false).await;
+    let secrets = call_secrets(plugin, env);
+    super::api_auth_failure::track_outcome(state, plugin, config_id, &mut outcome, &secrets, false)
+        .await;
     outcome
 }
 
@@ -900,6 +902,7 @@ async fn execute_api_call_step_with_db_inner(
     };
 
     let config_id = step.api_config_id.clone().unwrap_or_default();
+    let secrets = call_secrets(&plugin, &env);
     let mut outcome = execute_with_token_refresh(
         step,
         &plugin,
@@ -912,7 +915,15 @@ async fn execute_api_call_step_with_db_inner(
     )
     .await;
     // KT-1524 — flag / unflag the connection, and say which one refused.
-    super::api_auth_failure::track_outcome(state, &plugin, &config_id, &mut outcome, true).await;
+    super::api_auth_failure::track_outcome(
+        state,
+        &plugin,
+        &config_id,
+        &mut outcome,
+        &secrets,
+        true,
+    )
+    .await;
     outcome
 }
 

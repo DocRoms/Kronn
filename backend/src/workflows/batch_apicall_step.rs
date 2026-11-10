@@ -407,7 +407,7 @@ impl ItemOutcome {
             // KT-1524, so the "HTTP <status> on …" text is not always first).
             // Extract the numeric status for richer downstream branching.
             let http_status =
-                super::api_call_executor::extract_http_status_from_output(&raw).map(u64::from);
+                super::api_call_executor::extract_http_status_from_output(raw).map(u64::from);
             ItemOutcome::Failed {
                 error: raw.clone(),
                 http_status,
