@@ -1551,6 +1551,9 @@ async fn an_audit_killed_with_kronn_resumes_on_the_steps_left_after_the_restart(
 #[path = "revalidate_e2e_tests.rs"]
 mod revalidate_e2e_tests;
 
+#[path = "recette_http_e2e_tests.rs"]
+mod recette_http_e2e_tests;
+
 #[path = "relocation_e2e_tests.rs"]
 mod relocation_e2e_tests;
 
