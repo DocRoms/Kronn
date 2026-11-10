@@ -17,7 +17,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react';
 
-const { config, contacts } = vi.hoisted(() => ({
+const { config, contacts, setAuthToken } = vi.hoisted(() => ({
   config: {
     getServerConfig: vi.fn(),
     setServerConfig: vi.fn(),
@@ -31,10 +31,12 @@ const { config, contacts } = vi.hoisted(() => ({
   },
   contacts: {
     networkInfo: vi.fn(),
+    inviteCode: vi.fn(),
   },
+  setAuthToken: vi.fn(),
 }));
 
-vi.mock('../../../lib/api', () => ({ config, contacts }));
+vi.mock('../../../lib/api', () => ({ config, contacts, setAuthToken }));
 
 const { flushUiPreferences } = vi.hoisted(() => ({ flushUiPreferences: vi.fn() }));
 vi.mock('../../../lib/uiPreferences', () => ({ flushUiPreferences }));
@@ -239,6 +241,115 @@ describe('IdentitySection — global context lifecycle', () => {
     const neverOption = await screen.findByText('settings.gcModeNever');
     fireEvent.click(neverOption);
     await waitFor(() => expect(config.saveGlobalContextMode).toHaveBeenCalledWith('never'));
+  });
+});
+
+describe('IdentitySection — plain-HTTP exposure (KT-1596)', () => {
+  const declared = { exposed: false, restart_required: false, in_docker: false, kronn_bind: null, port: 3140, reachable_ips: [], auth_token_set: true, tls_terminated_by_proxy: false, tls_declared_by_env: false, public_origin: null, plain_http_blocked: false };
+
+  it('shows the backend refusal next to the toggle, which stays off', async () => {
+    config.getNetworkExposure.mockResolvedValue(declared);
+    config.setNetworkExposure.mockRejectedValue(new Error('Kronn cannot be exposed over plain HTTP: declare a TLS proxy first.'));
+    await mountIdentity();
+    const toggle = screen.getByTestId('expose-network-toggle');
+
+    await act(async () => { fireEvent.click(toggle); });
+
+    expect(await screen.findByTestId('expose-refusal')).toHaveTextContent('Kronn cannot be exposed over plain HTTP');
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(screen.queryByText('settings.exposeRestartRequired')).not.toBeInTheDocument();
+  });
+
+  it('explains why a stale exposed config started on loopback', async () => {
+    config.getNetworkExposure.mockResolvedValue({ ...declared, exposed: true, plain_http_blocked: true });
+    await mountIdentity();
+    expect(screen.getByTestId('expose-plain-http-blocked')).toHaveTextContent('settings.exposePlainBlocked');
+  });
+
+  it('offers no plain invite and one consistent notice while exposure is blocked', async () => {
+    config.getServerConfig.mockResolvedValue({
+      domain: null, port: 3140, max_concurrent_agents: 5, auth_enabled: true,
+      pseudo: 'me', avatar_email: '', bio: '',
+    });
+    config.getNetworkExposure.mockResolvedValue({ ...declared, exposed: true, plain_http_blocked: true });
+    await mountIdentity();
+
+    // One notice about the block: no "reachable from your network" note beside it,
+    // and the state badge agrees (this boot serves nobody).
+    expect(screen.getByTestId('expose-plain-http-blocked')).toBeInTheDocument();
+    expect(screen.queryByText('settings.exposeSecurityNote')).not.toBeInTheDocument();
+    expect(screen.getByText('settings.networkLocalOnly')).toBeInTheDocument();
+    expect(screen.queryByText('settings.networkReachable')).not.toBeInTheDocument();
+    // No plain kronn: invite is advertised, and no copy button for one.
+    expect(screen.getByTestId('invite-blocked')).toHaveTextContent('settings.identityInviteBlocked');
+    expect(screen.queryByText(/^kronn:me@/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the invite and the exposure note when nothing is blocked', async () => {
+    config.getServerConfig.mockResolvedValue({
+      domain: null, port: 3140, max_concurrent_agents: 5, auth_enabled: true,
+      pseudo: 'me', avatar_email: '', bio: '',
+    });
+    config.getNetworkExposure.mockResolvedValue({ ...declared, exposed: true, tls_terminated_by_proxy: true, public_origin: 'https://kronn.example.com' });
+    contacts.inviteCode.mockResolvedValue('kronns:me@kronn.example.com:443');
+    await mountIdentity();
+    expect(screen.queryByTestId('invite-blocked')).not.toBeInTheDocument();
+    expect(await screen.findByText('kronns:me@kronn.example.com:443')).toBeInTheDocument();
+    expect(screen.getByText('settings.exposeSecurityNote')).toBeInTheDocument();
+    expect(screen.getByText('settings.networkReachable')).toBeInTheDocument();
+  });
+
+  it('says nothing about plain HTTP once a proxy is declared', async () => {
+    config.getNetworkExposure.mockResolvedValue({ ...declared, exposed: true, tls_terminated_by_proxy: true, public_origin: 'https://kronn.example.com' });
+    contacts.inviteCode.mockResolvedValue('kronns:me@kronn.example.com:443');
+    await mountIdentity();
+    expect(screen.queryByTestId('expose-plain-http-blocked')).not.toBeInTheDocument();
+    expect(screen.getByTestId('expose-proxy-origin')).toHaveValue('https://kronn.example.com');
+  });
+
+  it('declares the proxy with its public address and keeps the token the reply hands over', async () => {
+    config.getNetworkExposure.mockResolvedValue(declared);
+    config.setNetworkExposure.mockResolvedValue({ ...declared, tls_terminated_by_proxy: true, public_origin: 'https://kronn.example.com', issued_auth_token: 'tok-123' });
+    const onExposureChange = vi.fn();
+    await mountIdentity(vi.fn(), onExposureChange);
+    const save = screen.getByTestId('expose-proxy-save');
+    expect(save).toBeDisabled();
+
+    fireEvent.change(screen.getByTestId('expose-proxy-origin'), { target: { value: ' https://kronn.example.com ' } });
+    await act(async () => { fireEvent.click(save); });
+
+    await waitFor(() => expect(config.setNetworkExposure).toHaveBeenCalledWith(false, {
+      tls_terminated_by_proxy: true,
+      public_origin: 'https://kronn.example.com',
+    }));
+    // The loopback bypass is withdrawn: the local UI must hold the token now.
+    expect(setAuthToken).toHaveBeenCalledWith('tok-123');
+    // The token never lingers in the state handed to the rest of the page.
+    expect(onExposureChange).toHaveBeenCalledWith(expect.not.objectContaining({ issued_auth_token: 'tok-123' }));
+    expect(await screen.findByTestId('expose-proxy-withdraw')).toBeInTheDocument();
+  });
+
+  it('shows the refusal of a bad declaration and withdraws a declaration with the exposure', async () => {
+    config.getNetworkExposure.mockResolvedValue({ ...declared, exposed: true, tls_terminated_by_proxy: true, public_origin: 'https://kronn.example.com' });
+    contacts.inviteCode.mockResolvedValue('kronns:me@kronn.example.com:443');
+    config.setNetworkExposure.mockRejectedValueOnce(new Error('The public address must be an https:// origin'));
+    await mountIdentity();
+
+    await act(async () => { fireEvent.click(screen.getByTestId('expose-proxy-save')); });
+    expect(await screen.findByTestId('expose-refusal')).toHaveTextContent('must be an https:// origin');
+
+    config.setNetworkExposure.mockResolvedValueOnce({ ...declared });
+    await act(async () => { fireEvent.click(screen.getByTestId('expose-proxy-withdraw')); });
+    // Withdrawing while exposed would leave plain HTTP: the exposure goes off with it.
+    await waitFor(() => expect(config.setNetworkExposure).toHaveBeenLastCalledWith(false, { tls_terminated_by_proxy: false }));
+  });
+
+  it('leaves an environment declaration to the environment', async () => {
+    config.getNetworkExposure.mockResolvedValue({ ...declared, tls_terminated_by_proxy: true, tls_declared_by_env: true, public_origin: 'https://kronn.example.com' });
+    contacts.inviteCode.mockResolvedValue('kronns:me@kronn.example.com:443');
+    await mountIdentity();
+    expect(screen.getByTestId('expose-proxy-env')).toBeInTheDocument();
+    expect(screen.queryByTestId('expose-proxy-save')).not.toBeInTheDocument();
   });
 });
 

@@ -26,6 +26,16 @@
 //! and relinked between the checks on Unix, deletion of a hard link while
 //! the file is open on Windows). Closing it needs OS isolation or protected
 //! staging, i.e. the rooted primitive planned in KT-1055.
+//!
+//! Known residual of `remove_if_same` (KT-1609, named by the KT-1594 review):
+//! the name is compared with the identity of the file that was read just
+//! before the unlink, so a swap in the instant between that check and
+//! `unlinkat` is still possible (there is no unlink-if-same system call). On
+//! Windows the identity is only the size and the last write time, weaker than
+//! the device, inode and change time of Unix: a file rewritten to the same
+//! size within the timestamp's resolution passes. The one caller (deleting a
+//! set-aside `config.toml`, `core::set_aside`) acts on the owner's request, on
+//! a file only Kronn writes, and re-assesses it from the bytes it unlinks.
 
 use std::io;
 use std::path::{Component, Path};
@@ -191,7 +201,21 @@ mod imp {
         Ok(st)
     }
 
+    /// What names one file at one moment: device, inode, change time, size.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Identity {
+        dev: u64,
+        ino: u64,
+        ctime: i64,
+        ctime_nsec: i64,
+        len: u64,
+    }
+
     pub fn read(root: &Path, rel: &Path, max: u64) -> io::Result<Vec<u8>> {
+        read_identified(root, rel, max).map(|(bytes, _)| bytes)
+    }
+
+    pub fn read_identified(root: &Path, rel: &Path, max: u64) -> io::Result<(Vec<u8>, Identity)> {
         let (dir, name) = parent_dir(root, rel, false)?;
         // O_NONBLOCK: opening a FIFO must fail or return, never hang.
         let file = File::from(open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK)?);
@@ -224,7 +248,39 @@ mod imp {
         if bytes.len() as u64 > max {
             return Err(super::refused("the file is larger than the limit"));
         }
-        Ok(bytes)
+        // Taken from the descriptor that was read: what was read and what the
+        // name points at are the same file only while this still matches.
+        let id = Identity {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            ctime: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+            len: bytes.len() as u64,
+        };
+        Ok((bytes, id))
+    }
+
+    /// Unlinks `rel` only when the name still names the file `id` was taken
+    /// from (same device, inode, change time and size, one link).
+    pub fn remove_if_same(root: &Path, rel: &Path, id: &Identity) -> io::Result<()> {
+        let (dir, name) = parent_dir(root, rel, false)?;
+        let st = stat_at(&dir, &name)?;
+        // Casts to the libc aliases: field widths differ by platform.
+        let same = (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && st.st_nlink == 1
+            && st.st_dev as u64 == id.dev
+            && st.st_ino as u64 == id.ino
+            && st.st_ctime as i64 == id.ctime
+            && st.st_ctime_nsec as i64 == id.ctime_nsec
+            && st.st_size as u64 == id.len;
+        if !same {
+            return Err(super::refused("the file changed since it was read"));
+        }
+        // SAFETY: as in open_at.
+        if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// A fresh temporary file in `dir`, created exclusively under a random
@@ -319,6 +375,26 @@ mod imp {
         }
         Ok(())
     }
+
+    pub fn rename(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
+        let (from_dir, from_name) = parent_dir(root, from, false)?;
+        let (to_dir, to_name) = parent_dir(root, to, true)?;
+        // SAFETY: both descriptors are open directories and both names
+        // NUL-terminated; the entries are renamed relative to those handles, so
+        // a parent swapped for a link after the walk is not followed.
+        let renamed = unsafe {
+            libc::renameat(
+                from_dir.as_raw_fd(),
+                from_name.as_ptr(),
+                to_dir.as_raw_fd(),
+                to_name.as_ptr(),
+            )
+        };
+        if renamed != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
@@ -352,7 +428,19 @@ mod imp {
         Ok(info.nNumberOfLinks)
     }
 
+    /// What names one file at one moment: size and last write time.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Identity {
+        len: u64,
+        written: u64,
+    }
+
     pub fn read(root: &Path, rel: &Path, max: u64) -> io::Result<Vec<u8>> {
+        read_identified(root, rel, max).map(|(bytes, _)| bytes)
+    }
+
+    pub fn read_identified(root: &Path, rel: &Path, max: u64) -> io::Result<(Vec<u8>, Identity)> {
+        use std::os::windows::fs::MetadataExt;
         let path = guarded(root, rel)?;
         let mut file = OpenOptions::new()
             .read(true)
@@ -373,7 +461,22 @@ mod imp {
         if bytes.len() as u64 > max {
             return Err(super::refused("the file is larger than the limit"));
         }
-        Ok(bytes)
+        let id = Identity {
+            len: bytes.len() as u64,
+            written: meta.last_write_time(),
+        };
+        Ok((bytes, id))
+    }
+
+    /// Removes `rel` only when it still has the size and write time of `id`.
+    pub fn remove_if_same(root: &Path, rel: &Path, id: &Identity) -> io::Result<()> {
+        use std::os::windows::fs::MetadataExt;
+        let path = guarded(root, rel)?;
+        let meta = std::fs::symlink_metadata(&path)?;
+        if !meta.is_file() || meta.len() != id.len || meta.last_write_time() != id.written {
+            return Err(super::refused("the file changed since it was read"));
+        }
+        std::fs::remove_file(path)
     }
 
     pub fn write(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -433,6 +536,15 @@ mod imp {
     pub fn remove(root: &Path, rel: &Path) -> io::Result<()> {
         std::fs::remove_file(guarded(root, rel)?)
     }
+
+    pub fn rename(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
+        let from = guarded(root, from)?;
+        let to = guarded(root, to)?;
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(from, to)
+    }
 }
 
 /// Reads `rel` under `root`: a regular, single-link file reached without
@@ -445,6 +557,21 @@ pub fn read(root: &Path, rel: &Path) -> io::Result<Vec<u8>> {
 /// before it is read, and a file that grows while it is read stays bounded.
 pub fn read_capped(root: &Path, rel: &Path, max: u64) -> io::Result<Vec<u8>> {
     imp::read(root, rel, max)
+}
+
+/// What names one file at one moment, to unlink it later only if it is still
+/// the one that was read.
+pub use imp::Identity;
+
+/// [`read_capped`] and the identity of the file that was read.
+pub fn read_identified(root: &Path, rel: &Path, max: u64) -> io::Result<(Vec<u8>, Identity)> {
+    imp::read_identified(root, rel, max)
+}
+
+/// Removes `rel` under `root` only if it still names the file `id` was taken
+/// from: a name swapped for another file after the read is refused.
+pub fn remove_if_same(root: &Path, rel: &Path, id: &Identity) -> io::Result<()> {
+    imp::remove_if_same(root, rel, id)
 }
 
 /// Replaces `rel` under `root` with `bytes` (fresh file renamed over it),
@@ -470,7 +597,17 @@ pub fn remove(root: &Path, rel: &Path) -> io::Result<()> {
     imp::remove(root, rel)
 }
 
-#[cfg(all(test, unix))]
+/// Renames `from` to `to`, both under `root`, creating the missing parents of
+/// `to`. Every directory on either path is walked without following a link and
+/// the rename is made between those open directories (Unix), so a parent
+/// swapped for a symlink while this runs is never followed. A directory is
+/// replaced only when the destination is an empty one; a link is moved, not
+/// followed.
+pub fn rename(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
+    imp::rename(root, from, to)
+}
+
+#[cfg(all(test, unix))] // exercises rooted_io's openat/O_NOFOLLOW paths with symlinks, FIFOs, unix sockets and libc
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
@@ -574,6 +711,43 @@ mod tests {
         });
         assert!(read(root.path(), Path::new("hard")).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_file_is_removed_only_if_the_name_still_names_what_was_read() {
+        let (root, _outside) = dirs();
+        let path = root.path().join("a");
+
+        // Untouched: removed.
+        std::fs::write(&path, "one").unwrap();
+        let (bytes, id) = read_identified(root.path(), Path::new("a"), 64).unwrap();
+        assert_eq!(bytes, b"one");
+        remove_if_same(root.path(), Path::new("a"), &id).unwrap();
+        assert!(!path.exists());
+
+        // Replaced by another file (new inode) after the read: kept.
+        std::fs::write(&path, "one").unwrap();
+        let (_, id) = read_identified(root.path(), Path::new("a"), 64).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "one").unwrap();
+        assert!(remove_if_same(root.path(), Path::new("a"), &id).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"one");
+
+        // Rewritten in place after the read: kept.
+        let (_, id) = read_identified(root.path(), Path::new("a"), 64).unwrap();
+        std::fs::write(&path, "one, and a secret added since").unwrap();
+        assert!(remove_if_same(root.path(), Path::new("a"), &id).is_err());
+        assert!(path.exists());
+
+        // Swapped for a link after the read: the link is not followed.
+        let (_, id) = read_identified(root.path(), Path::new("a"), 64).unwrap();
+        let elsewhere = root.path().join("b");
+        std::fs::write(&elsewhere, "keep").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink(&elsewhere, &path).unwrap();
+        assert!(remove_if_same(root.path(), Path::new("a"), &id).is_err());
+        assert!(path.symlink_metadata().is_ok());
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"keep");
     }
 
     #[test]
@@ -695,5 +869,23 @@ mod tests {
         // SAFETY: valid path; test-only.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
         assert!(read(root.path(), Path::new("pipe")).is_err());
+    }
+    #[test]
+    fn a_rename_creates_parents_and_never_follows_a_link_parent() {
+        let (root, outside) = dirs();
+        std::fs::create_dir(root.path().join("staging")).unwrap();
+        std::fs::write(root.path().join("staging/f"), "seed").unwrap();
+        rename(root.path(), Path::new("staging"), Path::new("a/b/c")).unwrap();
+        assert_eq!(std::fs::read(root.path().join("a/b/c/f")).unwrap(), b"seed");
+        assert!(!root.path().join("staging").exists());
+
+        // A parent that is a link (swapped in after any earlier check) is refused.
+        std::fs::create_dir(root.path().join("staging2")).unwrap();
+        symlink(outside.path(), root.path().join("planted")).unwrap();
+        assert!(rename(root.path(), Path::new("staging2"), Path::new("planted/c")).is_err());
+        assert!(!outside.path().join("c").exists());
+        assert!(root.path().join("staging2").exists());
+        // Nor may the source be reached through one.
+        assert!(rename(root.path(), Path::new("planted/x"), Path::new("y")).is_err());
     }
 }

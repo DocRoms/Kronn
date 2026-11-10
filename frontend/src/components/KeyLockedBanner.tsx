@@ -9,6 +9,9 @@ import { RecoveryRestorePanel } from './RecoveryRestorePanel';
 import { StartNewKeyPanel } from './StartNewKeyPanel';
 import { AlertTriangle } from 'lucide-react';
 import type { RecoveryStatus } from '../types/generated';
+import { AppLink } from './AppLink';
+import { settingsSectionPath } from '../lib/routes';
+import { clearCredentialLabel } from '../lib/clearCredentials';
 
 export function KeyLockedBanner() {
   const { t } = useT();
@@ -27,15 +30,30 @@ export function KeyLockedBanner() {
   }, []);
 
   if (!status) return null;
+  const clear = status.clear_credentials ?? [];
   return (
     <>
       {status.key_locked && (
         <div className="set-expose-warn" role="alert" data-testid="key-locked-banner">
           <AlertTriangle size={13} />
           <span>{t('keyLocked.banner')}</span>
+          {clear.length > 0 && (
+            <span data-testid="key-locked-clear-credentials">
+              {t('keyLocked.clearCredentials', clear.map(c => clearCredentialLabel(c, t)).join(', '))}
+            </span>
+          )}
           <RecoveryRestorePanel toast={toast} t={t} mode="restore" onRestored={() => window.location.reload()} />
           <StartNewKeyPanel t={t} onDone={() => window.location.reload()} />
           {message && <span className="set-hint-xs">{message}</span>}
+        </div>
+      )}
+      {!status.key_locked && status.config_holds_key && (
+        <div className="set-expose-warn" role="alert" data-testid="key-beside-data-banner">
+          <AlertTriangle size={13} />
+          <span>{t('keyLocked.keyBesideData')}</span>
+          <AppLink to={settingsSectionPath('settings-recovery')} className="kr-inline-link">
+            {t('keyLocked.keyBesideDataLink')}
+          </AppLink>
         </div>
       )}
       {!status.key_locked && status.credentials_unavailable && (

@@ -287,6 +287,8 @@ pub async fn save_api_key(
     match config::save(&config).await {
         Ok(_) => {
             *live = config;
+            // A new or changed key may lift a provider quota (KT-1657).
+            crate::workflows::quota_wait::request_recheck();
             Json(ApiResponse::ok(ApiKeyDisplay {
                 id: key.id,
                 name: key.name,
@@ -363,6 +365,8 @@ pub async fn activate_api_key(
         match config::save(&config).await {
             Ok(_) => {
                 *live = config;
+                // Another account may not be out of quota (KT-1657).
+                crate::workflows::quota_wait::request_recheck();
                 Json(ApiResponse::ok(()))
             }
             Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
@@ -880,6 +884,37 @@ fn normalize_mention_color(color: Option<&str>) -> Result<Option<String>, &'stat
     Ok(Some(color.to_ascii_lowercase()))
 }
 
+/// POST /api/config/agent-tools
+/// Set (or clear) the operator switch for the Kronn tool executor on one HTTP
+/// agent (KT-1600). CLI agents bring their own tools and have no such switch;
+/// a named `Custom` connection carries its own setting on the connection.
+pub async fn set_agent_tools(
+    State(state): State<AppState>,
+    Json(req): Json<SetAgentToolsRequest>,
+) -> Json<ApiResponse<()>> {
+    let mut config = state.config.write().await;
+    let agent = match req.agent {
+        AgentType::Ollama => &mut config.agents.ollama,
+        AgentType::LiteLlm => &mut config.agents.lite_llm,
+        AgentType::Nvidia => &mut config.agents.nvidia,
+        AgentType::Custom => {
+            return Json(ApiResponse::err(
+                "Set the tools option on the external API connection itself",
+            ))
+        }
+        _ => {
+            return Json(ApiResponse::err(
+                "Only HTTP agents have a tool executor switch",
+            ))
+        }
+    };
+    agent.tools_enabled = req.enabled;
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(error) => Json(ApiResponse::err(format!("Failed to save: {error}"))),
+    }
+}
+
 /// POST /api/config/agent-mention-color
 /// Set (or reset) the color used by the UI for a canonical agent mention.
 pub async fn set_agent_mention_color(
@@ -966,6 +1001,9 @@ pub async fn get_server_config(
         disk_sweep_idle_hours: config.server.disk_sweep_idle_hours,
         p2p_enabled: config.server.p2p_enabled,
         frontend_origins: config.server.frontend_origins.clone(),
+        lane_seeds_copy_enabled: config.server.lane_seeds_copy_enabled,
+        lane_seeds_adopt_suggested: config.server.lane_seeds_adopt_suggested,
+        lane_seeds_strong_confirm: config.server.lane_seeds_strong_confirm,
         timezone: config.server.timezone.clone(),
         timezone_effective: crate::core::timezone::current().name().to_string(),
         timezone_detected: crate::core::timezone::detect_machine_timezone()
@@ -1019,6 +1057,15 @@ pub async fn set_server_config(
         config.server.p2p_enabled = enabled;
         // Off waits for the federation work in progress; none starts after.
         state.p2p.set(enabled);
+    }
+    if let Some(enabled) = req.lane_seeds_copy_enabled {
+        config.server.lane_seeds_copy_enabled = enabled;
+    }
+    if let Some(adopt) = req.lane_seeds_adopt_suggested {
+        config.server.lane_seeds_adopt_suggested = adopt;
+    }
+    if let Some(ask) = req.lane_seeds_strong_confirm {
+        config.server.lane_seeds_strong_confirm = ask;
     }
     if let Some(weight) = req.discussion_weight {
         config.server.discussion_weight = weight;
@@ -1145,9 +1192,10 @@ pub struct NetworkExposure {
     /// Reachable from other machines. Native: the configured host is a bind-all
     /// address. Docker: the host port publish (`KRONN_BIND`) is not loopback.
     pub exposed: bool,
-    /// The configured exposure differs from what the process bound at boot →
-    /// a restart is needed for it to take effect. Never true in Docker, where
-    /// the exposure is set by `KRONN_BIND` in the compose file, not by Settings.
+    /// The host the next boot would bind differs from what the process bound
+    /// at boot → a restart is needed for it to take effect. Never true in
+    /// Docker, where the exposure is set by `KRONN_BIND` in the compose file,
+    /// not by Settings.
     pub restart_required: bool,
     /// Running in a container: exposure is controlled by `KRONN_BIND`, so the
     /// Settings toggle has no effect and the UI explains `KRONN_BIND` instead.
@@ -1159,40 +1207,78 @@ pub struct NetworkExposure {
     pub reachable_ips: Vec<crate::core::tailscale::DetectedIp>,
     /// A network access token is in force: auth is on and a token exists.
     pub auth_token_set: bool,
+    /// KT-1596 — a TLS-terminating proxy on this machine is declared (Settings
+    /// or `KRONN_TLS_TERMINATED_BY_PROXY`): the only way, until Kronn serves
+    /// TLS itself, to be exposed without plain HTTP.
+    pub tls_terminated_by_proxy: bool,
+    /// The declaration comes from the environment, so Settings cannot withdraw it.
+    pub tls_declared_by_env: bool,
+    /// The proxy's public `https://` origin, the address invites advertise.
+    pub public_origin: Option<String>,
+    /// The configuration, or `KRONN_HOST`, asks for exposure that nothing
+    /// encrypts. The backend started (or will start) on loopback instead, and
+    /// hands out no invite code; Settings says why.
+    pub plain_http_blocked: bool,
+    /// Only in the reply to a declaration: the network access token, handed over
+    /// once because the loopback bypass is withdrawn from now on and the local
+    /// UI must hold it before its next call. Never part of a GET.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub issued_auth_token: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub struct SetNetworkExposureRequest {
     pub exposed: bool,
+    /// KT-1596 — declare (`true`) or withdraw (`false`) the TLS-terminating
+    /// proxy. Absent leaves it as it is.
+    #[serde(default)]
+    pub tls_terminated_by_proxy: Option<bool>,
+    /// The proxy's public `https://` origin. Absent leaves it, empty clears it.
+    #[serde(default)]
+    pub public_origin: Option<String>,
 }
 
 /// `(exposed, restart_required)` for the given runtime. In Docker the backend
 /// always binds `0.0.0.0` inside the container, so `config.server.host` says
 /// nothing: the real lever is `KRONN_BIND` and nothing here can need a restart.
-fn exposure_state(is_docker: bool, kronn_bind: Option<&str>, config_host: &str) -> (bool, bool) {
+/// Natively a restart is due when the host the next boot would bind (a declared
+/// proxy and a plain-HTTP fallback both bind loopback) is not the one bound now.
+fn exposure_state(
+    is_docker: bool,
+    kronn_bind: Option<&str>,
+    config_host: &str,
+    requested_host: &str,
+    proxy_declared: bool,
+) -> (bool, bool) {
     if is_docker {
         (
             crate::core::net_expose::lan_exposed(true, kronn_bind, config_host),
             false,
         )
     } else {
+        // The next boot binds what `KRONN_HOST` (when set) or the config asks.
+        let planned =
+            crate::core::net_expose::boot_bind(requested_host, false, None, false, proxy_declared);
         (
             crate::core::net_expose::is_exposed_host(config_host),
-            crate::core::net_expose::restart_required(config_host),
+            crate::core::net_expose::restart_required(&planned.bind_host),
         )
     }
 }
 
-/// GET /api/config/network-exposure
-pub async fn get_network_exposure(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<NetworkExposure>> {
-    let (host, port, auth_token_set) = {
+/// The exposure state as the GET returns it.
+async fn network_exposure_snapshot(state: &AppState) -> NetworkExposure {
+    let (host, port, token_set, proxy_declared, declared_by_env, public_origin) = {
         let config = state.config.read().await;
+        let declared = crate::core::net_expose::proxy_declared_for(&config.server);
         (
             config.server.host.clone(),
             config.server.listening_port(),
             auth_token_set(&config.server),
+            declared,
+            declared && !config.server.tls_terminated_by_proxy,
+            crate::core::net_expose::public_origin_for(&config.server),
         )
     };
     let reachable_ips = crate::core::tailscale::detect_all_ips().await;
@@ -1202,68 +1288,171 @@ pub async fn get_network_exposure(
         .flatten()
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty());
-    let (exposed, restart_required) = exposure_state(in_docker, kronn_bind.as_deref(), &host);
-    Json(ApiResponse::ok(NetworkExposure {
+    // What this boot is asked to bind, `KRONN_HOST` included: a loopback fallback
+    // caused by the environment is as real as one caused by the config.
+    let requested_host = crate::core::net_expose::resolve_bind_host(
+        crate::core::child_env::var("KRONN_HOST").ok().as_deref(),
+        in_docker,
+        &host,
+    );
+    let (exposed, restart_required) = exposure_state(
+        in_docker,
+        kronn_bind.as_deref(),
+        &host,
+        &requested_host,
+        proxy_declared,
+    );
+    NetworkExposure {
         exposed,
         restart_required,
         in_docker,
         kronn_bind,
         port,
         reachable_ips,
-        auth_token_set,
-    }))
+        auth_token_set: token_set,
+        tls_terminated_by_proxy: proxy_declared,
+        tls_declared_by_env: declared_by_env,
+        public_origin,
+        plain_http_blocked: crate::core::net_expose::plain_http_blocked(
+            in_docker,
+            &requested_host,
+            proxy_declared,
+        ),
+        issued_auth_token: None,
+    }
+}
+
+/// GET /api/config/network-exposure
+pub async fn get_network_exposure(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<NetworkExposure>> {
+    Json(ApiResponse::ok(network_exposure_snapshot(&state).await))
 }
 
 fn auth_token_set(server: &crate::models::ServerConfig) -> bool {
     server.auth_enabled && server.auth_token.as_deref().is_some_and(|t| !t.is_empty())
 }
 
-/// POST /api/config/network-exposure — flip LAN/Tailscale exposure.
+type ExposureReply = (StatusCode, Json<ApiResponse<NetworkExposure>>);
+
+fn exposure_refused(status: StatusCode, message: impl Into<String>) -> ExposureReply {
+    (status, Json(ApiResponse::err(message.into())))
+}
+
+/// POST /api/config/network-exposure — flip LAN/Tailscale exposure and declare
+/// the TLS proxy that carries it.
 ///
 /// Exposing binds `0.0.0.0` (vs `127.0.0.1`) and, secure-by-default, forces auth
 /// on + ensures a token exists: a LAN/Tailscale peer isn't localhost, so the
-/// loopback auth-bypass won't apply to it — but the owner's local UI keeps
-/// working through that same bypass, so this never locks them out. Takes effect
-/// on the next restart (the host is only bound at boot).
+/// loopback auth-bypass won't apply to it.
+///
+/// KT-1596 — exposing over plain HTTP is REFUSED here (409, with what is needed)
+/// rather than written to the config: a `0.0.0.0` the next boot cannot honour is
+/// a trap for the owner, who would find no way back in the UI. What carries the
+/// exposure is a TLS-terminating proxy on this machine, declared together with
+/// its public `https://` origin. Declaring one withdraws the loopback bypass
+/// (every proxied request is a loopback request), so the reply hands over a token
+/// minted by that very call (never the standing one) for the local UI to keep.
+/// Takes effect on the next restart (the host is only bound at boot).
 pub async fn set_network_exposure(
     State(state): State<AppState>,
     Json(req): Json<SetNetworkExposureRequest>,
-) -> Json<ApiResponse<NetworkExposure>> {
+) -> ExposureReply {
     // Docker binds 0.0.0.0 whatever the config says: writing the host would be
     // a silent no-op, so say where the real switch is instead.
     if crate::core::env::is_docker() {
-        return Json(ApiResponse::err(
-            "In Docker, network exposure is set by KRONN_BIND (docker-compose), not from Settings."
-                .to_string(),
-        ));
+        return exposure_refused(
+            StatusCode::CONFLICT,
+            "In Docker, network exposure is set by KRONN_BIND (docker-compose), not from Settings.",
+        );
     }
-    {
+    let issued_token = {
         let mut config = state.config.write().await;
         // Change a copy, adopt it only once saved: a failed save must not leave
         // a live token or host that was never stored.
         let mut next = config.clone();
+        let proxy_declared_before = crate::core::net_expose::proxy_declared_for(&config.server);
+        if let Some(origin) = req.public_origin.as_deref() {
+            let origin = origin.trim();
+            next.server.public_origin = if origin.is_empty() {
+                None
+            } else {
+                match crate::db::contacts::normalize_public_origin(origin) {
+                    Some(normalized) => Some(normalized),
+                    None => {
+                        return exposure_refused(
+                            StatusCode::BAD_REQUEST,
+                            "The public address must be an https:// origin: host and optional \
+                             port, no path (e.g. https://kronn.example.com).",
+                        )
+                    }
+                }
+            };
+        }
+        if let Some(declared) = req.tls_terminated_by_proxy {
+            next.server.tls_terminated_by_proxy = declared;
+        }
+        if next.server.tls_terminated_by_proxy
+            && crate::core::net_expose::public_origin_for(&next.server).is_none()
+        {
+            return exposure_refused(
+                StatusCode::BAD_REQUEST,
+                "Declaring a TLS proxy needs its public https:// address: invites advertise it \
+                 and peers dial it over wss.",
+            );
+        }
+        let declared = crate::core::net_expose::proxy_declared_for(&next.server);
+        if req.exposed {
+            if let Some(message) =
+                crate::core::net_expose::plain_http_exposure_refusal(false, declared)
+            {
+                return exposure_refused(StatusCode::CONFLICT, message);
+            }
+        }
         next.server.host = if req.exposed {
             "0.0.0.0".to_string()
         } else {
             "127.0.0.1".to_string()
         };
-        if req.exposed {
+        // A proxy fronting Kronn puts the network behind a loopback peer: it
+        // needs the token as much as a direct LAN bind does.
+        //
+        // The plaintext token leaves this route only when THIS call made it: a
+        // loopback caller before the proxy is declared (strict_localhost still
+        // off) must not be able to read the standing one. Without a token one is
+        // minted; on the transition to a declared proxy the standing one is
+        // rotated, as the local UI has to be handed a token to keep once the
+        // loopback bypass is withdrawn.
+        let mut issued = None;
+        if req.exposed || declared {
             next.server.auth_enabled = true;
-            if next.server.auth_token.as_deref().unwrap_or("").is_empty() {
+            let no_token = next.server.auth_token.as_deref().unwrap_or("").is_empty();
+            let proxy_transition = declared && !proxy_declared_before;
+            if no_token || proxy_transition {
                 if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
-                    return Json(ApiResponse::err(locked));
+                    return exposure_refused(StatusCode::CONFLICT, locked);
                 }
-                next.server.auth_token = Some(uuid::Uuid::new_v4().to_string());
+                let token = uuid::Uuid::new_v4().to_string();
+                next.server.auth_token = Some(token.clone());
                 next.server.auth_token_session_only = false;
                 next.server.auth_locked = false;
+                issued = Some(token);
             }
         }
         if let Err(e) = config::save(&next).await {
-            return Json(ApiResponse::err(format!("Failed to save: {}", e)));
+            return exposure_refused(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to save: {}", e),
+            );
         }
+        // The recovery proof the owner will need behind this proxy, ready now.
+        crate::core::net_expose::arm_local_proof(&next.server);
         *config = next;
-    }
-    get_network_exposure(State(state)).await
+        issued
+    };
+    let mut exposure = network_exposure_snapshot(&state).await;
+    exposure.issued_auth_token = issued_token;
+    (StatusCode::OK, Json(ApiResponse::ok(exposure)))
 }
 
 /// POST /api/config/auth-token/regenerate
@@ -1940,6 +2129,23 @@ pub(crate) async fn build_export(state: &AppState) -> Result<DbExport, String> {
         .await
         .map_err(|e| format!("DB error: {}", e))?;
 
+    let mut context_files = state
+        .db
+        .with_read_conn(crate::db::discussions::list_context_file_records)
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
+    let omitted = mark_exportable_blobs(
+        &mut context_files,
+        ZIP_CAP_CONTEXT_BLOB,
+        ZIP_CAP_CONTEXT_BLOBS_TOTAL,
+    );
+    if omitted > 0 {
+        tracing::warn!(
+            omitted,
+            "export: context file bytes left out (missing on disk or over the import limit)"
+        );
+    }
+
     let custom_skills: Vec<_> = crate::core::skills::list_all_skills()
         .into_iter()
         .filter(|s| !s.is_builtin)
@@ -1981,7 +2187,56 @@ pub(crate) async fn build_export(state: &AppState) -> Result<DbExport, String> {
         learning_rejections,
         assistant_conversations,
         api_access_policies: Some(api_access_policies),
+        context_files,
     })
+}
+
+/// Where the bytes of a context file sit in the archive.
+const CONTEXT_BLOB_PREFIX: &str = "context-files/";
+/// Per-file DECOMPRESSED cap for a context file's bytes: the upload limit of
+/// the context-file route.
+const ZIP_CAP_CONTEXT_BLOB: u64 = 160 * 1024 * 1024;
+/// All context file bytes of one archive together. It matches the 512 MiB
+/// import body limit, and the exporter stops at it too, so an archive this
+/// instance wrote is never refused for its blobs.
+const ZIP_CAP_CONTEXT_BLOBS_TOTAL: u64 = 512 * 1024 * 1024;
+
+/// A context file id usable as an archive entry name and as the prefix of a
+/// file name on disk (`save_file_to_disk` slices its first 8 bytes).
+fn is_blob_id(id: &str) -> bool {
+    (8..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Set `has_blob` on the rows whose bytes will ride in the archive: a regular
+/// file on disk, within the per-file cap and the archive's blob budget, so the
+/// archive stays importable. Returns how many rows had a file that was left out.
+fn mark_exportable_blobs(
+    records: &mut [crate::models::db::ContextFileRecord],
+    per_file_cap: u64,
+    total_cap: u64,
+) -> usize {
+    let (mut total, mut omitted) = (0u64, 0usize);
+    for record in records {
+        let Some(path) = record.disk_path.as_deref() else {
+            continue;
+        };
+        let size = std::fs::metadata(path)
+            .ok()
+            .filter(|meta| meta.is_file())
+            .map(|meta| meta.len())
+            .filter(|len| *len <= per_file_cap);
+        match size {
+            Some(len) if is_blob_id(&record.id) && total + len <= total_cap => {
+                total += len;
+                record.has_blob = true;
+            }
+            _ => omitted += 1,
+        }
+    }
+    omitted
 }
 
 /// HMAC-SHA256 (RFC 2104).
@@ -2138,7 +2393,19 @@ pub async fn export_data(State(state): State<AppState>) -> Response {
         carries_secrets,
     );
 
-    let bytes = match build_export_zip(&data_json, &config_toml, recovery_code.as_deref()) {
+    let blobs: Vec<(String, String)> = db_export
+        .context_files
+        .iter()
+        .filter(|record| record.has_blob)
+        .filter_map(|record| Some((record.id.clone(), record.disk_path.clone()?)))
+        .collect();
+    // The blobs are read from disk: off the async workers.
+    let zipped = tokio::task::spawn_blocking(move || {
+        build_export_zip(&data_json, &config_toml, recovery_code.as_deref(), &blobs)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("ZIP task failed: {e}")));
+    let bytes = match zipped {
         Ok(b) => b,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
@@ -2193,12 +2460,14 @@ fn export_recovery_code(
 }
 
 /// Assemble the export ZIP: data.json + config.toml (+ recovery.key when the
-/// user configured a recovery passphrase). Factored out of the handler so the
+/// user configured a recovery passphrase, + one `context-files/<id>` entry per
+/// `(id, disk path)` of `context_blobs`). Factored out of the handler so the
 /// archive layout is unit-testable.
 fn build_export_zip(
     data_json: &str,
     config_toml: &str,
     recovery_code: Option<&str>,
+    context_blobs: &[(String, String)],
 ) -> Result<Vec<u8>, String> {
     let mut buf = std::io::Cursor::new(Vec::new());
     {
@@ -2221,6 +2490,22 @@ fn build_export_zip(
                 .map_err(|e| format!("ZIP error: {}", e))?;
             std::io::Write::write_all(&mut zip, code.as_bytes())
                 .map_err(|e| format!("ZIP write error: {}", e))?;
+        }
+
+        for (id, path) in context_blobs {
+            // A file that vanished since `has_blob` was set is left out: the
+            // import reports a row without bytes instead of failing the export.
+            let Ok(file) = std::fs::File::open(path) else {
+                tracing::warn!(id, "export: context file bytes unreadable, left out");
+                continue;
+            };
+            zip.start_file(format!("{CONTEXT_BLOB_PREFIX}{id}"), options)
+                .map_err(|e| format!("ZIP error: {}", e))?;
+            std::io::copy(
+                &mut std::io::Read::take(file, ZIP_CAP_CONTEXT_BLOB),
+                &mut zip,
+            )
+            .map_err(|e| format!("ZIP write error: {}", e))?;
         }
 
         zip.finish()
@@ -2268,6 +2553,7 @@ fn persist_imported_recovery(dir: &std::path::Path, code: &str) -> Vec<String> {
 fn import_clear_statements(data: &DbExport) -> Vec<&'static str> {
     let mut stmts: Vec<&'static str> = Vec::new();
     if !data.discussions.is_empty() {
+        stmts.push("DELETE FROM context_files");
         stmts.push("DELETE FROM messages");
         stmts.push("DELETE FROM discussions");
     }
@@ -2310,8 +2596,87 @@ fn import_clear_statements(data: &DbExport) -> Vec<&'static str> {
     stmts
 }
 
+/// The context file bytes read out of an archive, by file id (KT-1602).
+#[derive(Default)]
+struct ContextBlobs(std::collections::HashMap<String, Vec<u8>>);
+
+/// Counts only: a failed assertion must not print the files.
+impl std::fmt::Debug for ContextBlobs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ContextBlobs({} file(s))", self.0.len())
+    }
+}
+
+/// Removes the files an import wrote unless it is told the import went through.
+struct WrittenBlobs {
+    paths: Vec<String>,
+    kept: bool,
+}
+
+impl Drop for WrittenBlobs {
+    fn drop(&mut self) {
+        if !self.kept {
+            for path in &self.paths {
+                crate::core::context_files::delete_image_from_disk(path);
+            }
+        }
+    }
+}
+
+/// Write the archive's context file bytes under this machine's context-file
+/// store. Returns the disk path of each file written and, for the rows that
+/// cannot be restored as they are, a warning each. Never touches the source
+/// machine's `disk_path`: the archive does not carry one.
+fn write_context_blobs(
+    records: &[crate::models::db::ContextFileRecord],
+    blobs: &ContextBlobs,
+) -> (
+    WrittenBlobs,
+    std::collections::HashMap<String, String>,
+    Vec<String>,
+) {
+    let mut written = WrittenBlobs {
+        paths: Vec::new(),
+        kept: false,
+    };
+    let mut paths = std::collections::HashMap::new();
+    let (mut missing, mut failed) = (0usize, 0usize);
+    for record in records.iter().filter(|r| r.has_blob) {
+        let Some(bytes) = blobs.0.get(&record.id).filter(|_| is_blob_id(&record.id)) else {
+            missing += 1;
+            continue;
+        };
+        match crate::core::context_files::save_file_to_disk(&record.id, &record.filename, bytes) {
+            Ok(path) => {
+                written.paths.push(path.clone());
+                paths.insert(record.id.clone(), path);
+            }
+            Err(e) => {
+                tracing::warn!(id = %record.id, "Import context file bytes not written: {e}");
+                failed += 1;
+            }
+        }
+    }
+    let mut warnings = Vec::new();
+    if missing > 0 {
+        warnings.push(format!(
+            "{missing} context file(s) came back without their bytes: the archive does not carry them"
+        ));
+    }
+    if failed > 0 {
+        warnings.push(format!(
+            "{failed} context file(s) came back without their bytes: they could not be written to disk"
+        ));
+    }
+    (written, paths, warnings)
+}
+
 /// Import DB data from a DbExport struct. Returns warnings and invalid paths.
-async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult, String> {
+async fn do_import_db(
+    state: &AppState,
+    data: &DbExport,
+    blobs: ContextBlobs,
+) -> Result<ImportResult, String> {
     let mut warnings = Vec::new();
     let mut invalid_paths = Vec::new();
 
@@ -2419,6 +2784,16 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     let learnings = data.learnings.clone();
     let learning_rejections = data.learning_rejections.clone();
     let assistant_conversations = data.assistant_conversations.clone();
+    // The bytes go to disk first: writing them inside the transaction would
+    // hold the write connection for as long as the disk takes (KT-1646).
+    let context_files = data.context_files.clone();
+    let (mut written, blob_paths, blob_warnings) = {
+        let records = context_files.clone();
+        tokio::task::spawn_blocking(move || write_context_blobs(&records, &blobs))
+            .await
+            .map_err(|e| format!("Import aborted, nothing was changed: {e}"))?
+    };
+    warnings.extend(blob_warnings);
     // Checked before the transaction: a policy that would not be accepted by
     // the settings route is not restored either.
     let api_access_policies = match &data.api_access_policies {
@@ -2456,6 +2831,25 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
                 for m in &d.messages {
                     if let Err(e) = crate::db::discussions::insert_message(&tx, &d.id, m) {
                         tracing::warn!("Import discussion message error: {e}");
+                    }
+                }
+            }
+            // After the discussions they belong to. A row that cannot be restored
+            // is logged and skipped, like the discussions and their messages.
+            for record in &context_files {
+                let disk_path = blob_paths.get(&record.id).map(String::as_str);
+                if let Err(e) =
+                    crate::db::discussions::insert_context_file_record(&tx, record, disk_path)
+                {
+                    tracing::warn!("Import context file error: {e}");
+                }
+            }
+            for record in &context_files {
+                if let Some(source) = &record.extracted_from_asset_id {
+                    if let Err(e) =
+                        crate::db::discussions::link_context_file_source(&tx, &record.id, source)
+                    {
+                        tracing::warn!("Import context file source link error: {e}");
                     }
                 }
             }
@@ -2546,6 +2940,8 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         })
         .await
         .map_err(|e| format!("{e:#}"))?;
+    // The import went through: the bytes written for it stay.
+    written.kept = true;
     if pruned > 0 {
         warnings.push(format!(
             "{pruned} quick-prompt version row(s) dropped — their prompts are not part of this import"
@@ -2695,9 +3091,61 @@ fn read_zip_entry_capped(f: impl std::io::Read, name: &str, cap: u64) -> Result<
     Ok(contents)
 }
 
-/// Extract data.json, config.toml and the optional recovery blob from a ZIP
-/// file (synchronous, no await).
-fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>, Option<String>), String> {
+/// Extract data.json, config.toml, the optional recovery blob and the optional
+/// context file bytes from a ZIP file (synchronous, no await).
+/// What an import archive holds besides the database rows.
+type ExtractedArchive = (DbExport, Option<AppConfig>, Option<String>, ContextBlobs);
+
+/// The context file bytes of an archive, counted against a decompressed budget
+/// (KT-1602): each file within `ZIP_CAP_CONTEXT_BLOB`, all of them together
+/// within `ZIP_CAP_CONTEXT_BLOBS_TOTAL`, and only entries a `has_blob` row of
+/// data.json names are read at all. Going over either cap is a hard error:
+/// silently dropping bytes would hand back a restore that looks complete.
+fn read_context_blobs(
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+    data: &DbExport,
+    per_file_cap: u64,
+    total_cap: u64,
+) -> Result<ContextBlobs, String> {
+    let wanted: std::collections::HashSet<&str> = data
+        .context_files
+        .iter()
+        .filter(|record| record.has_blob && is_blob_id(&record.id))
+        .map(|record| record.id.as_str())
+        .collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .filter_map(|name| name.ok())
+        .filter(|name| {
+            name.strip_prefix(CONTEXT_BLOB_PREFIX)
+                .is_some_and(|id| wanted.contains(id))
+        })
+        .map(|name| name.into_owned())
+        .collect();
+    let mut blobs = ContextBlobs::default();
+    let mut total = 0u64;
+    for name in names {
+        let mut entry = archive
+            .by_name(&name)
+            .map_err(|e| format!("Failed to read {name}: {e}"))?;
+        let cap = per_file_cap.min(total_cap - total);
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(&mut entry, cap + 1), &mut bytes)
+            .map_err(|e| format!("Failed to read {name}: {e}"))?;
+        if bytes.len() as u64 > cap {
+            return Err(format!(
+                "{name} exceeds the decompressed context-file limit ({per_file_cap} bytes per \
+                 file, {total_cap} for all of them) — refusing (zip bomb?)"
+            ));
+        }
+        total += bytes.len() as u64;
+        let id = name[CONTEXT_BLOB_PREFIX.len()..].to_string();
+        blobs.0.insert(id, bytes);
+    }
+    Ok(blobs)
+}
+
+fn extract_zip(file_bytes: &[u8]) -> Result<ExtractedArchive, String> {
     let cursor = std::io::Cursor::new(file_bytes);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("Invalid ZIP: {}", e))?;
 
@@ -2730,7 +3178,14 @@ fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>, Option
         None
     };
 
-    Ok((data, imported_config, recovery_code))
+    let context_blobs = read_context_blobs(
+        &mut archive,
+        &data,
+        ZIP_CAP_CONTEXT_BLOB,
+        ZIP_CAP_CONTEXT_BLOBS_TOTAL,
+    )?;
+
+    Ok((data, imported_config, recovery_code, context_blobs))
 }
 
 /// POST /api/config/import — accepts ZIP (multipart) or JSON (legacy)
@@ -2757,13 +3212,13 @@ pub async fn import_data(
 
     if is_zip {
         // Extract ZIP (sync — no await needed, avoids Send issues with zip reader)
-        let (data, imported_config, recovery_code) = match extract_zip(&file_bytes) {
+        let (data, imported_config, recovery_code, context_blobs) = match extract_zip(&file_bytes) {
             Ok(r) => r,
             Err(e) => return Json(ApiResponse::err(e)),
         };
 
         // Import DB data
-        let mut result = match do_import_db(&state, &data).await {
+        let mut result = match do_import_db(&state, &data, context_blobs).await {
             Ok(r) => r,
             Err(e) => return Json(ApiResponse::err(e)),
         };
@@ -2792,7 +3247,7 @@ pub async fn import_data(
             Err(e) => return Json(ApiResponse::err(format!("Invalid JSON: {}", e))),
         };
 
-        let result = match do_import_db(&state, &data).await {
+        let result = match do_import_db(&state, &data, ContextBlobs::default()).await {
             Ok(r) => r,
             Err(e) => return Json(ApiResponse::err(e)),
         };
@@ -2801,9 +3256,33 @@ pub async fn import_data(
     }
 }
 
+/// Why a reset must not run now, if it must not (see `reset`). Pure + tested.
+/// `proxy_declared` is the effective declaration: the config field or the
+/// `KRONN_TLS_TERMINATED_BY_PROXY` env flag, which a reset would not clear.
+fn reset_refusal(proxy_declared: bool) -> Option<String> {
+    proxy_declared.then(|| {
+        "Reset refused: a TLS proxy is declared for this instance, and a reset would forget \
+         that at the next start, letting everyone behind the proxy in as the local owner. \
+         Clear the proxy declaration first (Settings › Server & network access, and \
+         KRONN_TLS_TERMINATED_BY_PROXY if it is set in the environment)."
+            .to_string()
+    })
+}
+
 /// POST /api/setup/reset
 /// Delete config file to trigger first-run wizard again
 pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
+    // KT-1596 — a reset leaves a key-only config.toml, so a TLS proxy declared in
+    // the config would be forgotten at the next start while the proxy keeps
+    // forwarding the whole network from 127.0.0.1, and every proxied request
+    // would regain the loopback owner trust. Clearing the declaration is a
+    // deliberate act in Settings, never a side effect of a reset. Checked before
+    // anything is deleted.
+    // The effective declaration counts: config or env.
+    let declared = crate::core::net_expose::proxy_declared_for(&state.config.read().await.server);
+    if let Some(refusal) = reset_refusal(declared) {
+        return Json(ApiResponse::err(refusal));
+    }
     // Clear the data first: a failure reports, and nothing else changes.
     if let Err(e) = state
         .db
@@ -2871,6 +3350,11 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     cfg.server.auth_strict_localhost = previous.server.auth_strict_localhost;
     // A reset does not turn the vault protection off or back on behind the owner's back.
     cfg.server.protect_vault_from_agents = previous.server.protect_vault_from_agents;
+    // Nor the lane-seed switches (KT-1438): what is copied into a worktree, and
+    // whether changing a seed asks for the code, are the owner's standing choice.
+    cfg.server.lane_seeds_copy_enabled = previous.server.lane_seeds_copy_enabled;
+    cfg.server.lane_seeds_adopt_suggested = previous.server.lane_seeds_adopt_suggested;
+    cfg.server.lane_seeds_strong_confirm = previous.server.lane_seeds_strong_confirm;
     cfg.server.auth_locked = previous.server.auth_locked;
     cfg.server.auth_token_session_only = previous.server.auth_token_session_only;
     // Defaults turn P2P off; the gate follows.
@@ -3071,6 +3555,54 @@ pub struct RecoveryStatus {
     /// recovery.key parses but its payload is damaged: replaced without a
     /// passphrase (kept aside).
     pub recovery_damaged: bool,
+    /// Credentials config.toml still carries in clear (names only, never
+    /// values): a locked or missing key at boot leaves them there (KT-1594).
+    pub clear_credentials: Vec<ClearCredentialView>,
+    /// The `config.toml.corrupt.*` files kept aside, each with the credentials
+    /// it holds and whether the owner may delete it now (KT-1594).
+    pub set_aside_files: Vec<SetAsideFileView>,
+}
+
+/// A credential found in clear in a file, without its value.
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ClearCredentialView {
+    /// `provider_key` or `auth_token`.
+    pub kind: String,
+    pub name: String,
+    pub provider: String,
+    /// The same value is in `stored_credentials` and the key in use decrypts it.
+    pub verified: bool,
+}
+
+/// A set-aside `config.toml.corrupt.<ts>` and what deleting it would lose.
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct SetAsideFileView {
+    pub name: String,
+    pub credentials: Vec<ClearCredentialView>,
+    /// The file carries an encryption key.
+    pub holds_key: bool,
+    /// Every credential is verified and no key or row depends on the file.
+    pub deletable: bool,
+    /// Why it is not deletable: `unreadable`, `sealed`, `key_locked`,
+    /// `unparsed`, `unknown_value`, `unverified`, `key_needed`, `key_bound_files`,
+    /// `key_check_unavailable` or `only_key_copy`.
+    pub blocker: Option<String>,
+}
+
+fn credential_views(
+    verdicts: Vec<(crate::core::set_aside::ClearCredential, bool)>,
+) -> Vec<ClearCredentialView> {
+    verdicts
+        .into_iter()
+        .map(|(c, verified)| ClearCredentialView {
+            kind: c.kind.to_string(),
+            name: c.name,
+            provider: c.provider,
+            verified,
+        })
+        .collect()
 }
 
 #[derive(serde::Deserialize)]
@@ -3092,7 +3624,70 @@ pub async fn recovery_status(State(state): State<AppState>) -> Json<ApiResponse<
             .await
             .unwrap_or(0) as u32;
     }
+    if let Some(dir) = dir.as_deref() {
+        if let Err(e) = fill_clear_credentials(&state.db, dir, key.as_deref(), &mut status).await {
+            tracing::warn!("recovery status: clear credentials could not be checked: {e:#}");
+        }
+    }
     Json(ApiResponse::ok(status))
+}
+
+/// Credentials still in clear in config.toml, and the set-aside files with
+/// the verdict on each (KT-1594).
+async fn fill_clear_credentials(
+    db: &crate::db::Database,
+    dir: &std::path::Path,
+    key: Option<&str>,
+    status: &mut RecoveryStatus,
+) -> anyhow::Result<()> {
+    use crate::core::set_aside;
+    if let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) {
+        let clear = set_aside::clear_credentials_in(&text);
+        status.clear_credentials = credential_views(set_aside::verify(db, key, clear).await?);
+    }
+    // The key copies are read now, not taken from the boot report: a rekey
+    // since the boot would make that stale.
+    let vaults = crate::core::keyvault::KeyStore::standard(dir);
+    for name in set_aside::files(dir) {
+        let view = match set_aside::assess(db, dir, key, &name, &vaults).await {
+            Ok(a) => SetAsideFileView {
+                deletable: a.deletable(),
+                blocker: a.blocker.as_ref().map(|b| b.code().to_string()),
+                holds_key: a.holds_key,
+                credentials: credential_views(a.credentials),
+                name,
+            },
+            Err(e) => {
+                tracing::warn!("set-aside file {name}: {e:#}");
+                continue;
+            }
+        };
+        status.set_aside_files.push(view);
+    }
+    Ok(())
+}
+
+/// DELETE /api/config/recovery/set-aside-files/{name} — delete a kept
+/// `config.toml.corrupt.<ts>` once every credential in it is verified in the
+/// encrypted store (KT-1594). Asks for the strong confirmation
+/// (`SENSITIVE_DELETES`); the check is made again here, whatever the screen
+/// showed.
+pub async fn delete_set_aside_file(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Json<ApiResponse<()>> {
+    let dir = match config::config_dir() {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::err(e.to_string())),
+    };
+    // Serializes with the writers of config and the key.
+    let config = state.config.write().await;
+    let key = config.encryption_secret.clone();
+    let vaults = crate::core::keyvault::KeyStore::standard(&dir);
+    match crate::core::set_aside::delete(&state.db, &dir, key.as_deref(), &name, &vaults).await {
+        Ok(()) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("{e:#}"))),
+    }
 }
 
 fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> RecoveryStatus {
@@ -3145,6 +3740,8 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
             == Some(crate::core::recovery::RecoveryMatch::Unverified),
         recovery_damaged: recovery_state == Some(crate::core::recovery::RecoveryMatch::Unreadable)
             && dir.and_then(crate::core::recovery::load_blob).is_some(),
+        clear_credentials: Vec::new(),
+        set_aside_files: Vec::new(),
         copies: report.copies as u32,
         stale_sources: names(&report.stale_sources),
         invalid_sources: names(&report.invalid_sources),
@@ -3675,7 +4272,7 @@ mod tests {
         assert_eq!(codex_auth_path(), host.join(".codex/auth.json"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     #[test]
     fn codex_sync_failure_leaves_the_original_byte_identical() {
         use std::os::unix::fs::PermissionsExt;
@@ -3706,7 +4303,7 @@ mod tests {
     /// A mount is a top-level directory like any other. This is what makes
     /// `/workspace` reachable in a Docker install without anyone typing it,
     /// while the operating system's own directories stay out of the way.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mount points and system roots (/etc, /usr, /proc)
     #[test]
     fn a_mount_point_is_offered_and_the_system_is_not() {
         for monte in [
@@ -3737,7 +4334,7 @@ mod tests {
         }]
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn an_unreadable_directory_is_an_error_not_an_empty_listing() {
         use std::os::unix::fs::PermissionsExt;
@@ -3816,7 +4413,7 @@ mod tests {
 
     /// And a symlink is not a way around it: the check happens after
     /// canonicalization, so the link's target is what is judged.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlink_does_not_walk_out_of_a_root() {
         let dedans = tempfile::tempdir().unwrap();
@@ -3833,7 +4430,7 @@ mod tests {
     }
 
     /// `..` likewise: it resolves before the check.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_parent_reference_does_not_walk_out_of_a_root() {
         let root = tempfile::tempdir().unwrap();
@@ -4089,7 +4686,7 @@ mod tests {
         // Within caps → the archive still imports (the damaged recovery entry
         // is passed on for persist_imported_recovery to report, C3-20).
         let bytes = zip_with(&[("data.json", &data), ("recovery.key", b"not-a-code")]);
-        let (export, cfg, key) = extract_zip(&bytes).expect("valid archive imports");
+        let (export, cfg, key, _) = extract_zip(&bytes).expect("valid archive imports");
         assert_eq!(export.version, crate::models::db::CURRENT_EXPORT_VERSION);
         assert!(cfg.is_none());
         assert_eq!(key.as_deref(), Some("not-a-code"));
@@ -4151,7 +4748,9 @@ mod tests {
 
         // Import into a FRESH instance — both tables restored verbatim.
         let target = mk_state().await;
-        do_import_db(&target, &export).await.expect("import");
+        do_import_db(&target, &export, ContextBlobs::default())
+            .await
+            .expect("import");
         let (versions, rej_count) = target
             .db
             .with_conn(|conn| {
@@ -4254,12 +4853,14 @@ mod tests {
             .await
             .unwrap();
         let export = build_export(&source).await.expect("export");
-        assert_eq!(export.version, 7);
+        assert_eq!(export.version, crate::models::db::CURRENT_EXPORT_VERSION);
         let json = serde_json::to_string(&export).unwrap();
         let export: DbExport = serde_json::from_str(&json).unwrap();
 
         let target = access_policy_state(&secret, &server.uri()).await;
-        do_import_db(&target, &export).await.expect("import");
+        do_import_db(&target, &export, ContextBlobs::default())
+            .await
+            .expect("import");
         let restored = target
             .db
             .with_conn(|conn| crate::db::api_access_policies::get(conn, "custom-notes"))
@@ -4320,7 +4921,9 @@ mod tests {
         old["version"] = serde_json::json!(6);
         let old: DbExport = serde_json::from_value(old).unwrap();
         assert!(old.api_access_policies.is_none());
-        do_import_db(&state, &old).await.expect("v6 import");
+        do_import_db(&state, &old, ContextBlobs::default())
+            .await
+            .expect("v6 import");
         let kept = state
             .db
             .with_conn(|conn| crate::db::api_access_policies::get(conn, "custom-notes"))
@@ -4377,7 +4980,9 @@ mod tests {
         let export = build_export(&source).await.expect("export");
         assert_eq!(export.assistant_conversations.len(), 1);
         let target = mk_state().await;
-        do_import_db(&target, &export).await.expect("import");
+        do_import_db(&target, &export, ContextBlobs::default())
+            .await
+            .expect("import");
         let found = target
             .db
             .with_conn(|conn| {
@@ -4417,7 +5022,9 @@ mod tests {
         let older: DbExport = serde_json::from_value(older).expect("older archive reads");
         assert!(older.assistant_conversations.is_empty());
         let restored = mk_state().await;
-        do_import_db(&restored, &older).await.expect("older import");
+        do_import_db(&restored, &older, ContextBlobs::default())
+            .await
+            .expect("older import");
     }
 
     #[tokio::test]
@@ -4463,7 +5070,9 @@ mod tests {
         let mut v4 = empty_export();
         v4.version = 4;
         v4.quick_prompts = vec![kept];
-        do_import_db(&state, &v4).await.expect("v4 import");
+        do_import_db(&state, &v4, ContextBlobs::default())
+            .await
+            .expect("v4 import");
 
         let (kept_versions, dropped_versions) = state
             .db
@@ -4561,7 +5170,9 @@ mod tests {
             .unwrap();
         let mut export = empty_export();
         export.workflows = vec![arriving];
-        do_import_db(&state, &export).await.expect("import");
+        do_import_db(&state, &export, ContextBlobs::default())
+            .await
+            .expect("import");
 
         let (approval, active) = state
             .db
@@ -4612,6 +5223,7 @@ mod tests {
             assistant_conversations: vec![],
             api_access_policies: None,
             trust_seal: None,
+            context_files: vec![],
         }
     }
 
@@ -4716,6 +5328,67 @@ mod tests {
         // longer keeps a dead run alive.
         assert_eq!(crate::models::clamp_agent_global_timeout_min(240), 240);
         assert_eq!(crate::models::clamp_agent_global_timeout_min(241), 240);
+    }
+
+    /// KT-1594: the status lists, by name only, what is still in clear and
+    /// what a set-aside file would lose.
+    #[tokio::test]
+    async fn the_status_lists_clear_credentials_and_the_set_aside_verdicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::core::crypto::generate_secret();
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let clear = "[server]\nauth_token = \"clear-token-fixture-1\"\n";
+        std::fs::write(dir.path().join("config.toml"), clear).unwrap();
+        std::fs::write(dir.path().join("config.toml.corrupt.1"), clear).unwrap();
+
+        // Key locked: everything is listed, nothing is verified or deletable.
+        let mut status = recovery_status_in(Some(dir.path()), None);
+        fill_clear_credentials(&db, dir.path(), None, &mut status)
+            .await
+            .unwrap();
+        assert_eq!(status.clear_credentials.len(), 1);
+        assert!(!status.clear_credentials[0].verified);
+        assert_eq!(status.set_aside_files.len(), 1);
+        assert!(!status.set_aside_files[0].deletable);
+        assert_eq!(
+            status.set_aside_files[0].blocker.as_deref(),
+            Some("key_locked")
+        );
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(
+            !json.contains("clear-token-fixture-1"),
+            "a value leaked: {json}"
+        );
+
+        // The same value stored under the key in use: verified, deletable.
+        let enc = crate::core::crypto::encrypt(
+            "clear-token-fixture-1",
+            &crate::core::crypto::parse_secret(&key).unwrap(),
+        )
+        .unwrap();
+        db.with_conn(move |c| {
+            crate::db::stored_credentials::upsert_all(
+                c,
+                &[crate::db::stored_credentials::StoredCredential {
+                    kind: "auth_token".into(),
+                    id: "server".into(),
+                    name: String::new(),
+                    provider: String::new(),
+                    active: true,
+                    position: 0,
+                    value_encrypted: enc,
+                }],
+            )
+        })
+        .await
+        .unwrap();
+        let mut status = recovery_status_in(Some(dir.path()), Some(&key));
+        fill_clear_credentials(&db, dir.path(), Some(&key), &mut status)
+            .await
+            .unwrap();
+        assert!(status.clear_credentials[0].verified);
+        assert!(status.set_aside_files[0].deletable);
+        assert_eq!(status.set_aside_files[0].blocker, None);
     }
 
     #[test]
@@ -4843,6 +5516,7 @@ mod tests {
             quick_apis: vec![],
             quick_execs: vec![],
             learnings: vec![],
+            context_files: vec![],
         };
         let data_json = serde_json::to_string(&data).unwrap();
 
@@ -4863,7 +5537,7 @@ mod tests {
         let bytes = buf.into_inner();
 
         // Extract
-        let (extracted_data, extracted_config, recovery_code) = extract_zip(&bytes).unwrap();
+        let (extracted_data, extracted_config, recovery_code, _) = extract_zip(&bytes).unwrap();
         assert_eq!(extracted_data.version, 4);
         assert!(extracted_config.is_some());
         assert!(recovery_code.is_none(), "no recovery.key in this zip");
@@ -4947,7 +5621,9 @@ mod tests {
 
             let mut export = build_export(&state).await.unwrap();
             export.projects.retain(|p| p.id == "p1");
-            let result = do_import_db(&state, &export).await.unwrap();
+            let result = do_import_db(&state, &export, ContextBlobs::default())
+                .await
+                .unwrap();
             assert!(
                 result
                     .warnings
@@ -5001,7 +5677,7 @@ mod tests {
                 .await
                 .unwrap();
             let export = build_export(&state).await.unwrap();
-            let result = do_import_db(&state, &export).await.unwrap();
+            let result = do_import_db(&state, &export, ContextBlobs::default()).await.unwrap();
             assert!(
                 !result.warnings.iter().any(|w| w.contains("another key")),
                 "{:?}",
@@ -5012,7 +5688,7 @@ mod tests {
             let other = crate::core::crypto::generate_secret();
             foreign.mcp_configs[0].env_encrypted =
                 crate::db::mcps::encrypt_env(&env, &other).unwrap();
-            let result = do_import_db(&state, &foreign).await.unwrap();
+            let result = do_import_db(&state, &foreign, ContextBlobs::default()).await.unwrap();
             assert!(
                 result.warnings.iter().any(|w| w.contains("Re-encrypt imported secrets")),
                 "{:?}",
@@ -5052,7 +5728,7 @@ mod tests {
             broken.server_id = "missing-server".into();
             export.mcp_configs.push(broken);
 
-            let err = do_import_db(&state, &export).await.unwrap_err();
+            let err = do_import_db(&state, &export, ContextBlobs::default()).await.unwrap_err();
             assert!(err.contains("nothing was changed"), "{err}");
             let kept: String = state
                 .db
@@ -5339,7 +6015,9 @@ mod tests {
             ),
         ];
 
-        let report = do_import_db(&state, &export).await.expect("do_import_db");
+        let report = do_import_db(&state, &export, ContextBlobs::default())
+            .await
+            .expect("do_import_db");
 
         assert!(
             report
@@ -5453,7 +6131,9 @@ mod tests {
 
         // Re-importing the same export clears then re-inserts — neither entity
         // may duplicate nor disappear.
-        do_import_db(&state, &export).await.expect("do_import_db");
+        do_import_db(&state, &export, ContextBlobs::default())
+            .await
+            .expect("do_import_db");
         let qas = state
             .db
             .with_conn(crate::db::quick_apis::list_quick_apis)
@@ -5557,6 +6237,7 @@ mod tests {
             quick_apis: vec![],
             quick_execs: vec![],
             learnings: vec![],
+            context_files: vec![],
         };
         let data_json = serde_json::to_string(&data).unwrap();
 
@@ -5570,7 +6251,7 @@ mod tests {
         }
         let bytes = buf.into_inner();
 
-        let (extracted_data, extracted_config, _) = extract_zip(&bytes).unwrap();
+        let (extracted_data, extracted_config, _, _) = extract_zip(&bytes).unwrap();
         assert_eq!(extracted_data.version, 4);
         assert!(extracted_config.is_none(), "config.toml should be optional");
     }
@@ -5584,9 +6265,9 @@ mod tests {
         let code = crate::core::recovery::to_code(&blob);
 
         let data_json = serde_json::to_string(&empty_export()).unwrap();
-        let bytes = build_export_zip(&data_json, "", Some(&code)).unwrap();
+        let bytes = build_export_zip(&data_json, "", Some(&code), &[]).unwrap();
 
-        let (_, _, extracted) = extract_zip(&bytes).unwrap();
+        let (_, _, extracted, _) = extract_zip(&bytes).unwrap();
         assert_eq!(
             extracted.as_deref(),
             Some(code.as_str()),
@@ -5603,8 +6284,8 @@ mod tests {
     #[test]
     fn export_zip_without_recovery_carries_no_blob() {
         let data_json = serde_json::to_string(&empty_export()).unwrap();
-        let bytes = build_export_zip(&data_json, "", None).unwrap();
-        let (_, _, extracted) = extract_zip(&bytes).unwrap();
+        let bytes = build_export_zip(&data_json, "", None, &[]).unwrap();
+        let (_, _, extracted, _) = extract_zip(&bytes).unwrap();
         assert!(extracted.is_none());
     }
 
@@ -5622,8 +6303,8 @@ mod tests {
         } else {
             damaged
         };
-        let bytes = build_export_zip(&data_json, "", Some(&damaged)).unwrap();
-        let (_, _, extracted) = extract_zip(&bytes).unwrap();
+        let bytes = build_export_zip(&data_json, "", Some(&damaged), &[]).unwrap();
+        let (_, _, extracted, _) = extract_zip(&bytes).unwrap();
         assert_eq!(extracted.as_deref(), Some(damaged.as_str()));
         let tmp = tempfile::tempdir().unwrap();
         let warnings = persist_imported_recovery(tmp.path(), &damaged);
@@ -5994,7 +6675,7 @@ mod frontend_origin_tests {
 
 #[cfg(test)]
 mod network_exposure_tests {
-    use super::{auth_token_set, exposure_state};
+    use super::{auth_token_set, exposure_state, reset_refusal};
 
     #[test]
     fn docker_exposure_follows_kronn_bind_and_never_needs_a_restart() {
@@ -6002,13 +6683,19 @@ mod network_exposure_tests {
         // 0.0.0.0): only the host port publish counts.
         for host in ["127.0.0.1", "0.0.0.0"] {
             assert_eq!(
-                exposure_state(true, Some("127.0.0.1"), host),
+                exposure_state(true, Some("127.0.0.1"), host, host, false),
                 (false, false)
             );
-            assert_eq!(exposure_state(true, None, host), (false, false));
-            assert_eq!(exposure_state(true, Some("0.0.0.0"), host), (true, false));
             assert_eq!(
-                exposure_state(true, Some("192.168.1.10"), host),
+                exposure_state(true, None, host, host, false),
+                (false, false)
+            );
+            assert_eq!(
+                exposure_state(true, Some("0.0.0.0"), host, host, false),
+                (true, false)
+            );
+            assert_eq!(
+                exposure_state(true, Some("192.168.1.10"), host, host, false),
                 (true, false)
             );
         }
@@ -6018,11 +6705,48 @@ mod network_exposure_tests {
     fn native_exposure_still_follows_the_configured_host() {
         // KRONN_BIND is ignored natively; with no boot host recorded there is
         // never a restart to ask for.
-        assert!(!exposure_state(false, Some("0.0.0.0"), "127.0.0.1").0);
-        assert!(exposure_state(false, None, "0.0.0.0").0);
-        assert!(exposure_state(false, None, "::").0);
-        assert!(!exposure_state(false, None, "127.0.0.1").0);
-        assert!(!exposure_state(false, None, "192.168.1.10").0);
+        let state = |host: &str| exposure_state(false, None, host, host, false);
+        assert!(!exposure_state(false, Some("0.0.0.0"), "127.0.0.1", "127.0.0.1", false).0);
+        assert!(state("0.0.0.0").0);
+        assert!(state("::").0);
+        assert!(!state("127.0.0.1").0);
+        assert!(!state("192.168.1.10").0);
+    }
+
+    #[test]
+    fn a_reset_is_refused_while_a_proxy_is_declared_in_the_config() {
+        // KT-1596: the reset rewrites config.toml key-only; the declaration would
+        // be forgotten while the proxy keeps forwarding from loopback.
+        let refusal = reset_refusal(true).expect("must refuse");
+        assert!(refusal.contains("Settings"), "{refusal}");
+        assert!(reset_refusal(false).is_none());
+    }
+
+    #[test]
+    fn a_reset_is_refused_when_the_proxy_is_declared_only_by_the_env() {
+        use crate::core::net_expose::proxy_declared;
+        // Config field false, env flag set: the effective declaration is true,
+        // and that is what the reset consults.
+        let declared = proxy_declared(false, Some("1"));
+        assert!(declared);
+        assert!(reset_refusal(declared).is_some());
+        assert!(reset_refusal(proxy_declared(false, None)).is_none());
+    }
+
+    #[test]
+    fn the_plain_http_banner_reads_the_effective_bind_not_only_the_config_host() {
+        use crate::core::net_expose::plain_http_blocked;
+        // KRONN_HOST=0.0.0.0 over a loopback config: the boot falls back, the
+        // owner must be told (the host passed is the resolved bind request).
+        let requested =
+            crate::core::net_expose::resolve_bind_host(Some("0.0.0.0"), false, "127.0.0.1");
+        assert!(plain_http_blocked(false, &requested, false));
+        // A declared proxy, loopback use and Docker (refuses to start) are not.
+        assert!(!plain_http_blocked(false, &requested, true));
+        assert!(!plain_http_blocked(false, "127.0.0.1", false));
+        assert!(!plain_http_blocked(true, "0.0.0.0", false));
+        // A specific LAN address is exposure too, not only the bind-all forms.
+        assert!(plain_http_blocked(false, "192.168.1.10", false));
     }
 
     #[test]
@@ -6107,3 +6831,7 @@ mod default_docs_dir_tests {
 #[cfg(test)]
 #[path = "setup_workers_tests.rs"]
 mod workers_config_tests;
+
+#[cfg(test)]
+#[path = "setup_context_files_tests.rs"]
+mod context_files_tests;
