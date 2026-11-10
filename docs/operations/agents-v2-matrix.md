@@ -91,7 +91,7 @@ first turn; history-tool discovery remains deferred until the third user
 message. This instruction contract does not imply a live provider validation
 or change session-resume and pricing limitations.
 [src: file: backend/src/api/disc_prompts.rs:1123-1153#opencode_prompt_matches_its_injected_mcp_bridge_on_first_and_later_turns]
-[src: file: backend/src/acp.rs:1591-1630#native_session_mcp_servers]
+[src: file: backend/src/acp.rs:1607-1646#native_session_mcp_servers]
 
 The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
@@ -127,7 +127,7 @@ the same job.
   reads Claude, Codex and Gemini logs. Missing cost therefore remains unknown,
   never free. This is an implementation limit, not a protocol prohibition.
   [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
-  [src: file: backend/src/acp.rs:1454-1476#usage_from_prompt_result]
+  [src: file: backend/src/acp.rs:1470-1492#usage_from_prompt_result]
   [src: file: backend/src/acp/claude_adapter.rs:450-467#Cost]
 - **Statistics distinguish missing cost from a recorded zero.** Token-usage
   aggregates retain recorded amounts, fresh pricing estimates and unpriced
@@ -171,7 +171,7 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:6064-6074#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:6083-6093#acp_failure_diagnostic]
 [src: file: backend/src/agents/runner.rs:15985-16266#run_acp_session_streams_usage_through_agent_process]
 [src: file: backend/src/core/redact.rs:626-654#redact_for_audit_artifact]
 

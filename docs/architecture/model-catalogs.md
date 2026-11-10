@@ -130,7 +130,7 @@ own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
 [src: file: backend/src/agents/runner.rs:5773-5827#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1932-1941#offers_model_catalogue]
-[src: file: backend/src/acp.rs:1909-1940#select_model]
+[src: file: backend/src/acp.rs:1957-1988#select_model]
 
 ## Launch safety and UI
 
@@ -217,7 +217,7 @@ adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13785-13802#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13804-13821#reasoning_effort]
 [src: file: backend/src/agents/runner.rs:13920-13951#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]

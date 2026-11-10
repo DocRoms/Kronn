@@ -69,7 +69,7 @@ The safe fresh-session fallback is restricted to absent resume capability or a
 positively identified missing session before a prompt is sent. Authentication,
 timeouts and ambiguous transport errors fail visibly. Prompt, cancellation and
 persistence failures are not followed by an automatic fresh-session replay.
-[src: file: backend/src/agents/runner.rs:5623-5679#resume_refused]
+[src: file: backend/src/agents/runner.rs:5642-5698#resume_refused]
 [src: file: backend/src/agents/runner.rs:6011-6076#acp_failure_diagnostic]
 
 OpenCode v1.18.27 defines a structured missing-session error using code -32602,
@@ -80,9 +80,9 @@ fallback. Unstructured upstream failures remain ambiguous rather than being
 guessed from a 404 or free text.
 [Pinned OpenCode error contract](https://github.com/anomalyco/opencode/blob/v1.18.27/packages/opencode/src/acp/error.ts)
 [src: file: backend/src/acp.rs:156-161#PendingRequest]
-[src: file: backend/src/acp.rs:1167-1175#missing_session_id]
+[src: file: backend/src/acp.rs:1215-1223#missing_session_id]
 [src: file: backend/src/acp.rs:1250-1254#JSON_RPC_INVALID_PARAMS]
-[src: file: backend/src/acp.rs:1254-1290#classify_response_error]
+[src: file: backend/src/acp.rs:1270-1306#classify_response_error]
 
 Each agent reply records which path its turn took in
 `messages.session_continuity`: `resumed`, `new` or `fallback_full_history`

@@ -63,7 +63,7 @@ redacted runner diagnostic as prompt failures, never as a clean success.
 [src: file: backend/src/acp/adapter_process.rs:235-254#install]
 [src: file: backend/src/acp/adapter_process.rs:292-302#cancel]
 [src: file: backend/src/agents/runner.rs:6062-6078#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:6119-6129#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:6126-6136#acp_failure_diagnostic]
 
 ## Packaged desktop bridge
 
@@ -151,7 +151,7 @@ subject to that filter. A permission request for a runtime-registered Kronn
 tool may read or write with `full_access=false`, but must still identify the
 bound protocol session and an authorized server/tool. Missing or ambiguous
 identity remains refused; registration does not grant filesystem access.
-[src: file: backend/src/acp.rs:1591-1630#native_session_mcp_servers]
+[src: file: backend/src/acp.rs:1607-1646#native_session_mcp_servers]
 [src: file: backend/src/acp/permission_broker.rs:577-585#trusted_internal_call]
 
 A native agent's `disc_append` can carry its runtime session id without having

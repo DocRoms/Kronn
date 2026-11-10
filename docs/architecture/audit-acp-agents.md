@@ -84,7 +84,7 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 2. `cancel_audit` trips the token. The ACP session writes `session/cancel`
    (bounded to five seconds, so a wedged agent cannot hold the stop hostage),
    drops the turn, and shuts the agent's process down
-   [src: file: backend/src/agents/runner.rs:5565-5567#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:6007-6026#task_cancel] [src: file: backend/src/agents/runner.rs:6087-6093#shutdown].
+   [src: file: backend/src/agents/runner.rs:5565-5567#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:6026-6045#task_cancel] [src: file: backend/src/agents/runner.rs:6087-6093#shutdown].
 3. The process is started as its own process group, and shutdown kills the
    group, so what the agent started — a shell command, an MCP server — stops
    with it [src: file: backend/src/acp.rs:1051-1055#process_group] [src: file: backend/src/acp.rs:780-793#kill_process_group] [src: file: backend/src/acp.rs:1855-1863#shutdown].
@@ -116,7 +116,7 @@ Every ACP step was recorded at 0 tokens, per step and per run. Now:
   runtime puts them on the `session/prompt` response — OpenCode sends
   `inputTokens`, `outputTokens`, `cachedReadTokens`, `cachedWriteTokens`, which
   the ACP host now keeps apart instead of dropping the cache
-  [src: file: backend/src/acp.rs:1454-1477#usage_from_prompt_result]. The counters are read as the stream goes and
+  [src: file: backend/src/acp.rs:1470-1493#usage_from_prompt_result]. The counters are read as the stream goes and
   once more when it ends, because ACP reports them with the end of the turn.
 - **What is recorded.** `audit_run_steps` keeps `input_tokens`, `output_tokens`,
   `cache_read_tokens` and `cache_write_tokens` (migration 205), and

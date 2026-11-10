@@ -51,7 +51,7 @@ capability they appear to have is a **tool Kronn executes server-side on their b
 
 The MCP bridge is deliberately not one of those capabilities. The HTTP path returns before
 any MCP environment is built [src: file: backend/src/agents/runner.rs:4489-4510#start_ollama_http_with_idle], and
-`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:4740-4757#insert_claude_mcp_config].
+`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:4757-4774#insert_claude_mcp_config].
 So "add a tool to the MCP server" never reaches an HTTP agent. Anything they must be able to
 do has to exist as a **native tool in Kronn's own catalogue**.
 
@@ -277,7 +277,7 @@ rest of the discussion, or keep the partial answer.
 * **In a discussion, the round ceiling is no longer a failure.** The round's calls are
   refused, the model answers with what it has, and the question follows. A workflow step or
   a worker still fails with its reason: there is no one there to answer.
-  [src: file: backend/src/agents/runner.rs:11187-11296#ask_on_ceiling]
+  [src: file: backend/src/agents/runner.rs:11206-11315#ask_on_ceiling]
   [src: file: backend/src/api/discussions/ceilings.rs:117-205#ceiling_question]
 
 ## Saved Quick Prompt generation settings (KT-670)
@@ -301,7 +301,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-71#apply_http]
-[src: file: backend/src/agents/runner.rs:9940#apply_http]
+[src: file: backend/src/agents/runner.rs:9943#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -566,7 +566,7 @@ undergo the existing clamping. This protects a protocol contract;
 it does not establish model authoring quality. The measured attempts and their
 execution checks are recorded in
 [`native-workflow-2026-09-22.md`](../research/native-workflow-2026-09-22.md).
-[src: file: backend/src/agents/runner.rs:7884-7901#workflow_step_schema]
+[src: file: backend/src/agents/runner.rs:7903-7920#workflow_step_schema]
 [src: file: backend/src/agents/runner_test.rs:2414-2481#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 
 ### Further capabilities
