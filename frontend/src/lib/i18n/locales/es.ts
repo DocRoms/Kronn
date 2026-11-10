@@ -2926,6 +2926,7 @@ const es: TranslationDict = {
   'disc.orchestrator': 'Orquestador',
   'disc.orchestratorKind': 'seguimiento automatizado',
   'disc.orchestratorUpdate': 'Actualización del orquestador',
+  'disc.orchestratorQuotaResumed': 'Cuota recuperada · worker reanudado',
   'disc.orchestratorShowDetails': 'Ver detalles',
   'disc.orchestratorHideDetails': 'Ocultar detalles',
   'disc.reply': 'Responder',

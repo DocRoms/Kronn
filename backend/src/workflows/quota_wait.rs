@@ -664,7 +664,17 @@ struct RecheckBook {
     seen_requests: u64,
 }
 
-/// Re-asks the provider of every quota-paused run, bounded by an interval.
+/// What one [`QuotaRechecker::recheck_pass`] resumed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RecheckOutcome {
+    /// Quota-paused workflow runs.
+    pub runs: Vec<String>,
+    /// Task executions escalated on a quota (KT-1664).
+    pub executions: Vec<String>,
+}
+
+/// Re-asks the provider of every quota-paused run and quota-escalated task
+/// execution, bounded by an interval.
 pub struct QuotaRechecker {
     probe: std::sync::Arc<dyn QuotaProbe>,
     interval: Duration,
@@ -689,30 +699,51 @@ impl QuotaRechecker {
     }
 
     /// One engine pass: resume every waiting run whose provider answers again
-    /// before the announced reset. Returns the ids it resumed.
+    /// before the announced reset. Returns the ids it resumed. The same pass
+    /// also serves task executions ([`Self::recheck_pass`]).
     pub async fn recheck_due(&self, state: &AppState, now: DateTime<Utc>) -> Vec<String> {
-        let runs = match state
+        self.recheck_pass(state, now).await.runs
+    }
+
+    /// One engine pass over everything parked on a provider quota that
+    /// announced no way out: the quota-paused workflow runs, then the task
+    /// executions escalated on `quota_exhausted` (KT-1664). Each agent is asked
+    /// at most once per pass, and its verdict serves both.
+    pub async fn recheck_pass(&self, state: &AppState, now: DateTime<Utc>) -> RecheckOutcome {
+        let runs = state
             .db
             .with_conn(crate::db::workflows::list_quota_waiting_runs)
-            .await
-        {
-            Ok(runs) => runs,
-            Err(error) => {
-                tracing::warn!("quota re-check scan failed: {error}");
-                return Vec::new();
-            }
-        };
+            .await;
+        let escalations = state
+            .db
+            .with_read_conn(crate::db::orchestration::executions_escalated_on_unannounced_quota)
+            .await;
+        if let Err(error) = &runs {
+            tracing::warn!("quota re-check scan failed: {error}");
+        }
+        if let Err(error) = &escalations {
+            tracing::warn!("quota re-check scan of task executions failed: {error}");
+        }
+        let scanned = runs.is_ok() && escalations.is_ok();
+        let runs = runs.unwrap_or_default();
+        let escalations = escalations.unwrap_or_default();
         let requested = RECHECK_REQUESTS.load(std::sync::atomic::Ordering::Relaxed);
         let forced = {
             let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
-            let live: std::collections::HashSet<String> = runs.iter().map(recheck_key).collect();
-            book.last.retain(|key, _| live.contains(key));
+            if scanned {
+                let live: std::collections::HashSet<String> = runs
+                    .iter()
+                    .map(recheck_key)
+                    .chain(escalations.iter().map(|e| escalation_key(&e.provider)))
+                    .collect();
+                book.last.retain(|key, _| live.contains(key));
+            }
             let forced = book.seen_requests != requested;
             book.seen_requests = requested;
             forced
         };
         let mut verdicts: std::collections::HashMap<String, Option<bool>> = Default::default();
-        let mut resumed = Vec::new();
+        let mut outcome = RecheckOutcome::default();
         for run in runs {
             // A child is resumed through its parent, which holds the same wait.
             if run.parent_run_id.is_some() {
@@ -746,23 +777,12 @@ impl QuotaRechecker {
                 }
             };
             let agent = leaf.step.agent.clone();
-            let verdict = match verdicts.get(&format!("{agent:?}")) {
-                Some(known) => *known,
-                None => {
-                    let (tokens, full_access) = {
-                        let config = state.config.read().await;
-                        (config.tokens.clone(), config.agents.full_access_for(&agent))
-                    };
-                    let project_path = project_path_of(state, &run).await;
-                    let verdict = self
-                        .probe
-                        .quota_is_back(&agent, &project_path, &tokens, full_access)
-                        .await;
-                    verdicts.insert(format!("{agent:?}"), verdict);
-                    verdict
-                }
-            };
-            if verdict != Some(true) {
+            let project_path = project_path_of(state, &run).await;
+            if self
+                .verdict(state, &mut verdicts, &agent, &project_path)
+                .await
+                != Some(true)
+            {
                 continue;
             }
             let workflow_id = run.workflow_id.clone();
@@ -776,10 +796,101 @@ impl QuotaRechecker {
             };
             tracing::info!(run_id = %run.id, ?agent, "provider quota is back before its announced reset");
             if let Some(id) = wake_one(state, workflow, run).await {
-                resumed.push(id);
+                outcome.runs.push(id);
             }
         }
-        resumed
+        self.recheck_escalations(state, now, forced, escalations, &mut verdicts, &mut outcome)
+            .await;
+        outcome
+    }
+
+    /// Task executions escalated on a quota that announced no reset (KT-1664):
+    /// one provider question per agent and interval, and when the provider
+    /// answers, every execution escalated on it goes back to its own worker.
+    /// A provider that still refuses, or stays silent, changes nothing.
+    async fn recheck_escalations(
+        &self,
+        state: &AppState,
+        now: DateTime<Utc>,
+        forced: bool,
+        escalations: Vec<crate::db::orchestration::UnannouncedQuotaEscalation>,
+        verdicts: &mut std::collections::HashMap<String, Option<bool>>,
+        outcome: &mut RecheckOutcome,
+    ) {
+        type Group = Vec<crate::db::orchestration::UnannouncedQuotaEscalation>;
+        let mut by_provider: Vec<(String, Group)> = Vec::new();
+        for escalation in escalations {
+            match by_provider
+                .iter_mut()
+                .find(|(provider, _)| *provider == escalation.provider)
+            {
+                Some((_, group)) => group.push(escalation),
+                None => by_provider.push((escalation.provider.clone(), vec![escalation])),
+            }
+        }
+        for (provider, group) in by_provider {
+            if !self.due(&escalation_key(&provider), now, forced) {
+                continue;
+            }
+            let Ok(agent) = crate::db::orchestration::agent_type_from_db(&provider) else {
+                tracing::info!(provider, "quota re-check skipped: unknown provider");
+                continue;
+            };
+            let project_path = group
+                .iter()
+                .find_map(|escalation| escalation.project_path.clone())
+                .unwrap_or_default();
+            if self.verdict(state, verdicts, &agent, &project_path).await != Some(true) {
+                continue;
+            }
+            for escalation in group {
+                match crate::api::orchestration::resume_quota_escalation_after_probe(
+                    state,
+                    &escalation.execution_id,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            execution_id = %escalation.execution_id,
+                            provider,
+                            "provider quota is back: escalated execution resumed on its worker"
+                        );
+                        outcome.executions.push(escalation.execution_id);
+                    }
+                    Err(error) => {
+                        tracing::info!(
+                            execution_id = %escalation.execution_id,
+                            "quota resume of an escalated execution skipped: {error}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The provider's answer for `agent`, asked once per pass.
+    async fn verdict(
+        &self,
+        state: &AppState,
+        verdicts: &mut std::collections::HashMap<String, Option<bool>>,
+        agent: &crate::models::AgentType,
+        project_path: &str,
+    ) -> Option<bool> {
+        let key = format!("{agent:?}");
+        if let Some(known) = verdicts.get(&key) {
+            return *known;
+        }
+        let (tokens, full_access) = {
+            let config = state.config.read().await;
+            (config.tokens.clone(), config.agents.full_access_for(agent))
+        };
+        let verdict = self
+            .probe
+            .quota_is_back(agent, project_path, &tokens, full_access)
+            .await;
+        verdicts.insert(key, verdict);
+        verdict
     }
 
     /// Whether `key` is asked now. A wait seen for the first time starts its
@@ -798,6 +909,12 @@ impl QuotaRechecker {
             }
         }
     }
+}
+
+/// One interval per provider for the task executions it escalated: they share
+/// the one question the provider is asked.
+fn escalation_key(provider: &str) -> String {
+    format!("task-escalation:{provider}")
 }
 
 fn recheck_key(run: &WorkflowRun) -> String {

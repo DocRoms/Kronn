@@ -792,6 +792,77 @@ pub(crate) async fn return_quota_escalations_past_reset(state: &AppState) -> Vec
     returned
 }
 
+/// KT-1664 — the room line that closes a quota escalation the provider
+/// re-check resolved. Its id carries the refused dispatch the escalation notice
+/// (`provider-quota-escalation:<dispatch>`) is keyed by, so the room shows that
+/// notice as settled and a replay cannot post it twice.
+pub(crate) fn quota_resumed_message_id(refused_dispatch_id: &str) -> String {
+    format!("provider-quota-resumed:{refused_dispatch_id}")
+}
+
+/// KT-1664 — a provider that answered the KT-1657 re-check closes the quota
+/// escalation of `execution_id` (one that announced no reset): the execution
+/// goes back to its own worker, in its kept child discussion and worktree, and
+/// its parent room gets one line saying so. Never another provider. The
+/// reassignment re-checks in its own transaction that the execution is still
+/// parked on that quota, so an owner who acted meanwhile is never overridden.
+pub(crate) async fn resume_quota_escalation_after_probe(
+    state: &AppState,
+    execution_id: &str,
+) -> Result<()> {
+    let id = execution_id.to_string();
+    let (execution, selection) = state
+        .db
+        .with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("execution vanished before its quota resume")?;
+            let selection = crate::models::CampaignWorkerSelection {
+                target: worker_target_from_execution(&execution)?,
+                model: execution.worker_model.clone(),
+                profile_id: execution.worker_profile_id.clone(),
+            };
+            Ok((execution, selection))
+        })
+        .await?;
+    let provider = crate::db::orchestration::agent_type_to_db(&selection.target.agent_type);
+    reassign_native_execution_as(
+        state,
+        execution_id,
+        selection,
+        "the provider answers again: the quota is back",
+        ReassignCause::QuotaProbed,
+    )
+    .await?;
+    let lang = room_lang(&state.db, &execution.parent_discussion_id).await;
+    let refused = execution.dispatch_job_id.as_deref().unwrap_or(execution_id);
+    let message = orchestrator_message(
+        quota_resumed_message_id(refused),
+        match lang {
+            RoomLang::Fr => format!(
+                "**Quota rétabli — worker relancé**\n\nLe provider `{provider}` répond de nouveau : Kronn a relancé l'exécution `{execution_id}` sur le même worker, dans sa sous-discussion et son worktree existants. Plus aucune action humaine n'est requise pour cette escalade."
+            ),
+            RoomLang::En => format!(
+                "**Quota back — worker resumed**\n\nProvider `{provider}` answers again: Kronn resumed execution `{execution_id}` on the same worker, in its existing child discussion and worktree. No human action is required for that escalation any more."
+            ),
+        },
+    );
+    let room = execution.parent_discussion_id.clone();
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::insert_message(conn, &room, &message)?;
+            Ok(())
+        })
+        .await
+    {
+        tracing::warn!(
+            execution_id,
+            "quota resumed notice could not be persisted: {error}"
+        );
+    }
+    Ok(())
+}
+
 /// Runtime counterpart of boot reconciliation. Four clocks remain distinct in
 /// the journal; review/human waiting can therefore be tuned without pretending
 /// that an agent was inactive, and a total campaign deadline cannot be reset by
@@ -13902,6 +13973,10 @@ pub(crate) enum ReassignCause {
     /// The sweep handing an execution back after the reset. Re-validated
     /// inside the reassignment transaction.
     QuotaReturn,
+    /// The provider re-check (KT-1664) found the provider answering again for
+    /// an escalation that announced no reset. Same worker, same worktree;
+    /// re-validated inside the reassignment transaction.
+    QuotaProbed,
 }
 
 impl ReassignCause {
@@ -13911,7 +13986,33 @@ impl ReassignCause {
     fn rearm_actor(self) -> PlanningActorKind {
         match self {
             Self::Human => PlanningActorKind::Human,
-            Self::QuotaFallback { .. } | Self::QuotaReturn => PlanningActorKind::Backend,
+            Self::QuotaFallback { .. } | Self::QuotaReturn | Self::QuotaProbed => {
+                PlanningActorKind::Backend
+            }
+        }
+    }
+
+    /// Kronn handing an execution back to the worker it was parked on.
+    fn is_quota_return(self) -> bool {
+        matches!(self, Self::QuotaReturn | Self::QuotaProbed)
+    }
+
+    /// The still-valid check a quota return runs before and inside its
+    /// reassignment transaction.
+    fn ensure_return_still_due(
+        self,
+        conn: &rusqlite::Connection,
+        exec_id: &str,
+        provider: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now();
+        match self {
+            Self::QuotaProbed => crate::db::orchestration::ensure_probed_quota_return_still_parked(
+                conn, exec_id, provider, now,
+            ),
+            _ => crate::db::orchestration::ensure_quota_return_still_due(
+                conn, exec_id, provider, now,
+            ),
         }
     }
 }
@@ -13937,7 +14038,7 @@ pub(crate) async fn reassign_native_execution_as(
                 .context("execution vanished before worker reassignment")
         })
         .await?;
-    if matches!(cause, ReassignCause::QuotaReturn) {
+    if cause.is_quota_return() {
         // Same check as the one inside the reassignment transaction (which
         // stays authoritative), run first so a return that is already stale
         // does not persist a re-anchored scope for a worker round that will
@@ -13946,14 +14047,7 @@ pub(crate) async fn reassign_native_execution_as(
         let provider = crate::db::orchestration::agent_type_to_db(&selection.target.agent_type);
         state
             .db
-            .with_conn(move |conn| {
-                crate::db::orchestration::ensure_quota_return_still_due(
-                    conn,
-                    &id,
-                    &provider,
-                    chrono::Utc::now(),
-                )
-            })
+            .with_conn(move |conn| cause.ensure_return_still_due(conn, &id, &provider))
             .await?;
     }
     let lang = room_lang(&state.db, &execution.parent_discussion_id).await;
@@ -13983,16 +14077,11 @@ pub(crate) async fn reassign_native_execution_as(
                 }
             }
             let transaction = conn.unchecked_transaction()?;
-            if matches!(cause, ReassignCause::QuotaReturn) {
+            if cause.is_quota_return() {
                 // The sweep read this execution before the git re-anchoring
                 // above. A person may have moved, paused or finished it since:
                 // refuse here, before anything is written or cancelled.
-                crate::db::orchestration::ensure_quota_return_still_due(
-                    &transaction,
-                    &id,
-                    &provider,
-                    chrono::Utc::now(),
-                )?;
+                cause.ensure_return_still_due(&transaction, &id, &provider)?;
             }
             let before = crate::db::orchestration::get_task_execution(&transaction, &id)?
                 .context("execution vanished before worker reassignment")?;
@@ -14010,7 +14099,7 @@ pub(crate) async fn reassign_native_execution_as(
             let back_on_origin = earlier_origin
                 .as_ref()
                 .is_some_and(|origin| origin.is_worker(&provider, selection.target.tier));
-            let keep_quota_origin = matches!(cause, ReassignCause::QuotaReturn)
+            let keep_quota_origin = cause.is_quota_return()
                 && earlier_origin.is_some()
                 && !back_on_origin;
             let execution = crate::db::orchestration::reassign_execution_worker_keeping_origin(
@@ -35069,6 +35158,502 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .unwrap()
+    }
+
+    /// KT-1664 — a provider that answers with a fixed verdict and remembers who
+    /// it was asked about, standing in for the KT-1657 agent probe.
+    struct StubQuotaProbe {
+        verdict: Option<bool>,
+        asked: std::sync::Mutex<Vec<AgentType>>,
+    }
+
+    impl StubQuotaProbe {
+        fn new(verdict: Option<bool>) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                verdict,
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn asked(&self) -> Vec<AgentType> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::workflows::quota_wait::QuotaProbe for StubQuotaProbe {
+        async fn quota_is_back(
+            &self,
+            agent: &AgentType,
+            _project_path: &str,
+            _tokens: &crate::models::TokensConfig,
+            _full_access: bool,
+        ) -> Option<bool> {
+            self.asked.lock().unwrap().push(agent.clone());
+            self.verdict
+        }
+    }
+
+    fn rechecker_with(
+        probe: &std::sync::Arc<StubQuotaProbe>,
+    ) -> crate::workflows::quota_wait::QuotaRechecker {
+        crate::workflows::quota_wait::QuotaRechecker::new(
+            probe.clone(),
+            chrono::Duration::minutes(20),
+        )
+    }
+
+    /// The 10/11 incident: Claude Code refused a worker's dispatch with no
+    /// announced reset, so KT-1564's reset sweep never lists it. Every execution
+    /// escalated that way, with its own tier and model.
+    async fn escalate_claude_without_reset(
+        db: &std::sync::Arc<Database>,
+        repo: &Path,
+        count: usize,
+    ) -> Vec<TaskExecution> {
+        let executions = economy_claude_executions(db, repo, count).await;
+        for execution in &executions {
+            escalate_claude_with_reset(db, execution.dispatch_job_id.clone().unwrap(), None).await;
+        }
+        executions
+    }
+
+    async fn messages_of(
+        db: &Database,
+        discussion_id: &str,
+    ) -> Vec<crate::models::DiscussionMessage> {
+        let id = discussion_id.to_string();
+        db.with_conn(move |conn| crate::db::discussions::list_messages(conn, &id))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_quota_escalation_with_no_announced_reset_resumes_on_its_worker_when_the_provider_answers(
+    ) {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let refused = was.dispatch_job_id.clone().unwrap();
+        let parent = was.parent_discussion_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussions SET language = 'en' WHERE id = ?1",
+                [&parent],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            exec_of(&db, &was.id).await.status,
+            TaskExecutionStatus::Escalated
+        );
+        assert!(
+            return_quota_escalations_past_reset(&quota_test_state(&db))
+                .await
+                .is_empty(),
+            "the reset sweep has nothing to go by"
+        );
+        let state = quota_test_state(&db);
+        let probe = StubQuotaProbe::new(Some(true));
+        let rechecker = rechecker_with(&probe);
+        let t0 = chrono::Utc::now();
+
+        // Just refused: the provider is not asked about it yet.
+        assert!(rechecker
+            .recheck_pass(&state, t0)
+            .await
+            .executions
+            .is_empty());
+        // Bounded: no new question inside the interval.
+        assert!(rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(10))
+            .await
+            .executions
+            .is_empty());
+        assert!(probe.asked().is_empty());
+        assert_eq!(
+            exec_of(&db, &was.id).await.status,
+            TaskExecutionStatus::Escalated
+        );
+
+        let resumed = rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+            .await;
+        assert_eq!(resumed.executions, vec![was.id.clone()]);
+        assert_eq!(probe.asked(), vec![AgentType::ClaudeCode]);
+
+        // Same worker, same room, same worktree; a fresh dispatch carries it.
+        let back = exec_of(&db, &was.id).await;
+        assert_eq!(back.status, TaskExecutionStatus::Working);
+        assert_eq!(back.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert_eq!(back.worker_model_tier.as_deref(), Some("economy"));
+        assert_eq!(back.worker_model, was.worker_model);
+        assert_eq!(back.sub_discussion_id, was.sub_discussion_id);
+        assert_eq!(back.workspace_id, was.workspace_id);
+        assert_eq!(back.child_branch, was.child_branch);
+        let dispatch = back.dispatch_job_id.clone().unwrap();
+        assert_ne!(dispatch, refused);
+        assert_eq!(
+            dispatch_of(&db, dispatch).await.agent_override,
+            Some(AgentType::ClaudeCode)
+        );
+        let id = was.id.clone();
+        assert!(db
+            .with_conn(move |conn| crate::db::orchestration::provider_changes(conn, &id))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            !claude_quota_blocked(&db).await,
+            "the provider stops being refused (KT-838)"
+        );
+
+        // The room gets one line, keyed by the refused dispatch the escalation
+        // notice is keyed by.
+        let notices = messages_of(&db, &was.parent_discussion_id)
+            .await
+            .into_iter()
+            .filter(|message| message.id == format!("provider-quota-resumed:{refused}"))
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].content.contains("Quota back"),
+            "{}",
+            notices[0].content
+        );
+        assert!(notices[0].content.contains("No human action"));
+
+        // Settled: the next passes find nothing left to ask about.
+        assert!(rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(60))
+            .await
+            .executions
+            .is_empty());
+        assert_eq!(probe.asked().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_room_line_of_a_resumed_quota_escalation_speaks_the_rooms_language() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let parent = was.parent_discussion_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussions SET language = 'fr' WHERE id = ?1",
+                [&parent],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        resume_quota_escalation_after_probe(&quota_test_state(&db), &was.id)
+            .await
+            .unwrap();
+        let line = messages_of(&db, &was.parent_discussion_id)
+            .await
+            .into_iter()
+            .find(|message| message.id.starts_with("provider-quota-resumed:"))
+            .expect("one line in the room");
+        assert!(line.content.contains("Quota rétabli"), "{}", line.content);
+        assert!(line.content.contains("Plus aucune action humaine"));
+    }
+
+    #[tokio::test]
+    async fn a_login_or_key_change_asks_the_provider_about_quota_escalations_at_once() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let probe = StubQuotaProbe::new(Some(true));
+        let rechecker = rechecker_with(&probe);
+        let t0 = chrono::Utc::now();
+        assert!(rechecker
+            .recheck_pass(&state, t0)
+            .await
+            .executions
+            .is_empty());
+        assert!(probe.asked().is_empty());
+
+        crate::workflows::quota_wait::request_recheck();
+        let resumed = rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(1))
+            .await;
+        assert_eq!(resumed.executions, vec![was.id.clone()]);
+        assert_eq!(probe.asked().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn several_executions_escalated_by_one_outage_all_resume_after_one_successful_probe() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let before = escalate_claude_without_reset(&db, repo.path(), 3).await;
+        assert!(claude_quota_blocked(&db).await);
+        let state = quota_test_state(&db);
+        let probe = StubQuotaProbe::new(Some(true));
+        let rechecker = rechecker_with(&probe);
+        let t0 = chrono::Utc::now();
+        rechecker.recheck_pass(&state, t0).await;
+        let mut resumed = rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+            .await
+            .executions;
+        resumed.sort();
+        let mut expected = before.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(resumed, expected);
+        assert_eq!(
+            probe.asked(),
+            vec![AgentType::ClaudeCode],
+            "one probe for all"
+        );
+        for was in &before {
+            let back = exec_of(&db, &was.id).await;
+            assert_eq!(back.status, TaskExecutionStatus::Working);
+            assert_eq!(back.worker_agent_type.as_deref(), Some("ClaudeCode"));
+            assert_eq!(
+                back.worker_model, was.worker_model,
+                "each keeps its own model, not its sibling's"
+            );
+            assert_ne!(back.dispatch_job_id, was.dispatch_job_id);
+        }
+        assert!(!claude_quota_blocked(&db).await);
+    }
+
+    #[tokio::test]
+    async fn a_provider_still_refusing_or_silent_keeps_every_escalation_without_a_dispatch() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let before = escalate_claude_without_reset(&db, repo.path(), 2).await;
+        let state = quota_test_state(&db);
+        let t0 = chrono::Utc::now();
+        for verdict in [Some(false), None] {
+            let probe = StubQuotaProbe::new(verdict);
+            let rechecker = rechecker_with(&probe);
+            rechecker.recheck_pass(&state, t0).await;
+            assert!(rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+                .await
+                .executions
+                .is_empty());
+            assert!(rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(30))
+                .await
+                .executions
+                .is_empty());
+            assert_eq!(probe.asked().len(), 1, "{verdict:?}: asked once in 30 min");
+            rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(42))
+                .await;
+            assert_eq!(
+                probe.asked().len(),
+                2,
+                "{verdict:?}: asked again after 20 min"
+            );
+        }
+        for was in &before {
+            let still = exec_of(&db, &was.id).await;
+            assert_eq!(still.status, TaskExecutionStatus::Escalated);
+            assert_eq!(
+                still.dispatch_job_id, was.dispatch_job_id,
+                "no new dispatch was enqueued"
+            );
+            let child = was.sub_discussion_id.clone().unwrap();
+            let jobs: i64 = db
+                .with_conn(move |conn| {
+                    Ok(conn.query_row(
+                        "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = ?1",
+                        [&child],
+                        |row| row.get(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(jobs, 1, "only the refused dispatch exists");
+        }
+        assert!(claude_quota_blocked(&db).await);
+        assert!(messages_of(&db, &before[0].parent_discussion_id)
+            .await
+            .iter()
+            .all(|message| !message.id.starts_with("provider-quota-resumed:")));
+    }
+
+    /// How an escalation stops being one the provider re-check may resume.
+    #[derive(Debug, Clone, Copy)]
+    enum Spoiled {
+        AnotherReason,
+        OwnerChangedWorker,
+        RunAwaitsHuman,
+        RunPaused,
+        TaskDone,
+        ResetAnnounced,
+    }
+
+    async fn spoil_the_escalation(
+        db: &std::sync::Arc<Database>,
+        state: &AppState,
+        was: &TaskExecution,
+        how: Spoiled,
+    ) {
+        let id = was.id.clone();
+        match how {
+            Spoiled::AnotherReason => {
+                db.with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE task_execution_recovery SET recovery_reason = 'review_wait_timeout' \
+                         WHERE task_execution_id = ?1",
+                        [&id],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+            Spoiled::OwnerChangedWorker => {
+                reassign_native_execution(
+                    state,
+                    &id,
+                    crate::models::CampaignWorkerSelection {
+                        target: MessageTarget::agent(AgentType::Codex),
+                        model: None,
+                        profile_id: None,
+                    },
+                    "the owner picked Codex",
+                )
+                .await
+                .unwrap();
+            }
+            Spoiled::RunAwaitsHuman => set_run_state(db, &id, "awaiting_human", "active").await,
+            Spoiled::RunPaused => set_run_state(db, &id, "paused", "active").await,
+            Spoiled::TaskDone => {
+                db.with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE planning_tasks SET status = 'done' \
+                         WHERE id = (SELECT task_id FROM task_executions WHERE id = ?1)",
+                        [&id],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+            // The provider announced a reset: the reset sweep owns it, not the probe.
+            Spoiled::ResetAnnounced => {
+                db.with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE provider_quota_generations SET reset_at = ?1 \
+                         WHERE provider = 'ClaudeCode'",
+                        [(chrono::Utc::now() + chrono::Duration::hours(2))
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_escalation_that_is_not_a_quota_one_or_was_taken_over_is_never_probed_or_resumed() {
+        for how in [
+            Spoiled::AnotherReason,
+            Spoiled::OwnerChangedWorker,
+            Spoiled::RunAwaitsHuman,
+            Spoiled::RunPaused,
+            Spoiled::TaskDone,
+            Spoiled::ResetAnnounced,
+        ] {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let state = quota_test_state(&db);
+            let was = escalate_claude_without_reset(&db, repo.path(), 1)
+                .await
+                .remove(0);
+            assert_eq!(
+                db.with_read_conn(
+                    crate::db::orchestration::executions_escalated_on_unannounced_quota
+                )
+                .await
+                .unwrap()
+                .len(),
+                1,
+                "the control: it is listed before being spoiled"
+            );
+            spoil_the_escalation(&db, &state, &was, how).await;
+            let before = exec_of(&db, &was.id).await;
+
+            let probe = StubQuotaProbe::new(Some(true));
+            let rechecker = rechecker_with(&probe);
+            let t0 = chrono::Utc::now();
+            rechecker.recheck_pass(&state, t0).await;
+            let resumed = rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+                .await;
+            assert!(resumed.executions.is_empty(), "{how:?}");
+            assert!(probe.asked().is_empty(), "{how:?}: no provider is asked");
+            let after = exec_of(&db, &was.id).await;
+            assert_eq!(after.status, before.status, "{how:?}");
+            assert_eq!(after.worker_agent_type, before.worker_agent_type, "{how:?}");
+            assert_eq!(after.dispatch_job_id, before.dispatch_job_id, "{how:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resume_never_overrides_an_owner_who_moved_the_worker_after_the_probe() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        // The re-check listed the execution; the owner then moves it to Codex.
+        reassign_native_execution(
+            &state,
+            &was.id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Codex),
+                model: None,
+                profile_id: None,
+            },
+            "the owner picked Codex",
+        )
+        .await
+        .unwrap();
+        let human = exec_of(&db, &was.id).await;
+        // The re-check's stale selection names Claude Code again.
+        let refused = reassign_native_execution_as(
+            &state,
+            &was.id,
+            selection_of(&was),
+            "the provider answers again",
+            ReassignCause::QuotaProbed,
+        )
+        .await
+        .err()
+        .expect("a stale resume must not move an execution its owner moved");
+        assert!(
+            refused.to_string().contains("quota return skipped"),
+            "{refused}"
+        );
+        let still = exec_of(&db, &was.id).await;
+        assert_eq!(still.worker_agent_type.as_deref(), Some("Codex"));
+        assert_eq!(still.dispatch_job_id, human.dispatch_job_id);
+        assert!(resume_quota_escalation_after_probe(&state, &was.id)
+            .await
+            .is_err());
+        assert!(messages_of(&db, &was.parent_discussion_id)
+            .await
+            .iter()
+            .all(|message| !message.id.starts_with("provider-quota-resumed:")));
     }
 
     #[tokio::test]

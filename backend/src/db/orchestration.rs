@@ -2850,6 +2850,97 @@ pub fn executions_past_quota_reset(conn: &Connection, now: DateTime<Utc>) -> Res
     Ok(ids)
 }
 
+/// An execution parked `Escalated` on its worker's provider quota with no
+/// announced reset, waiting for the provider to answer again (KT-1664).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnannouncedQuotaEscalation {
+    pub execution_id: String,
+    /// The refused provider, in the [`agent_type_to_db`] form.
+    pub provider: String,
+    /// The project the run works in, where a provider probe may start.
+    pub project_path: Option<String>,
+}
+
+/// KT-1664 — executions parked `Escalated` by a quota refusal that announced
+/// no reset, so [`executions_past_quota_reset`] never lists them and only a
+/// person would say the quota is back. The provider re-check of KT-1657 asks
+/// instead. Same guards as the reset sweep: the exact `quota_exhausted:<worker>`
+/// escalation (a worker the owner changed, an escalation opened on purpose or
+/// for another cause never matches), a native worker, a task still open and a
+/// run that is neither paused, human-gated nor finished.
+pub fn executions_escalated_on_unannounced_quota(
+    conn: &Connection,
+) -> Result<Vec<UnannouncedQuotaEscalation>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT e.id, e.worker_agent_type, p.path
+         FROM task_execution_recovery r
+         JOIN task_executions e ON e.id = r.task_execution_id
+         JOIN planning_tasks t ON t.id = e.task_id
+         LEFT JOIN orchestration_runs o ON o.id = e.orchestration_run_id
+         LEFT JOIN projects p ON p.id = o.project_id
+         LEFT JOIN provider_quota_generations g ON g.provider = e.worker_agent_type
+         WHERE e.status = 'Escalated'
+           AND r.recovery_action = 'await_human'
+           AND r.recovery_reason = 'quota_exhausted:' || e.worker_agent_type
+           AND COALESCE(e.worker_target_kind, '') <> 'cli'
+           AND g.reset_at IS NULL
+           AND t.status NOT IN ('done', 'archived')
+           AND {RUN_ALLOWS_RESTART_SQL}
+         ORDER BY r.updated_at ASC, e.id ASC"
+    ))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(UnannouncedQuotaEscalation {
+                execution_id: row.get(0)?,
+                provider: row.get(1)?,
+                project_path: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Re-checked inside the reassignment transaction, right before the provider
+/// re-check hands an execution back its worker (KT-1664): it must still be
+/// parked on that very provider's quota with the run running, and no newer
+/// refusal may have announced a reset still ahead.
+pub fn ensure_probed_quota_return_still_parked(
+    conn: &Connection,
+    exec_id: &str,
+    provider: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let allowed: bool = conn.query_row(
+        &format!("SELECT {RUN_ALLOWS_RESTART_SQL} FROM task_executions e WHERE e.id = ?1"),
+        [exec_id],
+        |row| row.get(0),
+    )?;
+    if !allowed {
+        bail!("quota return skipped: the campaign or run is not running");
+    }
+    let parked: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM task_execution_recovery r
+             JOIN task_executions e ON e.id = r.task_execution_id
+             WHERE e.id = ?1
+               AND e.status = 'Escalated'
+               AND e.worker_agent_type = ?2
+               AND r.recovery_action = 'await_human'
+               AND r.recovery_reason = ?3
+         )",
+        params![exec_id, provider, format!("quota_exhausted:{provider}")],
+        |row| row.get(0),
+    )?;
+    if !parked {
+        bail!("quota return skipped: the execution is no longer parked on its provider's quota");
+    }
+    if provider_quota_reset_at(conn, provider)?.is_some_and(|reset| reset > quota_reset_stamp(now))
+    {
+        bail!("quota return skipped: the provider announced a reset that is still ahead");
+    }
+    Ok(())
+}
+
 /// A campaign or run that is paused, waiting on a human, or finished must not
 /// have a worker restarted behind its back, whatever the quota clock says.
 const RUN_ALLOWS_RESTART_SQL: &str = "EXISTS(SELECT 1 FROM orchestration_runs o \

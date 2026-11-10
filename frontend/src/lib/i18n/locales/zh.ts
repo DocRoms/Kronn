@@ -2903,6 +2903,7 @@ const zh: TranslationDict = {
   "disc.orchestrator": "编排器",
   "disc.orchestratorKind": "自动跟进",
   "disc.orchestratorUpdate": "编排器更新",
+  "disc.orchestratorQuotaResumed": "配额已恢复 · 工作者已恢复运行",
   "disc.orchestratorShowDetails": "查看详情",
   "disc.orchestratorHideDetails": "隐藏详情",
   "disc.reply": "回复",

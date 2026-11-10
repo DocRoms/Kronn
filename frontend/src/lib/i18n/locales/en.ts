@@ -2926,6 +2926,7 @@ const en: TranslationDict = {
   'disc.orchestrator': 'Orchestrator',
   'disc.orchestratorKind': 'automated follow-up',
   'disc.orchestratorUpdate': 'Orchestrator update',
+  'disc.orchestratorQuotaResumed': 'Quota back · worker resumed',
   'disc.orchestratorShowDetails': 'Show details',
   'disc.orchestratorHideDetails': 'Hide details',
   'disc.reply': 'Reply',

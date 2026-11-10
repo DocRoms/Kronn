@@ -160,10 +160,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:10590-10594#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:10596-10645#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:9001-9025#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:38784-38885#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:10661-10665#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:10667-10716#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:9072-9096#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:39369-39470#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -415,10 +415,10 @@ lets the merge close the task.
 
 **Stop** cancels live dispatch and always keeps the child branch with its
 commits. What happens to the child worktree is the campaign's
-`cancellation_cleanup_policy`, which defaults to `remove_if_clean` [src: file: backend/src/api/orchestration.rs:9483]:
+`cancellation_cleanup_policy`, which defaults to `remove_if_clean` [src: file: backend/src/api/orchestration.rs:9554]:
 a clean worktree is removed (its provenance is kept), while one with
 uncommitted work, or whose removal Git refuses, is preserved
-[src: file: backend/src/api/orchestration.rs:10929]. Set the policy to
+[src: file: backend/src/api/orchestration.rs:11000]. Set the policy to
 `preserve` to keep the worktree whatever its state. Stop does not force-delete
 local work. It never changes the task's
 status (KT-1267): an `in_progress` or `done` task stays so, because the work may
