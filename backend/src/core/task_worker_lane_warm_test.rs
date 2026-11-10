@@ -1277,6 +1277,7 @@ fn the_process_runner_kills_a_cancelled_build_and_what_it_started() {
         env: Vec::new(),
         timeout: Duration::from_secs(120),
         priority: crate::core::background_priority::Priority::Normal,
+        clean_env: false,
     };
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();

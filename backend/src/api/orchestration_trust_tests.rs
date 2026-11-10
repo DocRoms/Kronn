@@ -36,6 +36,7 @@ fn probe_of(program: &str) -> crate::core::task_worker_env::ProbeCommand {
         env: vec![],
         timeout: std::time::Duration::from_secs(5),
         priority: crate::core::background_priority::Priority::Normal,
+        clean_env: false,
     }
 }
 

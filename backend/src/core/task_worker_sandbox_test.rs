@@ -63,6 +63,7 @@ fn probe(program: &str, args: &[&str], cwd: &Path) -> ProbeCommand {
         env: Vec::new(),
         timeout: Duration::from_secs(120),
         priority: crate::core::background_priority::Priority::Normal,
+        clean_env: false,
     }
 }
 

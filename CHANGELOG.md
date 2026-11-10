@@ -116,7 +116,12 @@ Release notes for 0.9.3 and earlier are available in the
   crates.io / the npm registry only. A lock naming a git dependency, another
   registry or a tarball URL is refused whole and fetches nothing; the worker
   gets no network of its own. Each fetch is journalled on the execution
-  (`dependency_fetch`) (KT-1649).
+  (`dependency_fetch`). The lock files are parsed (TOML, YAML) rather than
+  scanned, and the fetch runs in a private scratch project under Kronn's data
+  directory with a cleared environment, so nothing the worker wrote (a
+  `.cargo/config.toml`, a `[patch]`, an `.npmrc`, a workspace registry) and no
+  host registry setting or token reaches it; leftovers are swept at startup
+  (KT-1649).
 - An interrupted task execution no longer stays stuck on "recovery decision
   already consumed": it can always resume or deliver, and a resume never
   consumes the decision of a newer interruption (KT-1537, #492).

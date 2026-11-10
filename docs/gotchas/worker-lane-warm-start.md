@@ -76,25 +76,57 @@ registries the step was bounded to, its outcome (`cached`, `fetched`,
 
 What bounds the network:
 
-- **The lock file is the whole input.** `Cargo.lock` is parsed as TOML; every
-  package `source` must be crates.io (git index or sparse). `pnpm-lock.yaml` must
-  carry no `tarball:`, git (`repo:`, `commit:`, `type: git`) or `directory:`
-  resolution. One out-of-bounds entry **refuses the whole lock** (`refused`):
-  `cargo fetch` fetches all of a lock, so a partial fetch is not possible.
-  Git dependencies and alternate registries are therefore never fetched; the
+- **The lock file is the whole input, and it is parsed, never scanned.**
+  `Cargo.lock` is parsed as TOML; every package `source` must be crates.io (git
+  index or sparse), and only lock format 3+ is staged. `pnpm-lock.yaml` is parsed
+  with a YAML parser (`serde_yaml`: anchors, aliases, merge keys, folded and flow
+  scalars resolve before the walk), then every `packages` entry must be a
+  registry package — a key with no `:`/path/space — whose `resolution` is an
+  `integrity` hash plus at most a `tarball` under `https://registry.npmjs.org/`.
+  A `tarball` elsewhere, `type`/`repo`/`commit`/`directory`/`path`, a YAML tag, a
+  non-string, a duplicate key, several documents: **the whole lock is refused**
+  (`refused`). `cargo fetch` fetches all of a lock, so a partial fetch is not
+  possible; git dependencies and alternate registries are never fetched and the
   worker stays offline for them, as before.
-- **Probe first.** `cargo fetch --offline --locked` (and `pnpm fetch --offline`);
-  a complete cache never touches the network (`cached`).
-- **Nothing the worker writes configures the command.** Cargo reads
-  `.cargo/config.toml` from the working directory upwards, so it runs with the
-  host's `CARGO_HOME` as its cwd and `--manifest-path` at the worktree. pnpm reads
-  `.npmrc` and `pnpm-workspace.yaml` from the project, so it runs in a scratch
-  directory (`<tmp>/kronn-dep-fetch-<uuid>`, removed afterwards) with a copy of the
-  lock, an empty manifest and the workspace file — refused when it sets a
-  registry, proxy, store, cache, hook (`pnpmfile`), certificate or TLS switch —
-  and gets `--registry https://registry.npmjs.org/ --store-dir <host store>
-  --ignore-scripts` on the command line. `cargo fetch` builds nothing, so no
-  `build.rs` or proc-macro runs.
+- **Size caps.** A lock file over `MAX_LOCK_BYTES` (16 MiB) and a
+  `pnpm-workspace.yaml` over `MAX_WORKSPACE_BYTES` (1 MiB) are refused unread
+  (`read_capped` also bounds the read itself, and refuses a symlink). The cap is
+  per file; the YAML parser's own alias-repetition and depth limits bound the rest.
+- **Probe first.** `cargo fetch --offline` (and `pnpm fetch --offline`); a complete
+  cache never touches the network (`cached`).
+- **The command never runs in, or reads, the worktree.** Cargo's configuration is
+  not only discovered from the cwd upwards: the worktree's `Cargo.toml` can carry
+  `[patch]`/`[source]`/`[registries]`, and discovery differs between Cargo
+  versions. So Cargo runs in a private scratch project holding a lock of the
+  registry packages only (`name`/`version`/`source`/`checksum`/`dependencies`,
+  nothing else the worker wrote) and a generated manifest depending on each locked
+  crate at `=version` with default features off, `--manifest-path` pointing at it,
+  no `.cargo/`. (`--locked` is not used: the generated root package is not in the
+  lock, which `--locked` would refuse; the locked versions are kept by the lock
+  copy — the `#[ignore]`d `the_staged_cargo_project_is_accepted_by_the_real_cargo`
+  checks this repository's own lock against the real `cargo`.) pnpm gets the same
+  treatment: a scratch project with the lock **re-serialised from the validated
+  document** (what pnpm parses is what Kronn validated, not the worker's text, so
+  a YAML parser differential cannot hide anything), an empty manifest, no
+  `.npmrc`, and a workspace file **rebuilt from an allow-list** (`WORKSPACE_KEYS`:
+  `allowBuilds`, `onlyBuiltDependencies`, `neverBuiltDependencies`, `overrides`,
+  `packageExtensions`, `catalog(s)`, `ignoredOptionalDependencies`,
+  `supportedArchitectures`) whose values must be inert (scalars/lists/maps, no tag,
+  no `${…}`). Everything else — registries, proxies, store/cache dirs, `pnpmfile`,
+  hooks, certificates, `packages` globs — is dropped, not refused. The registry
+  and the store go on the command line (`--registry`, `--store-dir`,
+  `--ignore-scripts`), and the user/global npm config are pointed at an empty file.
+  `cargo fetch` builds nothing, so no `build.rs` or proc-macro runs.
+- **The environment is cleared.** Both commands run with `ProbeCommand::clean_env`
+  (the process runner calls `env_clear`) and get only `FETCH_ENV_NAMES` (`PATH`,
+  `HOME`, locale, `TMPDIR`, the toolchain homes, the operator's proxy and CA
+  variables) plus `CARGO_HOME`/`CARGO_NET_OFFLINE` for Cargo. The sealed Kronn
+  environment is not enough on its own: it inherits `NPM_CONFIG_*`
+  (`child_env::is_base`). A host `NPM_CONFIG_REGISTRY`, `CARGO_REGISTRIES_*`,
+  `CARGO_HTTP_*` or any token never reaches the child.
+- **Scratch lives under the data dir** (`<data dir>/dep-fetch/kronn-dep-fetch-<uuid>`,
+  mode 0700, which the worker's sandbox hides), is removed when the step ends, and
+  `sweep_stale_scratch` removes what a killed backend left, at startup (`main.rs`).
 - It fills the host's `~/.cargo/registry` and pnpm store, the caches the lane
   already reads, so the first build and the worker's own `cargo` see the crate.
 
@@ -102,9 +134,14 @@ Limits: best effort (a failed or refused fetch is journalled and the worker
 still starts); cancellable with the warm-up; the pnpm step only fills the
 **store** — a package the main checkout's `node_modules` lacks still needs an
 offline `pnpm install` by whoever uses it, since the lane's `node_modules` links
-the main checkout's. The pnpm commands were not run against the live registry
-when this was written (the sandbox of the author is offline): the lock/workspace
-guards and the command shape are unit-tested with a fake runner only.
+the main checkout's. A pnpm workspace whose lock needs a key outside the
+allow-list (`patchedDependencies`, say) is fetched without it. Cargo's staged
+project was run against the real `cargo`; the pnpm commands (and the
+`npm_config_userconfig` redirection) were **not** run against pnpm or the live
+registry when this was written (the author's sandbox is offline): the lock and
+workspace guards and the command shape are unit-tested with a fake runner only.
+The proxy/CA variables of the operator are the one piece of host configuration
+the fetch keeps; a proxy URL with credentials in it is passed as set.
 
 ## Known limits
 

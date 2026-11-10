@@ -481,6 +481,17 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             "Task orchestration boot reconciliation completed"
         );
     }
+    // KT-1649 — a dependency fetch's scratch project is removed when its step
+    // ends, but a killed backend never ran that: sweep what it left.
+    if let Ok(root) = kronn::core::task_worker_dep_fetch::scratch_root() {
+        let swept = kronn::core::task_worker_dep_fetch::sweep_stale_scratch(&root);
+        if swept > 0 {
+            tracing::info!(
+                swept,
+                "dependency fetch scratch projects of an earlier run removed"
+            );
+        }
+    }
     // KT-1318 — the boot pass above is not enough on a host that stays up for
     // weeks: orphaned lane build dirs are swept periodically as well.
     kronn::api::disk::spawn_periodic_sweep(state.db.clone());

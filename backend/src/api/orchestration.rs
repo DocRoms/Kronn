@@ -6424,6 +6424,7 @@ fn validation_metadata_command(
         timeout: std::time::Duration::from_secs(15),
         // A bounded target-dir lookup that gates a validation's refusal.
         priority: crate::core::background_priority::Priority::Normal,
+        clean_env: false,
     };
     // Preserve the validation's manifest and configuration options. Validations
     // are normally launched from the repository root, including commands such
@@ -10097,9 +10098,19 @@ async fn record_dependency_fetch(
     cancel: tokio_util::sync::CancellationToken,
 ) {
     let path = worktree.to_path_buf();
+    // The staged projects live under Kronn's data directory, which the worker
+    // cannot read; no data directory, no scratch, no fetch.
+    let scratch_root = match crate::core::task_worker_dep_fetch::scratch_root() {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "dependency fetch skipped: {error}");
+            return;
+        }
+    };
     let record = tokio::task::spawn_blocking(move || {
         crate::core::task_worker_dep_fetch::fetch_missing_dependencies(
             &path,
+            &scratch_root,
             runner.as_ref(),
             &cancel,
         )
