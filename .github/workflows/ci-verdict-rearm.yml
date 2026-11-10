@@ -1,9 +1,12 @@
 name: CI Verdict Re-arm
 
 # A CI Verdict job that waited for a CI Tests / CI Build run longer than its job
-# timeout ends cancelled (never red): the upstream run had not failed. Nothing
-# would clear that check, so when the upstream run completes this re-runs the
-# cancelled gate job; the re-run reads the real result (scripts/ci/rearm_verdict.sh).
+# timeout ends cancelled (never red): the upstream run had not failed. A verdict
+# that ran on the label event before the upstream run existed, or against an
+# earlier attempt of it, ends red for a result that has since changed (KT-1523).
+# Nothing would clear either check, so when the upstream run completes this
+# re-runs the cancelled or failed gate job; the re-run reads the real result
+# (scripts/ci/rearm_verdict.sh).
 #
 # Security: `workflow_run` runs with a write token whatever the pull request
 # is. So this workflow
@@ -36,7 +39,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: scripts/ci
           persist-credentials: false
-      - name: Re-run the CI Verdict gate that gave up on this run
+      - name: Re-run the CI Verdict gate that decided before this run completed
         env:
           GH_TOKEN: ${{ github.token }}
           UPSTREAM_NAME: ${{ github.event.workflow_run.name }}

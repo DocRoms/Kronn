@@ -51,9 +51,19 @@ red, and is healed automatically:
   takes the newest CI Verdict run of that head, waits for it to complete (up to
   `REARM_WAIT_SECONDS`, 900), and re-runs the one gate job that was cut short
   (`POST /actions/jobs/<id>/rerun`). The re-run reads the real upstream result
-  itself; the re-arm never decides a verdict. A gate that passed or really
-  failed is left alone. Every outcome exits 0: a red check of this workflow
-  would land on the default branch.
+  itself; the re-arm never decides a verdict. A gate that passed is left alone.
+  Every outcome exits 0: a red check of this workflow would land on the default
+  branch.
+- A gate that **failed** is re-run too (KT-1523): the verdict may have run on
+  the label event before CI Tests / CI Build existed for the head ("No ci-*.yml
+  run tested pull request #N…"), or repeated an earlier attempt that a re-run
+  has since fixed. The re-run reads the real result, so it turns green once the
+  upstream run succeeded, with no close/reopen and no empty commit. Two limits
+  keep this from looping or hiding a real problem: a gate whose own label guard
+  failed ("Require the `<label>` label": the label is absent, and a newer label
+  event starts a newer verdict run) is left alone, and a failed gate is re-armed
+  only while its `run_attempt` is below `REARM_MAX_ATTEMPTS` (default 3). A
+  verdict that repeats a genuine failure just repeats it.
 - The re-arm only takes effect once the workflow is on the default branch.
 - If the job's cut-off is reported as `failure` with a cancelled step, it is
   re-run too. A cancel made by hand is re-run the same way when the upstream run

@@ -120,6 +120,21 @@ verdict() {
     PREVIOUS_VERDICT_DISCOVERY_SECONDS=0 verdict
     assert_failure
     assert_output --partial "No ci-build.yml run tested pull request #7 at head h7, base b7"
+    # The red is healed by the re-arm, and the message says so.
+    assert_output --partial "CI Verdict Re-arm re-runs this check when it completes"
+}
+
+@test "verdict: a re-run after the label-event verdict went red finds the run that passed since (KT-1523)" {
+    runs
+    PREVIOUS_VERDICT_DISCOVERY_SECONDS=0 verdict
+    assert_failure
+    # CI Build started and passed afterwards; the re-run replays the same event.
+    runs 1002
+    jobs 1002 success
+    PREVIOUS_VERDICT_DISCOVERY_SECONDS=0 verdict
+    assert_success
+    assert_output --partial "Run 1002 passed ci-build-gates"
+    no_post
 }
 
 @test "verdict: upstream still running after the wait is held, then repeated green" {

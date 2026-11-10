@@ -82,13 +82,44 @@ rearm() {
     no_post
 }
 
-@test "rearm: a gate that really failed is left alone" {
+@test "rearm: a gate that failed before the upstream run completed is re-run (KT-1523)" {
+    # "No run tested this head" on the label event, red; CI Tests then passed.
     verdict_runs 500
     verdict_run 500 completed
     gate_job 500 555 ci-build-gates completed '"failure"' failure
     rearm
     assert_success
+    posted "repos/o/r/actions/jobs/555/rerun"
+    assert_output --partial "Re-ran ci-build-gates of CI Verdict run 500"
+}
+
+@test "rearm: a gate that failed on its label guard is left alone" {
+    verdict_runs 500
+    verdict_run 500 completed
+    cat > "$FIXTURES/actions_runs_500_jobs.json" <<'JSON'
+{"jobs":[{"id":555,"name":"ci-build-gates","status":"completed","conclusion":"failure","run_attempt":1,
+  "steps":[{"name":"Require the ci-build label","conclusion":"failure"},
+           {"name":"Repeat the CI Build verdict for this pull request","conclusion":"skipped"}]}]}
+JSON
+    rearm
+    assert_success
+    assert_output --partial "nothing to re-arm"
     no_post
+}
+
+@test "rearm: a failed gate already re-run REARM_MAX_ATTEMPTS times is left alone" {
+    verdict_runs 500
+    verdict_run 500 completed
+    cat > "$FIXTURES/actions_runs_500_jobs.json" <<'JSON'
+{"jobs":[{"id":555,"name":"ci-build-gates","status":"completed","conclusion":"failure","run_attempt":3,
+  "steps":[{"name":"Repeat","conclusion":"failure"}]}]}
+JSON
+    rearm
+    assert_success
+    no_post
+    REARM_MAX_ATTEMPTS=4 rearm
+    assert_success
+    posted "repos/o/r/actions/jobs/555/rerun"
 }
 
 @test "rearm: only the newest verdict run of the head is touched" {
