@@ -361,6 +361,7 @@ fn an_unreadable_repository_is_named() {
 
 // ─── python3, the interpreter of the shipped steps ──────────────────────────
 
+#[cfg(unix)] // sets POSIX mode bits
 fn executable(dir: &std::path::Path, name: &str, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     let file = dir.join(name);
@@ -369,6 +370,7 @@ fn executable(dir: &std::path::Path, name: &str, mode: u32) {
 }
 
 #[test]
+#[cfg(unix)] // fakes python3 as a #!/bin/sh file made executable by chmod mode bits
 fn python3_resolves_only_as_an_executable_file_of_the_path() {
     let with = tempfile::tempdir().unwrap();
     let without = tempfile::tempdir().unwrap();

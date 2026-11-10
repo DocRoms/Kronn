@@ -175,6 +175,7 @@ fn the_shared_stores_are_for_the_sandboxed_launches_only() {
 }
 
 #[test]
+#[cfg(unix)] // creates symlinks through std::os::unix
 fn a_store_that_is_not_there_is_not_listed_and_a_link_is_listed_with_its_target() {
     let home = tempfile::tempdir().unwrap();
     assert!(hidden_in(home.path(), None, Reach::Sandboxed).is_empty());

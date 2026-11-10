@@ -193,10 +193,12 @@ fn the_steps_render_with_the_values_of_a_run() {
 
 /// A directory holding an executable `python3` (and nothing else): the PATH of
 /// a machine that has Python 3, whatever the host running the test has.
+#[cfg(unix)] // a #!/bin/sh python3 made executable by mode bits
 struct FakePython {
     dir: tempfile::TempDir,
 }
 
+#[cfg(unix)]
 impl FakePython {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -320,6 +322,7 @@ fn fresh_state() -> crate::AppState {
 }
 
 #[tokio::test]
+#[cfg(unix)] // installs over a fake python3 that is a #!/bin/sh script
 async fn the_template_installs_on_a_fresh_data_dir_with_another_project_id() {
     let state = fresh_state();
     // Not the id of the instance the workflow was written on.
@@ -370,6 +373,7 @@ async fn the_template_installs_on_a_fresh_data_dir_with_another_project_id() {
 }
 
 #[tokio::test]
+#[cfg(unix)] // installs over a fake python3 that is a #!/bin/sh script
 async fn installing_twice_is_refused_instead_of_duplicating_the_workflows() {
     let state = fresh_state();
     let python = FakePython::new();
@@ -509,6 +513,7 @@ fn the_preflight_step_fails_with_the_actionable_message_and_passes_when_ready() 
     assert!(String::from_utf8_lossy(&bad_issue.stderr).contains("Invalid issue number"));
 }
 
+#[cfg(unix)] // only the gh dry runs use it
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .arg("-C")
@@ -527,6 +532,7 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// `<root>/<owner>/<name>.git`, a bare repository whose path reads like the
 /// slug of a remote.
+#[cfg(unix)] // only the gh dry runs use it
 fn bare(root: &Path, slug: &str) -> std::path::PathBuf {
     let path = root.join(format!("{slug}.git"));
     std::fs::create_dir_all(&path).unwrap();
@@ -534,6 +540,7 @@ fn bare(root: &Path, slug: &str) -> std::path::PathBuf {
     path
 }
 
+#[cfg(unix)] // only the gh dry runs use it
 struct Dry {
     _root: tempfile::TempDir,
     checkout: std::path::PathBuf,
@@ -547,6 +554,7 @@ struct Dry {
 /// `fork` remote is `octo/widgets`, holding `autocode/issue-7` one commit
 /// ahead of `main`; a `gh` that logs what it is asked and answers the calls the
 /// publish step makes.
+#[cfg(unix)] // only the gh dry runs use it
 fn dry_run_setup() -> Dry {
     let root = tempfile::tempdir().unwrap();
     let upstream = bare(root.path(), "acme/widgets");
@@ -597,6 +605,7 @@ fn dry_run_setup() -> Dry {
     }
 }
 
+#[cfg(unix)] // only the gh dry runs use it
 fn branch_exists(bare: &Path, branch: &str) -> bool {
     Command::new("git")
         .arg("-C")
@@ -612,6 +621,7 @@ fn branch_exists(bare: &Path, branch: &str) -> bool {
         .success()
 }
 
+#[cfg(unix)] // only the gh dry runs use it
 fn publish(dry: &Dry, can_push: bool, fork_exists: bool) -> (Output, String) {
     let mut facts = facts(can_push);
     facts.fork_exists = fork_exists;
@@ -635,6 +645,7 @@ fn publish(dry: &Dry, can_push: bool, fork_exists: bool) -> (Output, String) {
 }
 
 #[test]
+#[cfg(unix)] // stubs gh with a #!/bin/sh script made executable by mode bits
 fn a_maintainer_pushes_the_branch_to_the_repository_and_opens_the_pull_request() {
     if !python_available() {
         eprintln!("python3 missing: dry run skipped");
@@ -665,6 +676,7 @@ fn a_maintainer_pushes_the_branch_to_the_repository_and_opens_the_pull_request()
 }
 
 #[test]
+#[cfg(unix)] // stubs gh with a #!/bin/sh script made executable by mode bits
 fn a_contributor_forks_pushes_to_the_fork_and_opens_the_pull_request_against_the_repository() {
     if !python_available() {
         eprintln!("python3 missing: dry run skipped");
@@ -706,6 +718,7 @@ fn a_contributor_forks_pushes_to_the_fork_and_opens_the_pull_request_against_the
 }
 
 #[test]
+#[cfg(unix)] // stubs gh with a #!/bin/sh script made executable by mode bits
 fn nothing_is_published_before_the_campaign_delivered() {
     if !python_available() {
         eprintln!("python3 missing: dry run skipped");

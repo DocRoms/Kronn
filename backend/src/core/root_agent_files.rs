@@ -979,7 +979,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         assert!(body.contains("{{USER_TOKEN}}"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
     #[test]
     fn a_folder_swapped_after_the_walk_never_receives_an_adapter_file() {
         use crate::core::fs_guard::swap_probe;
@@ -995,7 +995,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         assert!(fs::read_dir(&external).unwrap().next().is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
     #[test]
     fn a_folder_swapped_after_the_walk_never_has_an_outside_adapter_file_upgraded() {
         use crate::core::fs_guard::swap_probe;

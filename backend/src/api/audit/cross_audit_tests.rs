@@ -1240,6 +1240,7 @@ async fn the_card_flags_an_open_dispute_and_validation_waits_for_it() {
 
 #[tokio::test]
 #[serial_test::serial]
+#[cfg(unix)] // swaps a folder for a symlink through std::os::unix
 async fn a_tech_debt_folder_swapped_after_the_walk_never_receives_a_sheet_or_the_index() {
     use crate::core::fs_guard::swap_probe;
     let dir = repo();

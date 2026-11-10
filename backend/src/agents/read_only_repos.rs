@@ -1545,6 +1545,7 @@ mod tests {
     /// and the arguments agree (no `--add-dir <own>` to re-open it).
     #[test]
     #[serial_test::serial]
+    #[cfg(unix)] // ReadOnlyRepos::resolve* refuses Windows in check_platform
     fn a_claude_launch_past_the_rule_cap_has_no_add_dir_for_its_run() {
         let (_temp, work, _repo) = fixture();
         let own = run_dir(OWN_RUN);

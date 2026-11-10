@@ -1426,7 +1426,7 @@ exec sleep 30"#,
     /// Skipped where a sandbox cannot be applied (a sandboxed worker).
     #[tokio::test]
     #[serial_test::serial]
-    #[cfg(target_os = "macos")]
+    #[cfg(target_os = "macos")] // only on macOS: runs the CLI under sandbox-exec (Seatbelt)
     async fn a_codex_turn_on_the_adapted_route_reads_its_own_run_behind_seatbelt() {
         if crate::core::task_worker_sandbox::Mechanism::Seatbelt
             .check_usable()

@@ -166,7 +166,7 @@ fn the_sealed_environment_alone_would_pass_an_npm_registry_override() {
     assert!(crate::core::child_env::is_base("NPM_CONFIG_REGISTRY"));
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs /usr/bin/printenv, a program Windows lacks
 #[test]
 fn the_process_runner_gives_a_clean_command_only_what_it_was_given() {
     use crate::core::task_worker_env::ProcessProbeRunner;
@@ -593,7 +593,7 @@ fn a_cancelled_launch_fetches_nothing() {
     assert!(runner.commands().is_empty());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_lock_that_is_a_symlink_is_refused_not_followed() {
     let tree = tree(None);
@@ -1105,7 +1105,7 @@ fn the_startup_sweep_removes_only_the_scratch_projects_of_an_earlier_run() {
     assert_eq!(sweep_stale_scratch(&dir.path().join("missing")), 0);
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits
 #[test]
 fn a_scratch_project_is_private_to_its_owner() {
     use std::os::unix::fs::PermissionsExt;
@@ -1593,7 +1593,7 @@ fn the_staged_pnpm_project_holds_the_rebuilt_lock_only() {
 
 // ─── a fake registry that must see no credential (KT-1674) ────────────────
 
-#[cfg(unix)]
+#[cfg(unix)] // serves a #!/bin/sh registry script made executable by mode bits
 mod fake_registry {
     use super::*;
     use crate::core::task_worker_env::ProcessProbeRunner;

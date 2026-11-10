@@ -238,7 +238,7 @@ fn a_target_reached_through_a_symlinked_directory_outside_the_project_has_no_dig
     assert_eq!(file_digest(project.path(), "docs/linked/secret.md"), None);
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
 #[test]
 fn a_docs_folder_swapped_after_the_walk_never_receives_the_run_state() {
     use crate::core::fs_guard::swap_probe;

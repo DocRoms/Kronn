@@ -25,7 +25,7 @@ pub mod messaging;
 pub mod monitor;
 pub mod orchestration;
 pub(crate) mod prompt_limit;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod review_workspace_tests;
 pub(crate) mod routing;
 pub mod runtime;

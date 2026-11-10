@@ -100,7 +100,7 @@ fn a_grant_with_a_parent_component_is_refused_even_when_it_resolves_to_a_run() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_link_inside_the_root_is_never_a_grant() {
     let (_temp, root) = root_with_two_runs();

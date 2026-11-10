@@ -5001,7 +5001,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn fix_worktree_paths_never_writes_through_a_link_at_either_name() {
         // KT-1595: the two reference files are written through the rooted
@@ -6056,7 +6056,7 @@ mod tests {
         assert_eq!(again.bytes_reclaimed, 0);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
     #[test]
     fn a_target_folder_swapped_after_the_walk_never_loses_an_outside_lane() {
         use crate::core::fs_guard::swap_probe;
@@ -6075,7 +6075,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
     #[test]
     fn a_target_folder_swapped_after_the_walk_never_receives_the_lane_marker() {
         use crate::core::fs_guard::swap_probe;
@@ -6091,7 +6091,7 @@ mod tests {
         assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
     #[test]
     fn a_kronn_folder_swapped_after_the_walk_never_receives_a_task_worktree() {
         use crate::core::fs_guard::swap_probe;

@@ -672,7 +672,7 @@ fn the_files_key_does_not_stand_in_for_an_unreadable_store() {
 
 /// KT-1528 — a dangling symlink holds its name: `free_name` skips it, so a new
 /// copy never lands on it.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn free_name_skips_a_dangling_symlink() {
     let dir = tempfile::tempdir().unwrap();
@@ -688,7 +688,7 @@ fn free_name_skips_a_dangling_symlink() {
 /// KT-1528 — a symlinked config.toml is refused (its target is not Kronn's to
 /// chmod or move) and the target keeps its mode; a plain file is made
 /// owner-only before the move, not after.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks and asserts POSIX mode bits
 #[test]
 fn a_symlinked_config_is_not_set_aside_and_its_target_keeps_its_mode() {
     use std::os::unix::fs::PermissionsExt;
@@ -728,7 +728,7 @@ fn a_symlinked_config_is_not_set_aside_and_its_target_keeps_its_mode() {
 
 /// KT-1528 — the chmod goes through an `O_NOFOLLOW` handle: a dangling link and
 /// a path that is no regular file are refused, and nothing is moved.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn the_owner_only_step_refuses_a_link_and_a_non_regular_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -751,7 +751,7 @@ fn the_owner_only_step_refuses_a_link_and_a_non_regular_file() {
 /// KT-1528 — the path swapped for a link between the open and the rename: what
 /// was moved is the link, not the opened file, so it is moved back and the
 /// set-aside is refused. Nothing is chmodded or lost, and no copy is left.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks and asserts POSIX mode bits
 #[test]
 fn a_path_swapped_for_a_link_while_being_set_aside_is_moved_back() {
     use std::os::unix::fs::PermissionsExt;
@@ -794,7 +794,7 @@ fn a_path_swapped_for_a_link_while_being_set_aside_is_moved_back() {
 
 /// KT-1528 — the same refusal when the path is swapped for another regular
 /// file (a different inode): it is moved back untouched.
-#[cfg(unix)]
+#[cfg(unix)] // swaps the file inside the libc openat/renameat move
 #[test]
 fn a_path_swapped_for_another_file_while_being_set_aside_is_moved_back() {
     let dir = tempfile::tempdir().unwrap();
@@ -821,7 +821,7 @@ fn a_path_swapped_for_another_file_while_being_set_aside_is_moved_back() {
 /// KT-1528 — the move-back never replaces: a config.toml created at the original
 /// path after the swap was found is left alone, and what was moved aside stays in
 /// its copy file, so both survive and the error says so.
-#[cfg(unix)]
+#[cfg(unix)] // swaps the file inside the libc openat/renameat move
 #[test]
 fn a_config_recreated_before_the_move_back_is_not_overwritten() {
     let dir = tempfile::tempdir().unwrap();
@@ -864,7 +864,10 @@ fn a_config_recreated_before_the_move_back_is_not_overwritten() {
 }
 
 /// KT-1528 — the rename itself refuses to replace an existing destination.
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+#[cfg(all(
+    unix,
+    any(target_os = "linux", target_os = "android", target_os = "macos")
+))] // libc renameat2/renameatx_np
 #[test]
 fn rename_noreplace_keeps_both_files_when_the_destination_exists() {
     use std::ffi::CString;
@@ -890,7 +893,6 @@ fn rename_noreplace_keeps_both_files_when_the_destination_exists() {
 
 /// KT-1528 — a path outside the directory handed in is refused, not set aside by
 /// its bare file name from the wrong place.
-#[cfg(unix)]
 #[test]
 fn a_path_outside_the_data_directory_is_not_set_aside() {
     let root = tempfile::tempdir().unwrap();
@@ -913,7 +915,7 @@ fn a_path_outside_the_data_directory_is_not_set_aside() {
 
 /// KT-1528 — a data directory that is itself a symlink (dotfiles setups) still
 /// works: only the file is refused when it is a link.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_symlinked_data_directory_can_still_be_set_aside_from() {
     let root = tempfile::tempdir().unwrap();
@@ -934,7 +936,7 @@ fn a_symlinked_data_directory_can_still_be_set_aside_from() {
 /// KT-1528 — a dangling `config.toml.backup.enc` link is neither skipped nor
 /// replaced: the rotation refuses it, and so does the snapshot writer, which
 /// would otherwise write over it.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_dangling_backup_link_is_refused_not_replaced() {
     let (dir, _key) = dir_with_key();
@@ -968,7 +970,7 @@ fn a_dangling_backup_link_is_refused_not_replaced() {
 
 /// KT-1528 — a link to a real file is refused as well, and its target is not
 /// read as the snapshot nor rotated.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_backup_link_to_a_real_file_is_refused_too() {
     let (dir, _key) = dir_with_key();

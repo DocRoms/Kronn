@@ -645,7 +645,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlinked_proof_is_refused_on_read_and_replaced_on_mint() {
         let dir = tempfile::tempdir().unwrap();
@@ -664,7 +664,7 @@ mod tests {
         assert!(!local_proof_matches(dir.path(), Some(&known_content)));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits
     #[test]
     fn a_proof_others_can_access_is_refused_on_read_and_replaced_on_mint() {
         use std::os::unix::fs::PermissionsExt;

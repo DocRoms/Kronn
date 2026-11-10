@@ -262,7 +262,7 @@ fn a_rename_outside_the_selected_additions_stays_put() {
     assert!(!project.join("docs/new.md").exists());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
 #[test]
 fn a_folder_swapped_after_the_walk_never_loses_an_outside_file_to_a_rename() {
     use crate::core::fs_guard::swap_probe;
@@ -284,7 +284,7 @@ fn a_folder_swapped_after_the_walk_never_loses_an_outside_file_to_a_rename() {
     assert!(!external.join("new.md").exists());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
 #[test]
 fn a_folder_swapped_after_the_walk_never_receives_the_spec_update() {
     use crate::core::fs_guard::swap_probe;
