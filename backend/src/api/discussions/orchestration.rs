@@ -1484,7 +1484,8 @@ pub async fn generate_summary_on_demand(
     } else if let Some(reported) = process.reported_token_usage() {
         reported
     } else {
-        parsed_tokens
+        // The summary cache column is NOT NULL, so unmeasured is stored as 0.
+        parsed_tokens.unwrap_or(0)
     };
     let model_name =
         runner::resolve_model_flag(&disc.agent, ModelTier::Economy, Some(&model_tiers))
@@ -1929,6 +1930,7 @@ mod orchestrate_validation_tests {
             image_model: None,
             video_model: None,
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         }
     }

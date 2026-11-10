@@ -5,7 +5,7 @@ Status: **implemented for 0.9.1** (2026-07-25).
 The domain schema, compact HTTP/MCP contract, discussion panel, global backlog,
 human-gated proposal cards and delta-only prompt notifications are implemented.
 `[src: file: backend/src/db/sql/081_planning_tasks.sql:1-99#planning_tasks]`
-`[src: file: backend/src/api/planning.rs:223-264#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:311-358#decide_proposal_item]`
+`[src: file: backend/src/api/planning.rs:239-280#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:327-374#decide_proposal_item]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:326-650#plan_get]`
 `[src: file: frontend/src/pages/PlanningPage.tsx:191-216#withDiscussion]`
 `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3771-3802#planning_change_count]`
@@ -202,7 +202,7 @@ Runtime parity is capability-based:
   `kronn-plan-action` proposal for human validation instead of pretending that
   a direct task write succeeded.
   `[src: file: backend/src/api/agent_tools.rs:2227-2434#plan_get]` `[src: file: backend/src/api/agent_tools.rs:2457-2488#task_create]` `[src: file: backend/src/api/agent_tools.rs:4037-4044#actor]`
-  `[src: file: backend/src/api/agent_tools.rs:4974-5001#unwrap_api_compact_task]`
+  `[src: file: backend/src/api/agent_tools.rs:5025-5052#unwrap_api_compact_task]`
   `[src: file: backend/src/api/disc_prompts.rs:278-287#agent_has_native_planning]`
 
 The first release is local-only. Actor/audit metadata must still distinguish

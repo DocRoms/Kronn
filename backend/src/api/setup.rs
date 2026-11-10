@@ -884,6 +884,37 @@ fn normalize_mention_color(color: Option<&str>) -> Result<Option<String>, &'stat
     Ok(Some(color.to_ascii_lowercase()))
 }
 
+/// POST /api/config/agent-tools
+/// Set (or clear) the operator switch for the Kronn tool executor on one HTTP
+/// agent (KT-1600). CLI agents bring their own tools and have no such switch;
+/// a named `Custom` connection carries its own setting on the connection.
+pub async fn set_agent_tools(
+    State(state): State<AppState>,
+    Json(req): Json<SetAgentToolsRequest>,
+) -> Json<ApiResponse<()>> {
+    let mut config = state.config.write().await;
+    let agent = match req.agent {
+        AgentType::Ollama => &mut config.agents.ollama,
+        AgentType::LiteLlm => &mut config.agents.lite_llm,
+        AgentType::Nvidia => &mut config.agents.nvidia,
+        AgentType::Custom => {
+            return Json(ApiResponse::err(
+                "Set the tools option on the external API connection itself",
+            ))
+        }
+        _ => {
+            return Json(ApiResponse::err(
+                "Only HTTP agents have a tool executor switch",
+            ))
+        }
+    };
+    agent.tools_enabled = req.enabled;
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(error) => Json(ApiResponse::err(format!("Failed to save: {error}"))),
+    }
+}
+
 /// POST /api/config/agent-mention-color
 /// Set (or reset) the color used by the UI for a canonical agent mention.
 pub async fn set_agent_mention_color(
@@ -1320,9 +1351,9 @@ fn exposure_refused(status: StatusCode, message: impl Into<String>) -> ExposureR
 /// a trap for the owner, who would find no way back in the UI. What carries the
 /// exposure is a TLS-terminating proxy on this machine, declared together with
 /// its public `https://` origin. Declaring one withdraws the loopback bypass
-/// (every proxied request is a loopback request), so the reply hands the token
-/// over for the local UI to keep. Takes effect on the next restart (the host is
-/// only bound at boot).
+/// (every proxied request is a loopback request), so the reply hands over a token
+/// minted by that very call (never the standing one) for the local UI to keep.
+/// Takes effect on the next restart (the host is only bound at boot).
 pub async fn set_network_exposure(
     State(state): State<AppState>,
     Json(req): Json<SetNetworkExposureRequest>,
@@ -1340,6 +1371,7 @@ pub async fn set_network_exposure(
         // Change a copy, adopt it only once saved: a failed save must not leave
         // a live token or host that was never stored.
         let mut next = config.clone();
+        let proxy_declared_before = crate::core::net_expose::proxy_declared_for(&config.server);
         if let Some(origin) = req.public_origin.as_deref() {
             let origin = origin.trim();
             next.server.public_origin = if origin.is_empty() {
@@ -1384,15 +1416,27 @@ pub async fn set_network_exposure(
         };
         // A proxy fronting Kronn puts the network behind a loopback peer: it
         // needs the token as much as a direct LAN bind does.
+        //
+        // The plaintext token leaves this route only when THIS call made it: a
+        // loopback caller before the proxy is declared (strict_localhost still
+        // off) must not be able to read the standing one. Without a token one is
+        // minted; on the transition to a declared proxy the standing one is
+        // rotated, as the local UI has to be handed a token to keep once the
+        // loopback bypass is withdrawn.
+        let mut issued = None;
         if req.exposed || declared {
             next.server.auth_enabled = true;
-            if next.server.auth_token.as_deref().unwrap_or("").is_empty() {
+            let no_token = next.server.auth_token.as_deref().unwrap_or("").is_empty();
+            let proxy_transition = declared && !proxy_declared_before;
+            if no_token || proxy_transition {
                 if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
                     return exposure_refused(StatusCode::CONFLICT, locked);
                 }
-                next.server.auth_token = Some(uuid::Uuid::new_v4().to_string());
+                let token = uuid::Uuid::new_v4().to_string();
+                next.server.auth_token = Some(token.clone());
                 next.server.auth_token_session_only = false;
                 next.server.auth_locked = false;
+                issued = Some(token);
             }
         }
         if let Err(e) = config::save(&next).await {
@@ -1403,9 +1447,6 @@ pub async fn set_network_exposure(
         }
         // The recovery proof the owner will need behind this proxy, ready now.
         crate::core::net_expose::arm_local_proof(&next.server);
-        let issued = (req.tls_terminated_by_proxy == Some(true))
-            .then(|| next.server.auth_token.clone())
-            .flatten();
         *config = next;
         issued
     };
@@ -2088,6 +2129,23 @@ pub(crate) async fn build_export(state: &AppState) -> Result<DbExport, String> {
         .await
         .map_err(|e| format!("DB error: {}", e))?;
 
+    let mut context_files = state
+        .db
+        .with_read_conn(crate::db::discussions::list_context_file_records)
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
+    let omitted = mark_exportable_blobs(
+        &mut context_files,
+        ZIP_CAP_CONTEXT_BLOB,
+        ZIP_CAP_CONTEXT_BLOBS_TOTAL,
+    );
+    if omitted > 0 {
+        tracing::warn!(
+            omitted,
+            "export: context file bytes left out (missing on disk or over the import limit)"
+        );
+    }
+
     let custom_skills: Vec<_> = crate::core::skills::list_all_skills()
         .into_iter()
         .filter(|s| !s.is_builtin)
@@ -2129,7 +2187,56 @@ pub(crate) async fn build_export(state: &AppState) -> Result<DbExport, String> {
         learning_rejections,
         assistant_conversations,
         api_access_policies: Some(api_access_policies),
+        context_files,
     })
+}
+
+/// Where the bytes of a context file sit in the archive.
+const CONTEXT_BLOB_PREFIX: &str = "context-files/";
+/// Per-file DECOMPRESSED cap for a context file's bytes: the upload limit of
+/// the context-file route.
+const ZIP_CAP_CONTEXT_BLOB: u64 = 160 * 1024 * 1024;
+/// All context file bytes of one archive together. It matches the 512 MiB
+/// import body limit, and the exporter stops at it too, so an archive this
+/// instance wrote is never refused for its blobs.
+const ZIP_CAP_CONTEXT_BLOBS_TOTAL: u64 = 512 * 1024 * 1024;
+
+/// A context file id usable as an archive entry name and as the prefix of a
+/// file name on disk (`save_file_to_disk` slices its first 8 bytes).
+fn is_blob_id(id: &str) -> bool {
+    (8..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Set `has_blob` on the rows whose bytes will ride in the archive: a regular
+/// file on disk, within the per-file cap and the archive's blob budget, so the
+/// archive stays importable. Returns how many rows had a file that was left out.
+fn mark_exportable_blobs(
+    records: &mut [crate::models::db::ContextFileRecord],
+    per_file_cap: u64,
+    total_cap: u64,
+) -> usize {
+    let (mut total, mut omitted) = (0u64, 0usize);
+    for record in records {
+        let Some(path) = record.disk_path.as_deref() else {
+            continue;
+        };
+        let size = std::fs::metadata(path)
+            .ok()
+            .filter(|meta| meta.is_file())
+            .map(|meta| meta.len())
+            .filter(|len| *len <= per_file_cap);
+        match size {
+            Some(len) if is_blob_id(&record.id) && total + len <= total_cap => {
+                total += len;
+                record.has_blob = true;
+            }
+            _ => omitted += 1,
+        }
+    }
+    omitted
 }
 
 /// HMAC-SHA256 (RFC 2104).
@@ -2286,7 +2393,19 @@ pub async fn export_data(State(state): State<AppState>) -> Response {
         carries_secrets,
     );
 
-    let bytes = match build_export_zip(&data_json, &config_toml, recovery_code.as_deref()) {
+    let blobs: Vec<(String, String)> = db_export
+        .context_files
+        .iter()
+        .filter(|record| record.has_blob)
+        .filter_map(|record| Some((record.id.clone(), record.disk_path.clone()?)))
+        .collect();
+    // The blobs are read from disk: off the async workers.
+    let zipped = tokio::task::spawn_blocking(move || {
+        build_export_zip(&data_json, &config_toml, recovery_code.as_deref(), &blobs)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("ZIP task failed: {e}")));
+    let bytes = match zipped {
         Ok(b) => b,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
@@ -2341,12 +2460,14 @@ fn export_recovery_code(
 }
 
 /// Assemble the export ZIP: data.json + config.toml (+ recovery.key when the
-/// user configured a recovery passphrase). Factored out of the handler so the
+/// user configured a recovery passphrase, + one `context-files/<id>` entry per
+/// `(id, disk path)` of `context_blobs`). Factored out of the handler so the
 /// archive layout is unit-testable.
 fn build_export_zip(
     data_json: &str,
     config_toml: &str,
     recovery_code: Option<&str>,
+    context_blobs: &[(String, String)],
 ) -> Result<Vec<u8>, String> {
     let mut buf = std::io::Cursor::new(Vec::new());
     {
@@ -2369,6 +2490,22 @@ fn build_export_zip(
                 .map_err(|e| format!("ZIP error: {}", e))?;
             std::io::Write::write_all(&mut zip, code.as_bytes())
                 .map_err(|e| format!("ZIP write error: {}", e))?;
+        }
+
+        for (id, path) in context_blobs {
+            // A file that vanished since `has_blob` was set is left out: the
+            // import reports a row without bytes instead of failing the export.
+            let Ok(file) = std::fs::File::open(path) else {
+                tracing::warn!(id, "export: context file bytes unreadable, left out");
+                continue;
+            };
+            zip.start_file(format!("{CONTEXT_BLOB_PREFIX}{id}"), options)
+                .map_err(|e| format!("ZIP error: {}", e))?;
+            std::io::copy(
+                &mut std::io::Read::take(file, ZIP_CAP_CONTEXT_BLOB),
+                &mut zip,
+            )
+            .map_err(|e| format!("ZIP write error: {}", e))?;
         }
 
         zip.finish()
@@ -2416,6 +2553,7 @@ fn persist_imported_recovery(dir: &std::path::Path, code: &str) -> Vec<String> {
 fn import_clear_statements(data: &DbExport) -> Vec<&'static str> {
     let mut stmts: Vec<&'static str> = Vec::new();
     if !data.discussions.is_empty() {
+        stmts.push("DELETE FROM context_files");
         stmts.push("DELETE FROM messages");
         stmts.push("DELETE FROM discussions");
     }
@@ -2458,8 +2596,87 @@ fn import_clear_statements(data: &DbExport) -> Vec<&'static str> {
     stmts
 }
 
+/// The context file bytes read out of an archive, by file id (KT-1602).
+#[derive(Default)]
+struct ContextBlobs(std::collections::HashMap<String, Vec<u8>>);
+
+/// Counts only: a failed assertion must not print the files.
+impl std::fmt::Debug for ContextBlobs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ContextBlobs({} file(s))", self.0.len())
+    }
+}
+
+/// Removes the files an import wrote unless it is told the import went through.
+struct WrittenBlobs {
+    paths: Vec<String>,
+    kept: bool,
+}
+
+impl Drop for WrittenBlobs {
+    fn drop(&mut self) {
+        if !self.kept {
+            for path in &self.paths {
+                crate::core::context_files::delete_image_from_disk(path);
+            }
+        }
+    }
+}
+
+/// Write the archive's context file bytes under this machine's context-file
+/// store. Returns the disk path of each file written and, for the rows that
+/// cannot be restored as they are, a warning each. Never touches the source
+/// machine's `disk_path`: the archive does not carry one.
+fn write_context_blobs(
+    records: &[crate::models::db::ContextFileRecord],
+    blobs: &ContextBlobs,
+) -> (
+    WrittenBlobs,
+    std::collections::HashMap<String, String>,
+    Vec<String>,
+) {
+    let mut written = WrittenBlobs {
+        paths: Vec::new(),
+        kept: false,
+    };
+    let mut paths = std::collections::HashMap::new();
+    let (mut missing, mut failed) = (0usize, 0usize);
+    for record in records.iter().filter(|r| r.has_blob) {
+        let Some(bytes) = blobs.0.get(&record.id).filter(|_| is_blob_id(&record.id)) else {
+            missing += 1;
+            continue;
+        };
+        match crate::core::context_files::save_file_to_disk(&record.id, &record.filename, bytes) {
+            Ok(path) => {
+                written.paths.push(path.clone());
+                paths.insert(record.id.clone(), path);
+            }
+            Err(e) => {
+                tracing::warn!(id = %record.id, "Import context file bytes not written: {e}");
+                failed += 1;
+            }
+        }
+    }
+    let mut warnings = Vec::new();
+    if missing > 0 {
+        warnings.push(format!(
+            "{missing} context file(s) came back without their bytes: the archive does not carry them"
+        ));
+    }
+    if failed > 0 {
+        warnings.push(format!(
+            "{failed} context file(s) came back without their bytes: they could not be written to disk"
+        ));
+    }
+    (written, paths, warnings)
+}
+
 /// Import DB data from a DbExport struct. Returns warnings and invalid paths.
-async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult, String> {
+async fn do_import_db(
+    state: &AppState,
+    data: &DbExport,
+    blobs: ContextBlobs,
+) -> Result<ImportResult, String> {
     let mut warnings = Vec::new();
     let mut invalid_paths = Vec::new();
 
@@ -2567,6 +2784,16 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     let learnings = data.learnings.clone();
     let learning_rejections = data.learning_rejections.clone();
     let assistant_conversations = data.assistant_conversations.clone();
+    // The bytes go to disk first: writing them inside the transaction would
+    // hold the write connection for as long as the disk takes (KT-1646).
+    let context_files = data.context_files.clone();
+    let (mut written, blob_paths, blob_warnings) = {
+        let records = context_files.clone();
+        tokio::task::spawn_blocking(move || write_context_blobs(&records, &blobs))
+            .await
+            .map_err(|e| format!("Import aborted, nothing was changed: {e}"))?
+    };
+    warnings.extend(blob_warnings);
     // Checked before the transaction: a policy that would not be accepted by
     // the settings route is not restored either.
     let api_access_policies = match &data.api_access_policies {
@@ -2604,6 +2831,25 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
                 for m in &d.messages {
                     if let Err(e) = crate::db::discussions::insert_message(&tx, &d.id, m) {
                         tracing::warn!("Import discussion message error: {e}");
+                    }
+                }
+            }
+            // After the discussions they belong to. A row that cannot be restored
+            // is logged and skipped, like the discussions and their messages.
+            for record in &context_files {
+                let disk_path = blob_paths.get(&record.id).map(String::as_str);
+                if let Err(e) =
+                    crate::db::discussions::insert_context_file_record(&tx, record, disk_path)
+                {
+                    tracing::warn!("Import context file error: {e}");
+                }
+            }
+            for record in &context_files {
+                if let Some(source) = &record.extracted_from_asset_id {
+                    if let Err(e) =
+                        crate::db::discussions::link_context_file_source(&tx, &record.id, source)
+                    {
+                        tracing::warn!("Import context file source link error: {e}");
                     }
                 }
             }
@@ -2694,6 +2940,8 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         })
         .await
         .map_err(|e| format!("{e:#}"))?;
+    // The import went through: the bytes written for it stay.
+    written.kept = true;
     if pruned > 0 {
         warnings.push(format!(
             "{pruned} quick-prompt version row(s) dropped — their prompts are not part of this import"
@@ -2843,9 +3091,61 @@ fn read_zip_entry_capped(f: impl std::io::Read, name: &str, cap: u64) -> Result<
     Ok(contents)
 }
 
-/// Extract data.json, config.toml and the optional recovery blob from a ZIP
-/// file (synchronous, no await).
-fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>, Option<String>), String> {
+/// Extract data.json, config.toml, the optional recovery blob and the optional
+/// context file bytes from a ZIP file (synchronous, no await).
+/// What an import archive holds besides the database rows.
+type ExtractedArchive = (DbExport, Option<AppConfig>, Option<String>, ContextBlobs);
+
+/// The context file bytes of an archive, counted against a decompressed budget
+/// (KT-1602): each file within `ZIP_CAP_CONTEXT_BLOB`, all of them together
+/// within `ZIP_CAP_CONTEXT_BLOBS_TOTAL`, and only entries a `has_blob` row of
+/// data.json names are read at all. Going over either cap is a hard error:
+/// silently dropping bytes would hand back a restore that looks complete.
+fn read_context_blobs(
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+    data: &DbExport,
+    per_file_cap: u64,
+    total_cap: u64,
+) -> Result<ContextBlobs, String> {
+    let wanted: std::collections::HashSet<&str> = data
+        .context_files
+        .iter()
+        .filter(|record| record.has_blob && is_blob_id(&record.id))
+        .map(|record| record.id.as_str())
+        .collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .filter_map(|name| name.ok())
+        .filter(|name| {
+            name.strip_prefix(CONTEXT_BLOB_PREFIX)
+                .is_some_and(|id| wanted.contains(id))
+        })
+        .map(|name| name.into_owned())
+        .collect();
+    let mut blobs = ContextBlobs::default();
+    let mut total = 0u64;
+    for name in names {
+        let mut entry = archive
+            .by_name(&name)
+            .map_err(|e| format!("Failed to read {name}: {e}"))?;
+        let cap = per_file_cap.min(total_cap - total);
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(&mut entry, cap + 1), &mut bytes)
+            .map_err(|e| format!("Failed to read {name}: {e}"))?;
+        if bytes.len() as u64 > cap {
+            return Err(format!(
+                "{name} exceeds the decompressed context-file limit ({per_file_cap} bytes per \
+                 file, {total_cap} for all of them) — refusing (zip bomb?)"
+            ));
+        }
+        total += bytes.len() as u64;
+        let id = name[CONTEXT_BLOB_PREFIX.len()..].to_string();
+        blobs.0.insert(id, bytes);
+    }
+    Ok(blobs)
+}
+
+fn extract_zip(file_bytes: &[u8]) -> Result<ExtractedArchive, String> {
     let cursor = std::io::Cursor::new(file_bytes);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("Invalid ZIP: {}", e))?;
 
@@ -2878,7 +3178,14 @@ fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>, Option
         None
     };
 
-    Ok((data, imported_config, recovery_code))
+    let context_blobs = read_context_blobs(
+        &mut archive,
+        &data,
+        ZIP_CAP_CONTEXT_BLOB,
+        ZIP_CAP_CONTEXT_BLOBS_TOTAL,
+    )?;
+
+    Ok((data, imported_config, recovery_code, context_blobs))
 }
 
 /// POST /api/config/import — accepts ZIP (multipart) or JSON (legacy)
@@ -2905,13 +3212,13 @@ pub async fn import_data(
 
     if is_zip {
         // Extract ZIP (sync — no await needed, avoids Send issues with zip reader)
-        let (data, imported_config, recovery_code) = match extract_zip(&file_bytes) {
+        let (data, imported_config, recovery_code, context_blobs) = match extract_zip(&file_bytes) {
             Ok(r) => r,
             Err(e) => return Json(ApiResponse::err(e)),
         };
 
         // Import DB data
-        let mut result = match do_import_db(&state, &data).await {
+        let mut result = match do_import_db(&state, &data, context_blobs).await {
             Ok(r) => r,
             Err(e) => return Json(ApiResponse::err(e)),
         };
@@ -2940,7 +3247,7 @@ pub async fn import_data(
             Err(e) => return Json(ApiResponse::err(format!("Invalid JSON: {}", e))),
         };
 
-        let result = match do_import_db(&state, &data).await {
+        let result = match do_import_db(&state, &data, ContextBlobs::default()).await {
             Ok(r) => r,
             Err(e) => return Json(ApiResponse::err(e)),
         };
@@ -4379,7 +4686,7 @@ mod tests {
         // Within caps → the archive still imports (the damaged recovery entry
         // is passed on for persist_imported_recovery to report, C3-20).
         let bytes = zip_with(&[("data.json", &data), ("recovery.key", b"not-a-code")]);
-        let (export, cfg, key) = extract_zip(&bytes).expect("valid archive imports");
+        let (export, cfg, key, _) = extract_zip(&bytes).expect("valid archive imports");
         assert_eq!(export.version, crate::models::db::CURRENT_EXPORT_VERSION);
         assert!(cfg.is_none());
         assert_eq!(key.as_deref(), Some("not-a-code"));
@@ -4441,7 +4748,9 @@ mod tests {
 
         // Import into a FRESH instance — both tables restored verbatim.
         let target = mk_state().await;
-        do_import_db(&target, &export).await.expect("import");
+        do_import_db(&target, &export, ContextBlobs::default())
+            .await
+            .expect("import");
         let (versions, rej_count) = target
             .db
             .with_conn(|conn| {
@@ -4544,12 +4853,14 @@ mod tests {
             .await
             .unwrap();
         let export = build_export(&source).await.expect("export");
-        assert_eq!(export.version, 7);
+        assert_eq!(export.version, crate::models::db::CURRENT_EXPORT_VERSION);
         let json = serde_json::to_string(&export).unwrap();
         let export: DbExport = serde_json::from_str(&json).unwrap();
 
         let target = access_policy_state(&secret, &server.uri()).await;
-        do_import_db(&target, &export).await.expect("import");
+        do_import_db(&target, &export, ContextBlobs::default())
+            .await
+            .expect("import");
         let restored = target
             .db
             .with_conn(|conn| crate::db::api_access_policies::get(conn, "custom-notes"))
@@ -4610,7 +4921,9 @@ mod tests {
         old["version"] = serde_json::json!(6);
         let old: DbExport = serde_json::from_value(old).unwrap();
         assert!(old.api_access_policies.is_none());
-        do_import_db(&state, &old).await.expect("v6 import");
+        do_import_db(&state, &old, ContextBlobs::default())
+            .await
+            .expect("v6 import");
         let kept = state
             .db
             .with_conn(|conn| crate::db::api_access_policies::get(conn, "custom-notes"))
@@ -4667,7 +4980,9 @@ mod tests {
         let export = build_export(&source).await.expect("export");
         assert_eq!(export.assistant_conversations.len(), 1);
         let target = mk_state().await;
-        do_import_db(&target, &export).await.expect("import");
+        do_import_db(&target, &export, ContextBlobs::default())
+            .await
+            .expect("import");
         let found = target
             .db
             .with_conn(|conn| {
@@ -4707,7 +5022,9 @@ mod tests {
         let older: DbExport = serde_json::from_value(older).expect("older archive reads");
         assert!(older.assistant_conversations.is_empty());
         let restored = mk_state().await;
-        do_import_db(&restored, &older).await.expect("older import");
+        do_import_db(&restored, &older, ContextBlobs::default())
+            .await
+            .expect("older import");
     }
 
     #[tokio::test]
@@ -4753,7 +5070,9 @@ mod tests {
         let mut v4 = empty_export();
         v4.version = 4;
         v4.quick_prompts = vec![kept];
-        do_import_db(&state, &v4).await.expect("v4 import");
+        do_import_db(&state, &v4, ContextBlobs::default())
+            .await
+            .expect("v4 import");
 
         let (kept_versions, dropped_versions) = state
             .db
@@ -4851,7 +5170,9 @@ mod tests {
             .unwrap();
         let mut export = empty_export();
         export.workflows = vec![arriving];
-        do_import_db(&state, &export).await.expect("import");
+        do_import_db(&state, &export, ContextBlobs::default())
+            .await
+            .expect("import");
 
         let (approval, active) = state
             .db
@@ -4902,6 +5223,7 @@ mod tests {
             assistant_conversations: vec![],
             api_access_policies: None,
             trust_seal: None,
+            context_files: vec![],
         }
     }
 
@@ -5194,6 +5516,7 @@ mod tests {
             quick_apis: vec![],
             quick_execs: vec![],
             learnings: vec![],
+            context_files: vec![],
         };
         let data_json = serde_json::to_string(&data).unwrap();
 
@@ -5214,7 +5537,7 @@ mod tests {
         let bytes = buf.into_inner();
 
         // Extract
-        let (extracted_data, extracted_config, recovery_code) = extract_zip(&bytes).unwrap();
+        let (extracted_data, extracted_config, recovery_code, _) = extract_zip(&bytes).unwrap();
         assert_eq!(extracted_data.version, 4);
         assert!(extracted_config.is_some());
         assert!(recovery_code.is_none(), "no recovery.key in this zip");
@@ -5298,7 +5621,9 @@ mod tests {
 
             let mut export = build_export(&state).await.unwrap();
             export.projects.retain(|p| p.id == "p1");
-            let result = do_import_db(&state, &export).await.unwrap();
+            let result = do_import_db(&state, &export, ContextBlobs::default())
+                .await
+                .unwrap();
             assert!(
                 result
                     .warnings
@@ -5352,7 +5677,7 @@ mod tests {
                 .await
                 .unwrap();
             let export = build_export(&state).await.unwrap();
-            let result = do_import_db(&state, &export).await.unwrap();
+            let result = do_import_db(&state, &export, ContextBlobs::default()).await.unwrap();
             assert!(
                 !result.warnings.iter().any(|w| w.contains("another key")),
                 "{:?}",
@@ -5363,7 +5688,7 @@ mod tests {
             let other = crate::core::crypto::generate_secret();
             foreign.mcp_configs[0].env_encrypted =
                 crate::db::mcps::encrypt_env(&env, &other).unwrap();
-            let result = do_import_db(&state, &foreign).await.unwrap();
+            let result = do_import_db(&state, &foreign, ContextBlobs::default()).await.unwrap();
             assert!(
                 result.warnings.iter().any(|w| w.contains("Re-encrypt imported secrets")),
                 "{:?}",
@@ -5403,7 +5728,7 @@ mod tests {
             broken.server_id = "missing-server".into();
             export.mcp_configs.push(broken);
 
-            let err = do_import_db(&state, &export).await.unwrap_err();
+            let err = do_import_db(&state, &export, ContextBlobs::default()).await.unwrap_err();
             assert!(err.contains("nothing was changed"), "{err}");
             let kept: String = state
                 .db
@@ -5690,7 +6015,9 @@ mod tests {
             ),
         ];
 
-        let report = do_import_db(&state, &export).await.expect("do_import_db");
+        let report = do_import_db(&state, &export, ContextBlobs::default())
+            .await
+            .expect("do_import_db");
 
         assert!(
             report
@@ -5804,7 +6131,9 @@ mod tests {
 
         // Re-importing the same export clears then re-inserts — neither entity
         // may duplicate nor disappear.
-        do_import_db(&state, &export).await.expect("do_import_db");
+        do_import_db(&state, &export, ContextBlobs::default())
+            .await
+            .expect("do_import_db");
         let qas = state
             .db
             .with_conn(crate::db::quick_apis::list_quick_apis)
@@ -5908,6 +6237,7 @@ mod tests {
             quick_apis: vec![],
             quick_execs: vec![],
             learnings: vec![],
+            context_files: vec![],
         };
         let data_json = serde_json::to_string(&data).unwrap();
 
@@ -5921,7 +6251,7 @@ mod tests {
         }
         let bytes = buf.into_inner();
 
-        let (extracted_data, extracted_config, _) = extract_zip(&bytes).unwrap();
+        let (extracted_data, extracted_config, _, _) = extract_zip(&bytes).unwrap();
         assert_eq!(extracted_data.version, 4);
         assert!(extracted_config.is_none(), "config.toml should be optional");
     }
@@ -5935,9 +6265,9 @@ mod tests {
         let code = crate::core::recovery::to_code(&blob);
 
         let data_json = serde_json::to_string(&empty_export()).unwrap();
-        let bytes = build_export_zip(&data_json, "", Some(&code)).unwrap();
+        let bytes = build_export_zip(&data_json, "", Some(&code), &[]).unwrap();
 
-        let (_, _, extracted) = extract_zip(&bytes).unwrap();
+        let (_, _, extracted, _) = extract_zip(&bytes).unwrap();
         assert_eq!(
             extracted.as_deref(),
             Some(code.as_str()),
@@ -5954,8 +6284,8 @@ mod tests {
     #[test]
     fn export_zip_without_recovery_carries_no_blob() {
         let data_json = serde_json::to_string(&empty_export()).unwrap();
-        let bytes = build_export_zip(&data_json, "", None).unwrap();
-        let (_, _, extracted) = extract_zip(&bytes).unwrap();
+        let bytes = build_export_zip(&data_json, "", None, &[]).unwrap();
+        let (_, _, extracted, _) = extract_zip(&bytes).unwrap();
         assert!(extracted.is_none());
     }
 
@@ -5973,8 +6303,8 @@ mod tests {
         } else {
             damaged
         };
-        let bytes = build_export_zip(&data_json, "", Some(&damaged)).unwrap();
-        let (_, _, extracted) = extract_zip(&bytes).unwrap();
+        let bytes = build_export_zip(&data_json, "", Some(&damaged), &[]).unwrap();
+        let (_, _, extracted, _) = extract_zip(&bytes).unwrap();
         assert_eq!(extracted.as_deref(), Some(damaged.as_str()));
         let tmp = tempfile::tempdir().unwrap();
         let warnings = persist_imported_recovery(tmp.path(), &damaged);
@@ -6501,3 +6831,7 @@ mod default_docs_dir_tests {
 #[cfg(test)]
 #[path = "setup_workers_tests.rs"]
 mod workers_config_tests;
+
+#[cfg(test)]
+#[path = "setup_context_files_tests.rs"]
+mod context_files_tests;

@@ -773,7 +773,7 @@ pub(super) fn is_acp_tool_marker(line: &str) -> bool {
 /// The streaming task and its test call this, so the panel's contract is
 /// pinned by the same code the task runs.
 pub(super) fn forwards_to_log_panel(trimmed: &str) -> bool {
-    !trimmed.is_empty() && !is_acp_tool_marker(trimmed)
+    !trimmed.is_empty() && !is_acp_tool_marker(trimmed) && !trimmed.starts_with("vibe_tokens:")
 }
 
 /// The fixed line announcing that the agent wrote a diagnostic.
@@ -3763,6 +3763,7 @@ pub(super) async fn make_agent_stream_inner(
                 display_name: connection.display_name.clone(),
                 mention_alias: connection.mention_alias.clone(),
                 endpoint: endpoint.clone(),
+                tools_enabled: connection.tools_enabled,
                 api_key: tokens
                     .active_key_for(&connection.credential_slug)
                     .filter(|key| !key.trim().is_empty())
@@ -5249,6 +5250,7 @@ pub(super) async fn make_agent_stream_inner(
                     .filter(|line| {
                         let line = line.trim_start();
                         !line.starts_with("ollama_tokens:")
+                            && !line.starts_with("vibe_tokens:")
                             && !line.starts_with("kronn_http_turn:")
                             && !line.starts_with("kronn_http_tool_exec:")
                             && !line.starts_with(runner::CEILING_TRACE_PREFIX)
@@ -5454,10 +5456,11 @@ pub(super) async fn make_agent_stream_inner(
                 } else {
                     let (cleaned, count) =
                         runner::parse_token_usage(&agent_type, &full_response, &stderr_lines);
-                    if count > 0 {
+                    if count.is_some_and(|count| count > 0) {
                         full_response = cleaned;
                     }
-                    count
+                    // `messages.tokens_used` is NOT NULL: unmeasured is stored as 0.
+                    count.unwrap_or(0)
                 };
 
                 // Hard cap before persistence — covers EVERY path (incl. the
@@ -6797,10 +6800,11 @@ pub(super) async fn run_agent_streaming(
         reported
     } else {
         let (cleaned, count) = runner::parse_token_usage(agent_type, &full_response, &stderr);
-        if count > 0 {
+        if count.is_some_and(|count| count > 0) {
             full_response = cleaned;
         }
-        count
+        // `messages.tokens_used` is NOT NULL: unmeasured is stored as 0.
+        count.unwrap_or(0)
     };
 
     AgentRunResult {

@@ -39,11 +39,11 @@ The former runtime literals are inserted once during startup and the runner's
 hot-path tier lookup is then projected from catalog rows. Editing the manual
 catalog refreshes that projection; removing a migrated/manual row therefore
 does not make a hidden hard-coded fallback reappear.
-[src: file: backend/src/core/model_catalog/mod.rs:112-138#refresh_runtime_cache]
-[src: file: backend/src/core/model_catalog/mod.rs:140-260#migrate_hardcoded_catalog_once]
+[src: file: backend/src/core/model_catalog/mod.rs:156-198#refresh_runtime_cache]
+[src: file: backend/src/core/model_catalog/mod.rs:200-320#migrate_hardcoded_catalog_once]
 [src: file: backend/src/api/model_catalog.rs:242-273#update_manual]
 [src: file: backend/src/api/model_catalog.rs:275-301#delete_manual]
-[src: file: backend/src/agents/runner.rs:3667-3686#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3707-3726#resolve_model_flag]
 
 ## Discovery boundaries
 
@@ -60,12 +60,12 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:80-109#discover_with_transport]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:95-121#discover]
 [src: file: backend/src/core/model_catalog/codex_discovery.rs:123-208#run_handshake_and_list]
-[src: file: backend/src/api/external_api_connections.rs:281-448#probe_models]
-[src: file: backend/src/api/external_api_connections.rs:1383-1413#fetch_capability_catalogue]
-[src: file: backend/src/api/external_api_connections.rs:1411-1423#catalog_declares_modality]
-[src: file: backend/src/api/external_api_connections.rs:1426-1480#catalog_models_from_body]
-[src: file: backend/src/api/external_api_connections.rs:1485-1500#merge_catalog]
-[src: file: backend/src/core/model_catalog/mod.rs:705-720#reconcile_http_catalog]
+[src: file: backend/src/api/external_api_connections.rs:287-454#probe_models]
+[src: file: backend/src/api/external_api_connections.rs:1389-1419#fetch_capability_catalogue]
+[src: file: backend/src/api/external_api_connections.rs:1417-1429#catalog_declares_modality]
+[src: file: backend/src/api/external_api_connections.rs:1435-1489#catalog_models_from_body]
+[src: file: backend/src/api/external_api_connections.rs:1491-1506#merge_catalog]
+[src: file: backend/src/core/model_catalog/mod.rs:765-780#reconcile_http_catalog]
 
 ## Where OpenCode's models come from (KT-928)
 
@@ -110,7 +110,7 @@ the files are never opened; at most 16 projects). The results are merged:
 - a project whose discovery fails is left out and logged by reason only; it
   does not fail the refresh. A failure of the neutral discovery is returned as
   it is, whatever the projects answered.
-[src: file: backend/src/core/model_catalog/mod.rs:413-553#OPENCODE_PROJECT_CONFIGS]
+[src: file: backend/src/core/model_catalog/mod.rs:473-613#OPENCODE_PROJECT_CONFIGS]
 
 Known gaps: a model seen only through `OPENCODE_CONFIG` set in a user's shell,
 or through an `opencode.json` above the project directory, is not found, since
@@ -128,9 +128,9 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5773-5827#offers_model_catalogue]
+[src: file: backend/src/agents/runner.rs:5842-5896#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1948-1957#offers_model_catalogue]
-[src: file: backend/src/acp.rs:1957-1988#select_model]
+[src: file: backend/src/acp.rs:1963-1994#select_model]
 
 ## Launch safety and UI
 
@@ -147,7 +147,7 @@ model still recorded `Available`. The cached provenance and error remain visible
 this is permission to attempt execution, not proof of account access. Missing CLI,
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
-[src: file: backend/src/core/model_catalog/mod.rs:1131-1162#retained_claude_model]
+[src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
 [src: file: backend/src/api/discussions/streaming.rs:4225-4271#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:2009-2094#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:964-994#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:999-1029#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -211,17 +211,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3705-3883#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3745-3923#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13804-13821#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:13920-13951#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13928-13945#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:14060-14091#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5114-5142#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5212-5240#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -232,7 +232,7 @@ catalog afterward, but the first scheduled workflow does not depend on opening
 Settings first.
 [src: file: backend/src/main.rs:309-313#migrate_hardcoded_catalog_once]
 [src: file: desktop/src-tauri/src/main.rs:716-720#migrate_hardcoded_catalog_once]
-[src: file: backend/src/core/model_catalog/mod.rs:140-260#refresh_runtime_cache]
+[src: file: backend/src/core/model_catalog/mod.rs:156-276#refresh_runtime_cache]
 
 A Quick Prompt's explicit `agent_settings.reasoning_effort` is copied onto a
 hydrated workflow step the same way its `agent_settings.model` already is
@@ -276,8 +276,8 @@ that changes the model. Even without available modes, the control remains
 usable to clear an invalid saved effort. Other runtime cards state that effort
 is unsupported.
 [src: file: frontend/src/components/settings/AgentsSection.tsx:200-245#saveTierPreference]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1333-1362#renderEffortSelect]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1406-1411#supportsEffort]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1360-1389#renderEffortSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1432-1437#supportsEffort]
 
 ## Migration and test invariants
 

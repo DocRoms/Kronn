@@ -450,6 +450,117 @@ pub fn worktree_cleanup_liveness(
     conn: &Connection,
     canonical_path: &str,
 ) -> Result<crate::core::worktree::ExecutionLiveness> {
+    workspace_liveness(conn, canonical_path, false)
+}
+
+/// [`worktree_cleanup_liveness`] for the release of a checkout (KT-1676): an
+/// execution that never reached a terminal state also counts as finished when
+/// its task was closed (`done` or `archived`) and nothing still works in the
+/// checkout. A task set to `done` by hand leaves its execution wherever it was,
+/// and that checkout would otherwise stay for good. Everything else the plain
+/// verdict requires still applies.
+pub fn worktree_release_liveness(
+    conn: &Connection,
+    canonical_path: &str,
+) -> Result<crate::core::worktree::ExecutionLiveness> {
+    workspace_liveness(conn, canonical_path, true)
+}
+
+/// Why an unfinished execution of a closed task still holds its checkout, or
+/// `None` when the task is closed and nothing works in it any more (KT-1676).
+///
+/// Mid-integration states keep it: the backend itself is acting in the
+/// checkout. So does a pending or running dispatch, an unsettled commit lease
+/// or an attached session of the execution's room.
+fn closed_task_blocker(
+    conn: &Connection,
+    execution_id: &str,
+    status: TaskExecutionStatus,
+) -> Result<Option<String>> {
+    // The execution's own room; an execution without a workspace row has none.
+    let disc_id: String = conn
+        .query_row(
+            "SELECT disc_id FROM discussion_workspaces WHERE task_execution_id = ?1",
+            params![execution_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let disc_id = disc_id.as_str();
+    let task_status: Option<String> = conn
+        .query_row(
+            "SELECT pt.status FROM task_executions te
+               JOIN planning_tasks pt ON pt.id = te.task_id
+              WHERE te.id = ?1",
+            params![execution_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if !matches!(task_status.as_deref(), Some("done" | "archived")) {
+        return Ok(Some(format!(
+            "execution {execution_id} is {}, which is not a finished state",
+            status.as_str()
+        )));
+    }
+    if matches!(
+        status,
+        TaskExecutionStatus::Provisioning
+            | TaskExecutionStatus::Approved
+            | TaskExecutionStatus::Integrating
+            | TaskExecutionStatus::Validating
+            | TaskExecutionStatus::Applying
+    ) {
+        return Ok(Some(format!(
+            "execution {execution_id} is {}, mid-way through its integration",
+            status.as_str()
+        )));
+    }
+    let busy = |sql: &str, key: &str| -> Result<bool> {
+        Ok(conn.query_row(sql, params![key], |row| row.get::<_, bool>(0))?)
+    };
+    if busy(
+        "SELECT EXISTS(SELECT 1 FROM agent_dispatch_jobs
+                        WHERE discussion_id = ?1 AND status IN ('Pending', 'Running'))",
+        disc_id,
+    )? {
+        return Ok(Some(format!(
+            "a worker dispatch of execution {execution_id} is still pending or running"
+        )));
+    }
+    if busy(
+        "SELECT EXISTS(SELECT 1 FROM task_execution_commit_leases
+                        WHERE task_execution_id = ?1 AND settled_at IS NULL)",
+        execution_id,
+    )? {
+        return Ok(Some(format!(
+            "execution {execution_id} holds an unsettled commit lease"
+        )));
+    }
+    // A joined CLI worker sits in the principal room and is bound to the
+    // execution; a native one sits in the execution's own room.
+    let attached: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM discussion_sessions s
+                        WHERE s.status = 'active'
+                          AND (s.disc_id = ?2
+                               OR s.id IN (SELECT cli_session_id
+                                             FROM task_execution_cli_bindings
+                                            WHERE task_execution_id = ?1)))",
+        params![execution_id, disc_id],
+        |row| row.get(0),
+    )?;
+    if attached {
+        return Ok(Some(format!(
+            "a session is still attached to execution {execution_id}"
+        )));
+    }
+    Ok(None)
+}
+
+fn workspace_liveness(
+    conn: &Connection,
+    canonical_path: &str,
+    closed_task_is_finished: bool,
+) -> Result<crate::core::worktree::ExecutionLiveness> {
     use crate::core::worktree::ExecutionLiveness;
 
     let row: Option<(String, String, Option<String>, Option<i64>)> = conn
@@ -496,9 +607,16 @@ pub fn worktree_cleanup_liveness(
     let parsed = TaskExecutionStatus::from_str(&status)
         .map_err(|error| anyhow::anyhow!("unreadable execution status {status}: {error}"))?;
     if !parsed.is_terminal() {
-        return Ok(ExecutionLiveness::Active(format!(
-            "execution {execution_id} is {status}, which is not a finished state"
-        )));
+        let reason = if closed_task_is_finished {
+            closed_task_blocker(conn, &execution_id, parsed)?
+        } else {
+            Some(format!(
+                "execution {execution_id} is {status}, which is not a finished state"
+            ))
+        };
+        if let Some(reason) = reason {
+            return Ok(ExecutionLiveness::Active(reason));
+        }
     }
 
     // A finished execution whose workspace is still attached to a live session
@@ -838,6 +956,43 @@ pub fn terminal_executions_with_checkout(
             (id, finished)
         })
         .collect())
+}
+
+/// Managed checkouts of executions that never finished although their task was
+/// closed (`done` or `archived`) by hand (KT-1676): the sibling of
+/// [`terminal_executions_with_checkout`]. Whether such a checkout may really go
+/// is [`worktree_release_liveness`]'s to prove.
+pub fn closed_task_executions_with_checkout(conn: &Connection) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT te.id FROM task_executions te
+           JOIN discussion_workspaces dw ON dw.task_execution_id = te.id
+           JOIN planning_tasks pt ON pt.id = te.task_id
+          WHERE dw.ownership = 'managed' AND dw.canonical_path IS NOT NULL
+            AND te.status NOT IN ('Done', 'Failed', 'Cancelled')
+            AND pt.status IN ('done', 'archived')
+          ORDER BY te.id",
+    )?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
+/// Every execution of `task_id` that still holds a managed checkout, whatever
+/// its state (KT-1676): what closing the task hands to the release, which then
+/// judges each one.
+pub fn executions_of_task_with_checkout(conn: &Connection, task_id: &str) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT te.id FROM task_executions te
+           JOIN discussion_workspaces dw ON dw.task_execution_id = te.id
+          WHERE te.task_id = ?1
+            AND dw.ownership = 'managed' AND dw.canonical_path IS NOT NULL
+          ORDER BY te.id",
+    )?;
+    let ids = statement
+        .query_map(params![task_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
 }
 
 /// Audit one lane target reclaim against the execution that owned `canonical_path`.

@@ -168,7 +168,7 @@ function mockVerificationSurface(page: Page, projectId: string) {
     recorded_audits: [], recorded_validated_at: null, latest_validation: null,
     lease_orphaned: false,
   })));
-  page.route('**/api/audit/steps', route => route.fulfill(json([
+  page.route('**/api/audit/steps*', route => route.fulfill(json([
     { index: 3, target_file: 'docs/repo-map.md' },
     { index: 8, target_file: 'docs/inconsistencies-tech-debt.md' },
     { index: 9, target_file: 'docs/decisions.md' },

@@ -37,4 +37,14 @@
   at 1591 s against a 600 s limit with ZERO step results — the guard counts
   wall-clock across a daemon blockage/reboot and fired late. Not the same bug;
   keep an eye on `kronn::invariant` for recurrences (runner.rs guard loop).
-- **Next step**: dedicated ticket/PR — explicitly OUT of the stab-1 scope.
+- **Disposition**: Accepted (KT-1603).
+  - **Reason**: a single personal workflow (the Daily Briefing) depends on it
+    and its cron is disabled, so nothing fails silently any more. Rebinding the
+    Quick APIs to the M365 MCP was rejected as not equivalent, and a delegated
+    OAuth flow in the broker (encrypted refresh-token storage and rotation) is a
+    feature-sized change with no second consumer today. The manual alternative
+    stays: an Agent step over the M365 MCP after a device-code consent.
+  - **Reopen when**: a scheduled workflow must read personal-scope Microsoft
+    data unattended, or another plugin needs a delegated (user-consent) OAuth
+    flow. Then the suggested direction above becomes a Planning feature.
+- **Next step**: none while accepted.

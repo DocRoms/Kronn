@@ -90,12 +90,28 @@ pub async fn update_task(
     Path(id): Path<String>,
     Json(request): Json<UpdatePlanningTaskRequest>,
 ) -> Json<ApiResponse<PlanningTaskDetail>> {
+    let closes = matches!(
+        request.status,
+        Some(crate::models::PlanningTaskStatus::Done | crate::models::PlanningTaskStatus::Archived)
+    );
     match state
         .db
         .with_conn(move |connection| crate::db::planning::update_task(connection, &id, &request))
         .await
     {
-        Ok(task) => Json(ApiResponse::ok(task)),
+        Ok(task) => {
+            if closes {
+                // KT-1676 — a task closed by hand never made its execution
+                // terminal, so nothing released its worktrees. Git runs off the
+                // request: the response does not wait for a slow disk.
+                let db = state.db.clone();
+                let task_id = task.summary.id.clone();
+                tokio::spawn(async move {
+                    crate::api::orchestration::release_closed_task_checkouts(&db, &task_id).await;
+                });
+            }
+            Json(ApiResponse::ok(task))
+        }
         Err(error) => planning_error(error),
     }
 }

@@ -4,6 +4,14 @@
 - **Area**: Docs / Backend
 - **Severity**: Low (scaffold serves a valid spec; richer docs unblock external integrators incrementally)
 - **Status**: 🟡 Scaffold shipped — incremental enrichment ongoing
+- **Disposition**: Accepted (KT-1603).
+  - **Reason**: nearly every route is internal (UI or CLI callers) and external
+    integrators are rare, so annotating ~170 routes is a 1-2 day grind for
+    marginal value. The scaffold already serves a valid spec and Swagger UI.
+  - **Reopen when**: an external integrator needs a documented endpoint, or an
+    endpoint meant for outside callers (for example a webhook receiver) ships.
+    Such an endpoint gets its `#[utoipa::path]` in the same PR, whatever this
+    entry says.
 
 ## What's done
 
@@ -59,4 +67,4 @@ No DoD — this is a long-tail enrichment, not a sprint goal.
 
 ## Next step
 
-None — this TD just tracks the residual so it doesn't get forgotten.
+None while accepted: the reopening trigger above is the next step.

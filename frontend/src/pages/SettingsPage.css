@@ -3615,6 +3615,71 @@
   appearance: textfield;
 }
 
+/* Kronn tools switch (KT-1600): the same pill as the concurrency control, so a
+   card header stays one row of small controls. */
+.set-tools-switch-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  gap: var(--kr-sp-1);
+}
+
+.set-tools-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  align-self: flex-start;
+  min-height: 28px;
+  padding: 2px var(--kr-sp-3);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 650;
+  border: 1px solid var(--kr-border);
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.set-tools-switch[data-on="false"] {
+  color: var(--kr-warning);
+  border-color: rgba(var(--kr-warning-rgb), 0.4);
+}
+
+.set-tools-switch input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--kr-accent);
+  cursor: pointer;
+}
+
+.set-tools-switch input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.set-agent-tools-defaults {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-3);
+  margin-bottom: var(--kr-sp-3);
+}
+
+.set-agent-tools-default {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.set-ext-api-conn-tools-off {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  padding: 1px var(--kr-sp-2);
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 650;
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.4);
+  border-radius: 999px;
+}
+
 .set-agent-mention-control input[type="color"]::-webkit-color-swatch {
   border: 0;
   border-radius: 50%;

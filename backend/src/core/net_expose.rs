@@ -217,11 +217,8 @@ pub const LOCAL_PROOF_FILE: &str = "local-proof";
 /// and no token can authenticate anyone. Minted on first use.
 pub fn local_proof(dir: &std::path::Path) -> std::io::Result<String> {
     let path = dir.join(LOCAL_PROOF_FILE);
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        let existing = existing.trim();
-        if existing.len() >= LOCAL_PROOF_MIN_LEN {
-            return Ok(existing.to_string());
-        }
+    if let Some(existing) = read_trusted_proof(&path) {
+        return Ok(existing);
     }
     let proof = format!(
         "{}{}",
@@ -231,6 +228,29 @@ pub fn local_proof(dir: &std::path::Path) -> std::io::Result<String> {
     let tmp = dir.join(format!(".{LOCAL_PROOF_FILE}.tmp"));
     crate::core::keyvault::write_private_atomic(&tmp, &path, proof.as_bytes())?;
     Ok(proof)
+}
+
+/// The proof stored at `path`, only when it can be trusted as ours: a regular
+/// file (a symlink would let a planted link to a known file pass as the proof,
+/// and a dangling or foreign target must not be followed), owner-only on Unix
+/// (a group/world-accessible file was writable or readable by others), and at
+/// least [`LOCAL_PROOF_MIN_LEN`] once trimmed. Anything else is None, so the
+/// mint replaces it and a match is refused.
+fn read_trusted_proof(path: &std::path::Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return None;
+        }
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    let content = content.trim();
+    (content.len() >= LOCAL_PROOF_MIN_LEN).then(|| content.to_string())
 }
 
 /// Put the on-machine proof in the data directory when a proxy is declared, so
@@ -249,19 +269,17 @@ pub fn arm_local_proof(server: &crate::models::ServerConfig) {
 }
 
 /// Whether `presented` is the on-machine proof of `dir`. A missing, empty or
-/// shorter-than-minted (hand-written, truncated) proof file never matches, and
-/// the comparison does not stop at the first differing byte. The file is only
+/// shorter-than-minted (hand-written, truncated) proof file never matches, nor
+/// does a symlink or a file others can access, and the comparison does not stop at the first differing byte. The file is only
 /// created by [`local_proof`], never here, so a request cannot make it appear.
 pub fn local_proof_matches(dir: &std::path::Path, presented: Option<&str>) -> bool {
     let Some(presented) = presented.map(str::trim).filter(|p| !p.is_empty()) else {
         return false;
     };
-    let Ok(expected) = std::fs::read_to_string(dir.join(LOCAL_PROOF_FILE)) else {
+    let Some(expected) = read_trusted_proof(&dir.join(LOCAL_PROOF_FILE)) else {
         return false;
     };
-    let expected = expected.trim();
-    expected.len() >= LOCAL_PROOF_MIN_LEN
-        && crate::core::bridge_token::operator_token_matches(Some(expected), presented)
+    crate::core::bridge_token::operator_token_matches(Some(&expected), presented)
 }
 
 /// Who the recovery routes treat as the local owner while auth is locked.
@@ -625,6 +643,44 @@ mod tests {
         assert!(local_proof_matches(&dir, Some(&minted)));
         assert!(!local_proof_matches(&dir, Some("letmein")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_proof_is_refused_on_read_and_replaced_on_mint() {
+        let dir = tempfile::tempdir().unwrap();
+        // A known file of 32+ bytes, planted as the proof.
+        let known = dir.path().join("known");
+        let known_content = "k".repeat(64);
+        std::fs::write(&known, &known_content).unwrap();
+        std::os::unix::fs::symlink(&known, dir.path().join(LOCAL_PROOF_FILE)).unwrap();
+        assert!(!local_proof_matches(dir.path(), Some(&known_content)));
+        let minted = local_proof(dir.path()).unwrap();
+        assert_ne!(minted, known_content, "the planted link is not adopted");
+        let meta = std::fs::symlink_metadata(dir.path().join(LOCAL_PROOF_FILE)).unwrap();
+        assert!(meta.file_type().is_file(), "the link itself was replaced");
+        assert_eq!(std::fs::read_to_string(&known).unwrap(), known_content);
+        assert!(local_proof_matches(dir.path(), Some(&minted)));
+        assert!(!local_proof_matches(dir.path(), Some(&known_content)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_proof_others_can_access_is_refused_on_read_and_replaced_on_mint() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOCAL_PROOF_FILE);
+        let planted = "p".repeat(64);
+        std::fs::write(&path, &planted).unwrap();
+        for mode in [0o644, 0o640, 0o604] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(!local_proof_matches(dir.path(), Some(&planted)), "{mode:o}");
+        }
+        let minted = local_proof(dir.path()).unwrap();
+        assert_ne!(minted, planted);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "owner-only, got {mode:o}");
+        assert!(local_proof_matches(dir.path(), Some(&minted)));
     }
 
     #[test]

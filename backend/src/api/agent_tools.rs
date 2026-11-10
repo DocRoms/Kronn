@@ -2368,7 +2368,10 @@ impl ToolExecutor for KronnToolExecutor {
                     Json(req),
                 )
                 .await;
-                unwrap_api(call, res.success, res.data, res.error)
+                cap_api_call_outcome(
+                    unwrap_api(call, res.success, res.data, res.error),
+                    API_CALL_RESULT_MAX_BYTES,
+                )
             }
             "room_scope" => {
                 // Only a room's own agent holds or asks for the room's reach; a
@@ -4960,6 +4963,54 @@ fn message_tail(
     (total, tail)
 }
 
+/// Most bytes of an `api_call` result a model is handed (KT-1600). A provider
+/// answers with whatever it likes — a full analytics report, a page of
+/// records — and a local model's context is the scarce resource: one unbounded
+/// result pushes the conversation out of the window and the turn fails or
+/// loses its instructions.
+pub(crate) const API_CALL_RESULT_MAX_BYTES: usize = 16 * 1024;
+
+/// Bound an `api_call` outcome to `max_bytes` of serialised `data`.
+///
+/// Over the cap, `data` becomes the leading excerpt of its own JSON text and
+/// the result says so — `truncated`, the sizes, and a marker that tells the
+/// model to narrow the request (`extract`, a smaller range, pagination)
+/// instead of treating the excerpt as the whole answer. A result within the
+/// cap, and a failed call, pass through untouched.
+fn cap_api_call_outcome(mut outcome: ToolOutcome, max_bytes: usize) -> ToolOutcome {
+    if !outcome.ok {
+        return outcome;
+    }
+    let Some(object) = outcome.content.as_object_mut() else {
+        return outcome;
+    };
+    let Some(data) = object.get("data").filter(|data| !data.is_null()) else {
+        return outcome;
+    };
+    let rendered = data.to_string();
+    if rendered.len() <= max_bytes {
+        return outcome;
+    }
+    let mut cut = max_bytes;
+    while !rendered.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let total = rendered.len();
+    let excerpt = rendered[..cut].to_string();
+    object.insert("data".into(), Value::String(excerpt));
+    object.insert("truncated".into(), Value::Bool(true));
+    object.insert("data_bytes_total".into(), json!(total));
+    object.insert("data_bytes_shown".into(), json!(cut));
+    object.insert(
+        "truncation_marker".into(),
+        Value::String(format!(
+            "[truncated: showing the first {cut} of {total} bytes of `data`, as JSON text that stops mid-value — \
+             narrow the request (`extract`, a smaller date range or page size) rather than relying on this excerpt]"
+        )),
+    );
+    outcome
+}
+
 fn unwrap_api<T: serde::Serialize>(
     call: &ToolCall,
     success: bool,
@@ -5444,6 +5495,7 @@ mod tests {
                     image_model: None,
                     video_model: Some("google/veo-3.1-lite".into()),
                     decision_model: None,
+                    tools_enabled: None,
                     media_endpoint: None,
                 },
             )?;
@@ -6345,6 +6397,56 @@ mod tests {
         let rendered = out.to_string();
         assert!(!rendered.contains("api_extract"));
         assert!(!rendered.contains("created_at"));
+    }
+
+    fn api_outcome(content: Value, ok: bool) -> ToolOutcome {
+        ToolOutcome {
+            call: ToolCall {
+                id: "call_1".into(),
+                name: "api_call".into(),
+                arguments: json!({}),
+            },
+            content,
+            ok,
+        }
+    }
+
+    #[test]
+    fn an_api_call_result_over_the_cap_is_cut_and_marked() {
+        let big = "é".repeat(50_000);
+        let outcome = cap_api_call_outcome(
+            api_outcome(
+                json!({ "success": true, "status": "OK", "summary": "ok", "data": { "rows": big } }),
+                true,
+            ),
+            1_000,
+        );
+        assert!(outcome.ok);
+        assert_eq!(outcome.content["truncated"], true);
+        // The cut lands on a character boundary: "é" is two bytes.
+        let shown = outcome.content["data_bytes_shown"].as_u64().unwrap();
+        assert!((998..=1_000).contains(&shown), "shown {shown}");
+        assert!(outcome.content["data_bytes_total"].as_u64().unwrap() > 100_000);
+        assert!(outcome.content["truncation_marker"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("[truncated: showing the first {shown} of")));
+        let excerpt = outcome.content["data"].as_str().expect("data became text");
+        assert!(excerpt.len() <= 1_000);
+        assert_eq!(outcome.content["status"], "OK", "the envelope survives");
+    }
+
+    #[test]
+    fn an_api_call_result_within_the_cap_or_failed_is_left_alone() {
+        let small = json!({ "success": true, "data": { "rows": [1, 2, 3] } });
+        let kept = cap_api_call_outcome(api_outcome(small.clone(), true), 1_000);
+        assert_eq!(kept.content, small);
+        let failed = json!({ "error": "x".repeat(5_000) });
+        let kept = cap_api_call_outcome(api_outcome(failed.clone(), false), 10);
+        assert_eq!(kept.content, failed);
+        let empty = json!({ "success": true, "data": null });
+        let kept = cap_api_call_outcome(api_outcome(empty.clone(), true), 1);
+        assert_eq!(kept.content, empty);
     }
 
     #[test]

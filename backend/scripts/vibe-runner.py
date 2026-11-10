@@ -105,6 +105,20 @@ def run_with_vibe_sdk(args):
         print(result)
 
 
+def report_usage(usage):
+    """Print the run's token usage on stderr as `vibe_tokens:<prompt>:<completion>`.
+
+    Kronn reads that marker (`vibe_token_usage` in runner.rs). Nothing is printed
+    when the API reported no usage, so the run stays "unmeasured" rather than 0.
+    """
+    if not isinstance(usage, dict):
+        return
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    if isinstance(prompt, int) and isinstance(completion, int) and prompt + completion > 0:
+        print(f"vibe_tokens:{prompt}:{completion}", file=sys.stderr, flush=True)
+
+
 def run_with_api_fallback(args, api_key):
     """Fallback: direct Mistral API streaming (no tools, no agent)."""
     import urllib.request
@@ -129,6 +143,7 @@ def run_with_api_fallback(args, api_key):
         },
     )
 
+    usage = None
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             for line in resp:
@@ -140,6 +155,8 @@ def run_with_api_fallback(args, api_key):
                     break
                 try:
                     chunk = json.loads(data)
+                    if chunk.get("usage"):
+                        usage = chunk["usage"]
                     delta = chunk.get("choices", [{}])[0].get("delta", {})
                     content = delta.get("content", "")
                     if content:
@@ -150,6 +167,7 @@ def run_with_api_fallback(args, api_key):
 
         sys.stdout.write("\n")
         sys.stdout.flush()
+        report_usage(usage)
 
     except urllib.error.HTTPError as e:
         body = e.read().decode()

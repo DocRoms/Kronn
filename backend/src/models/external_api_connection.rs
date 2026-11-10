@@ -34,6 +34,12 @@ pub struct ExternalApiConnection {
     /// capability like the media slots, not a quality tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_model: Option<String>,
+    /// Operator switch for the Kronn tool executor on runs on this connection
+    /// (KT-1600). Tools are on by default: `None` and `Some(true)` attach
+    /// them, `Some(false)` withholds them, for a model that cannot take tool
+    /// calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -49,6 +49,7 @@ async fn fixture() -> (Database, MockServer, ExternalHttpRuntime, TokensConfig) 
         .mount(&server)
         .await;
     let runtime = ExternalHttpRuntime {
+        tools_enabled: None,
         display_name: "Isolated fixture".into(),
         mention_alias: "fixture".into(),
         endpoint: server.uri(),

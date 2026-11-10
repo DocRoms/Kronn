@@ -12,7 +12,7 @@ snapshot request succeeded. Clearing an override is an explicit action; its
 placeholder and card preview show the catalogue's tier assignment when known.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1306-1331#renderSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1332-1357#renderSelect]
 
 The settings endpoint replaces the whole model-tier document. Before a save,
 the editor rereads it and merges only the selected agent/tier, guarded against
@@ -73,8 +73,8 @@ configured to another model. Configured Ollama tiers are imported alongside
 the CLI tiers. Seed insertion preserves an existing model row and fills only
 an unassigned tier in the exact runtime namespace; it does not overwrite a
 manual/live row or compete with an unavailable existing assignment.
-[src: file: backend/src/core/model_catalog/mod.rs:140-260#migrate_hardcoded_catalog_once]
-[src: file: backend/src/core/model_catalog/mod.rs:262-285#seed_configured_tiers]
+[src: file: backend/src/core/model_catalog/mod.rs:200-320#migrate_hardcoded_catalog_once]
+[src: file: backend/src/core/model_catalog/mod.rs:322-345#seed_configured_tiers]
 [src: file: backend/src/db/model_catalog.rs:942-990#insert_migrated_seed_for_target]
 
 Bootstrap records its durable marker in the same database operation. Reopening
@@ -83,7 +83,7 @@ does not restore deleted seeds, and does not import later configuration edits.
 This correction does not reset that marker or repair already-bootstrapped
 databases. No user database or configuration was changed during qualification.
 [src: file: backend/tests/model_catalog_migration.rs:95-141#catalogue_bootstrap_is_durable_and_does_not_restore_removed_seeds]
-[src: file: backend/src/core/model_catalog/mod.rs:140-260#mark_migration_done]
+[src: file: backend/src/core/model_catalog/mod.rs:315-435#mark_migration_done]
 
 Configuration remains unchanged and retains priority at resolution/preflight.
 Several explicitly configured tiers can still name the same model even though
@@ -92,7 +92,7 @@ that distinction, including an existing historical identity assigned to another
 tier and a refusal for the explicitly configured unavailable model.
 [src: file: backend/tests/model_catalog_migration.rs:220-271#an_existing_historical_identity_keeps_its_other_tier_and_explicit_configuration]
 [src: file: backend/tests/model_catalog_migration.rs:273-332#one_configured_identity_can_still_resolve_multiple_explicit_tiers]
-[src: file: backend/src/agents/runner.rs:3614-3686#configured_model_flag]
+[src: file: backend/src/agents/runner.rs:3654-3726#configured_model_flag]
 
 Qualification on backend tree `189eb0f577ac44372ea5e85540ff5052321729e7`:
 the first five migration controls produced four failures on unchanged code;

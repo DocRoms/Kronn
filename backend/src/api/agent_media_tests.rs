@@ -24,6 +24,7 @@ fn connection(
         image_model: None,
         video_model: video_model.map(str::to_string),
         decision_model: None,
+        tools_enabled: None,
         media_endpoint: None,
     }
 }

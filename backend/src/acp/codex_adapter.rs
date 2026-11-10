@@ -514,7 +514,7 @@ impl AcpTransport for CodexAcpAdapter {
         }
         args.push("-".into());
 
-        let mut child = crate::agents::runner::try_spawn(
+        let mut child = crate::agents::runner::try_spawn_granted(
             &self.program,
             None,
             &args,
@@ -531,6 +531,7 @@ impl AcpTransport for CodexAcpAdapter {
             self.launch.bridge_token.as_deref(),
             self.launch.priority,
             self.broker.full_access(),
+            &self.launch.run_artifacts,
         )
         .map_err(AcpError::Transport)?;
         let mut stdin = child
@@ -1311,5 +1312,159 @@ exec sleep 30"#,
             std::fs::read_to_string(discussion_file).unwrap().trim(),
             "disc-prod"
         );
+    }
+
+    const OWN_RUN: &str = "3e7f4d85-af84-4c3b-8a0d-4a5b6c7d8e9f";
+    const OTHER_RUN: &str = "4f805e96-b095-4d4c-9b1e-5b6c7d8e9fa0";
+
+    /// The launch options the default adapted route builds for a step granted
+    /// its run directory `own`: the policy's arguments and its typed grant.
+    fn granted_launch(work: &std::path::Path, own: &std::path::Path) -> AdapterLaunchOptions {
+        let policy = crate::agents::read_only_repos::ReadOnlyRepos::resolve_with_dirs(
+            &crate::models::AgentType::Codex,
+            work,
+            &[],
+            &[own.display().to_string()],
+        )
+        .unwrap()
+        .unwrap();
+        AdapterLaunchOptions {
+            worker_args: Some(crate::agents::runner::adapter_policy_args(
+                &crate::models::AgentType::Codex,
+                work,
+                &policy,
+            )),
+            run_artifacts: policy.granted_dirs().to_vec(),
+            ..AdapterLaunchOptions::default()
+        }
+    }
+
+    async fn run_one_turn(adapter: CodexAcpAdapter, cwd: &std::path::Path) -> Vec<AcpSessionEvent> {
+        let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
+        host.negotiate(init_request(&cwd.to_string_lossy()))
+            .await
+            .unwrap();
+        let target = host.create_session().await.unwrap();
+        let (tx, rx) = mpsc::channel(16);
+        host.prompt(&target, "hello", tx).await.unwrap();
+        drain(rx).await
+    }
+
+    fn adapter_with(
+        fixture: &std::path::Path,
+        dir: &std::path::Path,
+        own: &std::path::Path,
+    ) -> CodexAcpAdapter {
+        CodexAcpAdapter {
+            program: fixture.to_string_lossy().into_owned(),
+            launch: granted_launch(dir, own),
+            ..CodexAcpAdapter::new(
+                None,
+                None,
+                false,
+                None,
+                None,
+                AcpSessionScope::new(Some(dir.to_path_buf()), "artifacts"),
+            )
+        }
+    }
+
+    fn run_dir(run: &str) -> std::path::PathBuf {
+        crate::workflows::run_artifacts::ensure(run)
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+    }
+
+    /// KT-1587 — the default route (this adapter, `AdaptedAcp`) spawns the CLI
+    /// itself: the step's typed run artifacts grant must reach that spawn, or a
+    /// step granted `{{run.artifacts_dir}}` could not read its own run behind
+    /// the closed root. The wrap it gets reads the own run and no other.
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg(unix)] // fixture is a POSIX shell script standing in for the codex CLI
+    async fn a_codex_turn_on_the_adapted_route_spawns_with_its_typed_run_grant() {
+        let own = run_dir(OWN_RUN);
+        let other = run_dir(OTHER_RUN);
+        let dir = tempfile::tempdir().unwrap();
+        let argv_file = dir.path().join("argv.txt");
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" > '{}'\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"turn.completed\"}}'",
+                argv_file.display()
+            ),
+        );
+        run_one_turn(adapter_with(&fixture, dir.path(), &own), dir.path()).await;
+
+        let granted = crate::agents::runner::spawn_grants::last_for(&fixture.to_string_lossy())
+            .expect("the turn spawned the CLI");
+        assert_eq!(granted, vec![own.clone()], "the spawn lost the grant");
+        let argv = std::fs::read_to_string(argv_file).unwrap();
+        assert!(
+            argv.contains(&format!("\"{}\"=\"read\"", own.display())),
+            "{argv}"
+        );
+        assert!(!argv.contains(other.to_str().unwrap()), "{argv}");
+        // What that spawn wraps the CLI in: own run readable, another not.
+        let rules = crate::core::artifacts_reach::ArtifactsReach::new(
+            own.parent().unwrap().to_path_buf(),
+            &granted,
+        )
+        .seatbelt_rules();
+        assert!(
+            rules.contains(&format!("(subpath \"{}\")", own.display())),
+            "{rules}"
+        );
+        assert!(!rules.contains(other.to_str().unwrap()), "{rules}");
+        crate::workflows::run_artifacts::remove(OWN_RUN);
+        crate::workflows::run_artifacts::remove(OTHER_RUN);
+    }
+
+    /// KT-1587 — the same turn, run for real behind Kronn's Seatbelt profile on
+    /// macOS: the CLI reads its own run's file and is refused the other run's.
+    /// Skipped where a sandbox cannot be applied (a sandboxed worker).
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg(target_os = "macos")]
+    async fn a_codex_turn_on_the_adapted_route_reads_its_own_run_behind_seatbelt() {
+        if crate::core::task_worker_sandbox::Mechanism::Seatbelt
+            .check_usable()
+            .is_err()
+        {
+            eprintln!("live read skipped: a sandbox cannot be applied from here");
+            return;
+        }
+        let own = run_dir(OWN_RUN);
+        let other = run_dir(OTHER_RUN);
+        std::fs::write(own.join("probe.txt"), "artifact-content").unwrap();
+        std::fs::write(other.join("probe.txt"), "other-run-content").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            &format!(
+                r#"cat >/dev/null
+SEEN="$(cat '{own}/probe.txt' 2>/dev/null; cat '{other}/probe.txt' 2>/dev/null && echo LEAK-OTHER)"
+printf '%s\n' "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"$SEEN\"}}}}"
+printf '%s\n' '{{"type":"turn.completed"}}'"#,
+                own = own.display(),
+                other = other.display()
+            ),
+        );
+        crate::core::vault_guard::set_test_wrap(true);
+        let events = run_one_turn(adapter_with(&fixture, dir.path(), &own), dir.path()).await;
+        crate::core::vault_guard::set_test_wrap(false);
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                AcpSessionEvent::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("artifact-content"), "{text}");
+        assert!(!text.contains("other-run-content"), "{text}");
+        assert!(!text.contains("LEAK"), "{text}");
+        crate::workflows::run_artifacts::remove(OWN_RUN);
+        crate::workflows::run_artifacts::remove(OTHER_RUN);
     }
 }

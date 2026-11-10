@@ -2155,6 +2155,7 @@ async fn a_token_s_media_discussion_lands_in_its_project() {
                 image_model: Some("stub/image".into()),
                 video_model: None,
                 decision_model: None,
+                tools_enabled: None,
                 media_endpoint: None,
             },
         )?;
