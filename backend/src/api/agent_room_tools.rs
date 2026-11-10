@@ -53,7 +53,12 @@ pub(super) fn declarations() -> Vec<Value> {
         json!({"type": "function", "function": {
             "name": name,
             "description": description,
-            "parameters": {"type": "object", "properties": properties, "required": required},
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": false,
+            },
         }})
     })
     .collect()
@@ -72,6 +77,9 @@ impl KronnToolExecutor {
         };
         let room = member.context.discussion_id.as_str();
         if let Some(refusal) = foreign_room_refusal(call, room) {
+            return fail(call, refusal);
+        }
+        if let Some(refusal) = undeclared_field_refusal(call) {
             return fail(call, refusal);
         }
         if let Some(refusal) = self.membership_refusal(member).await {
@@ -241,6 +249,34 @@ fn foreign_room_refusal(call: &ToolCall, room: &str) -> Option<String> {
         ));
     }
     None
+}
+
+/// A field the tool's schema does not declare is refused, as the schema's
+/// `additionalProperties: false` says, rather than ignored: the model must not
+/// believe an argument it sent had an effect.
+fn undeclared_field_refusal(call: &ToolCall) -> Option<String> {
+    let declared: Vec<String> = declarations()
+        .into_iter()
+        .find(|tool| tool["function"]["name"] == call.name.as_str())
+        .and_then(|tool| {
+            tool["function"]["parameters"]["properties"]
+                .as_object()
+                .map(|properties| properties.keys().cloned().collect())
+        })
+        .unwrap_or_default();
+    let fields = call.arguments.as_object()?;
+    let extra: Vec<&str> = fields
+        .keys()
+        .map(String::as_str)
+        .filter(|field| !declared.iter().any(|known| known == field))
+        .collect();
+    if extra.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "refused: unknown field(s) {extra:?} for `{}`; it takes {declared:?} only",
+        call.name
+    ))
 }
 
 #[cfg(all(test, feature = "full-tests"))]

@@ -198,14 +198,16 @@ Only then does the step's native catalogue carry three room tools, bound to that
 room: `disc_read`, `disc_append` (main channel; this is also how a
 `kronn-question` card is published) and `disc_question_list` (the same contract
 as the bridge's: pending questions or the answer of an exact `key`; absence is
-not consent). A `discussion_id` naming any other discussion is refused. What the
+not consent). The schemas are closed: a `discussion_id` naming any other
+discussion, or any undeclared field, is refused, and the bridge-token gate
+decides the two writing/asking tools on the room the step owns. What the
 step posts is authored by the step's provider, not by the room's agent. A step
 without a `room_id` is offered exactly the workflow catalogue it had before,
 because every tool declaration costs a small model context. The model-facing
 behaviour is the same as for a joined CLI; see
 [kronn-internal.md](mcp-servers/kronn-internal.md) for the full contract.
 `[src: file: backend/src/api/agent_tools.rs:1803-1805#catalogue]`
-`[src: file: backend/src/api/agent_room_tools.rs:15-60#declarations]`
+`[src: file: backend/src/api/agent_room_tools.rs:19-65#declarations]`
 
 ## Known limitations
 

@@ -229,7 +229,8 @@ async fn the_room_tools_refuse_every_other_discussion() {
     }
     assert!(messages(&state, "room-b").await.is_empty());
     assert!(messages(&state, "room-a").await.is_empty());
-    // Naming its own room, or nothing, is the same call.
+    // The schemas declare no room field, so naming even its own room is an
+    // undeclared field: refused like any other, not quietly honoured.
     for named in [json!("room-a"), json!(""), Value::Null] {
         let outcome = call(
             tools.as_ref(),
@@ -237,11 +238,124 @@ async fn the_room_tools_refuse_every_other_discussion() {
             json!({"discussion_id": named, "content": "hello"}),
         )
         .await;
-        assert!(outcome.ok, "{}", outcome.content);
+        assert!(!outcome.ok, "{}", outcome.content);
+        assert!(outcome.content["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown field"));
     }
-    assert_eq!(messages(&state, "room-a").await.len(), 3);
+    assert!(messages(&state, "room-a").await.is_empty());
     assert!(messages(&state, "room-b").await.is_empty());
     active.finish().await;
+}
+
+/// The three schemas are closed, and an extra field is refused rather than
+/// ignored: nothing runs, nothing is posted.
+#[tokio::test]
+async fn the_room_tool_schemas_are_closed_and_extra_fields_are_refused() {
+    for tool in declarations() {
+        let name = tool["function"]["name"].as_str().unwrap();
+        assert_eq!(
+            tool["function"]["parameters"]["additionalProperties"],
+            json!(false),
+            "{name}"
+        );
+    }
+    let state = state().await;
+    let active = activation(&state, AgentType::LiteLlm).await;
+    let tools = executor(&state, &active);
+    for (tool, arguments) in [
+        ("disc_read", json!({"limit": 5, "offset": 1})),
+        (
+            "disc_append",
+            json!({"content": "hello", "channel": "side"}),
+        ),
+        ("disc_append", json!({"content": "hello", "role": "User"})),
+        ("disc_question_list", json!({"state": "answered"})),
+    ] {
+        let outcome = call(tools.as_ref(), tool, arguments).await;
+        assert!(!outcome.ok, "{tool}: {}", outcome.content);
+        assert!(outcome.content["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown field"));
+    }
+    assert!(messages(&state, "room-a").await.is_empty());
+    // The declared fields still work.
+    assert!(
+        call(tools.as_ref(), "disc_read", json!({"limit": 5}))
+            .await
+            .ok
+    );
+    active.finish().await;
+}
+
+/// KT-1346 — the room tools are decided by the gate, not exempt from it. A
+/// caller with no step membership is refused both tools: an in-process
+/// executor (no rule without a room), and bridge tokens that do not own the
+/// room (the route's `Own` rule, or no scope at all).
+#[tokio::test]
+async fn a_caller_without_a_membership_is_refused_both_tools_by_the_gate() {
+    let state = state().await;
+    let plain =
+        KronnToolExecutor::workflow_arc(state.clone(), None, "run-1".into(), "analyse".into());
+    for (tool, arguments) in [
+        ("disc_append", json!({"content": "hello"})),
+        ("disc_question_list", json!({})),
+    ] {
+        let outcome = call(plain.as_ref(), tool, arguments).await;
+        assert!(!outcome.ok, "{tool}: {}", outcome.content);
+        assert!(
+            outcome.content["error"]
+                .as_str()
+                .unwrap()
+                .contains("Kronn refused"),
+            "{}",
+            outcome.content
+        );
+    }
+    assert!(messages(&state, "room-a").await.is_empty());
+
+    // The bridge: the same two routes, for tokens that are not that room's.
+    let append = crate::core::bridge_token::route_for("POST", "/api/disc/append").unwrap();
+    let questions =
+        crate::core::bridge_token::route_for("GET", "/api/discussions/{id}/questions").unwrap();
+    for scope in [
+        crate::core::bridge_token::BridgeScope::default(),
+        crate::core::bridge_token::BridgeScope {
+            workflow_run_id: Some("run-1".into()),
+            ..Default::default()
+        },
+        crate::core::bridge_token::BridgeScope {
+            discussion_ids: vec!["room-b".into()],
+            ..Default::default()
+        },
+    ] {
+        let guard = crate::core::bridge_token::mint(scope.clone()).unwrap();
+        let grant = crate::core::bridge_token::lookup(guard.value()).unwrap();
+        let denied = crate::core::bridge_admit::admit(
+            &state.db,
+            grant.clone(),
+            append,
+            Vec::new(),
+            None,
+            Some(json!({"disc_id": "room-a"})),
+        )
+        .await;
+        assert!(denied.is_err(), "append admitted for {scope:?}");
+        if scope.owns_nothing() {
+            let denied = crate::core::bridge_admit::admit(
+                &state.db,
+                grant,
+                questions,
+                vec![("id".into(), "room-a".into())],
+                None,
+                None,
+            )
+            .await;
+            assert!(denied.is_err(), "questions admitted for {scope:?}");
+        }
+    }
 }
 
 /// DoD 4 — without a `room_id` the catalogue is the one a workflow step always
@@ -281,10 +395,12 @@ async fn a_step_without_a_room_keeps_its_catalogue() {
         assert!(!expected.iter().any(|name| NAMES.contains(&name.as_str())));
         let refused = call(plain.as_ref(), "disc_append", json!({"content": "hi"})).await;
         assert!(!refused.ok);
+        // The gate has no rule for it without a room; the catalogue check
+        // would refuse it next.
         assert!(refused.content["error"]
             .as_str()
             .unwrap()
-            .contains("not allowed in workflow Agent steps"));
+            .contains("Kronn refused"));
     }
     assert!(messages(&state, "room-a").await.is_empty());
 

@@ -489,17 +489,23 @@ room, `limit` 1–200, default 40), `disc_append` (a message on the `main`
 channel; a closed `kronn-question` fence in `content` publishes a decision card,
 and a card that could not be recorded comes back in `invalid_cards` to be
 reposted) and `disc_question_list` (pending questions, or the durable answer of
-an exact `key`; same result shape and the same 50-row cap as the bridge's). They
-declare no room argument: a `discussion_id` or `disc_id` naming another
-discussion is refused, not ignored. Every call also checks that the step still
+an exact `key`; same result shape and the same 50-row cap as the bridge's). Their
+schemas are closed (`additionalProperties: false`) and declare no room argument:
+a `discussion_id` or `disc_id` naming another discussion, and any other
+undeclared field (even the step's own room), is refused, not ignored. The
+KT-1346 bridge-token gate decides `disc_append` and `disc_question_list` like any
+other tool, on the bridge's own routes (`POST /api/disc/append`, an `Own` route,
+and `GET /api/discussions/{id}/questions`): the step's room is the only
+discussion its grant owns, and an executor with no membership has no rule for
+either tool, so it is refused. Every call also checks that the step still
 runs in this process and that its session is still active, so a finished,
 replaced or restarted step is refused with "membership has ended". A step with no
 `room_id` keeps exactly the catalogue it had (no extra tool in a small model's
 context), and cannot call these names. No other room tool is added: the step is
 already a member, so there is no `disc_join` or `disc_wait_for_peer`.
-`[src: file: backend/src/api/agent_room_tools.rs:15-60#declarations]`
-`[src: file: backend/src/api/agent_room_tools.rs:63-85#execute_step_room_tool]`
-`[src: file: backend/src/api/agent_room_tools.rs:231-244#foreign_room_refusal]`
+`[src: file: backend/src/api/agent_room_tools.rs:19-65#declarations]`
+`[src: file: backend/src/api/agent_room_tools.rs:68-93#execute_step_room_tool]`
+`[src: file: backend/src/api/agent_room_tools.rs:239-252#foreign_room_refusal]`
 `[src: file: backend/src/api/agent_tools.rs:1803-1805#catalogue]`
 The optional `validations` passed to `task_exec_launch` are principal-owned and
 persisted on the implicit single-task run. They use the same `ValidationSpec`
