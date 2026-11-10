@@ -897,6 +897,37 @@
   background: rgba(var(--kr-error-rgb), 0.08);
 }
 
+/* KT-1524 — the provider refuses this connection's token. */
+.mcp-token-refused {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4);
+  color: var(--kr-text-secondary);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.32);
+  border-radius: var(--kr-r-md);
+}
+
+.mcp-token-refused > svg {
+  flex: 0 0 auto;
+  color: var(--kr-error);
+  margin-top: 2px;
+}
+
+.mcp-token-refused strong {
+  display: block;
+  color: var(--kr-error);
+}
+
+.mcp-token-refused p {
+  margin: var(--kr-sp-2) 0 0;
+}
+
+.mcp-token-refused .mcp-btn-action {
+  margin-top: var(--kr-sp-3);
+}
+
 .mcp-registry-drift {
   display: flex;
   align-items: flex-start;

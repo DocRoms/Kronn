@@ -402,12 +402,12 @@ impl ItemOutcome {
                 http_status: None,
             }
         } else {
-            // Failure path: output starts with "HTTP <status> on <method> <url> — <body>".
-            // Try to extract the numeric status for richer downstream branching.
-            let http_status = raw
-                .strip_prefix("HTTP ")
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|s| s.parse::<u64>().ok());
+            // Failure path: the output carries a `[SIGNAL: http_<status>]` line
+            // (it may also start with the plain sentence of a refused token,
+            // KT-1524, so the "HTTP <status> on …" text is not always first).
+            // Extract the numeric status for richer downstream branching.
+            let http_status =
+                super::api_call_executor::extract_http_status_from_output(&raw).map(u64::from);
             ItemOutcome::Failed {
                 error: raw.clone(),
                 http_status,

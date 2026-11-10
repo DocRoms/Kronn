@@ -589,6 +589,26 @@ fn finish(step: &WorkflowStep, started: Instant, results: Vec<SourceResult>) -> 
     let mut failed = 0usize;
     let mut required_failed = 0usize;
 
+    // KT-1524 — sources that failed on a refused credential: the step says so
+    // up front (15 of 22 sources failing on one revoked token must not be
+    // found in a megabyte of output).
+    let auth_refused = results
+        .iter()
+        .filter_map(|result| {
+            result
+                .error
+                .as_deref()
+                .and_then(super::api_auth_failure::sentence_of)
+        })
+        .collect::<Vec<_>>();
+    let auth_sentence = auth_refused.first().map(|sentence| {
+        format!(
+            "{sentence} ({} of {} sources)",
+            auth_refused.len(),
+            results.len()
+        )
+    });
+
     let first_failure = results.iter().find_map(|result| {
         result.error.as_ref().map(|error| {
             let concise = error
@@ -659,7 +679,12 @@ fn finish(step: &WorkflowStep, started: Instant, results: Vec<SourceResult>) -> 
             "sources": source_meta,
         }
     });
-    outcome(step, started, payload, status, summary, failed_step)
+    let mut finished = outcome(step, started, payload, status, summary, failed_step);
+    if let Some(sentence) = auth_sentence {
+        finished.result.output =
+            super::api_auth_failure::annotate(&finished.result.output, &sentence);
+    }
+    finished
 }
 
 fn outcome(
@@ -902,6 +927,60 @@ mod tests {
         assert_eq!(envelope["status"], "ERROR");
         assert_eq!(envelope["data"]["meta"]["required_failed"], 0);
         assert_eq!(envelope["data"]["meta"]["succeeded"], 0);
+    }
+
+    #[test]
+    fn sources_failing_on_a_refused_token_are_named_up_front_by_the_step() {
+        let step = WorkflowStep {
+            name: "collect".into(),
+            step_type: StepType::CollectApiData,
+            ..WorkflowStep::default()
+        };
+        let refused = |index: usize| {
+            SourceResult::failed(
+                index,
+                format!("repo{index}"),
+                false,
+                "Connection \"GitHub X\" (GitHub) refused the token (HTTP 401): Bad credentials — update the token in Settings → APIs.\nHTTP 401 on GET https://api.github.com/x — {}\n[SIGNAL: ERROR]\n[SIGNAL: http_401]\n[SIGNAL: auth_refused]".into(),
+            )
+        };
+        let outcome = finish(
+            &step,
+            Instant::now(),
+            vec![
+                refused(0),
+                refused(1),
+                SourceResult::failed(2, "other".into(), false, "timeout".into()),
+            ],
+        );
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        let output = &outcome.result.output;
+        assert_eq!(
+            output.lines().next().unwrap(),
+            "Connection \"GitHub X\" (GitHub) refused the token (HTTP 401): Bad credentials — update the token in Settings → APIs. (2 of 3 sources)"
+        );
+        assert!(output.trim_end().ends_with("[SIGNAL: auth_refused]"));
+    }
+
+    #[test]
+    fn a_collection_without_a_refused_token_gets_no_auth_sentence() {
+        let step = WorkflowStep {
+            name: "collect".into(),
+            step_type: StepType::CollectApiData,
+            ..WorkflowStep::default()
+        };
+        let outcome = finish(
+            &step,
+            Instant::now(),
+            vec![SourceResult::failed(
+                0,
+                "a".into(),
+                true,
+                "HTTP 500 on GET x — boom".into(),
+            )],
+        );
+        assert!(!outcome.result.output.contains("auth_refused"));
     }
 
     #[test]

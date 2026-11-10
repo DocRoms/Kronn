@@ -11,6 +11,7 @@ import { StepTokensBadge } from './StepTokens';
 import { stepTokensUnknown } from './stepTokenStatus';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
 import { CopyIdPill } from '../CopyIdPill';
+import { authRefusalSentence, runAuthRefusals } from '../../lib/authRefusal';
 import {
   runStatusTimeline,
   tryParseTriageManifest,
@@ -976,6 +977,24 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
           this static `run.step_results` snapshot which would only update
           on page reload. Splitting the responsibility avoids two parallel
           step lists fighting for the user's attention. */}
+      {/* KT-1524 — run level: which connection refuses its token, in plain
+          words, instead of leaving it to the raw output of the failed step. */}
+      {run.status !== 'Running' && (() => {
+        const refusals = runAuthRefusals(run.step_results);
+        if (refusals.length === 0) return null;
+        return (
+          <div className="wf-auth-refused" role="alert" data-testid="wf-auth-refused">
+            <strong><AlertTriangle size={13} /> {t('wf.authRefused.title')}</strong>
+            {refusals.map(refusal => (
+              <p key={refusal.stepName}>
+                <span className="text-faint">{t('wf.authRefused.step', refusal.stepName)}</span> — {refusal.sentence}
+              </p>
+            ))}
+            <small>{t('wf.authRefused.hint')}</small>
+          </div>
+        );
+      })()}
+
       {run.step_results.length > 0 && run.status !== 'Running' && (
         <div className="mt-4">
           {run.step_results.map((sr, i) => {
@@ -1211,6 +1230,12 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                         </tbody>
                       </table>
                     )}
+                    {(() => {
+                      const sentence = authRefusalSentence(sr.output);
+                      return sentence && (
+                        <div className="wf-auth-refused" role="note" data-testid="wf-step-auth-refused">{sentence}</div>
+                      );
+                    })()}
                     <div className="wf-step-output-code">
                       {sr.output || t('wf.noOutput')}
                     </div>

@@ -13,7 +13,7 @@ export type PluginHealthTranslate = (key: string, ...args: (string | number)[]) 
 export interface PluginAccessHealth {
   access: PluginInterface;
   state: PluginHealthState;
-  code: ProbeDiagnosticCode | 'never_tested' | 'missing_secret';
+  code: ProbeDiagnosticCode | 'never_tested' | 'missing_secret' | 'token_refused';
   testedAt: string | null;
 }
 
@@ -61,6 +61,12 @@ export function accessHealth(
       code: liveCheck.code,
       testedAt: context.liveTestedAt ?? null,
     };
+  }
+
+  // KT-1524 — a refused call is fresher than the last stored probe: the next
+  // successful call clears it server-side, so its presence is the signal.
+  if (access === 'api' && config.auth_failure) {
+    return { access, state: 'error', code: 'token_refused', testedAt: config.auth_failure.failed_at };
   }
 
   const stored = latestStoredProbe(config, access);

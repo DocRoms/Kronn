@@ -823,7 +823,7 @@ pub async fn execute_api_call_probe(
     ctx: &TemplateContext,
     policy: SecurityPolicy,
 ) -> StepOutcome {
-    execute_with_token_refresh(
+    let mut outcome = execute_with_token_refresh(
         step,
         plugin,
         config_id,
@@ -833,7 +833,11 @@ pub async fn execute_api_call_probe(
         policy,
         None,
     )
-    .await
+    .await;
+    // The probe parses its raw failure text: it records the connection's
+    // auth state (a "Test" that gets a 401 flags it) without annotating.
+    super::api_auth_failure::track_outcome(state, plugin, config_id, &mut outcome, false).await;
+    outcome
 }
 
 /// Same as [`execute_api_call_step_with_db`] but lets the caller stamp a
@@ -896,7 +900,7 @@ async fn execute_api_call_step_with_db_inner(
     };
 
     let config_id = step.api_config_id.clone().unwrap_or_default();
-    execute_with_token_refresh(
+    let mut outcome = execute_with_token_refresh(
         step,
         &plugin,
         &config_id,
@@ -906,7 +910,10 @@ async fn execute_api_call_step_with_db_inner(
         policy,
         gate,
     )
-    .await
+    .await;
+    // KT-1524 — flag / unflag the connection, and say which one refused.
+    super::api_auth_failure::track_outcome(state, &plugin, &config_id, &mut outcome, true).await;
+    outcome
 }
 
 /// Mint (or fetch the cached) dynamic credential, run the call, and, when the
@@ -2707,7 +2714,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
 /// Parse the `[SIGNAL: http_NNN]` line emitted by both success and
 /// failure paths (see `execute_api_call_step_core` + `fail()`). Returns
 /// None when no HTTP code is encoded (transport error, config error).
-fn extract_http_status_from_output(output: &str) -> Option<u16> {
+pub(crate) fn extract_http_status_from_output(output: &str) -> Option<u16> {
     for line in output.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("[SIGNAL: http_") {

@@ -3,6 +3,7 @@
 //! Ticks every 30s, checks triggers, enforces concurrency limits,
 //! and spawns runs.
 
+pub mod api_auth_failure;
 pub mod api_call_binary;
 pub mod api_call_executor;
 pub mod api_call_ratelimit;

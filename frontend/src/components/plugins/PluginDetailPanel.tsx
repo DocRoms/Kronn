@@ -12,6 +12,7 @@ import { PluginAccessPolicyEditor } from './PluginAccessPolicyEditor';
 import { slugify } from './mcpPageHelpers';
 import { accessHealth, diagnosticLabel } from './pluginHealth';
 import { PluginHealthBadge } from './PluginHealthBadge';
+import { TokenRefusedNotice } from './TokenRefusedNotice';
 import type { McpPageState } from './useMcpPageState';
 
 /**
@@ -203,6 +204,16 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
             editing: everything happens here, no jump to the
             top Add panel, no scroll. */}
         {isEditingThisCustom ? <CustomApiForm state={state} /> : (<>
+        {cfg.auth_failure && (
+          <TokenRefusedNotice
+            failure={cfg.auth_failure}
+            t={t}
+            onUpdate={() => {
+              setActiveTab('credentials');
+              if (editingEnvId !== cfg.id) void handleStartEditSecrets(cfg.id);
+            }}
+          />
+        )}
         {cfg.registry_drift && (
           <div className="mcp-registry-drift" role="status" data-testid="mcp-registry-drift" data-detail-tab="status">
             <Info size={16} aria-hidden="true" />

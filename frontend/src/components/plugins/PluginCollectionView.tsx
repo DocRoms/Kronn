@@ -131,6 +131,7 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
                       {config.effective_kind !== 'api' && <HostSyncChip mode={config.host_sync} />}
                       {config.env_keys.length > 0 && <span className="mcp-installed-keys"><Key size={9} /> {config.env_keys.length}</span>}
                       {config.secrets_broken && <span className="mcp-scope-badge mcp-scope-broken" title={t('mcp.secretsBroken')}>⚠ {t('mcp.secretsBrokenShort')}</span>}
+                      {config.auth_failure && <span className="mcp-scope-badge mcp-scope-broken" data-testid={`mcp-token-refused-badge-${config.id}`} title={t(`mcp.authFailure.title.${config.auth_failure.kind}`)}>⚠ {t('mcp.authFailure.short')}</span>}
                       {config.registry_drift && <span className="mcp-scope-badge mcp-scope-drift" title={t('mcp.registryDrift')}>⚠ {t(config.registry_drift.orphaned ? 'mcp.registryOrphanShort' : 'mcp.registryDriftShort')}</span>}
                       {worstDrift && <span className="mcp-scope-badge mcp-scope-drift" data-testid={`mcp-endpoint-drift-${config.server_id}`} title={t(worstDrift.successes > 0 ? 'mcp.drift.sometimes' : 'mcp.drift.never', worstDrift.failures, worstDrift.endpoint_path, `HTTP ${worstDrift.http_status}`)}>⚠ {t('mcp.drift.short')}</span>}
                     </span>

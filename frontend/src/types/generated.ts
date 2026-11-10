@@ -5692,6 +5692,28 @@ export type ManifestTest = { name: string, status: TestStatus, evidence: string 
 export type MappingAction = "extracted" | "target_exists" | "unmapped" | "not_prose" | "kronn_managed";
 
 /**
+ * The last authentication refusal recorded on one API connection.
+ */
+export type McpAuthFailure = { kind: McpAuthFailureKind,
+/**
+ * HTTP status of the refusal; `None` for a failed token refresh.
+ */
+http_status?: number,
+/**
+ * The provider's own message, scrubbed of credentials and truncated.
+ */
+message: string,
+/**
+ * RFC3339 timestamp of the refused call.
+ */
+failed_at: string, };
+
+/**
+ * Why an API connection's credentials are refused (KT-1524).
+ */
+export type McpAuthFailureKind = "refused" | "forbidden" | "refresh_failed";
+
+/**
  * A configured instance of an MCP server — with label, env secrets, etc.
  * Multiple projects can share the same config (deduplication by config_hash).
  */
@@ -5756,7 +5778,13 @@ merged_into_existing?: string,
  * without re-running a probe on every page load. Empty when this
  * config was never tested.
  */
-last_probes: Array<McpLastProbe>, };
+last_probes: Array<McpLastProbe>,
+/**
+ * KT-1524 — set while the provider refuses this connection's credentials
+ * (401/403 auth error, failed token refresh); cleared by the next
+ * successful call.
+ */
+auth_failure?: McpAuthFailure, };
 
 /**
  * KT-829 — one config's probe outcome inside a `POST /api/mcps/test-all` run.
@@ -6134,7 +6162,7 @@ export type MessageRevisionReceipt = { event_id: string, message_id: string, rev
  * Requested targets dropped because they left the discussion
  * (`drop_departed_targets`); the client says so instead of failing.
  */
-dropped_targets?: number, };
+dropped_targets: number, };
 
 export type MessageRole = "User" | "Agent" | "System";
 
@@ -12074,14 +12102,6 @@ default_max_review_rounds: number,
  */
 review_rounds_unlimited: boolean,
 /**
- * KT-1632 — local task workers (a CLI agent in its own worktree) running at
- * once. A launch or re-dispatch beyond it waits `Queued`, in launch order,
- * and starts when a slot frees. Remote (HTTP) and Ollama workers do not
- * count. `max_concurrent_agents` counts agent processes, not the builds
- * behind them, so it cannot bound the machine load on its own.
- */
-max_concurrent_task_workers: number,
-/**
  * KT-1633 — run task workers (first dispatch and re-dispatch), their
  * validations and workflow Agent / Exec steps at background priority
  * (`taskpolicy -b`, `nice -n 10`, below-normal on Windows), so the owner's
@@ -12089,7 +12109,15 @@ max_concurrent_task_workers: number,
  * every spawn at the backend's priority. `KRONN_BACKGROUND_PRIORITY=0` turns
  * it off too, whatever this says.
  */
-background_priority: boolean, };
+background_priority: boolean,
+/**
+ * KT-1632 — local task workers (a CLI agent in its own worktree) running at
+ * once. A launch or re-dispatch beyond it waits `Queued`, in launch order,
+ * and starts when a slot frees. Remote (HTTP) and Ollama workers do not
+ * count. `max_concurrent_agents` counts agent processes, not the builds
+ * behind them, so it cannot bound the machine load on its own.
+ */
+max_concurrent_task_workers: number, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

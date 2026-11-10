@@ -4891,6 +4891,7 @@ mod tests {
             credential_source: CredentialSource::Stored,
             merged_into_existing: None,
             last_probes: vec![],
+            auth_failure: None,
         }
     }
 

@@ -563,6 +563,83 @@ fn list_last_probes(conn: &Connection) -> Result<HashMap<String, Vec<McpLastProb
     Ok(by_config)
 }
 
+// ─── Auth failures (KT-1524) ─────────────────────────────────────────────────
+
+fn auth_failure_kind_to_str(kind: McpAuthFailureKind) -> &'static str {
+    match kind {
+        McpAuthFailureKind::Refused => "refused",
+        McpAuthFailureKind::Forbidden => "forbidden",
+        McpAuthFailureKind::RefreshFailed => "refresh_failed",
+    }
+}
+
+fn parse_auth_failure_kind(value: &str) -> McpAuthFailureKind {
+    match value {
+        "forbidden" => McpAuthFailureKind::Forbidden,
+        "refresh_failed" => McpAuthFailureKind::RefreshFailed,
+        _ => McpAuthFailureKind::Refused,
+    }
+}
+
+/// Record (overwrite) the credential refusal of one config. A config deleted
+/// meanwhile is not an error: there is nothing left to flag.
+pub fn record_auth_failure(
+    conn: &Connection,
+    config_id: &str,
+    kind: McpAuthFailureKind,
+    http_status: Option<u16>,
+    message: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO mcp_auth_failures (config_id, kind, http_status, message, failed_at)
+         SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM mcp_configs WHERE id = ?1)
+         ON CONFLICT(config_id) DO UPDATE SET
+           kind = excluded.kind,
+           http_status = excluded.http_status,
+           message = excluded.message,
+           failed_at = excluded.failed_at",
+        params![
+            config_id,
+            auth_failure_kind_to_str(kind),
+            http_status.map(i64::from),
+            message,
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Forget the refusal of one config: its credentials just worked.
+pub fn clear_auth_failure(conn: &Connection, config_id: &str) -> Result<bool> {
+    let removed = conn.execute(
+        "DELETE FROM mcp_auth_failures WHERE config_id = ?1",
+        params![config_id],
+    )?;
+    Ok(removed > 0)
+}
+
+/// Every refused config's last refusal, keyed by `config_id`.
+pub fn list_auth_failures(conn: &Connection) -> Result<HashMap<String, McpAuthFailure>> {
+    let mut stmt = conn.prepare(
+        "SELECT config_id, kind, http_status, message, failed_at FROM mcp_auth_failures",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let config_id: String = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let http_status: Option<i64> = row.get(2)?;
+        Ok((
+            config_id,
+            McpAuthFailure {
+                kind: parse_auth_failure_kind(&kind),
+                http_status: http_status.and_then(|status| u16::try_from(status).ok()),
+                message: row.get(3)?,
+                failed_at: row.get(4)?,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+}
+
 // ─── Display helpers ─────────────────────────────────────────────────────────
 
 /// Build McpConfigDisplay list with masked secrets and server names.
@@ -573,6 +650,7 @@ pub fn list_configs_display(
 ) -> Result<Vec<McpConfigDisplay>> {
     let configs = list_configs(conn)?;
     let mut last_probes = list_last_probes(conn)?;
+    let mut auth_failures = list_auth_failures(conn)?;
     let preferences = list_config_preferences(conn)?;
     let servers = list_servers(conn)?;
     let registry = crate::core::registry::builtin_registry();
@@ -703,6 +781,7 @@ pub fn list_configs_display(
             });
 
             let config_last_probes = last_probes.remove(&c.id).unwrap_or_default();
+            let auth_failure = auth_failures.remove(&c.id);
 
             McpConfigDisplay {
                 id: c.id,
@@ -730,6 +809,7 @@ pub fn list_configs_display(
                 credential_source,
                 merged_into_existing: None,
                 last_probes: config_last_probes,
+                auth_failure,
             }
         })
         .collect())

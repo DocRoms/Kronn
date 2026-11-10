@@ -13,6 +13,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- API connections: a revoked or expired token is surfaced before the next run
+  fails on it (KT-1524). A 401 (or a 403 that names the credential, or a failed
+  OAuth refresh) flags the connection until its next successful call: the card
+  shows « Token refused » with the provider's message and an update action, and
+  a dashboard banner lists every connection that needs a new token. A workflow
+  step, collector or Quick API that fails on it now opens with one plain
+  sentence naming the connection, and the run page says so at run level.
+
 - Workflows: the design doctrine now reaches the agents that author them over
   MCP. One short file (decision tree, "at equal cost, choose for
   maintainability" rules, ApiCall limits) is served as `authoring_doctrine` by
