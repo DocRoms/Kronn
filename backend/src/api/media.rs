@@ -1047,6 +1047,7 @@ mod tests {
             image_model: image.map(str::to_string),
             video_model: video.map(str::to_string),
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         }
     }
@@ -1644,6 +1645,7 @@ mod tests {
             image_model: Some("  black-forest-labs/flux  ".into()),
             video_model: Some("   ".into()),
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         };
         assert_eq!(

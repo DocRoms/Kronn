@@ -65,6 +65,7 @@ vi.mock('../../lib/api', () => ({
     meta: vi.fn().mockResolvedValue({ poll_policy: { max_delay_seconds: 120 } }),
     sendMessage: vi.fn(),
     sendMessageStream: vi.fn().mockResolvedValue(undefined),
+    reviseMessageStream: vi.fn().mockResolvedValue(undefined),
     run: vi.fn(),
     runAgent: vi.fn().mockResolvedValue(undefined),
     orchestrate: vi.fn().mockResolvedValue(undefined),
@@ -3124,6 +3125,74 @@ describe('DiscussionsPage', () => {
       {...liftedProps()}
     />
   );
+
+  describe('retry the last response (KT-1598)', () => {
+    const peerTarget = { kind: 'Cli', agent_type: 'ClaudeCode', cli_session_id: 7 } as never;
+    const renderRetryThread = async () => {
+      const disc = {
+        ...longThread('d-retry'),
+        message_targets: { m28: [peerTarget] },
+      } as Discussion;
+      vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+      vi.mocked(discussionsApi.reviseMessageStream).mockReset();
+      vi.mocked(discussionsApi.reviseMessageStream).mockResolvedValue(undefined);
+      vi.mocked(discussionsApi.sendMessageStream).mockClear();
+      vi.mocked(discussionsApi.runAgent).mockClear();
+      vi.mocked(toastFn).mockClear();
+      await renderThread(disc);
+      fireEvent.click(await screen.findByRole('button', { name: 'Relancer la réponse' }));
+      await waitFor(() => expect(discussionsApi.reviseMessageStream).toHaveBeenCalledTimes(1));
+      return vi.mocked(discussionsApi.reviseMessageStream).mock.calls[0];
+    };
+
+    it('resends the last User turn through the revise path, asking to drop departed targets', async () => {
+      const [id, request] = await renderRetryThread();
+      expect(id).toBe('d-retry');
+      expect(request).toEqual(expect.objectContaining({
+        message_id: 'm28',
+        content: 'message 28',
+        targets: [peerTarget],
+        drop_departed_targets: true,
+      }));
+      expect(discussionsApi.sendMessageStream).not.toHaveBeenCalled();
+      expect(discussionsApi.runAgent).not.toHaveBeenCalled();
+    });
+
+    it('tells the user when the original recipient left and the default responder answers', async () => {
+      const call = await renderRetryThread();
+      await act(async () => {
+        call[8]?.({
+          event_id: 'e1', message_id: 'm28', revision: 'r', sort_order: 3,
+          duplicate: false, dispatch_job_id: 'job-1', dropped_targets: 1,
+        });
+      });
+      expect(toastFn).toHaveBeenCalledWith(
+        "Le destinataire d'origine a quitté la discussion — le répondeur par défaut répond à sa place.",
+        'info',
+      );
+    });
+
+    it('stays silent about targets when none were dropped', async () => {
+      const call = await renderRetryThread();
+      await act(async () => {
+        call[8]?.({
+          event_id: 'e1', message_id: 'm28', revision: 'r', sort_order: 3,
+          duplicate: false, dispatch_job_id: null, dropped_targets: 0,
+        });
+      });
+      expect(toastFn).not.toHaveBeenCalled();
+    });
+
+    it('says a reply is already running on a 409 instead of a generic error', async () => {
+      const call = await renderRetryThread();
+      await act(async () => { call[4]('HTTP 409: An agent response is already in progress'); });
+      expect(toastFn).toHaveBeenCalledWith(
+        'Une réponse est déjà en cours — attendez qu\'elle se termine, ou arrêtez-la, avant de réessayer.',
+        'warning',
+      );
+      expect(toastFn).not.toHaveBeenCalledWith(expect.stringContaining('HTTP 409'), 'error');
+    });
+  });
 
   it('opens the pending decision card in one click while rows above are still laying out', async () => {
     // Reported bug: "je suis obligé de cliquer au moins 10 fois" on the

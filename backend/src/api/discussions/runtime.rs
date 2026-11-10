@@ -495,10 +495,7 @@ pub(crate) async fn stream_dispatch_job(
     // dispatch scans cannot both believe the slot is free.
     let limits = {
         let config = state.config.read().await;
-        crate::agents::runner::agent_concurrency_limits(
-            &config.agents,
-            config.server.max_concurrent_agents,
-        )
+        crate::agents::runner::dispatch_concurrency_limits(&config)
     };
     let job = match state
         .db
@@ -654,6 +651,7 @@ pub(crate) async fn stream_claimed_dispatch_job(
             }
             AgentExecutionOutcome::PreflightFailed { diagnostic } => {
                 fail_dispatch_job(&state, &job, &diagnostic).await;
+                ensure_failure_visible(&state, &job, &diagnostic).await;
                 return;
             }
         };
@@ -682,7 +680,9 @@ pub(crate) async fn stream_claimed_dispatch_job(
                     "agent finished without a durable reply",
                     crate::db::workflows::BatchChildOutcome::NoResponse,
                 )
-                .await
+                .await;
+                ensure_failure_visible(&state, &job, "agent finished without a durable reply")
+                    .await;
             }
             Err(error) => {
                 fail_dispatch_job(&state, &job, &format!("reply lookup failed: {error}")).await
@@ -876,6 +876,35 @@ pub(crate) async fn try_quota_provider_fallback_among(
     Ok(Some((alternative, view.execution.parent_discussion_id)))
 }
 
+/// The provider's own words in a failed turn's reply (KT-1517).
+///
+/// The reply leads with Kronn's hint and folds the raw output into a
+/// `kronn:context` block, and a Codex failure can echo the whole prompt before the
+/// refusal. So the line that carries the quota signal is the message worth
+/// quoting; without one, the start of the raw output.
+pub(crate) fn provider_quota_message(response: &str) -> String {
+    const CONTEXT_CLOSE: &str = "<!-- /kronn:context -->";
+    let raw = response
+        .find("<!-- kronn:context")
+        .and_then(|open| {
+            let body = &response[open..];
+            let start = body.find("-->")? + "-->".len();
+            let end = body.find(CONTEXT_CLOSE).unwrap_or(body.len());
+            body.get(start..end.max(start))
+        })
+        .unwrap_or(response);
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && super::is_hard_quota_exhausted(line));
+    line.unwrap_or_else(|| raw.trim())
+        .trim_start_matches("[Agent provider error]")
+        .trim()
+        .chars()
+        .take(800)
+        .collect()
+}
+
 async fn finish_dispatch_turn(
     state: &AppState,
     job: crate::db::agent_dispatch::AgentDispatchJob,
@@ -883,7 +912,7 @@ async fn finish_dispatch_turn(
     execution_succeeded: bool,
 ) {
     if !execution_succeeded && super::is_hard_quota_exhausted(&response) {
-        let detail = response.trim().chars().take(800).collect::<String>();
+        let detail = provider_quota_message(&response);
         let durable_error = if detail.is_empty() {
             "quota_exhausted: provider plan or credit limit reached".to_string()
         } else {
@@ -1318,27 +1347,163 @@ async fn fail_dispatch_job_with_outcome_kind(
                         )
                     })
                     .unwrap_or_default();
-                let message = crate::api::orchestration::orchestrator_message(
-                    format!("provider-quota-escalation:{}", job.id),
-                    format!(
-                        "**Intervention humaine requise — quota épuisé**\n\nLe provider `{provider}` a refusé le dispatch `{}` pour limite de plan/crédits. Aucun provider alternatif explicitement autorisé n'est disponible ; Kronn ne relancera pas le même compte avant la réinitialisation.{return_note} Sans échéance annoncée : bascule de compte ou réaffectation explicite requise.",
-                        job.id
-                    ),
-                );
-                if let Err(db_error) = state
-                    .db
-                    .with_conn(move |conn| {
-                        crate::db::discussions::insert_message(conn, &target_discussion, &message)?;
-                        Ok(())
-                    })
-                    .await
-                {
-                    tracing::warn!(dispatch_job_id = %job.id, "quota notice could not be persisted: {db_error}");
+                // KT-1517 — the room that ran the turn gets the System card: the
+                // provider's message and what to do next. Without it the agent just
+                // stops publishing and the room looks idle.
+                record_quota_card(state, job, error, announced_reset).await;
+                // A task worker's parent room also gets the orchestrator's escalation.
+                if target_discussion != job.discussion_id {
+                    let message = crate::api::orchestration::orchestrator_message(
+                        format!("provider-quota-escalation:{}", job.id),
+                        format!(
+                            "**Intervention humaine requise — quota épuisé**\n\nLe provider `{provider}` a refusé le dispatch `{}` pour limite de plan/crédits. Aucun provider alternatif explicitement autorisé n'est disponible ; Kronn ne relancera pas le même compte avant la réinitialisation.{return_note} Sans échéance annoncée : bascule de compte ou réaffectation explicite requise.",
+                            job.id
+                        ),
+                    );
+                    if let Err(db_error) = state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::db::discussions::insert_message(
+                                conn,
+                                &target_discussion,
+                                &message,
+                            )?;
+                            Ok(())
+                        })
+                        .await
+                    {
+                        tracing::warn!(dispatch_job_id = %job.id, "quota notice could not be persisted: {db_error}");
+                    }
                 }
             }
         }
     }
     state.agent_dispatch_notify.notify_waiters();
+}
+
+/// KT-1517 — the System card a quota-refused turn leaves in its own room: the
+/// provider's message, when it resets if it said, and the way out. It is linked to
+/// the dispatch, so the room's Retry runs the same turn again.
+async fn record_quota_card(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    error: &str,
+    announced_reset: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    let lookup = job.clone();
+    let loaded = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(
+                crate::db::discussions::get_discussion(conn, &lookup.discussion_id)?.map(
+                    |discussion| {
+                        (
+                            discussion.agent,
+                            discussion.tier,
+                            discussion.model,
+                            discussion.language,
+                        )
+                    },
+                ),
+            )
+        })
+        .await;
+    let (agent, tier, model, language) = match loaded {
+        Ok(Some(loaded)) => loaded,
+        Ok(None) => return,
+        Err(db_error) => {
+            tracing::warn!(dispatch_job_id = %job.id, "unable to read the room for the quota card: {db_error}");
+            return;
+        }
+    };
+    let agent = job.agent_override.clone().unwrap_or(agent);
+    let message = error.strip_prefix("quota_exhausted: ").unwrap_or(error);
+    let content = super::start_refusal::quota_exhausted_card(
+        &language,
+        &format!("{agent:?}"),
+        message,
+        announced_reset,
+        tier,
+        Some(&job.id),
+    );
+    super::start_refusal::record_refusal_card(
+        state,
+        super::start_refusal::RefusedStart {
+            discussion_id: &job.discussion_id,
+            agent_type: &agent,
+            model,
+            tier,
+            dispatch_id: Some(&job.id),
+            tracked_dispatch: true,
+            reply_to: Some(job.trigger_message_id.clone()),
+        },
+        content,
+    )
+    .await;
+}
+
+/// KT-1607 — a settled dispatch must leave something the room can read. A refusal
+/// before the provider call and a run that wrote no reply used to settle the job
+/// with a `last_error` only, so the discussion showed nothing: no reply, no error
+/// and no system note. When nothing is linked to the dispatch, write the card that
+/// says why, retryable from the room like any other refused start.
+async fn ensure_failure_visible(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    reason: &str,
+) {
+    let lookup = job.clone();
+    let loaded = state
+        .db
+        .with_read_conn(move |conn| {
+            let has_message: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages
+                 WHERE discussion_id = ?1 AND agent_dispatch_job_id = ?2)",
+                rusqlite::params![lookup.discussion_id, lookup.id],
+                |row| row.get(0),
+            )?;
+            if has_message {
+                return Ok(None);
+            }
+            Ok(
+                crate::db::discussions::get_discussion(conn, &lookup.discussion_id)?.map(
+                    |discussion| {
+                        (
+                            discussion.agent,
+                            discussion.tier,
+                            discussion.model,
+                            discussion.language,
+                        )
+                    },
+                ),
+            )
+        })
+        .await;
+    let (agent, tier, model, language) = match loaded {
+        Ok(Some(loaded)) => loaded,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(dispatch_job_id = %job.id, "unable to check the dispatch's visible trace: {error}");
+            return;
+        }
+    };
+    let agent = job.agent_override.clone().unwrap_or(agent);
+    let content =
+        super::start_refusal::unexplained_end_card(&language, reason, tier, Some(&job.id));
+    super::start_refusal::record_refusal_card(
+        state,
+        super::start_refusal::RefusedStart {
+            discussion_id: &job.discussion_id,
+            agent_type: &agent,
+            model,
+            tier,
+            dispatch_id: Some(&job.id),
+            tracked_dispatch: true,
+            reply_to: Some(job.trigger_message_id.clone()),
+        },
+        content,
+    )
+    .await;
 }
 
 /// KT-1134 — seconds an audit validation agent waits, queued, while an audit of
@@ -1487,8 +1652,9 @@ pub(crate) fn render_chain_qp_prompt(
 #[cfg(all(test, feature = "full-tests"))]
 mod chain_render_tests {
     use super::{
-        dispatch_target_tier, persist_dispatch_settlement, render_chain_qp_prompt,
-        select_quota_alternative, unsuccessful_completion_diagnostic, DispatchHandoffGuard,
+        dispatch_target_tier, ensure_failure_visible, persist_dispatch_settlement,
+        render_chain_qp_prompt, select_quota_alternative, unsuccessful_completion_diagnostic,
+        DispatchHandoffGuard,
     };
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -1691,6 +1857,91 @@ mod chain_render_tests {
     fn no_var_no_batch_item_returns_template_as_is() {
         let out = render_chain_qp_prompt("Static prompt", None, None, "");
         assert_eq!(out, "Static prompt");
+    }
+
+    /// KT-1607 — a dispatch that settled with a reason but wrote nothing leaves
+    /// a System card naming it, once; a dispatch that already has a trace in the
+    /// room gets no second one.
+    #[tokio::test]
+    async fn a_settled_dispatch_with_no_trace_in_the_room_gets_a_card_with_its_reason() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let job = db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES ('d-vis', 'Vis', ?1, ?1)",
+                    [&now],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('u-vis', 'd-vis', 'User', 'go', ?1, 1, ?1)",
+                    [&now],
+                )?;
+                conn.execute(
+                    "UPDATE discussions SET next_message_seq = 2 WHERE id = 'd-vis'",
+                    [],
+                )?;
+                let job = crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id: "j-vis",
+                        discussion_id: "d-vis",
+                        dedupe_key: "message:u-vis",
+                        agent_override: None,
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                Ok(job)
+            })
+            .await
+            .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let system_cards = |state: &crate::AppState| {
+            let db = state.db.clone();
+            async move {
+                db.with_conn(|conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT content FROM messages
+                         WHERE discussion_id = 'd-vis' AND role = 'System'",
+                    )?;
+                    let rows = statement
+                        .query_map([], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(rows)
+                })
+                .await
+                .unwrap()
+            }
+        };
+
+        ensure_failure_visible(&state, &job, "agent finished without a durable reply").await;
+        let cards = system_cards(&state).await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert!(cards[0].starts_with("[kronn:agent-error]\n"), "{cards:?}");
+        assert!(
+            cards[0].contains("agent finished without a durable reply"),
+            "{cards:?}"
+        );
+        assert!(
+            cards[0].contains("j-vis"),
+            "retryable from the room: {cards:?}"
+        );
+
+        ensure_failure_visible(&state, &job, "agent finished without a durable reply").await;
+        assert_eq!(
+            system_cards(&state).await.len(),
+            1,
+            "a dispatch with a trace in the room gets no second card"
+        );
     }
 
     #[tokio::test]
@@ -2665,3 +2916,7 @@ mod refused_tool_call_notice_tests {
         assert!(notice.contains(REFUSAL), "{notice}");
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_quota_tests.rs"]
+mod quota_turn_tests;
