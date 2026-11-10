@@ -19,7 +19,7 @@ loss = **lost forever** without a copy.
 
 Kronn writes three kinds of copies. The scheduled one is built from the
 environment by `[src: file: backend/src/core/backup.rs:316-330#BackupScheduler]`;
-the manual one is `[src: file: backend/src/api/setup.rs:1924-1935#db_backup]`;
+the manual one is `[src: file: backend/src/api/setup.rs:1934-1945#db_backup]`;
 the pre-migration one is described below.
 
 | Copy | When | Where |
@@ -44,9 +44,9 @@ The pre-migration copy is a file copy of the checkpointed database to
 `kronn.db.backup.tmp`, synced, then renamed over `kronn.db.backup`. If the
 disk lacks room or the copy fails, boot stops before any migration with a
 message saying so. `KRONN_MIGRATION_BACKUP=0` upgrades without a backup; use
-it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1301-1364#backup_before_migration]`
+it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1309-1372#backup_before_migration]`
 The copy is taken only when a migration is pending, after the WAL is folded in
-and pinned. `[src: file: backend/src/db/migrations.rs:1465-1496#has_pending]`
+and pinned. `[src: file: backend/src/db/migrations.rs:1473-1504#has_pending]`
 
 ## Run retention and compaction
 
@@ -205,6 +205,53 @@ For **paranoid** setups, mirror to a second host nightly:
 ```bash
 0 3 * * * rsync -a --delete /var/backups/kronn/ user@backup-host:/var/backups/kronn-$(hostname)/
 ```
+
+## Redaction of stored credentials (KT-1656)
+
+An agent that prints a credential file (a worker that `cat`-ed
+`~/.gemini/settings.json`) leaves the secrets in the database, then in every
+copy of it. Kronn masks what it stores from now on, and the upgrade masks the
+vendor-shaped tokens already stored (migration 293, see
+`docs/architecture/agent-vault-protection.md`), but **rotate the exposed
+credentials: older backups keep the clear text.**
+
+- **Every copy taken before the upgrade holds the tokens in clear**: the
+  pre-migration copy `<data_dir>/kronn.db.backup` (taken by that very upgrade,
+  just before migration 293 masks the live database), the scheduled
+  `kronn-auto-*.db` and the manual `kronn-*.db` copies, and anything the hourly
+  cron job above or a filesystem snapshot made. Kronn does not delete or rewrite them:
+  they are the owner's restore points. Once the credentials are rotated the clear
+  text in them is worthless; delete the older copies when the owner decides to, not
+  before a restore point is no longer wanted.
+- **One discussion known to be exposed** gets the full audit redaction (secret-named
+  assignments and JSON keys too, any role, summaries, tombstones, the task
+  executions of that sub-discussion), by id, on the owner's own database, once:
+
+  ```bash
+  curl -X POST http://127.0.0.1:3140/api/maintenance/redact-discussion \
+    -H 'Content-Type: application/json' \
+    -d '{"discussion_id": "<the id, or its first 8 characters>"}'
+  ```
+
+  The answer names the id it resolved and how many values it rewrote per
+  `table.column`. A reference that matches several discussions is refused. The route
+  is gated like the other destructive POSTs (local owner, or the admin token) and an
+  agent's bridge token cannot call it. Take a manual backup first if the result is to
+  be reversible: the rewrite is not.
+- **Measuring what the insert-time redaction changes on real messages**, on a copy
+  (never the live file):
+
+  ```bash
+  cp "<data_dir>/kronn.db" /tmp/kronn-measure.db   # stop Kronn or use a backup copy
+  KRONN_REDACT_DB=/tmp/kronn-measure.db KRONN_REDACT_OUT=/tmp/redact-report.txt \
+    cargo nextest run --lib --run-ignored only --no-capture \
+      -E 'test(/insert_redaction_measure/)'
+  ```
+
+  It prints how many Agent messages the insert path would change and writes each
+  changed line to the report (secrets included: keep the report where the copy is).
+  `KRONN_REDACT_DIRS=<dir>:<dir>` runs the same measurement on text files cut into
+  message-sized chunks.
 
 ## Restore
 

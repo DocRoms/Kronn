@@ -23,21 +23,37 @@ use crate::AppState;
 /// The frame carries `role` + `agent_type` so the receiver can preserve author
 /// fidelity (an Agent reply lands as an Agent message with its CLI name rather
 /// than a generic "User").
+///
+/// KT-1656 — an Agent message is federated as it was **stored** (masked): the
+/// in-memory `msg` of a caller still holds what the agent wrote, and a peer must
+/// not receive a credential the transcript no longer has.
 pub async fn federate_message(state: &AppState, disc_id: &str, msg: &DiscussionMessage) {
     let did = disc_id.to_string();
     let message_id = msg.id.clone();
+    let agent_message = matches!(msg.role, crate::models::MessageRole::Agent);
     let routing = state
         .db
         .with_conn(move |conn| {
             let shared_id =
                 crate::db::discussions::get_discussion(conn, &did)?.and_then(|d| d.shared_id);
             let targets = crate::db::discussions::list_message_targets(conn, &message_id)?;
-            Ok((shared_id, targets))
+            let stored = if agent_message {
+                conn.query_row(
+                    "SELECT content FROM messages WHERE id = ?1",
+                    [&message_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            } else {
+                None
+            };
+            Ok((shared_id, targets, stored))
         })
         .await
         .ok()
         .unwrap_or_default();
-    let (shared_id, targets) = routing;
+    let (shared_id, targets, stored) = routing;
+    let content = federated_content(msg, stored);
     let Some(shared_id) = shared_id else {
         return; // not a shared disc — nothing to federate
     };
@@ -54,7 +70,7 @@ pub async fn federate_message(state: &AppState, disc_id: &str, msg: &DiscussionM
         from_pseudo,
         from_avatar_email,
         from_invite_code: from_invite_code.clone(),
-        content: msg.content.clone(),
+        content,
         timestamp: msg.timestamp.timestamp_millis(),
         role: msg.role.clone(),
         channel: msg.channel,
@@ -70,6 +86,18 @@ pub async fn federate_message(state: &AppState, disc_id: &str, msg: &DiscussionM
     // F8 — also announce any files pinned to this message so the peer can fetch
     // the binaries (federation is otherwise text-only).
     emit_attachments(state, &shared_id, &msg.id, &from_invite_code).await;
+}
+
+/// The text a peer receives for `msg`: the stored row of an Agent message, or its
+/// in-memory text masked the way the insert masks it when the row is not there
+/// (never the agent's raw text); the text as given for any other author.
+fn federated_content(msg: &DiscussionMessage, stored: Option<String>) -> String {
+    match msg.role {
+        crate::models::MessageRole::Agent => stored.unwrap_or_else(|| {
+            crate::db::discussions::mask_agent_output(&msg.role, msg.content.clone())
+        }),
+        _ => msg.content.clone(),
+    }
 }
 
 /// Announce files that were pinned after their message had already federated.
@@ -693,6 +721,97 @@ mod tests {
                 ..
             } if target == "user-sync-revision"
         ));
+    }
+
+    fn agent_reply(id: &str, content: &str) -> DiscussionMessage {
+        DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
+            session_continuity: None,
+            kind: Default::default(),
+            id: id.into(),
+            role: MessageRole::Agent,
+            channel: crate::models::MessageChannel::Main,
+            content: content.into(),
+            timestamp: Utc::now(),
+            model: None,
+            lint_report: None,
+            agent_type: Some(crate::models::AgentType::Codex),
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: None,
+        }
+    }
+
+    /// KT-1656 — a peer of a shared discussion receives what was stored (masked),
+    /// not the in-memory text a caller still holds after the insert.
+    #[tokio::test]
+    async fn a_federated_agent_message_carries_the_masked_text() {
+        const SECRET: &str = "t0kenNotShapedLikeAVendor01";
+        const VENDOR: &str = "AKIAZ5QWERTYUIOP7A3B";
+        let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
+        let printed = format!(
+            "cat settings.json: {{\"env\": {{\"GITHUB_PERSONAL_ACCESS_TOKEN\": \"{SECRET}\"}}}} and {VENDOR}"
+        );
+        let stored = agent_reply("agent-fed-stored", &printed);
+        let unstored = agent_reply("agent-fed-unstored", &printed);
+        db.with_conn({
+            let stored = stored.clone();
+            move |conn| {
+                let now = Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('p-fed-mask', 'Fed mask', '/tmp', ?1, ?1)",
+                    [&now],
+                )?;
+                conn.execute(
+                    "INSERT INTO discussions (id, project_id, title, shared_id, created_at, updated_at)
+                     VALUES ('d-fed-mask', 'p-fed-mask', 'Fed mask', 'shared-fed-mask', ?1, ?1)",
+                    [&now],
+                )?;
+                crate::db::discussions::insert_message(conn, "d-fed-mask", &stored)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        let state = AppState::new_defaults(
+            Arc::new(RwLock::new(default_config())),
+            db,
+            DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let mut receiver = state.ws_broadcast.subscribe();
+
+        // The caller's in-memory message is the unmasked one.
+        assert!(stored.content.contains(SECRET));
+        federate_message(&state, "d-fed-mask", &stored).await;
+        // A message with no stored row is masked on the way out, never sent raw.
+        federate_message(&state, "d-fed-mask", &unstored).await;
+
+        for frame in ["stored", "unstored"] {
+            let WsMessage::ChatMessage { content, .. } = receiver.try_recv().expect(frame) else {
+                panic!("{frame}: not a chat frame");
+            };
+            assert!(!content.contains(SECRET), "{frame}: {content}");
+            assert!(!content.contains(VENDOR), "{frame}: {content}");
+            assert!(content.contains("REDACTED"), "{frame}: {content}");
+        }
+    }
+
+    /// What a human wrote is theirs: federated as written.
+    #[test]
+    fn a_federated_user_message_is_not_rewritten() {
+        let mut message = agent_reply("user-fed", "password: \"correct horse battery\"");
+        message.role = MessageRole::User;
+        assert_eq!(federated_content(&message, None), message.content);
     }
 }
 

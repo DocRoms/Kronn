@@ -1630,6 +1630,7 @@ mod tests {
             &[],
             None,
             crate::core::background_priority::Priority::Normal,
+            false,
         )
         .expect("the scripted agent starts")
     }

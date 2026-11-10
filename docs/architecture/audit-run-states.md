@@ -124,7 +124,7 @@ this degrades and continues.
   refuses any bridge caller. It is refused when the target is missing, empty
   or still holds template placeholders. It is also refused when the run is not
   the latest `Interrupted` run, or while the audit lease is held.
-  [src: file: backend/src/lib.rs:2122-2127#accept_audit_step] [src: file: backend/src/api/audit/accept.rs:137-145#BridgeCaller] [src: file: backend/src/api/audit/accept.rs:59-81#check_target] [src: file: backend/src/api/audit/accept.rs:174-184#latest] [src: file: backend/src/api/audit/accept.rs:280-282#DocsWriteLease]
+  [src: file: backend/src/lib.rs:2129-2134#accept_audit_step] [src: file: backend/src/api/audit/accept.rs:137-145#BridgeCaller] [src: file: backend/src/api/audit/accept.rs:59-81#check_target] [src: file: backend/src/api/audit/accept.rs:174-184#latest] [src: file: backend/src/api/audit/accept.rs:280-282#DocsWriteLease]
 - Once no failed step is left, the resume runs no agent step and only
   finalizes the run. It goes to `Completed`, writes its validation discussion,
   which lists the accepted steps apart, and makes the project validatable.
@@ -439,7 +439,7 @@ committed provenance nor a matching timestamp replaces this local proof.
 Historical runs without fingerprints require a new audit before signoff.
 [src: file: backend/src/core/audit_documents.rs:11-45#capture]
 [src: file: backend/src/core/audit_documents.rs:51-65#verify]
-[src: file: backend/src/db/discussions.rs:1885-1922#insert_native_agent_message_with_audit_documents]
+[src: file: backend/src/db/discussions.rs:1895-1932#insert_native_agent_message_with_audit_documents]
 [src: file: backend/src/api/discussions/streaming.rs:5202-5224#validation_documents]
 [src: file: backend/src/db/sql/260_audit_document_fingerprints.sql:1-3#final_doc_fingerprints_json]
 
