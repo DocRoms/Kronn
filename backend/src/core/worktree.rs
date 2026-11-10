@@ -474,7 +474,7 @@ pub fn remove_lane_target(repo_path: &Path, lane_target: &Path) -> Result<Cleanu
     assert_no_build_in_progress(lane_target)?;
 
     let (bytes_reclaimed, bytes_are_partial) = measure_within_budget(lane_target);
-    std::fs::remove_dir_all(lane_target).map_err(|error| {
+    crate::core::fs_guard::guarded_remove_tree(repo_path, lane_target).map_err(|error| {
         format!(
             "failed to clean {}: {error}. The lane target is left as it stands.",
             lane_target.display()
@@ -531,8 +531,7 @@ pub fn mark_lane_target(
     let lane = crate::core::task_worker_env::WorkerLane::for_worktree(worktree_path)?;
     let lane_target = lane_target_for_worktree(repo_path, worktree_path)?;
     assert_lane_target_path(repo_path, &lane_target)?;
-    std::fs::create_dir_all(&lane_target)
-        .map_err(|error| format!("cannot create {}: {error}", lane_target.display()))?;
+    crate::core::fs_guard::guarded_create_dir_all(repo_path, &lane_target)?;
     let owner = LaneOwner {
         version: LANE_OWNER_VERSION,
         lane: lane.name,
@@ -543,23 +542,19 @@ pub fn mark_lane_target(
     // ignore `target/` it would read as uncommitted work and hold up the
     // integration preflight. A `*` ignore file keeps git blind to the whole lane.
     let ignore = lane_target.join(".gitignore");
-    if !ignore.exists() {
-        std::fs::write(&ignore, b"*\n").map_err(|error| {
-            format!(
-                "cannot write the lane ignore file in {}: {error}",
-                lane_target.display()
-            )
-        })?;
-    }
+    crate::core::fs_guard::guarded_write_new(repo_path, &ignore, b"*\n").map_err(|error| {
+        format!(
+            "cannot write the lane ignore file in {}: {error}",
+            lane_target.display()
+        )
+    })?;
     // Already stamped for this very execution: leave the file (and the lane's
     // idle clock) alone, so a relaunch does not look like a build.
     if read_lane_owner(&lane_target).as_ref() == Some(&owner) {
         return Ok(lane_target);
     }
     let bytes = serde_json::to_vec(&owner).map_err(|error| error.to_string())?;
-    let staging = lane_target.join(format!("{LANE_OWNER_MARKER}.tmp"));
-    std::fs::write(&staging, bytes)
-        .and_then(|()| std::fs::rename(&staging, lane_target.join(LANE_OWNER_MARKER)))
+    crate::core::fs_guard::guarded_replace(repo_path, &lane_target.join(LANE_OWNER_MARKER), &bytes)
         .map_err(|error| {
             format!(
                 "cannot write the lane marker in {}: {error}",
@@ -1242,10 +1237,14 @@ fn fix_worktree_paths(repo_path: &Path, worktree_path: &Path) {
     // 1. Fix <worktree>/.git — point to <up>.git/worktrees/<name>
     //    Use forward slashes (POSIX) because git always uses forward slashes in gitdir files,
     //    even on Windows (git normalizes internally).
+    //    Rooted at the worktree: a link at `.git` is refused (and one planted after the check
+    //    is replaced as an entry), never written through (KT-1595).
     let dot_git = worktree_path.join(".git");
     if dot_git.exists() {
         let content = format!("gitdir: {}.git/worktrees/{}", up, wt_name);
-        if let Err(e) = std::fs::write(&dot_git, &content) {
+        if let Err(e) =
+            crate::core::fs_guard::guarded_replace(worktree_path, &dot_git, content.as_bytes())
+        {
             tracing::warn!("Failed to fix worktree .git file: {}", e);
         }
     }
@@ -1256,14 +1255,16 @@ fn fix_worktree_paths(repo_path: &Path, worktree_path: &Path) {
     //    repo-root-relative path to the worktree's .git. A bare repo-root-relative path
     //    (no `../../../`) resolves under `.git/worktrees/<name>/` and git marks the
     //    worktree `prunable`, so `git worktree prune` can drop the admin entry (KT-331).
-    let gitdir_file = repo_path
-        .join(".git")
-        .join("worktrees")
-        .join(&wt_name)
-        .join("gitdir");
+    //    Rooted at the repo's `.git` (git's own admin folder: trusted, and possibly reached
+    //    through a link by the user's choice); `worktrees/<name>` below it is walked without
+    //    following a link (KT-1595).
+    let git_admin = repo_path.join(".git");
+    let gitdir_file = git_admin.join("worktrees").join(&wt_name).join("gitdir");
     if gitdir_file.exists() {
         let content = format!("../../../{}/.git\n", rel_from_repo);
-        if let Err(e) = std::fs::write(&gitdir_file, &content) {
+        if let Err(e) =
+            crate::core::fs_guard::guarded_replace(&git_admin, &gitdir_file, content.as_bytes())
+        {
             tracing::warn!("Failed to fix repo gitdir for worktree: {}", e);
         }
     }
@@ -1503,7 +1504,7 @@ pub fn create_discussion_worktree(
     }
 
     // Create base directory
-    std::fs::create_dir_all(worktree_base_dir(repo_path))
+    crate::core::fs_guard::guarded_create_dir_all(repo_path, &worktree_base_dir(repo_path))
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
 
     // Ensure .kronn/worktrees/ is gitignored
@@ -1923,7 +1924,7 @@ pub fn reattach_worktree(
         });
     }
 
-    std::fs::create_dir_all(worktree_base_dir(repo_path))
+    crate::core::fs_guard::guarded_create_dir_all(repo_path, &worktree_base_dir(repo_path))
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
 
     ensure_local_git_exclude(repo_path, ".kronn/")?;
@@ -4842,6 +4843,54 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fix_worktree_paths_never_writes_through_a_link_at_either_name() {
+        // KT-1595: the two reference files are written through the rooted
+        // primitive, so a link at either name is refused (the fix is skipped).
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt = repo.join(".kronn/worktrees/feat");
+        let admin = repo.join(".git/worktrees/feat");
+        fs::create_dir_all(&wt).unwrap();
+        fs::create_dir_all(&admin).unwrap();
+        let external = tmp.path().join("external");
+        fs::create_dir_all(&external).unwrap();
+        fs::write(external.join("dot-git"), "OUTSIDE-1").unwrap();
+        fs::write(external.join("gitdir"), "OUTSIDE-2").unwrap();
+        std::os::unix::fs::symlink(external.join("dot-git"), wt.join(".git")).unwrap();
+        std::os::unix::fs::symlink(external.join("gitdir"), admin.join("gitdir")).unwrap();
+
+        fix_worktree_paths(&repo, &wt);
+
+        assert_eq!(
+            fs::read_to_string(external.join("dot-git")).unwrap(),
+            "OUTSIDE-1"
+        );
+        assert_eq!(
+            fs::read_to_string(external.join("gitdir")).unwrap(),
+            "OUTSIDE-2"
+        );
+        assert!(fs::symlink_metadata(wt.join(".git")).unwrap().is_symlink());
+        assert!(fs::symlink_metadata(admin.join("gitdir"))
+            .unwrap()
+            .is_symlink());
+        // Regular files are rewritten as before.
+        fs::remove_file(wt.join(".git")).unwrap();
+        fs::remove_file(admin.join("gitdir")).unwrap();
+        fs::write(wt.join(".git"), "stale").unwrap();
+        fs::write(admin.join("gitdir"), "stale").unwrap();
+        fix_worktree_paths(&repo, &wt);
+        assert_eq!(
+            fs::read_to_string(wt.join(".git")).unwrap(),
+            "gitdir: ../../../.git/worktrees/feat"
+        );
+        assert_eq!(
+            fs::read_to_string(admin.join("gitdir")).unwrap(),
+            "../../../.kronn/worktrees/feat/.git\n"
+        );
+    }
+
     #[test]
     fn git_commands_run_inside_a_discussion_worktree() {
         // Regression for KT-331: the gitdir rewrite must let real git commands run
@@ -5847,6 +5896,56 @@ mod tests {
         // Idempotent: absent is success with a zero figure.
         let again = remove_lane_target(repo.path(), &lane).unwrap();
         assert_eq!(again.bytes_reclaimed, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_target_folder_swapped_after_the_walk_never_loses_an_outside_lane() {
+        use crate::core::fs_guard::swap_probe;
+        let repo = make_test_repo("lane-rm-swap");
+        let lane = seed_lane_target(repo.path(), "kt-1-aaaa");
+        let outside = tempfile::tempdir().unwrap();
+        let outside_lane = outside.path().join("wt-kt-1-aaaa");
+        fs::create_dir_all(outside_lane.join("debug")).unwrap();
+        fs::write(outside_lane.join("debug/kronn"), "KEEP").unwrap();
+        swap_probe::arm(&repo.path().join("target"), outside.path());
+        let _ = remove_lane_target(repo.path(), &lane);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            fs::read_to_string(outside_lane.join("debug/kronn")).unwrap(),
+            "KEEP"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_target_folder_swapped_after_the_walk_never_receives_the_lane_marker() {
+        use crate::core::fs_guard::swap_probe;
+        let repo = make_test_repo("lane-mark-swap");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-30", "c3d4", &base).unwrap();
+        fs::create_dir_all(repo.path().join("target")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        swap_probe::arm(&repo.path().join("target"), outside.path());
+        let marked = mark_lane_target(repo.path(), Path::new(&info.path), "exec-30");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(marked.is_err(), "{marked:?}");
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_kronn_folder_swapped_after_the_walk_never_receives_a_task_worktree() {
+        use crate::core::fs_guard::swap_probe;
+        let repo = make_test_repo("wt-create-swap");
+        let base = head_sha(repo.path());
+        fs::create_dir_all(repo.path().join(".kronn")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        swap_probe::arm(&repo.path().join(".kronn"), outside.path());
+        let created = create_task_worktree(repo.path(), "KT-31", "e5f6", &base);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(created.is_err(), "{created:?}");
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
     #[test]

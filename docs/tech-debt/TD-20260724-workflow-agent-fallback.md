@@ -48,13 +48,13 @@ does not mean enabling the feature without consent on a fresh installation.
 An agent start contains the provider/transport, filesystem and MCP context,
 skills/directives/profiles, tool executor, tier, explicit model override, and
 discussion identity. Switching Claude to Codex or Ollama changes more than the
-`--model` flag. [src: file: backend/src/agents/runner.rs:3091-3246#AgentStartConfig]
+`--model` flag. [src: file: backend/src/agents/runner.rs:3150-3305#AgentStartConfig]
 
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
 currently wins over the tier. [src: file: backend/src/models/setup.rs:927-973#ModelTier]
-[src: file: backend/src/agents/runner.rs:3608-3642#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3667-3701#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
 
@@ -118,7 +118,7 @@ The execution boundary currently exposes strings for start failures and only
 three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 `RuntimeUnavailable`). The richer rate-limit/auth/server detection is a
 presentation helper that scans raw output after execution; it is not a routing
-contract. [src: file: backend/src/agents/runner.rs:3928#start_agent_with_config]
+contract. [src: file: backend/src/agents/runner.rs:3987#start_agent_with_config]
 [src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
 [src: file: backend/src/api/discussions/orchestration.rs:1683-1823#detect_agent_error_hint]
 
@@ -232,7 +232,7 @@ project/run-scoped catalogue without Planning mutations, and no per-model
 capability gate checks that the model can call tools. A local Ollama
 model therefore cannot safely replace every CLI step merely because the model
 is pulled. [src: file: backend/src/api/agent_tools.rs:205-226#workflow_arc]
-[src: file: backend/src/workflows/runner.rs:2638-2643#workflow_arc]
+[src: file: backend/src/workflows/runner.rs:2653-2659#workflow_room_arc]
 [src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:51-53#capability]
 
 No-capability declaration should mean “unknown/ineligible”, not “probably

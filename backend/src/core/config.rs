@@ -3,6 +3,8 @@ use directories::ProjectDirs;
 use std::path::PathBuf;
 use tokio::fs;
 
+use super::config_copies;
+
 use crate::models::{
     AgentConfig, AgentsConfig, ApiKey, AppConfig, ModelTier, ScanConfig, ServerConfig, TokensConfig,
 };
@@ -407,7 +409,9 @@ pub async fn load() -> Result<Option<AppConfig>> {
                 } else {
                     "it is valid TOML but not a configuration this Kronn understands"
                 };
-                let kept = set_aside_unreadable_config(&dir, &path)?;
+                let aside = set_aside_unreadable_config(&dir, &path)?;
+                // How the notices name what became of the file.
+                let kept = aside.describe();
                 let key = salvage_key_line(&content);
                 // Only a real 32-byte key counts as recovered.
                 let key_ok = key
@@ -422,15 +426,18 @@ pub async fn load() -> Result<Option<AppConfig>> {
                     "No valid encryption key could be read from it; the key is looked for in the \
                      other key stores and backups."
                 };
-                let credentials_sentence = |mentions: bool| {
-                    if mentions {
-                        format!(
-                            " {kept} {} credentials in clear: delete it once you have checked them.",
-                            if parseable { "holds" } else { "may hold" }
-                        )
-                    } else {
-                        String::new()
-                    }
+                let credentials_sentence = |mentions: bool| match (&aside, mentions) {
+                    (config_copies::Aside::Sealed(name), true) => format!(
+                        " {name} {} credentials, encrypted with the encryption key: delete it \
+                         once you have checked them.",
+                        if parseable { "holds" } else { "may hold" }
+                    ),
+                    (config_copies::Aside::Deferred(name), true) => format!(
+                        " {name} {} credentials in clear until it is encrypted at the next start: \
+                         restart once the encryption key can be read.",
+                        if parseable { "holds" } else { "may hold" }
+                    ),
+                    _ => String::new(),
                 };
                 // The readable sections of a broken file, read as any other.
                 let salvaged = reading.or_else(|| {
@@ -443,12 +450,12 @@ pub async fn load() -> Result<Option<AppConfig>> {
                     // (the file wins, as in the migration).
                     let recovered = salvage_credentials(&content, &mut config);
                     tracing::error!(
-                        "config.toml was set aside as {kept}: {cause} ({schema_error}). Kronn \
+                        "config.toml {kept}: {cause} ({schema_error}). Kronn \
                          starts as a first run{}; {recovered} credential(s) recovered from it",
                         if key_ok { " with the key it held" } else { "" }
                     );
                     let mut notice = format!(
-                        "config.toml could not be read ({cause}) and was kept as {kept}. \
+                        "config.toml could not be read ({cause}) and {kept}. \
                          {key_sentence} The settings start over."
                     );
                     if recovered > 0 {
@@ -466,12 +473,12 @@ pub async fn load() -> Result<Option<AppConfig>> {
                     return Ok(Some(config));
                 };
                 tracing::error!(
-                    "config.toml was set aside as {kept}: {cause} ({schema_error}). Kronn kept \
+                    "config.toml {kept}: {cause} ({schema_error}). Kronn kept \
                      the settings that could be read{}",
                     if key_ok { " and the key it held" } else { "" }
                 );
                 let mut notice = format!(
-                    "config.toml could not be read ({cause}) and was kept as {kept}. \
+                    "config.toml could not be read ({cause}) and {kept}. \
                      {key_sentence} The settings that could be read were recovered; the others \
                      start over."
                 );
@@ -1099,18 +1106,35 @@ pub fn forget_set_aside(dir: &std::path::Path, name: &str) {
     }
 }
 
-/// Move an unreadable config.toml to `config.toml.corrupt.<ts>` (owner-only).
-fn set_aside_unreadable_config(dir: &std::path::Path, path: &std::path::Path) -> Result<String> {
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
-    let name = format!("{CONFIG_FILE}.corrupt.{stamp}");
-    std::fs::rename(path, dir.join(&name)).context("move the unreadable config.toml aside")?;
+/// Take an unreadable config.toml out of the way without leaving its content in
+/// clear: kept whole but encrypted (`config.toml.corrupt.<ts>.enc`) under a key
+/// the key stores hold, else (none exists, proven) only its key line is kept.
+/// When the stores cannot be read a key may exist, so the file is moved as it
+/// is (owner-only) and encrypted at the next start, never dropped or reduced.
+fn set_aside_unreadable_config(
+    dir: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<config_copies::Aside> {
+    // Not the key the file holds itself: that file is about to go.
+    let key = match config_copies::sealing(dir, false) {
+        config_copies::Sealing::Key(key) => Some(key),
+        config_copies::Sealing::Absent => None,
+        config_copies::Sealing::Unavailable(why) => {
+            tracing::warn!(
+                "the key stores could not be read ({why}): the unreadable config.toml is kept \
+                 as it is until they can"
+            );
+            return config_copies::set_aside_unchanged(dir, path)
+                .context("move the unreadable config.toml aside");
+        }
+    };
+    // The raw bytes: sealed as they are, not as a lossy string.
+    let bytes = std::fs::read(path).context("move the unreadable config.toml aside")?;
+    let aside = config_copies::set_aside_content(dir, &bytes, key.as_deref())
+        .context("keep the unreadable config.toml aside")?;
+    std::fs::remove_file(path).context("move the unreadable config.toml aside")?;
     super::keyvault::sync_dir(dir);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dir.join(&name), std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(name)
+    Ok(aside)
 }
 
 /// A top-level `encryption_secret = "..."` line that parses on its own.
@@ -1407,6 +1431,27 @@ mod tests {
         p
     }
 
+    /// A key in the key file of `dir`, as an installed Kronn has.
+    fn install_key(dir: &std::path::Path) -> String {
+        use crate::core::keyvault::KeyVault;
+        let key = crate::core::crypto::generate_secret();
+        crate::core::keyvault::SidecarFile::in_dir(dir)
+            .store(&key)
+            .unwrap();
+        key
+    }
+
+    /// The text of the one encrypted `config.toml.corrupt.<ts>.enc` of `dir`.
+    fn aside_text(dir: &std::path::Path, key: &str) -> String {
+        let copies: Vec<_> = crate::core::config_copies::copies(dir)
+            .into_iter()
+            .filter(|c| c.kind == crate::core::config_copies::Kind::Corrupt)
+            .collect();
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert!(copies[0].sealed, "{} is in clear", copies[0].name);
+        crate::core::config_copies::open_sealed(&copies[0].path, &[key.to_string()]).unwrap()
+    }
+
     /// C2-17 — the temp file is created owner-only and never follows a
     /// symlink planted at its name.
     #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
@@ -1459,14 +1504,83 @@ mod tests {
                     .starts_with("config.toml.corrupt.")
             })
             .collect();
+        // No key store holds a key: only the key line is kept, in clear, and
+        // nothing else of the file.
         assert_eq!(kept.len(), 1);
-        assert!(std::fs::read_to_string(kept[0].path())
-            .unwrap()
-            .contains("x = [broken"));
+        assert_eq!(
+            std::fs::read_to_string(kept[0].path()).unwrap(),
+            format!("encryption_secret = \"{key}\"\n")
+        );
         assert!(is_first_run().await.unwrap());
         release_disk_key(&tmp);
         crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// KT-1528 — an unreadable config.toml holding credentials of every kind
+    /// (known, unknown, in a table, in an array, in a URL) leaves none in clear
+    /// outside the live config.toml: encrypted whole when a key store holds a
+    /// key, else reduced to its key line.
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_config_leaves_no_clear_credential_on_disk() {
+        const NEEDLES: [&str; 6] = [
+            "tok-clear",
+            "sk-unknown-clear",
+            "sk-mistral-clear",
+            "argkey-clear",
+            "dbpass-clear",
+            "pat-clear",
+        ];
+        for vault in [false, true] {
+            let _lock = ENV_LOCK.lock().await;
+            let tmp = scratch_dir("aside-secrets");
+            crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+            let vault_key = vault.then(|| install_key(&tmp));
+            let file_key = crate::core::crypto::generate_secret();
+            let text = format!(
+                "encryption_secret = \"{file_key}\"\nserver_broken = [\n\
+                 [server]\nauth_token = \"tok-clear\"\nport = 4242\n\
+                 [tokens]\nmistral = \"sk-mistral-clear\"\n\
+                 [future]\napi_key = \"sk-unknown-clear\"\npat = \"pat-clear\"\n\
+                 args = [\"--api-key\", \"argkey-clear\"]\n\
+                 database_url = \"postgres://u:dbpass-clear@h/db\"\n"
+            );
+            std::fs::write(tmp.join(CONFIG_FILE), &text).unwrap();
+            load().await.unwrap().expect("settings recovered");
+
+            for entry in std::fs::read_dir(&tmp).unwrap().filter_map(|e| e.ok()) {
+                // The live file is config.toml itself, which keeps its
+                // credentials until the credential boot moves them.
+                if entry.file_name() == CONFIG_FILE {
+                    continue;
+                }
+                let raw = std::fs::read(entry.path()).unwrap_or_default();
+                let raw = String::from_utf8_lossy(&raw);
+                for needle in NEEDLES {
+                    assert!(
+                        !raw.contains(needle),
+                        "{needle} in {:?} (vault key: {vault})",
+                        entry.file_name()
+                    );
+                }
+            }
+            match vault_key {
+                Some(key) => assert_eq!(aside_text(&tmp, &key), text),
+                None => {
+                    let asides: Vec<_> = crate::core::config_copies::copies(&tmp);
+                    assert_eq!(asides.len(), 1, "{asides:?}");
+                    assert_eq!(
+                        std::fs::read_to_string(&asides[0].path).unwrap(),
+                        format!("encryption_secret = \"{file_key}\"\n")
+                    );
+                }
+            }
+            crate::core::child_env::remove_var("KRONN_DATA_DIR");
+            release_disk_key(&tmp);
+            preserve(&tmp, Default::default());
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
     }
 
     /// C4-09 — valid TOML that is not a Kronn config: set aside, and the
@@ -1477,6 +1591,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("schema");
         crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        install_key(&tmp);
         std::fs::write(tmp.join(CONFIG_FILE), "[unrelated]\nfoo = 1\n").unwrap();
         let loaded = load().await.unwrap().expect("first run");
         assert!(loaded.encryption_secret.is_none());
@@ -1492,6 +1607,56 @@ mod tests {
             "{notice}"
         );
         crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// KT-1528 — a key store that cannot be read (locked keychain, I/O error)
+    /// is not "no key": the unreadable config.toml is moved as it is, owner-only
+    /// and announced, not reduced to its key line or dropped, and the next
+    /// start that reads the store encrypts it.
+    #[tokio::test]
+    #[serial]
+    async fn an_unreadable_config_is_kept_whole_while_the_key_store_cannot_be_read() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("aside-unreadable-store");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        let sidecar = tmp.join(crate::core::keyvault::SIDECAR_FILENAME);
+        std::fs::create_dir(&sidecar).unwrap();
+        let text = "language = \"fr\"\n[server\n[tokens]\nmistral = \"sk-mistral-clear\"\n";
+        std::fs::write(tmp.join(CONFIG_FILE), text).unwrap();
+
+        load().await.unwrap().expect("first run");
+        let copies = crate::core::config_copies::copies(&tmp);
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert!(!copies[0].sealed);
+        assert_eq!(std::fs::read_to_string(&copies[0].path).unwrap(), text);
+        let notice = set_aside_notice(&tmp).expect("recorded");
+        assert!(
+            notice.contains("until the encryption key can be read"),
+            "{notice}"
+        );
+
+        std::fs::remove_dir(&sidecar).unwrap();
+        let key = install_key(&tmp);
+        let sealing = crate::core::config_copies::sealing(&tmp, false);
+        crate::core::config_copies::protect_copies(&tmp, &sealing);
+        assert_eq!(aside_text(&tmp, &key), text);
+        for entry in std::fs::read_dir(&tmp).unwrap().filter_map(|e| e.ok()) {
+            // The live config.toml keeps its credentials until the credential
+            // boot moves them.
+            if entry.file_name() == CONFIG_FILE {
+                continue;
+            }
+            let raw = std::fs::read(entry.path()).unwrap_or_default();
+            assert!(
+                !String::from_utf8_lossy(&raw).contains("sk-mistral-clear"),
+                "clear value in {:?}",
+                entry.file_name()
+            );
+        }
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        release_disk_key(&tmp);
+        preserve(&tmp, Default::default());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1536,13 +1701,14 @@ mod tests {
     }
 
     /// C7-08 — legacy single keys of a schema-invalid file are recovered and
-    /// the notice says the kept file holds credentials in clear.
+    /// the notice says the kept file holds them encrypted.
     #[tokio::test]
     #[serial]
     async fn legacy_keys_of_a_schema_invalid_config_are_recovered() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("legacy-salvage");
         crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        let vault_key = install_key(&tmp);
         std::fs::write(
             tmp.join(CONFIG_FILE),
             "encryption_secret = 5\n[tokens]\nanthropic = \"sk-legacy-x\"\n",
@@ -1551,7 +1717,20 @@ mod tests {
         let loaded = load().await.unwrap().expect("first run");
         assert!(loaded.tokens.keys.iter().any(|k| k.value == "sk-legacy-x"));
         let notice = set_aside_notice(&tmp).expect("recorded");
-        assert!(notice.contains("credentials in clear"), "{notice}");
+        assert!(
+            notice.contains("credentials, encrypted with the encryption key")
+                && !notice.contains("in clear"),
+            "{notice}"
+        );
+        // The kept file holds the legacy key encrypted: no other file but
+        // config.toml has it in clear.
+        assert!(aside_text(&tmp, &vault_key).contains("sk-legacy-x"));
+        for entry in std::fs::read_dir(&tmp).unwrap().filter_map(|e| e.ok()) {
+            if entry.file_name() != CONFIG_FILE {
+                let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                assert!(!text.contains("sk-legacy-x"), "{:?}", entry.file_name());
+            }
+        }
         crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1712,6 +1891,7 @@ image_family = "flux9_future"
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("salvage-sections");
         crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        let vault_key = install_key(&tmp);
         let key = crate::core::crypto::generate_secret();
         std::fs::write(
             tmp.join(CONFIG_FILE),
@@ -1730,19 +1910,8 @@ image_family = "flux9_future"
         let notice = set_aside_notice(&tmp).expect("recorded");
         assert!(notice.contains("config.toml.corrupt."), "{notice}");
         assert!(notice.contains("could be read were recovered"), "{notice}");
-        // The aside copy is untouched, the live file carries the recovery.
-        let aside = std::fs::read_dir(&tmp)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .find(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("config.toml.corrupt.")
-            })
-            .expect("aside copy");
-        assert!(std::fs::read_to_string(aside.path())
-            .unwrap()
-            .contains("broken = ["));
+        // The aside copy is whole but encrypted, the live file carries the recovery.
+        assert!(aside_text(&tmp, &vault_key).contains("broken = ["));
         let live = std::fs::read_to_string(tmp.join(CONFIG_FILE)).unwrap();
         assert!(live.contains("port = 4242"), "{live}");
 
@@ -1981,6 +2150,7 @@ image_family = "flux9_future"
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("aside-once");
         crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        install_key(&tmp);
         std::fs::write(
             tmp.join(CONFIG_FILE),
             "encryption_secret = 5\n[server]\nport = 4242\n",
@@ -2166,6 +2336,7 @@ image_family = "flux9_future"
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("foreign-file");
         crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        let vault_key = install_key(&tmp);
         std::fs::write(tmp.join(CONFIG_FILE), "future_only = 1\n").unwrap();
         let loaded = load().await.unwrap().expect("a config, not a first run");
         assert_eq!(loaded.server.port, default_config().server.port);
@@ -2175,19 +2346,7 @@ image_family = "flux9_future"
         assert!(notice.contains("settings start over"), "{notice}");
         assert!(!notice.contains("credential"), "{notice}");
         assert!(!tmp.join(CONFIG_FILE).exists());
-        let aside = std::fs::read_dir(&tmp)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .find(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("config.toml.corrupt.")
-            })
-            .expect("aside copy");
-        assert_eq!(
-            std::fs::read_to_string(aside.path()).unwrap(),
-            "future_only = 1\n"
-        );
+        assert_eq!(aside_text(&tmp, &vault_key), "future_only = 1\n");
         crate::core::child_env::remove_var("KRONN_DATA_DIR");
         release_disk_key(&tmp);
         preserve(&tmp, Default::default());
@@ -2203,6 +2362,7 @@ image_family = "flux9_future"
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("broken-and-unknown");
         crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        install_key(&tmp);
         std::fs::write(
             tmp.join(CONFIG_FILE),
             "broken = [\n[server]\nport = 4242\n[comfyui]\nimage_family = \"flux9_future\"\n",

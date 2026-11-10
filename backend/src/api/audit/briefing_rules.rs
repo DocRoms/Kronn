@@ -340,8 +340,7 @@ pub(crate) fn sync_coding_rules_doc(
     if next == current {
         return Ok(false);
     }
-    crate::core::fs_guard::assert_contained_no_symlink(project_root, &target)?;
-    crate::core::mcp_scanner::atomic_write(&target, &next)?;
+    crate::core::fs_guard::guarded_replace(project_root, &target, next.as_bytes())?;
     Ok(true)
 }
 

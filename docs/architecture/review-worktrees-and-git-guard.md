@@ -50,9 +50,9 @@ A review worktree is disposable only when removing it loses nothing:
 It is never force-removed, and only a `<slug>--review-<id>` directory directly under
 `.kronn/worktrees/` qualifies. A kept worktree is retried by the sweep.
 
-[src: file: backend/src/core/worktree.rs#create_review_worktree]
-[src: file: backend/src/core/worktree.rs#release_review_worktree]
-[src: file: backend/src/api/discussions/crud.rs#provision_review_workspace]
+[src: file: backend/src/core/worktree.rs:1593-1659#create_review_worktree]
+[src: file: backend/src/core/worktree.rs:1681-1713#release_review_worktree]
+[src: file: backend/src/api/discussions/crud.rs:839-870#provision_review_workspace]
 
 ## Agents cannot move a main checkout
 
@@ -91,5 +91,5 @@ in `git: command not found`, exit 127).
 Limits: it is a net against accidents, not a boundary or a sandbox. The agent runs as
 the same user, so it can set `KRONN_MAIN_CHECKOUT_GIT_CONFIRMED` itself; an absolute
 path to git (`/usr/bin/git`) and git aliases are not seen either. Windows / WSL agents
-get no shim. [src: file: backend/src/core/git_guard.sh]
-[src: file: backend/src/core/git_guard.rs]
+get no shim. [src: file: backend/src/core/git_guard.sh:1-119]
+[src: file: backend/src/core/git_guard.rs:1-500]

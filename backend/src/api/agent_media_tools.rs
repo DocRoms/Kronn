@@ -917,7 +917,7 @@ fn read_project_image(
     root: &std::path::Path,
     reference: &std::path::Path,
 ) -> Result<Option<ProjectImage>, String> {
-    use crate::workflows::run_artifacts::fd::Dir;
+    use crate::core::rooted_fd::Dir;
     use std::path::Component;
     let link =
         || "a project file stays inside the project: a link on its path is refused".to_string();

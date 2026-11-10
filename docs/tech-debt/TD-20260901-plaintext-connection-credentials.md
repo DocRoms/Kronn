@@ -21,14 +21,16 @@
      `config.toml` is left as it is, so credentials an install had in clear
      before the migration stay there until the key is restored. No new
      credential is written in clear: a save that would add one is refused.
-     [src: file: backend/src/core/credential_store.rs:487-505]
-     [src: file: backend/src/core/credential_store.rs:349-367]
+     [src: file: backend/src/core/credential_store.rs:484-506]
+     [src: file: backend/src/core/credential_store.rs:348-366]
   3. **Set-aside `config.toml`.** An unreadable `config.toml` is moved to
-     `config.toml.corrupt.<timestamp>` (`0600`) and kept; it may hold
-     credentials in clear. Its credentials join the boot, and the notice tells
-     the operator to delete the file once checked; Kronn does not delete it.
-     [src: file: backend/src/core/config.rs:410-465#set_aside_unreadable_config]
-     [src: file: backend/src/core/config.rs:1100-1112#set_aside_unreadable_config]
+     `config.toml.corrupt.<timestamp>.enc` (`0600`), encrypted with the
+     instance key (KT-1528); with no key to encrypt with, only its key line is
+     kept; when the key stores cannot be read, it is moved unchanged (`0600`) and
+     encrypted at the next start. Its credentials join the boot, and the notice tells the operator to
+     delete the file once checked; Kronn does not delete it.
+     [src: file: backend/src/core/config.rs:412-467#set_aside_unreadable_config]
+     [src: file: backend/src/core/config.rs:1109-1121#set_aside_unreadable_config]
 - **Why we can't fix now (constraint)**: All three are deliberate KT-1007
   trade-offs against losing the key or a credential: dropping the file copy
   of the key without two durable copies, rewriting `config.toml` under a

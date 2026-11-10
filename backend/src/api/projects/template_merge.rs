@@ -663,7 +663,7 @@ pub fn accept_merge(repo: &Path, paths: &[String]) -> Result<TemplateMergeAccept
         .iter()
         .filter_map(|p| p.strip_prefix(&prefix).map(str::to_string))
         .collect();
-    crate::core::kronn_state::record_template_merge(&worktree.join(&docs_dir), &written)?;
+    crate::core::kronn_state::record_template_merge(&worktree, &docs_dir, &written)?;
     let state_file = format!("{prefix}{}", crate::core::kronn_state::KRONN_STATE_FILENAME);
     let mut committed_paths: Vec<&str> = paths.iter().map(String::as_str).collect();
     committed_paths.push(&state_file);

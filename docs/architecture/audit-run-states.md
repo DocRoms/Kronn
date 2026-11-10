@@ -440,7 +440,7 @@ Historical runs without fingerprints require a new audit before signoff.
 [src: file: backend/src/core/audit_documents.rs:11-45#capture]
 [src: file: backend/src/core/audit_documents.rs:51-65#verify]
 [src: file: backend/src/db/discussions.rs:1885-1922#insert_native_agent_message_with_audit_documents]
-[src: file: backend/src/api/discussions/streaming.rs:5195-5217#validation_documents]
+[src: file: backend/src/api/discussions/streaming.rs:5202-5224#validation_documents]
 [src: file: backend/src/db/sql/260_audit_document_fingerprints.sql:1-3#final_doc_fingerprints_json]
 
 The explicit re-anchor action sends `deterministic_only: true`. It returns the
@@ -524,7 +524,7 @@ since, and a doc added since are reported with the date of the validation. The
 record kept for the `owner="human"` sections of a doc nobody validated
 (`HumanOwned`) is the person's own text: that check skips it. The banner reads
 « since the last validation » when `.kronn.json` holds no date.
-[src: file: backend/src/core/doc_provenance.rs:710-739#outside_kronn_in]
+[src: file: backend/src/core/doc_provenance.rs:703-738#outside_kronn_in]
 
 The banner (hidden while an audit runs) carries one primary button, named by
 its outcome. Edited docs: « Valider la doc telle qu'elle est » with the changed
@@ -549,7 +549,7 @@ re-records the fingerprints and the provenance, stamps the unowned docs as read,
 moves the previous `validated_at` / `validated_by` to `validation_history` in
 `docs/.kronn.json`, and dates the new validation.
 [src: file: backend/src/api/audit/validate_version.rs:51-73#broken_citations]
-[src: file: backend/src/core/kronn_state.rs:366-379#revalidate_current]
+[src: file: backend/src/core/kronn_state.rs:364-377#revalidate_current]
 
 Nothing is left half done. The records it depends on (`.kronn.json`,
 `provenance.json` and `citations.json`) are read strictly before the first write, so an unreadable
@@ -625,7 +625,7 @@ it ran the audit, from the committed copy otherwise.
 | A rescan, a resume, a validation | Only a file identical to `HEAD` (a human committed it). An uncommitted file is shown, flagged as not committed, and never used to resume or validate. |
 | A step | Trusted when its file still has the recorded digest. A changed or missing file is « à revérifier »: never trusted, replayed on resume, and it blocks a validation from the repository. |
 
-[src: file: backend/src/core/audit_run_state.rs:281-300#probe]
+[src: file: backend/src/core/audit_run_state.rs:277-296#probe]
 
 **What the UI shows.** `GET /api/projects/:id/audit-latest`,
 `audit-timeline` and `audit-repo-state` carry the repository's run, read off
@@ -696,7 +696,7 @@ last recorded installed hash or an exact historical bundled revision. Local
 edits survive and are reported. Reinstall uses the scanner's uppercase
 placeholder grammar, so ordinary Vue, Jinja and Twig expressions are filled
 content, not preselected damage.
-[src: file: backend/src/core/template_manifest.rs:212-254#record_install]
+[src: file: backend/src/core/template_manifest.rs:210-252#record_install]
 [src: file: backend/src/api/projects/template_reinstall.rs:262-279#has_unfilled_placeholder]
 
 Standalone install and reinstall snapshot provenance before writing and record
@@ -706,8 +706,8 @@ caller. Both template writers use the existing `TemplateReinstall` provenance
 category.
 [src: file: backend/src/api/projects/template.rs:103-104#snapshot_tracked]
 [src: file: backend/src/api/projects/template.rs:161-168#note_snapshot_writes]
-[src: file: backend/src/api/projects/template_reinstall.rs:393-394#snapshot_tracked]
-[src: file: backend/src/api/projects/template_reinstall.rs:504-512#note_snapshot_writes]
+[src: file: backend/src/api/projects/template_reinstall.rs:441-442#snapshot_tracked]
+[src: file: backend/src/api/projects/template_reinstall.rs:528-536#note_snapshot_writes]
 
 ## Cancel and failed steps keep the docs whole (KT-1211)
 
@@ -729,14 +729,14 @@ category.
   cannot restore it, but its step still never ended and so still needs the
   override). A new run drops the snapshots of the project's earlier runs and
   deleting a run cascades.
-  [src: file: backend/src/api/audit/step_guard.rs:129-154#restore_target] [src: file: backend/src/api/audit/step_guard.rs:246-263#KilledOutcome] [src: file: backend/src/api/audit/step_guard.rs:297-319#target_state] [src: file: backend/src/db/audit_runs.rs:281-314#MAX_SNAPSHOT_BYTES] [src: file: backend/src/db/audit_runs.rs:32-39#audit_step_snapshots] [src: file: backend/src/db/sql/265_audit_cancel_and_integrity.sql:20-31#audit_step_snapshots]
+  [src: file: backend/src/api/audit/step_guard.rs:94-115#restore_target] [src: file: backend/src/api/audit/step_guard.rs:211-228#KilledOutcome] [src: file: backend/src/api/audit/step_guard.rs:262-271#target_state] [src: file: backend/src/db/audit_runs.rs:281-314#MAX_SNAPSHOT_BYTES] [src: file: backend/src/db/audit_runs.rs:32-39#audit_step_snapshots] [src: file: backend/src/db/sql/265_audit_cancel_and_integrity.sql:20-31#audit_step_snapshots]
 - **A crash is settled at boot, not at the next launch.** Right after the
   recorded agents are killed, every step that never ended and has a snapshot
   is put back (or marked) and recorded failed with a `stopped during step N
   (the backend stopped)` reason. Until then the doc would sit half-written
   with no marker. A step that never ended and has no verdict is a blocker of
   its own (`NeverEnded`): accepting it needs the override too.
-  [src: file: backend/src/api/audit/step_guard.rs:587-614#settle_unfinished_at_boot] [src: file: backend/src/db/mod.rs:298-302#stop_agents_and_settle_at_boot] [src: file: backend/src/api/audit/step_guard.rs:926-941#AcceptBlocker]
+  [src: file: backend/src/api/audit/step_guard.rs:551-578#settle_unfinished_at_boot] [src: file: backend/src/db/mod.rs:298-302#stop_agents_and_settle_at_boot] [src: file: backend/src/api/audit/step_guard.rs:890-905#AcceptBlocker]
 - **Settling never destroys what the agent did not write.** The audit
   watches the target on the activity tick and keeps the fingerprint of what it
   saw the agent write (`audit_step_snapshots.observed_hash`, migration 264).
@@ -748,15 +748,19 @@ category.
   restores, but content it cannot vouch for is first copied to
   `<target>.kronn-displaced-<UTC timestamp>` and the step's reason names the
   path; if the copy cannot be made the target is not replaced.
-  [src: file: backend/src/api/audit/step_guard.rs:353-434#settle_killed] [src: file: backend/src/api/audit/step_guard.rs:156-189#save_aside]
+  [src: file: backend/src/api/audit/step_guard.rs:318-399#settle_killed] [src: file: backend/src/api/audit/step_guard.rs:117-150#save_aside]
 - **Settling never writes outside the project.** Every read, restore, marker
   and displaced copy goes through the project-containment check (no symlink
-  on the path, no `..`), temp files are created exclusively
-  (`create_new`, `O_NOFOLLOW`) under a unique name, and no directory is created
-  with `create_dir_all` beyond the project. A project root that does not exist
+  on the path, no `..`), every write then resolves through the project's
+  directory fds (`fs_guard::guarded_replace`, `guarded_write_new`,
+  `guarded_remove_file`: `openat(O_NOFOLLOW)` from the held parent, temp files
+  created exclusively under a unique name), so a parent swapped for a link after
+  the check is never written through, and no directory is created beyond the
+  project (Windows keeps the check-then-write-by-path behaviour, see
+  [fs-guard-rooted-writes](../operations/fs-guard-rooted-writes.md)). A project root that does not exist
   (an unmounted volume) is never recreated: its steps stay open, snapshot
   kept, and are settled by the next boot or launch that finds the root.
-  [src: file: backend/src/api/audit/step_guard.rs:60-75#contained_path] [src: file: backend/src/api/audit/step_guard.rs:86-101#sibling] [src: file: backend/src/api/audit/step_guard.rs:103-117#create_new_file]
+  [src: file: backend/src/api/audit/step_guard.rs:61-76#contained_path] [src: file: backend/src/api/audit/step_guard.rs:87-92#write_atomically]
 - **File work stays off the writer connection.** The launch-time net reads
   the pending snapshots, settles the files, then records the verdicts, in three
   separate steps (`pending_steps`, `settle_pending`, `record_settled`).
@@ -764,13 +768,13 @@ category.
   wrote its target, Kronn keeps the text (a human may accept it) under a
   `<!-- kronn:partial-step -->` banner and records `target_state = partial`.
   A later success, or an acceptance, removes the banner.
-  [src: file: backend/src/api/audit/step_guard.rs:16-22#PARTIAL_OPEN] [src: file: backend/src/api/audit/step_guard.rs:225-244#settle_failed_target] [src: file: backend/src/api/audit/step_guard.rs:212-223#clear_partial_marker]
+  [src: file: backend/src/api/audit/step_guard.rs:16-22#PARTIAL_OPEN] [src: file: backend/src/api/audit/step_guard.rs:190-209#settle_failed_target] [src: file: backend/src/api/audit/step_guard.rs:177-188#clear_partial_marker]
 - **Accept refuses an unsound step.** A step that failed for truncation,
   citations that do not resolve, an undisposed detector signal, incomplete
   coverage, or a stop is accepted only with `override_unsound: true`. The
   refusal starts with `override_required:` and carries a bounded diff against
   the pre-step content. The override is recorded in the acceptance reason.
-  [src: file: backend/src/api/audit/step_guard.rs:923-941#AcceptBlocker] [src: file: backend/src/api/audit/accept.rs:34-36#OVERRIDE_REQUIRED_PREFIX] [src: file: backend/src/api/audit/accept.rs:261-275#OVERRIDE_REQUIRED_PREFIX]
+  [src: file: backend/src/api/audit/step_guard.rs:887-905#AcceptBlocker] [src: file: backend/src/api/audit/accept.rs:34-36#OVERRIDE_REQUIRED_PREFIX] [src: file: backend/src/api/audit/accept.rs:261-275#OVERRIDE_REQUIRED_PREFIX]
 - **Boot kills an agent the previous backend left.** The run records the
   agent's process group and the start stamp of its leader (`agent_pgid`,
   `agent_started_marker`). At boot, before the lease is freed, the group is
